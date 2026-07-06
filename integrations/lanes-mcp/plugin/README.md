@@ -70,8 +70,8 @@ server-created git worktree cut from `origin/main`, and the server rejects a wri
 
 ## Caveat: MCP tool names in agent frontmatter
 
-The ignition agents restrict `tools:` to `mcp__lanes__lane_dispatch_start` and
-`mcp__lanes__lane_wait` (the `mcp__<server>__<tool>` convention, server key `lanes`).
+The ignition agents restrict `tools:` to `mcp__plugin_lanes_lanes__lane_dispatch_start` and
+`mcp__plugin_lanes_lanes__lane_wait` (the `mcp__<server>__<tool>` convention, server key `lanes`).
 If your Claude Code version namespaces plugin MCP tools differently, the agents would
 have no tools; verify the exact names after install (`/plugin` inventory or the tool
 picker) and adjust `agents/*.md` if needed. The zero-discretion body contract (no Bash,
