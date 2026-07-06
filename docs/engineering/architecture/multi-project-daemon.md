@@ -51,8 +51,9 @@ every stdio session  →  pure proxy  →  daemon routes each call to (global | 
 
 ### 4.1 How the daemon learns a request's project scope
 The proxy must convey, per session, which project DB the session belongs to. Options:
-- **(chosen) per-session project binding at handshake**: the proxy sends the canonical project-DB path in `initialize` (a client-info/meta field); the daemon binds this session→project for its lifetime. Per-call routing then needs no extra data. Simplest, matches "a stdio session is one project."
-- rejected — per-call project arg: bloats every tool call, invites mismatch between calls in one session.
+- **target shape: per-session project binding at handshake**: the proxy sends the canonical project-DB path in `initialize` (a client-info/meta field); the daemon binds this session→project for its lifetime. Per-call routing then needs no extra data. Simplest, matches "a stdio session is one project."
+- **Phase 1 stdio compatibility path**: until daemon-side session binding exists, the stdio adapter validates the project name↔DB path pair once, rejects any per-call `project` mismatch, and injects the bound project into project-defaulting calls before forwarding. This keeps stdio pure transport and removes the #730 fatal without pretending HTTP direct-connect binding is solved.
+- rejected — unchecked per-call project arg: bloats every tool call, invites mismatch between calls in one session.
 
 ### 4.2 Scope routing inside the daemon (global vs project per call)
 The daemon already distinguishes global vs project writes internally (the `scope` field on memory ops). The router uses the **session's bound project** as the project-DB target and the shared global DB as the global target; each tool's existing scope semantics pick which. No new per-tool classification is invented — the existing `scope=user|project|general` mapping is reused, verified against `MemoryStore`'s current global/project split.
@@ -68,6 +69,8 @@ Today a stdio session opens its own project DB under its own FS permissions. Onc
 - Canonicalize + validate the project path (no symlink escape, must end in `/.tachi/memory.db` under a real project root); reject anything else.
 - A session bound to project P can never route to project Q's DB — binding is immutable per session.
 - This isolation MUST have a discriminating test (a session bound to Sigil attempting a Quant-scoped op is refused).
+
+Phase 1 includes the minimum safe subset of this section: project binding must be derived from a validated project DB path/name pair, same-global daemons may only accept a project-scoped stdio client when the project name resolves back to that exact DB, and the binding is fixed for the adapter lifetime. Broader local-auth/profile policy can land later, but Phase 1 cannot accept arbitrary client-supplied paths or mutable project identity.
 
 ### 4.5 CLI-arg evolution
 - `--project-db <path>` / `--no-project-db` become **optional hints** (a project to pre-attach at boot), not the daemon's whole project scope. Default resident daemon needs neither — it attaches on demand.
@@ -87,8 +90,8 @@ The recurring regressions trace directly to zero end-to-end proxy coverage. This
 
 ## 6. Phasing (each independently shippable and useful)
 
-- **Phase 1 — daemon project registry + lazy attach + per-session binding + routing** (4.1–4.3). Ships the core; #730 fatal gone. Gate: end-to-end multi-project proxy test green, #730 discrimination test green.
-- **Phase 2 — security isolation hardening** (4.4). Ships the path-validation + cross-project-refusal + tests. Independently mergeable; Phase 1 without it is usable on a single-user trusted machine but MUST land before any shared/multi-tenant use.
+- **Phase 1 — daemon project registry + lazy attach + per-session binding + routing + minimum binding safety** (4.1–4.3 plus the minimum subset of 4.4). Ships the core; #730 fatal gone. Gate: end-to-end multi-project proxy test green, #730 discrimination test green, project binding path/name validation green, and cross-project binding refusal green.
+- **Phase 2 — security isolation hardening** (the remaining 4.4 work). Ships caller-access proof or FD handoff, local-auth posture, and any multi-user safeguards. Independently mergeable; Phase 1 remains single-user/loopback-trusted only and must not expose mutable or arbitrary path binding.
 - **Phase 3 — lifecycle polish**: idle reclaim tuning, LRU cap calibration from telemetry, CLI-arg deprecation cleanup (4.5).
 
 Phase 1 alone removes the production regression; 2 and 3 harden and tune.

@@ -280,6 +280,8 @@ pub struct DbRuntime {
     pub global_db_path: Arc<PathBuf>,
     pub global_vec_available: bool,
     pub project_db: Arc<StdRwLock<Option<ProjectDbState>>>,
+    pub attached_project_dbs: Arc<StdRwLock<HashMap<PathBuf, ProjectDbState>>>,
+    pub project_attach_init_gate: Arc<StdMutex<()>>,
 }
 
 impl DbRuntime {
@@ -327,12 +329,9 @@ impl DbRuntime {
         label: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let db_str = db_path
-            .to_str()
-            .ok_or_else(|| format!("DB path contains invalid UTF-8: {}", db_path.display()))?;
-        let _gate = write_or_recover(&self.global_rw_gate, "path_db_rw_gate");
-        let mut store = MemoryStore::open_with_label(db_str, label)
-            .map_err(|e| format!("open path store {}: {e}", db_path.display()))?;
+        let state = self.attached_project_state(db_path)?;
+        let _gate = write_or_recover(&state.rw_gate, "path_db_rw_gate");
+        let mut store = lock_or_recover(&state.store, label);
         f(&mut store)
     }
 
@@ -342,9 +341,53 @@ impl DbRuntime {
         label: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let _gate = read_or_recover(&self.global_rw_gate, "path_db_rw_gate");
-        let mut store = open_read_store(db_path, label)?;
+        let key = project_db_read_cache_key(db_path)?;
+        if let Some(state) = self
+            .attached_project_dbs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()
+        {
+            let _gate = read_or_recover(&state.rw_gate, "path_db_rw_gate");
+            return state.read_pool.with_store(label, f);
+        }
+
+        let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
+        let mut store = open_read_store(&key, label)?;
         f(&mut store)
+    }
+
+    fn attached_project_state(&self, db_path: &Path) -> Result<ProjectDbState, String> {
+        let key = project_db_cache_key(db_path)?;
+        if let Some(state) = self
+            .attached_project_dbs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()
+        {
+            return Ok(state);
+        }
+
+        let _init_gate =
+            lock_or_recover(&self.project_attach_init_gate, "project_attach_init_gate");
+        if let Some(state) = self
+            .attached_project_dbs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned()
+        {
+            return Ok(state);
+        }
+
+        let state = ProjectDbState::open(key.clone(), configured_memory_read_pool_size())?;
+        let mut guard = self
+            .attached_project_dbs
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        Ok(guard.entry(key).or_insert(state).clone())
     }
 
     pub fn with_global_store<T>(
@@ -434,6 +477,32 @@ impl DbRuntime {
             .as_ref()
             .is_some_and(|state| state.vec_available)
     }
+}
+
+fn project_db_cache_key(db_path: &Path) -> Result<PathBuf, String> {
+    if db_path.exists() {
+        return std::fs::canonicalize(db_path)
+            .map_err(|e| format!("canonicalize project db {}: {e}", db_path.display()));
+    }
+    let parent = db_path
+        .parent()
+        .ok_or_else(|| format!("project db path has no parent: {}", db_path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("create project db parent {}: {e}", parent.display()))?;
+    let parent = std::fs::canonicalize(parent)
+        .map_err(|e| format!("canonicalize project db parent {}: {e}", parent.display()))?;
+    let file_name = db_path
+        .file_name()
+        .ok_or_else(|| format!("project db path has no file name: {}", db_path.display()))?;
+    Ok(parent.join(file_name))
+}
+
+fn project_db_read_cache_key(db_path: &Path) -> Result<PathBuf, String> {
+    if !db_path.exists() {
+        return Err(format!("project db does not exist: {}", db_path.display()));
+    }
+    std::fs::canonicalize(db_path)
+        .map_err(|e| format!("canonicalize project db {}: {e}", db_path.display()))
 }
 
 /// Default requests-per-minute limit per session (0 = unlimited)
@@ -582,6 +651,37 @@ fn zero_key(key: &mut [u8; 32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "tachi-runtime-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).expect("temp dir");
+        path
+    }
+
+    fn test_runtime(global_db: PathBuf) -> DbRuntime {
+        let global_db_str = global_db.to_str().expect("global db utf8");
+        DbRuntime {
+            global_store: Arc::new(StdMutex::new(
+                MemoryStore::open_with_label(global_db_str, "global").expect("global store"),
+            )),
+            global_read_pool: ReadStorePool::open_read_only(global_db_str, 1)
+                .expect("global read pool"),
+            global_rw_gate: Arc::new(StdRwLock::new(())),
+            global_db_path: Arc::new(global_db),
+            global_vec_available: false,
+            project_db: Arc::new(StdRwLock::new(None)),
+            attached_project_dbs: Arc::new(StdRwLock::new(HashMap::new())),
+            project_attach_init_gate: Arc::new(StdMutex::new(())),
+        }
+    }
 
     #[test]
     fn db_scope_strings_match_persisted_labels() {
@@ -600,5 +700,136 @@ mod tests {
 
         assert_eq!(cached.bytes()[0], 7);
         assert_eq!(cached.bytes()[31], 9);
+    }
+
+    #[test]
+    fn path_store_attaches_project_db_once_and_reuses_it() {
+        let temp = unique_temp_dir("path-store-cache");
+        let global_db = temp.join("global/memory.db");
+        let project_db = temp.join("project/.tachi/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        let runtime = test_runtime(global_db);
+
+        runtime
+            .with_path_store(&project_db, |store| {
+                let _ = store.vec_available;
+                Ok(())
+            })
+            .expect("first attach");
+        assert_eq!(
+            runtime
+                .attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            1
+        );
+
+        runtime
+            .with_path_store_read(&project_db, |store| {
+                let _ = store.vec_available;
+                Ok(())
+            })
+            .expect("second attach reuses cached state");
+        assert_eq!(
+            runtime
+                .attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn first_path_store_read_does_not_attach_writer_state() {
+        let temp = unique_temp_dir("path-store-read-only");
+        let global_db = temp.join("global/memory.db");
+        let project_db = temp.join("project/.tachi/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        std::fs::create_dir_all(project_db.parent().expect("project parent")).expect("project dir");
+        let project_db_str = project_db.to_str().expect("project db utf8");
+        drop(MemoryStore::open_with_label(project_db_str, "seed").expect("seed project db"));
+        let runtime = test_runtime(global_db);
+
+        runtime
+            .with_path_store_read(&project_db, |store| {
+                let _ = store.vec_available;
+                Ok(())
+            })
+            .expect("first read-only attach");
+        assert_eq!(
+            runtime
+                .attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            0,
+            "read-only first use must not create cached writer state"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn missing_path_store_read_does_not_create_parent_dir() {
+        let temp = unique_temp_dir("path-store-missing-read");
+        let global_db = temp.join("global/memory.db");
+        let project_db = temp.join("missing/.tachi/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        let runtime = test_runtime(global_db);
+
+        let err = runtime
+            .with_path_store_read(&project_db, |_| Ok(()))
+            .expect_err("missing read should fail");
+        assert!(
+            err.contains("project db does not exist"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !project_db.parent().expect("project parent").exists(),
+            "read-only missing DB lookup must not create parent dirs"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn concurrent_first_attach_uses_one_cached_project_state() {
+        let temp = unique_temp_dir("path-store-concurrent-cache");
+        let global_db = temp.join("global/memory.db");
+        let project_db = temp.join("project/.tachi/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        let runtime = Arc::new(test_runtime(global_db));
+
+        let left_runtime = runtime.clone();
+        let left_db = project_db.clone();
+        let left = std::thread::spawn(move || {
+            left_runtime
+                .with_path_store(&left_db, |_| Ok(()))
+                .expect("left attach");
+        });
+        let right_runtime = runtime.clone();
+        let right_db = project_db.clone();
+        let right = std::thread::spawn(move || {
+            right_runtime
+                .with_path_store(&right_db, |_| Ok(()))
+                .expect("right attach");
+        });
+
+        left.join().expect("left thread");
+        right.join().expect("right thread");
+        assert_eq!(
+            runtime
+                .attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 }

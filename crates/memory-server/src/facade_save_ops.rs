@@ -24,6 +24,7 @@ pub(crate) async fn handle_tachi_save(
                 .source
                 .clone()
                 .unwrap_or_else(|| "tachi_save".to_string()),
+            project: params.project.clone(),
         };
         return handle_extract_facts(server, extract_params).await;
     }

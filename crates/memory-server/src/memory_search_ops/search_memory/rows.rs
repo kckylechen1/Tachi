@@ -211,6 +211,16 @@ pub(crate) async fn search_memory_rows_with_recall_config(
             )?;
             combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
             searched_named = true;
+            if !project_only {
+                let global_results = with_global_search(
+                    server,
+                    &params,
+                    record_access,
+                    recall_config,
+                    "Search failed in global DB",
+                )?;
+                combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
+            }
         } else if !project_only {
             return Err(format!(
                 "Project '{project_name}' not found (expected DB at {})",

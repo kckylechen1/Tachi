@@ -228,6 +228,10 @@ pub struct FindSimilarMemoryParams {
     #[serde(default)]
     pub path_prefix: Option<String>,
 
+    /// Optional project name to search a specific project DB.
+    #[serde(default)]
+    pub project: Option<String>,
+
     /// Whether to include archived entries
     #[serde(default)]
     pub include_archived: bool,
@@ -320,6 +324,7 @@ mod tests {
             query_vec: vec![0.1, 0.2],
             top_k: 10_000,
             path_prefix: None,
+            project: None,
             include_archived: false,
             include_training: false,
             candidates_per_channel: 50_000,

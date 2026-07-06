@@ -8,6 +8,7 @@ pub(super) async fn ensure_stdio_proxy_daemon(
     app_home: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
+    client_project: Option<&str>,
 ) -> Option<crate::cli_client::DaemonInfo> {
     let auto_daemon_disabled = auto_daemon_disabled();
     if stdio_proxy_disabled() {
@@ -19,7 +20,7 @@ pub(super) async fn ensure_stdio_proxy_daemon(
         replace_stale_daemon_if_needed(app_home, global_db_path).await;
     }
 
-    match compatible_daemon(app_home, global_db_path, project_db_path).await {
+    match compatible_daemon(app_home, global_db_path, project_db_path, client_project).await {
         DaemonCompatibility::Compatible(info) => return Some(info),
         DaemonCompatibility::Incompatible => return None,
         DaemonCompatibility::Missing => {}
@@ -30,8 +31,8 @@ pub(super) async fn ensure_stdio_proxy_daemon(
         return None;
     }
 
-    spawn_stdio_daemon(app_home, global_db_path, project_db_path).await;
-    match compatible_daemon(app_home, global_db_path, project_db_path).await {
+    spawn_stdio_daemon(app_home, global_db_path, project_db_path, client_project).await;
+    match compatible_daemon(app_home, global_db_path, project_db_path, client_project).await {
         DaemonCompatibility::Compatible(info) => Some(info),
         DaemonCompatibility::Missing | DaemonCompatibility::Incompatible => None,
     }
@@ -41,9 +42,42 @@ pub(super) fn proxy_can_preserve_project_context(
     info: &crate::cli_client::DaemonInfo,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
-    _client_project: Option<&str>,
+    client_project: Option<&str>,
 ) -> bool {
-    crate::cli_client::daemon_matches_requested_dbs(info, global_db_path, project_db_path)
+    if crate::cli_client::daemon_matches_requested_dbs(info, global_db_path, project_db_path) {
+        if let (Some(project_db_path), Some(_)) = (project_db_path, client_project) {
+            return valid_proxy_project_binding(project_db_path, client_project);
+        }
+        return true;
+    }
+    if !crate::cli_client::daemon_global_db_matches(info, global_db_path) {
+        return false;
+    }
+    match project_db_path {
+        None => false,
+        Some(project_db_path) => valid_proxy_project_binding(project_db_path, client_project),
+    }
+}
+
+fn valid_proxy_project_binding(project_db_path: &Path, client_project: Option<&str>) -> bool {
+    let Some(project) = client_project else {
+        return false;
+    };
+    let Ok(bound_path) = crate::MemoryServer::resolve_named_project_db_path(project) else {
+        return false;
+    };
+    paths_match(project_db_path, &bound_path)
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    if left.as_os_str() == right.as_os_str() {
+        return true;
+    }
+    std::fs::canonicalize(left)
+        .ok()
+        .zip(std::fs::canonicalize(right).ok())
+        .map(|(left, right)| left == right)
+        .unwrap_or(false)
 }
 
 pub(super) async fn serve_stdio_proxy(
@@ -159,13 +193,19 @@ async fn compatible_daemon(
     app_home: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
+    client_project: Option<&str>,
 ) -> DaemonCompatibility {
     let Some(info) = crate::cli_client::detect_daemon_for_global_db(app_home, global_db_path).await
     else {
         return DaemonCompatibility::Missing;
     };
     if crate::cli_client::daemon_version_matches(&info) {
-        if crate::cli_client::daemon_matches_requested_dbs(&info, global_db_path, project_db_path) {
+        if proxy_can_preserve_project_context(
+            &info,
+            global_db_path,
+            project_db_path,
+            client_project,
+        ) {
             DaemonCompatibility::Compatible(info)
         } else {
             eprintln!(
@@ -232,6 +272,7 @@ async fn spawn_stdio_daemon(
     app_home: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
+    client_project: Option<&str>,
 ) {
     match std::env::current_exe() {
         Ok(exe) => {
@@ -249,7 +290,13 @@ async fn spawn_stdio_daemon(
                     tokio::spawn(async move {
                         let _ = child.wait();
                     });
-                    wait_for_daemon_ready(app_home, global_db_path, project_db_path).await;
+                    wait_for_daemon_ready(
+                        app_home,
+                        global_db_path,
+                        project_db_path,
+                        client_project,
+                    )
+                    .await;
                 }
                 Err(e) => eprintln!("[auto-daemon] failed to spawn daemon: {e}"),
             }
@@ -262,11 +309,13 @@ async fn wait_for_daemon_ready(
     app_home: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
+    client_project: Option<&str>,
 ) {
     let ready = tokio::time::timeout(Duration::from_secs(5), async {
         for _ in 0..25 {
             tokio::time::sleep(Duration::from_millis(200)).await;
-            match compatible_daemon(app_home, global_db_path, project_db_path).await {
+            match compatible_daemon(app_home, global_db_path, project_db_path, client_project).await
+            {
                 DaemonCompatibility::Compatible(_) => return true,
                 DaemonCompatibility::Incompatible => return false,
                 DaemonCompatibility::Missing => {}
@@ -317,6 +366,7 @@ impl StdioProxyServer {
             &self.app_home,
             &self.global_db_path,
             self.project_db_path.as_deref(),
+            self.client_project.as_deref(),
         )
         .await?;
         if !proxy_can_preserve_project_context(
@@ -333,9 +383,8 @@ impl StdioProxyServer {
             // Same endpoint resolved again; retrying it would fail identically.
             return None;
         }
-        if let Ok(mut guard) = self.daemon.write() {
-            *guard = fresh.clone();
-        }
+        let mut guard = self.daemon.write().unwrap_or_else(|e| e.into_inner());
+        *guard = fresh.clone();
         eprintln!(
             "[stdio-proxy] self-healed daemon endpoint: {stale_url} -> {}",
             fresh.url
@@ -419,7 +468,7 @@ impl rmcp::ServerHandler for StdioProxyServer {
             if request.name.as_ref() == "runtime_info" {
                 return Ok(self.runtime_info_result());
             }
-            let request = prepare_proxy_tool_call(request, self.client_project.as_deref());
+            let request = prepare_proxy_tool_call(request, self.client_project.as_deref())?;
             let current = self.current_daemon();
             match crate::cli_client::call_daemon_tool_raw(&current, request.clone()).await {
                 Ok(result) => Ok(result),
@@ -448,7 +497,7 @@ fn daemon_error_data(error: crate::cli_client::DaemonCallError) -> rmcp::ErrorDa
 fn prepare_proxy_tool_call(
     mut request: rmcp::model::CallToolRequestParams,
     client_project: Option<&str>,
-) -> rmcp::model::CallToolRequestParams {
+) -> Result<rmcp::model::CallToolRequestParams, rmcp::ErrorData> {
     if request.name.as_ref() == "tachi_briefing" {
         let mut args = serde_json::Map::new();
         args.insert("action".to_string(), serde_json::json!("briefing"));
@@ -465,24 +514,35 @@ fn prepare_proxy_tool_call(
         }
         request.name = "tachi_memory".into();
         request.arguments = Some(args);
-        return request;
+        return Ok(request);
     }
 
     if let Some(project) = client_project {
-        inject_client_project(request.name.as_ref(), &mut request.arguments, project);
+        enforce_client_project(request.name.as_ref(), &mut request.arguments, project)?;
     }
-    request
+    Ok(request)
 }
 
-fn inject_client_project(
+fn enforce_client_project(
     tool_name: &str,
     arguments: &mut Option<rmcp::model::JsonObject>,
     project: &str,
-) {
-    if !project_aware_default_project_tool(tool_name) {
-        return;
-    }
+) -> Result<(), rmcp::ErrorData> {
     let args = arguments.get_or_insert_with(serde_json::Map::new);
+    if let Some(explicit_project) = args.get("project") {
+        if explicit_project.as_str() == Some(project) {
+            return Ok(());
+        }
+        return Err(rmcp::ErrorData::invalid_params(
+            format!(
+                "stdio proxy project binding mismatch: session is bound to '{project}', but tool call requested project={explicit_project}"
+            ),
+            None,
+        ));
+    }
+    if !project_defaults_to_bound_project(tool_name, args) {
+        return Ok(());
+    }
     if tool_name == "tachi_memory"
         && args
             .get("action")
@@ -490,27 +550,41 @@ fn inject_client_project(
             .map(|action| !tachi_memory_action_defaults_to_project(action))
             .unwrap_or(false)
     {
-        return;
-    }
-    if args.contains_key("project") {
-        return;
+        return Ok(());
     }
     if args
         .get("scope")
         .and_then(|value| value.as_str())
         .is_some_and(|scope| scope.eq_ignore_ascii_case("global"))
     {
-        return;
+        return Ok(());
     }
     args.insert("project".to_string(), serde_json::json!(project));
+    Ok(())
 }
 
-fn project_aware_default_project_tool(tool_name: &str) -> bool {
+fn project_defaults_to_bound_project(tool_name: &str, args: &rmcp::model::JsonObject) -> bool {
+    if tool_name == "tachi_memory" {
+        return args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .is_none_or(tachi_memory_action_defaults_to_project);
+    }
     matches!(
         tool_name,
-        "save_memory"
+        "search_memory"
+            | "find_similar_memory"
+            | "get_memory"
+            | "list_memories"
+            | "delete_memory"
+            | "archive_memory"
+            | "save_memory"
             | "remember"
+            | "ingest"
+            | "ingest_event"
+            | "ingest_source"
             | "extract_facts"
+            | "tachi_search"
             | "tachi_save"
             | "tachi_event"
             | "tachi_domain_adapter"
@@ -526,7 +600,22 @@ fn project_aware_default_project_tool(tool_name: &str) -> bool {
 fn tachi_memory_action_defaults_to_project(action: &str) -> bool {
     matches!(
         action.to_ascii_lowercase().as_str(),
-        "briefing" | "save" | "checkpoint" | "extract_facts" | "progress"
+        "alerts"
+            | "ask"
+            | "briefing"
+            | "checkpoint"
+            | "consolidate"
+            | "extract_facts"
+            | "get"
+            | "apply_recall_proposals"
+            | "pattern_feedback"
+            | "progress"
+            | "readiness"
+            | "recall_proposals"
+            | "recall_simulate"
+            | "review_recall_proposal"
+            | "save"
+            | "search"
     )
 }
 
@@ -555,6 +644,8 @@ fn auto_daemon_command_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use tokio_util::sync::CancellationToken;
 
     fn daemon(global: Option<&Path>, project: Option<&Path>) -> crate::cli_client::DaemonInfo {
         crate::cli_client::DaemonInfo {
@@ -564,6 +655,623 @@ mod tests {
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             pid: Some(std::process::id() as i64),
         }
+    }
+
+    fn with_tachi_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var_os("TACHI_HOME");
+        let saved_sigil = std::env::var_os("SIGIL_HOME");
+        let saved_app = std::env::var_os("TACHI_APP_HOME");
+        std::env::set_var("TACHI_HOME", home);
+        std::env::remove_var("SIGIL_HOME");
+        std::env::remove_var("TACHI_APP_HOME");
+        let out = f();
+        restore_env("TACHI_HOME", saved_home);
+        restore_env("SIGIL_HOME", saved_sigil);
+        restore_env("TACHI_APP_HOME", saved_app);
+        out
+    }
+
+    fn restore_env(name: &str, value: Option<OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(name, value);
+        } else {
+            std::env::remove_var(name);
+        }
+    }
+
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+    }
+
+    async fn spawn_test_http_daemon(
+        server: crate::MemoryServer,
+        global_db_path: &Path,
+    ) -> (
+        crate::cli_client::DaemonInfo,
+        CancellationToken,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use rmcp::transport::streamable_http_server::{
+            session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind daemon listener");
+        let local_addr = listener.local_addr().expect("local addr");
+        let ct = CancellationToken::new();
+        let ct_shutdown = ct.clone();
+
+        let mut http_config = StreamableHttpServerConfig::default();
+        http_config.stateful_mode = true;
+        http_config.cancellation_token = ct.child_token();
+
+        let service = StreamableHttpService::new(
+            move || Ok(server.clone()),
+            std::sync::Arc::new(LocalSessionManager::default()),
+            http_config,
+        );
+        let router = axum::Router::new().nest_service("/mcp", service);
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, router)
+                .with_graceful_shutdown(async move { ct_shutdown.cancelled_owned().await })
+                .await;
+        });
+
+        (
+            crate::cli_client::DaemonInfo {
+                url: format!("http://{local_addr}/mcp"),
+                global_db: Some(global_db_path.display().to_string()),
+                project_db: None,
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                pid: Some(std::process::id() as i64),
+            },
+            ct,
+            handle,
+        )
+    }
+
+    async fn call_tool_via_stdio_proxy(
+        proxy: StdioProxyServer,
+        tool_name: &str,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let mut params = rmcp::model::CallToolRequestParams::new(tool_name.to_string());
+        if !arguments.is_empty() {
+            params = params.with_arguments(arguments);
+        }
+        let request =
+            rmcp::model::ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(params));
+        let (transport, mut receiver) = rmcp::transport::OneshotTransport::<
+            rmcp::service::RoleServer,
+        >::new(rmcp::model::ClientJsonRpcMessage::request(
+            request,
+            rmcp::model::RequestId::Number(1),
+        ));
+        let service = rmcp::service::serve_directly(proxy, transport, None);
+
+        let message = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
+            .await
+            .expect("proxied tool call timed out")
+            .expect("proxied tool call should yield one response");
+
+        let quit_reason = service.waiting().await.expect("wait for proxy service");
+        assert!(
+            matches!(quit_reason, rmcp::service::QuitReason::Closed),
+            "proxy oneshot service should close cleanly after one tool call"
+        );
+
+        match message {
+            rmcp::model::ServerJsonRpcMessage::Response(response) => match response.result {
+                rmcp::model::ServerResult::CallToolResult(result) => Ok(result),
+                other => panic!("expected CallToolResult, got {other:?}"),
+            },
+            rmcp::model::ServerJsonRpcMessage::Error(error) => Err(error.error),
+            other => panic!("expected tool response or error, got {other:?}"),
+        }
+    }
+
+    fn memory_text_count(db_path: &Path, text: &str) -> i64 {
+        rusqlite::Connection::open(db_path)
+            .expect("open db")
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE text = ?1",
+                [text],
+                |row| row.get(0),
+            )
+            .expect("count memories")
+    }
+
+    fn memory_id_count(db_path: &Path, id: &str) -> i64 {
+        rusqlite::Connection::open(db_path)
+            .expect("open db")
+            .query_row("SELECT COUNT(*) FROM memories WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .expect("count memory id")
+    }
+
+    fn memory_archived_value(db_path: &Path, id: &str) -> i64 {
+        rusqlite::Connection::open(db_path)
+            .expect("open db")
+            .query_row("SELECT archived FROM memories WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .expect("archived value")
+    }
+
+    fn first_text(result: &rmcp::model::CallToolResult) -> String {
+        result
+            .content
+            .iter()
+            .find_map(|content| match &content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .expect("text tool result")
+    }
+
+    fn first_text_json(result: &rmcp::model::CallToolResult) -> serde_json::Value {
+        let text = first_text(result);
+        serde_json::from_str(&text)
+            .unwrap_or_else(|err| panic!("tool result json: {err}; text={text:?}"))
+    }
+
+    fn assert_tool_ok(result: &rmcp::model::CallToolResult) {
+        assert!(
+            !result.is_error.unwrap_or(false),
+            "tool call should not be an MCP error: {result:?}"
+        );
+    }
+
+    fn seed_project_db(tachi_home: &Path, project_db_path: &Path) {
+        let _seed = crate::MemoryServer::new(
+            tachi_home.join(format!("seed-{}.db", uuid::Uuid::new_v4())),
+            Some(project_db_path.to_path_buf()),
+        )
+        .expect("seed project db schema");
+    }
+
+    #[test]
+    fn ensure_stdio_proxy_accepts_global_only_daemon_for_project_client() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var_os("TACHI_HOME");
+        let saved_sigil = std::env::var_os("SIGIL_HOME");
+        let saved_app = std::env::var_os("TACHI_APP_HOME");
+        let saved_disable_proxy = std::env::var_os("TACHI_DISABLE_STDIO_PROXY");
+        let saved_disable_auto = std::env::var_os("TACHI_DISABLE_AUTO_DAEMON");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        let project = tachi_home.join("projects/Sigil-test/memory.db");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        std::fs::create_dir_all(project.parent().expect("project parent")).expect("project parent");
+        std::fs::write(&project, b"").expect("project db placeholder");
+        std::env::set_var("TACHI_HOME", &tachi_home);
+        std::env::remove_var("SIGIL_HOME");
+        std::env::remove_var("TACHI_APP_HOME");
+        std::env::remove_var("TACHI_DISABLE_STDIO_PROXY");
+        std::env::set_var("TACHI_DISABLE_AUTO_DAEMON", "1");
+
+        let rt = test_runtime();
+        let listener = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .expect("listener");
+        let port = listener.local_addr().expect("local addr").port();
+        let pid_path = crate::daemon_lock::scoped_daemon_pid_path(&tachi_home, &global);
+        std::fs::write(
+            &pid_path,
+            serde_json::json!({
+                "pid": std::process::id(),
+                "port": port,
+                "url": format!("http://127.0.0.1:{port}/mcp"),
+                "global_db": global.display().to_string(),
+                "project_db": null,
+                "version": env!("CARGO_PKG_VERSION"),
+            })
+            .to_string(),
+        )
+        .expect("pid file");
+
+        let info = rt
+            .block_on(ensure_stdio_proxy_daemon(
+                &tachi_home,
+                &global,
+                Some(&project),
+                Some("Sigil-test"),
+            ))
+            .expect("global-only daemon should accept bound project client");
+        assert_eq!(info.project_db, None);
+        assert_eq!(info.url, format!("http://127.0.0.1:{port}/mcp"));
+
+        drop(listener);
+        restore_env("TACHI_HOME", saved_home);
+        restore_env("SIGIL_HOME", saved_sigil);
+        restore_env("TACHI_APP_HOME", saved_app);
+        restore_env("TACHI_DISABLE_STDIO_PROXY", saved_disable_proxy);
+        restore_env("TACHI_DISABLE_AUTO_DAEMON", saved_disable_auto);
+    }
+
+    #[test]
+    fn stdio_proxy_call_writes_bound_project_via_global_only_daemon() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var_os("TACHI_HOME");
+        let saved_sigil = std::env::var_os("SIGIL_HOME");
+        let saved_app = std::env::var_os("TACHI_APP_HOME");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        let project_name = "Sigil-proxy-e2e";
+        let project = tachi_home
+            .join("projects")
+            .join(project_name)
+            .join("memory.db");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        std::env::set_var("TACHI_HOME", &tachi_home);
+        std::env::remove_var("SIGIL_HOME");
+        std::env::remove_var("TACHI_APP_HOME");
+        seed_project_db(&tachi_home, &project);
+
+        let rt = test_runtime();
+        let (ct, daemon_task) = rt.block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+            let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+            let proxy = StdioProxyServer {
+                daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
+                app_home: tachi_home.clone(),
+                global_db_path: global.clone(),
+                project_db_path: Some(project.clone()),
+                client_project: Some(project_name.to_string()),
+            };
+
+            let saved_text = "stdio proxy e2e writes only the bound project db";
+            let result = call_tool_via_stdio_proxy(
+                proxy,
+                "tachi_memory",
+                serde_json::Map::from_iter([
+                    ("action".to_string(), serde_json::json!("save")),
+                    ("text".to_string(), serde_json::json!(saved_text)),
+                    ("summary".to_string(), serde_json::json!("stdio proxy e2e")),
+                    (
+                        "path".to_string(),
+                        serde_json::json!("/tests/stdio-proxy-e2e"),
+                    ),
+                    ("category".to_string(), serde_json::json!("fact")),
+                    ("scope".to_string(), serde_json::json!("project")),
+                    ("force".to_string(), serde_json::json!(true)),
+                ]),
+            )
+            .await
+            .expect("proxied save_memory should succeed");
+
+            assert_tool_ok(&result);
+            (ct, daemon_task)
+        });
+
+        let saved_text = "stdio proxy e2e writes only the bound project db";
+        assert_eq!(memory_text_count(&project, saved_text), 1);
+        assert_eq!(memory_text_count(&global, saved_text), 0);
+
+        ct.cancel();
+        rt.block_on(daemon_task).expect("daemon task");
+        restore_env("TACHI_HOME", saved_home);
+        restore_env("SIGIL_HOME", saved_sigil);
+        restore_env("TACHI_APP_HOME", saved_app);
+    }
+
+    #[test]
+    fn stdio_proxy_call_rejects_cross_project_override_before_daemon_write() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var_os("TACHI_HOME");
+        let saved_sigil = std::env::var_os("SIGIL_HOME");
+        let saved_app = std::env::var_os("TACHI_APP_HOME");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        let bound_project_name = "Sigil-proxy-e2e";
+        let other_project_name = "Quant-proxy-e2e";
+        let bound_project = tachi_home
+            .join("projects")
+            .join(bound_project_name)
+            .join("memory.db");
+        let other_project = tachi_home
+            .join("projects")
+            .join(other_project_name)
+            .join("memory.db");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        std::env::set_var("TACHI_HOME", &tachi_home);
+        std::env::remove_var("SIGIL_HOME");
+        std::env::remove_var("TACHI_APP_HOME");
+        seed_project_db(&tachi_home, &bound_project);
+        seed_project_db(&tachi_home, &other_project);
+
+        let rt = test_runtime();
+        let (ct, daemon_task) = rt.block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+            let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+            let proxy = StdioProxyServer {
+                daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
+                app_home: tachi_home.clone(),
+                global_db_path: global.clone(),
+                project_db_path: Some(bound_project.clone()),
+                client_project: Some(bound_project_name.to_string()),
+            };
+
+            let rejected_text = "stdio proxy e2e rejects cross-project override";
+            let err = call_tool_via_stdio_proxy(
+                proxy,
+                "tachi_memory",
+                serde_json::Map::from_iter([
+                    ("action".to_string(), serde_json::json!("save")),
+                    ("project".to_string(), serde_json::json!(other_project_name)),
+                    ("text".to_string(), serde_json::json!(rejected_text)),
+                    (
+                        "summary".to_string(),
+                        serde_json::json!("stdio proxy e2e reject"),
+                    ),
+                    (
+                        "path".to_string(),
+                        serde_json::json!("/tests/stdio-proxy-e2e-reject"),
+                    ),
+                    ("category".to_string(), serde_json::json!("fact")),
+                    ("scope".to_string(), serde_json::json!("project")),
+                    ("force".to_string(), serde_json::json!(true)),
+                ]),
+            )
+            .await
+            .expect_err("cross-project override should be rejected before dispatch");
+
+            assert!(
+                err.message.contains("stdio proxy project binding mismatch"),
+                "unexpected error: {err:?}"
+            );
+            (ct, daemon_task)
+        });
+
+        let rejected_text = "stdio proxy e2e rejects cross-project override";
+        assert_eq!(memory_text_count(&bound_project, rejected_text), 0);
+        assert_eq!(memory_text_count(&other_project, rejected_text), 0);
+        assert_eq!(memory_text_count(&global, rejected_text), 0);
+
+        ct.cancel();
+        rt.block_on(daemon_task).expect("daemon task");
+        restore_env("TACHI_HOME", saved_home);
+        restore_env("SIGIL_HOME", saved_sigil);
+        restore_env("TACHI_APP_HOME", saved_app);
+    }
+
+    #[test]
+    fn stdio_proxy_tachi_search_returns_global_and_bound_project_rows() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var_os("TACHI_HOME");
+        let saved_sigil = std::env::var_os("SIGIL_HOME");
+        let saved_app = std::env::var_os("TACHI_APP_HOME");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        let project_name = "Sigil-proxy-search-e2e";
+        let project = tachi_home
+            .join("projects")
+            .join(project_name)
+            .join("memory.db");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        std::env::set_var("TACHI_HOME", &tachi_home);
+        std::env::remove_var("SIGIL_HOME");
+        std::env::remove_var("TACHI_APP_HOME");
+        seed_project_db(&tachi_home, &project);
+
+        let rt = test_runtime();
+        let (ct, daemon_task) = rt.block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+            let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+            let proxy = StdioProxyServer {
+                daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
+                app_home: tachi_home.clone(),
+                global_db_path: global.clone(),
+                project_db_path: Some(project.clone()),
+                client_project: Some(project_name.to_string()),
+            };
+
+            for (id, scope, summary) in [
+                (
+                    "global-proxy-search-e2e",
+                    "global",
+                    "global PROXYREADMERGE row",
+                ),
+                (
+                    "project-proxy-search-e2e",
+                    "project",
+                    "project PROXYREADMERGE row",
+                ),
+            ] {
+                let result = call_tool_via_stdio_proxy(
+                    proxy.clone(),
+                    "tachi_memory",
+                    serde_json::Map::from_iter([
+                        ("action".to_string(), serde_json::json!("save")),
+                        ("id".to_string(), serde_json::json!(id)),
+                        (
+                            "text".to_string(),
+                            serde_json::json!(format!("{summary} lossless text")),
+                        ),
+                        ("summary".to_string(), serde_json::json!(summary)),
+                        (
+                            "path".to_string(),
+                            serde_json::json!("/tests/stdio-proxy-search-e2e"),
+                        ),
+                        ("category".to_string(), serde_json::json!("fact")),
+                        ("scope".to_string(), serde_json::json!(scope)),
+                        ("force".to_string(), serde_json::json!(true)),
+                    ]),
+                )
+                .await
+                .unwrap_or_else(|err| panic!("seed {id}: {err}"));
+                assert_tool_ok(&result);
+            }
+
+            let result = call_tool_via_stdio_proxy(
+                proxy,
+                "tachi_memory",
+                serde_json::Map::from_iter([
+                    ("action".to_string(), serde_json::json!("search")),
+                    ("query".to_string(), serde_json::json!("PROXYREADMERGE")),
+                    ("scope".to_string(), serde_json::json!("memory")),
+                    ("top_k".to_string(), serde_json::json!(10)),
+                    ("format".to_string(), serde_json::json!("json")),
+                ]),
+            )
+            .await
+            .expect("proxied tachi_memory search should succeed");
+            assert_tool_ok(&result);
+            let text = first_text(&result);
+            assert!(
+                text.contains("global-proxy-search-e2e"),
+                "proxied search lost global row: {text}"
+            );
+            assert!(
+                text.contains("project-proxy-search-e2e"),
+                "proxied search lost bound project row: {text}"
+            );
+
+            (ct, daemon_task)
+        });
+
+        ct.cancel();
+        rt.block_on(daemon_task).expect("daemon task");
+        restore_env("TACHI_HOME", saved_home);
+        restore_env("SIGIL_HOME", saved_sigil);
+        restore_env("TACHI_APP_HOME", saved_app);
+    }
+
+    #[test]
+    fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var_os("TACHI_HOME");
+        let saved_sigil = std::env::var_os("SIGIL_HOME");
+        let saved_app = std::env::var_os("TACHI_APP_HOME");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        let project_name = "Sigil-proxy-delete-e2e";
+        let project = tachi_home
+            .join("projects")
+            .join(project_name)
+            .join("memory.db");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        std::env::set_var("TACHI_HOME", &tachi_home);
+        std::env::remove_var("SIGIL_HOME");
+        std::env::remove_var("TACHI_APP_HOME");
+        seed_project_db(&tachi_home, &project);
+
+        let rt = test_runtime();
+        let (ct, daemon_task) = rt.block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+            server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
+            let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+            let proxy = StdioProxyServer {
+                daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
+                app_home: tachi_home.clone(),
+                global_db_path: global.clone(),
+                project_db_path: Some(project.clone()),
+                client_project: Some(project_name.to_string()),
+            };
+
+            for (id, summary) in [
+                ("global-proxy-delete-e2e", "global delete fallback row"),
+                ("global-proxy-archive-e2e", "global archive fallback row"),
+            ] {
+                let result = call_tool_via_stdio_proxy(
+                    proxy.clone(),
+                    "tachi_memory",
+                    serde_json::Map::from_iter([
+                        ("action".to_string(), serde_json::json!("save")),
+                        ("id".to_string(), serde_json::json!(id)),
+                        (
+                            "text".to_string(),
+                            serde_json::json!(format!("{summary} PROXYMUTATEGLOBAL")),
+                        ),
+                        ("summary".to_string(), serde_json::json!(summary)),
+                        (
+                            "path".to_string(),
+                            serde_json::json!("/tests/stdio-proxy-mutate-global"),
+                        ),
+                        ("category".to_string(), serde_json::json!("fact")),
+                        ("scope".to_string(), serde_json::json!("global")),
+                        ("force".to_string(), serde_json::json!(true)),
+                    ]),
+                )
+                .await
+                .unwrap_or_else(|err| panic!("seed {id}: {err}"));
+                assert_tool_ok(&result);
+            }
+
+            let deleted = call_tool_via_stdio_proxy(
+                proxy.clone(),
+                "delete_memory",
+                serde_json::Map::from_iter([(
+                    "id".to_string(),
+                    serde_json::json!("global-proxy-delete-e2e"),
+                )]),
+            )
+            .await
+            .expect("proxied delete should succeed");
+            assert_tool_ok(&deleted);
+            let deleted = first_text_json(&deleted);
+            assert_eq!(deleted["deleted"], serde_json::json!(true));
+            assert_eq!(deleted["db"], serde_json::json!("global"));
+
+            let archived = call_tool_via_stdio_proxy(
+                proxy,
+                "archive_memory",
+                serde_json::Map::from_iter([(
+                    "id".to_string(),
+                    serde_json::json!("global-proxy-archive-e2e"),
+                )]),
+            )
+            .await
+            .expect("proxied archive should succeed");
+            assert_tool_ok(&archived);
+            let archived = first_text_json(&archived);
+            assert_eq!(archived["archived"], serde_json::json!(true));
+            assert_eq!(archived["db"], serde_json::json!("global"));
+
+            (ct, daemon_task)
+        });
+
+        assert_eq!(memory_id_count(&global, "global-proxy-delete-e2e"), 0);
+        assert_eq!(
+            memory_archived_value(&global, "global-proxy-archive-e2e"),
+            1
+        );
+        assert_eq!(memory_id_count(&project, "global-proxy-delete-e2e"), 0);
+        assert_eq!(memory_id_count(&project, "global-proxy-archive-e2e"), 0);
+
+        ct.cancel();
+        rt.block_on(daemon_task).expect("daemon task");
+        restore_env("TACHI_HOME", saved_home);
+        restore_env("SIGIL_HOME", saved_sigil);
+        restore_env("TACHI_APP_HOME", saved_app);
     }
 
     #[test]
@@ -623,8 +1331,31 @@ mod tests {
             &info,
             global,
             Some(project),
-            Some("Sigil-test")
+            None
         ));
+    }
+
+    #[test]
+    fn stdio_proxy_rejects_matching_project_daemon_with_wrong_named_binding() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        let project = tachi_home.join("projects/Sigil-test/memory.db");
+        let other = tachi_home.join("projects/Quant-test/memory.db");
+        for path in [&global, &project, &other] {
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("parent");
+            std::fs::write(path, b"").expect("db placeholder");
+        }
+        let info = daemon(Some(&global), Some(&project));
+
+        with_tachi_home(&tachi_home, || {
+            assert!(!proxy_can_preserve_project_context(
+                &info,
+                &global,
+                Some(&project),
+                Some("Quant-test")
+            ));
+        });
     }
 
     #[test]
@@ -664,6 +1395,48 @@ mod tests {
     }
 
     #[test]
+    fn stdio_proxy_accepts_global_only_daemon_for_bound_named_project_client() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        let project = tachi_home.join("projects/Sigil-test/memory.db");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        std::fs::create_dir_all(project.parent().expect("project parent")).expect("project parent");
+        std::fs::write(&project, b"").expect("project db placeholder");
+        let info = daemon(Some(&global), None);
+
+        with_tachi_home(&tachi_home, || {
+            assert!(proxy_can_preserve_project_context(
+                &info,
+                &global,
+                Some(&project),
+                Some("Sigil-test")
+            ));
+        });
+    }
+
+    #[test]
+    fn stdio_proxy_rejects_unverified_named_project_binding() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        let project = temp.path().join("repo/.tachi/memory.db");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        std::fs::create_dir_all(project.parent().expect("project parent")).expect("project parent");
+        std::fs::write(&project, b"").expect("project db placeholder");
+        let info = daemon(Some(&global), None);
+
+        with_tachi_home(&tachi_home, || {
+            assert!(!proxy_can_preserve_project_context(
+                &info,
+                &global,
+                Some(&project),
+                Some("Sigil-test")
+            ));
+        });
+    }
+
+    #[test]
     fn stdio_proxy_env_gate_accepts_common_truthy_values() {
         assert!(env_truthy("1"));
         assert!(env_truthy("true"));
@@ -677,7 +1450,7 @@ mod tests {
     fn proxy_maps_zero_arg_briefing_to_project_memory_briefing() {
         let request = rmcp::model::CallToolRequestParams::new("tachi_briefing");
 
-        let mapped = prepare_proxy_tool_call(request, Some("Sigil-abc123"));
+        let mapped = prepare_proxy_tool_call(request, Some("Sigil-abc123")).expect("mapped");
 
         assert_eq!(mapped.name.as_ref(), "tachi_memory");
         let args = mapped.arguments.expect("briefing args");
@@ -692,11 +1465,11 @@ mod tests {
     }
 
     #[test]
-    fn proxy_injects_project_for_tachi_memory_writes_only() {
+    fn proxy_injects_bound_project_for_tachi_memory_project_actions() {
         let save = rmcp::model::CallToolRequestParams::new("tachi_memory").with_arguments(
             serde_json::Map::from_iter([("action".to_string(), serde_json::json!("save"))]),
         );
-        let save = prepare_proxy_tool_call(save, Some("Sigil-abc123"));
+        let save = prepare_proxy_tool_call(save, Some("Sigil-abc123")).expect("save mapped");
         assert_eq!(
             save.arguments.expect("save args")["project"],
             serde_json::json!("Sigil-abc123")
@@ -705,14 +1478,57 @@ mod tests {
         let search = rmcp::model::CallToolRequestParams::new("tachi_memory").with_arguments(
             serde_json::Map::from_iter([("action".to_string(), serde_json::json!("search"))]),
         );
-        let search = prepare_proxy_tool_call(search, Some("Sigil-abc123"));
-        assert!(
-            !search
-                .arguments
-                .expect("search args")
-                .contains_key("project"),
-            "search should not be narrowed to a named project implicitly"
+        let search = prepare_proxy_tool_call(search, Some("Sigil-abc123")).expect("search mapped");
+        assert_eq!(
+            search.arguments.expect("search args")["project"],
+            serde_json::json!("Sigil-abc123")
         );
+
+        for action in [
+            "consolidate",
+            "pattern_feedback",
+            "recall_proposals",
+            "review_recall_proposal",
+            "apply_recall_proposals",
+        ] {
+            let request = rmcp::model::CallToolRequestParams::new("tachi_memory").with_arguments(
+                serde_json::Map::from_iter([("action".to_string(), serde_json::json!(action))]),
+            );
+            let mapped =
+                prepare_proxy_tool_call(request, Some("Sigil-abc123")).expect("action mapped");
+            assert_eq!(
+                mapped.arguments.expect("args")["project"],
+                serde_json::json!("Sigil-abc123"),
+                "{action} should inherit the bound project"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_injects_bound_project_for_raw_project_tools() {
+        for tool in [
+            "search_memory",
+            "find_similar_memory",
+            "get_memory",
+            "list_memories",
+            "delete_memory",
+            "archive_memory",
+            "ingest",
+            "ingest_event",
+            "ingest_source",
+            "tachi_search",
+        ] {
+            let mapped = prepare_proxy_tool_call(
+                rmcp::model::CallToolRequestParams::new(tool),
+                Some("Sigil-abc123"),
+            )
+            .unwrap_or_else(|err| panic!("{tool} should map: {err}"));
+            assert_eq!(
+                mapped.arguments.expect("args")["project"],
+                serde_json::json!("Sigil-abc123"),
+                "{tool} should inherit the bound project"
+            );
+        }
     }
 
     #[test]
@@ -721,11 +1537,62 @@ mod tests {
             serde_json::Map::from_iter([("scope".to_string(), serde_json::json!("global"))]),
         );
 
-        let mapped = prepare_proxy_tool_call(request, Some("Sigil-abc123"));
+        let mapped = prepare_proxy_tool_call(request, Some("Sigil-abc123")).expect("mapped");
 
         assert!(
             !mapped.arguments.expect("args").contains_key("project"),
             "explicit global writes must remain global"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_explicit_cross_project_write_override() {
+        let request = rmcp::model::CallToolRequestParams::new("tachi_save").with_arguments(
+            serde_json::Map::from_iter([("project".to_string(), serde_json::json!("Quant-test"))]),
+        );
+
+        let err = prepare_proxy_tool_call(request, Some("Sigil-test"))
+            .expect_err("cross-project override should be rejected");
+
+        assert!(
+            err.to_string().contains("project binding mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_explicit_cross_project_read_override() {
+        let request = rmcp::model::CallToolRequestParams::new("tachi_memory").with_arguments(
+            serde_json::Map::from_iter([
+                ("action".to_string(), serde_json::json!("search")),
+                ("project".to_string(), serde_json::json!("Quant-test")),
+            ]),
+        );
+
+        let err = prepare_proxy_tool_call(request, Some("Sigil-test"))
+            .expect_err("cross-project read override should be rejected");
+
+        assert!(
+            err.to_string().contains("project binding mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_cross_project_override_even_with_global_scope() {
+        let request = rmcp::model::CallToolRequestParams::new("tachi_save").with_arguments(
+            serde_json::Map::from_iter([
+                ("scope".to_string(), serde_json::json!("global")),
+                ("project".to_string(), serde_json::json!("Quant-test")),
+            ]),
+        );
+
+        let err = prepare_proxy_tool_call(request, Some("Sigil-test"))
+            .expect_err("cross-project override should be rejected");
+
+        assert!(
+            err.to_string().contains("project binding mismatch"),
+            "unexpected error: {err}"
         );
     }
 }
