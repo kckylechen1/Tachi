@@ -259,18 +259,30 @@ pub struct ListMemoriesParams {
     /// Whether to include archived entries
     #[serde(default)]
     pub include_archived: bool,
+
+    /// Optional project name to list a specific project DB.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub struct DeleteMemoryParams {
     /// Memory entry ID to delete
     pub id: String,
+
+    /// Optional project name to delete from a specific project DB.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ArchiveMemoryParams {
     /// Memory entry ID to archive
     pub id: String,
+
+    /// Optional project name to archive in a specific project DB.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 // ─── Graph Edges ────────────────────────────────────────────────────────────

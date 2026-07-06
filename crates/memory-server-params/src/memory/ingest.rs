@@ -30,6 +30,10 @@ pub struct ExtractFactsParams {
     /// Source identifier for the extraction
     #[serde(default = "default_extraction_source")]
     pub source: String,
+
+    /// Optional named project target
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 /// A single message in a conversation turn.

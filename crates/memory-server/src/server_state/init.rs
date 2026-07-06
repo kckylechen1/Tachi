@@ -133,6 +133,8 @@ impl MemoryServer {
             global_db_path: Arc::new(global_db_path),
             global_vec_available,
             project_db: Arc::new(StdRwLock::new(project_db_state)),
+            attached_project_dbs: Arc::new(StdRwLock::new(HashMap::new())),
+            project_attach_init_gate: Arc::new(StdMutex::new(())),
         };
 
         let server = Self {

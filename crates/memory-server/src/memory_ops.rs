@@ -108,6 +108,34 @@ pub(crate) async fn handle_list_memories(
 ) -> Result<String, String> {
     let mut combined_entries: Vec<(MemoryEntry, DbScope)> = Vec::new();
 
+    if let Some(ref project_name) = params.project {
+        let global_entries = server.with_global_store_read(|store| {
+            store
+                .list_by_path(&params.path_prefix, params.limit, params.include_archived)
+                .map_err(|e| format!("Failed to list memories from global DB: {}", e))
+        })?;
+        combined_entries.extend(global_entries.into_iter().map(|e| (e, DbScope::Global)));
+
+        let project_entries = server.with_named_project_store_read(project_name, |store| {
+            store
+                .list_by_path(&params.path_prefix, params.limit, params.include_archived)
+                .map_err(|e| {
+                    format!(
+                        "Failed to list memories from project '{}': {}",
+                        project_name, e
+                    )
+                })
+        })?;
+        combined_entries.extend(project_entries.into_iter().map(|e| (e, DbScope::Project)));
+        combined_entries.sort_by(|a, b| b.0.timestamp.cmp(&a.0.timestamp));
+        combined_entries.truncate(params.limit);
+        let slim: Vec<serde_json::Value> = combined_entries
+            .iter()
+            .map(|(e, db_scope)| slim_entry(e, *db_scope))
+            .collect();
+        return serde_json::to_string(&slim).map_err(|e| format!("Failed to serialize: {}", e));
+    }
+
     let global_entries = server.with_global_store_read(|store| {
         store
             .list_by_path(&params.path_prefix, params.limit, params.include_archived)
@@ -272,6 +300,36 @@ pub(crate) async fn handle_delete_memory(
     server: &MemoryServer,
     params: DeleteMemoryParams,
 ) -> Result<String, String> {
+    if let Some(ref project_name) = params.project {
+        let project_deleted = server.with_named_project_store(project_name, |store| {
+            store
+                .delete(&params.id)
+                .map_err(|e| format!("Delete failed in project '{}': {}", project_name, e))
+        })?;
+        if project_deleted {
+            return serde_json::to_string(&json!({
+                "deleted": true,
+                "db": "project",
+                "project": project_name,
+                "id": params.id,
+            }))
+            .map_err(|e| format!("Failed to serialize: {}", e));
+        }
+
+        let global_deleted = server.with_global_store(|store| {
+            store
+                .delete(&params.id)
+                .map_err(|e| format!("Delete failed in global DB: {}", e))
+        })?;
+        return serde_json::to_string(&json!({
+            "deleted": global_deleted,
+            "db": if global_deleted { "global" } else { "not_found" },
+            "project": project_name,
+            "id": params.id,
+        }))
+        .map_err(|e| format!("Failed to serialize: {}", e));
+    }
+
     if server.has_project_db() {
         let deleted = server.with_project_store(|store| {
             store
@@ -304,6 +362,36 @@ pub(crate) async fn handle_archive_memory(
     server: &MemoryServer,
     params: ArchiveMemoryParams,
 ) -> Result<String, String> {
+    if let Some(ref project_name) = params.project {
+        let project_archived = server.with_named_project_store(project_name, |store| {
+            store
+                .archive_memory(&params.id)
+                .map_err(|e| format!("Archive failed in project '{}': {}", project_name, e))
+        })?;
+        if project_archived {
+            return serde_json::to_string(&json!({
+                "archived": true,
+                "db": "project",
+                "project": project_name,
+                "id": params.id,
+            }))
+            .map_err(|e| format!("Failed to serialize: {}", e));
+        }
+
+        let global_archived = server.with_global_store(|store| {
+            store
+                .archive_memory(&params.id)
+                .map_err(|e| format!("Archive failed in global DB: {}", e))
+        })?;
+        return serde_json::to_string(&json!({
+            "archived": global_archived,
+            "db": if global_archived { "global" } else { "not_found" },
+            "project": project_name,
+            "id": params.id,
+        }))
+        .map_err(|e| format!("Failed to serialize: {}", e));
+    }
+
     if server.has_project_db() {
         let archived = server.with_project_store(|store| {
             store

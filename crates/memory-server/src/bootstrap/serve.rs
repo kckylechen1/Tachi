@@ -461,9 +461,13 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     });
 
     if !cli.daemon {
-        if let Some(info) =
-            stdio::ensure_stdio_proxy_daemon(&app_home, &global_db_path, project_db_path.as_deref())
-                .await
+        if let Some(info) = stdio::ensure_stdio_proxy_daemon(
+            &app_home,
+            &global_db_path,
+            project_db_path.as_deref(),
+            client_project_name.as_deref(),
+        )
+        .await
         {
             if stdio::proxy_can_preserve_project_context(
                 &info,

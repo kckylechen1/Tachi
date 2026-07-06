@@ -53,14 +53,51 @@ pub(crate) async fn handle_find_similar_memory(
         recall_config: None,
     };
 
-    let global_results = server.with_global_store_read(|store| {
-        store
-            .search("", Some(global_opts))
-            .map_err(|e| format!("Vector search failed in global DB: {}", e))
-    })?;
-    combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
+    if let Some(ref project_name) = params.project {
+        let global_results = server.with_global_store_read(|store| {
+            store
+                .search("", Some(global_opts))
+                .map_err(|e| format!("Vector search failed in global DB: {}", e))
+        })?;
+        combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
 
-    if server.has_project_db() {
+        let project_vec_available = server
+            .with_named_project_store_read(project_name, |store| Ok(store.vec_available))
+            .unwrap_or(false);
+        let project_opts = SearchOptions {
+            candidates_per_channel,
+            top_k,
+            weights: common_weights.clone(),
+            path_prefix: params.path_prefix.clone(),
+            query_vec: Some(params.query_vec.clone()),
+            vec_available: project_vec_available,
+            record_access: false,
+            include_archived: params.include_archived,
+            include_superseded: false,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            domain: None,
+            as_of: None,
+            precision_matchers: Vec::new(),
+            recall_config: None,
+        };
+        let project_results = server.with_named_project_store_read(project_name, |store| {
+            store
+                .search("", Some(project_opts))
+                .map_err(|e| format!("Vector search failed in project DB '{project_name}': {e}"))
+        })?;
+        combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+    } else {
+        let global_results = server.with_global_store_read(|store| {
+            store
+                .search("", Some(global_opts))
+                .map_err(|e| format!("Vector search failed in global DB: {}", e))
+        })?;
+        combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
+    }
+
+    if params.project.is_none() && server.has_project_db() {
         let project_opts = SearchOptions {
             candidates_per_channel,
             top_k,
