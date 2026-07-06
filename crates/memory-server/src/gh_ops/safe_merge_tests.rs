@@ -74,6 +74,7 @@ fn write_verification(root: &std::path::Path, flow: &str, status: &str, head_sha
 }
 
 mod auth_env;
+mod check_state_artifact;
 mod flow_events;
 mod merge_gate;
 mod parsers;

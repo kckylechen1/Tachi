@@ -1,5 +1,5 @@
 use crate::gh_safe_merge::{
-    evaluate_merge_gate_with_policy, ChecksState, ClosingIssueLabels, GhClient, GhError,
+    evaluate_merge_gate_with_policy, CheckRun, ChecksState, ClosingIssueLabels, GhClient, GhError,
     MergeDecision, MergeGatePolicy, MergeGatePolicyMode, MergeResult, MergeStrategy, Mergeable,
     PrLifecycleState, PrState, ReviewDecision,
 };
