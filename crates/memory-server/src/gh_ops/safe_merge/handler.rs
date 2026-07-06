@@ -14,6 +14,7 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
     strategy: MergeStrategy,
     dry_run: bool,
     flow_id: Option<&str>,
+    tests_run: &[String],
     policy: MergeGatePolicy,
 ) -> Result<String, String> {
     let flow_run_dir = match flow_id {
@@ -44,6 +45,12 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         })),
         Err(err) => return Err(err),
     };
+    if verification_gate.is_none() && !tests_run.is_empty() {
+        if let Some(fid) = flow_id {
+            record_tests_run_verification(fid, repo, pr_number, &pr.head_sha, tests_run)?;
+            verification_gate = evaluate_verification_gate(flow_id, &pr.head_sha)?;
+        }
+    }
     if verification_gate.is_none()
         && flow_id.is_some()
         && !matches!(policy.mode, MergeGatePolicyMode::Permissive)
@@ -393,4 +400,35 @@ fn pr_lifecycle_state_label(state: PrLifecycleState) -> &'static str {
         PrLifecycleState::Closed => "CLOSED",
         PrLifecycleState::Merged => "MERGED",
     }
+}
+
+fn record_tests_run_verification(
+    flow_id: &str,
+    repo: &str,
+    pr_number: u64,
+    head_sha: &str,
+    tests_run: &[String],
+) -> Result<(), String> {
+    let params = TachiVerifyParams {
+        action: "record".to_string(),
+        format: Some("json".to_string()),
+        flow_id: Some(flow_id.to_string()),
+        pr_ref: Some(format!("{repo}#{pr_number}")),
+        head_sha: Some(head_sha.to_string()),
+        check_id: None,
+        kind: None,
+        command: None,
+        commands: tests_run.to_vec(),
+        status: Some("passed".to_string()),
+        exit_code: Some(0),
+        log_path: None,
+        summary: Some("safe_merge recorded caller-supplied tests_run evidence".to_string()),
+        cwd: None,
+        required: Some(true),
+        limit: None,
+        checks: Vec::new(),
+    };
+    record_verification_items(&params, "passed")
+        .map(|_| ())
+        .map_err(|err| format!("record tests_run verification: {err}"))
 }

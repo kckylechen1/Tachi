@@ -14,6 +14,7 @@ async fn safe_merge_strict_requires_flow_id_before_merge() {
         MergeStrategy::Squash,
         false,
         None,
+        &[],
         policy,
     )
     .await
@@ -46,6 +47,7 @@ async fn safe_merge_strict_accepts_linked_issue_without_flow_id() {
         MergeStrategy::Squash,
         true,
         None,
+        &[],
         policy,
     )
     .await
@@ -73,6 +75,7 @@ async fn safe_merge_head_consistency_required_blocks_merge() {
         MergeStrategy::Squash,
         false,
         None,
+        &[],
         policy,
     )
     .await
@@ -113,6 +116,7 @@ async fn safe_merge_with_flow_id_missing_verification_waits() {
         MergeStrategy::Squash,
         false,
         Some("flow_missing-verification"),
+        &[],
         MergeGatePolicy::standard(),
     )
     .await
@@ -156,6 +160,7 @@ async fn safe_merge_failed_verification_blocks_even_permissive() {
         MergeStrategy::Squash,
         false,
         Some(flow),
+        &[],
         MergeGatePolicy::permissive(),
     )
     .await
@@ -198,6 +203,7 @@ async fn safe_merge_stale_verification_waits_on_head_mismatch() {
         MergeStrategy::Squash,
         false,
         Some(flow),
+        &[],
         MergeGatePolicy::standard(),
     )
     .await
@@ -240,6 +246,7 @@ async fn safe_merge_strict_uses_passed_verification_for_head_consistency() {
         MergeStrategy::Squash,
         true,
         Some(flow),
+        &[],
         MergeGatePolicy::strict(),
     )
     .await
@@ -298,6 +305,7 @@ async fn safe_merge_strict_does_not_treat_not_required_verification_as_head_proo
         MergeStrategy::Squash,
         false,
         Some(flow),
+        &[],
         MergeGatePolicy::strict(),
     )
     .await
@@ -314,6 +322,62 @@ async fn safe_merge_strict_does_not_treat_not_required_verification_as_head_proo
         .unwrap()
         .iter()
         .any(|r| r == "head:consistency_unavailable"));
+    assert!(client.merge_calls().is_empty());
+    if let Some(v) = original {
+        std::env::set_var("TACHI_RUN_ROOT", v);
+    } else {
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn safe_merge_records_missing_verification_from_tests_run() {
+    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let original = std::env::var_os("TACHI_RUN_ROOT");
+    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let flow = "flow_record-tests-run";
+    let tests_run = vec![
+        "cargo test -p memory-server gh_ops::safe_merge_tests".to_string(),
+        "gitleaks detect --source .".to_string(),
+    ];
+    let client = MockGhClient::new()
+        .with_pr("o/r", ready_pr())
+        .with_checks("o/r", 42, vec![]);
+
+    let out = handle_github_safe_merge(
+        &client,
+        "o/r",
+        42,
+        MergeStrategy::Squash,
+        true,
+        Some(flow),
+        &tests_run,
+        MergeGatePolicy::standard(),
+    )
+    .await
+    .expect("ok");
+
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["merge_state"], "ready");
+    assert_eq!(v["status_patch"]["verification"]["overall"], "passed");
+    assert_eq!(v["status_patch"]["verification"]["required_total"], 2);
+
+    let ledger: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(tmp.path().join(flow).join("verification.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(ledger["overall"], "passed");
+    assert_eq!(ledger["pr_ref"], "o/r#42");
+    assert_eq!(ledger["head_sha"], "deadbeef");
+    assert_eq!(ledger["items"].as_array().unwrap().len(), 2);
+    assert!(ledger["items"].as_array().unwrap().iter().all(|item| {
+        item.get("status").and_then(serde_json::Value::as_str) == Some("passed")
+            && item.get("head_sha").and_then(serde_json::Value::as_str) == Some("deadbeef")
+    }));
     assert!(client.merge_calls().is_empty());
     if let Some(v) = original {
         std::env::set_var("TACHI_RUN_ROOT", v);

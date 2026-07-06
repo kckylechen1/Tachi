@@ -125,7 +125,7 @@ fn read_or_new_ledger(flow_id: &str) -> Result<Value, String> {
     Ok(read_json(&ledger_path_for_flow(flow_id)?)?.unwrap_or_else(|| empty_ledger(flow_id)))
 }
 
-pub(super) fn record_items(params: &TachiVerifyParams, status: &str) -> Result<Value, String> {
+pub(crate) fn record_items(params: &TachiVerifyParams, status: &str) -> Result<Value, String> {
     validate_record_params(params)?;
     let flow_id = params
         .flow_id

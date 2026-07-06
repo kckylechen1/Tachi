@@ -32,10 +32,8 @@ mod receipt_golden_tests;
 
 pub(crate) use self::gate::evaluate_verification_gate;
 pub(crate) use self::handler::handle_tachi_verify;
-pub(crate) use self::ledger::read_verification_ledger;
+pub(crate) use self::ledger::{read_verification_ledger, record_items};
 pub(crate) use self::recent::recent_verification_summaries;
 
-#[cfg(test)]
-use self::ledger::record_items;
 #[cfg(test)]
 use self::storage::{ledger_path_for_flow, write_json};
