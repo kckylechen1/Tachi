@@ -70,6 +70,7 @@ fn task_params(action: &str) -> TachiTaskParams {
         diff: None,
         subagents: Vec::new(),
         feedback_rules_applied: Vec::new(),
+        signatures: Vec::new(),
         evidence_refs: Vec::new(),
         tests_run: Vec::new(),
         diff_present: None,

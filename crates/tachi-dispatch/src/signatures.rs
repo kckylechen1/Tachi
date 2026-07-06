@@ -216,9 +216,7 @@ fn effective_severity(signature: &str, rows: &[&SignatureEvidenceRow]) -> Severi
 }
 
 /// Group rows by signature id, preserving first-seen order for determinism.
-fn group_by_signature(
-    rows: &[SignatureEvidenceRow],
-) -> Vec<(String, Vec<&SignatureEvidenceRow>)> {
+fn group_by_signature(rows: &[SignatureEvidenceRow]) -> Vec<(String, Vec<&SignatureEvidenceRow>)> {
     let mut groups: Vec<(String, Vec<&SignatureEvidenceRow>)> = Vec::new();
     for row in rows {
         if let Some(entry) = groups.iter_mut().find(|(id, _)| id == &row.signature) {
@@ -360,10 +358,17 @@ fn vendor_family_from_token(token: &str) -> Option<&'static str> {
 
 /// Coarse role class for the `(role, vendor)` axis. Accepts a dispatch profile
 /// `role`, a `stage`, or an already-canonical class, so the seed, the `complete`
-/// recording path, and packet assembly all agree. Unrecognized → `None` (no
-/// projection).
+/// recording path, and packet assembly all agree. A suffixed stage of the form
+/// `"<stage>:<suffix>"` (e.g. convoy's `"execute:slice-1"`) resolves to the same
+/// class as its prefix. Unrecognized → `None` (no projection).
 pub fn dispatch_role_class(role_or_stage: &str) -> Option<&'static str> {
-    match role_or_stage.trim().to_ascii_lowercase().as_str() {
+    let normalized = role_or_stage.trim().to_ascii_lowercase();
+    // Convoy and other slice producers stamp a `"<stage>:<suffix>"` stage; the
+    // suffix does not change the role class, so resolve on the prefix.
+    let key = normalized
+        .split_once(':')
+        .map_or(normalized.as_str(), |(prefix, _)| prefix);
+    match key {
         "implementer" | "executor" | "execute" | "hotfix" => Some("implementer"),
         "reviewer" | "senior_reviewer" | "fast_checker" | "review" | "review_light"
         | "ux_researcher" => Some("reviewer"),
@@ -461,6 +466,10 @@ mod tests {
         assert_eq!(dispatch_role_class("review"), Some("reviewer"));
         assert_eq!(dispatch_role_class("explore"), Some("explorer"));
         assert_eq!(dispatch_role_class("nonsense"), None);
+        // Suffixed stages (convoy's "execute:slice-1") resolve on the prefix.
+        assert_eq!(dispatch_role_class("execute:slice-1"), Some("implementer"));
+        assert_eq!(dispatch_role_class("review:pass-2"), Some("reviewer"));
+        assert_eq!(dispatch_role_class("nonsense:x"), None);
     }
 
     #[test]

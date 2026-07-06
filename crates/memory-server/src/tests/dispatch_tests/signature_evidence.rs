@@ -6,11 +6,14 @@
 //! contrasts fail if projection is absent or vendor-blind.
 
 use super::super::make_server;
-use super::dispatch_params;
+use super::{dispatch_params, task_params};
 use crate::signature_evidence::{
-    record_signature, rows_for_lane, seed_signature_taxonomy_evidence, SignatureRecord,
+    record_signature, rows_for_lane, rows_for_vendor, seed_signature_taxonomy_evidence,
+    SignatureRecord,
 };
+use crate::tool_params::SignatureRecordParams;
 use chrono::{Duration, Utc};
+use rmcp::handler::server::wrapper::Parameters;
 use tachi_dispatch::{project_counter_clauses, Severity, COUNTER_CLAUSE_TOP_N};
 
 // Verbatim counter-clauses from the frozen taxonomy.
@@ -201,5 +204,108 @@ async fn g4_unknown_vendor_produces_clean_packet() {
     assert!(
         !prompt.contains(VACCINATION_HEADER),
         "unknown vendor must yield a clean packet, no error: {prompt}"
+    );
+}
+
+// ─── G6: record through the canonical facade → projects on next packet ──────
+
+#[tokio::test]
+async fn g6_record_through_tachi_task_facade_projects_next_packet() {
+    let server = make_server();
+
+    // Record a signature through the facade the leader/pipeline actually use
+    // (tachi_task action=complete), not the direct tachi_complete tool.
+    let mut complete = task_params("complete");
+    complete.agent = Some("grok".to_string());
+    complete.outcome = Some("failure".to_string());
+    complete.task = Some("vault access check fix".to_string());
+    complete.signatures = vec![SignatureRecordParams {
+        signature: "fake_security_fix".to_string(),
+        severity: None,
+        evidence_ref: Some("G6".to_string()),
+        resolved: false,
+        role: Some("implementer".to_string()),
+        vendor: None, // derive vendor from agent=grok
+    }];
+    server
+        .tachi_task(Parameters(complete))
+        .await
+        .expect("complete via tachi_task facade");
+
+    // The evidence row landed on the (implementer, grok) lane...
+    let rows = rows_for_lane(&server, "implementer", "grok").expect("rows");
+    assert_eq!(
+        rows.len(),
+        1,
+        "signature recorded through the facade must land, not be dropped: {rows:?}"
+    );
+
+    // ...and the NEXT packet for that lane projects the counter-clause.
+    let mut pkt = dispatch_params(Some("grok"), "vault access check fix");
+    pkt.stage = Some("execute".to_string());
+    let prompt = crate::dispatch_ops::assemble_prompt(&server, &pkt).await;
+    assert!(
+        prompt.contains(FAKE_SECURITY_FIX_CLAUSE),
+        "facade-recorded signature must vaccinate the next dispatch: {prompt}"
+    );
+}
+
+// ─── G7: convoy suffixed stage resolves and gets vaccinated ─────────────────
+
+#[tokio::test]
+async fn g7_convoy_suffixed_stage_gets_vaccinated() {
+    let server = make_server();
+    record_signature(
+        &server,
+        &SignatureRecord {
+            vendor: "grok".to_string(),
+            role: "implementer".to_string(),
+            signature: "fake_security_fix".to_string(),
+            severity: Some(Severity::High),
+            evidence_ref: Some("G7".to_string()),
+            resolved: false,
+            recorded_at: Utc::now(),
+        },
+    )
+    .expect("seed grok implementer signature");
+
+    // Convoy stamps stage "execute:<slice_id>"; it must still resolve to the
+    // implementer lane and project the clause.
+    let mut pkt = dispatch_params(Some("grok"), "convoy raw slice");
+    pkt.stage = Some("execute:slice-1".to_string());
+    let prompt = crate::dispatch_ops::assemble_prompt(&server, &pkt).await;
+    assert!(
+        prompt.contains(FAKE_SECURITY_FIX_CLAUSE),
+        "convoy suffixed stage must be vaccinated: {prompt}"
+    );
+}
+
+// ─── G8: seed-once idempotency across daemon restarts ───────────────────────
+
+#[tokio::test]
+async fn g8_seed_is_idempotent_across_restarts() {
+    let server = make_server();
+
+    assert!(
+        seed_signature_taxonomy_evidence(&server).expect("first seed"),
+        "first seed must run"
+    );
+    let glm_after_first = rows_for_vendor(&server, "glm").expect("glm rows").len();
+    let codex_after_first = rows_for_vendor(&server, "codex").expect("codex rows").len();
+    assert_eq!(glm_after_first, 8, "glm seeds: 4 + 1 + 3");
+    assert_eq!(codex_after_first, 5, "codex seeds: (1+1) + (1+1) + 1");
+
+    // A second startup must be a no-op — no duplicate rows (a double-seed
+    // corrupts the vaccine counts).
+    assert!(
+        !seed_signature_taxonomy_evidence(&server).expect("second seed"),
+        "second seed must be a no-op"
+    );
+    let glm_after_second = rows_for_vendor(&server, "glm").expect("glm rows").len();
+    let codex_after_second = rows_for_vendor(&server, "codex").expect("codex rows").len();
+    assert_eq!(glm_after_first, glm_after_second, "no duplicate glm rows");
+    assert_eq!(
+        codex_after_first, codex_after_second,
+        "no duplicate codex rows"
     );
 }
