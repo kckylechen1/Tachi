@@ -236,9 +236,37 @@ impl Default for HybridWeights {
     }
 }
 
-fn rank_map(scores: &HashMap<String, f64>) -> HashMap<String, usize> {
+/// Deterministic tie-break comparator for every score-ranked recall sort site
+/// (tachi#718). Best element sorts to the front:
+/// 1. `score` descending (`total_cmp`, NaN-safe);
+/// 2. `timestamp` descending — a newer memory wins an exact score tie (recall
+///    semantics: recency is the default preference). ISO-8601 strings compare
+///    chronologically, so a plain reverse `str` compare is correct;
+/// 3. `id` ascending — ids are unique, so this is the absolute determinism
+///    backstop when score and timestamp both tie.
+///
+/// Each element is `(score, timestamp, id)`. Routing all sorts through one
+/// comparator keeps tie order identical run to run and prevents each site from
+/// hand-rolling a divergent key.
+pub(crate) fn cmp_recall_rank(a: (f64, &str, &str), b: (f64, &str, &str)) -> std::cmp::Ordering {
+    let (a_score, a_ts, a_id) = a;
+    let (b_score, b_ts, b_id) = b;
+    b_score
+        .total_cmp(&a_score)
+        .then_with(|| b_ts.cmp(a_ts))
+        .then_with(|| a_id.cmp(b_id))
+}
+
+fn rank_map(
+    scores: &HashMap<String, f64>,
+    entries: &HashMap<String, &MemoryEntry>,
+) -> HashMap<String, usize> {
     let mut ranked = scores.iter().collect::<Vec<_>>();
-    ranked.sort_by(|a, b| b.1.total_cmp(a.1));
+    ranked.sort_by(|a, b| {
+        let a_ts = entries.get(a.0).map(|e| e.timestamp.as_str()).unwrap_or("");
+        let b_ts = entries.get(b.0).map(|e| e.timestamp.as_str()).unwrap_or("");
+        cmp_recall_rank((*a.1, a_ts, a.0), (*b.1, b_ts, b.0))
+    });
     ranked
         .into_iter()
         .enumerate()
@@ -306,9 +334,9 @@ pub fn hybrid_score_with_config(
         .collect();
 
     let mut out: HashMap<String, HybridScore> = HashMap::new();
-    let vec_ranks = weights.use_rrf.then(|| rank_map(vec_scores));
-    let fts_ranks = weights.use_rrf.then(|| rank_map(fts_scores));
-    let symbolic_ranks = weights.use_rrf.then(|| rank_map(symbolic_scores));
+    let vec_ranks = weights.use_rrf.then(|| rank_map(vec_scores, entries));
+    let fts_ranks = weights.use_rrf.then(|| rank_map(fts_scores, entries));
+    let symbolic_ranks = weights.use_rrf.then(|| rank_map(symbolic_scores, entries));
 
     for id in all_ids {
         let vs = normalize(*vec_scores.get(id).unwrap_or(&0.0));

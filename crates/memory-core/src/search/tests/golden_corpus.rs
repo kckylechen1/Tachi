@@ -36,13 +36,14 @@
 //!
 //! # Determinism
 //! All timestamps derive from a fixed base instant minus a per-entry day offset
-//! (never `Utc::now()`), and MMR is disabled in the eval driver. Production
-//! ranking breaks `final_score` ties by HashMap iteration order, so the
-//! intra-top-10 rank of the summary slice's symbolic-only targets jitters within
-//! positions 1..8 (verified over 20 runs; it never crosses the top-10 boundary).
-//! `rank_of` re-sorts test-side by `(final_score desc, id asc)` to remove what
-//! jitter it can; the ratchet floors sit below the 20-run minimum and the target
-//! thresholds above the 20-run maximum, so neither layer flakes.
+//! (never `Utc::now()`), and MMR is disabled in the eval driver. Since tachi#718
+//! production ranking carries a stable `(final_score desc, timestamp desc,
+//! id asc)` tie-break at every sort site, so an identical query returns a
+//! byte-identical id order run to run (asserted by
+//! `golden_corpus_recall_order_is_deterministic`). `rank_of` still re-sorts
+//! test-side by `(final_score desc, id asc)` — now redundant but harmless — and
+//! the historical floors (measured under the old HashMap-order jitter) keep
+//! their margin.
 //!
 //! # Vector channel
 //! FTS + symbolic only. No entry carries a `vector`, so the vec channel is off
@@ -587,12 +588,12 @@ const ALL_SLICES: [Slice; 5] = [
 /// Rank of `expected` (1-based) under a deterministic ordering, or `None` if the
 /// target never entered the returned pool.
 ///
-/// Production ranking sorts by `final_score` alone, so score ties are broken by
-/// HashMap iteration order — nondeterministic run to run. That is fine for
-/// production (a tie is a tie) but would make rank-sensitive metrics here flap.
-/// We pull a deep pool (`top_k = 40`, larger than the corpus's per-query match
-/// set) and re-sort test-side by `(final_score desc, id asc)` so every rank is
-/// reproducible. This touches no production code — only the eval harness.
+/// Since tachi#718 production ranking is itself deterministic on ties
+/// (`final_score desc, timestamp desc, id asc`). We still pull a deep pool
+/// (`top_k = 40`, larger than the corpus's per-query match set) and re-sort
+/// test-side by `(final_score desc, id asc)` — redundant now, but it keeps this
+/// metric independent of any future ranking-key change. Touches no production
+/// code — only the eval harness.
 fn rank_of(
     conn: &Connection,
     spec: &QuerySpec,
@@ -674,12 +675,11 @@ fn overall_mrr(conn: &Connection, recall_config: Option<RecallConfig>) -> f64 {
 //   metrics (recall@3, MRR) carry the *discrimination* — they are the ones the
 //   known defects push below the spec target of 0.9.
 //
-// Nondeterminism note: production ranking breaks `final_score` ties by HashMap
-// order, so the intra-top-10 rank of the summary slice's symbolic-only targets
-// flaps within positions 1..8 (never crossing the top-10 boundary). Floors sit
-// safely below the 20-run minimum; targets safely above the 20-run maximum, so
-// neither layer flakes. If a future phase legitimately changes behavior, re-run
-// the report and RAISE these floors (never lower one — that hides a regression).
+// Determinism note: since tachi#718 production ties break stably (score desc,
+// timestamp desc, id asc), so these metrics no longer flap. The floors were
+// measured under the old HashMap-order jitter and retain their margin. If a
+// future phase legitimately changes behavior, re-run the report and RAISE these
+// floors (never lower one — that hides a regression).
 // ---------------------------------------------------------------------------
 
 /// recall@10 floor per slice (20-run stable value = 1.000 everywhere).
@@ -758,6 +758,56 @@ fn golden_corpus_meets_spec_targets() {
         overall >= TARGET_QUALITY,
         "overall MRR {overall:.3} < spec target {TARGET_QUALITY:.3}"
     );
+}
+
+/// DISCRIMINATION TEST (tachi#718) — production recall order must be byte-stable
+/// across reruns of an identical query over an identical corpus.
+///
+/// Pre-fix, `final_score` ties broke by HashMap iteration order at three sites
+/// (`scorer::rank_map` RRF per-channel ranks, `ranking` final sort,
+/// `filtering::newest_by_shared_entity` recency-boost pick), so the same query
+/// returned different id sequences run to run. `rank_map` is the deepest source:
+/// two docs with an equal per-channel score get adjacent RRF ranks in a
+/// nondeterministic order, so their *final scores themselves* swap between runs.
+///
+/// This asserts each query's RAW production-returned id order — not the
+/// `(score desc, id asc)` test-side re-sort in `rank_of`, which deliberately
+/// masks the defect — is byte-identical across N consecutive runs. RED pre-fix
+/// (some summary/CJK query jitters), GREEN once every sort site carries the
+/// stable `(score desc, timestamp desc, id asc)` tie-break.
+#[test]
+fn golden_corpus_recall_order_is_deterministic() {
+    let mut conn = setup();
+    seed_corpus(&mut conn);
+
+    const N: usize = 10;
+    for spec in QUERIES {
+        let opts = SearchOptions {
+            top_k: 40,
+            candidates_per_channel: 128,
+            record_access: false,
+            mmr_threshold: None,
+            path_prefix: (spec.slice == Slice::WikiScoped).then(|| "/wiki".to_string()),
+            ..Default::default()
+        };
+        let ids_at = || -> Vec<String> {
+            hybrid_search(&conn, spec.query, &opts)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.entry.id)
+                .collect()
+        };
+        let baseline = ids_at();
+        for run in 1..N {
+            let ids = ids_at();
+            assert_eq!(
+                ids, baseline,
+                "query {:?} returned a different id order on run {run} of {N} \
+                 (nondeterministic score-tie break — tachi#718)",
+                spec.query
+            );
+        }
+    }
 }
 
 /// VARIANT HOOK — documents that `or_fallback` is a live per-call lever that is

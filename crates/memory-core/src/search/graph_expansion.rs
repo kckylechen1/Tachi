@@ -91,10 +91,18 @@ pub(super) fn append_graph_expansion(
         })
         .collect();
     new_entries.sort_by(|a, b| {
-        b.score
-            .final_score
-            .total_cmp(&a.score.final_score)
-            .then_with(|| a.entry.id.cmp(&b.entry.id))
+        crate::scorer::cmp_recall_rank(
+            (
+                a.score.final_score,
+                a.entry.timestamp.as_str(),
+                a.entry.id.as_str(),
+            ),
+            (
+                b.score.final_score,
+                b.entry.timestamp.as_str(),
+                b.entry.id.as_str(),
+            ),
+        )
     });
 
     results.extend(new_entries);

@@ -86,7 +86,10 @@ pub(super) fn newest_by_shared_entity(entries: &HashMap<String, &MemoryEntry>) -
         .filter_map(|items| {
             items
                 .into_iter()
-                .max_by(|a, b| a.timestamp.cmp(&b.timestamp))
+                // Tie-break by id so an exact-timestamp tie picks the same
+                // recency-boost target run to run (tachi#718); HashMap order
+                // fed this `max_by` before.
+                .max_by(|a, b| a.timestamp.cmp(&b.timestamp).then_with(|| a.id.cmp(&b.id)))
                 .map(|entry| entry.id.clone())
         })
         .collect()

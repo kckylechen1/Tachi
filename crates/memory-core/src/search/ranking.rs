@@ -121,7 +121,17 @@ pub(super) fn rank_candidate_entries(
         .filter(|(id, _)| entries_ref.contains_key(*id))
         .map(|(id, hs)| (id, hs.final_score))
         .collect();
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    ranked.sort_by(|a, b| {
+        let a_ts = entries_ref
+            .get(a.0)
+            .map(|e| e.timestamp.as_str())
+            .unwrap_or("");
+        let b_ts = entries_ref
+            .get(b.0)
+            .map(|e| e.timestamp.as_str())
+            .unwrap_or("");
+        crate::scorer::cmp_recall_rank((a.1, a_ts, a.0), (b.1, b_ts, b.0))
+    });
 
     let ranked_ids: Vec<String> = if let Some(threshold) = opts.mmr_threshold {
         apply_mmr_diversity(&ranked, &entries_map, threshold, opts.top_k)
