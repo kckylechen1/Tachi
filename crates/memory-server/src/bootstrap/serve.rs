@@ -554,7 +554,11 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         ));
         run_startup_integrity_checks(&server, project_db_path.is_some())?;
         load_cached_hub_tools(&server);
-        report_pipeline_and_spawn_daily_distill(&server, &app_home);
+        bg_handles.push(report_pipeline_and_spawn_daily_distill(
+            &server,
+            &app_home,
+            background_shutdown.clone(),
+        ));
     }
 
     eprintln!("Starting Tachi MCP Server v{}", env!("CARGO_PKG_VERSION"));
@@ -599,12 +603,15 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     };
 
     background_shutdown.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+    if !bg_handles.is_empty() {
+        eprintln!(
+            "[shutdown] waiting for {} background task(s) to finish...",
+            bg_handles.len()
+        );
         for handle in bg_handles {
             let _ = handle.await;
         }
-    })
-    .await;
+    }
 
     serve_result?;
     Ok(())

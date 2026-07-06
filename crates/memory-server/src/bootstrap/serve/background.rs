@@ -282,7 +282,8 @@ pub(super) fn load_cached_hub_tools(server: &MemoryServer) {
 pub(super) fn report_pipeline_and_spawn_daily_distill(
     server: &MemoryServer,
     app_home: &std::path::Path,
-) {
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
     if server.pipeline_enabled {
         eprintln!("Pipeline workers: ENABLED (external)");
     } else {
@@ -301,7 +302,10 @@ pub(super) fn report_pipeline_and_spawn_daily_distill(
         let distill_server = server.clone();
         let marker_path = daily_distill_marker_path(app_home);
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+            }
             eprintln!(
                 "Distill scheduler: ENABLED (daily batch, interval={}s)",
                 distill_interval_secs
@@ -375,12 +379,17 @@ pub(super) fn report_pipeline_and_spawn_daily_distill(
             // First tick fires immediately; consume it so we wait a full cadence.
             interval.tick().await;
             loop {
-                interval.tick().await;
-                run_once(&distill_server, &marker_path).await;
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = interval.tick() => {
+                        run_once(&distill_server, &marker_path).await;
+                    }
+                }
             }
-        });
+        })
     } else {
         eprintln!("Distill scheduler: DISABLED (no project DB available)");
+        tokio::spawn(async {})
     }
 }
 
@@ -423,13 +432,7 @@ mod tests {
     async fn background_gc_exits_on_shutdown_cancel_during_initial_delay() {
         let (_tmp, server) = make_server();
         let shutdown = CancellationToken::new();
-        let handle = spawn_background_gc(
-            &server,
-            true,
-            3600,
-            3600,
-            shutdown.clone(),
-        );
+        let handle = spawn_background_gc(&server, true, 3600, 3600, shutdown.clone());
         shutdown.cancel();
         tokio::time::timeout(Duration::from_secs(2), handle)
             .await
