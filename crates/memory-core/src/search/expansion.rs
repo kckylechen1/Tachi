@@ -116,24 +116,85 @@ fn expanded_fts_queries(query: &str, max_queries: usize) -> Vec<String> {
 fn fts_or_fallback_match_query(query: &str, max_terms: usize) -> Option<String> {
     let max_terms = max_terms.max(1);
     let mut terms = Vec::new();
-    for token in tokenize(query) {
-        if token.len() < 2 || !token.chars().all(|ch| ch.is_ascii_alphanumeric()) {
-            continue;
+    let mut ascii = String::new();
+    let mut cjk = String::new();
+
+    let flush_ascii = |terms: &mut Vec<String>, ascii: &mut String| {
+        if ascii.len() >= 2 {
+            push_unique(terms, ascii);
         }
-        push_unique(&mut terms, &token);
-        if terms.len() >= max_terms {
-            break;
+        ascii.clear();
+    };
+    let flush_cjk = |terms: &mut Vec<String>, cjk: &mut String| {
+        if !cjk.is_empty() {
+            let phrase = format!("\"{cjk}\"");
+            if !terms.iter().any(|existing| existing == &phrase) {
+                terms.push(phrase);
+            }
+        }
+        cjk.clear();
+    };
+
+    for ch in query.chars() {
+        if ch.is_ascii_alphanumeric() {
+            flush_cjk(&mut terms, &mut cjk);
+            if terms.len() >= max_terms {
+                break;
+            }
+            ascii.push(ch.to_ascii_lowercase());
+        } else if is_cjk(ch) {
+            flush_ascii(&mut terms, &mut ascii);
+            if terms.len() >= max_terms {
+                break;
+            }
+            cjk.push(ch);
+        } else {
+            flush_ascii(&mut terms, &mut ascii);
+            flush_cjk(&mut terms, &mut cjk);
+            if terms.len() >= max_terms {
+                break;
+            }
         }
     }
+    if terms.len() < max_terms {
+        flush_ascii(&mut terms, &mut ascii);
+    }
+    if terms.len() < max_terms {
+        flush_cjk(&mut terms, &mut cjk);
+    }
+    terms.truncate(max_terms);
     if terms.len() < 2 {
         return None;
     }
-    Some(
-        terms
-            .into_iter()
-            .map(|term| format!("{term}*"))
-            .collect::<Vec<_>>()
-            .join(" OR "),
+
+    let query_terms = terms
+        .into_iter()
+        .map(|term| {
+            if term.starts_with('"') {
+                term
+            } else {
+                format!("{term}*")
+            }
+        })
+        .collect::<Vec<_>>();
+    if query_terms.len() < 2 {
+        return None;
+    }
+    Some(query_terms.join(" OR "))
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2A6DF
+            | 0x2A700..=0x2B73F
+            | 0x2B740..=0x2B81F
+            | 0x2B820..=0x2CEAF
+            | 0x2CEB0..=0x2EBEF
+            | 0x30000..=0x3134F
     )
 }
 
@@ -202,7 +263,7 @@ pub(super) fn search_fts_with_expansion_config(
                 .or_insert(adjusted);
         }
     }
-    if recall_config.or_fallback_fts_score_factor > 0.0 {
+    if merged.is_empty() && recall_config.or_fallback_fts_score_factor > 0.0 {
         if let Some(or_query) =
             fts_or_fallback_match_query(query, recall_config.or_fallback_fts_max_terms)
         {

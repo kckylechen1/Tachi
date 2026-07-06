@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn fts_or_fallback_is_config_gated_and_preserves_all_terms_precision() {
+fn fts_or_fallback_is_enabled_by_default_and_preserves_all_terms_precision() {
     let mut conn = setup();
     insert(
         &mut conn,
@@ -33,9 +33,10 @@ fn fts_or_fallback_is_config_gated_and_preserves_all_terms_precision() {
     );
 
     let default_config = RecallConfig::default();
+    let fallback_query = "cleanup cli absent";
     let default_scores = search_fts_with_expansion_config(
         &conn,
-        "cleanup cli safe",
+        fallback_query,
         10,
         false,
         false,
@@ -45,9 +46,10 @@ fn fts_or_fallback_is_config_gated_and_preserves_all_terms_precision() {
     )
     .unwrap();
     assert!(
-        !default_scores.contains_key("partial-term"),
-        "OR fallback must stay disabled by default to preserve current behavior"
+        default_scores.contains_key("partial-term"),
+        "tachi#708 Gate 1 turns OR fallback on by default when conjunctive FTS returns no candidates"
     );
+    assert_eq!(RecallConfig::default().or_fallback_fts_score_factor, 0.55);
 
     let tuned_config = RecallConfig {
         or_fallback_fts_score_factor: 0.3,
@@ -55,7 +57,7 @@ fn fts_or_fallback_is_config_gated_and_preserves_all_terms_precision() {
     };
     let tuned_scores = search_fts_with_expansion_config(
         &conn,
-        "cleanup cli safe",
+        fallback_query,
         10,
         false,
         false,
@@ -72,7 +74,10 @@ fn fts_or_fallback_is_config_gated_and_preserves_all_terms_precision() {
         .get("partial-term")
         .copied()
         .expect("partial term should enter through OR fallback");
-    assert_eq!(all_terms, 1.0);
+    assert!(
+        all_terms > 0.0 && all_terms <= tuned_config.or_fallback_fts_score_factor,
+        "all-term fallback score should be bounded by the configured factor, got {all_terms}"
+    );
     assert!(
         partial > 0.0 && partial <= tuned_config.or_fallback_fts_score_factor,
         "fallback score should be bounded by the configured factor, got {partial}"
@@ -80,6 +85,98 @@ fn fts_or_fallback_is_config_gated_and_preserves_all_terms_precision() {
     assert!(
         all_terms > partial,
         "all-term AND precision should outrank partial-term OR fallback"
+    );
+}
+
+#[test]
+fn fts_or_fallback_cjk_phrase_recovers_when_ascii_term_is_missing() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "cjk-target",
+        "中文查询无法触发回退的诊断记录",
+        &["中文", "回退"],
+    );
+    insert(
+        &mut conn,
+        "ascii-only",
+        "diagnostic note about a missing lexical token",
+        &["diagnostic"],
+    );
+
+    let and_only = search_fts(&conn, "中文查询 missing", 10, false, false, None, None).unwrap();
+    assert!(
+        !and_only.contains_key("cjk-target"),
+        "simple_query FTS requires the missing ASCII term and should zero the CJK target"
+    );
+
+    let scores = search_fts_with_expansion_config(
+        &conn,
+        "中文查询 missing",
+        10,
+        false,
+        false,
+        None,
+        None,
+        &RecallConfig::default(),
+    )
+    .unwrap();
+    let target = scores
+        .get("cjk-target")
+        .copied()
+        .expect("quoted CJK phrase should enter through the OR fallback");
+    assert!(
+        target > 0.0,
+        "CJK fallback phrase should contribute a positive FTS score"
+    );
+}
+
+#[test]
+fn hybrid_recovers_candidate_starved_partial_coverage_target_through_or_fallback() {
+    let mut conn = setup();
+    let mut target = memory_entry(
+        "starved-target",
+        "quartz beacon coverage repair note",
+        &["quartz", "beacon"],
+    );
+    target.timestamp = "2026-01-01T00:00:00Z".to_string();
+    insert_entry(&mut conn, target);
+
+    for idx in 0..12 {
+        let mut distractor = memory_entry(
+            &format!("fresh-symbolic-{idx:02}"),
+            "quartz scratch distractor",
+            &["quartz"],
+        );
+        distractor.timestamp = format!("2026-01-02T00:00:{idx:02}Z");
+        insert_entry(&mut conn, distractor);
+    }
+
+    let opts = SearchOptions {
+        top_k: 1,
+        candidates_per_channel: 1,
+        weights: HybridWeights {
+            semantic: 0.0,
+            fts: 1.0,
+            symbolic: 0.0,
+            decay: 0.0,
+            use_rrf: false,
+        },
+        record_access: false,
+        mmr_threshold: None,
+        ..Default::default()
+    };
+    let results = hybrid_search(&conn, "quartz beacon absent", &opts).unwrap();
+    let top = results
+        .first()
+        .expect("OR fallback should supply a candidate despite conjunctive zero");
+    assert_eq!(
+        top.entry.id, "starved-target",
+        "coverage-ranked OR fallback should rescue a target missing one query term"
+    );
+    assert!(
+        top.score.fts > 0.0,
+        "rescued target should enter via the FTS fallback stream"
     );
 }
 
