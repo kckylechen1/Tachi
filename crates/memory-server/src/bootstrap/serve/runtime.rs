@@ -64,6 +64,24 @@ pub(super) fn daemon_idle_timeout() -> Option<std::time::Duration> {
     (secs > 0).then(|| std::time::Duration::from_secs(secs))
 }
 
+/// Idle window after which a **direct** stdio MCP server (one that opened the
+/// DB for writing) self-terminates. Targets the "host alive but session
+/// abandoned" leak mode identified in #520: the dominant pattern is NOT
+/// reparent-to-init (parent-death catches that), but long-lived hosts that
+/// leave stdio tachi-serve processes connected yet inactive — each holding a
+/// write-capable SQLite connection and feeding the lock storm.
+///
+/// `None` disables (env value `0`). Defaults to 1 hour (longer than the
+/// daemon's 30 min because stdio sessions are tied to interactive IDE/agent
+/// windows where the user may be away for a meeting).
+pub(super) fn stdio_idle_timeout() -> Option<std::time::Duration> {
+    let secs = std::env::var("TACHI_STDIO_IDLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(3600);
+    (secs > 0).then(|| std::time::Duration::from_secs(secs))
+}
+
 /// Resolves when the launching parent has exited. An orphaned stdio MCP server
 /// has no host left to talk to, so it should exit rather than linger as an
 /// init/launchd-reparented process. Unix-only; default on, disable with
