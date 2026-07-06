@@ -181,7 +181,8 @@ pub(crate) async fn search_memory_rows_with_recall_config(
             || default_wiki_vec_available)
     {
         server.ensure_provider_secrets_materialized(&["VOYAGE_API_KEY"]);
-        match server.llm.embed_voyage(&params.query, "query").await {
+        let (scrubbed_query, _) = crate::memory_search_ops::scrub_secrets(&params.query);
+        match server.llm.embed_voyage(&scrubbed_query, "query").await {
             Ok(query_vec) => {
                 params.query_vec = Some(query_vec);
             }

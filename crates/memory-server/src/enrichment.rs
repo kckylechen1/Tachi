@@ -320,6 +320,10 @@ impl MemoryServer {
         let mut embed_results: Vec<Option<Vec<f32>>> = vec![None; items.len()];
 
         if !embed_texts.is_empty() {
+            let embed_texts: Vec<_> = embed_texts
+                .iter()
+                .map(|t| crate::memory_search_ops::scrub_secrets(t).0)
+                .collect();
             match self.llm.embed_voyage_batch(&embed_texts, "document").await {
                 Ok(vecs) => {
                     for (vec_idx, &item_idx) in embed_indices.iter().enumerate() {
