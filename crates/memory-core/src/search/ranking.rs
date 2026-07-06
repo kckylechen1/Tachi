@@ -116,17 +116,26 @@ pub(super) fn rank_candidate_entries(
     apply_tier_boosts(&entries_ref, &mut scores);
     apply_entity_recency_boosts(&entries_ref, &superseded_ids, &mut scores);
 
-    let mut ranked: Vec<(&String, f64)> = scores
+    // Decorate each candidate with its parsed instant once (epoch millis), then
+    // sort — the comparator compares the pre-parsed key, never the raw string
+    // (tachi#718 CP2/CP3).
+    let mut ranked: Vec<(&String, f64, i64)> = scores
         .iter()
         .filter(|(id, _)| entries_ref.contains_key(*id))
-        .map(|(id, hs)| (id, hs.final_score))
+        .map(|(id, hs)| {
+            let ms = entries_ref
+                .get(id)
+                .map(|e| crate::scorer::timestamp_epoch_millis(&e.timestamp))
+                .unwrap_or(i64::MIN);
+            (id, hs.final_score, ms)
+        })
         .collect();
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    ranked.sort_by(|a, b| crate::scorer::cmp_recall_rank((a.1, a.2, a.0), (b.1, b.2, b.0)));
 
     let ranked_ids: Vec<String> = if let Some(threshold) = opts.mmr_threshold {
         apply_mmr_diversity(&ranked, &entries_map, threshold, opts.top_k)
     } else {
-        ranked.iter().map(|(id, _)| id.to_string()).collect()
+        ranked.iter().map(|(id, _, _)| id.to_string()).collect()
     };
     drop(entries_ref);
 
@@ -268,24 +277,24 @@ fn apply_entity_recency_boosts(
 /// Candidates with cosine similarity > `threshold` to any already-selected
 /// entry are deferred to the end rather than dropped entirely.
 fn apply_mmr_diversity(
-    ranked: &[(&String, f64)],
+    ranked: &[(&String, f64, i64)],
     entries: &HashMap<String, MemoryEntry>,
     threshold: f64,
     needed: usize,
 ) -> Vec<String> {
     if ranked.len() <= 1 {
-        return ranked.iter().map(|(id, _)| id.to_string()).collect();
+        return ranked.iter().map(|(id, _, _)| id.to_string()).collect();
     }
 
     let mut selected: Vec<String> = Vec::new();
     let mut deferred: Vec<String> = Vec::new();
 
-    for (idx, (id, _)) in ranked.iter().enumerate() {
+    for (idx, (id, _, _)) in ranked.iter().enumerate() {
         if selected.len() >= needed {
             deferred.extend(
                 ranked[idx..]
                     .iter()
-                    .map(|(rest_id, _)| (*rest_id).to_string()),
+                    .map(|(rest_id, _, _)| (*rest_id).to_string()),
             );
             break;
         }

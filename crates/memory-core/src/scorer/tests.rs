@@ -375,3 +375,33 @@ fn graph_spreading_activation_uses_weighted_seeds_and_converging_paths() {
     assert!(activation["shared"] > activation["weak-only"]);
     assert!(activation["shared"] > 0.45);
 }
+
+/// tachi#718 CP2 — a score tie must break by TRUE instant, not lexical string
+/// order. The three real-world timestamp formats below are mis-ordered by a raw
+/// `str` compare: `.` (0x2E) < `Z` (0x5A), so `...00:00:00Z` sorts ABOVE the
+/// strictly-newer `...00:00:00.500Z`; and a `+01:00` offset is compared as text,
+/// ignoring the zone. Parsed to an instant the order is unambiguous. RED under
+/// the string-compare tie-break, GREEN once the key is parsed epoch millis.
+#[test]
+fn recall_tiebreak_orders_mixed_timestamp_formats_by_true_instant() {
+    let score = 1.0;
+    // True instants (UTC): plain=00:00:00.000, millis=00:00:00.500,
+    // offset(01:30+01:00)=00:30:00.000. Newest-first → offset, millis, plain.
+    let mut rows = [
+        (score, "2026-01-01T00:00:00Z", "plain"),
+        (score, "2026-01-01T00:00:00.500Z", "millis"),
+        (score, "2026-01-01T01:30:00+01:00", "offset"),
+    ];
+    rows.sort_by(|a, b| {
+        cmp_recall_rank(
+            (a.0, timestamp_epoch_millis(a.1), a.2),
+            (b.0, timestamp_epoch_millis(b.1), b.2),
+        )
+    });
+    let order: Vec<&str> = rows.iter().map(|r| r.2).collect();
+    assert_eq!(
+        order,
+        ["offset", "millis", "plain"],
+        "score-tied rows must order by parsed instant desc, not lexical string"
+    );
+}

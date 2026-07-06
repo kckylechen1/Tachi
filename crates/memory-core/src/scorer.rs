@@ -236,13 +236,72 @@ impl Default for HybridWeights {
     }
 }
 
-fn rank_map(scores: &HashMap<String, f64>) -> HashMap<String, usize> {
-    let mut ranked = scores.iter().collect::<Vec<_>>();
-    ranked.sort_by(|a, b| b.1.total_cmp(a.1));
+/// Parse an ISO-8601 / RFC-3339 timestamp to epoch milliseconds for tie-break
+/// ordering. Unparseable or empty → `i64::MIN` (sorts as the oldest), keeping
+/// the order total and deterministic.
+///
+/// Recall sorts compare parsed *instants*, not raw strings (tachi#718 CP2): the
+/// `timestamp` column is plain `TEXT NOT NULL` and only new writes are
+/// normalized to UTC+millis `Z` (`db/common.rs`), so a lexical compare
+/// mis-orders legacy/mixed rows — `...00:00:00Z` vs `...00:00:00.500Z` (`.` <
+/// `Z`) and any `+hh:mm` offset both invert real time. Normalizing the column
+/// itself is a larger migration deliberately deferred out of this fix; parsing
+/// on read is the bounded fallback. Callers parse once per candidate
+/// (decorate-sort-undecorate), never inside the comparator.
+pub(crate) fn timestamp_epoch_millis(ts: &str) -> i64 {
+    let raw = ts.trim();
+    if raw.is_empty() {
+        return i64::MIN;
+    }
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|_| raw.parse::<chrono::DateTime<Utc>>())
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or(i64::MIN)
+}
+
+/// Deterministic tie-break comparator for every score-ranked recall sort site
+/// (tachi#718). Best element sorts to the front:
+/// 1. `score` descending (`total_cmp`, NaN-safe);
+/// 2. instant descending — a newer memory wins an exact score tie (recall
+///    semantics: recency is the default preference). The instant is epoch
+///    millis parsed by [`timestamp_epoch_millis`], not the raw string;
+/// 3. `id` ascending — ids are unique, so this is the absolute determinism
+///    backstop when score and instant both tie.
+///
+/// Each element is `(score, epoch_millis, id)`. Routing all sorts through one
+/// comparator keeps tie order identical run to run and prevents each site from
+/// hand-rolling a divergent key.
+pub(crate) fn cmp_recall_rank(a: (f64, i64, &str), b: (f64, i64, &str)) -> std::cmp::Ordering {
+    let (a_score, a_ms, a_id) = a;
+    let (b_score, b_ms, b_id) = b;
+    b_score
+        .total_cmp(&a_score)
+        .then_with(|| b_ms.cmp(&a_ms))
+        .then_with(|| a_id.cmp(b_id))
+}
+
+fn rank_map(
+    scores: &HashMap<String, f64>,
+    entries: &HashMap<String, &MemoryEntry>,
+) -> HashMap<String, usize> {
+    // Decorate each candidate with its parsed instant once, then sort — the
+    // comparator never re-parses (tachi#718 CP2/CP3).
+    let mut ranked: Vec<(&String, f64, i64)> = scores
+        .iter()
+        .map(|(id, score)| {
+            let ms = entries
+                .get(id)
+                .map(|e| timestamp_epoch_millis(&e.timestamp))
+                .unwrap_or(i64::MIN);
+            (id, *score, ms)
+        })
+        .collect();
+    ranked.sort_by(|a, b| cmp_recall_rank((a.1, a.2, a.0), (b.1, b.2, b.0)));
     ranked
         .into_iter()
         .enumerate()
-        .map(|(idx, (id, _))| (id.clone(), idx + 1))
+        .map(|(idx, (id, _, _))| (id.clone(), idx + 1))
         .collect()
 }
 
@@ -306,9 +365,9 @@ pub fn hybrid_score_with_config(
         .collect();
 
     let mut out: HashMap<String, HybridScore> = HashMap::new();
-    let vec_ranks = weights.use_rrf.then(|| rank_map(vec_scores));
-    let fts_ranks = weights.use_rrf.then(|| rank_map(fts_scores));
-    let symbolic_ranks = weights.use_rrf.then(|| rank_map(symbolic_scores));
+    let vec_ranks = weights.use_rrf.then(|| rank_map(vec_scores, entries));
+    let fts_ranks = weights.use_rrf.then(|| rank_map(fts_scores, entries));
+    let symbolic_ranks = weights.use_rrf.then(|| rank_map(symbolic_scores, entries));
 
     for id in all_ids {
         let vs = normalize(*vec_scores.get(id).unwrap_or(&0.0));
