@@ -31,7 +31,7 @@ mod memory_maintenance;
 mod recall_parse_params;
 
 #[test]
-fn rerank_merge_keeps_hybrid_top_k_floor_when_model_prefers_tail() {
+fn rerank_merge_blends_rerank_order_with_hybrid_rank() {
     let rows = (0..6)
         .map(|idx| {
             json!({
@@ -53,11 +53,45 @@ fn rerank_merge_keeps_hybrid_top_k_floor_when_model_prefers_tail() {
         .map(|row| row["id"].as_str().expect("row id"))
         .collect::<Vec<_>>();
 
-    assert_eq!(ids, vec!["hybrid-2", "hybrid-1", "hybrid-0"]);
-    assert_eq!(merged[0]["rerank_score"], json!(0.97));
-    assert_eq!(merged[1]["rerank_score"], json!(0.96));
+    assert_eq!(ids, vec!["hybrid-5", "hybrid-0", "hybrid-1"]);
+    assert_eq!(merged[0]["rerank_score"], json!(0.99));
+    assert!(merged[1].get("rerank_score").is_none());
+    assert_eq!(merged[2]["rerank_score"], json!(0.96));
     assert!(
-        merged[2].get("rerank_score").is_none(),
-        "floor-restored rows keep their hybrid score when the model omitted them"
+        ids.contains(&"hybrid-0"),
+        "hybrid head should remain available as the no-evict seatbelt"
+    );
+}
+
+#[test]
+fn rerank_merge_allows_tail_promotion_without_dropping_the_hybrid_head() {
+    let rows = (0..6)
+        .map(|idx| {
+            json!({
+                "id": format!("hybrid-{idx}"),
+                "text": format!("candidate {idx}"),
+                "relevance": 1.0 - (idx as f64 * 0.01),
+                "score": { "final": 1.0 - (idx as f64 * 0.01) }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let merged = merge_rerank_order_with_hybrid_floor(
+        &rows,
+        &[(5, 0.99), (4, 0.98), (2, 0.97), (1, 0.96)],
+        3,
+    );
+    let ids = merged
+        .iter()
+        .map(|row| row["id"].as_str().expect("row id"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        ids.contains(&"hybrid-5"),
+        "expanded rerank candidates must be able to promote into top_k: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"hybrid-0"),
+        "the hybrid head is the no-evict seatbelt for prior top-k hits: {ids:?}"
     );
 }

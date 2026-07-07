@@ -76,4 +76,16 @@ async fn tachi_memory_recall_simulate_keeps_exact_token_top_when_rerank_enabled(
         parsed["variants"][0]["rerank"]["policy_counts"]["skipped_exact_token"],
         json!(1)
     );
+    assert_eq!(
+        parsed["variants"][0]["flip_report"]["hit_to_miss"],
+        json!(0)
+    );
+    assert_eq!(
+        parsed["variants"][0]["flip_report"]["hit_retained"],
+        json!(1)
+    );
+    assert_eq!(
+        parsed["cases"][0]["baseline"]["returned_ids"][0],
+        json!("recall-sim-rerank-alpha")
+    );
 }

@@ -95,37 +95,50 @@ pub(super) fn merge_rerank_order_with_hybrid_floor(
     order: &[(usize, f64)],
     top_k: usize,
 ) -> Vec<Value> {
-    let floor_len = top_k.min(rows.len());
-    if floor_len == 0 {
+    let output_len = top_k.min(rows.len());
+    if output_len == 0 {
         return Vec::new();
     }
 
-    let mut emitted = std::collections::HashSet::new();
-    let mut out = Vec::with_capacity(floor_len);
-    for &(index, score) in order {
-        if out.len() >= floor_len {
-            break;
-        }
-        if index >= floor_len || !emitted.insert(index) {
-            continue;
-        }
-        if let Some(row) = rows.get(index).cloned() {
-            out.push(apply_rerank_score(row, score));
+    let mut rerank_by_index = std::collections::HashMap::new();
+    for (rerank_rank, &(index, score)) in order.iter().enumerate() {
+        if index < rows.len() {
+            rerank_by_index
+                .entry(index)
+                .or_insert((rerank_rank + 1, score));
         }
     }
+    let missing_rerank_rank = rows.len() + 1;
+    let mut ranked = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let original_rank = index + 1;
+            let rerank_rank = rerank_by_index
+                .get(&index)
+                .map(|(rank, _)| *rank)
+                .unwrap_or(missing_rerank_rank);
+            let blend_score = (1.0 / original_rank as f64) + (1.0 / rerank_rank as f64);
+            (index, blend_score, row)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
 
-    for index in 0..floor_len {
-        if out.len() >= floor_len {
-            break;
-        }
-        if emitted.insert(index) {
-            if let Some(row) = rows.get(index).cloned() {
-                out.push(row);
+    ranked
+        .into_iter()
+        .take(output_len)
+        .map(|(index, _score, row)| {
+            if let Some((_, rerank_score)) = rerank_by_index.get(&index) {
+                apply_rerank_score(row.clone(), *rerank_score)
+            } else {
+                row.clone()
             }
-        }
-    }
-
-    out
+        })
+        .collect()
 }
 
 pub(super) fn build_prepend_context(rows: &[Value]) -> String {
