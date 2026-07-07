@@ -79,7 +79,7 @@ Built-in profiles must remain stable enough for agents to learn:
 | Profile | Role | Default use |
 |---|---|---|
 | `claude_plan` | planner | ambiguous planning, feature breakdown |
-| `glm_51_impl` | executor | bounded implementation with tests |
+| `glm_impl` | executor | bounded implementation with tests; resolves through the GLM coding model card |
 | `opencode_builder` | executor | credentialed OpenCode implementation lane |
 | `codex_55_review` | senior reviewer | high-risk review and regression detection |
 | `codex_53_fast` | fast checker | low-risk quick sanity checks |

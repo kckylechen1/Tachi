@@ -13,7 +13,7 @@ async fn dispatch_response_includes_suggested_complete_payload() {
     let mut params = dispatch_params(Some("custom"), "smoke custom dispatch completion skeleton");
     params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
     params.cwd = Some(tmp.path().to_string_lossy().to_string());
-    params.profile = Some("glm_51_impl".to_string());
+    params.profile = Some("glm_impl".to_string());
     params.flow_id = Some("flow-complete-skeleton".to_string());
     params.issue_ref = Some("kckylechen1/tachi#194".to_string());
 
@@ -34,7 +34,7 @@ async fn dispatch_response_includes_suggested_complete_payload() {
     );
     assert_eq!(
         suggested["arguments"]["profile"],
-        serde_json::json!("glm_51_impl")
+        serde_json::json!("glm_impl")
     );
     assert_eq!(
         suggested["arguments"]["flow_id"],

@@ -15,6 +15,15 @@ impl EnvGuard {
         Self { key, original }
     }
 
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var_os(key);
+        // SAFETY: arena tests that use this helper hold tachi_arena_root_env_lock.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, original }
+    }
+
     fn prepend_path(key: &'static str, dir: &Path) -> Self {
         let original = std::env::var_os(key);
         let mut paths = vec![dir.to_path_buf()];
@@ -253,4 +262,64 @@ async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
         collected["missions"][0]["completion_draft"]["arguments"]["agent"],
         json!("opencode")
     );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn arena_opencode_executor_fallback_uses_glm_registry_model() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _root = temp_arena_root();
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let fake_bin = tempfile::tempdir().expect("fake bin");
+    let opencode_path = fake_bin.path().join("opencode");
+    let args_path = fake_bin.path().join("args.txt");
+    std::fs::write(
+        &opencode_path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nprintf '%s\\n' 'Summary: fake opencode completed'\nexit 0\n",
+            args_path.display()
+        ),
+    )
+    .expect("write fake opencode");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&opencode_path)
+            .expect("fake opencode metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&opencode_path, perms).expect("chmod fake opencode");
+    }
+    let _home = EnvGuard::set_path("TACHI_HOME", temp_home.path());
+    let _path = EnvGuard::prepend_path("PATH", fake_bin.path());
+    let _model = EnvGuard::set("TACHI_DISPATCH_GLM_CODING_MODEL", "zhipuai/glm-5.2-arena");
+
+    let server = server();
+    let mut open = params("open");
+    open.objective = Some("launch registry worker".into());
+    let opened: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
+    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
+
+    let mut spawn = params("spawn");
+    spawn.arena_id = Some(arena_id);
+    spawn.prompt = Some("run a fake worker".into());
+    spawn.harness = Some("opencode".into());
+    spawn.role = Some("execute".into());
+    spawn.launch = true;
+    spawn.timeout_secs = Some(5);
+    let spawned: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
+    let run_dir = PathBuf::from(
+        spawned["launch"]["run_dir"]
+            .as_str()
+            .expect("linked run dir"),
+    );
+    let dispatch_result = wait_for_nonempty_file(&run_dir.join("result.md")).await;
+    assert!(dispatch_result.contains("fake opencode completed"));
+
+    let args = std::fs::read_to_string(args_path).expect("captured opencode args");
+    assert!(args.contains("--model\nzhipuai/glm-5.2-arena"), "{args}");
 }

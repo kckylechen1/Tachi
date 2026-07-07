@@ -76,7 +76,7 @@ fn tachi_task_dispatch_completion_marker_updates_card_and_status_idempotently() 
         dispatch_id,
         json!({
             "agent": "custom",
-            "profile": "glm_51_impl",
+            "profile": "glm_impl",
             "task": "implementation",
         }),
     )

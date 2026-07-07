@@ -175,7 +175,7 @@ This is a starting hypothesis, not a leaderboard:
 |---|---|---|
 | `explore` / `search` / `librarian` | DeepSeek V4 Flash | Cheap, broad repo scanning, repeated structure queries |
 | `architect` / long-context challenge | Kimi Code / K2.6 | Good for schema and lifecycle critique |
-| `executor` | GLM 5.1, DeepSeek V4 Pro | Use when edit slice is bounded and tests are clear |
+| `executor` | GLM coding lane (`glm_coding`, currently GLM-5.2), DeepSeek V4 Pro | Use when edit slice is bounded and tests are clear |
 | `critic` | DeepSeek V4 Pro, GPT frontier | Needs real risk detection, not rewrite impulses |
 | final integration | GPT frontier leader | Owns judgment, verification, and user-facing result |
 

@@ -8,7 +8,16 @@ fn default_opencode_model(role: Option<&str>) -> &'static str {
     match role.unwrap_or("").trim().to_ascii_lowercase().as_str() {
         "explore" | "search" | "librarian" => "deepseek/deepseek-v4-flash",
         "critic" | "review" | "reviewer" => "deepseek/deepseek-v4-pro",
-        _ => "zhipuai-coding-plan/glm-5.1",
+        _ => tachi_dispatch::GLM_CODING_DEFAULT_MODEL,
+    }
+}
+
+fn default_opencode_model_for_command(role: Option<&str>) -> String {
+    match role.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "explore" | "search" | "librarian" => default_opencode_model(role).to_string(),
+        "critic" | "review" | "reviewer" => default_opencode_model(role).to_string(),
+        _ => tachi_dispatch::resolve_dispatch_model(tachi_dispatch::GLM_CODING_MODEL_ALIAS)
+            .unwrap_or_else(|| tachi_dispatch::GLM_CODING_DEFAULT_MODEL.to_string()),
     }
 }
 
@@ -37,13 +46,14 @@ pub(super) fn dispatch_params_for_mission(
         let model = params
             .model
             .as_deref()
-            .unwrap_or_else(|| default_opencode_model(params.role.as_deref()));
+            .map(str::to_string)
+            .unwrap_or_else(|| default_opencode_model_for_command(params.role.as_deref()));
         command = vec![
             opencode_binary(),
             "--pure".to_string(),
             "run".to_string(),
             "--model".to_string(),
-            model.to_string(),
+            model,
         ];
     }
 

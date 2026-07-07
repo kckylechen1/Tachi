@@ -61,7 +61,7 @@ fn load_route_policy_rule_loadout_classifies_persisted_rules() {
         (
             "route_policy:fix_request:glm_51_impl_sparse",
             "fix_request",
-            "glm_51_impl",
+            "glm_impl",
             0,
         ),
         (

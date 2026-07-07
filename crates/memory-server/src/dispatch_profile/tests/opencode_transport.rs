@@ -143,7 +143,7 @@ fn opencode_builder_profile_uses_typed_opencode_backend() {
             "--pure".to_string(),
             "run".to_string(),
             "--model".to_string(),
-            "zhipuai-coding-plan/glm-5.1".to_string()
+            "zhipuai-coding-plan/glm-5.2".to_string()
         ]
     );
 }

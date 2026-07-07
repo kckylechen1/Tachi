@@ -3,8 +3,9 @@ use serde_json::{json, Value};
 
 use crate::eval::{AgentPerformanceMatrixRow, CompletionStatus, EvalRow, SubagentTaskScore};
 use crate::{
-    fallback_chain, profile_matches_agent, DispatchProfileDef, DISPATCH_PROFILES,
-    MIN_ROUTE_POLICY_RULE_SAMPLES, ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
+    fallback_chain, profile_matches_agent, resolve_dispatch_profile, DispatchProfileDef,
+    DISPATCH_PROFILES, MIN_ROUTE_POLICY_RULE_SAMPLES, ROUTE_POLICY_RULE_NS,
+    ROUTE_POLICY_RULE_SCORE_BONUS,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -154,7 +155,7 @@ pub struct RecommendationProfilePayload {
 pub fn route_eval_rows(rows: &[EvalRow]) -> Vec<RouteEvalRow> {
     rows.iter()
         .map(|row| RouteEvalRow {
-            profile: row.profile.clone(),
+            profile: canonical_profile_for_row(row.profile.as_deref()),
             completed: row.completion_status == CompletionStatus::Completed,
             verification_present: row.verification_present,
         })
@@ -178,7 +179,7 @@ pub fn route_performance_rows(rows: &[AgentPerformanceMatrixRow]) -> Vec<RoutePe
     rows.iter()
         .map(|row| RoutePerformanceRow {
             scope: row.scope.clone(),
-            profile: row.profile.clone(),
+            profile: canonical_profile_for_row(row.profile.as_deref()),
             role: row.role.clone(),
             agent: row.agent.clone(),
             task_type: row.task_type.clone(),
@@ -194,6 +195,14 @@ pub fn route_performance_rows(rows: &[AgentPerformanceMatrixRow]) -> Vec<RoutePe
             avg_quality_score: row.avg_quality_score,
         })
         .collect()
+}
+
+fn canonical_profile_for_row(profile: Option<&str>) -> Option<String> {
+    profile.map(|raw| {
+        resolve_dispatch_profile(raw)
+            .map(|profile| profile.name.to_string())
+            .unwrap_or_else(|| raw.to_string())
+    })
 }
 
 pub fn classify_dispatch_risk(
@@ -1236,7 +1245,7 @@ mod tests {
             blocked_profiles: Vec::new(),
         };
 
-        let executor = resolve_dispatch_profile("glm_51_impl").expect("executor profile");
+        let executor = resolve_dispatch_profile("glm_impl").expect("executor profile");
         let competitor = resolve_dispatch_profile("codex_55_review").expect("reviewer profile");
         let rows = vec![
             failed_eval_row(executor.name),
@@ -1266,7 +1275,7 @@ mod tests {
             blocked_profiles: Vec::new(),
         };
 
-        let executor = resolve_dispatch_profile("glm_51_impl").expect("executor profile");
+        let executor = resolve_dispatch_profile("glm_impl").expect("executor profile");
         let explorer = resolve_dispatch_profile("deepseek_explore").expect("explore profile");
         let executor_rows = vec![
             verified_eval_row(executor.name),
