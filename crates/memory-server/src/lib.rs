@@ -42,6 +42,7 @@ mod capability_ops;
 mod capture_gate;
 mod cli_client;
 mod complete_ops;
+mod component_governance_ops;
 mod continuity_ops;
 mod continuity_projector;
 mod copilot_ops;

@@ -30,6 +30,8 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_profile",
     // Zero-param session-start alias for tachi_memory(action='briefing')
     "tachi_briefing",
+    // Component governance read model (Issue #796)
+    "tachi_component",
 ];
 
 pub const REMEMBER_TOOL_PATTERNS: &[&str] = &[
