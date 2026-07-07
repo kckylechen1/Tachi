@@ -38,6 +38,15 @@ fn make_legacy_db(path: &Path) {
     .unwrap();
 }
 
+#[cfg(unix)]
+fn make_corrupt_db(path: &Path) {
+    fs::write(
+        path,
+        b"this is not a sqlite database, just some junk bytes for testing 1234567890",
+    )
+    .unwrap();
+}
+
 #[test]
 fn classify_healthy() {
     let dir = tempdir().unwrap();
@@ -134,11 +143,7 @@ fn classify_legacy_schema() {
 fn classify_corrupt() {
     let dir = tempdir().unwrap();
     let p = dir.path().join("memory.db");
-    fs::write(
-        &p,
-        b"this is not a sqlite database, just some junk bytes for testing 1234567890",
-    )
-    .unwrap();
+    make_corrupt_db(&p);
     let f = classify_one(&p);
     assert_eq!(f.classification, DbClassification::Corrupt);
     assert!(f.error.is_some());
@@ -297,6 +302,158 @@ fn doctor_fix_retires_old_hash_alias_without_touching_legacy() {
             }),
             "doctor --fix should report the alias retirement action: {:?}",
             report.auto_fix_actions
+        );
+
+        restore_env("TACHI_HOME", saved_home);
+        restore_env("SIGIL_HOME", saved_sigil);
+        restore_env("TACHI_APP_HOME", saved_app);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_fix_does_not_rebrand_corrupt_plan_c_db() {
+    with_env_lock(|| {
+        let dir = tempdir().unwrap();
+        let saved_home = std::env::var_os("TACHI_HOME");
+        let saved_sigil = std::env::var_os("SIGIL_HOME");
+        let saved_app = std::env::var_os("TACHI_APP_HOME");
+        let tachi_home = dir.path().join(".tachi");
+        std::env::set_var("TACHI_HOME", &tachi_home);
+        std::env::remove_var("SIGIL_HOME");
+        std::env::remove_var("TACHI_APP_HOME");
+
+        let repo = dir.path().join("Sigil");
+        let local_db = repo.join(".tachi/memory.db");
+        fs::create_dir_all(local_db.parent().unwrap()).unwrap();
+        make_corrupt_db(&local_db);
+        let local_db = fs::canonicalize(&local_db).unwrap();
+
+        let new_name =
+            crate::path_utils::plan_c_dir_name_from_root(&repo).expect("derived alias name");
+        let old_hash_name = "Sigil-94c144a9";
+        assert_ne!(new_name, old_hash_name);
+
+        let old_hash_dir = tachi_home.join("projects").join(old_hash_name);
+        fs::create_dir_all(&old_hash_dir).unwrap();
+        let old_hash_db = old_hash_dir.join("memory.db");
+        std::os::unix::fs::symlink(&local_db, &old_hash_db).unwrap();
+
+        let new_db = tachi_home
+            .join("projects")
+            .join(&new_name)
+            .join("memory.db");
+        assert!(
+            !new_db.exists(),
+            "precondition: the current hashed alias is absent"
+        );
+
+        let report = scan(
+            &[repo.join(".tachi")],
+            &tachi_home.join("quarantine"),
+            ScanOptions {
+                auto_fix: true,
+                max_depth: 5,
+            },
+        );
+
+        assert_eq!(report.summary.corrupt, 1);
+        assert!(
+            !new_db.exists(),
+            "doctor --fix must not create a current alias for a corrupt DB"
+        );
+        assert!(
+            old_hash_db.is_symlink(),
+            "old-hash alias for a corrupt DB must remain untouched"
+        );
+        assert_eq!(fs::canonicalize(&old_hash_db).unwrap(), local_db);
+        assert!(
+            report
+                .auto_fix_actions
+                .iter()
+                .all(|action| !action.action.starts_with("plan_c_alias_")),
+            "corrupt DB must emit no Plan C alias retirement actions: {:?}",
+            report.auto_fix_actions
+        );
+
+        restore_env("TACHI_HOME", saved_home);
+        restore_env("SIGIL_HOME", saved_sigil);
+        restore_env("TACHI_APP_HOME", saved_app);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_fix_plan_c_alias_retirement_is_idempotent() {
+    with_env_lock(|| {
+        let dir = tempdir().unwrap();
+        let saved_home = std::env::var_os("TACHI_HOME");
+        let saved_sigil = std::env::var_os("SIGIL_HOME");
+        let saved_app = std::env::var_os("TACHI_APP_HOME");
+        let tachi_home = dir.path().join(".tachi");
+        std::env::set_var("TACHI_HOME", &tachi_home);
+        std::env::remove_var("SIGIL_HOME");
+        std::env::remove_var("TACHI_APP_HOME");
+
+        let repo = dir.path().join("Sigil");
+        let local_db = repo.join(".tachi/memory.db");
+        fs::create_dir_all(local_db.parent().unwrap()).unwrap();
+        make_healthy_db(&local_db);
+        let local_db = fs::canonicalize(&local_db).unwrap();
+
+        let new_name =
+            crate::path_utils::plan_c_dir_name_from_root(&repo).expect("derived alias name");
+        let old_hash_name = "Sigil-94c144a9";
+        let old_hash_db = tachi_home
+            .join("projects")
+            .join(old_hash_name)
+            .join("memory.db");
+        fs::create_dir_all(old_hash_db.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&local_db, &old_hash_db).unwrap();
+
+        let new_db = tachi_home
+            .join("projects")
+            .join(&new_name)
+            .join("memory.db");
+
+        let first = scan(
+            &[repo.join(".tachi")],
+            &tachi_home.join("quarantine"),
+            ScanOptions {
+                auto_fix: true,
+                max_depth: 5,
+            },
+        );
+        assert!(
+            first.auto_fix_actions.iter().any(|action| {
+                action.action == "plan_c_alias_retire_old_hash" && action.outcome == "ok"
+            }),
+            "first doctor --fix should retire the drifted old-hash alias: {:?}",
+            first.auto_fix_actions
+        );
+
+        let second = scan(
+            &[repo.join(".tachi")],
+            &tachi_home.join("quarantine"),
+            ScanOptions {
+                auto_fix: true,
+                max_depth: 5,
+            },
+        );
+
+        assert!(
+            second
+                .auto_fix_actions
+                .iter()
+                .all(|action| !action.action.starts_with("plan_c_alias_")),
+            "second doctor --fix should be a clean Plan C no-op: {:?}",
+            second.auto_fix_actions
+        );
+        assert!(new_db.is_symlink());
+        assert_eq!(fs::canonicalize(&new_db).unwrap(), local_db);
+        assert!(
+            !old_hash_db.exists(),
+            "old-hash alias should remain retired after the second run"
         );
 
         restore_env("TACHI_HOME", saved_home);
