@@ -367,6 +367,29 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     #[test]
     fn collect_sweep_paths_includes_global_and_manifest_entries() {
         let tmp = TempDir::new().unwrap();
@@ -548,6 +571,47 @@ mod tests {
         assert_eq!(
             state.last_provider_error.as_deref(),
             Some("Voyage embed batch failed: provider 429")
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_sweep_does_not_count_unattempted_pending_rows_as_failed() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("below-threshold.db");
+        let mut store = memory_core::MemoryStore::open(db_path.to_str().unwrap()).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let dummy_vec = vec![0.0_f32; 1024];
+        for index in 0..100 {
+            let id = format!("threshold-{index}");
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO memories
+                     (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
+                     VALUES (?1, '/facts/skipped', '', 'body', 0.5, ?2, 'fact', 'status', '[]', '[]', 'manual', 'project', 0, ?2, ?2, 0, 1, '{}')",
+                    rusqlite::params![id, now],
+                )
+                .unwrap();
+            if index < 99 {
+                store
+                    .update_enrichment_fields(&id, None, Some(&dummy_vec), None, None, 1)
+                    .unwrap();
+            }
+        }
+        drop(store);
+
+        let _threshold = EnvGuard::set("TACHI_VECTOR_SWEEP_PENDING_THRESHOLD", "1");
+        let llm = LlmClient::new().expect("llm client");
+        let embedded = run_vector_sweep_paths(vec![db_path.clone()], &llm, 1, true).await;
+
+        assert_eq!(embedded, 0);
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("state recorded");
+        assert_eq!(state.embedded_count, 0);
+        assert_eq!(
+            state.failed_count, 0,
+            "pending rows below the sweep threshold were not attempted and must not count as failures"
         );
     }
 }

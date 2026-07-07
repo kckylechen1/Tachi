@@ -366,7 +366,7 @@ pub(crate) async fn sweep_db_vectors(
     if !auto_backfill_needed(total, with_vec, pending, auto_backfill_pending_threshold()) {
         return Ok(VectorSweepOutcome {
             embedded_count: 0,
-            attempted_count: pending,
+            attempted_count: 0,
             remaining_count: pending,
         });
     }
