@@ -5,7 +5,6 @@ fn profile_filter_and_env_whitelist_form_intersection() {
     let filtered = filter_tool_defs(
         vec![
             test_tool("search_memory"),
-            test_tool("save_memory"),
             test_tool("recall_context"),
             test_tool("post_card"),
         ],
@@ -16,19 +15,19 @@ fn profile_filter_and_env_whitelist_form_intersection() {
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect();
-    assert_eq!(
-        names,
-        vec!["search_memory".to_string(), "recall_context".to_string()]
-    );
+    assert_eq!(names, vec!["recall_context".to_string()]);
 }
 
 #[test]
 fn coordinate_surface_includes_memory_and_workflow_tools() {
     let filtered = filter_tool_defs(
         vec![
+            test_tool("tachi_memory"),
+            test_tool("tachi_save"),
             test_tool("search_memory"),
             test_tool("save_memory"),
             test_tool("ingest_event"),
+            test_tool("tachi_arena"),
             test_tool("post_card"),
             test_tool("hub_register"),
         ],
@@ -42,10 +41,10 @@ fn coordinate_surface_includes_memory_and_workflow_tools() {
     assert_eq!(
         names,
         vec![
-            "search_memory".to_string(),
-            "save_memory".to_string(),
+            "tachi_memory".to_string(),
+            "tachi_save".to_string(),
             "ingest_event".to_string(),
-            "post_card".to_string()
+            "tachi_arena".to_string()
         ]
     );
 }
@@ -54,6 +53,8 @@ fn coordinate_surface_includes_memory_and_workflow_tools() {
 fn explicit_remember_surface_excludes_admin_tools() {
     let filtered = filter_tool_defs(
         vec![
+            test_tool("tachi_memory"),
+            test_tool("tachi_save"),
             test_tool("search_memory"),
             test_tool("save_memory"),
             test_tool("ingest_event"),
@@ -69,8 +70,8 @@ fn explicit_remember_surface_excludes_admin_tools() {
     assert_eq!(
         names,
         vec![
-            "search_memory".to_string(),
-            "save_memory".to_string(),
+            "tachi_memory".to_string(),
+            "tachi_save".to_string(),
             "ingest_event".to_string()
         ]
     );
