@@ -417,7 +417,7 @@ fn collect_capabilities(
     Ok(out)
 }
 
-pub(super) fn recommend_capabilities_inner(
+pub(crate) fn recommend_capabilities_inner(
     server: &MemoryServer,
     query: &str,
     host: Option<&str>,

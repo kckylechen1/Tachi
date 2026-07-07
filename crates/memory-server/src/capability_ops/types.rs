@@ -12,21 +12,21 @@ pub(super) struct CapabilityRecord {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct CapabilityRecommendation {
-    pub(super) id: String,
-    pub(super) cap_type: String,
-    pub(super) name: String,
-    pub(super) description: String,
-    pub(super) db: String,
-    pub(super) visibility: String,
-    pub(super) callable: bool,
-    pub(super) score: f64,
-    pub(super) reasons: Vec<String>,
-    pub(super) uses: u64,
-    pub(super) avg_rating: f64,
-    pub(super) suggested_tool_name: Option<String>,
+pub(crate) struct CapabilityRecommendation {
+    pub(crate) id: String,
+    pub(crate) cap_type: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) db: String,
+    pub(crate) visibility: String,
+    pub(crate) callable: bool,
+    pub(crate) score: f64,
+    pub(crate) reasons: Vec<String>,
+    pub(crate) uses: u64,
+    pub(crate) avg_rating: f64,
+    pub(crate) suggested_tool_name: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(super) pattern_refs: Vec<Value>,
+    pub(crate) pattern_refs: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]

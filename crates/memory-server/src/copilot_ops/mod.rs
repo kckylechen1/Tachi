@@ -5,11 +5,13 @@ use crate::tool_params::{
     TachiBoardParams, TachiTaskParams, TaskBriefParams, WikiSearchParams, WikiWriteParams,
 };
 use chrono::Utc;
-use memory_core::{HubCapability, MemoryEntry, MemoryStore};
+use memory_core::{MemoryEntry, MemoryStore};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use tachi_hub::review_status_allows_call;
+
+#[cfg(test)]
+use memory_core::HubCapability;
 
 const DEBUG_CHECKLIST_LIMIT: usize = 4;
 const FALLBACK_DEBUG_CHECKLIST: [&str; DEBUG_CHECKLIST_LIMIT] = [

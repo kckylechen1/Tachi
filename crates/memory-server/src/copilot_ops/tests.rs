@@ -35,42 +35,88 @@ fn wiki_slug_preserves_cjk_and_readable_separators() {
 
 #[test]
 fn skill_scoring_ignores_generic_fix_tokens() {
-    let frontend = HubCapability {
-        id: "skill:frontend-design".to_string(),
-        cap_type: "skill".to_string(),
-        name: "frontend-design".to_string(),
-        version: 1,
-        description: "Fix UI layout and visual design issues".to_string(),
-        definition: String::new(),
-        enabled: true,
-        review_status: "approved".to_string(),
-        health_status: "healthy".to_string(),
-        last_error: None,
-        last_success_at: None,
-        last_failure_at: None,
-        fail_streak: 0,
-        active_version: None,
-        exposure_mode: "direct".to_string(),
-        uses: 0,
-        successes: 0,
-        failures: 0,
-        avg_rating: 0.0,
-        last_used: None,
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-    let mcp = HubCapability {
-        id: "skill:mcp-schema-debug".to_string(),
-        name: "mcp-schema-debug".to_string(),
-        description: "Debug MCP schema arguments and hub_call serialization".to_string(),
-        ..frontend.clone()
-    };
-    let tokens = tokenize_task("fix Exa hub_call arguments 丢失");
+    // Migrated (#517 cut 2): the original test asserted integer scores from the
+    // deleted `score_capability` against the old duplicate tokenizer. The
+    // discriminating property is preserved here through the consolidated
+    // `recommend_skills_light` path: for a task sharing domain vocabulary
+    // ("arguments", "hub_call", "serialization") with the MCP-schema-debug skill
+    // but NO domain token with the unrelated frontend-design skill, the MCP skill
+    // must be recommended and frontend-design must be ABSENT from the
+    // recommendation set entirely.
+    //
+    // This is a frozen guarantee (hard bounds), not a soft ranking:
+    //   - frontend-design shares no domain token with the query, so it must NOT
+    //     appear in the recommendation set at all (frontend_score.is_none()).
+    //   - the MCP skill must be present AND clear a score threshold (>= 3.0),
+    //     pinning that the domain tokens actually drove the match.
+    // The query deliberately avoids tokens that appear in frontend-design's
+    // description ("Visual layout and design surface workflow") so the comparison
+    // isolates domain-token relevance rather than coincidental substring hits.
+    use crate::tests::make_server;
 
-    assert_eq!(score_capability(&tokens, &frontend), 0);
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let frontend = HubCapability {
+                id: "skill:frontend-design".to_string(),
+                cap_type: "skill".to_string(),
+                name: "frontend-design".to_string(),
+                version: 1,
+                description: "Visual layout and design surface workflow".to_string(),
+                definition: serde_json::json!({"policy": {"visibility": "discoverable"}})
+                    .to_string(),
+                enabled: true,
+                review_status: "approved".to_string(),
+                health_status: "healthy".to_string(),
+                last_error: None,
+                last_success_at: None,
+                last_failure_at: None,
+                fail_streak: 0,
+                active_version: None,
+                exposure_mode: "direct".to_string(),
+                uses: 0,
+                successes: 0,
+                failures: 0,
+                avg_rating: 0.0,
+                last_used: None,
+                created_at: String::new(),
+                updated_at: String::new(),
+            };
+            store.hub_register(&frontend).map_err(|e| e.to_string())?;
+            let mcp = HubCapability {
+                id: "skill:mcp-schema-debug".to_string(),
+                name: "mcp-schema-debug".to_string(),
+                description: "Debug MCP schema arguments and hub_call serialization".to_string(),
+                ..frontend.clone()
+            };
+            store.hub_register(&mcp).map_err(|e| e.to_string())
+        })
+        .expect("seed skills");
+
+    let skills =
+        super::support::recommend_skills_light(&server, "Exa hub_call arguments serialization", 10)
+            .expect("recommend light");
+    let mcp_score = skills
+        .iter()
+        .find(|skill| skill.get("id").and_then(|v| v.as_str()) == Some("skill:mcp-schema-debug"))
+        .map(|skill| skill.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0));
+    let frontend_score = skills
+        .iter()
+        .find(|skill| skill.get("id").and_then(|v| v.as_str()) == Some("skill:frontend-design"))
+        .map(|skill| skill.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0));
+    // Hard lower-bound on the MCP skill: domain tokens must clear a threshold so
+    // the match is driven by vocabulary, not incidental substring noise.
     assert!(
-        score_capability(&tokens, &mcp) >= 3,
-        "expected MCP-specific skill to match task tokens"
+        mcp_score.is_some_and(|m| m >= 3.0),
+        "expected MCP-specific skill to match the task tokens with score >= 3.0, got {mcp_score:?}"
+    );
+    // Hard exclusion: frontend-design shares no domain token with the query, so
+    // it must NOT appear in the recommendation set at all (not merely
+    // lower-ranked). This restores the frozen bound the migration had loosened.
+    assert!(
+        frontend_score.is_none(),
+        "frontend-design shares no domain token with the query and must be ABSENT from \
+         recommendations, not merely lower-ranked; got {frontend_score:?} in {skills:?}"
     );
 }
 
