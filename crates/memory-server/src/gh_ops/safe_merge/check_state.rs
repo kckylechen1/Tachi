@@ -1,4 +1,5 @@
 use super::*;
+use async_trait::async_trait;
 use chrono::Utc;
 use serde::Serialize;
 use std::path::Path;
@@ -18,6 +19,7 @@ pub(crate) struct CheckStateArtifactInput<'a> {
     pub(crate) source: &'a str,
     pub(crate) dry_run: bool,
     pub(crate) checks: &'a [CheckRun],
+    pub(crate) transition: Option<CheckStateTransition<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -26,6 +28,144 @@ pub(crate) struct CheckStateArtifactResult {
     pub(crate) artifact_path: Option<String>,
     pub(crate) non_auditable_reason: Option<String>,
     pub(crate) failed_checks_recorded_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CheckStateRead {
+    pub(crate) checks: Vec<CheckRun>,
+    pub(crate) observed_head_sha: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CheckStateLedgerState {
+    NoChecks,
+    Pending,
+    Failed,
+    Passed,
+    Skipped,
+    Stale,
+    ReaderError,
+}
+
+impl CheckStateLedgerState {
+    fn as_str(self) -> &'static str {
+        match self {
+            CheckStateLedgerState::NoChecks => "no_checks",
+            CheckStateLedgerState::Pending => "pending",
+            CheckStateLedgerState::Failed => "failed",
+            CheckStateLedgerState::Passed => "passed",
+            CheckStateLedgerState::Skipped => "skipped",
+            CheckStateLedgerState::Stale => "stale",
+            CheckStateLedgerState::ReaderError => "reader_error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct CheckStateTransition<'a> {
+    pub(crate) previous_state: Option<&'a str>,
+    pub(crate) state: CheckStateLedgerState,
+    pub(crate) changed: bool,
+    pub(crate) expected_head_sha: Option<&'a str>,
+    pub(crate) observed_head_sha: Option<&'a str>,
+    pub(crate) read_error: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CheckStateIngestRequest<'a> {
+    pub(crate) flow_id: &'a str,
+    pub(crate) repo: &'a str,
+    pub(crate) pr_number: u64,
+    pub(crate) pr_ref: Option<&'a str>,
+    pub(crate) head_ref: Option<&'a str>,
+    pub(crate) expected_head_sha: Option<&'a str>,
+    pub(crate) source: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct CheckStateIngestResult {
+    pub(crate) state: CheckStateLedgerState,
+    pub(crate) previous_state: Option<String>,
+    pub(crate) changed: bool,
+    #[serde(flatten)]
+    pub(crate) artifact: CheckStateArtifactResult,
+}
+
+#[async_trait]
+pub(crate) trait CheckStateReader: Send + Sync {
+    async fn read_check_state(&self, repo: &str, pr_number: u64)
+        -> Result<CheckStateRead, GhError>;
+}
+
+#[async_trait]
+impl<T: GhClient + ?Sized> CheckStateReader for T {
+    async fn read_check_state(
+        &self,
+        repo: &str,
+        pr_number: u64,
+    ) -> Result<CheckStateRead, GhError> {
+        let checks = self.checks_list(repo, pr_number).await?;
+        Ok(CheckStateRead {
+            checks,
+            observed_head_sha: None,
+        })
+    }
+}
+
+pub(crate) async fn ingest_check_state_transition<R: CheckStateReader + ?Sized>(
+    reader: &R,
+    request: &CheckStateIngestRequest<'_>,
+) -> Result<CheckStateIngestResult, String> {
+    let run_dir = run_dir_for_flow_id(request.flow_id)?;
+    let previous_state = read_previous_check_state(&run_dir)?;
+    let observed_at = Utc::now().to_rfc3339();
+    let read = reader
+        .read_check_state(request.repo, request.pr_number)
+        .await
+        .map_err(|err| err.to_string());
+
+    let (checks, observed_head_sha, read_error) = match read {
+        Ok(read) => (read.checks, read.observed_head_sha, None),
+        Err(err) => (Vec::new(), None, Some(err)),
+    };
+    let state = classify_ledger_state(
+        &checks,
+        request.expected_head_sha,
+        observed_head_sha.as_deref(),
+        read_error.as_deref(),
+    );
+    let changed = previous_state.as_deref() != Some(state.as_str());
+    let transition = CheckStateTransition {
+        previous_state: previous_state.as_deref(),
+        state,
+        changed,
+        expected_head_sha: request.expected_head_sha,
+        observed_head_sha: observed_head_sha.as_deref(),
+        read_error: read_error.as_deref(),
+    };
+
+    let artifact = write_check_state_artifact(
+        Some(request.flow_id),
+        &CheckStateArtifactInput {
+            repo: request.repo,
+            pr_number: request.pr_number,
+            pr_ref: request.pr_ref,
+            head_ref: request.head_ref,
+            observed_at: observed_at.as_str(),
+            source: request.source,
+            dry_run: true,
+            checks: &checks,
+            transition: Some(transition),
+        },
+    )?;
+
+    Ok(CheckStateIngestResult {
+        state,
+        previous_state,
+        changed,
+        artifact,
+    })
 }
 
 pub(crate) fn write_check_state_artifact(
@@ -95,7 +235,7 @@ fn build_check_state_artifact(
     input: &CheckStateArtifactInput<'_>,
     aggregate: ChecksState,
 ) -> Value {
-    json!({
+    let mut artifact = json!({
         "schema": CHECK_STATE_SCHEMA,
         "flow_id": flow_id,
         "repo": input.repo,
@@ -122,7 +262,67 @@ fn build_check_state_artifact(
             "repair": "dispatch",
             "adjudicate": "leader",
         },
-    })
+    });
+    if let Some(transition) = input.transition {
+        artifact["transition"] = json!(transition);
+    }
+    artifact
+}
+
+fn read_previous_check_state(run_dir: &Path) -> Result<Option<String>, String> {
+    let path = run_dir.join(CHECK_STATE_FILE);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("read {}: {err}", path.display())),
+    };
+    let parsed: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    Ok(parsed
+        .get("transition")
+        .and_then(|transition| transition.get("state"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            parsed
+                .get("aggregate")
+                .and_then(|aggregate| aggregate.get("state"))
+                .and_then(Value::as_str)
+        })
+        .map(normalize_previous_state))
+}
+
+fn normalize_previous_state(state: &str) -> String {
+    match state {
+        "failure" => CheckStateLedgerState::Failed.as_str().to_string(),
+        "success" => CheckStateLedgerState::Passed.as_str().to_string(),
+        "none" => CheckStateLedgerState::NoChecks.as_str().to_string(),
+        "skipped" => CheckStateLedgerState::Skipped.as_str().to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn classify_ledger_state(
+    checks: &[CheckRun],
+    expected_head_sha: Option<&str>,
+    observed_head_sha: Option<&str>,
+    read_error: Option<&str>,
+) -> CheckStateLedgerState {
+    if read_error.is_some() {
+        return CheckStateLedgerState::ReaderError;
+    }
+    if expected_head_sha.is_some()
+        && observed_head_sha.is_some()
+        && expected_head_sha != observed_head_sha
+    {
+        return CheckStateLedgerState::Stale;
+    }
+    match ChecksState::aggregate(checks) {
+        ChecksState::None => CheckStateLedgerState::NoChecks,
+        ChecksState::Pending => CheckStateLedgerState::Pending,
+        ChecksState::Skipped => CheckStateLedgerState::Skipped,
+        ChecksState::Success => CheckStateLedgerState::Passed,
+        ChecksState::Failure => CheckStateLedgerState::Failed,
+    }
 }
 
 fn check_buckets(checks: &[CheckRun]) -> Value {
