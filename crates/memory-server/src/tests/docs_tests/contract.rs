@@ -26,6 +26,7 @@ fn generic_chat_agent_memory_contract_stays_layered_and_portable() {
     assert!(doc.contains("### Memory Tool Surface"));
     assert!(doc.contains("### Event Projection"));
     assert!(doc.contains("### Policy Boundary"));
+    assert!(doc.contains("This section is a target adapter contract"));
 
     for operation in [
         "`retain` / `save`",
@@ -38,6 +39,22 @@ fn generic_chat_agent_memory_contract_stays_layered_and_portable() {
         assert!(
             doc.contains(operation),
             "generic chat-agent tool surface should include {operation}"
+        );
+    }
+    assert!(doc.contains("current save path; `retain` is adapter vocabulary"));
+    assert!(
+        doc.contains("proposed/target | Allowed only where the kernel has reviewed edit semantics")
+    );
+    assert!(doc.contains("`memory.saved` current; request event proposed"));
+    for proposed_event in [
+        "memory.recall_requested",
+        "memory.recall_returned",
+        "memory.reflect_requested",
+        "memory.reflection_returned",
+    ] {
+        assert!(
+            doc.contains(proposed_event),
+            "contract should name proposed event {proposed_event}"
         );
     }
 

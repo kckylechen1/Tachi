@@ -294,6 +294,11 @@ project-cycle surfaces. Those surfaces can enrich a coding workflow, but durable
 chat memory only depends on the portable kernel primitives: retain, recall,
 reflect when available, readiness, and optional direct read/edit operations.
 
+This section is a target adapter contract. Current Tachi bindings are named
+explicitly below; OMP/Hindsight-style retain/recall/reflect lifecycle event
+names are proposed adapter vocabulary until a later implementation adds
+executable event emission and projection tests.
+
 ### Context Assembly Input
 
 The host calls the adapter before a model turn with a bounded request:
@@ -388,14 +393,14 @@ into one prompt bucket where authority and freshness are indistinguishable.
 
 The generic adapter exposes only a small memory surface to the host:
 
-| Adapter operation | Kernel mapping | Required | Notes |
-|---|---|---|---|
-| `retain` / `save` | `tachi_memory(action="save")`, `save_memory`, or kernel save API | yes | Stores durable user/session facts with provenance and policy labels. |
-| `recall` / `search` | `tachi_memory(action="search")`, `search_memory`, or kernel search API | yes | Returns ranked memory rows plus source, scope, and confidence metadata. |
-| `reflect` / `synthesize` | `tachi_memory(action="ask")`, distill/read-model API, or no-op | optional | Produces synthesis only when the kernel and adapter policy support it. |
-| `status` / `readiness` | `tachi_memory(action="readiness")`, `tachi_status`, or runtime info | yes | Reports degraded recall, locked vault, vector gaps, or unavailable kernel. |
-| `read_by_id` | `tachi_memory(action="get")` or kernel get API | optional | Allowed only when the host policy permits direct memory reads. |
-| `edit` | kernel update/edit API | optional | Allowed only where the kernel has reviewed edit semantics. |
+| Adapter operation | Kernel mapping | Required | Implementation status | Notes |
+|---|---|---|---|---|
+| `retain` / `save` | `tachi_memory(action="save")`, `save_memory`, or kernel save API | yes | current save path; `retain` is adapter vocabulary | Stores durable user/session facts with provenance and policy labels. |
+| `recall` / `search` | `tachi_memory(action="search")`, `search_memory`, or kernel search API | yes | current search path | Returns ranked memory rows plus source, scope, and confidence metadata. |
+| `reflect` / `synthesize` | `tachi_memory(action="ask")`, distill/read-model API, or no-op | optional | partially current through ask/distill; adapter reflection API is target | Produces synthesis only when the kernel and adapter policy support it. |
+| `status` / `readiness` | `tachi_memory(action="readiness")`, `tachi_status`, or runtime info | yes | current | Reports degraded recall, locked vault, vector gaps, or unavailable kernel. |
+| `read_by_id` | `tachi_memory(action="get")` or kernel get API | optional | current get path | Allowed only when the host policy permits direct memory reads. |
+| `edit` | kernel update/edit API | optional | proposed/target | Allowed only where the kernel has reviewed edit semantics. |
 
 The surface deliberately excludes GitHub, dispatch, ship, release notes, worker
 spawning, and direct Hindsight HTTP calls. A host may have those tools for other
@@ -406,15 +411,15 @@ reasons; this adapter contract does not require or expose them.
 Chat adapters should emit neutral lifecycle events and project them into the
 existing or planned Tachi event/read-model surfaces:
 
-| Host action | Lifecycle event | Projection target |
-|---|---|---|
-| Session starts | `host.before_session` | runtime identity, readiness, stable profile context |
-| Prompt assembled | `host.before_prompt` | context assembly receipt and memory refs |
-| User or agent fact retained | `memory.retain_requested` -> `memory.saved` | durable memory row plus continuity event when enabled |
-| Recall performed | `memory.recall_requested` -> `memory.recall_returned` | recall telemetry, access history, optional recall-cache evidence |
-| Reflection requested | `memory.reflect_requested` -> `memory.reflection_returned` | synthesis artifact or no-op reason |
-| Host summary compacted | `host.after_compact` | continue memory, summary refs, open threads |
-| Session ends | `host.after_session` | outcome summary, durable candidates, distillation candidates |
+| Host action | Lifecycle event | Implementation status | Projection target |
+|---|---|---|---|
+| Session starts | `host.before_session` | proposed/target | runtime identity, readiness, stable profile context |
+| Prompt assembled | `host.before_prompt` | proposed/target | context assembly receipt and memory refs |
+| User or agent fact retained | `memory.retain_requested` -> `memory.saved` | `memory.saved` current; request event proposed | durable memory row plus continuity event when enabled |
+| Recall performed | `memory.recall_requested` -> `memory.recall_returned` | proposed/target | recall telemetry, access history, optional recall-cache evidence |
+| Reflection requested | `memory.reflect_requested` -> `memory.reflection_returned` | proposed/target | synthesis artifact or no-op reason |
+| Host summary compacted | `host.after_compact` | proposed/target | continue memory, summary refs, open threads |
+| Session ends | `host.after_session` | proposed/target | outcome summary, durable candidates, distillation candidates |
 
 Projection rules:
 
