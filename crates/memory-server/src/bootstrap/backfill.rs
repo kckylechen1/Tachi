@@ -74,7 +74,11 @@ pub(super) async fn run_backfill_vectors(
         )
     })?;
 
-    let store = MemoryStore::open(db_str)?;
+    let store = if dry_run {
+        MemoryStore::open_read_only(db_str)?
+    } else {
+        MemoryStore::open(db_str)?
+    };
     let skip_recall_cache = !include_cache;
     let (total, with_vec) = durable_vector_counts(&store, skip_recall_cache)?;
     let missing = total - with_vec;
@@ -88,7 +92,7 @@ pub(super) async fn run_backfill_vectors(
     }
 
     if dry_run {
-        println!("\n(dry-run mode, no changes made)");
+        println!("\n(dry-run mode, opened read-only; no changes made)");
         return Ok(());
     }
 
@@ -522,6 +526,16 @@ mod tests {
     use super::{durable_vector_counts, run_backfill_vectors};
     use memory_core::MemoryStore;
     use rusqlite::params;
+    use std::path::Path;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct DryRunDbSnapshot {
+        schema_version: i64,
+        user_version: i64,
+        sqlite_master: Vec<(String, String, String)>,
+        hard_state: Vec<(String, String, String, i64, String, String)>,
+        sibling_files: Vec<String>,
+    }
 
     fn insert_memory(store: &MemoryStore, id: &str, source: &str, topic: &str) {
         let now = chrono::Utc::now().to_rfc3339();
@@ -538,6 +552,80 @@ mod tests {
                 params![id, now, topic, source],
             )
             .expect("insert memory");
+    }
+
+    fn dry_run_db_snapshot(db_path: &Path) -> DryRunDbSnapshot {
+        let conn = rusqlite::Connection::open(db_path).expect("open sqlite snapshot");
+        let schema_version = conn
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .expect("schema_version");
+        let user_version = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user_version");
+        let sqlite_master = query_string_triples(
+            &conn,
+            "SELECT type, name, COALESCE(sql, '')
+             FROM sqlite_master
+             WHERE name NOT LIKE 'sqlite_%'
+             ORDER BY type, name",
+        );
+        let hard_state = conn
+            .prepare(
+                "SELECT namespace, key, value_json, version, created_at, updated_at
+                 FROM hard_state
+                 ORDER BY namespace, key",
+            )
+            .expect("prepare hard_state snapshot")
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .expect("query hard_state snapshot")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect hard_state snapshot");
+        let db_file_name = db_path
+            .file_name()
+            .expect("db file name")
+            .to_string_lossy()
+            .to_string();
+        let mut sibling_files = std::fs::read_dir(db_path.parent().expect("db parent"))
+            .expect("read db parent")
+            .map(|entry| {
+                entry
+                    .expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .filter(|name| name == &db_file_name || name.starts_with(&format!("{db_file_name}.")))
+            .collect::<Vec<_>>();
+        sibling_files.sort();
+
+        DryRunDbSnapshot {
+            schema_version,
+            user_version,
+            sqlite_master,
+            hard_state,
+            sibling_files,
+        }
+    }
+
+    fn query_string_triples(
+        conn: &rusqlite::Connection,
+        sql: &str,
+    ) -> Vec<(String, String, String)> {
+        conn.prepare(sql)
+            .expect("prepare snapshot query")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query snapshot")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect snapshot")
     }
 
     /// G3 (counting basis): a row shaped like recall-cache content by `topic`
@@ -589,26 +677,27 @@ mod tests {
         let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
         insert_memory(&store, "durable-1", "manual", "note");
         drop(store);
+        let migration_marker = dir.path().join("dry-run.db.migration-marker");
+        std::fs::remove_file(&migration_marker).expect("remove migration marker");
+        let before = dry_run_db_snapshot(&db_path);
 
         run_backfill_vectors(&db_path, &vault_path, 16, true, false)
             .await
             .expect("dry-run vector backfill");
 
-        let conn = rusqlite::Connection::open(&db_path).expect("open sqlite");
-        let table_exists: bool = conn
-            .query_row(
-                "SELECT EXISTS (
-                    SELECT 1 FROM sqlite_master
-                    WHERE type='table' AND name='vector_sweep_state'
-                )",
-                [],
-                |row| row.get(0),
-            )
-            .expect("query state table");
+        let after = dry_run_db_snapshot(&db_path);
         assert!(
-            !table_exists,
-            "dry-run must not create or mutate vector_sweep_state"
+            !after
+                .sqlite_master
+                .iter()
+                .any(|(_, name, _)| name == "vector_sweep_state"),
+            "dry-run must not create vector_sweep_state"
         );
+        assert_eq!(after.schema_version, before.schema_version);
+        assert_eq!(after.user_version, before.user_version);
+        assert_eq!(after.sqlite_master, before.sqlite_master);
+        assert_eq!(after.hard_state, before.hard_state);
+        assert_eq!(after.sibling_files, before.sibling_files);
     }
 
     #[tokio::test]
