@@ -5,5 +5,6 @@ use std::fs;
 use tempfile::tempdir;
 
 mod conflicts;
+mod contract;
 mod organize;
 mod safety;

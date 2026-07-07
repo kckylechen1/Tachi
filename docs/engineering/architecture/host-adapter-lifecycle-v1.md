@@ -10,7 +10,10 @@ Related docs:
 - [`subagent-eval-system.md`](./subagent-eval-system.md)
 - [`tachi-continuity-memory-architecture.md`](./tachi-continuity-memory-architecture.md)
 
-Tracking issue: [#445](https://github.com/kckylechen1/tachi/issues/445)
+Tracking issues:
+
+- [#445](https://github.com/kckylechen1/tachi/issues/445)
+- [#792](https://github.com/kckylechen1/tachi/issues/792)
 
 ## Intent
 
@@ -277,6 +280,161 @@ Records:
 - issue/PR/docs refs;
 - durable memory or wiki candidates;
 - subagent eval rows where applicable.
+
+## Generic Chat-Agent Memory Adapter Contract
+
+The host lifecycle hooks above are generic enough for coding agents, but chat
+agents also need a smaller memory-specific contract that can be embedded in
+zeroclaw, RomanBath-like harnesses, OpenClaw-style plugins, local CLIs, or any
+other conversation host. This adapter is generic: RomanBath may be a fixture or
+example consumer, but no field, policy, or prompt shape is RomanBath-specific.
+
+The adapter must operate without Tachi GitHub, dispatch, ship, release, or
+project-cycle surfaces. Those surfaces can enrich a coding workflow, but durable
+chat memory only depends on the portable kernel primitives: retain, recall,
+reflect when available, readiness, and optional direct read/edit operations.
+
+### Context Assembly Input
+
+The host calls the adapter before a model turn with a bounded request:
+
+```json
+{
+  "host": "zeroclaw",
+  "adapter": "generic-chat-agent",
+  "project": "optional-project-name",
+  "session_id": "host-session-id",
+  "turn_id": "host-turn-id",
+  "actor": {
+    "user_id": "stable-user-or-profile-id",
+    "agent_id": "character-or-agent-runtime-id"
+  },
+  "conversation": {
+    "recent_messages": [],
+    "summary_ref": "optional-host-summary-ref",
+    "continue_memory_ref": "optional-host-continuation-ref"
+  },
+  "query": {
+    "text": "current user turn or host-supplied recall query",
+    "intent": "chat|roleplay|coding|support|other",
+    "entities": [],
+    "topics": []
+  },
+  "limits": {
+    "max_context_tokens": 4000,
+    "max_recall_items": 8
+  },
+  "policy": {
+    "persona_profile": "adapter-policy-ref",
+    "allow_memory_write": true,
+    "allow_reflection": true,
+    "allow_edit_by_id": false
+  }
+}
+```
+
+Required input semantics:
+
+- `conversation.recent_messages` is transient host context, not durable memory.
+- `summary_ref` and `continue_memory_ref` point to stable summaries or host
+  continuation memory already accepted by the host.
+- `query` is the immediate recall seed and may be rewritten by adapter policy
+  before hitting the kernel.
+- `policy.persona_profile` is an adapter policy reference. It is not a durable
+  memory schema field.
+
+### Context Assembly Output
+
+The adapter returns typed sections instead of one untyped memory block:
+
+```json
+{
+  "adapter": "generic-chat-agent",
+  "context": {
+    "stable": {
+      "conversation_summary": [],
+      "continue_memory": [],
+      "profile_memory": []
+    },
+    "immediate_recall": [],
+    "reflection": [],
+    "readiness": {
+      "status": "ready|degraded|unavailable",
+      "warnings": []
+    }
+  },
+  "provenance": {
+    "memory_ids": [],
+    "event_ids": [],
+    "kernel": "tachi"
+  }
+}
+```
+
+The ordering is load-bearing:
+
+1. Stable mental model first: accepted summaries, continue memory, profile
+   memory, and other durable projections that define the conversation frame.
+2. Immediate recall second: search results triggered by the current turn.
+3. Reflection third: synthesized guidance when the kernel supports it and host
+   policy allows it.
+
+This follows the Hindsight/OMP mental-model-before-recall shape: the agent first
+knows the stable conversation model, then reads fresh recall hits. The adapter
+must not flatten summaries, continuation memory, search hits, and reflections
+into one prompt bucket where authority and freshness are indistinguishable.
+
+### Memory Tool Surface
+
+The generic adapter exposes only a small memory surface to the host:
+
+| Adapter operation | Kernel mapping | Required | Notes |
+|---|---|---|---|
+| `retain` / `save` | `tachi_memory(action="save")`, `save_memory`, or kernel save API | yes | Stores durable user/session facts with provenance and policy labels. |
+| `recall` / `search` | `tachi_memory(action="search")`, `search_memory`, or kernel search API | yes | Returns ranked memory rows plus source, scope, and confidence metadata. |
+| `reflect` / `synthesize` | `tachi_memory(action="ask")`, distill/read-model API, or no-op | optional | Produces synthesis only when the kernel and adapter policy support it. |
+| `status` / `readiness` | `tachi_memory(action="readiness")`, `tachi_status`, or runtime info | yes | Reports degraded recall, locked vault, vector gaps, or unavailable kernel. |
+| `read_by_id` | `tachi_memory(action="get")` or kernel get API | optional | Allowed only when the host policy permits direct memory reads. |
+| `edit` | kernel update/edit API | optional | Allowed only where the kernel has reviewed edit semantics. |
+
+The surface deliberately excludes GitHub, dispatch, ship, release notes, worker
+spawning, and direct Hindsight HTTP calls. A host may have those tools for other
+reasons; this adapter contract does not require or expose them.
+
+### Event Projection
+
+Chat adapters should emit neutral lifecycle events and project them into the
+existing or planned Tachi event/read-model surfaces:
+
+| Host action | Lifecycle event | Projection target |
+|---|---|---|
+| Session starts | `host.before_session` | runtime identity, readiness, stable profile context |
+| Prompt assembled | `host.before_prompt` | context assembly receipt and memory refs |
+| User or agent fact retained | `memory.retain_requested` -> `memory.saved` | durable memory row plus continuity event when enabled |
+| Recall performed | `memory.recall_requested` -> `memory.recall_returned` | recall telemetry, access history, optional recall-cache evidence |
+| Reflection requested | `memory.reflect_requested` -> `memory.reflection_returned` | synthesis artifact or no-op reason |
+| Host summary compacted | `host.after_compact` | continue memory, summary refs, open threads |
+| Session ends | `host.after_session` | outcome summary, durable candidates, distillation candidates |
+
+Projection rules:
+
+- The append-only event ledger remains the evidence substrate.
+- Durable memory rows and continuity projections remain kernel-owned.
+- Adapter receipts may include prompt section ordering and memory ids, but not
+  raw private transcripts by default.
+- Host policy may suppress retention, reflection, or direct edit/read, but it
+  must report that suppression in readiness or the operation receipt.
+
+### Policy Boundary
+
+Persona, character-card behavior, tone, roleplay style, safety narration, and
+token-pressure choices are adapter policy. The portable kernel owns durable
+memory schema, recall primitives, provenance, access history, and continuity
+projection semantics.
+
+That split keeps the same memory kernel reusable across coding agents, chat
+agents, zeroclaw consumers, RomanBath fixtures, and future host adapters without
+hardcoding one character system or one UI prompt format.
 
 ## Relationship To Existing Surfaces
 
