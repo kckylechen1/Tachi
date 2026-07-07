@@ -58,6 +58,10 @@ pub(crate) async fn run_daemon(
                 crate::status_ops::DaemonStatus::Running { pid, .. } => {
                     #[cfg(unix)]
                     {
+                        // SAFETY: `kill(pid, SIGTERM)` sends a signal to an OS
+                        // pid; it passes no pointers across the FFI boundary and
+                        // aliases no Rust memory. A stale/invalid pid yields
+                        // ESRCH and is handled below.
                         let r = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
                         if r == 0 {
                             println!("[OK] sent SIGTERM to daemon pid={pid}");
@@ -105,6 +109,9 @@ fn process_alive(pid: i64) -> bool {
     if pid <= 0 {
         return false;
     }
+    // SAFETY: `kill(pid, 0)` is a signal-0 existence probe — it sends no
+    // signal, passes no pointers across the FFI boundary, and aliases no
+    // Rust memory.
     let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
     r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
@@ -220,6 +227,10 @@ fn reap_stale_processes(
         if reap {
             reaped += 1;
             if apply {
+                // SAFETY: `kill(pid, SIGTERM)` sends a signal to an OS pid; it
+                // passes no pointers across the FFI boundary and aliases no
+                // Rust memory. Best-effort reap — a stale pid yields ESRCH
+                // which is tolerated (result intentionally discarded).
                 unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
             }
         } else {

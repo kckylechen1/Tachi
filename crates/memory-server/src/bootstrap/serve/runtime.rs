@@ -104,6 +104,8 @@ pub(super) async fn wait_for_parent_death() {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             // Reparented to init/launchd or a userspace subreaper ⇒ the host died.
+            // SAFETY: getppid() reads the caller's parent pid; it passes no
+            // pointers across the FFI boundary and aliases no Rust memory.
             if unsafe { libc::getppid() } != original_ppid {
                 return;
             }

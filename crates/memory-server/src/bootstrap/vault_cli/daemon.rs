@@ -50,6 +50,10 @@ pub(super) async fn call_daemon_vault_unlock(
             uuid::Uuid::new_v4()
         ));
         let c_path = CString::new(fifo_path.as_os_str().as_bytes())?;
+        // SAFETY: `c_path` is a valid NUL-terminated CString outliving the call.
+        // `mkfifo` only reads the path and a mode bitmask; it returns an integer
+        // status and aliases no Rust memory. The FIFO is created under a 0o700
+        // owner-only directory (set above) with mode 0o600.
         let mkfifo_rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
         if mkfifo_rc != 0 {
             return Err(format!(
@@ -116,6 +120,9 @@ fn write_password_to_fifo_nonblocking(
         let c_path = CString::new(path.as_os_str().as_bytes())?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
+            // SAFETY: `c_path` is a valid NUL-terminated CString outliving the
+            // call. `open` only reads the path and returns an integer fd; it
+            // hands no pointers back into Rust memory.
             let fd = unsafe {
                 libc::open(
                     c_path.as_ptr(),
@@ -123,6 +130,10 @@ fn write_password_to_fifo_nonblocking(
                 )
             };
             if fd >= 0 {
+                // SAFETY: `fd` is a freshly-returned valid descriptor (≥ 0)
+                // not yet owned by any `File`. `from_raw_fd` takes single
+                // ownership; `file` closes the descriptor on drop, so there
+                // is no double-close hazard.
                 let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
                 file.write_all(password.as_bytes())?;
                 file.flush()?;

@@ -109,12 +109,21 @@ pub fn zero_key(key: &mut [u8; 32]) {
 pub fn zero_string(value: &mut String) {
     // `String` stores UTF-8 bytes; writing NUL bytes preserves UTF-8 validity
     // while clearing the previous password contents in-place.
+    // SAFETY: `value` is an exclusive `&mut String`, so the underlying
+    // `Vec<u8>` is uniquely reachable through this reference. Writing NUL
+    // bytes keeps the buffer valid UTF-8 (NUL is a valid UTF-8 code point),
+    // so the `String` invariant is preserved. We do not reallocate or change
+    // the length, so capacity/length stay consistent.
     let bytes = unsafe { value.as_mut_vec() };
     zero_bytes(bytes);
 }
 
 fn zero_bytes(bytes: &mut [u8]) {
     for byte in bytes.iter_mut() {
+        // SAFETY: `byte` is a unique `&mut u8` within a validly-initialized
+        // slice; `write_volatile(byte, 0)` writes a single fully-initialized
+        // byte and the volatile store prevents the compiler from eliding the
+        // zeroization. The fence below orders the stores against later reads.
         unsafe {
             std::ptr::write_volatile(byte, 0);
         }
