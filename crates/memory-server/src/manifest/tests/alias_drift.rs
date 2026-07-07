@@ -12,6 +12,21 @@
 //! is the pre-existing `path_utils/tests.rs` suite, left unmodified.
 
 use super::*;
+use std::path::PathBuf;
+
+/// Keep fixtures outside `/tmp`: on Linux, `should_skip_path` drops
+/// `/.tachi/memory.db` paths under `/tmp` as ephemeral smoke workspaces.
+fn alias_drift_tempdir() -> tempfile::TempDir {
+    let base = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target"))
+        .join("alias-drift-fixtures");
+    std::fs::create_dir_all(&base).expect("alias-drift fixture base");
+    tempfile::Builder::new()
+        .prefix("case-")
+        .tempdir_in(&base)
+        .expect("alias-drift tempdir")
+}
 
 fn with_env_lock<F: FnOnce()>(f: F) {
     let _guard = crate::utils::global_test_lock()
@@ -40,7 +55,7 @@ fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
 #[test]
 fn g_relabel_flips_label_without_touching_filesystem() {
     with_env_lock(|| {
-        let tmp = tempfile::tempdir().expect("tmp");
+        let tmp = alias_drift_tempdir();
         let saved_home = std::env::var_os("TACHI_HOME");
         let saved_sigil = std::env::var_os("SIGIL_HOME");
         let saved_app = std::env::var_os("TACHI_APP_HOME");
@@ -143,7 +158,7 @@ fn g_relabel_flips_label_without_touching_filesystem() {
 #[test]
 fn g_role_scope_and_role_agree_after_relabel() {
     with_env_lock(|| {
-        let tmp = tempfile::tempdir().expect("tmp");
+        let tmp = alias_drift_tempdir();
         let saved_home = std::env::var_os("TACHI_HOME");
         let saved_sigil = std::env::var_os("SIGIL_HOME");
         let saved_app = std::env::var_os("TACHI_APP_HOME");
@@ -157,6 +172,10 @@ fn g_role_scope_and_role_agree_after_relabel() {
         std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
         std::fs::write(&local_db, b"canonical-bytes").expect("write local db");
         let local_db = std::fs::canonicalize(&local_db).expect("canonicalize local db");
+        assert!(
+            should_skip_path(&local_db).is_none(),
+            "precondition: repo-local fixture must not match temporary-workspace skip"
+        );
 
         let new_name =
             crate::path_utils::plan_c_dir_name_from_root(&repo).expect("current derived name");
