@@ -107,18 +107,29 @@ pub(crate) trait CheckStateReader: Send + Sync {
 
 #[async_trait]
 impl<T: GhClient + ?Sized> CheckStateReader for T {
-    /// Returns `observed_head_sha: None` today; the `Stale` ledger state is
-    /// therefore unreachable in production until a real reader (see #605
-    /// watcher) populates the observed head SHA.
+    /// Populates `observed_head_sha` from the PR's current `headRefOid` so the
+    /// `Stale` ledger state is reachable in production (the #605 watcher relies
+    /// on this to detect a head that moved after the expected snapshot). A
+    /// `pr_view` failure is tolerated — checks are still returned with a `None`
+    /// observed SHA — because a transient `pr_view` error must not mask a red
+    /// check the operator needs to see; it surfaces instead as `ReaderError`
+    /// only when the checks read itself failed.
     async fn read_check_state(
         &self,
         repo: &str,
         pr_number: u64,
     ) -> Result<CheckStateRead, GhError> {
         let checks = self.checks_list(repo, pr_number).await?;
+        // Best-effort head SHA: a pr_view hiccup degrades staleness detection
+        // (observed SHA unknown) but does NOT fail the whole read — the check
+        // list is the authoritative input for the Failed/Passed ledger state.
+        let observed_head_sha = match self.pr_view(repo, pr_number).await {
+            Ok(pr) => Some(pr.head_sha).filter(|sha| !sha.is_empty()),
+            Err(_) => None,
+        };
         Ok(CheckStateRead {
             checks,
-            observed_head_sha: None,
+            observed_head_sha,
         })
     }
 }
