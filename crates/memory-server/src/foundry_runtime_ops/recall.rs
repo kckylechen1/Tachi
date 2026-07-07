@@ -78,6 +78,56 @@ pub(super) fn build_rerank_document(row: &Value) -> String {
         .join("\n")
 }
 
+fn apply_rerank_score(mut row: Value, score: f64) -> Value {
+    let score = round3(score);
+    if let Value::Object(map) = &mut row {
+        map.insert("relevance".into(), json!(score));
+        map.insert("rerank_score".into(), json!(score));
+        if let Some(Value::Object(score_map)) = map.get_mut("score") {
+            score_map.insert("final".into(), json!(score));
+        }
+    }
+    row
+}
+
+pub(super) fn merge_rerank_order_with_hybrid_floor(
+    rows: &[Value],
+    order: &[(usize, f64)],
+    top_k: usize,
+) -> Vec<Value> {
+    let floor_len = top_k.min(rows.len());
+    if floor_len == 0 {
+        return Vec::new();
+    }
+
+    let mut emitted = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(floor_len);
+    for &(index, score) in order {
+        if out.len() >= floor_len {
+            break;
+        }
+        if index >= floor_len || !emitted.insert(index) {
+            continue;
+        }
+        if let Some(row) = rows.get(index).cloned() {
+            out.push(apply_rerank_score(row, score));
+        }
+    }
+
+    for index in 0..floor_len {
+        if out.len() >= floor_len {
+            break;
+        }
+        if emitted.insert(index) {
+            if let Some(row) = rows.get(index).cloned() {
+                out.push(row);
+            }
+        }
+    }
+
+    out
+}
+
 pub(super) fn build_prepend_context(rows: &[Value]) -> String {
     if rows.is_empty() {
         return String::new();
@@ -260,20 +310,7 @@ pub(crate) async fn rerank_rows_with_outcome(
     let docs = rows.iter().map(build_rerank_document).collect::<Vec<_>>();
     match server.llm.rerank_voyage(query, &docs, top_k).await {
         Ok(order) => {
-            let mut out = Vec::with_capacity(order.len());
-            for (index, score) in order {
-                let Some(mut row) = rows.get(index).cloned() else {
-                    continue;
-                };
-                if let Value::Object(map) = &mut row {
-                    map.insert("relevance".into(), json!(round3(score)));
-                    map.insert("rerank_score".into(), json!(round3(score)));
-                    if let Some(Value::Object(score_map)) = map.get_mut("score") {
-                        score_map.insert("final".into(), json!(round3(score)));
-                    }
-                }
-                out.push(row);
-            }
+            let out = merge_rerank_order_with_hybrid_floor(&rows, &order, top_k);
             let outcome = if out.is_empty() {
                 RerankOutcome::Fallback
             } else {
