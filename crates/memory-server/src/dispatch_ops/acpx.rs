@@ -13,38 +13,10 @@ pub(super) use spec::{
 mod tests {
     use super::types::ACPX_EVENTS_FILE;
     use super::*;
+    use crate::test_support::EnvRestore;
     use crate::tool_params::TachiDispatchParams;
     use serde_json::json;
     use std::path::Path;
-
-    struct EnvRestore {
-        key: &'static str,
-        old: Option<String>,
-    }
-
-    impl EnvRestore {
-        fn set(key: &'static str, value: &str) -> Self {
-            let old = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, old }
-        }
-
-        fn remove(key: &'static str) -> Self {
-            let old = std::env::var(key).ok();
-            std::env::remove_var(key);
-            Self { key, old }
-        }
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            if let Some(old) = &self.old {
-                std::env::set_var(self.key, old);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
 
     fn params() -> TachiDispatchParams {
         TachiDispatchParams {

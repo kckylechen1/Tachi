@@ -1,16 +1,8 @@
 use super::*;
-
-const OPENCODE_DOC_FIXTURE: &str = r#"{
-    "openapi":"3.1.0",
-    "info":{"title":"opencode","version":"1.0.0"},
-    "paths":{
-        "/api/session":{"post":{}},
-        "/api/session/{sessionID}/prompt":{"post":{}},
-        "/api/session/{sessionID}/wait":{"post":{}},
-        "/api/model":{"get":{}},
-        "/api/provider":{"get":{}}
-    }
-}"#;
+// Shared OpenCode OpenAPI fixture lives in `crate::test_support`; the local
+// `spawn_auth_gated_opencode_doc_server` below is a distinct (auth-gated)
+// variant that uses it.
+use crate::test_support::OPENCODE_DOC_FIXTURE;
 
 struct EnvGuard {
     key: &'static str,
