@@ -533,6 +533,8 @@ fn enforce_client_project(
         if explicit_project.as_str() == Some(project) {
             return Ok(());
         }
+        // #733 write isolation: reject routing into another project's DB. Cross-library
+        // reads are safe (daemon opens read-only stores) and are allow-listed below (#737).
         if explicit_project.as_str().is_some()
             && explicit_project_can_cross_binding(tool_name, args)
         {
@@ -568,6 +570,9 @@ fn enforce_client_project(
     Ok(())
 }
 
+/// Returns true when an explicit `project` param may differ from the stdio
+/// session binding. Protects #733 write isolation only: daemon-side reads use
+/// read-only opens and do not threaten single-writer discipline (#520).
 fn explicit_project_can_cross_binding(tool_name: &str, args: &rmcp::model::JsonObject) -> bool {
     match tool_name {
         "search_memory"
@@ -583,6 +588,10 @@ fn explicit_project_can_cross_binding(tool_name: &str, args: &rmcp::model::JsonO
             .get("action")
             .and_then(|value| value.as_str())
             .is_some_and(tachi_wiki_action_allows_cross_project_read),
+        "tachi_event" => args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .is_some_and(tachi_event_action_allows_cross_project_read),
         _ => false,
     }
 }
@@ -643,6 +652,8 @@ fn tachi_memory_action_defaults_to_project(action: &str) -> bool {
     )
 }
 
+/// Read-only or dry-run `tachi_memory` actions. `consolidate` returns dry_run
+/// candidates; `recall_simulate` replays search without persisting writes.
 fn tachi_memory_action_allows_cross_project_read(action: &str) -> bool {
     matches!(
         action.to_ascii_lowercase().as_str(),
@@ -655,6 +666,10 @@ fn tachi_memory_action_allows_cross_project_read(action: &str) -> bool {
             | "recall_simulate"
             | "search"
     )
+}
+
+fn tachi_event_action_allows_cross_project_read(action: &str) -> bool {
+    matches!(action.to_ascii_lowercase().as_str(), "metrics" | "query")
 }
 
 fn tachi_wiki_action_allows_cross_project_read(action: &str) -> bool {
@@ -1864,6 +1879,32 @@ mod tests {
             err.to_string().contains("project binding mismatch"),
             "unexpected error: {err}"
         );
+
+        for (tool, action) in [
+            ("tachi_memory", Some("save")),
+            ("tachi_memory", Some("extract_facts")),
+            ("tachi_memory", Some("checkpoint")),
+            ("delete_memory", None),
+            ("save_memory", None),
+            ("tachi_event", Some("emit")),
+        ] {
+            let mut args = serde_json::Map::from_iter([(
+                "project".to_string(),
+                serde_json::json!("Quant-test"),
+            )]);
+            if let Some(action) = action {
+                args.insert("action".to_string(), serde_json::json!(action));
+            }
+            let request = rmcp::model::CallToolRequestParams::new(tool).with_arguments(args);
+
+            let err = prepare_proxy_tool_call(request, Some("Sigil-test"))
+                .expect_err("{tool}/{action:?} cross-project write must be rejected");
+
+            assert!(
+                err.to_string().contains("project binding mismatch"),
+                "{tool}/{action:?} unexpected error: {err}"
+            );
+        }
     }
 
     #[test]
@@ -1871,6 +1912,10 @@ mod tests {
         for (tool, action) in [
             ("tachi_memory", Some("search")),
             ("tachi_memory", Some("get")),
+            ("tachi_memory", Some("briefing")),
+            ("tachi_memory", Some("consolidate")),
+            ("tachi_memory", Some("recall_simulate")),
+            ("tachi_memory", Some("readiness")),
             ("tachi_search", None),
             ("search_memory", None),
             ("find_similar_memory", None),
@@ -1879,6 +1924,8 @@ mod tests {
             ("tachi_wiki", Some("search")),
             ("tachi_wiki", Some("browse")),
             ("tachi_wiki", Some("read")),
+            ("tachi_event", Some("query")),
+            ("tachi_event", Some("metrics")),
         ] {
             let mut args = serde_json::Map::from_iter([(
                 "project".to_string(),
