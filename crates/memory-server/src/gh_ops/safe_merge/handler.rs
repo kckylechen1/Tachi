@@ -237,7 +237,7 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         pr_lifecycle_state_label(pr.state)
     };
 
-    let status_patch = json!({
+    let mut status_patch = json!({
         "repo": repo,
         "pr_number": pr_number,
         "pr_state": pr_state,
@@ -304,6 +304,7 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         },
         "verification": verification_gate,
     });
+    omit_ingest_owned_check_fields_if_persisted(&mut status_patch, check_state_ingest.as_ref());
 
     let mut persisted = false;
     if let (Some(fid), Some(run_dir)) = (flow_id, flow_run_dir.as_ref()) {
@@ -376,7 +377,7 @@ async fn handle_already_merged_pr(
     } else {
         "merge_requested"
     };
-    let status_patch = json!({
+    let mut status_patch = json!({
         "repo": repo,
         "pr_number": pr_number,
         "pr_state": "MERGED",
@@ -432,6 +433,7 @@ async fn handle_already_merged_pr(
         },
         "verification": null,
     });
+    omit_ingest_owned_check_fields_if_persisted(&mut status_patch, check_state_ingest.as_ref());
     let event_payload = json!({
         "repo": repo,
         "pr_number": pr_number,
@@ -477,6 +479,29 @@ async fn handle_already_merged_pr(
         },
     }))
     .map_err(|e| format!("serialize: {e}"))
+}
+
+fn omit_ingest_owned_check_fields_if_persisted(
+    status_patch: &mut Value,
+    check_state_ingest: Option<&Value>,
+) {
+    if check_state_ingest
+        .and_then(|v| v.get("persisted"))
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return;
+    }
+
+    let Some(checks) = status_patch
+        .get_mut("checks")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    for key in ["state", "status", "conclusion", "source"] {
+        checks.remove(key);
+    }
 }
 
 fn pr_lifecycle_state_label(state: PrLifecycleState) -> &'static str {

@@ -219,7 +219,7 @@ async fn safe_merge_dry_run_records_red_check_state_artifact_without_merge_or_re
     let checks = vec![CheckRun {
         name: "ci".to_string(),
         status: "completed".to_string(),
-        conclusion: Some("failure".to_string()),
+        conclusion: Some("success".to_string()),
     }];
     let client = MockGhClient::new()
         .with_pr(
@@ -231,6 +231,8 @@ async fn safe_merge_dry_run_records_red_check_state_artifact_without_merge_or_re
         )
         .with_checks("o/r", 42, checks);
     let flow = "flow_safe-merge-check-state";
+    let mut policy = MergeGatePolicy::standard();
+    policy.allow_missing_checks = true;
     let out = handle_github_safe_merge(
         &client,
         "o/r",
@@ -239,7 +241,7 @@ async fn safe_merge_dry_run_records_red_check_state_artifact_without_merge_or_re
         true,
         Some(flow),
         &[],
-        MergeGatePolicy::standard(),
+        policy,
         None,
         false,
     )
@@ -252,7 +254,7 @@ async fn safe_merge_dry_run_records_red_check_state_artifact_without_merge_or_re
     assert_eq!(v["check_state_ingest"]["persisted"], json!(true));
     assert_eq!(
         v["check_state_ingest"]["failed_checks_recorded_only"],
-        json!(true)
+        json!(false)
     );
     assert!(client.merge_calls().is_empty());
 
@@ -261,12 +263,24 @@ async fn safe_merge_dry_run_records_red_check_state_artifact_without_merge_or_re
         serde_json::from_str(&std::fs::read_to_string(run_dir.join("check_state.json")).unwrap())
             .unwrap();
     assert_eq!(artifact["pr"]["head_ref"], json!("feat/source-branch"));
-    assert_eq!(artifact["aggregate"]["conclusion"], json!("failure"));
-    assert_eq!(artifact["failed_checks_recorded_only"], json!(true));
+    assert_eq!(artifact["aggregate"]["conclusion"], json!("success"));
+    assert_eq!(artifact["failed_checks_recorded_only"], json!(false));
     assert_eq!(artifact["repair_attempted"], json!(false));
     assert_eq!(artifact["merge_attempted"], json!(false));
     assert!(!run_dir.join("repair.json").exists());
     assert!(!run_dir.join("merge.json").exists());
+    let status: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        status["github"]["checks"]["source"],
+        json!("safe_merge.dry_run")
+    );
+    assert_eq!(status["github"]["checks"]["state"], json!("success"));
+    assert_eq!(status["github"]["checks"]["status"], json!("completed"));
+    assert_eq!(status["github"]["checks"]["conclusion"], json!("success"));
+    assert_eq!(status["github"]["checks"]["required"], json!(true));
+    assert_eq!(status["github"]["checks"]["allow_missing"], json!(true));
 
     if let Some(v) = original {
         std::env::set_var("TACHI_RUN_ROOT", v);
@@ -291,9 +305,17 @@ async fn safe_merge_already_merged_dry_run_still_records_check_state_artifact() 
         conclusion: Some("success".to_string()),
     }];
     let client = MockGhClient::new()
-        .with_pr("o/r", already_merged_pr())
+        .with_pr(
+            "o/r",
+            PrState {
+                checks: ChecksState::Failure,
+                ..already_merged_pr()
+            },
+        )
         .with_checks("o/r", 42, checks);
     let flow = "flow_already-merged-check-state";
+    let mut policy = MergeGatePolicy::strict();
+    policy.allow_missing_checks = true;
     let out = handle_github_safe_merge(
         &client,
         "o/r",
@@ -302,7 +324,7 @@ async fn safe_merge_already_merged_dry_run_still_records_check_state_artifact() 
         true,
         Some(flow),
         &[],
-        MergeGatePolicy::strict(),
+        policy,
         None,
         false,
     )
@@ -322,6 +344,18 @@ async fn safe_merge_already_merged_dry_run_still_records_check_state_artifact() 
     assert_eq!(artifact["aggregate"]["conclusion"], json!("success"));
     assert_eq!(artifact["merge_attempted"], json!(false));
     assert!(client.merge_calls().is_empty());
+    let status: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        status["github"]["checks"]["source"],
+        json!("safe_merge.dry_run")
+    );
+    assert_eq!(status["github"]["checks"]["state"], json!("success"));
+    assert_eq!(status["github"]["checks"]["status"], json!("completed"));
+    assert_eq!(status["github"]["checks"]["conclusion"], json!("success"));
+    assert_eq!(status["github"]["checks"]["required"], json!(true));
+    assert_eq!(status["github"]["checks"]["allow_missing"], json!(true));
 
     if let Some(v) = original {
         std::env::set_var("TACHI_RUN_ROOT", v);
