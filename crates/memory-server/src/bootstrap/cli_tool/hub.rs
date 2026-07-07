@@ -282,7 +282,9 @@ fn build_mcp_quick_add_params(
         "transport": transport,
         "tool_exposure": "gateway",
         "policy": {
-            "visibility": "discoverable"
+            "visibility": "discoverable",
+            "seats": [],
+            "allowed_mcp_servers": []
         },
         "startup_timeout_ms": 10_000,
         "tool_timeout_ms": 30_000,
@@ -555,6 +557,35 @@ mod tests {
         assert_eq!(
             definition["headers"]["Authorization"],
             "Bearer ${vault:MCP_CONTEXT7_API_KEY}"
+        );
+    }
+
+    #[test]
+    fn hub_quick_add_mcp_cli_reserves_empty_seat_scope_policy() {
+        let params = build_mcp_quick_add_params(
+            "context7",
+            "https://mcp.context7.com/mcp",
+            "http",
+            &[],
+            None,
+        )
+        .expect("params");
+        let definition: Value = serde_json::from_str(&params.definition).expect("definition json");
+
+        assert_eq!(definition["policy"]["visibility"], "discoverable");
+        assert_eq!(
+            definition["policy"]["seats"]
+                .as_array()
+                .expect("seats array")
+                .len(),
+            0
+        );
+        assert_eq!(
+            definition["policy"]["allowed_mcp_servers"]
+                .as_array()
+                .expect("allowed_mcp_servers array")
+                .len(),
+            0
         );
     }
 
