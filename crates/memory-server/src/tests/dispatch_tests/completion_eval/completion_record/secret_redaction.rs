@@ -51,6 +51,7 @@ async fn tachi_complete_scrubs_secretish_eval_metadata() {
                 output_tokens: None,
                 cost_tokens: None,
                 cost_usd: None,
+                ..Default::default()
             }],
             feedback_rules_applied: Vec::new(),
             dispatch_id: None,

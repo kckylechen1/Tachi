@@ -142,6 +142,7 @@ async fn tachi_task_recommend_surfaces_human_override_and_retry_penalties() {
                 output_tokens: Some(500),
                 cost_tokens: Some(2000),
                 cost_usd: Some(0.05),
+                ..Default::default()
             }],
             feedback_rules_applied: Vec::new(),
             dispatch_id: None,

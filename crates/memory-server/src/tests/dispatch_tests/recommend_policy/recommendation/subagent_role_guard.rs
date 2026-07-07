@@ -43,6 +43,7 @@ async fn tachi_task_recommend_does_not_apply_same_backend_wrong_role_subagent_ev
                 output_tokens: None,
                 cost_tokens: None,
                 cost_usd: None,
+                ..Default::default()
             }],
             feedback_rules_applied: Vec::new(),
             dispatch_id: None,

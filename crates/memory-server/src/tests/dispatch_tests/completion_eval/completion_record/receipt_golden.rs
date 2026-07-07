@@ -45,6 +45,7 @@ async fn g4_complete_default_omits_subagent_notes_sentinel() {
                 output_tokens: None,
                 cost_tokens: None,
                 cost_usd: None,
+                ..Default::default()
             }],
             feedback_rules_applied: Vec::new(),
             dispatch_id: None,
