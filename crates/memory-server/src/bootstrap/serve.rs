@@ -732,6 +732,7 @@ async fn start_server_transport(
             bg_handles.len()
         );
         for handle in bg_handles {
+            // Deliberately swallows task-panic JoinError so a panicking bg task doesn't take down the daemon.
             let _ = handle.await;
         }
     }

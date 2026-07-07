@@ -95,14 +95,34 @@ pub(crate) struct CheckStateIngestResult {
     /// ingest), but this flag lets operators notice the data was degraded so a
     /// permissive `Ready` is not mistaken for "all checks confirmed green".
     pub(crate) reader_error: bool,
+    /// **Typed** rate-limit signal (companion to `reader_error`). `true` iff the
+    /// reader failed with `GhError::RateLimited`. The watcher reads this field
+    /// directly instead of substring-matching the recorded `read_error` string
+    /// (re-reading JSON + string-matching was a ban-risk: a transient
+    /// non-rate-limit error whose message happened to contain "rate limit"
+    /// would falsely trip the backoff, and a genuine rate-limit whose Display
+    /// form ever changed would silently miss it). Set here, at the typed-err
+    /// boundary, so downstream decisions are branch-on-enum, not grep-on-text.
+    pub(crate) rate_limited: bool,
     #[serde(flatten)]
     pub(crate) artifact: CheckStateArtifactResult,
 }
 
 #[async_trait]
 pub(crate) trait CheckStateReader: Send + Sync {
-    async fn read_check_state(&self, repo: &str, pr_number: u64)
-        -> Result<CheckStateRead, GhError>;
+    /// `expected_head_sha` gates whether the reader must resolve the PR's live
+    /// head SHA. When `Some`, the reader calls `pr_view` to populate
+    /// `observed_head_sha` so a moved head can be classified `Stale`. When
+    /// `None` (first poll of a flow with no prior artifact), `pr_view` is
+    /// skipped entirely — there is nothing to be stale against, so the call
+    /// would only spend API budget for no gain. This halves per-PR calls for
+    /// newly-discovered flows.
+    async fn read_check_state(
+        &self,
+        repo: &str,
+        pr_number: u64,
+        expected_head_sha: Option<&str>,
+    ) -> Result<CheckStateRead, GhError>;
 }
 
 #[async_trait]
@@ -118,14 +138,25 @@ impl<T: GhClient + ?Sized> CheckStateReader for T {
         &self,
         repo: &str,
         pr_number: u64,
+        expected_head_sha: Option<&str>,
     ) -> Result<CheckStateRead, GhError> {
         let checks = self.checks_list(repo, pr_number).await?;
-        // Best-effort head SHA: a pr_view hiccup degrades staleness detection
-        // (observed SHA unknown) but does NOT fail the whole read — the check
-        // list is the authoritative input for the Failed/Passed ledger state.
-        let observed_head_sha = match self.pr_view(repo, pr_number).await {
-            Ok(pr) => Some(pr.head_sha).filter(|sha| !sha.is_empty()),
-            Err(_) => None,
+        // Gate the pr_view call: only fetch the live head SHA when there is a
+        // prior expected SHA to compare it against. On a first poll (no prior
+        // artifact) there is nothing to be stale against, so observed_head_sha
+        // stays None — which keeps Stale unreachable, the correct result.
+        // Skipping this call halves per-PR API cost for new flows.
+        let observed_head_sha = if expected_head_sha.is_some() {
+            // Best-effort head SHA: a pr_view hiccup degrades staleness
+            // detection (observed SHA unknown) but does NOT fail the whole read
+            // — the check list is the authoritative input for the
+            // Failed/Passed ledger state.
+            match self.pr_view(repo, pr_number).await {
+                Ok(pr) => Some(pr.head_sha).filter(|sha| !sha.is_empty()),
+                Err(_) => None,
+            }
+        } else {
+            None
         };
         Ok(CheckStateRead {
             checks,
@@ -142,13 +173,23 @@ pub(crate) async fn ingest_check_state_transition<R: CheckStateReader + ?Sized>(
     let previous_state = read_previous_check_state(&run_dir)?;
     let observed_at = Utc::now().to_rfc3339();
     let read = reader
-        .read_check_state(request.repo, request.pr_number)
-        .await
-        .map_err(|err| err.to_string());
+        .read_check_state(request.repo, request.pr_number, request.expected_head_sha)
+        .await;
 
-    let (checks, observed_head_sha, read_error) = match read {
-        Ok(read) => (read.checks, read.observed_head_sha, None),
-        Err(err) => (Vec::new(), None, Some(err)),
+    // Decompose the typed `Result<CheckStateRead, GhError>` WITHOUT flattening
+    // to String first, so the rate-limit signal is branch-on-enum. `read_error`
+    // is the Display form persisted to the artifact; `rate_limited` is the
+    // authoritative typed signal the watcher reads directly instead of
+    // re-reading JSON + substring-matching.
+    let (checks, observed_head_sha, read_error, rate_limited) = match read {
+        Ok(read) => (read.checks, read.observed_head_sha, None, false),
+        Err(err) => {
+            // Match the GhError variant — never the string. RateLimited is the
+            // ban-risk signal the watcher backs off on; any other error is a
+            // generic degraded read.
+            let rate_limited = matches!(err, GhError::RateLimited(_));
+            (Vec::new(), None, Some(err.to_string()), rate_limited)
+        }
     };
     let state = classify_ledger_state(
         &checks,
@@ -186,6 +227,7 @@ pub(crate) async fn ingest_check_state_transition<R: CheckStateReader + ?Sized>(
         previous_state,
         changed,
         reader_error: read_error.is_some(),
+        rate_limited,
         artifact,
     })
 }

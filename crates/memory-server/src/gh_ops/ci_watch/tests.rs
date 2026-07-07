@@ -1,8 +1,11 @@
 use super::*;
-use crate::gh_ops::safe_merge::{CheckStateLedgerState, CheckStateRead};
+use crate::gh_ops::safe_merge::{
+    ingest_check_state_transition, CheckStateIngestRequest, CheckStateLedgerState, CheckStateRead,
+};
 use crate::gh_safe_merge::{CheckRun, GhError};
 use async_trait::async_trait;
 use serde_json::json;
+use std::time::Duration;
 
 /// A reader whose response can vary per call, so a single test can simulate a
 /// pending→failed transition across two cycles.
@@ -24,6 +27,7 @@ impl CheckStateReader for ScriptedReader {
         &self,
         _repo: &str,
         _pr_number: u64,
+        _expected_head_sha: Option<&str>,
     ) -> Result<CheckStateRead, GhError> {
         self.responses
             .lock()
@@ -63,11 +67,46 @@ impl CheckStateReader for CountingReader {
         &self,
         repo: &str,
         pr_number: u64,
+        _expected_head_sha: Option<&str>,
     ) -> Result<CheckStateRead, GhError> {
         self.calls
             .lock()
             .expect("calls lock")
             .push((repo.to_string(), pr_number));
+        self.result.clone()
+    }
+}
+
+/// A reader whose call count is observable through a shared `AtomicUsize`,
+/// decoupled from the `Arc<dyn CheckStateReader>` handed to the spawned task.
+/// The backoff test drives `spawn_ci_watch` (which owns the reader as a trait
+/// object) but still needs to read the live call count from outside the loop —
+/// `Arc<dyn Trait>` cannot be downcast to `dyn Any`, so the count is shared via
+/// this side-channel atomic instead.
+struct SharedCountingReader {
+    counter: Arc<std::sync::atomic::AtomicUsize>,
+    result: Result<CheckStateRead, GhError>,
+}
+
+impl SharedCountingReader {
+    fn new(
+        counter: Arc<std::sync::atomic::AtomicUsize>,
+        result: Result<CheckStateRead, GhError>,
+    ) -> Self {
+        Self { counter, result }
+    }
+}
+
+#[async_trait]
+impl CheckStateReader for SharedCountingReader {
+    async fn read_check_state(
+        &self,
+        _repo: &str,
+        _pr_number: u64,
+        _expected_head_sha: Option<&str>,
+    ) -> Result<CheckStateRead, GhError> {
+        self.counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.result.clone()
     }
 }
@@ -289,6 +328,55 @@ async fn ci_watch_rate_limit_skips_cycle_without_crashing() {
         .join(&target_b.flow_id)
         .join("check_state.json")
         .exists());
+
+    // Typed-field discrimination (finding #2b): the rate-limit signal must be a
+    // `bool` set from `matches!(err, GhError::RateLimited(_))`, NOT derived by
+    // substring-matching the recorded `read_error`. Drive the recorder directly
+    // against both a RateLimited and a Sanitized error whose message
+    // DELIBERATELY contains "rate limit" to prove the typed match is what
+    // governs the flag (a Sanitized error mentioning "rate limit" must NOT set
+    // it, and a RateLimited must — regardless of message wording).
+    let typed_request = CheckStateIngestRequest {
+        flow_id: "flow_watch-rl-typed",
+        repo: "o/r",
+        pr_number: 99,
+        pr_ref: Some("o/r#99"),
+        head_ref: None,
+        expected_head_sha: None,
+        source: "ci_state.watch",
+    };
+    let rate_limited_result = ingest_check_state_transition(
+        &CountingReader::new(Err(GhError::RateLimited("403 too many".to_string()))),
+        &typed_request,
+    )
+    .await
+    .expect("ingest rate-limited");
+    assert!(
+        rate_limited_result.rate_limited,
+        "RateLimited variant must set rate_limited=true (typed match, not string)"
+    );
+    // A Sanitized error that happens to mention "rate limit" must NOT trip the
+    // typed flag — this is exactly the false-positive the substring match risked.
+    let sanitized_luring = ingest_check_state_transition(
+        &CountingReader::new(Err(GhError::Sanitized(
+            "upstream returned 'rate limit exceeded' as a generic error".to_string(),
+        ))),
+        &CheckStateIngestRequest {
+            flow_id: "flow_watch-rl-luring",
+            repo: "o/r",
+            pr_number: 100,
+            pr_ref: Some("o/r#100"),
+            head_ref: None,
+            expected_head_sha: None,
+            source: "ci_state.watch",
+        },
+    )
+    .await
+    .expect("ingest sanitized");
+    assert!(
+        !sanitized_luring.rate_limited,
+        "Sanitized error (even one mentioning 'rate limit') must NOT set rate_limited=true"
+    );
 
     restore_run_root(original);
 }
@@ -602,6 +690,187 @@ async fn ci_watch_spawn_exits_on_shutdown_cancel() {
         Some(v) => std::env::set_var("TACHI_CI_WATCH_INTERVAL_SECS", v),
         None => std::env::remove_var("TACHI_CI_WATCH_INTERVAL_SECS"),
     }
+}
+
+/// **pr_view gate test (finding #4).** Proves the blanket
+/// `CheckStateReader` impl only calls `pr_view` when there is an expected head
+/// SHA to compare against (i.e. a prior artifact exists). On the FIRST poll of
+/// a new flow (`expected_head_sha` is None) `pr_view` is NOT called at all —
+/// halving per-PR API cost — and `Stale` stays unreachable (nothing to be
+/// stale against). On the SECOND poll (expected SHA now present from the first
+/// cycle's artifact), `pr_view` IS called so a moved head can be detected.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn ci_watch_pr_view_gated_on_expected_head_sha() {
+    use crate::gh_ops::safe_merge::CheckStateReader;
+    use crate::gh_safe_merge::{
+        ChecksState, Mergeable, MockGhClient, PrLifecycleState, PrState, ReviewDecision,
+    };
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_guard, original) = lock_run_root(&tmp);
+
+    let ready = PrState {
+        number: 42,
+        state: PrLifecycleState::Open,
+        mergeable: Mergeable::Mergeable,
+        review_decision: Some(ReviewDecision::Approved),
+        checks: ChecksState::Success,
+        is_draft: false,
+        head_sha: "live-head".to_string(),
+        head_ref: Some("feat/live".to_string()),
+        linked_issue_refs: Vec::new(),
+        closing_issue_labels: Vec::new(),
+        head_consistent: None,
+    };
+    let client = MockGhClient::new().with_pr("o/r", ready).with_checks(
+        "o/r",
+        42,
+        vec![CheckRun {
+            name: "ci".to_string(),
+            status: "completed".to_string(),
+            conclusion: Some("success".to_string()),
+        }],
+    );
+
+    // FIRST poll of a brand-new flow: no prior artifact → expected_head_sha is
+    // None → the blanket impl MUST skip pr_view.
+    let first = CheckStateReader::read_check_state(&client, "o/r", 42, None)
+        .await
+        .expect("first read");
+    assert!(
+        client.pr_view_calls().is_empty(),
+        "first poll (expected_head_sha=None) must NOT call pr_view, but got {:?}",
+        client.pr_view_calls()
+    );
+    // observed_head_sha stays None on a gated read — Stale not reachable, correct.
+    assert_eq!(first.observed_head_sha, None);
+    assert!(!first.checks.is_empty(), "checks_list was still called");
+
+    // SECOND poll: now there IS an expected SHA to compare against → pr_view
+    // IS called so a moved head can be detected as Stale.
+    let second = CheckStateReader::read_check_state(&client, "o/r", 42, Some("expected-head"))
+        .await
+        .expect("second read");
+    assert_eq!(
+        client.pr_view_calls().len(),
+        1,
+        "second poll (expected_head_sha=Some) MUST call pr_view exactly once"
+    );
+    // observed_head_sha is now populated from pr_view.
+    assert_eq!(second.observed_head_sha.as_deref(), Some("live-head"));
+
+    restore_run_root(original);
+}
+
+/// **Backoff test (finding #2).** Proves that after a rate-limited cycle the
+/// watcher skips ticks (the reader's call count stays flat across the backoff
+/// window) instead of resuming at the fixed cadence. Uses `tokio::time::pause()`
+/// so the real wall-clock sleeps are virtualized and the test is fast.
+///
+/// Strategy: drive `spawn_ci_watch` with a rate-limiting reader; assert that
+/// across a backoff window (>= base interval * 2^1) the reader call count does
+/// not increase, then after the backoff delay elapses a second cycle runs.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(start_paused = true)]
+async fn ci_watch_backoff_skips_ticks_after_rate_limit() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_run_guard, original_run) = lock_run_root(&tmp);
+    // Seed a tracked flow so discovery returns a target every cycle.
+    let flow_dir = tmp.path().join("flow_watch-backoff");
+    std::fs::create_dir_all(&flow_dir).unwrap();
+    std::fs::write(
+        flow_dir.join("status.json"),
+        json!({ "github": { "repo": "o/r", "pr_number": 7, "pr_url": "https://github.com/o/r/pull/7" } }).to_string(),
+    )
+    .unwrap();
+
+    // Reader: rate-limits on EVERY call, recording each call through a shared
+    // atomic so the test can observe the live count without downcasting the
+    // trait object the spawned task owns.
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reader: Arc<dyn CheckStateReader> = Arc::new(SharedCountingReader::new(
+        counter.clone(),
+        Err(GhError::RateLimited("secondary rate limit".to_string())),
+    ));
+    let calls = || counter.load(std::sync::atomic::Ordering::SeqCst);
+
+    let saved_watch = std::env::var("TACHI_CI_WATCH").ok();
+    let saved_interval = std::env::var("TACHI_CI_WATCH_INTERVAL_SECS").ok();
+    std::env::set_var("TACHI_CI_WATCH", "on");
+    // Min clamp is 15s; with time paused this is virtualized. Backoff after one
+    // rate-limited cycle = 15s * 2^1 = 30s before the next poll.
+    std::env::set_var("TACHI_CI_WATCH_INTERVAL_SECS", "15");
+
+    let shutdown = CancellationToken::new();
+    let handle = spawn_ci_watch(reader.clone(), shutdown.clone());
+
+    // Let the initial base-interval sleep (15s) + first poll cycle run.
+    tokio::time::sleep(Duration::from_secs(16)).await;
+    let calls_after_first = calls();
+    assert_eq!(
+        calls_after_first, 1,
+        "exactly one poll cycle (one reader call) should have run after the base interval"
+    );
+
+    // Advance partway through the backoff window (after a rate-limited cycle the
+    // next delay is 15s * 2^1 = 30s). 20s in is within the backoff window → the
+    // reader call count must stay flat (no second cycle yet).
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    assert_eq!(
+        calls(),
+        calls_after_first,
+        "reader call count must stay flat across the backoff window (no re-poll until the backoff delay elapses)"
+    );
+
+    // Advance past the full backoff delay (total elapsed from first poll now
+    // exceeds 30s) → a second poll cycle runs.
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    assert_eq!(
+        calls(),
+        calls_after_first + 1,
+        "after the backoff delay elapses, the watcher must resume and run a second cycle"
+    );
+
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("ci watch task did not exit within 5s after shutdown")
+        .expect("task panicked");
+
+    match saved_watch {
+        Some(v) => std::env::set_var("TACHI_CI_WATCH", v),
+        None => std::env::remove_var("TACHI_CI_WATCH"),
+    }
+    match saved_interval {
+        Some(v) => std::env::set_var("TACHI_CI_WATCH_INTERVAL_SECS", v),
+        None => std::env::remove_var("TACHI_CI_WATCH_INTERVAL_SECS"),
+    }
+    restore_run_root(original_run);
+}
+
+/// **Backoff curve unit test (finding #2).** Pins the exponential backoff
+/// formula `min(base * 2^n, cap=30min)` and its reset-on-clean semantics, so a
+/// future edit can't silently weaken the curve.
+#[test]
+fn ci_watch_backoff_delay_doubles_per_consecutive_rate_limit_and_caps() {
+    let base = Duration::from_secs(60);
+    // Clean cycle → base cadence.
+    assert_eq!(backoff_delay(base, 0), base);
+    // 1 consecutive rate-limit → 2x.
+    assert_eq!(backoff_delay(base, 1), Duration::from_secs(120));
+    // 2 → 4x.
+    assert_eq!(backoff_delay(base, 2), Duration::from_secs(240));
+    // 3 → 8x.
+    assert_eq!(backoff_delay(base, 3), Duration::from_secs(480));
+    // Cap kicks in: 2^5 * 60s = 1920s, 2^6 * 60s = 3840s > 1800s cap.
+    assert_eq!(
+        backoff_delay(base, 6),
+        RATE_LIMIT_BACKOFF_CAP,
+        "must be clamped to the 30 min cap"
+    );
+    // Even extreme counts never exceed the cap and never overflow.
+    assert_eq!(backoff_delay(base, u32::MAX), RATE_LIMIT_BACKOFF_CAP);
 }
 
 fn restore_run_root(original: Option<std::ffi::OsString>) {

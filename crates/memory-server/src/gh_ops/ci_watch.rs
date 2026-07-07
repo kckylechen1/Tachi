@@ -188,12 +188,13 @@ fn read_expected_head_sha(run_dir: &Path) -> Option<String> {
 /// degraded-input marker from #816 that keeps a permissive `Ready` from being
 /// mistaken for "all checks confirmed green".
 ///
-/// Rate-limit detection: #816's recorder converts any reader error into a
-/// `reader_error` ledger state with a `read_error` message. When that message
-/// indicates a GitHub rate-limit (`GhError::RateLimited`'s Display form), the
-/// watcher treats the whole cycle as throttled and short-circuits — recording
-/// one `reader_error` transition for the first target, then skipping the rest,
-/// rather than hammering the API with N more doomed reads.
+/// Rate-limit detection is **typed**: #816's recorder matches on the
+/// `GhError::RateLimited` variant and sets `result.rate_limited` directly —
+/// the watcher reads that boolean from the in-memory `CheckStateIngestResult`
+/// instead of re-reading JSON + substring-matching the `read_error` string.
+/// String-matching was a ban-risk: a non-rate-limit error whose message
+/// contained "rate limit" would falsely trip the backoff, and a genuine
+/// rate-limit whose Display form ever changed would silently miss it.
 pub(crate) async fn poll_one_pr<R: CheckStateReader + ?Sized>(
     reader: &R,
     target: &WatchTarget,
@@ -209,19 +210,16 @@ pub(crate) async fn poll_one_pr<R: CheckStateReader + ?Sized>(
     };
     match ingest_check_state_transition(reader, &request).await {
         Ok(result) => {
-            // If the recorder flagged a degraded read AND the underlying error
-            // was a rate-limit, surface it so the cycle short-circuits. The
-            // transition was still recorded (so the operator sees the
-            // reader_error state), but we stop polling further targets this
-            // cycle to respect the rate limit.
-            if result.reader_error && result.artifact.persisted {
-                if let Some(read_error) = read_recorded_error(&target.flow_id) {
-                    if is_rate_limit_error(&read_error) {
-                        return Err(GhError::RateLimited(
-                            "ci watch cycle rate-limited; skipping remaining targets".to_string(),
-                        ));
-                    }
-                }
+            // Typed rate-limit signal: read the boolean set by the recorder from
+            // a `matches!(err, GhError::RateLimited(_))` match, NOT from
+            // re-reading JSON + substring-matching. The transition was still
+            // recorded (so the operator sees the reader_error state), but we
+            // stop polling further targets this cycle to respect the rate
+            // limit.
+            if result.rate_limited && result.artifact.persisted {
+                return Err(GhError::RateLimited(
+                    "ci watch cycle rate-limited; skipping remaining targets".to_string(),
+                ));
             }
             Ok(result.changed)
         }
@@ -236,28 +234,6 @@ pub(crate) async fn poll_one_pr<R: CheckStateReader + ?Sized>(
             Ok(false)
         }
     }
-}
-
-/// Read the `transition.read_error` string from a flow's check_state artifact,
-/// if one was recorded. Used to distinguish a rate-limit from other reader
-/// errors after the recorder has already converted the error into a ledger
-/// state.
-fn read_recorded_error(flow_id: &str) -> Option<String> {
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).ok()?;
-    let raw = std::fs::read_to_string(run_dir.join("check_state.json")).ok()?;
-    let value: Value = serde_json::from_str(&raw).ok()?;
-    value
-        .get("transition")
-        .and_then(|t| t.get("read_error"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
-/// Whether a recorded `read_error` message represents a GitHub rate-limit.
-/// Matches the `GhError::RateLimited` Display form (`"rate limited: ..."`).
-fn is_rate_limit_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("rate limited") || lower.contains("rate limit")
 }
 
 /// Run a single poll cycle over the discovered targets. Exposed (and tested)
@@ -383,6 +359,7 @@ impl CheckStateReader for DaemonCheckStateReader {
         &self,
         repo: &str,
         pr_number: u64,
+        expected_head_sha: Option<&str>,
     ) -> Result<CheckStateRead, GhError> {
         // Build the selected client for this poll. `gh_client_for_server`
         // decides CLI vs HTTP from `TACHI_GH_TRANSPORT`; both implement
@@ -391,13 +368,35 @@ impl CheckStateReader for DaemonCheckStateReader {
             .map_err(|err| GhError::Sanitized(format!("ci-watch client build: {err}")))?;
         match client {
             SelectedGhClient::Cli(cli) => {
-                CheckStateReader::read_check_state(&cli, repo, pr_number).await
+                CheckStateReader::read_check_state(&cli, repo, pr_number, expected_head_sha).await
             }
             SelectedGhClient::Http(http) => {
-                CheckStateReader::read_check_state(&http, repo, pr_number).await
+                CheckStateReader::read_check_state(&http, repo, pr_number, expected_head_sha).await
             }
         }
     }
+}
+
+/// Cap for the exponential backoff after a rate-limited cycle. GitHub's
+/// secondary rate-limit window is short (~minutes), so 30 min is a generous
+/// ceiling that still bounds worst-case latency before the watcher retries.
+const RATE_LIMIT_BACKOFF_CAP: Duration = Duration::from_secs(30 * 60);
+
+/// Compute the next poll delay, applying an exponential backoff when the
+/// previous cycle was rate-limited. `consecutive_rate_limits` counts how many
+/// cycles in a row hit a rate-limit; the delay is
+/// `min(base_interval * 2^consecutive_rate_limits, RATE_LIMIT_BACKOFF_CAP)`.
+/// A clean cycle resets the counter to 0 (no extra delay). Exposed as a free
+/// fn so the backoff curve is unit-testable without a running loop.
+pub(crate) fn backoff_delay(base_interval: Duration, consecutive_rate_limits: u32) -> Duration {
+    if consecutive_rate_limits == 0 {
+        return base_interval;
+    }
+    // `2^consecutive_rate_limits` saturates at u32::MAX, but the cap makes the
+    // overflow unreachable well before that (2^11 * 60s > 30min).
+    let multiplier = 2u32.saturating_pow(consecutive_rate_limits);
+    let scaled = base_interval.saturating_mul(multiplier);
+    scaled.min(RATE_LIMIT_BACKOFF_CAP)
 }
 
 /// Spawn the background CI watcher loop. Matches the architecture of the other
@@ -408,11 +407,18 @@ impl CheckStateReader for DaemonCheckStateReader {
 /// The reader is boxed (`Arc<dyn CheckStateReader>`) so the real `GhClient`
 /// (cli or http transport) can be injected at spawn time, while tests inject a
 /// `FixedCheckReader`.
+///
+/// **Rate-limit backoff.** A `tokio::time::interval` would resume at the fixed
+/// cadence every cycle, hammering GitHub after a 403. Instead the loop is a
+/// manual sleep: the next delay is `backoff_delay(base, consecutive_rate_limits)`,
+/// doubling per consecutive rate-limited cycle (capped at 30 min) and resetting
+/// to the base cadence on a clean (non-rate-limited) cycle. This is the ban-risk
+/// mitigation for GitHub's secondary rate-limit.
 pub(crate) fn spawn_ci_watch(
     reader: Arc<dyn CheckStateReader>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let Some(interval) = resolve_watch_interval() else {
+    let Some(base_interval) = resolve_watch_interval() else {
         eprintln!("[ci-watch] disabled (TACHI_CI_WATCH_INTERVAL_SECS=0)");
         return tokio::spawn(async {});
     };
@@ -421,29 +427,51 @@ pub(crate) fn spawn_ci_watch(
         return tokio::spawn(async {});
     }
     eprintln!(
-        "[ci-watch] enabled (interval={}s, min={}s)",
-        interval.as_secs(),
-        MIN_CI_WATCH_INTERVAL_SECS
+        "[ci-watch] enabled (interval={}s, min={}s, backoff_cap={}s)",
+        base_interval.as_secs(),
+        MIN_CI_WATCH_INTERVAL_SECS,
+        RATE_LIMIT_BACKOFF_CAP.as_secs()
     );
     tokio::spawn(async move {
-        // Consume the immediate first tick so we wait a full cadence before
-        // the first poll (matches the WAL-checkpoint / distill pattern).
-        let mut ticker = tokio::time::interval(interval);
-        ticker.tick().await;
+        // Backoff state: counts consecutive rate-limited cycles. Reset to 0 on
+        // any clean (non-rate-limited) cycle. Drives the exponential delay via
+        // `backoff_delay`.
+        let mut consecutive_rate_limits: u32 = 0;
+        // Wait a full base cadence before the first poll (matches the
+        // WAL-checkpoint / distill "no immediate first tick" pattern).
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tokio::time::sleep(base_interval) => {}
+        }
         loop {
+            let runs_root = shell_runs_root();
+            let summary =
+                run_poll_cycle(reader.as_ref(), || discover_watch_targets(&runs_root)).await;
+            eprintln!(
+                "[ci-watch] cycle: polled={} transitions={} errors={} rate_limited={} skipped={}",
+                summary.polled,
+                summary.transitions,
+                summary.errors,
+                summary.rate_limited,
+                summary.skipped
+            );
+            // Backoff bookkeeping: increment on a rate-limited cycle, reset on
+            // a clean one. A cycle with no targets (skipped == len, polled 0)
+            // counts as clean — there was no rate-limit signal.
+            if summary.rate_limited {
+                consecutive_rate_limits = consecutive_rate_limits.saturating_add(1);
+                eprintln!(
+                    "[ci-watch] rate-limited; backing off (consecutive={}, next_delay={}s)",
+                    consecutive_rate_limits,
+                    backoff_delay(base_interval, consecutive_rate_limits).as_secs()
+                );
+            } else {
+                consecutive_rate_limits = 0;
+            }
+            let delay = backoff_delay(base_interval, consecutive_rate_limits);
             tokio::select! {
                 _ = shutdown.cancelled() => break,
-                _ = ticker.tick() => {
-                    let runs_root = shell_runs_root();
-                    let summary = run_poll_cycle(reader.as_ref(), || {
-                        discover_watch_targets(&runs_root)
-                    }).await;
-                    eprintln!(
-                        "[ci-watch] cycle: polled={} transitions={} errors={} rate_limited={} skipped={}",
-                        summary.polled, summary.transitions, summary.errors,
-                        summary.rate_limited, summary.skipped
-                    );
-                }
+                _ = tokio::time::sleep(delay) => {}
             }
         }
     })
