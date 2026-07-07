@@ -431,4 +431,71 @@ mod tests {
             "contradiction supersession must close valid_until"
         );
     }
+
+    #[test]
+    fn contradiction_candidate_collection_does_not_record_access() {
+        let mut store = memory_core::MemoryStore::open_in_memory().unwrap();
+        if !store.vec_available {
+            return;
+        }
+
+        let mut vector = vec![0.0; 1024];
+        vector[0] = 1.0;
+
+        let mut old_entry = test_entry("old-access", "Acme rollout threshold is 3%");
+        old_entry.path = "/project/acme".to_string();
+        old_entry.timestamp = "2025-01-01T00:00:00Z".to_string();
+        old_entry.entities = vec!["Acme".to_string()];
+        old_entry.vector = Some(vector.clone());
+        let mut new_entry = test_entry("new-access", "Acme rollout threshold is 7%");
+        new_entry.path = "/project/acme/notes".to_string();
+        new_entry.timestamp = "2025-01-02T00:00:00Z".to_string();
+        new_entry.entities = vec!["Acme".to_string()];
+        new_entry.vector = Some(vector);
+
+        store.upsert(&old_entry).unwrap();
+        store.upsert(&new_entry).unwrap();
+
+        let candidates = collect_contradiction_candidates(&mut store, &new_entry).unwrap();
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.entry.id == "old-access"),
+            "expected old entry to be returned as a contradiction candidate: {candidates:#?}"
+        );
+
+        let (access_count, recall_count, last_access): (i64, i64, Option<String>) = store
+            .connection()
+            .query_row(
+                "SELECT access_count, recall_count, last_access FROM memories WHERE id = 'old-access'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let history_count: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM access_history WHERE memory_id = 'old-access'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            access_count, 0,
+            "candidate collection must not bump access_count"
+        );
+        assert_eq!(
+            recall_count, 0,
+            "candidate collection must not bump recall_count"
+        );
+        assert!(
+            last_access.is_none(),
+            "candidate collection must not set last_access"
+        );
+        assert_eq!(
+            history_count, 0,
+            "candidate collection must not append access_history"
+        );
+    }
 }
