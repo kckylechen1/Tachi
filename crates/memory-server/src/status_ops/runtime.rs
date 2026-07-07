@@ -331,6 +331,7 @@ async fn handle_tachi_status_detail(
                     },
                 },
                 "vector_sweep": &d.vector_sweep,
+                "vector_sweep_error": &d.vector_sweep_error,
                 "namespace": &d.namespace,
                 "continuity": &d.continuity,
             })

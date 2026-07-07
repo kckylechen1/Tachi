@@ -191,3 +191,65 @@ async fn tachi_status_reports_durable_vector_sweep_state() {
         json!("Voyage embed batch failed: 429")
     );
 }
+
+#[tokio::test]
+async fn tachi_status_surfaces_malformed_vector_sweep_state() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let manifest_path = temp_home.temp_home.join(".tachi/manifest.json");
+
+    server
+        .with_global_store(|store| {
+            store
+                .connection()
+                .execute(
+                    "CREATE TABLE vector_sweep_state (
+                        key TEXT PRIMARY KEY,
+                        enabled TEXT NOT NULL
+                    )",
+                    [],
+                )
+                .map_err(|e| e.to_string())?;
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO vector_sweep_state (key, enabled) VALUES ('default', 'yes')",
+                    [],
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed malformed sweep state");
+
+    let manifest = crate::manifest::Manifest {
+        schema_version: 1,
+        generated_at: Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![crate::manifest::DbEntry {
+            path: server.global_db_path_buf().display().to_string(),
+            role: crate::manifest::DbRole::Global,
+            owner: "tachi".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: Utc::now().to_rfc3339(),
+            last_classification: "healthy".to_string(),
+            scope_hint: "global".to_string(),
+            notes: String::new(),
+        }],
+    };
+    manifest.save(&manifest_path).expect("save manifest");
+
+    let body = crate::status_ops::handle_tachi_status_full(&server)
+        .await
+        .expect("status should serialize");
+    let parsed: Value = serde_json::from_str(&body).expect("status JSON");
+    let db = &parsed["databases"]["worker_queues"][0];
+    assert_eq!(db["vector_sweep"], Value::Null);
+    assert!(
+        db["vector_sweep_error"]
+            .as_str()
+            .is_some_and(|err| err.contains("read vector sweep state")),
+        "malformed sweep state must be visible: {}",
+        db["vector_sweep_error"]
+    );
+}

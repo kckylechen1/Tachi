@@ -278,6 +278,12 @@ async fn render_one(
                 reason
             );
         }
+        if let Some(err) = &db.vector_sweep_error {
+            println!(
+                "       [!] vector_sweep_error={}",
+                crate::status_ops::truncate(err, 160)
+            );
+        }
         if db.namespace.recall_cache_rows > 0
             || db.namespace.wiki_rows > 0
             || db.namespace.graph_edges > 0

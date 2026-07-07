@@ -251,17 +251,40 @@ async fn run_vector_sweep_paths(
     let mut total_done = 0usize;
     for path in paths {
         match vector_backfill::sweep_db_vectors(&path, llm, batch_per_db, skip_cache).await {
-            Ok((done, todo)) if todo > 0 => {
-                record_enabled_sweep_state(&path, skip_cache, done, todo, None);
-                total_done += done;
-                tracing::info!("[vector-sweep] {} embedded {done}/{todo}", path.display());
+            Ok(outcome) if outcome.attempted_count > 0 => {
+                record_enabled_sweep_state(
+                    &path,
+                    skip_cache,
+                    outcome.embedded_count,
+                    outcome.attempted_count,
+                    None,
+                );
+                total_done += outcome.embedded_count;
+                tracing::info!(
+                    "[vector-sweep] {} embedded {}/{}",
+                    path.display(),
+                    outcome.embedded_count,
+                    outcome.attempted_count
+                );
             }
-            Ok((done, todo)) => {
-                record_enabled_sweep_state(&path, skip_cache, done, todo, None);
+            Ok(outcome) => {
+                record_enabled_sweep_state(
+                    &path,
+                    skip_cache,
+                    outcome.embedded_count,
+                    outcome.attempted_count,
+                    None,
+                );
             }
             Err(e) => {
-                record_enabled_sweep_state(&path, skip_cache, 0, 0, Some(e.clone()));
-                tracing::warn!("[vector-sweep] {} failed: {e}", path.display());
+                record_enabled_sweep_state(
+                    &path,
+                    skip_cache,
+                    e.embedded_count,
+                    e.attempted_count,
+                    Some(e.message.clone()),
+                );
+                tracing::warn!("[vector-sweep] {} failed: {}", path.display(), e.message);
             }
         }
     }
@@ -473,10 +496,12 @@ mod tests {
             "TACHI_DISABLE_VECTOR_SWEEP",
         );
 
-        let global_state =
-            crate::vector_backfill::read_vector_sweep_state_for_status(&global).unwrap();
-        let project_state =
-            crate::vector_backfill::read_vector_sweep_state_for_status(&project).unwrap();
+        let global_state = crate::vector_backfill::read_vector_sweep_state_for_status(&global)
+            .unwrap()
+            .unwrap();
+        let project_state = crate::vector_backfill::read_vector_sweep_state_for_status(&project)
+            .unwrap()
+            .unwrap();
         assert!(!global_state.enabled);
         assert!(!project_state.enabled);
         assert_eq!(
@@ -485,5 +510,44 @@ mod tests {
         );
         assert_eq!(global_state.interval_secs, Some(1800));
         assert!(global_state.skip_recall_cache);
+    }
+
+    #[tokio::test]
+    async fn daemon_sweep_records_partial_progress_when_later_batch_fails() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("partial-failure.db");
+        let store = memory_core::MemoryStore::open(db_path.to_str().unwrap()).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        for index in 0..33 {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO memories
+                     (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
+                     VALUES (?1, '/facts/partial', '', ?2, 0.5, ?3, 'fact', 'status', '[]', '[]', 'manual', 'project', 0, ?3, ?3, 0, 1, '{}')",
+                    rusqlite::params![format!("partial-{index}"), format!("body {index}"), now],
+                )
+                .unwrap();
+        }
+        drop(store);
+
+        crate::vector_backfill::set_test_embed_batch_results(vec![
+            Ok(32),
+            Err("Voyage embed batch failed: provider 429".to_string()),
+        ]);
+        let llm = LlmClient::new().expect("llm client");
+        let embedded = run_vector_sweep_paths(vec![db_path.clone()], &llm, 33, true).await;
+        crate::vector_backfill::set_test_embed_batch_results(Vec::new());
+
+        assert_eq!(embedded, 0, "failed sweep runs do not count as complete");
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("state recorded");
+        assert_eq!(state.embedded_count, 32);
+        assert_eq!(state.failed_count, 1);
+        assert_eq!(
+            state.last_provider_error.as_deref(),
+            Some("Voyage embed batch failed: provider 429")
+        );
     }
 }

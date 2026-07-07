@@ -43,6 +43,21 @@ pub(crate) struct VectorSweepState {
     pub(crate) updated_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VectorSweepOutcome {
+    pub(crate) embedded_count: usize,
+    pub(crate) attempted_count: usize,
+    pub(crate) remaining_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VectorSweepError {
+    pub(crate) embedded_count: usize,
+    pub(crate) attempted_count: usize,
+    pub(crate) remaining_count: usize,
+    pub(crate) message: String,
+}
+
 fn embedding_input(text: &str, summary: &str) -> String {
     let t = text.trim();
     let summary = summary.trim();
@@ -187,12 +202,17 @@ pub(crate) fn record_vector_sweep_state(
     Ok(())
 }
 
-pub(crate) fn read_vector_sweep_state_for_status(db_path: &Path) -> Option<VectorSweepState> {
-    let db_str = db_path.to_str()?;
-    let store = MemoryStore::open_read_only(db_str).ok()?;
+pub(crate) fn read_vector_sweep_state_for_status(
+    db_path: &Path,
+) -> Result<Option<VectorSweepState>, String> {
+    let db_str = db_path
+        .to_str()
+        .ok_or_else(|| format!("non-utf8 path: {}", db_path.display()))?;
+    let store = MemoryStore::open_read_only(db_str)
+        .map_err(|e| format!("open {} read-only: {e}", db_path.display()))?;
     let conn = store.connection();
     if !vector_sweep_state_table_exists(conn) {
-        return None;
+        return Ok(None);
     }
     conn.query_row(
         &format!(
@@ -220,8 +240,7 @@ pub(crate) fn read_vector_sweep_state_for_status(db_path: &Path) -> Option<Vecto
         },
     )
     .optional()
-    .ok()
-    .flatten()
+    .map_err(|e| format!("read vector sweep state: {e}"))
 }
 
 fn vector_counts_filtered(
@@ -268,6 +287,26 @@ pub(crate) async fn embed_and_write_batch(
     if entries.is_empty() {
         return Ok(0);
     }
+    #[cfg(test)]
+    if let Some(result) = next_test_embed_batch_result() {
+        match result {
+            Ok(written) => {
+                let dummy_vec = vec![0.0_f32; 1024];
+                let mut actual = 0usize;
+                for (id, _, _, revision) in entries.iter().take(written) {
+                    if store
+                        .update_enrichment_fields(id, None, Some(&dummy_vec), None, None, *revision)
+                        .map_err(|e| format!("test vector write failed: {e}"))?
+                    {
+                        actual += 1;
+                    }
+                }
+                return Ok(actual);
+            }
+            Err(message) => return Err(message),
+        }
+    }
+
     let texts: Vec<String> = entries
         .iter()
         .map(|(_, text, summary, _)| embedding_input(text, summary))
@@ -302,39 +341,104 @@ pub(crate) async fn sweep_db_vectors(
     llm: &LlmClient,
     max_entries: usize,
     skip_recall_cache: bool,
-) -> Result<(usize, usize), String> {
-    let db_str = db_path
-        .to_str()
-        .ok_or_else(|| format!("non-utf8 path: {}", db_path.display()))?;
+) -> Result<VectorSweepOutcome, VectorSweepError> {
+    let db_str = db_path.to_str().ok_or_else(|| VectorSweepError {
+        embedded_count: 0,
+        attempted_count: 0,
+        remaining_count: 0,
+        message: format!("non-utf8 path: {}", db_path.display()),
+    })?;
 
-    let mut store =
-        MemoryStore::open(db_str).map_err(|e| format!("open {}: {e}", db_path.display()))?;
-    let (total, with_vec) = vector_counts_filtered(&store, skip_recall_cache)?;
+    let mut store = MemoryStore::open(db_str).map_err(|e| VectorSweepError {
+        embedded_count: 0,
+        attempted_count: 0,
+        remaining_count: 0,
+        message: format!("open {}: {e}", db_path.display()),
+    })?;
+    let (total, with_vec) =
+        vector_counts_filtered(&store, skip_recall_cache).map_err(|message| VectorSweepError {
+            embedded_count: 0,
+            attempted_count: 0,
+            remaining_count: 0,
+            message,
+        })?;
     let pending = total.saturating_sub(with_vec);
     if !auto_backfill_needed(total, with_vec, pending, auto_backfill_pending_threshold()) {
-        return Ok((0, pending));
+        return Ok(VectorSweepOutcome {
+            embedded_count: 0,
+            attempted_count: pending,
+            remaining_count: pending,
+        });
     }
-    let missing = list_missing_vector_entries(&store, skip_recall_cache, Some(max_entries))?;
+    let missing = list_missing_vector_entries(&store, skip_recall_cache, Some(max_entries))
+        .map_err(|message| VectorSweepError {
+            embedded_count: 0,
+            attempted_count: 0,
+            remaining_count: 0,
+            message,
+        })?;
     if missing.is_empty() {
-        return Ok((0, 0));
+        return Ok(VectorSweepOutcome {
+            embedded_count: 0,
+            attempted_count: 0,
+            remaining_count: 0,
+        });
     }
     let todo = missing.len();
 
     let batch_size = 32usize.min(todo.max(1));
     let mut done = 0usize;
     for chunk in missing.chunks(batch_size) {
-        done += embed_and_write_batch(&mut store, llm, chunk).await?;
+        match embed_and_write_batch(&mut store, llm, chunk).await {
+            Ok(written) => done += written,
+            Err(message) => {
+                return Err(VectorSweepError {
+                    embedded_count: done,
+                    attempted_count: todo,
+                    remaining_count: todo.saturating_sub(done),
+                    message,
+                });
+            }
+        }
         if done < todo {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
-    Ok((done, todo))
+    Ok(VectorSweepOutcome {
+        embedded_count: done,
+        attempted_count: todo,
+        remaining_count: todo.saturating_sub(done),
+    })
+}
+
+#[cfg(test)]
+static TEST_EMBED_BATCH_RESULTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::VecDeque<Result<usize, String>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn set_test_embed_batch_results(results: Vec<Result<usize, String>>) {
+    let mut guard = TEST_EMBED_BATCH_RESULTS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    *guard = results.into();
+}
+
+#[cfg(test)]
+fn next_test_embed_batch_result() -> Option<Result<usize, String>> {
+    TEST_EMBED_BATCH_RESULTS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pop_front()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        auto_backfill_needed, embedding_input, list_missing_vector_entries, vector_counts_filtered,
+        auto_backfill_needed, embedding_input, list_missing_vector_entries,
+        read_vector_sweep_state_for_status, vector_counts_filtered,
     };
     use memory_core::MemoryStore;
     use rusqlite::params;
@@ -410,6 +514,37 @@ mod tests {
             selected_ids,
             ["durable-1"],
             "selection basis must match the durable count basis"
+        );
+    }
+
+    #[test]
+    fn malformed_vector_sweep_state_is_error_not_absent() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("malformed-sweep-state.db");
+        let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        store
+            .connection()
+            .execute(
+                "CREATE TABLE vector_sweep_state (
+                    key TEXT PRIMARY KEY,
+                    enabled TEXT NOT NULL
+                )",
+                [],
+            )
+            .expect("create malformed state table");
+        store
+            .connection()
+            .execute(
+                "INSERT INTO vector_sweep_state (key, enabled) VALUES ('default', 'yes')",
+                [],
+            )
+            .expect("insert malformed state row");
+
+        let err = read_vector_sweep_state_for_status(&db_path)
+            .expect_err("malformed state must be surfaced");
+        assert!(
+            err.contains("read vector sweep state"),
+            "unexpected error: {err}"
         );
     }
 }

@@ -94,7 +94,6 @@ pub(super) async fn run_backfill_vectors(
     }
 
     if dry_run {
-        record_cli_vector_sweep_state(db_path, skip_recall_cache, 0, missing.max(0) as usize, None);
         println!("\n(dry-run mode, no changes made)");
         return Ok(());
     }
@@ -518,7 +517,7 @@ pub(super) async fn run_backfill_fts(
 
 #[cfg(test)]
 mod tests {
-    use super::durable_vector_counts;
+    use super::{durable_vector_counts, run_backfill_vectors};
     use memory_core::MemoryStore;
     use rusqlite::params;
 
@@ -577,6 +576,36 @@ mod tests {
         assert_eq!(
             missing, 1,
             "only the genuinely durable row is missing a vector"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_vector_backfill_does_not_write_sweep_state() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("dry-run.db");
+        let vault_path = dir.path().join("vault.db");
+        let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        insert_memory(&store, "durable-1", "manual", "note");
+        drop(store);
+
+        run_backfill_vectors(&db_path, &vault_path, 16, true, false)
+            .await
+            .expect("dry-run vector backfill");
+
+        let conn = rusqlite::Connection::open(&db_path).expect("open sqlite");
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM sqlite_master
+                    WHERE type='table' AND name='vector_sweep_state'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query state table");
+        assert!(
+            !table_exists,
+            "dry-run must not create or mutate vector_sweep_state"
         );
     }
 }
