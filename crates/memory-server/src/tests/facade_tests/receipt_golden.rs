@@ -2,6 +2,57 @@ use super::*;
 use crate::tool_params::TachiSaveParams;
 
 const ECHO_SENTINEL: &str = "ZX9-ECHO-SENTINEL";
+const MEMORY_SAVE_SENTINEL: &str = "ZX9-MEMORY-SAVE-SENTINEL";
+
+fn memory_save_params(text: String, path: &str, format: Option<&str>) -> TachiMemoryParams {
+    TachiMemoryParams {
+        action: "save".to_string(),
+        format: format.map(str::to_string),
+        query: None,
+        scope: Some("project".to_string()),
+        top_k: 6,
+        path_prefix: None,
+        file_context: None,
+        error_context: None,
+        category: Some("decision".to_string()),
+        include_archived: false,
+        include_training: false,
+        enable_rerank: false,
+        as_of: None,
+        synthesize: false,
+        model: None,
+        agent_role: None,
+        text: Some(text),
+        title: None,
+        summary: None,
+        topic: None,
+        keywords: vec!["issue527".to_string()],
+        entities: Vec::new(),
+        importance: Some(0.7),
+        retention_policy: None,
+        kind: Some("memory".to_string()),
+        path: Some(path.to_string()),
+        id: None,
+        force: true,
+        source: None,
+        valid_from: None,
+        valid_until: None,
+        metadata: None,
+        emit_continuity: false,
+        files: Vec::new(),
+        flow_id: None,
+        event: None,
+        state: None,
+        project: None,
+        domain: None,
+        compact: false,
+        proposal_id: None,
+        review_status: None,
+        notes: None,
+        confirm: false,
+        state_filter: None,
+    }
+}
 
 #[tokio::test]
 async fn g3_save_default_omits_echo_sentinel_full_restores_it() {
@@ -84,6 +135,44 @@ async fn g3_save_default_omits_echo_sentinel_full_restores_it() {
     assert!(
         full_resp.contains(ECHO_SENTINEL),
         "full save should restore echo: {full_resp}"
+    );
+}
+
+#[tokio::test]
+async fn issue527_tachi_memory_save_default_receipt_omits_echo_full_restores_it() {
+    let server = make_server();
+    let text = format!("Decision routed through tachi_memory save {MEMORY_SAVE_SENTINEL}");
+
+    let default_resp = crate::facade_memory_ops::handle_tachi_memory(
+        &server,
+        memory_save_params(text.clone(), "/scratch/issue527-memory-save", None),
+    )
+    .await
+    .expect("tachi_memory save default");
+    assert!(
+        !default_resp.contains(MEMORY_SAVE_SENTINEL),
+        "default tachi_memory save receipt echoed input: {default_resp}"
+    );
+    assert!(
+        default_resp.len() < 500,
+        "tachi_memory save receipt too large: {} bytes: {default_resp}",
+        default_resp.len()
+    );
+    let receipt: Value = serde_json::from_str(&default_resp).expect("memory save receipt JSON");
+    assert_eq!(receipt["ok"], json!(true));
+    assert!(receipt.get("id").is_some());
+    assert_eq!(receipt["path"], json!("/scratch/issue527-memory-save"));
+    assert!(receipt.get("echo").is_none());
+
+    let full_resp = crate::facade_memory_ops::handle_tachi_memory(
+        &server,
+        memory_save_params(text, "/scratch/issue527-memory-save-full", Some("full")),
+    )
+    .await
+    .expect("tachi_memory save full");
+    assert!(
+        full_resp.contains(MEMORY_SAVE_SENTINEL),
+        "format=full tachi_memory save should preserve legacy echo: {full_resp}"
     );
 }
 
