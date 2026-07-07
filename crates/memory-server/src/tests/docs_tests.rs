@@ -5,5 +5,6 @@ use std::fs;
 use tempfile::tempdir;
 
 mod conflicts;
+mod kernel_surface;
 mod organize;
 mod safety;
