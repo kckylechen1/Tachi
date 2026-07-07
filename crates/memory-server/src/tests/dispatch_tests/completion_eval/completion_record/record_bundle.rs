@@ -45,6 +45,7 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
                 output_tokens: Some(240),
                 cost_tokens: Some(321),
                 cost_usd: None,
+                ..Default::default()
             }],
             feedback_rules_applied: Vec::new(),
             dispatch_id: None,

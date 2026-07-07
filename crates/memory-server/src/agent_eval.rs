@@ -194,6 +194,7 @@ mod tests {
                     output_tokens: Some(200),
                     cost_tokens: Some(1200),
                     cost_usd: Some(0.01),
+                    ..Default::default()
                 }],
             },
             EvalRow {
@@ -230,6 +231,7 @@ mod tests {
                     output_tokens: Some(100),
                     cost_tokens: Some(600),
                     cost_usd: Some(0.002),
+                    ..Default::default()
                 }],
             },
         ];

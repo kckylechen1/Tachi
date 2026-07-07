@@ -93,6 +93,24 @@ pub struct SubagentEvalRow {
     pub cost_tokens: Option<u64>,
     #[serde(default)]
     pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub execution_origin: Option<String>,
+    #[serde(default)]
+    pub lifecycle_owner: Option<String>,
+    #[serde(default)]
+    pub harness: Option<String>,
+    #[serde(default)]
+    pub native_agent_id: Option<String>,
+    #[serde(default)]
+    pub tachi_dispatch_id: Option<String>,
+    #[serde(default)]
+    pub result_collected: Option<bool>,
+    #[serde(default)]
+    pub evidence_usable: Option<bool>,
+    #[serde(default)]
+    pub used_in_final_claim: Option<bool>,
+    #[serde(default)]
+    pub next_prompt_delta: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -198,6 +216,9 @@ pub fn aggregate_subagent_scores(rows: &[EvalRow]) -> Vec<SubagentTaskScore> {
     for row in rows {
         let task_type = task_type_name(&row.task_type);
         for subagent in &row.subagents {
+            if !subagent_has_usable_evidence(subagent) {
+                continue;
+            }
             let subagent_task_type = subagent
                 .task_type
                 .clone()
@@ -266,6 +287,10 @@ pub fn aggregate_subagent_scores(rows: &[EvalRow]) -> Vec<SubagentTaskScore> {
             .then(a.task_type.cmp(&b.task_type))
     });
     out
+}
+
+fn subagent_has_usable_evidence(subagent: &SubagentEvalRow) -> bool {
+    subagent.result_collected != Some(false) && subagent.evidence_usable != Some(false)
 }
 
 pub fn aggregate_performance_matrix(rows: &[EvalRow]) -> Vec<AgentPerformanceMatrixRow> {
@@ -412,6 +437,9 @@ pub fn aggregate_performance_matrix(rows: &[EvalRow]) -> Vec<AgentPerformanceMat
         );
 
         for subagent in &row.subagents {
+            if !subagent_has_usable_evidence(subagent) {
+                continue;
+            }
             let subagent_task_type = subagent
                 .task_type
                 .clone()
@@ -558,6 +586,7 @@ mod tests {
                     output_tokens: Some(200),
                     cost_tokens: Some(1200),
                     cost_usd: Some(0.01),
+                    ..Default::default()
                 }],
             },
             EvalRow {
@@ -594,6 +623,7 @@ mod tests {
                     output_tokens: Some(100),
                     cost_tokens: Some(600),
                     cost_usd: Some(0.002),
+                    ..Default::default()
                 }],
             },
         ];

@@ -203,7 +203,7 @@ pub struct TachiApproveMergeParams {
 
 // ─── Facade: task completion + eval ledger ───────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]
 pub struct TachiSubagentEvalParams {
     /// Subagent role: explore | critic | specialist | executor | verifier | other
     pub role: String,
@@ -306,6 +306,42 @@ pub struct TachiSubagentEvalParams {
     )]
     #[schemars(schema_with = "crate::coerce::opt_number_from_string_or_number_schema")]
     pub cost_usd: Option<f64>,
+
+    /// Where execution happened: harness_native | tachi_dispatch | manual_external.
+    #[serde(default)]
+    pub execution_origin: Option<String>,
+
+    /// Runtime that owns wait/cancel/close semantics: codex | claude | opencode | tachi | manual.
+    #[serde(default)]
+    pub lifecycle_owner: Option<String>,
+
+    /// Harness/client name when execution_origin is harness_native.
+    #[serde(default)]
+    pub harness: Option<String>,
+
+    /// Native worker/session id from the owning harness, if any.
+    #[serde(default)]
+    pub native_agent_id: Option<String>,
+
+    /// Tachi dispatch id when Tachi owns the worker lifecycle.
+    #[serde(default)]
+    pub tachi_dispatch_id: Option<String>,
+
+    /// Whether an actual worker result was collected, distinct from run metadata.
+    #[serde(default)]
+    pub result_collected: Option<bool>,
+
+    /// Whether the collected result was usable evidence for evaluation/routing.
+    #[serde(default)]
+    pub evidence_usable: Option<bool>,
+
+    /// Whether this subagent output was used in the leader's final claim.
+    #[serde(default)]
+    pub used_in_final_claim: Option<bool>,
+
+    /// Prompt/agent-contract adjustment learned from this subagent run.
+    #[serde(default)]
+    pub next_prompt_delta: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
