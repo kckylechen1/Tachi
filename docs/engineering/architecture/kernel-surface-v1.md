@@ -10,6 +10,11 @@ organize: true
 
 `Tachi` is the kernel. `Kernel Surface V1` defines the minimal, opinionated contract that the kernel exposes to hosts and agents.
 
+This is a target contract, not a claim that every named operation is already a
+public server API. Rows below call out whether they are current, partially
+current, or proposed so downstream forks do not treat future vocabulary as an
+implemented compatibility promise.
+
 The goal is not to expose every primitive. The goal is to expose the right layers:
 
 1. kernel
@@ -78,14 +83,19 @@ in Tachi or downstream in an adapter/product layer.
 The portable boundary intentionally mirrors the small shape seen in OMP's
 `MemoryBackend`, but remains Tachi-owned and local-first:
 
-| Operation family | Required | Tachi-owned meaning |
-|---|---|---|
-| `status` / `readiness` | yes | Report kernel availability, DB identity, vector/backfill coverage, and degraded modes. |
-| `search` / `recall` | yes | Return ranked memories plus provenance, score components where available, and stable row shape. |
-| `save` / `retain` | yes | Store durable facts, experiences, observations, and policy-labeled adapter memory with provenance. |
-| developer/briefing context | yes | Produce compact memory context for a host before a prompt/session without exposing product workflow tools. |
-| readiness/diagnostics | yes | Report recall lanes, fallback behavior, true-empty recall, vector health, and adapter-visible failures. |
-| lifecycle hooks | optional where wired | Consume neutral host events such as `before_session`, `before_prompt`, `after_compact`, and `after_session`. |
+| Operation family | Required | Implementation status | Tachi-owned meaning |
+|---|---|---|---|
+| `status` / `readiness` | yes | current | Report kernel availability, DB identity, vector/backfill coverage, and degraded modes. |
+| `search` / `recall` | yes | current via `tachi_memory search` and `recall_simulate`; richer recall diagnostics are target contract | Return ranked memories plus provenance, score components where available, and stable row shape. |
+| `save` / `retain` | yes | current via `tachi_memory save`; `retain` is adapter vocabulary | Store durable facts, experiences, observations, and policy-labeled adapter memory with provenance. |
+| developer/briefing context | yes | current via briefing/readiness facades, target for generic adapters | Produce compact memory context for a host before a prompt/session without exposing product workflow tools. |
+| readiness/diagnostics | yes | partially current; portable diagnostic API is target contract | Report recall lanes, fallback behavior, true-empty recall, vector health, and adapter-visible failures. |
+| lifecycle hooks | optional where wired | proposed/target | Consume neutral host events such as `before_session`, `before_prompt`, `after_compact`, and `after_session`. |
+
+Current continuity events are narrower than the target lifecycle vocabulary:
+`memory.saved` exists today; retain/recall/reflect request and response events
+remain proposed unless a later issue adds executable emission and projection
+tests for them.
 
 This boundary is deliberately smaller than Tachi's full MCP surface. A consumer
 that only wants memory should not need `tachi_gh`, `tachi_task` dispatch,

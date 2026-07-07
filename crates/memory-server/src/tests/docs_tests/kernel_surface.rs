@@ -77,6 +77,33 @@ fn kernel_surface_fixture_covers_portable_memory_contract() {
             "missing operation {required}"
         );
     }
+    let lifecycle = fixture["backend_boundary"]
+        .as_array()
+        .expect("backend boundary")
+        .iter()
+        .find(|item| item["operation"] == json!("lifecycle_hooks"))
+        .expect("lifecycle hooks boundary");
+    assert_eq!(lifecycle["implementation_status"], json!("target_proposed"));
+    assert_eq!(lifecycle["required"], json!(false));
+    assert!(lifecycle["current_bindings"]
+        .as_array()
+        .expect("current bindings")
+        .contains(&json!("memory.saved")));
+    for proposed in [
+        "retain_requested",
+        "recall_requested",
+        "recall_returned",
+        "reflect_requested",
+        "reflection_returned",
+    ] {
+        assert!(
+            lifecycle["target_terms"]
+                .as_array()
+                .expect("target terms")
+                .contains(&json!(proposed)),
+            "missing explicit proposed lifecycle term {proposed}"
+        );
+    }
 
     let ontology = fixture["ontology"]
         .as_array()
@@ -127,4 +154,6 @@ fn kernel_surface_doc_names_evidence_and_decision_rule() {
     assert!(doc.contains("Hindsight's four-network ontology"));
     assert!(doc.contains("It explicitly excludes GitHub, dispatch, ship, release"));
     assert!(doc.contains("Downstream\nagents should cite that fixture"));
+    assert!(doc.contains("This is a target contract"));
+    assert!(doc.contains("`memory.saved` exists today"));
 }

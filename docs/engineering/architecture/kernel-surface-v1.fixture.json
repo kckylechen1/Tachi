@@ -78,27 +78,71 @@
   "backend_boundary": [
     {
       "operation": "status_readiness",
-      "required": true
+      "required": true,
+      "implementation_status": "current",
+      "current_bindings": [
+        "runtime_info",
+        "tachi_memory.readiness"
+      ]
     },
     {
       "operation": "search_recall",
-      "required": true
+      "required": true,
+      "implementation_status": "current_plus_target",
+      "current_bindings": [
+        "tachi_memory.search",
+        "tachi_memory.recall_simulate"
+      ],
+      "target_terms": [
+        "recall_diagnostics"
+      ]
     },
     {
       "operation": "save_retain",
-      "required": true
+      "required": true,
+      "implementation_status": "current_plus_adapter_vocabulary",
+      "current_bindings": [
+        "tachi_memory.save",
+        "memory.saved"
+      ],
+      "target_terms": [
+        "retain"
+      ]
     },
     {
       "operation": "developer_briefing_context",
-      "required": true
+      "required": true,
+      "implementation_status": "current_plus_target",
+      "current_bindings": [
+        "tachi_memory.briefing"
+      ]
     },
     {
       "operation": "readiness_diagnostics",
-      "required": true
+      "required": true,
+      "implementation_status": "partial_current_target_api",
+      "current_bindings": [
+        "tachi_memory.readiness",
+        "recall_simulate.metrics"
+      ],
+      "target_terms": [
+        "documented_export_view"
+      ]
     },
     {
       "operation": "lifecycle_hooks",
-      "required": false
+      "required": false,
+      "implementation_status": "target_proposed",
+      "current_bindings": [
+        "memory.saved"
+      ],
+      "target_terms": [
+        "retain_requested",
+        "recall_requested",
+        "recall_returned",
+        "reflect_requested",
+        "reflection_returned"
+      ]
     }
   ],
   "ontology": [
