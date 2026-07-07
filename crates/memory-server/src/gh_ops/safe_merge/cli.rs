@@ -19,7 +19,7 @@ impl<'a> GhClient for CliGhClient<'a> {
             .args(["--repo", repo])
             .args([
                 "--json",
-                "number,state,mergeable,reviewDecision,isDraft,headRefOid,closingIssuesReferences",
+                "number,state,mergeable,reviewDecision,isDraft,headRefOid,headRefName,closingIssuesReferences",
             ]);
         let raw = run_gh(cmd, &token).map_err(|e| classify_gh_error(&e))?;
         let v: serde_json::Value = serde_json::from_str(&raw)

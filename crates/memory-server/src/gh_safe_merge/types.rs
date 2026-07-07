@@ -26,6 +26,10 @@ pub struct PrState {
     /// `github_merge_blocked` / `github_pr_merged` events so an audit can pin
     /// down exactly which commit was (or wasn't) merged.
     pub head_sha: String,
+    /// GitHub HEAD branch name when the PR source exposes it. Optional so old
+    /// serialized fixtures and callers that only know the SHA keep working.
+    #[serde(default)]
+    pub head_ref: Option<String>,
     /// GitHub closing issue references associated with the PR, e.g. values
     /// from `closingIssuesReferences`. Strict policy accepts either one of
     /// these links or an explicit Tachi `flow_id`.

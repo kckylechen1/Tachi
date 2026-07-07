@@ -13,6 +13,7 @@ fn ready_pr() -> PrState {
         checks: ChecksState::Success,
         is_draft: false,
         head_sha: "deadbeef".to_string(),
+        head_ref: Some("feat/source-branch".to_string()),
         linked_issue_refs: Vec::new(),
         closing_issue_labels: Vec::new(),
         head_consistent: None,
