@@ -78,8 +78,9 @@ pub use recall_cache::{
     recall_cache_stats, RecallCacheHit, RecallCacheStats,
 };
 pub use sandbox::{
-    check_sandbox_access, get_sandbox_policy, insert_sandbox_exec_audit, list_sandbox_exec_audit,
-    list_sandbox_policies, set_sandbox_policy, set_sandbox_rule,
+    check_sandbox_access, evaluate_sandbox_access, get_sandbox_policy, insert_sandbox_exec_audit,
+    list_sandbox_exec_audit, list_sandbox_policies, list_sandbox_rules_for_role,
+    path_matches_pattern, set_sandbox_policy, set_sandbox_rule,
 };
 pub use schema::{init_schema, init_schema_with_label_mut};
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};

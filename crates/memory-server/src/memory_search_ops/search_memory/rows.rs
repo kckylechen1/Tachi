@@ -28,15 +28,13 @@ fn sandbox_role(params: &SearchMemoryParams) -> Option<&str> {
         .filter(|role| !role.is_empty())
 }
 
-fn sandbox_allows_read(
-    server: &MemoryServer,
-    role: &str,
-    path: &str,
-) -> Result<(bool, Option<String>), String> {
+/// Fetch sandbox rules for `role` once, so the caller can evaluate many paths against them
+/// in memory instead of issuing a DB query per result row (N+1 → 1).
+fn load_sandbox_rules(server: &MemoryServer, role: &str) -> Result<Vec<(String, String)>, String> {
     server.with_global_store_read(|store| {
-        store.check_sandbox_access(role, path, "read").map_err(|e| {
-            format!("sandbox access check failed for role '{role}' path '{path}': {e}")
-        })
+        store
+            .list_sandbox_rules_for_role(role)
+            .map_err(|e| format!("sandbox rules load failed for role '{role}': {e}"))
     })
 }
 
@@ -414,10 +412,14 @@ pub(crate) async fn search_memory_rows_with_recall_config(
     // Sandbox enforcement: rules are stored in the global policy DB and apply
     // to rows from every searched DB. This keeps repo/project memories from
     // bypassing role rules just because the result came from another store.
+    // Rules are fetched once per search (not once per result row) and evaluated
+    // in memory, so a top_k=N search issues 1 sandbox query instead of N.
     if let Some(role) = sandbox_role(&params) {
+        let rules = load_sandbox_rules(server, role)?;
         let mut allowed_results = Vec::with_capacity(deduped_results.len());
         for (result, db_scope) in deduped_results {
-            let (allowed, matching_rule) = sandbox_allows_read(server, role, &result.entry.path)?;
+            let (allowed, matching_rule) =
+                memory_core::db::evaluate_sandbox_access(&rules, role, &result.entry.path, "read");
             if allowed {
                 allowed_results.push((result, db_scope));
             } else {
