@@ -237,7 +237,9 @@ pub(super) async fn serve_http_daemon(
                         code,
                         axum::Json(serde_json::json!({
                             "status": status,
-                            "version": env!("CARGO_PKG_VERSION"),
+                            "version": crate::build_info::PKG_VERSION,
+                            "git_sha": crate::build_info::GIT_SHA,
+                            "build_time": crate::build_info::BUILD_TIME,
                             "transport": "http",
                             "mcp": "streamable-http",
                             "db_ready": db_ok,
@@ -262,7 +264,8 @@ pub(super) async fn serve_http_daemon(
             .as_ref()
             .map(|p| p.display().to_string()),
         "started_at": Utc::now().to_rfc3339(),
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::build_info::PKG_VERSION,
+        "git_sha": crate::build_info::GIT_SHA,
     });
     if let Some(parent) = pid_path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;

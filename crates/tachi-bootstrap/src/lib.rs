@@ -1,10 +1,12 @@
 //! CLI contract and startup helpers for the Tachi server binary.
 
+pub mod build_info;
 pub mod cli;
 
 use clap::Parser;
 use std::error::Error;
 
+pub use build_info::{build_version_string, git_sha_short, BUILD_TIME, GIT_SHA, PKG_VERSION};
 pub use cli::Cli;
 
 pub fn parse_cli() -> Cli {

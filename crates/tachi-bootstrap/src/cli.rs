@@ -3,8 +3,32 @@ use std::path::PathBuf;
 
 // ─── CLI Arguments ────────────────────────────────────────────────────────────
 
+// `--version` prints the short form (just the semver); `--version` on its own
+// uses `version`. A long-form (`tachi --version` already covers the short
+// value; clap shows `long_version` when invoked as `--version` ONLY if no
+// separate short/long distinction is made). We expose the git sha via the
+// `long_version` so `tachi --version` (the common case) shows it; the bare
+// semver is retained as the short form for scripts that grep version output.
+//
+// `concat!` + `env!` evaluate at compile time, so this is a `&'static str`
+// as clap's attribute requires. The `GIT_SHA` / `BUILD_TIME` env values are
+// injected by `build.rs`.
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "+git-",
+    env!("GIT_SHA"),
+    " (built ",
+    env!("BUILD_TIME"),
+    ")"
+);
+
 #[derive(Parser, Debug)]
-#[command(name = "tachi", version, about = "Tachi — memory + Hub MCP server")]
+#[command(
+    name = "tachi",
+    version,
+    long_version = LONG_VERSION,
+    about = "Tachi — memory + Hub MCP server"
+)]
 pub struct Cli {
     /// Run as HTTP daemon instead of stdio transport
     #[arg(long)]
