@@ -206,7 +206,7 @@ async fn readiness_fixture(server: &crate::MemoryServer) -> Result<Value, String
     Ok(json!({
         "status": parsed["status"].clone(),
         "vector_health": parsed["vector_health"].clone(),
-        "ready_path": "#789 portable vector/backfill readiness",
+        "ready_path": "#789 portable vector/backfill readiness issue; first implementation merged as PR #801",
     }))
 }
 
@@ -250,21 +250,25 @@ fn adapter_policy_denials() -> Value {
         {
             "surface": "tachi_gh",
             "classification": "adapter_policy_failure",
+            "verification": "declared_static_denial",
             "reason": "downstream kernel fixture must not depend on Tachi GitHub/product lifecycle tools"
         },
         {
             "surface": "dispatch_task_lifecycle",
             "classification": "adapter_policy_failure",
+            "verification": "declared_static_denial",
             "reason": "dispatch-only task lifecycle is outside the portable memory kernel"
         },
         {
             "surface": "ship_release_automation",
             "classification": "adapter_policy_failure",
+            "verification": "declared_static_denial",
             "reason": "ship/release automation belongs to the Tachi product adapter, not downstream forks"
         },
         {
             "surface": "github_pr_lifecycle",
             "classification": "adapter_policy_failure",
+            "verification": "declared_static_denial",
             "reason": "GitHub PR lifecycle is explicitly excluded from no-product-surface dogfood"
         }
     ])
@@ -332,6 +336,7 @@ async fn run_fixture(
         "recall_diagnostics": diagnostics,
         "adapter_policy": {
             "status": "completed",
+            "verification_mode": "declared_static_denial_not_runtime_tool_probe",
             "denied_surfaces": adapter_policy_denials(),
         },
     }))
@@ -354,7 +359,8 @@ async fn run_downstream_no_product_surface_dogfood_harness() -> Result<Value, St
                 "dispatch_task_lifecycle",
                 "ship_release_automation",
                 "github_pr_lifecycle"
-            ]
+            ],
+            "adapter_policy_verification": "declared_static_denial_not_runtime_tool_probe"
         },
         "fixtures": fixtures,
     }))
@@ -377,7 +383,7 @@ async fn downstream_no_product_surface_dogfood_harness_reports_kernel_and_policy
         assert_eq!(fixture["kernel"]["recall"]["status"], json!("completed"));
         assert_eq!(
             fixture["kernel"]["vector_status"]["ready_path"],
-            json!("#789 portable vector/backfill readiness")
+            json!("#789 portable vector/backfill readiness issue; first implementation merged as PR #801")
         );
         assert_eq!(
             fixture["kernel"]["event_projection"]["status"],
@@ -417,6 +423,10 @@ async fn downstream_no_product_surface_dogfood_harness_reports_kernel_and_policy
         let denied = fixture["adapter_policy"]["denied_surfaces"]
             .as_array()
             .expect("denied surface array");
+        assert_eq!(
+            fixture["adapter_policy"]["verification_mode"],
+            json!("declared_static_denial_not_runtime_tool_probe")
+        );
         for surface in [
             "tachi_gh",
             "dispatch_task_lifecycle",
@@ -427,8 +437,9 @@ async fn downstream_no_product_surface_dogfood_harness_reports_kernel_and_policy
                 denied.iter().any(|entry| {
                     entry["surface"] == json!(surface)
                         && entry["classification"] == json!("adapter_policy_failure")
+                        && entry["verification"] == json!("declared_static_denial")
                 }),
-                "{surface} should be denied as an adapter policy failure: {denied:?}"
+                "{surface} should be declared as an adapter policy failure: {denied:?}"
             );
         }
     }
