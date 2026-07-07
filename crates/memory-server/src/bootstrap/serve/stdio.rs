@@ -533,6 +533,13 @@ fn enforce_client_project(
         if explicit_project.as_str() == Some(project) {
             return Ok(());
         }
+        // #733 write isolation: reject routing into another project's DB. Cross-library
+        // reads are safe (daemon opens read-only stores) and are allow-listed below (#737).
+        if explicit_project.as_str().is_some()
+            && explicit_project_can_cross_binding(tool_name, args)
+        {
+            return Ok(());
+        }
         return Err(rmcp::ErrorData::invalid_params(
             format!(
                 "stdio proxy project binding mismatch: session is bound to '{project}', but tool call requested project={explicit_project}"
@@ -561,6 +568,32 @@ fn enforce_client_project(
     }
     args.insert("project".to_string(), serde_json::json!(project));
     Ok(())
+}
+
+/// Returns true when an explicit `project` param may differ from the stdio
+/// session binding. Protects #733 write isolation only: daemon-side reads use
+/// read-only opens and do not threaten single-writer discipline (#520).
+fn explicit_project_can_cross_binding(tool_name: &str, args: &rmcp::model::JsonObject) -> bool {
+    match tool_name {
+        "search_memory"
+        | "find_similar_memory"
+        | "get_memory"
+        | "list_memories"
+        | "tachi_search" => true,
+        "tachi_memory" => args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .is_some_and(tachi_memory_action_allows_cross_project_read),
+        "tachi_wiki" => args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .is_some_and(tachi_wiki_action_allows_cross_project_read),
+        "tachi_event" => args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .is_some_and(tachi_event_action_allows_cross_project_read),
+        _ => false,
+    }
 }
 
 fn project_defaults_to_bound_project(tool_name: &str, args: &rmcp::model::JsonObject) -> bool {
@@ -616,6 +649,33 @@ fn tachi_memory_action_defaults_to_project(action: &str) -> bool {
             | "review_recall_proposal"
             | "save"
             | "search"
+    )
+}
+
+/// Read-only or dry-run `tachi_memory` actions. `consolidate` returns dry_run
+/// candidates; `recall_simulate` replays search without persisting writes.
+fn tachi_memory_action_allows_cross_project_read(action: &str) -> bool {
+    matches!(
+        action.to_ascii_lowercase().as_str(),
+        "alerts"
+            | "ask"
+            | "briefing"
+            | "consolidate"
+            | "get"
+            | "readiness"
+            | "recall_simulate"
+            | "search"
+    )
+}
+
+fn tachi_event_action_allows_cross_project_read(action: &str) -> bool {
+    matches!(action.to_ascii_lowercase().as_str(), "metrics" | "query")
+}
+
+fn tachi_wiki_action_allows_cross_project_read(action: &str) -> bool {
+    matches!(
+        action.to_ascii_lowercase().as_str(),
+        "browse" | "read" | "search"
     )
 }
 
@@ -1180,6 +1240,118 @@ mod tests {
     }
 
     #[test]
+    fn stdio_proxy_allows_explicit_cross_project_read() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var_os("TACHI_HOME");
+        let saved_sigil = std::env::var_os("SIGIL_HOME");
+        let saved_app = std::env::var_os("TACHI_APP_HOME");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        let bound_project_name = "Sigil-proxy-cross-read-e2e";
+        let other_project_name = "Quant-proxy-cross-read-e2e";
+        let bound_project = tachi_home
+            .join("projects")
+            .join(bound_project_name)
+            .join("memory.db");
+        let other_project = tachi_home
+            .join("projects")
+            .join(other_project_name)
+            .join("memory.db");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        std::env::set_var("TACHI_HOME", &tachi_home);
+        std::env::remove_var("SIGIL_HOME");
+        std::env::remove_var("TACHI_APP_HOME");
+        seed_project_db(&tachi_home, &bound_project);
+        seed_project_db(&tachi_home, &other_project);
+
+        let rt = test_runtime();
+        let (ct, daemon_task) = rt.block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+            let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+            let daemon = std::sync::Arc::new(std::sync::RwLock::new(daemon));
+            let bound_proxy = StdioProxyServer {
+                daemon: daemon.clone(),
+                app_home: tachi_home.clone(),
+                global_db_path: global.clone(),
+                project_db_path: Some(bound_project.clone()),
+                client_project: Some(bound_project_name.to_string()),
+            };
+            let other_proxy = StdioProxyServer {
+                daemon,
+                app_home: tachi_home.clone(),
+                global_db_path: global.clone(),
+                project_db_path: Some(other_project.clone()),
+                client_project: Some(other_project_name.to_string()),
+            };
+
+            let result = call_tool_via_stdio_proxy(
+                other_proxy,
+                "tachi_memory",
+                serde_json::Map::from_iter([
+                    ("action".to_string(), serde_json::json!("save")),
+                    (
+                        "id".to_string(),
+                        serde_json::json!("other-proxy-cross-read-e2e"),
+                    ),
+                    (
+                        "text".to_string(),
+                        serde_json::json!("other PROXYCROSSREAD row"),
+                    ),
+                    (
+                        "summary".to_string(),
+                        serde_json::json!("other PROXYCROSSREAD row"),
+                    ),
+                    (
+                        "path".to_string(),
+                        serde_json::json!("/tests/stdio-proxy-cross-read-e2e"),
+                    ),
+                    ("category".to_string(), serde_json::json!("fact")),
+                    ("scope".to_string(), serde_json::json!("project")),
+                    ("force".to_string(), serde_json::json!(true)),
+                ]),
+            )
+            .await
+            .expect("seed other project through proxy");
+            assert_tool_ok(&result);
+
+            let result = call_tool_via_stdio_proxy(
+                bound_proxy,
+                "tachi_memory",
+                serde_json::Map::from_iter([
+                    ("action".to_string(), serde_json::json!("search")),
+                    ("project".to_string(), serde_json::json!(other_project_name)),
+                    ("query".to_string(), serde_json::json!("PROXYCROSSREAD")),
+                    ("scope".to_string(), serde_json::json!("memory")),
+                    ("top_k".to_string(), serde_json::json!(10)),
+                    ("format".to_string(), serde_json::json!("json")),
+                ]),
+            )
+            .await
+            .expect("explicit cross-project read should be forwarded");
+            assert_tool_ok(&result);
+            let parsed = first_text_json(&result);
+            assert_search_section_rows_are_objects(&parsed);
+            let text = parsed.to_string();
+            assert!(
+                text.contains("other-proxy-cross-read-e2e"),
+                "proxied explicit project read lost other project row: {parsed:#}"
+            );
+
+            (ct, daemon_task)
+        });
+
+        ct.cancel();
+        rt.block_on(daemon_task).expect("daemon task");
+        restore_env("TACHI_HOME", saved_home);
+        restore_env("SIGIL_HOME", saved_sigil);
+        restore_env("TACHI_APP_HOME", saved_app);
+    }
+
+    #[test]
     fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding() {
         let _guard = crate::utils::global_test_lock()
             .lock()
@@ -1692,24 +1864,87 @@ mod tests {
             err.to_string().contains("project binding mismatch"),
             "unexpected error: {err}"
         );
-    }
 
-    #[test]
-    fn proxy_rejects_explicit_cross_project_read_override() {
-        let request = rmcp::model::CallToolRequestParams::new("tachi_memory").with_arguments(
+        let request = rmcp::model::CallToolRequestParams::new("tachi_wiki").with_arguments(
             serde_json::Map::from_iter([
-                ("action".to_string(), serde_json::json!("search")),
+                ("action".to_string(), serde_json::json!("write")),
                 ("project".to_string(), serde_json::json!("Quant-test")),
             ]),
         );
 
         let err = prepare_proxy_tool_call(request, Some("Sigil-test"))
-            .expect_err("cross-project read override should be rejected");
+            .expect_err("cross-project wiki write should be rejected");
 
         assert!(
             err.to_string().contains("project binding mismatch"),
             "unexpected error: {err}"
         );
+
+        for (tool, action) in [
+            ("tachi_memory", Some("save")),
+            ("tachi_memory", Some("extract_facts")),
+            ("tachi_memory", Some("checkpoint")),
+            ("delete_memory", None),
+            ("save_memory", None),
+            ("tachi_event", Some("emit")),
+        ] {
+            let mut args = serde_json::Map::from_iter([(
+                "project".to_string(),
+                serde_json::json!("Quant-test"),
+            )]);
+            if let Some(action) = action {
+                args.insert("action".to_string(), serde_json::json!(action));
+            }
+            let request = rmcp::model::CallToolRequestParams::new(tool).with_arguments(args);
+
+            let err = prepare_proxy_tool_call(request, Some("Sigil-test"))
+                .expect_err("{tool}/{action:?} cross-project write must be rejected");
+
+            assert!(
+                err.to_string().contains("project binding mismatch"),
+                "{tool}/{action:?} unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_allows_explicit_cross_project_read_override() {
+        for (tool, action) in [
+            ("tachi_memory", Some("search")),
+            ("tachi_memory", Some("get")),
+            ("tachi_memory", Some("briefing")),
+            ("tachi_memory", Some("consolidate")),
+            ("tachi_memory", Some("recall_simulate")),
+            ("tachi_memory", Some("readiness")),
+            ("tachi_search", None),
+            ("search_memory", None),
+            ("find_similar_memory", None),
+            ("get_memory", None),
+            ("list_memories", None),
+            ("tachi_wiki", Some("search")),
+            ("tachi_wiki", Some("browse")),
+            ("tachi_wiki", Some("read")),
+            ("tachi_event", Some("query")),
+            ("tachi_event", Some("metrics")),
+        ] {
+            let mut args = serde_json::Map::from_iter([(
+                "project".to_string(),
+                serde_json::json!("Quant-test"),
+            )]);
+            if let Some(action) = action {
+                args.insert("action".to_string(), serde_json::json!(action));
+            }
+            let request = rmcp::model::CallToolRequestParams::new(tool).with_arguments(args);
+
+            let mapped = prepare_proxy_tool_call(request, Some("Sigil-test"))
+                .unwrap_or_else(|err| panic!("{tool}/{action:?} should be forwarded: {err}"));
+
+            assert_eq!(
+                mapped.arguments.expect("args")["project"],
+                serde_json::json!("Quant-test"),
+                "{tool}/{action:?} should preserve explicit project"
+            );
+        }
     }
 
     #[test]
