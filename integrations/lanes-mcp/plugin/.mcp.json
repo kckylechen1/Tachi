@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "lanes": {
-      "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/lanes-mcp.mjs"]
-    }
-  }
-}
