@@ -174,7 +174,7 @@ resident daemon instead of spawning a per-session stdio adapter:
       "headers": {
         "X-Tachi-Profile": "standard",
         "X-Tachi-Client": "codex",
-        "X-Tachi-Project": "Sigil"
+        "X-Tachi-Project": "Sigil-433b921b"
       }
     }
   }
@@ -183,11 +183,13 @@ resident daemon instead of spawning a per-session stdio adapter:
 
 `X-Tachi-Profile` selects the filtered tool surface for that HTTP session, and
 `X-Tachi-Project` binds project-defaulting memory calls to that named project
-for the lifetime of the MCP session. Reads that explicitly name another project
-remain allowed only for read-only tools/actions; mutations stay bound to the
-session project unless a narrower invariant allows otherwise. `admin` is not
-accepted over HTTP direct-connect until profile claims are wired to an explicit
-authorization policy.
+for the lifetime of the MCP session. Use the named project key reported by
+Tachi for the repo (often the sanitized repo name plus a stable hash suffix,
+such as `Sigil-433b921b`), not just the display name. Reads that explicitly
+name another project remain allowed only for read-only tools/actions; mutations
+stay bound to the session project unless a narrower invariant allows otherwise.
+`admin` is not accepted over HTTP direct-connect until profile claims are wired
+to an explicit authorization policy.
 
 If the daemon is restarted, HTTP clients may need to reconnect so they receive a
 fresh MCP session id. Stdio clients keep working through the compatibility
