@@ -136,11 +136,23 @@ pub(crate) use server_state::{AgentProfile, CachedVaultKey, DbScope, MemoryServe
 // ─── Runtime Entrypoint ──────────────────────────────────────────────────────────
 
 pub fn run_cli() {
+    // Install the rustls `ring` crypto provider before any HTTPS client is
+    // built. reqwest uses rustls-no-provider, so this is required for TLS.
+    ensure_tls_provider();
+
     tachi_bootstrap::run_cli_with(bootstrap::run, |error| {
         error
             .downcast_ref::<repair::RepairExit>()
             .map(|exit| exit.code())
     });
+}
+
+/// Install the rustls `ring` crypto provider as the process default.
+/// Thin wrapper over `tachi_llm::install_tls_provider`; re-exposed so that
+/// internal modules building reqwest clients (mcp_connection, gh_ops,
+/// wiki_ops) share one idempotent install site.
+pub fn ensure_tls_provider() {
+    tachi_llm::install_tls_provider();
 }
 
 #[cfg(test)]

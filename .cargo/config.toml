@@ -1,0 +1,21 @@
+# Cargo build configuration.
+# See issue #833 — these settings cut cold-compile time of memory-server.
+
+[build]
+# Pipelining lets rustc emit rmeta early so downstream crates can start
+# compiling before the upstream crate's codegen finishes. This raises CPU
+# utilization during the dependency chain (the build was bottlenecked at
+# ~289% on a 10-core machine because of a serialized tail).
+pipelining = true
+
+# Optional faster linker. Uncomment after `brew install mold` (arm64) or
+# installing lld. This is NOT required — the default linker works fine.
+# mold shaves link time off the 165K-LOC memory-server crate on debug builds.
+#
+# [target.aarch64-apple-darwin]
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/bin/ld64.mold"]
+#
+# [target.x86_64-apple-darwin]
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/bin/ld64.mold"]

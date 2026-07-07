@@ -118,10 +118,13 @@ impl HttpGhClient {
                     format!("{api_base}/graphql")
                 }
             });
-        let http = reqwest::Client::builder()
-            .user_agent(format!("tachi/{}", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|err| format!("build GitHub HTTP client: {err}"))?;
+        let http = {
+            crate::ensure_tls_provider();
+            reqwest::Client::builder()
+                .user_agent(format!("tachi/{}", env!("CARGO_PKG_VERSION")))
+                .build()
+                .map_err(|err| format!("build GitHub HTTP client: {err}"))?
+        };
         Ok(Self {
             http,
             token,
@@ -132,6 +135,9 @@ impl HttpGhClient {
 
     #[cfg(test)]
     fn for_tests(api_base: String, graphql_url: String) -> Self {
+        // reqwest rustls-no-provider requires a crypto provider even for the
+        // test client; install ring so these unit tests can build a Client.
+        crate::ensure_tls_provider();
         Self {
             http: reqwest::Client::new(),
             token: "test-token".to_string(),

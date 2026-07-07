@@ -84,6 +84,7 @@ pub(super) fn wiki_ingest_http_client_for_url(
         .url
         .host_str()
         .ok_or_else(|| "wiki ingest source URL must include a host".to_string())?;
+    crate::ensure_tls_provider();
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(StdDuration::from_secs(30))
@@ -95,6 +96,7 @@ pub(super) fn wiki_ingest_http_client_for_url(
 pub(super) fn wiki_ingest_http_client() -> Result<&'static reqwest::Client, String> {
     WIKI_INGEST_HTTP_CLIENT
         .get_or_init(|| {
+            crate::ensure_tls_provider();
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(StdDuration::from_secs(30))

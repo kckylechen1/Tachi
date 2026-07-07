@@ -1,5 +1,12 @@
 use super::*;
 
+/// reqwest is built with rustls-no-provider, so the crypto provider must be
+/// installed before any `reqwest::Client` is built (even for plain HTTP).
+/// Tests here construct clients directly, so install ring once up front.
+fn ensure_test_tls_provider() {
+    crate::ensure_tls_provider();
+}
+
 #[test]
 fn expand_env_placeholders_supports_fallback_chain() {
     std::env::remove_var("BIGMODEL_API_KEY");
@@ -242,11 +249,14 @@ async fn remote_mcp_body_reader_rejects_large_content_length() {
         }
     });
 
-    let response = reqwest::Client::new()
-        .get(format!("http://127.0.0.1:{port}/mcp"))
-        .send()
-        .await
-        .expect("response headers");
+    let response = {
+        ensure_test_tls_provider();
+        reqwest::Client::new()
+    }
+    .get(format!("http://127.0.0.1:{port}/mcp"))
+    .send()
+    .await
+    .expect("response headers");
     let err = read_remote_mcp_body(response, "tools/list")
         .await
         .expect_err("oversized content-length should be rejected before body read");
@@ -276,11 +286,14 @@ async fn remote_mcp_body_reader_rejects_streaming_oversize_body() {
         }
     });
 
-    let response = reqwest::Client::new()
-        .get(format!("http://127.0.0.1:{port}/mcp"))
-        .send()
-        .await
-        .expect("response headers");
+    let response = {
+        ensure_test_tls_provider();
+        reqwest::Client::new()
+    }
+    .get(format!("http://127.0.0.1:{port}/mcp"))
+    .send()
+    .await
+    .expect("response headers");
     let err = read_remote_mcp_body(response, "remote tool")
         .await
         .expect_err("streaming body should stop at the configured limit");
@@ -307,12 +320,15 @@ async fn initialized_notification_reports_http_failure() {
         }
     });
 
-    let err = send_remote_mcp_initialized_notification(
-        &reqwest::Client::new(),
-        &format!("http://127.0.0.1:{port}/mcp"),
-        reqwest::header::HeaderMap::new(),
-    )
-    .await
+    let err = {
+        ensure_test_tls_provider();
+        send_remote_mcp_initialized_notification(
+            &reqwest::Client::new(),
+            &format!("http://127.0.0.1:{port}/mcp"),
+            reqwest::header::HeaderMap::new(),
+        )
+        .await
+    }
     .expect_err("non-success initialized notification status should fail");
 
     assert!(err.contains("initialized notification failed"));
