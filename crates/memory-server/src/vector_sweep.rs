@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::time::{interval, MissedTickBehavior};
 
 use crate::manifest::Manifest;
-use crate::vector_backfill;
+use crate::vector_backfill::{self, VectorSweepStateUpdate};
 use tachi_llm::LlmClient;
 
 const DEFAULT_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
@@ -147,6 +147,18 @@ impl VectorSweepScheduler {
 
         tokio::spawn(async move {
             if sweep_disabled() {
+                let paths = collect_sweep_paths_inner(
+                    &manifest_path,
+                    &global_db,
+                    project_db.as_deref(),
+                    include_manifest,
+                );
+                record_disabled_sweep_state(
+                    paths,
+                    sweep_interval_secs(),
+                    skip_recall_cache(),
+                    "TACHI_DISABLE_VECTOR_SWEEP",
+                );
                 tracing::info!("[vector-sweep] disabled via TACHI_DISABLE_VECTOR_SWEEP");
                 return;
             }
@@ -239,13 +251,40 @@ async fn run_vector_sweep_paths(
     let mut total_done = 0usize;
     for path in paths {
         match vector_backfill::sweep_db_vectors(&path, llm, batch_per_db, skip_cache).await {
-            Ok((done, todo)) if todo > 0 => {
-                total_done += done;
-                tracing::info!("[vector-sweep] {} embedded {done}/{todo}", path.display());
+            Ok(outcome) if outcome.attempted_count > 0 => {
+                record_enabled_sweep_state(
+                    &path,
+                    skip_cache,
+                    outcome.embedded_count,
+                    outcome.attempted_count,
+                    None,
+                );
+                total_done += outcome.embedded_count;
+                tracing::info!(
+                    "[vector-sweep] {} embedded {}/{}",
+                    path.display(),
+                    outcome.embedded_count,
+                    outcome.attempted_count
+                );
             }
-            Ok(_) => {}
+            Ok(outcome) => {
+                record_enabled_sweep_state(
+                    &path,
+                    skip_cache,
+                    outcome.embedded_count,
+                    outcome.attempted_count,
+                    None,
+                );
+            }
             Err(e) => {
-                tracing::warn!("[vector-sweep] {} failed: {e}", path.display());
+                record_enabled_sweep_state(
+                    &path,
+                    skip_cache,
+                    e.embedded_count,
+                    e.attempted_count,
+                    Some(e.message.clone()),
+                );
+                tracing::warn!("[vector-sweep] {} failed: {}", path.display(), e.message);
             }
         }
     }
@@ -255,11 +294,106 @@ async fn run_vector_sweep_paths(
     total_done
 }
 
+fn provider_error(error: &str) -> Option<String> {
+    let lower = error.to_ascii_lowercase();
+    (lower.contains("provider") || lower.contains("voyage") || lower.contains("embed"))
+        .then(|| error.to_string())
+}
+
+fn record_enabled_sweep_state(
+    path: &Path,
+    skip_recall_cache: bool,
+    done: usize,
+    todo: usize,
+    error: Option<String>,
+) {
+    let failed_count = if error.is_some() {
+        todo.saturating_sub(done).max(1)
+    } else {
+        todo.saturating_sub(done)
+    };
+    let last_provider_error = error.as_deref().and_then(provider_error);
+    let preserve_outcome = error.is_none() && todo == 0;
+    if let Err(err) = vector_backfill::record_vector_sweep_state(
+        path,
+        VectorSweepStateUpdate {
+            enabled: true,
+            disabled_reason: None,
+            skip_recall_cache,
+            embedded_count: done,
+            failed_count,
+            last_error: error,
+            last_provider_error,
+            interval_secs: Some(sweep_interval_secs()),
+            preserve_schedule: false,
+            preserve_outcome,
+        },
+    ) {
+        tracing::warn!(
+            "[vector-sweep] {} state write failed: {err}",
+            path.display()
+        );
+    }
+}
+
+fn record_disabled_sweep_state(
+    paths: Vec<PathBuf>,
+    interval_secs: u64,
+    skip_recall_cache: bool,
+    reason: &str,
+) {
+    for path in paths {
+        if let Err(err) = vector_backfill::record_vector_sweep_state(
+            &path,
+            VectorSweepStateUpdate {
+                enabled: false,
+                disabled_reason: Some(reason.to_string()),
+                skip_recall_cache,
+                embedded_count: 0,
+                failed_count: 0,
+                last_error: None,
+                last_provider_error: None,
+                interval_secs: Some(interval_secs),
+                preserve_schedule: false,
+                preserve_outcome: false,
+            },
+        ) {
+            tracing::warn!(
+                "[vector-sweep] {} disabled state write failed: {err}",
+                path.display()
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn collect_sweep_paths_includes_global_and_manifest_entries() {
@@ -373,5 +507,138 @@ mod tests {
         } else {
             std::env::remove_var("TACHI_VECTOR_SWEEP_INTERVAL_SECS");
         }
+    }
+
+    #[test]
+    fn disabled_sweep_records_state_for_owned_paths() {
+        let tmp = TempDir::new().unwrap();
+        let global = tmp.path().join("global.db");
+        let project = tmp.path().join("project.db");
+        memory_core::MemoryStore::open(global.to_str().unwrap()).unwrap();
+        memory_core::MemoryStore::open(project.to_str().unwrap()).unwrap();
+
+        record_disabled_sweep_state(
+            vec![global.clone(), project.clone()],
+            1800,
+            true,
+            "TACHI_DISABLE_VECTOR_SWEEP",
+        );
+
+        let global_state = crate::vector_backfill::read_vector_sweep_state_for_status(&global)
+            .unwrap()
+            .unwrap();
+        let project_state = crate::vector_backfill::read_vector_sweep_state_for_status(&project)
+            .unwrap()
+            .unwrap();
+        assert!(!global_state.enabled);
+        assert!(!project_state.enabled);
+        assert_eq!(
+            global_state.disabled_reason.as_deref(),
+            Some("TACHI_DISABLE_VECTOR_SWEEP")
+        );
+        assert_eq!(global_state.interval_secs, Some(1800));
+        assert!(global_state.skip_recall_cache);
+    }
+
+    #[tokio::test]
+    async fn daemon_sweep_records_partial_progress_when_later_batch_fails() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("partial-failure.db");
+        let store = memory_core::MemoryStore::open(db_path.to_str().unwrap()).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        for index in 0..33 {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO memories
+                     (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
+                     VALUES (?1, '/facts/partial', '', ?2, 0.5, ?3, 'fact', 'status', '[]', '[]', 'manual', 'project', 0, ?3, ?3, 0, 1, '{}')",
+                    rusqlite::params![format!("partial-{index}"), format!("body {index}"), now],
+                )
+                .unwrap();
+        }
+        drop(store);
+
+        crate::vector_backfill::set_test_embed_batch_results(vec![
+            Ok(32),
+            Err("Voyage embed batch failed: provider 429".to_string()),
+        ]);
+        let llm = LlmClient::new().expect("llm client");
+        let embedded = run_vector_sweep_paths(vec![db_path.clone()], &llm, 33, true).await;
+        crate::vector_backfill::set_test_embed_batch_results(Vec::new());
+
+        assert_eq!(embedded, 0, "failed sweep runs do not count as complete");
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("state recorded");
+        assert_eq!(state.embedded_count, 32);
+        assert_eq!(state.failed_count, 1);
+        assert_eq!(
+            state.last_provider_error.as_deref(),
+            Some("Voyage embed batch failed: provider 429")
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_sweep_does_not_count_unattempted_pending_rows_as_failed() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("below-threshold.db");
+        let mut store = memory_core::MemoryStore::open(db_path.to_str().unwrap()).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let dummy_vec = vec![0.0_f32; 1024];
+        for index in 0..100 {
+            let id = format!("threshold-{index}");
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO memories
+                     (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
+                     VALUES (?1, '/facts/skipped', '', 'body', 0.5, ?2, 'fact', 'status', '[]', '[]', 'manual', 'project', 0, ?2, ?2, 0, 1, '{}')",
+                    rusqlite::params![id, now],
+                )
+                .unwrap();
+            if index < 99 {
+                store
+                    .update_enrichment_fields(&id, None, Some(&dummy_vec), None, None, 1)
+                    .unwrap();
+            }
+        }
+        drop(store);
+
+        crate::vector_backfill::record_vector_sweep_state(
+            &db_path,
+            crate::vector_backfill::VectorSweepStateUpdate {
+                enabled: true,
+                disabled_reason: None,
+                skip_recall_cache: true,
+                embedded_count: 12,
+                failed_count: 2,
+                last_error: Some("Voyage embed batch failed: provider 429".to_string()),
+                last_provider_error: Some("Voyage embed batch failed: provider 429".to_string()),
+                interval_secs: Some(1800),
+                preserve_schedule: false,
+                preserve_outcome: false,
+            },
+        )
+        .expect("seed prior failure state");
+
+        let _threshold = EnvGuard::set("TACHI_VECTOR_SWEEP_PENDING_THRESHOLD", "1");
+        let llm = LlmClient::new().expect("llm client");
+        let embedded = run_vector_sweep_paths(vec![db_path.clone()], &llm, 1, true).await;
+
+        assert_eq!(embedded, 0);
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("state recorded");
+        assert_eq!(state.embedded_count, 12);
+        assert_eq!(
+            state.failed_count, 2,
+            "no-op sweep must preserve prior failure counts"
+        );
+        assert_eq!(
+            state.last_provider_error.as_deref(),
+            Some("Voyage embed batch failed: provider 429"),
+            "no-op sweep must preserve prior provider errors"
+        );
     }
 }

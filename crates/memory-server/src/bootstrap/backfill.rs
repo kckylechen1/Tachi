@@ -1,5 +1,8 @@
 use crate::provider_config::materialize_standalone;
-use crate::vector_backfill::{embed_and_write_batch, list_missing_vector_entries};
+use crate::vector_backfill::{
+    embed_and_write_batch, list_missing_vector_entries, record_vector_sweep_state,
+    VectorSweepStateUpdate,
+};
 use futures::{stream, StreamExt};
 use memory_core::MemoryStore;
 use std::error::Error;
@@ -84,13 +87,14 @@ pub(super) async fn run_backfill_vectors(
         println!("Scope:   durable rows (recall cache excluded; pass --include-cache to include)");
     }
 
-    if missing == 0 {
-        println!("\n✅ All entries have vectors!");
+    if dry_run {
+        println!("\n(dry-run mode, no changes made)");
         return Ok(());
     }
 
-    if dry_run {
-        println!("\n(dry-run mode, no changes made)");
+    if missing == 0 {
+        record_cli_vector_sweep_state(db_path, skip_recall_cache, 0, 0, None);
+        println!("\n✅ All entries have vectors!");
         return Ok(());
     }
 
@@ -102,6 +106,7 @@ pub(super) async fn run_backfill_vectors(
     let batch_size = batch_size.min(128).max(1);
     let total_missing = entries.len();
     let mut processed = 0usize;
+    let mut last_error = None;
 
     println!("\nBackfilling {total_missing} entries (batch_size={batch_size})...\n");
 
@@ -117,6 +122,7 @@ pub(super) async fn run_backfill_vectors(
             Err(e) => {
                 eprintln!("  ERROR: {e}");
                 eprintln!("  Stopping. {processed} entries saved successfully.");
+                last_error = Some(e);
                 break;
             }
         }
@@ -127,8 +133,49 @@ pub(super) async fn run_backfill_vectors(
     }
 
     let (total, final_vec) = store.vector_stats()?;
+    record_cli_vector_sweep_state(
+        db_path,
+        skip_recall_cache,
+        processed,
+        total_missing.saturating_sub(processed),
+        last_error,
+    );
     println!("\n✅ Done! Vectors: {with_vec} → {final_vec} / {total}");
     Ok(())
+}
+
+fn record_cli_vector_sweep_state(
+    db_path: &PathBuf,
+    skip_recall_cache: bool,
+    embedded_count: usize,
+    failed_count: usize,
+    last_error: Option<String>,
+) {
+    let lower_error = last_error.as_deref().map(str::to_ascii_lowercase);
+    let last_provider_error = lower_error
+        .as_deref()
+        .is_some_and(|err| {
+            err.contains("provider") || err.contains("voyage") || err.contains("embed")
+        })
+        .then(|| last_error.clone())
+        .flatten();
+    if let Err(err) = record_vector_sweep_state(
+        db_path,
+        VectorSweepStateUpdate {
+            enabled: true,
+            disabled_reason: None,
+            skip_recall_cache,
+            embedded_count,
+            failed_count,
+            last_error,
+            last_provider_error,
+            interval_secs: None,
+            preserve_schedule: true,
+            preserve_outcome: false,
+        },
+    ) {
+        eprintln!("  WARN: vector sweep state write failed: {err}");
+    }
 }
 
 /// Backfill missing summaries for a given DB.
@@ -472,7 +519,7 @@ pub(super) async fn run_backfill_fts(
 
 #[cfg(test)]
 mod tests {
-    use super::durable_vector_counts;
+    use super::{durable_vector_counts, run_backfill_vectors};
     use memory_core::MemoryStore;
     use rusqlite::params;
 
@@ -531,6 +578,126 @@ mod tests {
         assert_eq!(
             missing, 1,
             "only the genuinely durable row is missing a vector"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_vector_backfill_does_not_write_sweep_state() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("dry-run.db");
+        let vault_path = dir.path().join("vault.db");
+        let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        insert_memory(&store, "durable-1", "manual", "note");
+        drop(store);
+
+        run_backfill_vectors(&db_path, &vault_path, 16, true, false)
+            .await
+            .expect("dry-run vector backfill");
+
+        let conn = rusqlite::Connection::open(&db_path).expect("open sqlite");
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM sqlite_master
+                    WHERE type='table' AND name='vector_sweep_state'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query state table");
+        assert!(
+            !table_exists,
+            "dry-run must not create or mutate vector_sweep_state"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_all_vectored_db_does_not_update_existing_sweep_state() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("dry-run-complete.db");
+        let vault_path = dir.path().join("vault.db");
+        let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        insert_memory(&store, "durable-1", "manual", "note");
+        let dummy_vec = vec![0.0_f32; 1024];
+        store
+            .update_enrichment_fields("durable-1", None, Some(&dummy_vec), None, None, 1)
+            .expect("write vector");
+        drop(store);
+
+        crate::vector_backfill::record_vector_sweep_state(
+            &db_path,
+            crate::vector_backfill::VectorSweepStateUpdate {
+                enabled: true,
+                disabled_reason: None,
+                skip_recall_cache: true,
+                embedded_count: 7,
+                failed_count: 3,
+                last_error: Some("previous provider error".to_string()),
+                last_provider_error: Some("previous provider error".to_string()),
+                interval_secs: Some(1800),
+                preserve_schedule: false,
+                preserve_outcome: false,
+            },
+        )
+        .expect("seed existing state");
+
+        run_backfill_vectors(&db_path, &vault_path, 16, true, false)
+            .await
+            .expect("dry-run vector backfill");
+
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("existing state remains");
+        assert_eq!(state.embedded_count, 7);
+        assert_eq!(state.failed_count, 3);
+        assert_eq!(state.last_error.as_deref(), Some("previous provider error"));
+    }
+
+    #[tokio::test]
+    async fn cli_vector_backfill_preserves_daemon_schedule_metadata() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("cli-schedule.db");
+        let vault_path = dir.path().join("vault.db");
+        let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        insert_memory(&store, "durable-1", "manual", "note");
+        let dummy_vec = vec![0.0_f32; 1024];
+        store
+            .update_enrichment_fields("durable-1", None, Some(&dummy_vec), None, None, 1)
+            .expect("write vector");
+        drop(store);
+
+        crate::vector_backfill::record_vector_sweep_state(
+            &db_path,
+            crate::vector_backfill::VectorSweepStateUpdate {
+                enabled: true,
+                disabled_reason: None,
+                skip_recall_cache: true,
+                embedded_count: 0,
+                failed_count: 0,
+                last_error: None,
+                last_provider_error: None,
+                interval_secs: Some(1800),
+                preserve_schedule: false,
+                preserve_outcome: false,
+            },
+        )
+        .expect("seed daemon schedule");
+
+        run_backfill_vectors(&db_path, &vault_path, 16, false, false)
+            .await
+            .expect("cli vector backfill");
+
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("state remains");
+        assert_eq!(
+            state.interval_secs,
+            Some(1800),
+            "manual CLI backfill must not clear daemon interval_secs"
+        );
+        assert!(
+            state.next_run_after.is_some(),
+            "manual CLI backfill must not clear daemon next_run_after"
         );
     }
 }

@@ -331,19 +331,29 @@ pub(crate) fn database_vector_health_json(db_path: &Path) -> serde_json::Value {
     };
     match MemoryStore::open_read_only(path_str) {
         Ok(store) => match vector_health(store.connection()) {
-            Ok(health) => json!({
-                "path": db_path.display().to_string(),
-                "memory_total": health.total,
-                "vector_count": health.with_vec,
-                "vector_missing": health.missing,
-                "vector_orphans": health.orphans,
-                "coverage": health.coverage,
-                "dimension": health.dimension,
-                "expected_dimension": EXPECTED_EMBEDDING_DIM,
-                "pending_enrichment": health.pending_enrichment,
-                "enrichment_failed_recent": health.enrichment_failed_recent,
-                "enrichment_failures": health.enrichment_failures,
-            }),
+            Ok(health) => {
+                let vector_sweep_result =
+                    crate::vector_backfill::read_vector_sweep_state_for_status(db_path);
+                let (vector_sweep, vector_sweep_error) = match vector_sweep_result {
+                    Ok(state) => (state, None),
+                    Err(err) => (None, Some(err)),
+                };
+                json!({
+                    "path": db_path.display().to_string(),
+                    "memory_total": health.total,
+                    "vector_count": health.with_vec,
+                    "vector_missing": health.missing,
+                    "vector_orphans": health.orphans,
+                    "coverage": health.coverage,
+                    "dimension": health.dimension,
+                    "expected_dimension": EXPECTED_EMBEDDING_DIM,
+                    "pending_enrichment": health.pending_enrichment,
+                    "enrichment_failed_recent": health.enrichment_failed_recent,
+                    "enrichment_failures": health.enrichment_failures,
+                    "vector_sweep": vector_sweep,
+                    "vector_sweep_error": vector_sweep_error,
+                })
+            }
             Err(err) => json!({
                 "path": db_path.display().to_string(),
                 "error": err.to_string(),
