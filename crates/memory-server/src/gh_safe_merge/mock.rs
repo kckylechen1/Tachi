@@ -18,6 +18,7 @@ pub struct MockGhClient {
     issues: Mutex<HashMap<(String, u64), IssueState>>,
     issue_labels: Mutex<HashMap<(String, u64), Vec<String>>>,
     checks: Mutex<HashMap<(String, u64), Vec<CheckRun>>>,
+    checks_list_error: Mutex<Option<GhError>>,
     merge_calls: Mutex<Vec<(String, u64, MergeStrategy, String)>>,
     next_issue_number: Mutex<u64>,
 }
@@ -29,6 +30,7 @@ impl MockGhClient {
             issues: Mutex::new(HashMap::new()),
             issue_labels: Mutex::new(HashMap::new()),
             checks: Mutex::new(HashMap::new()),
+            checks_list_error: Mutex::new(None),
             merge_calls: Mutex::new(Vec::new()),
             next_issue_number: Mutex::new(1000),
         }
@@ -45,6 +47,12 @@ impl MockGhClient {
             .lock()
             .unwrap()
             .insert((repo.to_string(), pr_number), runs);
+        self
+    }
+    /// Force `checks_list` to return this error instead of reading the
+    /// registered check list, exercising the degraded-input error path.
+    pub fn with_checks_list_error(self, error: GhError) -> Self {
+        *self.checks_list_error.lock().unwrap() = Some(error);
         self
     }
     pub fn with_issue_labels(self, repo: &str, issue_number: u64, labels: Vec<&str>) -> Self {
@@ -161,6 +169,9 @@ impl GhClient for MockGhClient {
         Ok(issue)
     }
     async fn checks_list(&self, repo: &str, pr_number: u64) -> Result<Vec<CheckRun>, GhError> {
+        if let Some(error) = self.checks_list_error.lock().unwrap().clone() {
+            return Err(error);
+        }
         Ok(self
             .checks
             .lock()

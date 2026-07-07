@@ -88,6 +88,13 @@ pub(crate) struct CheckStateIngestResult {
     pub(crate) state: CheckStateLedgerState,
     pub(crate) previous_state: Option<String>,
     pub(crate) changed: bool,
+    /// Degraded-input marker: `true` when the check-state reader returned an
+    /// error (e.g. GitHub rate-limit / network failure) and the ledger was
+    /// recorded against an empty check list. The merge decision is still
+    /// computed from `pr_view`'s `checks` snapshot (independent of this
+    /// ingest), but this flag lets operators notice the data was degraded so a
+    /// permissive `Ready` is not mistaken for "all checks confirmed green".
+    pub(crate) reader_error: bool,
     #[serde(flatten)]
     pub(crate) artifact: CheckStateArtifactResult,
 }
@@ -100,6 +107,9 @@ pub(crate) trait CheckStateReader: Send + Sync {
 
 #[async_trait]
 impl<T: GhClient + ?Sized> CheckStateReader for T {
+    /// Returns `observed_head_sha: None` today; the `Stale` ledger state is
+    /// therefore unreachable in production until a real reader (see #605
+    /// watcher) populates the observed head SHA.
     async fn read_check_state(
         &self,
         repo: &str,
@@ -164,6 +174,7 @@ pub(crate) async fn ingest_check_state_transition<R: CheckStateReader + ?Sized>(
         state,
         previous_state,
         changed,
+        reader_error: read_error.is_some(),
         artifact,
     })
 }

@@ -546,3 +546,74 @@ async fn check_state_ingest_distinguishes_no_checks_stale_and_reader_error() {
         std::env::remove_var("TACHI_RUN_ROOT");
     }
 }
+
+/// End-to-end guard for the dry-run `checks_list` error semantics.
+///
+/// Before #816, a `checks_list` failure during a dry-run ingest propagated via
+/// `?` and `handle_github_safe_merge` returned `Err`. The check-state recorder
+/// now converts that failure into a `reader_error` ledger state and returns
+/// `Ok`, so the dry-run still produces an envelope. This test pins that
+/// behavior and asserts the degraded-input marker is surfaced so a permissive
+/// `Ready` (computed from `pr_view`'s independent checks snapshot) cannot be
+/// mistaken for "all checks confirmed green" by the operator.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn safe_merge_dry_run_returns_ok_with_reader_error_marker_when_checks_list_fails() {
+    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let original = std::env::var_os("TACHI_RUN_ROOT");
+    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+
+    // pr_view succeeds with green checks; checks_list fails (rate-limited).
+    // The merge decision is computed from `pr.checks` (Success), which under a
+    // permissive policy yields `Ready` — exactly the misleading case the
+    // reader_error marker exists to flag.
+    let client = MockGhClient::new()
+        .with_pr("o/r", ready_pr())
+        .with_checks_list_error(GhError::RateLimited("secondary rate limit".to_string()));
+    let flow = "flow_dry-run-reader-error";
+    let out = handle_github_safe_merge(
+        &client,
+        "o/r",
+        42,
+        MergeStrategy::Squash,
+        true,
+        Some(flow),
+        &[],
+        MergeGatePolicy::permissive(),
+    )
+    .await
+    .expect("dry-run must return Ok with a reader_error ledger state");
+
+    // New behavior: Ok (NOT Err) — the error was converted to a ledger state.
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    // Degraded-input marker is surfaced in the envelope.
+    assert_eq!(v["check_state_ingest"]["reader_error"], json!(true));
+    assert_eq!(v["check_state_ingest"]["state"], json!("reader_error"));
+    assert_eq!(v["check_state_ingest"]["persisted"], json!(true));
+    // Decision still computed from pr_view's independent checks snapshot.
+    assert_eq!(v["merge_state"], json!("ready"));
+    assert_eq!(v["merge_attempted"], json!(false));
+    assert!(client.merge_calls().is_empty());
+
+    // reader_error transition was written to the check_state artifact.
+    let run_dir = tmp.path().join(flow);
+    let artifact: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run_dir.join("check_state.json")).unwrap())
+            .unwrap();
+    assert_eq!(artifact["transition"]["state"], json!("reader_error"));
+    assert_eq!(artifact["checks"].as_array().unwrap().len(), 0);
+    assert_eq!(artifact["buckets"]["total"], json!(0));
+    assert_eq!(
+        artifact["transition"]["read_error"],
+        json!("rate limited: secondary rate limit")
+    );
+
+    if let Some(v) = original {
+        std::env::set_var("TACHI_RUN_ROOT", v);
+    } else {
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+}
