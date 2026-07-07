@@ -1,5 +1,8 @@
 use crate::provider_config::materialize_standalone;
-use crate::vector_backfill::{embed_and_write_batch, list_missing_vector_entries};
+use crate::vector_backfill::{
+    embed_and_write_batch, list_missing_vector_entries, record_vector_sweep_state,
+    VectorSweepStateUpdate,
+};
 use futures::{stream, StreamExt};
 use memory_core::MemoryStore;
 use std::error::Error;
@@ -85,11 +88,13 @@ pub(super) async fn run_backfill_vectors(
     }
 
     if missing == 0 {
+        record_cli_vector_sweep_state(db_path, skip_recall_cache, 0, 0, None);
         println!("\n✅ All entries have vectors!");
         return Ok(());
     }
 
     if dry_run {
+        record_cli_vector_sweep_state(db_path, skip_recall_cache, 0, missing.max(0) as usize, None);
         println!("\n(dry-run mode, no changes made)");
         return Ok(());
     }
@@ -102,6 +107,7 @@ pub(super) async fn run_backfill_vectors(
     let batch_size = batch_size.min(128).max(1);
     let total_missing = entries.len();
     let mut processed = 0usize;
+    let mut last_error = None;
 
     println!("\nBackfilling {total_missing} entries (batch_size={batch_size})...\n");
 
@@ -117,6 +123,7 @@ pub(super) async fn run_backfill_vectors(
             Err(e) => {
                 eprintln!("  ERROR: {e}");
                 eprintln!("  Stopping. {processed} entries saved successfully.");
+                last_error = Some(e);
                 break;
             }
         }
@@ -127,8 +134,47 @@ pub(super) async fn run_backfill_vectors(
     }
 
     let (total, final_vec) = store.vector_stats()?;
+    record_cli_vector_sweep_state(
+        db_path,
+        skip_recall_cache,
+        processed,
+        total_missing.saturating_sub(processed),
+        last_error,
+    );
     println!("\n✅ Done! Vectors: {with_vec} → {final_vec} / {total}");
     Ok(())
+}
+
+fn record_cli_vector_sweep_state(
+    db_path: &PathBuf,
+    skip_recall_cache: bool,
+    embedded_count: usize,
+    failed_count: usize,
+    last_error: Option<String>,
+) {
+    let lower_error = last_error.as_deref().map(str::to_ascii_lowercase);
+    let last_provider_error = lower_error
+        .as_deref()
+        .is_some_and(|err| {
+            err.contains("provider") || err.contains("voyage") || err.contains("embed")
+        })
+        .then(|| last_error.clone())
+        .flatten();
+    if let Err(err) = record_vector_sweep_state(
+        db_path,
+        VectorSweepStateUpdate {
+            enabled: true,
+            disabled_reason: None,
+            skip_recall_cache,
+            embedded_count,
+            failed_count,
+            last_error,
+            last_provider_error,
+            interval_secs: None,
+        },
+    ) {
+        eprintln!("  WARN: vector sweep state write failed: {err}");
+    }
 }
 
 /// Backfill missing summaries for a given DB.

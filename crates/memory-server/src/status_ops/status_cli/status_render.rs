@@ -249,6 +249,35 @@ async fn render_one(
                 orphans
             );
         }
+        if let Some(sweep) = &db.vector_sweep {
+            let state = if sweep.enabled { "enabled" } else { "disabled" };
+            let reason = sweep
+                .disabled_reason
+                .as_deref()
+                .or(sweep.last_error.as_deref())
+                .map(|value| format!(" reason={}", crate::status_ops::truncate(value, 96)))
+                .unwrap_or_default();
+            let next = sweep
+                .next_run_after
+                .as_deref()
+                .map(|value| format!(" next={value}"))
+                .or_else(|| {
+                    sweep
+                        .interval_secs
+                        .map(|secs| format!(" interval_secs={secs}"))
+                })
+                .unwrap_or_default();
+            println!(
+                "       [i] vector_sweep={} last_run={} embedded={} failed={} skip_cache={}{}{}",
+                state,
+                sweep.last_run_at,
+                sweep.embedded_count,
+                sweep.failed_count,
+                sweep.skip_recall_cache,
+                next,
+                reason
+            );
+        }
         if db.namespace.recall_cache_rows > 0
             || db.namespace.wiki_rows > 0
             || db.namespace.graph_edges > 0

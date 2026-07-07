@@ -120,3 +120,74 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
     );
     assert_eq!(parsed["models"]["embedding"]["model"], json!("voyage-4"));
 }
+
+#[tokio::test]
+async fn tachi_status_reports_durable_vector_sweep_state() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let manifest_path = temp_home.temp_home.join(".tachi/manifest.json");
+
+    server
+        .with_global_store(|store| {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO memories
+                     (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
+                     VALUES (?1, '/facts/sweep', 'sweep', 'durable vector sweep test', 0.8, ?2, 'fact', 'status', '[]', '[]', 'manual', 'project', 0, ?2, ?2, 0, 1, '{}')",
+                    rusqlite::params!["sweep-memory", Utc::now().to_rfc3339()],
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed status db");
+
+    crate::vector_backfill::record_vector_sweep_state(
+        &server.global_db_path_buf(),
+        crate::vector_backfill::VectorSweepStateUpdate {
+            enabled: true,
+            disabled_reason: None,
+            skip_recall_cache: true,
+            embedded_count: 3,
+            failed_count: 1,
+            last_error: Some("Voyage embed batch failed: 429".to_string()),
+            last_provider_error: Some("Voyage embed batch failed: 429".to_string()),
+            interval_secs: Some(1800),
+        },
+    )
+    .expect("record sweep state");
+
+    let manifest = crate::manifest::Manifest {
+        schema_version: 1,
+        generated_at: Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![crate::manifest::DbEntry {
+            path: server.global_db_path_buf().display().to_string(),
+            role: crate::manifest::DbRole::Global,
+            owner: "tachi".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: Utc::now().to_rfc3339(),
+            last_classification: "healthy".to_string(),
+            scope_hint: "global".to_string(),
+            notes: String::new(),
+        }],
+    };
+    manifest.save(&manifest_path).expect("save manifest");
+
+    let body = crate::status_ops::handle_tachi_status_full(&server)
+        .await
+        .expect("status should serialize");
+    let parsed: Value = serde_json::from_str(&body).expect("status JSON");
+    let sweep = &parsed["databases"]["worker_queues"][0]["vector_sweep"];
+    assert_eq!(sweep["enabled"], json!(true));
+    assert_eq!(sweep["skip_recall_cache"], json!(true));
+    assert_eq!(sweep["embedded_count"], json!(3));
+    assert_eq!(sweep["failed_count"], json!(1));
+    assert_eq!(sweep["interval_secs"], json!(1800));
+    assert!(sweep["last_run_at"].as_str().is_some());
+    assert_eq!(
+        sweep["last_provider_error"],
+        json!("Voyage embed batch failed: 429")
+    );
+}

@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::time::{interval, MissedTickBehavior};
 
 use crate::manifest::Manifest;
-use crate::vector_backfill;
+use crate::vector_backfill::{self, VectorSweepStateUpdate};
 use tachi_llm::LlmClient;
 
 const DEFAULT_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
@@ -147,6 +147,18 @@ impl VectorSweepScheduler {
 
         tokio::spawn(async move {
             if sweep_disabled() {
+                let paths = collect_sweep_paths_inner(
+                    &manifest_path,
+                    &global_db,
+                    project_db.as_deref(),
+                    include_manifest,
+                );
+                record_disabled_sweep_state(
+                    paths,
+                    sweep_interval_secs(),
+                    skip_recall_cache(),
+                    "TACHI_DISABLE_VECTOR_SWEEP",
+                );
                 tracing::info!("[vector-sweep] disabled via TACHI_DISABLE_VECTOR_SWEEP");
                 return;
             }
@@ -240,11 +252,15 @@ async fn run_vector_sweep_paths(
     for path in paths {
         match vector_backfill::sweep_db_vectors(&path, llm, batch_per_db, skip_cache).await {
             Ok((done, todo)) if todo > 0 => {
+                record_enabled_sweep_state(&path, skip_cache, done, todo, None);
                 total_done += done;
                 tracing::info!("[vector-sweep] {} embedded {done}/{todo}", path.display());
             }
-            Ok(_) => {}
+            Ok((done, todo)) => {
+                record_enabled_sweep_state(&path, skip_cache, done, todo, None);
+            }
             Err(e) => {
+                record_enabled_sweep_state(&path, skip_cache, 0, 0, Some(e.clone()));
                 tracing::warn!("[vector-sweep] {} failed: {e}", path.display());
             }
         }
@@ -253,6 +269,73 @@ async fn run_vector_sweep_paths(
         tracing::info!("[vector-sweep] run complete, embedded {total_done} row(s)");
     }
     total_done
+}
+
+fn provider_error(error: &str) -> Option<String> {
+    let lower = error.to_ascii_lowercase();
+    (lower.contains("provider") || lower.contains("voyage") || lower.contains("embed"))
+        .then(|| error.to_string())
+}
+
+fn record_enabled_sweep_state(
+    path: &Path,
+    skip_recall_cache: bool,
+    done: usize,
+    todo: usize,
+    error: Option<String>,
+) {
+    let failed_count = if error.is_some() {
+        todo.saturating_sub(done).max(1)
+    } else {
+        todo.saturating_sub(done)
+    };
+    let last_provider_error = error.as_deref().and_then(provider_error);
+    if let Err(err) = vector_backfill::record_vector_sweep_state(
+        path,
+        VectorSweepStateUpdate {
+            enabled: true,
+            disabled_reason: None,
+            skip_recall_cache,
+            embedded_count: done,
+            failed_count,
+            last_error: error,
+            last_provider_error,
+            interval_secs: Some(sweep_interval_secs()),
+        },
+    ) {
+        tracing::warn!(
+            "[vector-sweep] {} state write failed: {err}",
+            path.display()
+        );
+    }
+}
+
+fn record_disabled_sweep_state(
+    paths: Vec<PathBuf>,
+    interval_secs: u64,
+    skip_recall_cache: bool,
+    reason: &str,
+) {
+    for path in paths {
+        if let Err(err) = vector_backfill::record_vector_sweep_state(
+            &path,
+            VectorSweepStateUpdate {
+                enabled: false,
+                disabled_reason: Some(reason.to_string()),
+                skip_recall_cache,
+                embedded_count: 0,
+                failed_count: 0,
+                last_error: None,
+                last_provider_error: None,
+                interval_secs: Some(interval_secs),
+            },
+        ) {
+            tracing::warn!(
+                "[vector-sweep] {} disabled state write failed: {err}",
+                path.display()
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -373,5 +456,34 @@ mod tests {
         } else {
             std::env::remove_var("TACHI_VECTOR_SWEEP_INTERVAL_SECS");
         }
+    }
+
+    #[test]
+    fn disabled_sweep_records_state_for_owned_paths() {
+        let tmp = TempDir::new().unwrap();
+        let global = tmp.path().join("global.db");
+        let project = tmp.path().join("project.db");
+        memory_core::MemoryStore::open(global.to_str().unwrap()).unwrap();
+        memory_core::MemoryStore::open(project.to_str().unwrap()).unwrap();
+
+        record_disabled_sweep_state(
+            vec![global.clone(), project.clone()],
+            1800,
+            true,
+            "TACHI_DISABLE_VECTOR_SWEEP",
+        );
+
+        let global_state =
+            crate::vector_backfill::read_vector_sweep_state_for_status(&global).unwrap();
+        let project_state =
+            crate::vector_backfill::read_vector_sweep_state_for_status(&project).unwrap();
+        assert!(!global_state.enabled);
+        assert!(!project_state.enabled);
+        assert_eq!(
+            global_state.disabled_reason.as_deref(),
+            Some("TACHI_DISABLE_VECTOR_SWEEP")
+        );
+        assert_eq!(global_state.interval_secs, Some(1800));
+        assert!(global_state.skip_recall_cache);
     }
 }

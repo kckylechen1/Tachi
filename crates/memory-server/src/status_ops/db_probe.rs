@@ -343,6 +343,7 @@ pub(crate) fn database_vector_health_json(db_path: &Path) -> serde_json::Value {
                 "pending_enrichment": health.pending_enrichment,
                 "enrichment_failed_recent": health.enrichment_failed_recent,
                 "enrichment_failures": health.enrichment_failures,
+                "vector_sweep": crate::vector_backfill::read_vector_sweep_state_for_status(db_path),
             }),
             Err(err) => json!({
                 "path": db_path.display().to_string(),
