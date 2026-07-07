@@ -28,6 +28,33 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
     if matches!(pr.state, PrLifecycleState::Merged) {
         return handle_already_merged_pr(repo, pr_number, &pr, dry_run, flow_id, policy).await;
     }
+    let check_state_ingest = if dry_run {
+        let check_runs = client
+            .checks_list(repo, pr_number)
+            .await
+            .map_err(|e| format!("checks_list failed for check-state ingest: {e}"))?;
+        let observed_at = chrono::Utc::now().to_rfc3339();
+        let pr_ref = format!("{repo}#{pr_number}");
+        Some(write_check_state_artifact(
+            flow_id,
+            &CheckStateArtifactInput {
+                repo,
+                pr_number,
+                pr_ref: Some(pr_ref.as_str()),
+                head_ref: None,
+                observed_at: observed_at.as_str(),
+                source: "safe_merge.dry_run",
+                dry_run,
+                checks: &check_runs,
+            },
+        )?)
+    } else {
+        None
+    };
+    let check_state_ingest = check_state_ingest
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|e| format!("serialize check_state_ingest: {e}"))?;
     let mut verification_gate = match evaluate_verification_gate(flow_id, &pr.head_sha) {
         Ok(gate) => gate,
         Err(err) if flow_id.is_some() => Some(json!({
@@ -265,6 +292,7 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         "merge_attempted": merged_sha.is_some(),
         "merge_executed": merged_sha.is_some(),
         "flow_id": flow_id,
+        "check_state_ingest": check_state_ingest,
         "persisted": persisted,
         "status_patch": status_patch,
         "event": {

@@ -93,6 +93,38 @@ Given `issue` + current branch (or worktree) + optional `base`:
 `safe_merge` stays a separate, human-triggered (or campaign-close) act. Ship opens;
 the adjudicator merges. Ship never merges to the default branch.
 
+### CI check-state ingest artifact
+
+`tachi_gh safe_merge` preview mode records CI state as observation only. When a
+`flow_id` is supplied it writes `.tachi/runs/<flow_id>/check_state.json` and stores a
+small discovery pointer at `status.json::artifacts.check_state`; when `flow_id` is
+missing, the response reports `check_state_ingest.non_auditable_reason` and no ledger
+write is claimed.
+
+The artifact schema is `tachi.github.check_state.v1`:
+
+```json
+{
+  "schema": "tachi.github.check_state.v1",
+  "flow_id": "flow_...",
+  "repo": "owner/repo",
+  "pr": { "number": 123, "ref": "owner/repo#123", "head_ref": null },
+  "observed_at": "2026-07-07T00:00:00Z",
+  "source": "safe_merge.dry_run",
+  "dry_run": true,
+  "aggregate": { "state": "failure", "status": "completed", "conclusion": "failure" },
+  "buckets": { "success": 0, "failure": 1, "pending": 0, "skipped": 0, "other": 0, "total": 1 },
+  "checks": [{ "name": "ci", "status": "completed", "conclusion": "failure" }],
+  "failed_checks_recorded_only": true,
+  "repair_attempted": false,
+  "merge_attempted": false,
+  "boundary": { "watch": "ingest", "repair": "dispatch", "adjudicate": "leader" }
+}
+```
+
+Failed checks are ledger state, not authority. The boundary is: watch = ingest,
+repair = dispatch, adjudicate = leader.
+
 ### Campaigns and `goal/*` integration branches
 
 A multi-contract campaign (umbrella issue) gets an integration branch `goal/<issue>`:
