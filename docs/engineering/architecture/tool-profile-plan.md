@@ -29,7 +29,8 @@ The target split is:
 2. Runtime hooks stay explicit.
    - `recall_context`, `capture_session`, and later `compact_context` are runtime/adapter APIs, not part of the ordinary IDE default
 3. Capability selection should become a first-class public layer.
-   - `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, and `run_skill` are the preferred agent UX
+   - `recommend_capability`, `recommend_skill`, and `recommend_toolchain` remain direct recommendation APIs; `tachi_skill(action="discover"|"run"|"bundle")` is the preferred skill workflow UX
+   - standalone `run_skill`, `prepare_capability_bundle`, and skill-focused `hub_discover` calls are compatibility routes, not the canonical new-caller path
    - raw hub / pack / vc governance tools should not leak into ordinary agent surfaces
 4. Workflow tools are not kernel primitives.
    - `ghost_*`, `post_card`, `check_inbox`, `update_card`, proposal review/project tools stay hidden unless a host or profile explicitly asks for them
@@ -55,7 +56,7 @@ The target split is:
   - `observe` +
   - `save_memory`
   - `extract_facts`
-  - `run_skill`
+  - `tachi_skill(action="run")`; standalone `run_skill` remains for compatibility
 - `coordinate`
   - `remember` +
   - kanban / ghost / handoff collaboration tools

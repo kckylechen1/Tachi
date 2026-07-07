@@ -133,12 +133,12 @@ Candidate APIs:
 - `recommend_capability`
 - `recommend_skill`
 - `recommend_toolchain`
-- `prepare_capability_bundle`
+- `tachi_skill(action="bundle")`
 
 Status:
 
 - first-pass recommendation APIs are now implemented
-- `prepare_capability_bundle` now assembles a host-aware bundle with packs, skills, host tools, and a ready-to-inject section
+- `tachi_skill(action="bundle")` now assembles a host-aware bundle with packs, skills, host tools, and a ready-to-inject section; standalone `prepare_capability_bundle` remains a compatibility route
 - current implementation is deterministic and Hub/Pack-aware
 - future iterations can add richer outcome learning and LLM-assisted planning on top
 
@@ -264,14 +264,14 @@ Tachi now expresses exposure through additive bundles instead of mutually exclus
 - `recommend_capability`
 - `recommend_skill`
 - `recommend_toolchain`
-- `prepare_capability_bundle`
+- `tachi_skill(action="bundle")`; native `prepare_capability_bundle` is backcompat only
 
 ### `remember`
 
 - `observe` +
 - `save_memory`
 - `extract_facts`
-- `run_skill`
+- `tachi_skill(action="run")`; native `run_skill` is backcompat only
 
 ### `coordinate`
 

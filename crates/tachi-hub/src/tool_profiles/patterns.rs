@@ -4,7 +4,11 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "recommend_capability",
     "recommend_skill",
     "recommend_toolchain",
+    // Standalone bundle preparation remains visible for broad observe profiles,
+    // but tachi_skill(action='bundle') is the canonical skill-workflow route.
     "prepare_capability_bundle",
+    // General Hub discovery remains visible for broad observe profiles; skill
+    // workflow discovery should prefer tachi_skill(action='discover').
     "hub_discover",
     "memory_graph",
     "list_memories",
@@ -43,7 +47,7 @@ pub const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     "tachi_complete",
     // Facade wiki write (action=write)
     "tachi_wiki",
-    // Facade skill run (action=run)
+    // Facade skill workflow (discover / run / bundle)
     "tachi_skill",
     // Unified memory facade (save / extract_facts are write ops)
     "tachi_memory",
@@ -135,8 +139,10 @@ pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_gh",
 ];
 
-/// Delegate profile allow-list (7 tools). For worker agents spawned by
-/// tachi_dispatch. No dispatch (prevent recursion), no handoff, no hub_discover.
+/// Delegate profile allow-list. For worker agents spawned by tachi_dispatch.
+/// No dispatch (prevent recursion), no handoff, no hub_discover. `tachi_skill`
+/// is the canonical skill workflow facade; `run_skill` remains for backcompat
+/// with injected/recommended skills that still call the standalone route.
 pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_tools",
     "runtime_info",
@@ -150,6 +156,8 @@ pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_unstick",
     // Declare task completion
     "tachi_complete",
-    // Execute injected/recommended skills
+    // Canonical skill workflow facade (run/bundle/discover where delegated)
+    "tachi_skill",
+    // Backcompat execution route for injected/recommended skills
     "run_skill",
 ];
