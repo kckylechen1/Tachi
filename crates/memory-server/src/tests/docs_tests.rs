@@ -4,6 +4,7 @@ use serde_json::json;
 use std::fs;
 use tempfile::tempdir;
 
+mod component_governance;
 mod conflicts;
 mod contract;
 mod hypermem_gate;

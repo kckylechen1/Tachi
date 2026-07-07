@@ -1,0 +1,310 @@
+{
+  "schema_version": "component_governance.v0",
+  "issue": 795,
+  "parent_issue": 771,
+  "required_record_fields": [
+    "component_id",
+    "component_type",
+    "owner_repo",
+    "owner_path",
+    "contract_summary",
+    "source_refs",
+    "upstream_prereqs",
+    "allowed_variation",
+    "forbidden_variation",
+    "downstream_consumers",
+    "known_drift",
+    "backflow_candidates",
+    "last_verified_at",
+    "last_checked_ref"
+  ],
+  "component_type_enum": [
+    "kernel",
+    "runtime_adapter",
+    "workflow_bridge",
+    "frontend_app_shell"
+  ],
+  "drift_classification_enum": [
+    "none",
+    "accepted_local_policy",
+    "backflow_candidate",
+    "retire_delete",
+    "blocked_fork",
+    "unknown"
+  ],
+  "record_schema": {
+    "component_id": "stable kebab-case id for this governance record",
+    "component_type": "one of component_type_enum",
+    "owner_repo": "canonical repository or downstream project that owns the implementation",
+    "owner_path": "repo-relative path, package, or documented fixture location for owner review",
+    "contract_summary": "short atomic description of the component contract",
+    "source_refs": "issue, doc, fixture, or PR references that define the contract",
+    "upstream_prereqs": "upstream gates or contracts required before downstream cutover",
+    "allowed_variation": "local differences that are explicitly permitted",
+    "forbidden_variation": "local differences that would fork or weaken the contract",
+    "downstream_consumers": "known consumers that must inspect this record before migration work",
+    "known_drift": "array of drift entries with classification from drift_classification_enum",
+    "backflow_candidates": "local ideas that may be proposed upstream but are not silently copied",
+    "last_verified_at": "RFC3339 timestamp for the fixture review",
+    "last_checked_ref": "git ref or issue ref used for this fixture review"
+  },
+  "records": [
+    {
+      "component_id": "tachi-memory-kernel",
+      "component_type": "kernel",
+      "owner_repo": "kckylechen1/tachi",
+      "owner_path": "crates/memory-core; crates/memory-server; docs/engineering/architecture/kernel-surface-v1.fixture.json",
+      "contract_summary": "Portable memory kernel owning durable schema, provenance, recall primitives, vector/FTS fallback behavior, event-ledger projection, and readiness diagnostics without product workflow dependencies.",
+      "source_refs": [
+        "#790",
+        "#770",
+        "docs/engineering/architecture/kernel-surface-v1.md",
+        "docs/engineering/architecture/kernel-surface-v1.fixture.json"
+      ],
+      "upstream_prereqs": [
+        "kernel_surface_v1 fixture remains the portable surface manifest",
+        "memory schema and recall tests stay in Tachi before downstream cutover",
+        "operator/product surfaces remain excluded from the portable bundle"
+      ],
+      "allowed_variation": [
+        "adapter vocabulary may rename retain/recall while preserving kernel save/search semantics",
+        "downstream products may add persona or domain policy outside the kernel boundary"
+      ],
+      "forbidden_variation": [
+        "copying GitHub, dispatch, ship, release, or PR lifecycle into the memory kernel contract",
+        "forking durable memory schema without an upstream record",
+        "weakening provenance, access history, or recall diagnostic evidence"
+      ],
+      "downstream_consumers": [
+        "hypermemory-trading-adapter",
+        "zeroclaw-chat-memory-adapter",
+        "romanbath-frontend-app-shell"
+      ],
+      "known_drift": [
+        {
+          "area": "operator_workflow_surface",
+          "classification": "none",
+          "summary": "Fixture explicitly excludes operator/product surfaces from the portable memory kernel."
+        }
+      ],
+      "backflow_candidates": [
+        "documented_export_view",
+        "recall_diagnostics"
+      ],
+      "last_verified_at": "2026-07-07T00:00:00Z",
+      "last_checked_ref": "issue-795"
+    },
+    {
+      "component_id": "hypermemory-trading-adapter",
+      "component_type": "runtime_adapter",
+      "owner_repo": "kckylechen1/Quant_Analyzer_2026",
+      "owner_path": "Hapiedge/HyperMemory adapter boundary; docs/engineering/architecture/hypermem-compatibility-gate.fixture.json",
+      "contract_summary": "Trading-domain adapter that shims HyperMemory/HAPI vocabulary onto Tachi memory-kernel exports while keeping A-share policy, request envelopes, and verdict logic downstream.",
+      "source_refs": [
+        "#793",
+        "#791",
+        "docs/engineering/architecture/hypermem-compatibility-gate.md",
+        "docs/engineering/architecture/hypermem-compatibility-gate.fixture.json"
+      ],
+      "upstream_prereqs": [
+        "golden-corpus recall gate remains required before downstream cutover",
+        "domain scorer and decay policy hooks are available before policy cutover",
+        "direct table readers are shimmed and retired rather than preserved as a fork"
+      ],
+      "allowed_variation": [
+        "HAPI request and response envelopes",
+        "A-share freshness and session decay policy through reviewed hooks",
+        "trading metadata vocabulary carried as adapter metadata"
+      ],
+      "forbidden_variation": [
+        "raw memories table access as a permanent contract",
+        "trading verdict or position logic inside Tachi core",
+        "legacy HyperMemory facade names treated as upstream API"
+      ],
+      "downstream_consumers": [
+        "Quant_Analyzer_2026 trading-memory workflows",
+        "tachi-memory-kernel"
+      ],
+      "known_drift": [
+        {
+          "area": "legacy_hypermemory_facade_names",
+          "classification": "retire_delete",
+          "summary": "Compatibility names are temporary adapter shims, not portable kernel vocabulary."
+        },
+        {
+          "area": "a_share_freshness_and_session_decay",
+          "classification": "accepted_local_policy",
+          "summary": "Market-session decay belongs downstream behind reviewed scoring hooks."
+        },
+        {
+          "area": "recall_diagnostics_score_components",
+          "classification": "backflow_candidate",
+          "summary": "Score-component diagnostics may be proposed upstream as generic recall evidence."
+        }
+      ],
+      "backflow_candidates": [
+        "generic metadata provenance round trip",
+        "recall diagnostic score components",
+        "domain scorer policy hook"
+      ],
+      "last_verified_at": "2026-07-07T00:00:00Z",
+      "last_checked_ref": "issue-795"
+    },
+    {
+      "component_id": "zeroclaw-chat-memory-adapter",
+      "component_type": "runtime_adapter",
+      "owner_repo": "kckylechen1/zeroclaw",
+      "owner_path": "generic chat-agent memory adapter contract; docs/engineering/architecture/host-adapter-lifecycle-v1.md",
+      "contract_summary": "Generic chat-agent adapter that assembles stable memory, immediate recall, and reflection around Tachi retain/recall/readiness surfaces without importing product workflow tools.",
+      "source_refs": [
+        "#770",
+        "#790",
+        "docs/engineering/architecture/host-adapter-lifecycle-v1.md"
+      ],
+      "upstream_prereqs": [
+        "portable memory kernel manifest remains product-agnostic",
+        "readiness/status surface is available without GitHub or dispatch dependencies",
+        "event projection bridge records recall/reflection lifecycle without requiring product sync"
+      ],
+      "allowed_variation": [
+        "host-specific prompt assembly order after stable memory and recall layers are preserved",
+        "persona and character-card style remain local product policy",
+        "adapter vocabulary may expose retain and recall names over save and search"
+      ],
+      "forbidden_variation": [
+        "RomanBath-specific fields in the generic chat-agent contract",
+        "GitHub, dispatch, ship, release, or worker lifecycle as required adapter dependencies",
+        "silent edit semantics before the kernel has reviewed edit behavior"
+      ],
+      "downstream_consumers": [
+        "zeroclaw chat agents",
+        "romanbath-frontend-app-shell",
+        "tachi-event-projection-bridge"
+      ],
+      "known_drift": [
+        {
+          "area": "persona_prompt_policy",
+          "classification": "accepted_local_policy",
+          "summary": "Persona and style belong to host adapters, not the portable memory kernel."
+        },
+        {
+          "area": "memory_edit_surface",
+          "classification": "blocked_fork",
+          "summary": "Edit is target-only until reviewed semantics exist upstream."
+        }
+      ],
+      "backflow_candidates": [
+        "generic context assembly fixture",
+        "host lifecycle recall/reflection event names"
+      ],
+      "last_verified_at": "2026-07-07T00:00:00Z",
+      "last_checked_ref": "issue-795"
+    },
+    {
+      "component_id": "tachi-event-projection-bridge",
+      "component_type": "workflow_bridge",
+      "owner_repo": "kckylechen1/tachi",
+      "owner_path": "crates/memory-server event projection and continuity paths",
+      "contract_summary": "Bridge from memory lifecycle events into projection/readiness evidence so downstream adapters can inspect recall, reflection, and continuity state without owning the kernel schema.",
+      "source_refs": [
+        "#770",
+        "#790",
+        "docs/engineering/architecture/kernel-surface-v1.fixture.json",
+        "docs/engineering/architecture/host-adapter-lifecycle-v1.md"
+      ],
+      "upstream_prereqs": [
+        "memory.saved remains the current save lifecycle signal",
+        "proposed recall/reflection lifecycle events stay documented as target terms",
+        "projection records remain inspectable fixtures before any CLI/MCP listing surface"
+      ],
+      "allowed_variation": [
+        "fixture-only target event names while runtime projection coverage is incomplete",
+        "downstream read models may consume documented export views once available"
+      ],
+      "forbidden_variation": [
+        "auto-syncing downstream repos from projection records",
+        "turning fixture projection records into a cutover planner",
+        "requiring GitHub or dispatch tools to inspect memory lifecycle evidence"
+      ],
+      "downstream_consumers": [
+        "hypermemory-trading-adapter",
+        "zeroclaw-chat-memory-adapter",
+        "romanbath-frontend-app-shell"
+      ],
+      "known_drift": [
+        {
+          "area": "recall_reflection_event_names",
+          "classification": "backflow_candidate",
+          "summary": "Target lifecycle names are documented and may become upstream bridge contract terms."
+        },
+        {
+          "area": "auto_sync",
+          "classification": "blocked_fork",
+          "summary": "Automatic downstream sync is explicitly outside this schema seed."
+        }
+      ],
+      "backflow_candidates": [
+        "memory.recall_requested",
+        "memory.recall_returned",
+        "memory.reflect_requested",
+        "memory.reflection_returned"
+      ],
+      "last_verified_at": "2026-07-07T00:00:00Z",
+      "last_checked_ref": "issue-795"
+    },
+    {
+      "component_id": "romanbath-frontend-app-shell",
+      "component_type": "frontend_app_shell",
+      "owner_repo": "kckylechen1/RomanBath",
+      "owner_path": "frontend app shell memory consumer fixture",
+      "contract_summary": "Frontend application shell consumer that may display or request generic chat-agent memory context while keeping UI, persona, and product workflow policy outside the portable Tachi kernel.",
+      "source_refs": [
+        "#770",
+        "#790",
+        "docs/engineering/architecture/host-adapter-lifecycle-v1.md"
+      ],
+      "upstream_prereqs": [
+        "generic chat-agent adapter contract remains RomanBath-neutral",
+        "portable memory kernel keeps product workflow surfaces excluded",
+        "component governance fixtures are inspectable before list/show/check/plan tools exist"
+      ],
+      "allowed_variation": [
+        "RomanBath-specific UI state, copy, persona framing, and product navigation",
+        "frontend-only presentation of memory readiness and recall context",
+        "local feature flags for experimental memory surfaces"
+      ],
+      "forbidden_variation": [
+        "RomanBath-specific fields in upstream component records",
+        "frontend app shell defining kernel memory schema",
+        "shipping a cutover planner or auto-sync path from this fixture"
+      ],
+      "downstream_consumers": [
+        "RomanBath frontend",
+        "zeroclaw-chat-memory-adapter"
+      ],
+      "known_drift": [
+        {
+          "area": "product_persona_shell",
+          "classification": "accepted_local_policy",
+          "summary": "UI/persona behavior stays local and does not backflow into kernel schema."
+        },
+        {
+          "area": "memory_readiness_display",
+          "classification": "unknown",
+          "summary": "Frontend display contract needs later inspection once list/show/check surfaces are designed."
+        }
+      ],
+      "backflow_candidates": [
+        "generic frontend readiness display requirements"
+      ],
+      "last_verified_at": "2026-07-07T00:00:00Z",
+      "last_checked_ref": "issue-795"
+    }
+  ],
+  "non_goals": [
+    "repo_scanning",
+    "cli_or_mcp_surface",
+    "cutover_planner",
+    "auto_sync"
+  ]
+}
