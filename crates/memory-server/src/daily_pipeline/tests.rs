@@ -47,13 +47,14 @@ fn restore_env_var(key: &str, saved: Option<std::ffi::OsString>) {
 
 #[test]
 fn truth_maintenance_routes_external_project_target_by_path() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crate::test_support::non_skipped_fixture_tempdir("daily-pipeline-");
     let global = tmp.path().join("global").join("memory.db");
     let current_project = tmp
         .path()
         .join("workspace")
         .join(".tachi")
         .join("memory.db");
+    crate::test_support::assert_repo_local_db_fixture_not_skipped(&current_project);
     let external = tmp.path().join("agent").join("memory.db");
     let target = manifest_target("agent", external.clone());
 
@@ -66,13 +67,14 @@ fn truth_maintenance_routes_external_project_target_by_path() {
 
 #[test]
 fn truth_maintenance_routes_external_global_target_as_global_path() {
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crate::test_support::non_skipped_fixture_tempdir("daily-pipeline-");
     let global = tmp.path().join("global").join("memory.db");
     let current_project = tmp
         .path()
         .join("workspace")
         .join(".tachi")
         .join("memory.db");
+    crate::test_support::assert_repo_local_db_fixture_not_skipped(&current_project);
     let external_global = tmp.path().join("archive").join("global-memory.db");
     let target = manifest_target("global", external_global.clone());
 
@@ -88,7 +90,7 @@ fn truth_maintenance_routes_plan_c_project_by_name() {
     let _guard = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let tmp = crate::test_support::non_skipped_fixture_tempdir("daily-pipeline-");
     let saved = std::env::var_os("TACHI_HOME");
     std::env::set_var("TACHI_HOME", tmp.path());
 
@@ -98,6 +100,7 @@ fn truth_maintenance_routes_plan_c_project_by_name() {
         .join("workspace")
         .join(".tachi")
         .join("memory.db");
+    crate::test_support::assert_repo_local_db_fixture_not_skipped(&current_project);
     let named = tmp.path().join("projects").join("sigil").join("memory.db");
     let target = manifest_target("project", named);
 

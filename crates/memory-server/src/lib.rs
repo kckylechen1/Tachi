@@ -103,6 +103,8 @@ mod skill_chain_ops;
 mod skill_policy;
 mod status_ops;
 mod task_lifecycle;
+#[cfg(test)]
+mod test_support;
 mod tool_params;
 mod tools;
 mod utils;

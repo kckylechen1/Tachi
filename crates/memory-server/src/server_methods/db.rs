@@ -256,7 +256,7 @@ mod resolve_named_project_tests {
     #[test]
     fn resolve_prefers_manifest_repo_local_db_without_symlink() {
         with_env_lock(|| {
-            let tmp = tempfile::tempdir().expect("tmp");
+            let tmp = crate::test_support::non_skipped_fixture_tempdir("server-methods-");
             let saved = std::env::var_os("TACHI_HOME");
             let tachi_home = tmp.path().join("home");
             std::fs::create_dir_all(&tachi_home).expect("home");
@@ -267,6 +267,7 @@ mod resolve_named_project_tests {
             let local_db = repo.join(".tachi/memory.db");
             std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
             std::fs::write(&local_db, b"").expect("local db");
+            crate::test_support::assert_repo_local_db_fixture_not_skipped(&local_db);
 
             // Record the repo-local DB in the manifest at <tachi_home>/manifest.json.
             let entry = serde_json::json!({
