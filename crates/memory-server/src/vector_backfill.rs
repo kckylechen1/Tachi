@@ -26,6 +26,10 @@ pub(crate) struct VectorSweepStateUpdate {
     pub(crate) last_error: Option<String>,
     pub(crate) last_provider_error: Option<String>,
     pub(crate) interval_secs: Option<u64>,
+    /// Keep existing interval_secs/next_run_after when this update leaves them unset.
+    pub(crate) preserve_schedule: bool,
+    /// Keep existing embedded/failed/error fields (no-op daemon tick).
+    pub(crate) preserve_outcome: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -163,6 +167,24 @@ pub(crate) fn record_vector_sweep_state(
     let next_run_after = update.interval_secs.map(|secs| {
         (now + chrono::Duration::seconds(secs.min(i64::MAX as u64) as i64)).to_rfc3339()
     });
+    let schedule_clause = if update.preserve_schedule {
+        "next_run_after=COALESCE(excluded.next_run_after, vector_sweep_state.next_run_after),
+                interval_secs=COALESCE(excluded.interval_secs, vector_sweep_state.interval_secs)"
+    } else {
+        "next_run_after=excluded.next_run_after,
+                interval_secs=excluded.interval_secs"
+    };
+    let outcome_clause = if update.preserve_outcome {
+        "embedded_count=vector_sweep_state.embedded_count,
+                failed_count=vector_sweep_state.failed_count,
+                last_error=vector_sweep_state.last_error,
+                last_provider_error=vector_sweep_state.last_provider_error"
+    } else {
+        "embedded_count=excluded.embedded_count,
+                failed_count=excluded.failed_count,
+                last_error=excluded.last_error,
+                last_provider_error=excluded.last_provider_error"
+    };
     conn.execute(
         &format!(
             "INSERT INTO {VECTOR_SWEEP_STATE_TABLE} (
@@ -175,12 +197,8 @@ pub(crate) fn record_vector_sweep_state(
                 disabled_reason=excluded.disabled_reason,
                 skip_recall_cache=excluded.skip_recall_cache,
                 last_run_at=excluded.last_run_at,
-                embedded_count=excluded.embedded_count,
-                failed_count=excluded.failed_count,
-                last_error=excluded.last_error,
-                last_provider_error=excluded.last_provider_error,
-                next_run_after=excluded.next_run_after,
-                interval_secs=excluded.interval_secs,
+                {outcome_clause},
+                {schedule_clause},
                 updated_at=excluded.updated_at"
         ),
         rusqlite::params![

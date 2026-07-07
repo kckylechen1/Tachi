@@ -170,6 +170,8 @@ fn record_cli_vector_sweep_state(
             last_error,
             last_provider_error,
             interval_secs: None,
+            preserve_schedule: true,
+            preserve_outcome: false,
         },
     ) {
         eprintln!("  WARN: vector sweep state write failed: {err}");
@@ -633,6 +635,8 @@ mod tests {
                 last_error: Some("previous provider error".to_string()),
                 last_provider_error: Some("previous provider error".to_string()),
                 interval_secs: Some(1800),
+                preserve_schedule: false,
+                preserve_outcome: false,
             },
         )
         .expect("seed existing state");
@@ -647,5 +651,53 @@ mod tests {
         assert_eq!(state.embedded_count, 7);
         assert_eq!(state.failed_count, 3);
         assert_eq!(state.last_error.as_deref(), Some("previous provider error"));
+    }
+
+    #[tokio::test]
+    async fn cli_vector_backfill_preserves_daemon_schedule_metadata() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("cli-schedule.db");
+        let vault_path = dir.path().join("vault.db");
+        let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        insert_memory(&store, "durable-1", "manual", "note");
+        let dummy_vec = vec![0.0_f32; 1024];
+        store
+            .update_enrichment_fields("durable-1", None, Some(&dummy_vec), None, None, 1)
+            .expect("write vector");
+        drop(store);
+
+        crate::vector_backfill::record_vector_sweep_state(
+            &db_path,
+            crate::vector_backfill::VectorSweepStateUpdate {
+                enabled: true,
+                disabled_reason: None,
+                skip_recall_cache: true,
+                embedded_count: 0,
+                failed_count: 0,
+                last_error: None,
+                last_provider_error: None,
+                interval_secs: Some(1800),
+                preserve_schedule: false,
+                preserve_outcome: false,
+            },
+        )
+        .expect("seed daemon schedule");
+
+        run_backfill_vectors(&db_path, &vault_path, 16, false, false)
+            .await
+            .expect("cli vector backfill");
+
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("state remains");
+        assert_eq!(
+            state.interval_secs,
+            Some(1800),
+            "manual CLI backfill must not clear daemon interval_secs"
+        );
+        assert!(
+            state.next_run_after.is_some(),
+            "manual CLI backfill must not clear daemon next_run_after"
+        );
     }
 }

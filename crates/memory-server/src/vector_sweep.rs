@@ -313,6 +313,7 @@ fn record_enabled_sweep_state(
         todo.saturating_sub(done)
     };
     let last_provider_error = error.as_deref().and_then(provider_error);
+    let preserve_outcome = error.is_none() && todo == 0;
     if let Err(err) = vector_backfill::record_vector_sweep_state(
         path,
         VectorSweepStateUpdate {
@@ -324,6 +325,8 @@ fn record_enabled_sweep_state(
             last_error: error,
             last_provider_error,
             interval_secs: Some(sweep_interval_secs()),
+            preserve_schedule: false,
+            preserve_outcome,
         },
     ) {
         tracing::warn!(
@@ -351,6 +354,8 @@ fn record_disabled_sweep_state(
                 last_error: None,
                 last_provider_error: None,
                 interval_secs: Some(interval_secs),
+                preserve_schedule: false,
+                preserve_outcome: false,
             },
         ) {
             tracing::warn!(
@@ -600,6 +605,23 @@ mod tests {
         }
         drop(store);
 
+        crate::vector_backfill::record_vector_sweep_state(
+            &db_path,
+            crate::vector_backfill::VectorSweepStateUpdate {
+                enabled: true,
+                disabled_reason: None,
+                skip_recall_cache: true,
+                embedded_count: 12,
+                failed_count: 2,
+                last_error: Some("Voyage embed batch failed: provider 429".to_string()),
+                last_provider_error: Some("Voyage embed batch failed: provider 429".to_string()),
+                interval_secs: Some(1800),
+                preserve_schedule: false,
+                preserve_outcome: false,
+            },
+        )
+        .expect("seed prior failure state");
+
         let _threshold = EnvGuard::set("TACHI_VECTOR_SWEEP_PENDING_THRESHOLD", "1");
         let llm = LlmClient::new().expect("llm client");
         let embedded = run_vector_sweep_paths(vec![db_path.clone()], &llm, 1, true).await;
@@ -608,10 +630,15 @@ mod tests {
         let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
             .expect("read state")
             .expect("state recorded");
-        assert_eq!(state.embedded_count, 0);
+        assert_eq!(state.embedded_count, 12);
         assert_eq!(
-            state.failed_count, 0,
-            "pending rows below the sweep threshold were not attempted and must not count as failures"
+            state.failed_count, 2,
+            "no-op sweep must preserve prior failure counts"
+        );
+        assert_eq!(
+            state.last_provider_error.as_deref(),
+            Some("Voyage embed batch failed: provider 429"),
+            "no-op sweep must preserve prior provider errors"
         );
     }
 }

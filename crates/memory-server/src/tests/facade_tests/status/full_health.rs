@@ -152,6 +152,8 @@ async fn tachi_status_reports_durable_vector_sweep_state() {
             last_error: Some("Voyage embed batch failed: 429".to_string()),
             last_provider_error: Some("Voyage embed batch failed: 429".to_string()),
             interval_secs: Some(1800),
+            preserve_schedule: false,
+            preserve_outcome: false,
         },
     )
     .expect("record sweep state");
