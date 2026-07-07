@@ -283,7 +283,7 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 | `standard` | 日常门面：`tachi_save`、`tachi_memory`、`tachi_task`、`tachi_arena`、`tachi_verify`、`tachi_web_search`、`tachi_wiki`、`tachi_skill`、`tachi_gh`、`vault_status`，以及 `runtime_info`、`tachi_status`、`tachi_briefing` 和 `tachi_tools`。 | IDE Agent：Claude、Cursor、Codex、Windsurf、Trae、Antigravity。 |
 | `coordinate` | `remember` + `coordinate` bundles：增加 `handoff_*`、`post_card`、`check_inbox`、`update_card`、`approve_merge`、`tachi_handoff`、`tachi_workflow`、`tachi_orchestrator`；派发通过 `tachi_task(action='dispatch')`。 | 主控/编排 Agent，负责派发任务并协调多 Agent。 |
 | `operate` | `remember` + `operate` bundles：增加 Foundry 生命周期、`agent_register`、`hub_call`、`vault_unlock`/`lock`/`status`、`wiki_lint`。 | 运行时适配器、OpenClaw、运维自动化。 |
-| `delegate` | 精选 worker 工具面：`tachi_tools`、`runtime_info`、`tachi_memory`、`tachi_web_search`、`tachi_browse`、`tachi_unstick`、`tachi_complete`、`tachi_skill`，以及兼容入口 `run_skill`。 | `tachi_task(action='dispatch')` 派生的工作 Agent。无派发、无交接。 |
+| `delegate` | 精选 worker 工具面：`tachi_tools`、`runtime_info`、`tachi_memory`、`tachi_web_search`、`tachi_browse`、`tachi_unstick`、`tachi_complete`、`tachi_skill(action='discover'|'run'|'bundle')`，以及旧兼容入口 `run_skill`。 | `tachi_task(action='dispatch')` 派生的工作 Agent。无派发、无交接、无技能候选注册。 |
 | `admin` | 完整目录。 | 维护、开发与治理。 |
 
 宿主别名自动解析：`claude`、`claude-code`、`codex`、`cursor`、`trae`、`windsurf`、`ide`、`antigravity` → `standard`；`worker`、`subagent`、`delegate` → `delegate`；`openclaw`、`hermes`、`runtime`、`adapter`、`ops` → `operate`。

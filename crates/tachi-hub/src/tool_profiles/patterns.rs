@@ -140,9 +140,10 @@ pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
 ];
 
 /// Delegate profile allow-list. For worker agents spawned by tachi_dispatch.
-/// No dispatch (prevent recursion), no handoff, no hub_discover. `tachi_skill`
-/// is the canonical skill workflow facade; `run_skill` remains for backcompat
-/// with injected/recommended skills that still call the standalone route.
+/// No dispatch (prevent recursion), no handoff, no hub_discover. Delegate
+/// runtime policy limits `tachi_skill` to discover/run/bundle; `run_skill`
+/// remains for backcompat with injected/recommended skills that still call the
+/// standalone route.
 pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_tools",
     "runtime_info",
@@ -156,7 +157,7 @@ pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_unstick",
     // Declare task completion
     "tachi_complete",
-    // Canonical skill workflow facade (run/bundle/discover where delegated)
+    // Canonical skill workflow facade (discover/run/bundle under delegate)
     "tachi_skill",
     // Backcompat execution route for injected/recommended skills
     "run_skill",
