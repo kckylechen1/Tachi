@@ -53,6 +53,7 @@ pub(crate) const GITHUB_EVENT_KINDS: &[&str] = &[
     "github_review_gate_passed",
     "github_merge_blocked",
     "github_pr_merged",
+    "github_safe_merge_reclaimed",
     "github_ship_completed",
 ];
 

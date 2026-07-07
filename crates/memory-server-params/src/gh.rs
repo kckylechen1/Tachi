@@ -106,6 +106,17 @@ pub struct TachiGhParams {
     /// Repository root override for action="ship". Defaults to current process cwd.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Optional local worktree path to reclaim after a successful safe_merge
+    /// (disk-governor reclamation hook, #484). When supplied and the GitHub PR
+    /// merge succeeds, `tachi-clean wt-remove` reclaims the worktree + branch +
+    /// target dir. Best-effort: a missing worktree logs a warning and does NOT
+    /// fail the merge. No-op when absent (no PR→worktree mapping recorded).
+    #[serde(default)]
+    pub worktree: Option<String>,
+    /// When true (default), safe_merge reclaims the supplied worktree after a
+    /// successful merge. Set false to opt out of reclamation.
+    #[serde(default)]
+    pub reclaim_worktree: Option<bool>,
 }
 
 /// Parameters for reading a GitHub issue

@@ -24,6 +24,8 @@ async fn safe_merge_persists_status_and_event_when_flow_id_supplied() {
         Some(flow),
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect("ok");
@@ -76,6 +78,8 @@ async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
         Some("flow_pending-safe-merge"),
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect("pending ok");
@@ -100,6 +104,8 @@ async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
         Some("flow_blocked-safe-merge"),
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect("blocked ok");
@@ -133,6 +139,8 @@ async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
         Some("flow_merged-safe-merge"),
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect("merged ok");
@@ -180,6 +188,8 @@ async fn safe_merge_persists_observed_merged_pr_without_overwriting_it_blocked()
         Some(flow),
         &[],
         MergeGatePolicy::strict(),
+        None,
+        false,
     )
     .await
     .expect("observed merged ok");
@@ -219,6 +229,8 @@ async fn safe_merge_rejects_invalid_flow_id() {
         Some("../escape"),
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect_err("invalid flow id should fail");
@@ -237,6 +249,8 @@ async fn safe_merge_propagates_pr_view_not_found() {
         None,
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect_err("should fail");

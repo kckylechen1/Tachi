@@ -153,6 +153,8 @@ pub(crate) async fn handle_tachi_gh(
                 params.flow_id.as_deref(),
                 &params.tests_run,
                 policy,
+                params.worktree.as_deref(),
+                params.reclaim_worktree.unwrap_or(true),
             )
             .await
         }
@@ -185,6 +187,9 @@ pub(crate) async fn handle_tachi_gh(
                 task_params.flow_id.as_deref(),
                 &[],
                 policy,
+                // pr_status is a dry-run preview: reclamation never fires.
+                None,
+                false,
             )
             .await
         }

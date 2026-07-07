@@ -16,6 +16,8 @@ async fn safe_merge_strict_requires_flow_id_before_merge() {
         None,
         &[],
         policy,
+        None,
+        false,
     )
     .await
     .expect("ok");
@@ -49,6 +51,8 @@ async fn safe_merge_strict_accepts_linked_issue_without_flow_id() {
         None,
         &[],
         policy,
+        None,
+        false,
     )
     .await
     .expect("ok");
@@ -77,6 +81,8 @@ async fn safe_merge_head_consistency_required_blocks_merge() {
         None,
         &[],
         policy,
+        None,
+        false,
     )
     .await
     .expect("ok");
@@ -118,6 +124,8 @@ async fn safe_merge_with_flow_id_missing_verification_waits() {
         Some("flow_missing-verification"),
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect("ok");
@@ -162,6 +170,8 @@ async fn safe_merge_failed_verification_blocks_even_permissive() {
         Some(flow),
         &[],
         MergeGatePolicy::permissive(),
+        None,
+        false,
     )
     .await
     .expect("ok");
@@ -205,6 +215,8 @@ async fn safe_merge_stale_verification_waits_on_head_mismatch() {
         Some(flow),
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect("ok");
@@ -248,6 +260,8 @@ async fn safe_merge_strict_uses_passed_verification_for_head_consistency() {
         Some(flow),
         &[],
         MergeGatePolicy::strict(),
+        None,
+        false,
     )
     .await
     .expect("ok");
@@ -307,6 +321,8 @@ async fn safe_merge_strict_does_not_treat_not_required_verification_as_head_proo
         Some(flow),
         &[],
         MergeGatePolicy::strict(),
+        None,
+        false,
     )
     .await
     .expect("ok");
@@ -357,6 +373,8 @@ async fn safe_merge_records_missing_verification_from_tests_run() {
         Some(flow),
         &tests_run,
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect("ok");
