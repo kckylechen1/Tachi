@@ -269,6 +269,128 @@ fn actr_access_history_uses_day_scale() {
 }
 
 #[test]
+fn default_decay_policy_preserves_existing_decay_entry_points() {
+    use chrono::Duration;
+    let mut entry = test_entry("default-policy");
+    entry.timestamp = (Utc::now() - Duration::days(10)).to_rfc3339();
+    entry.last_access = Some((Utc::now() - Duration::days(2)).to_rfc3339());
+    entry.access_count = 3;
+
+    let access_ages = [3_600.0, 7_200.0];
+    assert_eq!(
+        decay_score_with_config(&entry, RecallConfig::get()),
+        decay_score_with_policy(&entry, RecallConfig::get(), &DEFAULT_DECAY_POLICY)
+    );
+    assert_eq!(
+        decay_score_actr_with_config(&entry, Some(&access_ages), RecallConfig::get()),
+        decay_score_actr_with_policy(
+            &entry,
+            Some(&access_ages),
+            RecallConfig::get(),
+            &DEFAULT_DECAY_POLICY,
+        )
+    );
+}
+
+struct FakeTradingStyleDecay;
+
+impl DecayPolicy for FakeTradingStyleDecay {
+    fn score_decay(
+        &self,
+        entry: &crate::types::MemoryEntry,
+        _recall_config: &RecallConfig,
+        access_ages: Option<&[f64]>,
+    ) -> f64 {
+        let latest_access_days = access_ages
+            .and_then(|ages| ages.iter().copied().reduce(f64::min))
+            .map(|secs| secs / 86_400.0)
+            .unwrap_or(30.0);
+        if entry.tier == "pattern" && latest_access_days <= 1.0 {
+            0.95
+        } else {
+            0.20
+        }
+    }
+}
+
+struct FakeAffectStyleDecay;
+
+impl DecayPolicy for FakeAffectStyleDecay {
+    fn score_decay(
+        &self,
+        entry: &crate::types::MemoryEntry,
+        _recall_config: &RecallConfig,
+        _access_ages: Option<&[f64]>,
+    ) -> f64 {
+        entry
+            .metadata
+            .get("affect_weight")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.10)
+    }
+}
+
+#[test]
+fn fake_trading_style_decay_policy_can_drive_hybrid_decay_without_domain_names() {
+    let mut recent_signal = test_entry("recent-signal");
+    recent_signal.tier = "pattern".to_string();
+    let mut stale_signal = test_entry("stale-signal");
+    stale_signal.tier = "pattern".to_string();
+    let entries = HashMap::from([
+        ("recent-signal".to_string(), &recent_signal),
+        ("stale-signal".to_string(), &stale_signal),
+    ]);
+    let vec_scores = HashMap::from([
+        ("recent-signal".to_string(), 0.1),
+        ("stale-signal".to_string(), 0.1),
+    ]);
+    let fts_scores = HashMap::new();
+    let symbolic_scores = HashMap::new();
+    let access_times = HashMap::from([
+        ("recent-signal".to_string(), vec![30.0 * 60.0]),
+        ("stale-signal".to_string(), vec![14.0 * 86_400.0]),
+    ]);
+    let weights = HybridWeights {
+        semantic: 0.0,
+        fts: 0.0,
+        symbolic: 0.0,
+        decay: 1.0,
+        use_rrf: false,
+    };
+
+    let scored = hybrid_score_with_policy(
+        &entries,
+        &vec_scores,
+        &fts_scores,
+        &symbolic_scores,
+        &weights,
+        &access_times,
+        DecayPolicyContext::new(RecallConfig::get(), &FakeTradingStyleDecay),
+    );
+
+    assert_eq!(scored["recent-signal"].decay, 0.95);
+    assert_eq!(scored["stale-signal"].decay, 0.20);
+    assert!(scored["recent-signal"].final_score > scored["stale-signal"].final_score);
+}
+
+#[test]
+fn fake_chat_affect_decay_policy_can_use_adapter_metadata_without_kernel_names() {
+    let mut calm = test_entry("calm");
+    calm.metadata = serde_json::json!({ "affect_weight": 0.25 });
+    let mut urgent = test_entry("urgent");
+    urgent.metadata = serde_json::json!({ "affect_weight": 0.85 });
+
+    let calm_score =
+        decay_score_actr_with_policy(&calm, None, RecallConfig::get(), &FakeAffectStyleDecay);
+    let urgent_score =
+        decay_score_actr_with_policy(&urgent, None, RecallConfig::get(), &FakeAffectStyleDecay);
+
+    assert_eq!(calm_score, 0.25);
+    assert_eq!(urgent_score, 0.85);
+    assert!(urgent_score > calm_score);
+}
+
+#[test]
 fn rrf_blend_rewards_absolute_vector_similarity_without_penalizing_missing_vector() {
     let vec_scores = HashMap::from([
         ("a".to_string(), 0.99),

@@ -32,6 +32,50 @@ fn tier_actr_d(tier: &str) -> f64 {
     }
 }
 
+/// Policy hook for library-specific recall decay.
+///
+/// The kernel owns the scorer call site; downstream libraries may adapt their
+/// own semantics into this trait without hardcoding product behavior here.
+pub trait DecayPolicy {
+    fn score_decay(
+        &self,
+        entry: &MemoryEntry,
+        recall_config: &RecallConfig,
+        access_ages: Option<&[f64]>,
+    ) -> f64;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultDecayPolicy;
+
+pub static DEFAULT_DECAY_POLICY: DefaultDecayPolicy = DefaultDecayPolicy;
+
+impl DecayPolicy for DefaultDecayPolicy {
+    fn score_decay(
+        &self,
+        entry: &MemoryEntry,
+        recall_config: &RecallConfig,
+        access_ages: Option<&[f64]>,
+    ) -> f64 {
+        default_decay_score_actr_with_config(entry, access_ages, recall_config)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct DecayPolicyContext<'a> {
+    pub recall_config: &'a RecallConfig,
+    pub decay_policy: &'a dyn DecayPolicy,
+}
+
+impl<'a> DecayPolicyContext<'a> {
+    pub fn new(recall_config: &'a RecallConfig, decay_policy: &'a dyn DecayPolicy) -> Self {
+        Self {
+            recall_config,
+            decay_policy,
+        }
+    }
+}
+
 /// Normalise an f64 to [0, 1].
 #[inline]
 pub fn normalize(v: f64) -> f64 {
@@ -71,6 +115,18 @@ pub fn decay_score(entry: &MemoryEntry) -> f64 {
 }
 
 pub fn decay_score_with_config(entry: &MemoryEntry, recall_config: &RecallConfig) -> f64 {
+    default_decay_score_with_config(entry, recall_config)
+}
+
+pub fn decay_score_with_policy(
+    entry: &MemoryEntry,
+    recall_config: &RecallConfig,
+    policy: &(impl DecayPolicy + ?Sized),
+) -> f64 {
+    policy.score_decay(entry, recall_config, None)
+}
+
+fn default_decay_score_with_config(entry: &MemoryEntry, recall_config: &RecallConfig) -> f64 {
     let now = Utc::now();
     let reference = entry
         .last_access
@@ -152,6 +208,23 @@ pub fn decay_score_actr_with_config(
     access_ages: Option<&[f64]>,
     recall_config: &RecallConfig,
 ) -> f64 {
+    decay_score_actr_with_policy(entry, access_ages, recall_config, &DEFAULT_DECAY_POLICY)
+}
+
+pub fn decay_score_actr_with_policy(
+    entry: &MemoryEntry,
+    access_ages: Option<&[f64]>,
+    recall_config: &RecallConfig,
+    policy: &(impl DecayPolicy + ?Sized),
+) -> f64 {
+    policy.score_decay(entry, recall_config, access_ages)
+}
+
+fn default_decay_score_actr_with_config(
+    entry: &MemoryEntry,
+    access_ages: Option<&[f64]>,
+    recall_config: &RecallConfig,
+) -> f64 {
     let d = tier_actr_d(&entry.tier);
     match access_ages {
         Some(ages) if !ages.is_empty() => {
@@ -160,10 +233,10 @@ pub fn decay_score_actr_with_config(
             let normalized = (bla + 5.0) / 10.0;
             normalized
                 .clamp(0.0, 1.0)
-                .max(decay_score_with_config(entry, recall_config))
+                .max(default_decay_score_with_config(entry, recall_config))
                 .max(entry.importance * 0.3)
         }
-        _ => decay_score_with_config(entry, recall_config),
+        _ => default_decay_score_with_config(entry, recall_config),
     }
 }
 
@@ -358,6 +431,26 @@ pub fn hybrid_score_with_config(
     access_times: &HashMap<String, Vec<f64>>,
     recall_config: &RecallConfig,
 ) -> HashMap<String, HybridScore> {
+    hybrid_score_with_policy(
+        entries,
+        vec_scores,
+        fts_scores,
+        symbolic_scores,
+        weights,
+        access_times,
+        DecayPolicyContext::new(recall_config, &DEFAULT_DECAY_POLICY),
+    )
+}
+
+pub fn hybrid_score_with_policy(
+    entries: &HashMap<String, &MemoryEntry>,
+    vec_scores: &HashMap<String, f64>,
+    fts_scores: &HashMap<String, f64>,
+    symbolic_scores: &HashMap<String, f64>,
+    weights: &HybridWeights,
+    access_times: &HashMap<String, Vec<f64>>,
+    decay_policy_context: DecayPolicyContext<'_>,
+) -> HashMap<String, HybridScore> {
     let all_ids: std::collections::HashSet<&String> = vec_scores
         .keys()
         .chain(fts_scores.keys())
@@ -379,7 +472,12 @@ pub fn hybrid_score_with_config(
             .get(id.as_str())
             .map(|e| {
                 let ages = access_times.get(id).map(|v| v.as_slice());
-                decay_score_actr_with_config(e, ages, recall_config)
+                decay_score_actr_with_policy(
+                    e,
+                    ages,
+                    decay_policy_context.recall_config,
+                    decay_policy_context.decay_policy,
+                )
             })
             .unwrap_or(0.0);
 
