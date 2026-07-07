@@ -161,6 +161,38 @@ AMP uses `amp.mcpServers`:
 }
 ```
 
+### Streamable HTTP Direct Connect (Opt-In)
+
+If your host supports MCP Streamable HTTP, it can connect directly to the
+resident daemon instead of spawning a per-session stdio adapter:
+
+```json
+{
+  "mcpServers": {
+    "tachi": {
+      "url": "http://127.0.0.1:6919/mcp",
+      "headers": {
+        "X-Tachi-Profile": "standard",
+        "X-Tachi-Client": "codex",
+        "X-Tachi-Project": "Sigil"
+      }
+    }
+  }
+}
+```
+
+`X-Tachi-Profile` selects the filtered tool surface for that HTTP session, and
+`X-Tachi-Project` binds project-defaulting memory calls to that named project
+for the lifetime of the MCP session. Reads that explicitly name another project
+remain allowed only for read-only tools/actions; mutations stay bound to the
+session project unless a narrower invariant allows otherwise. `admin` is not
+accepted over HTTP direct-connect until profile claims are wired to an explicit
+authorization policy.
+
+If the daemon is restarted, HTTP clients may need to reconnect so they receive a
+fresh MCP session id. Stdio clients keep working through the compatibility
+adapter below.
+
 ### With Full Lane Configuration
 
 ```json

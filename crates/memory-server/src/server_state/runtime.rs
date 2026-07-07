@@ -5,10 +5,12 @@ use std::sync::Arc;
 use tachi_hub::ToolProfile;
 use tokio::sync::mpsc;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct AgentRuntime {
     pub(crate) agent_profile: Option<AgentProfile>,
     pub(crate) tool_profile: Option<ToolProfile>,
+    pub(crate) session_client: Option<String>,
+    pub(crate) session_project: Option<String>,
     pub(crate) handoff_memos: Vec<HandoffMemo>,
 }
 

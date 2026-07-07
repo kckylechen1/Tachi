@@ -1,14 +1,42 @@
 use crate::server_state::MemoryServer;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use tachi_hub::ToolProfile;
 
 impl MemoryServer {
+    pub(crate) fn clone_for_mcp_session(&self) -> Self {
+        let mut clone = self.clone();
+        clone.agent_runtime = Arc::new(StdRwLock::new(self.agent_runtime_read().clone()));
+        clone
+    }
+
     pub(crate) fn set_tool_profile(&self, profile: Option<ToolProfile>) {
         self.agent_runtime_write().tool_profile = profile;
     }
 
     pub(crate) fn active_tool_profile(&self) -> Option<ToolProfile> {
         self.agent_runtime_read().tool_profile
+    }
+
+    pub(crate) fn set_session_identity(
+        &self,
+        client: Option<String>,
+        project: Option<String>,
+        profile: Option<ToolProfile>,
+    ) {
+        let mut runtime = self.agent_runtime_write();
+        runtime.session_client = client;
+        runtime.session_project = project;
+        if let Some(profile) = profile {
+            runtime.tool_profile = Some(profile);
+        }
+    }
+
+    pub(crate) fn session_project(&self) -> Option<String> {
+        self.agent_runtime_read().session_project.clone()
+    }
+
+    pub(crate) fn session_client(&self) -> Option<String> {
+        self.agent_runtime_read().session_client.clone()
     }
 
     pub(crate) fn native_tool_visibility(&self) -> Vec<(String, String, bool)> {
