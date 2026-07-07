@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use tachi_hub::{
     tool_matches_bundle, tool_name_matches_pattern, ToolBundle, COORDINATE_TOOL_PATTERNS,
     DELEGATE_MINIMAL_TOOL_PATTERNS, OBSERVE_TOOL_PATTERNS, OPERATE_TOOL_PATTERNS,
@@ -36,6 +36,33 @@ fn native_route_names() -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+fn native_route_descriptions() -> BTreeMap<String, String> {
+    ensure_test_env();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("profiles test runtime");
+    let _guard = runtime.enter();
+    let db_path = std::env::temp_dir().join(format!(
+        "profiles-description-test-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = crate::MemoryServer::new(db_path, None).expect("test memory server");
+    server
+        .tool_router
+        .list_all()
+        .into_iter()
+        .map(|tool| {
+            (
+                tool.name.into_owned(),
+                tool.description
+                    .map(|description| description.into_owned())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect()
 }
 
 fn bundle_count(tool_name: &str) -> usize {
@@ -315,4 +342,45 @@ fn profile_retired_direct_tools_stay_admin_only() {
             "profile-retired direct tool '{tool_name}' must not be exposed through minimal profiles"
         );
     }
+}
+
+#[test]
+fn standalone_skill_entrypoints_stay_routable_but_point_to_tachi_skill() {
+    let descriptions = native_route_descriptions();
+
+    let tachi_skill = descriptions
+        .get("tachi_skill")
+        .expect("canonical tachi_skill facade should stay registered");
+    assert!(
+        tachi_skill.contains("action='run'"),
+        "tachi_skill description should advertise canonical run action: {tachi_skill}"
+    );
+    assert!(
+        tachi_skill.contains("action='bundle'"),
+        "tachi_skill description should advertise canonical bundle action: {tachi_skill}"
+    );
+
+    let run_skill = descriptions
+        .get("run_skill")
+        .expect("run_skill compatibility route should stay registered");
+    assert!(
+        run_skill.contains("compatibility route"),
+        "run_skill description should mark it as a compatibility route: {run_skill}"
+    );
+    assert!(
+        run_skill.contains("tachi_skill(action='run')"),
+        "run_skill description should name the canonical tachi_skill action: {run_skill}"
+    );
+
+    let prepare_bundle = descriptions
+        .get("prepare_capability_bundle")
+        .expect("prepare_capability_bundle compatibility route should stay registered");
+    assert!(
+        prepare_bundle.contains("compatibility route"),
+        "prepare_capability_bundle description should mark it as a compatibility route: {prepare_bundle}"
+    );
+    assert!(
+        prepare_bundle.contains("tachi_skill(action='bundle')"),
+        "prepare_capability_bundle description should name the canonical tachi_skill action: {prepare_bundle}"
+    );
 }
