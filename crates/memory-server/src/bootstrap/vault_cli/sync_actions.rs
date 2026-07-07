@@ -52,7 +52,10 @@ pub(super) fn run_sync_action(
             println!("Vault sync export complete.");
             vault_sync::print_status(&status);
             println!(
-                "  contents: signed encrypted Vault config, entries, and key-rotation metadata"
+                "  contents: signed Vault ciphertext, verifier material, and key-rotation metadata"
+            );
+            println!(
+                "  risk: possession of this bundle permits offline password guessing; keep it local or accept cloud-sync risk explicitly"
             );
             Ok(())
         }

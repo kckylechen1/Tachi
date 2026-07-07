@@ -1,5 +1,5 @@
 use super::*;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 #[test]
 fn card_cli_parses_list_and_show() {
@@ -192,4 +192,35 @@ fn clean_sweep_uses_cli_default_max_age() {
         }
         other => panic!("unexpected command: {other:?}"),
     }
+}
+
+#[test]
+fn vault_sync_help_names_offline_guessing_risk() {
+    let mut export_cmd = Cli::command();
+    let export_help = export_cmd
+        .find_subcommand_mut("vault")
+        .expect("vault command")
+        .find_subcommand_mut("sync-export")
+        .expect("sync-export command")
+        .render_long_help()
+        .to_string();
+    assert!(
+        export_help.contains("offline password guessing"),
+        "{export_help}"
+    );
+    assert!(export_help.contains("--allow-cloud"), "{export_help}");
+
+    let mut import_cmd = Cli::command();
+    let import_help = import_cmd
+        .find_subcommand_mut("vault")
+        .expect("vault command")
+        .find_subcommand_mut("sync-import")
+        .expect("sync-import command")
+        .render_long_help()
+        .to_string();
+    assert!(
+        import_help.contains("offline password guessing"),
+        "{import_help}"
+    );
+    assert!(import_help.contains("--allow-unsigned"), "{import_help}");
 }

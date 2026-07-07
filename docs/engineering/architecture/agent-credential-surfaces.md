@@ -28,6 +28,12 @@ The important boundary is that live project memory databases stay local or
 project-scoped. Cloud sync may carry encrypted Vault material, but it should not
 silently replicate live SQLite memory DBs.
 
+Vault sync bundles are portable ciphertext, not offline-guessing-resistant
+backups. The bundle carries enough verifier/ciphertext material for anyone who
+obtains the file to test Vault password guesses offline. Keep the default sync
+path local, require explicit `--allow-cloud` for cloud-synced destinations, and
+do not describe the signed bundle as safe merely because rows are encrypted.
+
 ## Observed Consumers
 
 ### OpenCode
@@ -234,4 +240,3 @@ format. The user-facing workflow should be:
 3. Run `tachi vault materialize <consumer>` to render only the needed auth shape.
 4. Launch agents through wrappers that inject short-lived env/config overlays.
 5. Let doctor/probe report drift, 401, 429, and missing mappings.
-

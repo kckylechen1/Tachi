@@ -349,11 +349,16 @@ pub enum VaultAction {
         config: Option<PathBuf>,
     },
     /// Export encrypted Vault rows to a signed sync bundle.
+    ///
+    /// If this file is stolen, its verifier/ciphertext material permits offline
+    /// password guessing. Keep it local, use a strong Vault password, and treat
+    /// --allow-cloud as an explicit risk acceptance.
     SyncExport {
         /// Output bundle path. Defaults to ~/.tachi/sync/vault/vault.bundle.json.
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,
-        /// Allow writing the encrypted bundle to a cloud-sync path such as iCloud Drive.
+        /// Allow writing the bundle to a cloud-sync path such as iCloud Drive,
+        /// accepting offline password guessing risk if the synced file leaks.
         #[arg(long)]
         allow_cloud: bool,
         /// Read Vault password from stdin.
@@ -370,6 +375,10 @@ pub enum VaultAction {
         insecure_password_file: bool,
     },
     /// Import encrypted Vault rows from a sync bundle.
+    ///
+    /// Possession of a signed or legacy unsigned bundle can permit offline
+    /// password guessing against the Vault password; import only from trusted
+    /// storage and prefer locally kept bundles.
     SyncImport {
         /// Input bundle path. Defaults to ~/.tachi/sync/vault/vault.bundle.json.
         #[arg(long, value_name = "PATH")]
