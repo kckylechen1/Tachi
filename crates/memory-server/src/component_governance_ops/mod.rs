@@ -129,24 +129,31 @@ fn entry_for_record(record: &Value) -> MemoryEntry {
     }
 }
 
-/// Deterministic entry id for a component record so re-seeds upsert rather than dup.
+/// Deterministic, cross-toolchain-stable entry id for a component record so
+/// re-seeds upsert rather than dup. Uses FNV-1a `stable_hash` (guaranteed
+/// stable across Rust versions, unlike `DefaultHasher`).
 fn deterministic_component_id(component_id: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    format!("component-v0-{component_id}").hash(&mut hasher);
-    format!("c{:016x}", hasher.finish())
+    format!(
+        "c{}",
+        crate::utils::stable_hash(&format!("component-v0-{component_id}"))
+    )
 }
 
 /// Seed component records + relation edges into the global store, once.
-/// Idempotent via a seed-once marker. Returns true if seeded this call.
+/// Idempotent via a seed-once marker claimed LAST (only after all writes
+/// succeed), so a mid-seed failure leaves no marker and the next boot retries.
+/// Upserts are idempotent (keyed on entry id) so retries are safe.
+/// Returns true if seeded this call.
 pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, String> {
-    let already = server.with_global_store(|store| {
+    // Check the marker first (read-only) so an already-seeded store short-circuits
+    // without touching writes. The marker is only CLAIMED after success below.
+    let already_seeded = server.with_global_store_read(|store| {
         store
-            .insert_state_if_absent(SEED_NS, SEED_KEY, "{\"seeded\":true}")
-            .map_err(|e| format!("claim component governance seed marker: {e}"))
+            .get_state_kv(SEED_NS, SEED_KEY)
+            .map(|v| v.is_some())
+            .map_err(|e| format!("check component governance seed marker: {e}"))
     })?;
-    if !already {
+    if already_seeded {
         return Ok(false);
     }
 
@@ -161,14 +168,15 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
         .collect();
 
     server.with_global_store(|store| {
-        // Upsert each record.
+        // Upsert each record (idempotent — keyed on entry id).
         for record in &records {
             let entry = entry_for_record(record);
             store
                 .upsert(&entry)
                 .map_err(|e| format!("upsert component record: {e}"))?;
         }
-        // Seed relation edges between known component ids.
+        // Seed relation edges between known component ids. Edges are upserts
+        // (ON CONFLICT source,target,relation), so retries don't duplicate.
         for record in &records {
             let component_id = record
                 .get("component_id")
@@ -178,13 +186,11 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
                 continue;
             }
             let entry_id = deterministic_component_id(component_id);
-            // kernel "owns" its declared downstream consumers that are known components
             let is_kernel = record
                 .get("component_type")
                 .and_then(Value::as_str)
                 .map(|t| t == "kernel")
                 .unwrap_or(false);
-            // consumers that reference this record (declared in downstream_consumers)
             for consumer in record
                 .get("downstream_consumers")
                 .and_then(Value::as_array)
@@ -194,7 +200,7 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
             {
                 if let Some(target_id) = known_ids.iter().find(|c| consumer.contains(c.as_str())) {
                     let relation = if is_kernel { "owns" } else { "consumes" };
-                    let _ = store.add_edge(&MemoryEdge {
+                    store.add_edge(&MemoryEdge {
                         source_id: entry_id.clone(),
                         target_id: deterministic_component_id(target_id),
                         relation: relation.to_string(),
@@ -203,10 +209,9 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
                         created_at: chrono::Utc::now().to_rfc3339(),
                         valid_from: chrono::Utc::now().to_rfc3339(),
                         valid_to: None,
-                    });
+                    }).map_err(|e| format!("seed {relation} edge: {e}"))?;
                 }
             }
-            // drift-classified edges
             for drift in record
                 .get("known_drift")
                 .and_then(Value::as_array)
@@ -224,7 +229,7 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
                 };
                 if let Some(rel) = relation {
                     // self-edge documenting the drift classification on this record
-                    let _ = store.add_edge(&MemoryEdge {
+                    store.add_edge(&MemoryEdge {
                         source_id: entry_id.clone(),
                         target_id: entry_id.clone(),
                         relation: rel.to_string(),
@@ -233,11 +238,19 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
                         created_at: chrono::Utc::now().to_rfc3339(),
                         valid_from: chrono::Utc::now().to_rfc3339(),
                         valid_to: None,
-                    });
+                    }).map_err(|e| format!("seed {rel} drift edge: {e}"))?;
                 }
             }
         }
         Ok(())
+    })?;
+
+    // Claim the marker LAST, only after all writes succeeded. A mid-seed
+    // failure leaves no marker, so the next boot retries the idempotent upserts.
+    server.with_global_store(|store| {
+        store
+            .insert_state_if_absent(SEED_NS, SEED_KEY, "{\"seeded\":true}")
+            .map_err(|e| format!("claim component governance seed marker: {e}"))
     })?;
 
     Ok(true)
