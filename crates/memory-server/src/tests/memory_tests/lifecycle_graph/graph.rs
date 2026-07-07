@@ -100,3 +100,53 @@ async fn memory_graph_caps_query_seed_top_k() {
         Some(crate::MAX_SEARCH_TOP_K as u64)
     );
 }
+
+#[tokio::test]
+async fn get_edges_explicit_named_project_read_uses_read_only_project_route() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let project = "graph_edges_named_read";
+    let db_path = crate::path_utils::plan_c_global_db_path(project);
+    std::fs::create_dir_all(db_path.parent().expect("named project DB parent"))
+        .expect("create named project DB parent");
+    let db_str = db_path.to_str().expect("named project DB path");
+    let mut store =
+        memory_core::MemoryStore::open_with_label(db_str, project).expect("open named project DB");
+
+    let mut source = make_entry("project_edge_source");
+    source.text = "Project-only graph edge source".to_string();
+    let mut target = make_entry("project_edge_target");
+    target.text = "Project-only graph edge target".to_string();
+    store.upsert(&source).expect("seed project source");
+    store.upsert(&target).expect("seed project target");
+    store
+        .add_edge(&memory_core::MemoryEdge {
+            source_id: "project_edge_source".to_string(),
+            target_id: "project_edge_target".to_string(),
+            relation: "supports".to_string(),
+            weight: 1.0,
+            metadata: json!({}),
+            created_at: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_to: None,
+        })
+        .expect("seed project edge");
+    drop(store);
+
+    let result = server
+        .get_edges(Parameters(GetEdgesParams {
+            memory_id: "project_edge_source".to_string(),
+            direction: "outgoing".to_string(),
+            relation_filter: None,
+            project: Some(project.to_string()),
+            scope: "project".to_string(),
+        }))
+        .await
+        .expect("get_edges should read named project");
+    let json: Value = serde_json::from_str(&result).expect("json");
+    let edges = json.as_array().expect("edges array");
+
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0]["db"], json!("project"));
+    assert_eq!(edges[0]["source_id"], json!("project_edge_source"));
+    assert_eq!(edges[0]["target_id"], json!("project_edge_target"));
+}

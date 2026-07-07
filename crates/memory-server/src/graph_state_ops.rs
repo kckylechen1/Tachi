@@ -110,9 +110,7 @@ pub(crate) async fn handle_get_edges(
     server: &MemoryServer,
     params: GetEdgesParams,
 ) -> Result<String, String> {
-    let (target_db, _warning) = server.resolve_write_scope(&params.scope);
-
-    let edges = server.with_store_for_scope(target_db, |store| {
+    let load_edges = |store: &mut MemoryStore| {
         store
             .get_edges(
                 &params.memory_id,
@@ -120,7 +118,25 @@ pub(crate) async fn handle_get_edges(
                 params.relation_filter.as_deref(),
             )
             .map_err(|e| format!("Failed to get edges: {}", e))
-    })?;
+    };
+    let (target_db, edges) = if let Some(project_name) = params.project.as_deref() {
+        (
+            DbScope::Project,
+            server.with_named_project_store_read(project_name, load_edges)?,
+        )
+    } else {
+        let target_db = if params.scope == "global" {
+            DbScope::Global
+        } else if server.has_project_db() {
+            DbScope::Project
+        } else {
+            DbScope::Global
+        };
+        (
+            target_db,
+            server.with_store_for_scope_read(target_db, load_edges)?,
+        )
+    };
 
     let output: Vec<serde_json::Value> = edges
         .iter()
