@@ -10,6 +10,48 @@ fn hypermem_compatibility_gate_fixture_covers_issue_793_contract() {
 
     assert_eq!(fixture["issue"], json!(793));
     assert_eq!(fixture["direct_reader_decision"], json!("shim_then_retire"));
+    let current_bindings = fixture["current_kernel_bindings"]
+        .as_array()
+        .expect("current kernel bindings")
+        .iter()
+        .map(|item| item.as_str().expect("current binding string"))
+        .collect::<BTreeSet<_>>();
+    for binding in [
+        "tachi_memory.get",
+        "tachi_memory.search",
+        "tachi_memory.recall_simulate",
+    ] {
+        assert!(
+            current_bindings.contains(binding),
+            "missing current binding {binding}"
+        );
+    }
+    let target_exports = fixture["target_kernel_exports"]
+        .as_array()
+        .expect("target kernel exports")
+        .iter()
+        .map(|item| item.as_str().expect("target export string"))
+        .collect::<BTreeSet<_>>();
+    for target in [
+        "recall_diagnostics",
+        "documented_export_view",
+        "domain_scorer_policy_hook",
+        "decay_policy_hook",
+    ] {
+        assert!(target_exports.contains(target), "missing target {target}");
+        assert!(
+            !current_bindings.contains(target),
+            "target export {target} must not be presented as a current binding"
+        );
+    }
+
+    let prerequisites = fixture["cutover_prerequisites"]
+        .as_array()
+        .expect("cutover prerequisites");
+    assert!(prerequisites.iter().any(|item| item["issue"] == json!(708)
+        && item["status"] == json!("open_required_before_downstream_cutover")));
+    assert!(prerequisites.iter().any(|item| item["issue"] == json!(791)
+        && item["status"] == json!("target_required_before_policy_cutover")));
 
     let checklist = fixture["checklist"]
         .as_array()

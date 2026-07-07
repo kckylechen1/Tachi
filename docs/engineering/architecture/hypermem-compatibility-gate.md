@@ -14,6 +14,11 @@ This is not a Quant migration plan, a fork-preservation plan, or a trading
 strategy spec. Hypermem may keep a thin adapter, fixture corpus, and policy
 configuration. It must not keep a copy-paste kernel fork.
 
+This gate is not a claim that Hypermem can cut over today. It is the target
+contract for convergence. The golden-corpus recall gate (#708) remains a
+required cutover prerequisite, and the scorer/decay hook (#791) remains the
+target non-fork path for A-share policy.
+
 ## Boundary
 
 Tachi owns the portable kernel:
@@ -65,8 +70,11 @@ API. The compatibility decision is **shim, then retire**:
    consumers after the #786 direct-read fix.
 2. The shim must pin its selected columns and must fail loudly when required
    columns or metadata keys are missing.
-3. New downstream code must use kernel APIs such as `memory_get`,
-   `memory_search`, recall diagnostics, or a documented export view.
+3. New downstream code must use current kernel bindings such as
+   `tachi_memory(action="get")`, `tachi_memory(action="search")`, and
+   `tachi_memory(action="recall_simulate")` where available. Rich
+   `recall_diagnostics` and documented export views are target exports, not
+   current public API promises.
 4. The shim is removed once the convergence fixture proves callers no longer
    depend on raw table access.
 
@@ -80,7 +88,7 @@ registering a policy object that receives the kernel's neutral recall candidate,
 score components, timestamps, and metadata, then returns additive or bounded
 multiplier adjustments with diagnostics.
 
-Required shape:
+Target shape:
 
 - `DomainScorer`: receives candidate metadata and query context; may add
   domain-neutral diagnostics plus downstream-owned score adjustments.
@@ -98,12 +106,15 @@ References only:
   reinforced by later hits. Tachi may expose confidence and reinforcement fields,
   but Hypermem owns any trading interpretation.
 
-The portable kernel may provide default no-op or generic policies. A-share
-freshness, trading-session semantics, and signal half-lives are adapter policy.
+The portable kernel may provide default no-op or generic policies once #791
+lands. Until then, A-share freshness, trading-session semantics, and signal
+half-lives remain downstream adapter policy and must not be implemented by
+forking core scorer code.
 
 ## Minimum Recall-Quality Evidence
 
-Before Hypermem adopts the shared kernel, its convergence fixture must show:
+Before Hypermem adopts the shared kernel, #708's golden-corpus gate and its own
+convergence fixture must show:
 
 1. **Score stability:** top-k rank and score components remain within the
    approved tolerance for representative trading-memory queries. Any intentional

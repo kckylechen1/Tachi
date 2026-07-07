@@ -2,11 +2,28 @@
   "gate": "hypermem_compatibility_gate",
   "issue": 793,
   "direct_reader_decision": "shim_then_retire",
-  "kernel_public_api": [
-    "memory_get",
-    "memory_search",
+  "current_kernel_bindings": [
+    "tachi_memory.get",
+    "tachi_memory.search",
+    "tachi_memory.recall_simulate"
+  ],
+  "target_kernel_exports": [
     "recall_diagnostics",
-    "documented_export_view"
+    "documented_export_view",
+    "domain_scorer_policy_hook",
+    "decay_policy_hook"
+  ],
+  "cutover_prerequisites": [
+    {
+      "issue": 708,
+      "status": "open_required_before_downstream_cutover",
+      "reason": "golden-corpus recall gate must pass before Hypermem adopts shared ranking behavior"
+    },
+    {
+      "issue": 791,
+      "status": "target_required_before_policy_cutover",
+      "reason": "domain scorer/decay hooks are the non-fork path for A-share policy"
+    }
   ],
   "required_surfaces": [
     "local_docs",
