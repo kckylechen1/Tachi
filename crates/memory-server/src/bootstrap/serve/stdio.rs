@@ -474,7 +474,13 @@ impl rmcp::ServerHandler for StdioProxyServer {
             }
             let request = prepare_proxy_tool_call(request, self.client_project.as_deref())?;
             let current = self.current_daemon();
-            match crate::cli_client::call_daemon_tool_raw(&current, request.clone()).await {
+            match crate::cli_client::call_daemon_tool_raw(
+                &current,
+                request.clone(),
+                self.client_project.as_deref(),
+            )
+            .await
+            {
                 Ok(result) => Ok(result),
                 // Only BeforeDispatch is safe to retry: the request never reached
                 // the daemon, so a re-resolved retry cannot duplicate a write.
@@ -482,9 +488,13 @@ impl rmcp::ServerHandler for StdioProxyServer {
                 // as-is to avoid replaying a possibly-applied write.
                 Err(err) if err.allows_in_process_fallback() => {
                     match self.refresh_daemon(&current.url).await {
-                        Some(fresh) => crate::cli_client::call_daemon_tool_raw(&fresh, request)
-                            .await
-                            .map_err(daemon_error_data),
+                        Some(fresh) => crate::cli_client::call_daemon_tool_raw(
+                            &fresh,
+                            request,
+                            self.client_project.as_deref(),
+                        )
+                        .await
+                        .map_err(daemon_error_data),
                         None => Err(daemon_error_data(err)),
                     }
                 }

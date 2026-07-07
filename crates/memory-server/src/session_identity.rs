@@ -165,6 +165,43 @@ fn tachi_wiki_action_allows_cross_project_read(action: &str) -> bool {
     )
 }
 
+/// Reject explicit cross-project targeting from an UNBOUND session when the
+/// tool/action is not a read-only cross-project case. Bound sessions are
+/// handled by `enforce_session_project`. An unbound HTTP direct-connect session
+/// has no declared tenant, so an explicit `project=` on a mutating tool is a
+/// potential cross-tenant write and must be rejected. (C1 fix.)
+///
+/// Invariant protected: single-writer project isolation — an unbound session
+/// must not be able to route a write into an arbitrary project's DB. Read-only
+/// cross-project cases (handled by `explicit_project_can_cross_binding`) do not
+/// threaten single-writer discipline and remain allowed; this guard checks both
+/// sides so it does not over-reach into legitimate reads.
+pub(crate) fn reject_unbound_cross_project_write(
+    tool_name: &str,
+    arguments: &Option<JsonObject>,
+    bound_project: Option<&str>,
+    transport_label: &str,
+) -> Result<(), rmcp::ErrorData> {
+    if bound_project.is_some() {
+        return Ok(());
+    }
+    let Some(args) = arguments.as_ref() else {
+        return Ok(());
+    };
+    let Some(explicit) = args.get("project").and_then(|v| v.as_str()) else {
+        return Ok(());
+    };
+    if explicit_project_can_cross_binding(tool_name, args) {
+        return Ok(());
+    }
+    Err(rmcp::ErrorData::invalid_params(
+        format!(
+            "{transport_label} session is not bound to a project; refusing explicit project='{explicit}' on tool '{tool_name}' (cross-project writes require a bound session — send X-Tachi-Project at initialize)"
+        ),
+        None,
+    ))
+}
+
 pub(crate) fn normalize_identity_value(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())

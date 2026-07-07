@@ -315,14 +315,26 @@ impl ServerHandler for MemoryServer {
                 return Ok(tool_not_found_result(name));
             }
 
-            if let Some(project) = self.session_project() {
+            let bound_project = self.session_project();
+            if let Some(project) = bound_project.as_deref() {
                 crate::session_identity::enforce_session_project(
                     name,
                     &mut params.arguments,
-                    &project,
+                    project,
                     "HTTP direct-connect",
                 )?;
             }
+            // C1 fix (fail-closed): an unbound HTTP direct-connect session has no
+            // declared tenant, so an explicit `project=` on a mutating tool is a
+            // potential cross-tenant write and must be rejected. Bound sessions
+            // (including the stdio proxy, which forwards X-Tachi-Project) pass the
+            // bound_project check above and are not affected.
+            crate::session_identity::reject_unbound_cross_project_write(
+                name,
+                &params.arguments,
+                bound_project.as_deref(),
+                "HTTP direct-connect",
+            )?;
 
             // ─── Rate Limiter: throttle and loop detection ───────────────
             let stuck_warning: Option<String> = {

@@ -1,7 +1,9 @@
 //! Streamable HTTP MCP transport calls used by CLI and stdio proxy surfaces.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
+use http::{HeaderName, HeaderValue};
 use rmcp::model::{CallToolRequestParams, ListToolsResult, RawContent};
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
@@ -52,7 +54,7 @@ pub(crate) async fn call_daemon_tool(
     if !daemon_args.is_empty() {
         params = params.with_arguments(daemon_args);
     }
-    let result = call_daemon_tool_raw(info, params).await?;
+    let result = call_daemon_tool_raw(info, params, None).await?;
     if result.is_error.unwrap_or(false) {
         let err_text =
             first_text_block(&result.content).unwrap_or_else(|| "<no error text>".to_string());
@@ -67,12 +69,32 @@ pub(crate) async fn call_daemon_tool(
 /// Call a daemon tool over Streamable HTTP without remapping the name or
 /// collapsing the result to text. stdio proxy mode uses this to stay a pure
 /// transport adapter while the daemon remains the semantic owner.
+///
+/// `proxy_project` lets the stdio proxy declare its bound project identity to
+/// the daemon by forwarding `X-Tachi-Project` via rmcp's `custom_headers`
+/// builder. The proxy already enforces the binding client-side
+/// (`prepare_proxy_tool_call` → `enforce_session_project`), so forwarding it
+/// keeps the daemon-side binding consistent with the already-enforced `project=`
+/// arg and lets the fail-closed C1 guard (`reject_unbound_cross_project_write`)
+/// accept the proxied write instead of rejecting it as unbound. CLI invocations
+/// have no proxy project and pass `None`.
 pub(crate) async fn call_daemon_tool_raw(
     info: &DaemonInfo,
     params: CallToolRequestParams,
+    proxy_project: Option<&str>,
 ) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
     let tool_name = params.name.as_ref().to_string();
-    let transport_config = StreamableHttpClientTransportConfig::with_uri(info.url.clone());
+    let mut transport_config = StreamableHttpClientTransportConfig::with_uri(info.url.clone());
+    if let Some(project) = proxy_project {
+        let mut headers = HashMap::new();
+        headers.insert(
+            HeaderName::from_static(crate::session_identity::HEADER_PROJECT),
+            HeaderValue::from_str(project).map_err(|e| {
+                DaemonCallError::BeforeDispatch(format!("invalid proxy project header value: {e}"))
+            })?,
+        );
+        transport_config = transport_config.custom_headers(headers);
+    }
     let transport = StreamableHttpClientTransport::from_config(transport_config);
     let client = ServiceExt::serve((), transport).await.map_err(|e| {
         DaemonCallError::BeforeDispatch(format!("daemon handshake failed at {}: {e}", info.url))
