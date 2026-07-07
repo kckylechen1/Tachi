@@ -8,7 +8,12 @@ mod http;
 mod parser;
 mod policy;
 
-pub(crate) use check_state::{write_check_state_artifact, CheckStateArtifactInput};
+pub(crate) use check_state::{
+    ingest_check_state_transition, write_check_state_artifact, CheckStateArtifactInput,
+    CheckStateIngestRequest,
+};
+#[cfg(test)]
+pub(crate) use check_state::{CheckStateLedgerState, CheckStateRead, CheckStateReader};
 pub(crate) use cli::CliGhClient;
 pub(in crate::gh_ops) use error::{classify_gh_error, is_no_checks_reported};
 pub(crate) use handler::handle_github_safe_merge;

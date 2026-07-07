@@ -26,32 +26,53 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         .await
         .map_err(|e| format!("pr_view failed: {e}"))?;
     let check_state_ingest = if dry_run {
-        let check_runs = client
-            .checks_list(repo, pr_number)
-            .await
-            .map_err(|e| format!("checks_list failed for check-state ingest: {e}"))?;
         let observed_at = chrono::Utc::now().to_rfc3339();
         let pr_ref = format!("{repo}#{pr_number}");
-        Some(write_check_state_artifact(
-            flow_id,
-            &CheckStateArtifactInput {
-                repo,
-                pr_number,
-                pr_ref: Some(pr_ref.as_str()),
-                head_ref: pr.head_ref.as_deref(),
-                observed_at: observed_at.as_str(),
-                source: "safe_merge.dry_run",
-                dry_run,
-                checks: &check_runs,
-            },
-        )?)
+        if let Some(fid) = flow_id {
+            let ingest = ingest_check_state_transition(
+                client,
+                &CheckStateIngestRequest {
+                    flow_id: fid,
+                    repo,
+                    pr_number,
+                    pr_ref: Some(pr_ref.as_str()),
+                    head_ref: pr.head_ref.as_deref(),
+                    expected_head_sha: Some(pr.head_sha.as_str()),
+                    source: "safe_merge.dry_run",
+                },
+            )
+            .await?;
+            Some(
+                serde_json::to_value(ingest)
+                    .map_err(|e| format!("serialize check_state_ingest: {e}"))?,
+            )
+        } else {
+            let check_runs = client
+                .checks_list(repo, pr_number)
+                .await
+                .map_err(|e| format!("checks_list failed for check-state ingest: {e}"))?;
+            let artifact = write_check_state_artifact(
+                flow_id,
+                &CheckStateArtifactInput {
+                    repo,
+                    pr_number,
+                    pr_ref: Some(pr_ref.as_str()),
+                    head_ref: pr.head_ref.as_deref(),
+                    observed_at: observed_at.as_str(),
+                    source: "safe_merge.dry_run",
+                    dry_run,
+                    checks: &check_runs,
+                    transition: None,
+                },
+            )?;
+            Some(
+                serde_json::to_value(artifact)
+                    .map_err(|e| format!("serialize check_state_ingest: {e}"))?,
+            )
+        }
     } else {
         None
     };
-    let check_state_ingest = check_state_ingest
-        .map(serde_json::to_value)
-        .transpose()
-        .map_err(|e| format!("serialize check_state_ingest: {e}"))?;
     if matches!(pr.state, PrLifecycleState::Merged) {
         return handle_already_merged_pr(
             repo,

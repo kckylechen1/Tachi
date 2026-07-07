@@ -1,0 +1,178 @@
+{
+  "gate": "hypermem_compatibility_gate",
+  "issue": 793,
+  "direct_reader_decision": "shim_then_retire",
+  "current_kernel_bindings": [
+    "tachi_memory.get",
+    "tachi_memory.search",
+    "tachi_memory.recall_simulate"
+  ],
+  "target_kernel_exports": [
+    "recall_diagnostics",
+    "documented_export_view",
+    "domain_scorer_policy_hook",
+    "decay_policy_hook"
+  ],
+  "cutover_prerequisites": [
+    {
+      "issue": 708,
+      "status": "open_required_before_downstream_cutover",
+      "reason": "golden-corpus recall gate must pass before Hypermem adopts shared ranking behavior"
+    },
+    {
+      "issue": 791,
+      "status": "target_required_before_policy_cutover",
+      "reason": "domain scorer/decay hooks are the non-fork path for A-share policy"
+    }
+  ],
+  "required_surfaces": [
+    "local_docs",
+    "fixture_json",
+    "memory_kernel_api"
+  ],
+  "forbidden_required_surfaces": [
+    "tachi_dispatch",
+    "tachi_task_dispatch",
+    "github",
+    "gh",
+    "issue",
+    "pull_request",
+    "ship",
+    "release",
+    "close_loop"
+  ],
+  "checklist": [
+    {
+      "area": "hypermemory_aliases",
+      "decision": "adapter_shim_then_delete",
+      "classification": "delete_retire",
+      "must_cover": [
+        "function_aliases",
+        "cli_aliases",
+        "env_aliases",
+        "json_field_aliases"
+      ]
+    },
+    {
+      "area": "hapi_trading_harness_bridge",
+      "decision": "adapter_translation",
+      "classification": "allowed_adapter_policy",
+      "must_cover": [
+        "request_envelope",
+        "response_envelope",
+        "smoke_entrypoint"
+      ]
+    },
+    {
+      "area": "direct_memories_table_reader",
+      "decision": "shim_then_retire",
+      "classification": "delete_retire",
+      "must_cover": [
+        "pinned_columns",
+        "loud_missing_column_failure",
+        "migration_warning",
+        "api_replacement"
+      ]
+    },
+    {
+      "area": "trading_metadata_categories",
+      "decision": "preserve_generic_metadata_upstream_keep_vocabulary_downstream",
+      "classification": "upstream_backflow_candidate",
+      "must_cover": [
+        "category",
+        "symbol",
+        "market",
+        "timeframe",
+        "source",
+        "strategy_tag",
+        "provenance"
+      ]
+    },
+    {
+      "area": "a_share_decay_policy",
+      "decision": "domain_decay_policy_hook",
+      "classification": "allowed_adapter_policy",
+      "must_cover": [
+        "market_session_age",
+        "policy_half_life",
+        "stale_signal_handling"
+      ]
+    }
+  ],
+  "difference_classifications": [
+    {
+      "difference": "legacy_hypermemory_facade_names",
+      "classification": "delete_retire"
+    },
+    {
+      "difference": "hapi_request_response_envelope",
+      "classification": "allowed_adapter_policy"
+    },
+    {
+      "difference": "raw_memories_table_access",
+      "classification": "delete_retire"
+    },
+    {
+      "difference": "generic_metadata_round_trip_and_provenance",
+      "classification": "upstream_backflow_candidate"
+    },
+    {
+      "difference": "a_share_freshness_and_session_decay",
+      "classification": "allowed_adapter_policy"
+    },
+    {
+      "difference": "trading_verdict_or_position_logic",
+      "classification": "delete_retire"
+    },
+    {
+      "difference": "recall_diagnostics_score_components",
+      "classification": "upstream_backflow_candidate"
+    }
+  ],
+  "extension_points": {
+    "domain_scorer": {
+      "required": true,
+      "forks_kernel": false,
+      "inputs": [
+        "recall_candidate",
+        "query_context",
+        "score_components",
+        "metadata"
+      ],
+      "outputs": [
+        "bounded_score_adjustment",
+        "diagnostic_reason"
+      ]
+    },
+    "decay_policy": {
+      "required": true,
+      "forks_kernel": false,
+      "inputs": [
+        "memory_type",
+        "created_at",
+        "last_seen_at",
+        "domain_metadata"
+      ],
+      "outputs": [
+        "decay_factor",
+        "reason_code"
+      ],
+      "references_only": [
+        "omp_type_specific_decay",
+        "hindsight_confidence_reinforcement"
+      ]
+    }
+  },
+  "minimum_recall_quality_evidence": [
+    "score_stability",
+    "vector_fts_fallback_behavior",
+    "domain_metadata_preservation",
+    "trading_memory_provenance"
+  ],
+  "non_goals": [
+    "quant_repo_migration",
+    "copy_paste_kernel_fork_preservation",
+    "trading_verdict_logic_in_tachi_core",
+    "financial_strategy_in_portable_memory_policy"
+  ]
+}

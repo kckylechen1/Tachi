@@ -1,0 +1,182 @@
+{
+  "manifest": "kernel_surface_v1",
+  "issue": 790,
+  "design_evidence": [
+    "omp_memory_backend_boundary",
+    "hindsight_four_network_ontology"
+  ],
+  "portable_bundle": {
+    "required_surfaces": [
+      "memory-core",
+      "memory_db_schema_contracts",
+      "recall_scorer_rrf",
+      "vector_backfill",
+      "event_ledger_projection",
+      "library_identity_routing",
+      "status_readiness"
+    ],
+    "excluded_surfaces": [
+      "tachi_gh",
+      "github",
+      "dispatch",
+      "tachi_task_dispatch",
+      "ship",
+      "release",
+      "pull_request_lifecycle",
+      "ci_merge"
+    ]
+  },
+  "surface_classes": [
+    {
+      "class": "kernel",
+      "owns": [
+        "memory-core",
+        "memory_db_schema_contracts",
+        "recall_scorer_rrf",
+        "vector_backfill",
+        "event_ledger_projection"
+      ]
+    },
+    {
+      "class": "runtime_adapter",
+      "owns": [
+        "library_identity_routing",
+        "status_readiness",
+        "host_lifecycle_hooks",
+        "developer_briefing_context"
+      ]
+    },
+    {
+      "class": "workflow",
+      "owns": [
+        "dispatch",
+        "kanban",
+        "handoff",
+        "close_loop"
+      ]
+    },
+    {
+      "class": "admin",
+      "owns": [
+        "vault",
+        "hub_governance",
+        "sandbox",
+        "pack_management"
+      ]
+    },
+    {
+      "class": "product",
+      "owns": [
+        "github",
+        "ship",
+        "release",
+        "pr_lifecycle",
+        "persona_defaults"
+      ]
+    }
+  ],
+  "backend_boundary": [
+    {
+      "operation": "status_readiness",
+      "required": true,
+      "implementation_status": "current",
+      "current_bindings": [
+        "runtime_info",
+        "tachi_memory.readiness"
+      ]
+    },
+    {
+      "operation": "search_recall",
+      "required": true,
+      "implementation_status": "current_plus_target",
+      "current_bindings": [
+        "tachi_memory.search",
+        "tachi_memory.recall_simulate"
+      ],
+      "target_terms": [
+        "recall_diagnostics"
+      ]
+    },
+    {
+      "operation": "save_retain",
+      "required": true,
+      "implementation_status": "current_plus_adapter_vocabulary",
+      "current_bindings": [
+        "tachi_memory.save",
+        "memory.saved"
+      ],
+      "target_terms": [
+        "retain"
+      ]
+    },
+    {
+      "operation": "developer_briefing_context",
+      "required": true,
+      "implementation_status": "current_plus_target",
+      "current_bindings": [
+        "tachi_memory.briefing"
+      ]
+    },
+    {
+      "operation": "readiness_diagnostics",
+      "required": true,
+      "implementation_status": "partial_current_target_api",
+      "current_bindings": [
+        "tachi_memory.readiness",
+        "recall_simulate.metrics"
+      ],
+      "target_terms": [
+        "documented_export_view"
+      ]
+    },
+    {
+      "operation": "lifecycle_hooks",
+      "required": false,
+      "implementation_status": "target_proposed",
+      "current_bindings": [
+        "memory.saved"
+      ],
+      "target_terms": [
+        "retain_requested",
+        "recall_requested",
+        "recall_returned",
+        "reflect_requested",
+        "reflection_returned"
+      ]
+    }
+  ],
+  "ontology": [
+    {
+      "name": "world_fact",
+      "status": "in_kernel_now"
+    },
+    {
+      "name": "experience",
+      "status": "in_kernel_now"
+    },
+    {
+      "name": "opinion_preference",
+      "status": "policy_hooked_later"
+    },
+    {
+      "name": "observation_summary",
+      "status": "policy_hooked_now_kernel_lifecycle_later"
+    }
+  ],
+  "upstream_decision_rule": {
+    "upstream_in_tachi": [
+      "durable_schema",
+      "provenance",
+      "recall_primitives",
+      "graph_relations",
+      "readiness_diagnostics"
+    ],
+    "downstream_adapter_or_product": [
+      "persona",
+      "domain_interpretation",
+      "product_defaults",
+      "final_prompt_composition",
+      "github_or_release_workflow"
+    ]
+  }
+}
