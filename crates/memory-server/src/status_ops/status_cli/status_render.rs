@@ -268,11 +268,14 @@ async fn render_one(
                 })
                 .unwrap_or_default();
             println!(
-                "       [i] vector_sweep={} last_run={} embedded={} failed={} skip_cache={}{}{}",
+                "       [i] vector_sweep={} last_run={} embedded={} failed={} current_pending={} threshold={} needed={} skip_cache={}{}{}",
                 state,
                 sweep.last_run_at,
                 sweep.embedded_count,
                 sweep.failed_count,
+                sweep.current_pending_count,
+                sweep.current_pending_threshold,
+                sweep.current_backfill_needed,
                 sweep.skip_recall_cache,
                 next,
                 reason

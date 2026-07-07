@@ -187,6 +187,11 @@ async fn tachi_status_reports_durable_vector_sweep_state() {
     assert_eq!(sweep["embedded_count"], json!(3));
     assert_eq!(sweep["failed_count"], json!(1));
     assert_eq!(sweep["interval_secs"], json!(1800));
+    assert_eq!(sweep["current_total_count"], json!(1));
+    assert_eq!(sweep["current_with_vector_count"], json!(0));
+    assert_eq!(sweep["current_pending_count"], json!(1));
+    assert!(sweep["current_pending_threshold"].as_u64().is_some());
+    assert!(sweep["current_backfill_needed"].as_bool().is_some());
     assert!(sweep["last_run_at"].as_str().is_some());
     assert_eq!(
         sweep["last_provider_error"],
