@@ -163,7 +163,7 @@ fn named_project_from_path_rejects_external_projects_dir() {
 #[test]
 fn named_project_for_db_path_accepts_plan_c_symlink_target() {
     with_env_lock(|| {
-        let tmp = tempfile::tempdir().expect("tmp");
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
         let saved = std::env::var_os("TACHI_HOME");
         let tachi_home = tmp.path().join("home");
         std::env::set_var("TACHI_HOME", &tachi_home);
@@ -172,6 +172,7 @@ fn named_project_for_db_path_accepts_plan_c_symlink_target() {
         let local_db = repo.join(".tachi/memory.db");
         std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
         std::fs::write(&local_db, b"").expect("local db placeholder");
+        crate::test_support::assert_repo_local_db_fixture_not_skipped(&local_db);
         ensure_plan_c_symlink(&local_db, &repo);
 
         // The alias dir name now carries the stable-hash suffix; the reverse
@@ -191,7 +192,7 @@ fn named_project_for_db_path_accepts_plan_c_symlink_target() {
 #[test]
 fn plan_c_regular_alias_file_reports_split_brain() {
     with_env_lock(|| {
-        let tmp = tempfile::tempdir().expect("tmp");
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
         let saved = std::env::var_os("TACHI_HOME");
         let tachi_home = tmp.path().join("home");
         std::env::set_var("TACHI_HOME", &tachi_home);
@@ -201,6 +202,7 @@ fn plan_c_regular_alias_file_reports_split_brain() {
         std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
         memory_core::MemoryStore::open(local_db.to_str().expect("local db"))
             .expect("create local db");
+        crate::test_support::assert_repo_local_db_fixture_not_skipped(&local_db);
 
         let alias_db = plan_c_global_db_path("Split_Brain_Repo");
         std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");

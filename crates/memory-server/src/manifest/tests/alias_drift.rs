@@ -12,20 +12,9 @@
 //! is the pre-existing `path_utils/tests.rs` suite, left unmodified.
 
 use super::*;
-use std::path::PathBuf;
 
-/// Keep fixtures outside `/tmp`: on Linux, `should_skip_path` drops
-/// `/.tachi/memory.db` paths under `/tmp` as ephemeral smoke workspaces.
 fn alias_drift_tempdir() -> tempfile::TempDir {
-    let base = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target"))
-        .join("alias-drift-fixtures");
-    std::fs::create_dir_all(&base).expect("alias-drift fixture base");
-    tempfile::Builder::new()
-        .prefix("case-")
-        .tempdir_in(&base)
-        .expect("alias-drift tempdir")
+    crate::test_support::non_skipped_fixture_tempdir("alias-drift-")
 }
 
 fn with_env_lock<F: FnOnce()>(f: F) {
@@ -70,6 +59,7 @@ fn g_relabel_flips_label_without_touching_filesystem() {
         std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
         std::fs::write(&local_db, b"canonical-bytes").expect("write local db");
         let local_db = std::fs::canonicalize(&local_db).expect("canonicalize local db");
+        crate::test_support::assert_repo_local_db_fixture_not_skipped(&local_db);
 
         // Legacy un-hashed alias dir (`sigil`), symlinked to the repo-local DB.
         let legacy_name =
@@ -172,10 +162,7 @@ fn g_role_scope_and_role_agree_after_relabel() {
         std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
         std::fs::write(&local_db, b"canonical-bytes").expect("write local db");
         let local_db = std::fs::canonicalize(&local_db).expect("canonicalize local db");
-        assert!(
-            should_skip_path(&local_db).is_none(),
-            "precondition: repo-local fixture must not match temporary-workspace skip"
-        );
+        crate::test_support::assert_repo_local_db_fixture_not_skipped(&local_db);
 
         let new_name =
             crate::path_utils::plan_c_dir_name_from_root(&repo).expect("current derived name");
