@@ -8,8 +8,9 @@ use super::*;
 ///    `status.json::github` and append the matching event to `events.jsonl`.
 /// 5. After a successful non-dry-run merge, when `reclaim_worktree` is true
 ///    and `worktree` resolves to a local path, reclaim the worktree + branch +
-///    target via `tachi-clean wt-remove` (best-effort) and record a
-///    `github_safe_merge_reclaimed` event.
+///    target via `tachi-clean wt-remove` (best-effort) and record a reclamation
+///    event (`github_safe_merge_reclaimed` on success, or
+///    `github_safe_merge_reclaim_skipped` on any skip/failure).
 /// 6. Return a JSON envelope the agent can render directly.
 pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
     client: &C,
@@ -474,7 +475,9 @@ fn pr_lifecycle_state_label(state: PrLifecycleState) -> &'static str {
 ///
 /// Returns a JSON object describing the outcome so the handler can surface it
 /// in the response envelope. When `run_dir` is present, also appends a
-/// `github_safe_merge_reclaimed` event to the flow ledger.
+/// reclamation event to the flow ledger: `github_safe_merge_reclaimed` for a
+/// genuine success (`reclaimed: true`), or `github_safe_merge_reclaim_skipped`
+/// for any skip or failure (worktree_missing, cleaner error, `reclaimed: false`).
 async fn reclaim_worktree_after_merge(
     merge_sha: Option<&str>,
     dry_run: bool,
@@ -555,9 +558,15 @@ async fn reclaim_worktree_after_merge(
     detail
 }
 
-/// Append the `github_safe_merge_reclaimed` event to the flow ledger when a
-/// flow run dir is present. Errors here are logged but never propagate — the
-/// merge already succeeded and reclamation is best-effort.
+/// Append a reclamation event to the flow ledger when a flow run dir is
+/// present. The event kind reflects the outcome so readers filtering by kind
+/// are not misled:
+///   - genuine success (`reclaimed: true`) → `github_safe_merge_reclaimed`
+///   - skip (`worktree_missing`) OR cleaner-error OR `reclaimed: false` →
+///     `github_safe_merge_reclaim_skipped`
+///
+/// Errors here are logged but never propagate — the merge already succeeded
+/// and reclamation is best-effort.
 fn record_reclamation_event(
     flow_id: Option<&str>,
     run_dir: Option<&std::path::Path>,
@@ -566,11 +575,17 @@ fn record_reclamation_event(
     let (Some(fid), Some(dir)) = (flow_id, run_dir) else {
         return;
     };
-    if let Err(err) = append_github_event(dir, fid, "github_safe_merge_reclaimed", detail.clone()) {
+    let reclaimed = detail.get("reclaimed").and_then(Value::as_bool) == Some(true);
+    let kind = if reclaimed {
+        "github_safe_merge_reclaimed"
+    } else {
+        "github_safe_merge_reclaim_skipped"
+    };
+    if let Err(err) = append_github_event(dir, fid, kind, detail.clone()) {
         tracing::warn!(
             flow_id = fid,
             error = %err,
-            "failed to append github_safe_merge_reclaimed event (best-effort)"
+            "failed to append {kind} event (best-effort)"
         );
     }
 }

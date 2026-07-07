@@ -105,11 +105,23 @@ async fn safe_merge_reclaims_worktree_after_successful_merge() {
         !worktree.exists(),
         "worktree should have been removed by the cleaner"
     );
-    // The reclaim event was recorded in the flow ledger.
+    // The reclaim event was recorded in the flow ledger with the success kind.
     let events = std::fs::read_to_string(tmp.path().join(flow).join("events.jsonl")).unwrap();
-    assert!(
-        events.contains("github_safe_merge_reclaimed"),
-        "expected github_safe_merge_reclaimed event; got: {events}"
+    let reclaim_event = events
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .into_iter()
+        .find(|e| {
+            e.get("event").and_then(|v| v.as_str()).map_or(false, |s| {
+                s == "github_safe_merge_reclaimed" || s == "github_safe_merge_reclaim_skipped"
+            })
+        })
+        .expect("expected a reclamation event");
+    assert_eq!(
+        reclaim_event["event"], "github_safe_merge_reclaimed",
+        "genuine success should record github_safe_merge_reclaimed; got: {events}"
     );
     assert_eq!(client.merge_calls().len(), 1);
 
@@ -175,12 +187,13 @@ async fn safe_merge_dry_run_does_not_reclaim_worktree() {
     assert!(!marker_path.exists(), "dry-run must not invoke the cleaner");
     // The worktree survived.
     assert!(worktree.exists(), "worktree must survive a dry-run");
-    // No reclaim event was recorded.
+    // No reclaim event was recorded (neither success nor skipped kind).
     let events_path = tmp.path().join(flow).join("events.jsonl");
     if events_path.exists() {
         let events = std::fs::read_to_string(&events_path).unwrap();
         assert!(
-            !events.contains("github_safe_merge_reclaimed"),
+            !events.contains("github_safe_merge_reclaimed")
+                && !events.contains("github_safe_merge_reclaim_skipped"),
             "dry-run must not record a reclaim event; got: {events}"
         );
     }
@@ -238,11 +251,24 @@ async fn safe_merge_missing_worktree_warns_does_not_fail_merge() {
     assert_eq!(v["reclamation"]["attempted"], false);
     assert_eq!(v["reclamation"]["reclaimed"], false);
     assert_eq!(v["reclamation"]["skipped"], "worktree_missing");
-    // The best-effort warning is still recorded as a reclaim event.
+    // The best-effort skip is recorded as a reclamation event with the skipped
+    // kind (not the success kind, which would over-count successful reclaims).
     let events = std::fs::read_to_string(tmp.path().join(flow).join("events.jsonl")).unwrap();
-    assert!(
-        events.contains("github_safe_merge_reclaimed"),
-        "missing-worktree skip should still record a reclaim event; got: {events}"
+    let reclaim_event = events
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .into_iter()
+        .find(|e| {
+            e.get("event").and_then(|v| v.as_str()).map_or(false, |s| {
+                s == "github_safe_merge_reclaimed" || s == "github_safe_merge_reclaim_skipped"
+            })
+        })
+        .expect("expected a reclamation event");
+    assert_eq!(
+        reclaim_event["event"], "github_safe_merge_reclaim_skipped",
+        "worktree_missing skip should record github_safe_merge_reclaim_skipped; got: {events}"
     );
     assert_eq!(client.merge_calls().len(), 1);
 
