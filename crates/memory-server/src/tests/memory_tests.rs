@@ -1,9 +1,9 @@
 use super::{make_entry, make_server, make_server_with_temp_home, TempHomeGuard};
 use crate::kanban::{PostCardParams, UpdateCardParams};
 use crate::tool_params::{
-    AgentRegisterParams, FindSimilarMemoryParams, GetMemoryParams, InitProjectDbParams,
-    MemoryGraphParams, SaveMemoryParams, SearchMemoryParams, SyncMemoriesParams,
-    TachiCompleteParams, TachiMemoryParams, TachiSaveParams, TachiSearchParams,
+    AgentRegisterParams, FindSimilarMemoryParams, GetEdgesParams, GetMemoryParams,
+    InitProjectDbParams, MemoryGraphParams, SaveMemoryParams, SearchMemoryParams,
+    SyncMemoriesParams, TachiCompleteParams, TachiMemoryParams, TachiSaveParams, TachiSearchParams,
     TachiWorkflowParams,
 };
 use chrono::Utc;

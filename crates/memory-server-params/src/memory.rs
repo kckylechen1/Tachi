@@ -318,6 +318,10 @@ pub struct GetEdgesParams {
     #[serde(default)]
     pub relation_filter: Option<String>,
 
+    /// Optional named project DB for read-only edge lookup
+    #[serde(default)]
+    pub project: Option<String>,
+
     /// Scope: "global" or "project" (default)
     #[serde(default = "default_scope")]
     pub scope: String,

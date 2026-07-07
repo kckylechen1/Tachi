@@ -579,6 +579,8 @@ fn explicit_project_can_cross_binding(tool_name: &str, args: &rmcp::model::JsonO
         | "find_similar_memory"
         | "get_memory"
         | "list_memories"
+        | "memory_graph"
+        | "get_edges"
         | "tachi_search" => true,
         "tachi_memory" => args
             .get("action")
@@ -678,6 +680,10 @@ fn tachi_wiki_action_allows_cross_project_read(action: &str) -> bool {
         "browse" | "read" | "search"
     )
 }
+
+// HTTP direct-connect parity (#732): keep any future direct-connect guard aligned
+// with this stdio read/write split; reads may select readable projects, mutations
+// must remain bound unless their specific invariant proves otherwise.
 
 fn auto_daemon_command_args(
     global_db_path: &Path,
@@ -1943,6 +1949,27 @@ mod tests {
                 mapped.arguments.expect("args")["project"],
                 serde_json::json!("Quant-test"),
                 "{tool}/{action:?} should preserve explicit project"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_allows_explicit_cross_project_direct_read_override() {
+        for tool in ["memory_graph", "get_edges"] {
+            let request = rmcp::model::CallToolRequestParams::new(tool).with_arguments(
+                serde_json::Map::from_iter([(
+                    "project".to_string(),
+                    serde_json::json!("Quant-test"),
+                )]),
+            );
+
+            let mapped = prepare_proxy_tool_call(request, Some("Sigil-test"))
+                .unwrap_or_else(|err| panic!("{tool} direct read should be forwarded: {err}"));
+
+            assert_eq!(
+                mapped.arguments.expect("args")["project"],
+                serde_json::json!("Quant-test"),
+                "{tool} should preserve explicit project"
             );
         }
     }
