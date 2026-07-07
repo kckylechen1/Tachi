@@ -45,6 +45,68 @@ Examples:
 
 This layer owns the canonical memory graph and its maintenance lifecycle.
 
+### Portable Memory Kernel Manifest
+
+The portable kernel is the part downstream memory consumers can take without
+inheriting Tachi's operator/product surfaces. Hypermem, Hyperion, zeroclaw-style
+chat harnesses, OpenClaw-style plugins, and local CLIs should be able to depend
+on this bundle and still keep their own product policy outside Tachi.
+
+The portable bundle includes:
+
+| Surface | Layer | Portable contract |
+|---|---|---|
+| `memory-core` | `kernel` | Canonical memory rows, graph edges, store/open/read/write contracts, access history, and scorer types. |
+| Memory DB/schema contracts | `kernel` | Stable schema expectations for `memories`, FTS, `memory_edges`, access history, event ledger, and migration-owned columns. |
+| Recall/scorer/RRF | `kernel` | Hybrid search, symbolic/FTS/vector scoring, RRF/MMR ranking, decay scoring, and recall diagnostics inputs. |
+| Vector/backfill | `kernel` | Embedding readiness, vector coverage, backfill state, and degraded-mode reporting. |
+| Event ledger/projection | `kernel` | Append-only continuity events plus read-model projection hooks for adapters. |
+| Library identity/routing | `runtime_adapter` | Project/global library identity, path binding, and routing receipts needed to keep writes/read scopes correct. |
+| Status/readiness | `runtime_adapter` | Health/readiness output for vector gaps, locked vault, unavailable kernel, and degraded recall. |
+
+It explicitly excludes GitHub, dispatch, ship, release, PR lifecycle, CI merge,
+and other workflow/product automation. Those tools can use the kernel; the
+kernel must not require them.
+
+The machine-readable fixture for this contract is
+[`kernel-surface-v1.fixture.json`](./kernel-surface-v1.fixture.json). Downstream
+agents should cite that fixture when deciding whether a change belongs upstream
+in Tachi or downstream in an adapter/product layer.
+
+### Backend Boundary
+
+The portable boundary intentionally mirrors the small shape seen in OMP's
+`MemoryBackend`, but remains Tachi-owned and local-first:
+
+| Operation family | Required | Tachi-owned meaning |
+|---|---|---|
+| `status` / `readiness` | yes | Report kernel availability, DB identity, vector/backfill coverage, and degraded modes. |
+| `search` / `recall` | yes | Return ranked memories plus provenance, score components where available, and stable row shape. |
+| `save` / `retain` | yes | Store durable facts, experiences, observations, and policy-labeled adapter memory with provenance. |
+| developer/briefing context | yes | Produce compact memory context for a host before a prompt/session without exposing product workflow tools. |
+| readiness/diagnostics | yes | Report recall lanes, fallback behavior, true-empty recall, vector health, and adapter-visible failures. |
+| lifecycle hooks | optional where wired | Consume neutral host events such as `before_session`, `before_prompt`, `after_compact`, and `after_session`. |
+
+This boundary is deliberately smaller than Tachi's full MCP surface. A consumer
+that only wants memory should not need `tachi_gh`, `tachi_task` dispatch,
+`ship`, release notes, or GitHub PR lifecycle actions.
+
+### Memory Ontology
+
+Hindsight's four-network ontology is useful as design evidence. Tachi does not
+clone Hindsight, but the portable kernel should preserve the same distinctions:
+
+| Ontology | Tachi status | Notes |
+|---|---|---|
+| `world` / fact | in-kernel now | Stored through categories, summaries/text, entities, provenance, validity, and graph support/contradiction edges. |
+| experience | in-kernel now | Stored as durable memories/events with path, source, access history, and session/project provenance. |
+| opinion / preference | policy-hooked | The kernel can store the rows; adapter policy decides authority, persona impact, and whether to inject them. |
+| observation / summary | policy-hooked now, kernel lifecycle later | Continue memory, distillation, projections, and pattern rows exist; typed consolidation/forgetting policy remains follow-up work. |
+
+The rule is structural: the kernel owns durable storage, provenance, recall, and
+graph relations; adapters own persona, product defaults, domain interpretation,
+and final prompt composition.
+
 ## Layer 2: Capability
 
 This is the missing “librarian brain” layer.
