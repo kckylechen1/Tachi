@@ -61,7 +61,6 @@ pub const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "tachi_workflow",
     "tachi_orchestrator",
     "tachi_agents",
-    "approve_merge",
     // GitHub tools (bundle membership for classification; visibility gated by vault token)
     "tachi_gh",
     // Facade task dispatch/merge/board

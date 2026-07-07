@@ -7,6 +7,7 @@ organize: true
 # MCP Surface Death List
 
 Status: first evidence ledger for #757, under the #745 small-surface umbrella.
+Batch C: executed 2026-07-07 — `tachi_dispatch`, `tachi_board`, and `approve_merge` MCP routes deleted; canonical `tachi_task(action='dispatch'/'board'/'merge')` remain.
 Base reviewed: `2cd7a750` (`main`, 2026-07-07).
 
 This document turns the small-surface product direction into a deletion queue.
