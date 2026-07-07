@@ -474,3 +474,38 @@ pub enum HubAction {
         fix: bool,
     },
 }
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum McpAction {
+    /// Register an upstream MCP server in the Tachi Hub.
+    Add {
+        /// Human name for the MCP server. Stored as capability id mcp:<normalized-name>.
+        name: String,
+        /// Remote URL for http/sse transports, or command path for stdio.
+        url: String,
+        /// Upstream transport.
+        #[arg(long, value_parser = ["http", "sse", "stdio"], default_value = "http")]
+        transport: String,
+        /// Header in "Name: Value" form. Use ${vault:KEY} placeholders for secrets.
+        #[arg(long = "header", value_name = "NAME: VALUE")]
+        headers: Vec<String>,
+        /// Store this API key in Vault and reference it from the MCP definition.
+        #[arg(long, value_name = "VALUE")]
+        key: Option<String>,
+        /// Read vault password from stdin when --key is supplied.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read vault password from macOS Keychain when --key is supplied.
+        #[arg(long)]
+        keychain: bool,
+        /// Read vault password from a local file when --key is supplied.
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other when --key is supplied.
+        #[arg(long)]
+        insecure_password_file: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}

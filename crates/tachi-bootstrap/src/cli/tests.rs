@@ -41,6 +41,78 @@ fn poke_cli_parses_smoke_run() {
 }
 
 #[test]
+fn mcp_cli_parses_add_with_vault_header() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "mcp",
+        "add",
+        "context7",
+        "https://mcp.context7.com/mcp",
+        "--transport",
+        "http",
+        "--header",
+        "Authorization: Bearer ${vault:CONTEXT7_API_KEY}",
+        "--json",
+    ])
+    .expect("mcp add should parse");
+
+    match parsed.command.expect("command") {
+        Commands::Mcp {
+            action:
+                McpAction::Add {
+                    name,
+                    url,
+                    transport,
+                    headers,
+                    key,
+                    stdin_password,
+                    keychain,
+                    password_file,
+                    insecure_password_file,
+                    json,
+                },
+        } => {
+            assert_eq!(name, "context7");
+            assert_eq!(url, "https://mcp.context7.com/mcp");
+            assert_eq!(transport, "http");
+            assert_eq!(headers, ["Authorization: Bearer ${vault:CONTEXT7_API_KEY}"]);
+            assert!(key.is_none());
+            assert!(!stdin_password);
+            assert!(!keychain);
+            assert!(password_file.is_none());
+            assert!(!insecure_password_file);
+            assert!(json);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn mcp_cli_parses_key_flag_with_vault_unlock_options() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "mcp",
+        "add",
+        "context7",
+        "https://mcp.context7.com/mcp",
+        "--key",
+        "TEST_SENTINEL_VALUE_DO_NOT_STORE",
+        "--keychain",
+    ])
+    .expect("--key parses with vault unlock options");
+
+    match parsed.command.expect("command") {
+        Commands::Mcp {
+            action: McpAction::Add { key, keychain, .. },
+        } => {
+            assert_eq!(key.as_deref(), Some("TEST_SENTINEL_VALUE_DO_NOT_STORE"));
+            assert!(keychain);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
 fn skill_surface_cli_parses_sources() {
     let parsed = Cli::try_parse_from(["tachi", "skill-surface", "sources", "--json"])
         .expect("skill-surface sources should parse");

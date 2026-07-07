@@ -54,8 +54,8 @@ mod vault_actions;
 pub use commands::Commands;
 pub use maintenance_actions::{
     CardAction, CleanAction, DaemonAction, DistillAction, FoundryAction, HarnessAction, HubAction,
-    ManifestAction, PokeAction, QuarantineAction, RepairAction, RescueAction, SkillSurfaceAction,
-    WatcherAction, WikiAction, DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS,
+    ManifestAction, McpAction, PokeAction, QuarantineAction, RepairAction, RescueAction,
+    SkillSurfaceAction, WatcherAction, WikiAction, DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS,
 };
 pub use vault_actions::{EnvAction, VaultAction, VaultIntakeAction};
 

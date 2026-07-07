@@ -25,7 +25,7 @@ pub(super) fn read_vault_config_for_key(
         .ok_or_else(|| "Vault not initialized. Run `tachi vault init` first.".into())
 }
 
-pub(super) fn read_verified_vault_key(
+pub(in crate::bootstrap) fn read_verified_vault_key(
     config: &memory_core::vault::VaultConfig,
     stdin_password: bool,
     keychain: bool,
