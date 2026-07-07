@@ -1,4 +1,6 @@
 use chrono::Utc;
+#[cfg(unix)]
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -27,7 +29,213 @@ pub fn auto_fix_safe(findings: &[DoctorFinding], quarantine_root: &Path) -> Vec<
             _ => {}
         }
     }
+    actions.extend(plan_c_alias_retirement_actions(findings));
     actions
+}
+
+#[cfg(unix)]
+fn plan_c_alias_retirement_actions(findings: &[DoctorFinding]) -> Vec<AutoFixAction> {
+    let mut actions = Vec::new();
+    let mut seen = HashSet::new();
+
+    for finding in findings {
+        let path = PathBuf::from(&finding.path);
+        let Ok(canonical) = fs::canonicalize(&path) else {
+            continue;
+        };
+        let Some(project_root) = crate::path_utils::plan_c_project_root_from_local_db(&canonical)
+        else {
+            continue;
+        };
+        if !seen.insert(canonical.clone()) {
+            continue;
+        }
+        actions.extend(reconcile_plan_c_alias_for_local_db(
+            &canonical,
+            &project_root,
+        ));
+    }
+
+    actions
+}
+
+#[cfg(not(unix))]
+fn plan_c_alias_retirement_actions(_findings: &[DoctorFinding]) -> Vec<AutoFixAction> {
+    Vec::new()
+}
+
+#[cfg(unix)]
+fn reconcile_plan_c_alias_for_local_db(local_db: &Path, project_root: &Path) -> Vec<AutoFixAction> {
+    let mut actions = Vec::new();
+    let Some(current_name) = crate::path_utils::plan_c_dir_name_from_root(project_root) else {
+        return actions;
+    };
+    let Some(legacy_name) = crate::path_utils::plan_c_legacy_dir_name_from_root(project_root)
+    else {
+        return actions;
+    };
+    let current_db = crate::path_utils::plan_c_global_db_path(&current_name);
+
+    let projects_root = crate::path_utils::tachi_home().join("projects");
+    let Ok(entries) = fs::read_dir(&projects_root) else {
+        return actions;
+    };
+    let mut old_hash_aliases = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name == current_name || name == legacy_name {
+            continue;
+        }
+        if !looks_like_old_plan_c_hash_alias(name, &legacy_name) {
+            continue;
+        }
+        let candidate = entry.path().join("memory.db");
+        if !old_hash_alias_points_to_local_db(&candidate, local_db) {
+            continue;
+        }
+        old_hash_aliases.push(candidate);
+    }
+    if old_hash_aliases.is_empty() {
+        return actions;
+    }
+
+    match ensure_current_hashed_alias(local_db, &current_db) {
+        Ok(Some(action)) => actions.push(action),
+        Ok(None) => {}
+        Err(action) => {
+            actions.push(action);
+            return actions;
+        }
+    }
+
+    for candidate in old_hash_aliases {
+        if !old_hash_alias_points_to_local_db(&candidate, local_db) {
+            actions.push(AutoFixAction {
+                path: candidate.display().to_string(),
+                action: "plan_c_alias_retire_old_hash".to_string(),
+                outcome: "skipped".to_string(),
+                note: "old-hash alias changed before removal; refused stale delete".to_string(),
+                destination: Some(current_db.display().to_string()),
+            });
+            continue;
+        }
+        match fs::remove_file(&candidate) {
+            Ok(()) => {
+                if let Some(parent) = candidate.parent() {
+                    let _ = fs::remove_dir(parent);
+                }
+                actions.push(AutoFixAction {
+                    path: candidate.display().to_string(),
+                    action: "plan_c_alias_retire_old_hash".to_string(),
+                    outcome: "ok".to_string(),
+                    note: format!(
+                        "retired old-hash Plan C alias after creating current alias {current_name}"
+                    ),
+                    destination: Some(current_db.display().to_string()),
+                });
+            }
+            Err(e) => actions.push(AutoFixAction {
+                path: candidate.display().to_string(),
+                action: "plan_c_alias_retire_old_hash".to_string(),
+                outcome: "error".to_string(),
+                note: format!("remove old-hash alias symlink: {e}"),
+                destination: Some(current_db.display().to_string()),
+            }),
+        }
+    }
+
+    actions
+}
+
+#[cfg(unix)]
+fn ensure_current_hashed_alias(
+    local_db: &Path,
+    current_db: &Path,
+) -> Result<Option<AutoFixAction>, AutoFixAction> {
+    if current_db.is_symlink() {
+        if fs::canonicalize(current_db)
+            .map(|path| path == local_db)
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+        return Err(AutoFixAction {
+            path: current_db.display().to_string(),
+            action: "plan_c_alias_create_hashed".to_string(),
+            outcome: "error".to_string(),
+            note: "current hashed alias already exists but points elsewhere; refusing retirement"
+                .to_string(),
+            destination: None,
+        });
+    }
+    if current_db.exists() {
+        return Err(AutoFixAction {
+            path: current_db.display().to_string(),
+            action: "plan_c_alias_create_hashed".to_string(),
+            outcome: "error".to_string(),
+            note: "current hashed alias path exists and is not a symlink; refusing retirement"
+                .to_string(),
+            destination: None,
+        });
+    }
+    let Some(parent) = current_db.parent() else {
+        return Err(AutoFixAction {
+            path: current_db.display().to_string(),
+            action: "plan_c_alias_create_hashed".to_string(),
+            outcome: "error".to_string(),
+            note: "current hashed alias path has no parent".to_string(),
+            destination: None,
+        });
+    };
+    if let Err(e) = fs::create_dir_all(parent) {
+        return Err(AutoFixAction {
+            path: current_db.display().to_string(),
+            action: "plan_c_alias_create_hashed".to_string(),
+            outcome: "error".to_string(),
+            note: format!("create current hashed alias dir: {e}"),
+            destination: None,
+        });
+    }
+    if let Err(e) = std::os::unix::fs::symlink(local_db, current_db) {
+        return Err(AutoFixAction {
+            path: current_db.display().to_string(),
+            action: "plan_c_alias_create_hashed".to_string(),
+            outcome: "error".to_string(),
+            note: format!("create current hashed alias symlink: {e}"),
+            destination: None,
+        });
+    }
+    Ok(Some(AutoFixAction {
+        path: current_db.display().to_string(),
+        action: "plan_c_alias_create_hashed".to_string(),
+        outcome: "ok".to_string(),
+        note: "created current hashed Plan C alias".to_string(),
+        destination: Some(local_db.display().to_string()),
+    }))
+}
+
+#[cfg(unix)]
+fn old_hash_alias_points_to_local_db(candidate: &Path, local_db: &Path) -> bool {
+    let Ok(meta) = fs::symlink_metadata(candidate) else {
+        return false;
+    };
+    if !meta.file_type().is_symlink() {
+        return false;
+    }
+    fs::canonicalize(candidate)
+        .map(|path| path == local_db)
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn looks_like_old_plan_c_hash_alias(name: &str, legacy_name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix(&format!("{legacy_name}-")) else {
+        return false;
+    };
+    suffix.len() == 8 && suffix.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 fn quarantine_placeholder(src: &str, dest_dir: &Path) -> AutoFixAction {
