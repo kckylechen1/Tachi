@@ -6,5 +6,6 @@ use tempfile::tempdir;
 
 mod conflicts;
 mod contract;
+mod kernel_surface;
 mod organize;
 mod safety;
