@@ -57,6 +57,8 @@ pub(crate) struct VectorSweepState {
 pub(crate) struct VectorSweepOutcome {
     pub(crate) embedded_count: usize,
     pub(crate) attempted_count: usize,
+    pub(crate) skipped_count: usize,
+    pub(crate) failed_count: usize,
     /// Remaining rows from this sweep attempt's selected worklist, not a status read model.
     pub(crate) remaining_count: usize,
 }
@@ -65,9 +67,18 @@ pub(crate) struct VectorSweepOutcome {
 pub(crate) struct VectorSweepError {
     pub(crate) embedded_count: usize,
     pub(crate) attempted_count: usize,
+    pub(crate) skipped_count: usize,
+    pub(crate) failed_count: usize,
     /// Remaining rows from this sweep attempt's selected worklist, not a status read model.
     pub(crate) remaining_count: usize,
     pub(crate) message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VectorBatchWriteOutcome {
+    pub(crate) written_count: usize,
+    pub(crate) skipped_count: usize,
+    pub(crate) failed_count: usize,
 }
 
 fn embedding_input(text: &str, summary: &str) -> String {
@@ -329,22 +340,26 @@ fn vector_counts_filtered(
     Ok((total.max(0) as usize, with_vec.max(0) as usize))
 }
 
-/// Embed and persist up to `batch_size` rows; returns count written.
+/// Embed and persist up to `batch_size` rows; partitions written, skipped, and failed rows.
 pub(crate) async fn embed_and_write_batch(
     store: &mut MemoryStore,
     llm: &LlmClient,
     entries: &[(String, String, String, i64)],
-) -> Result<usize, String> {
+) -> Result<VectorBatchWriteOutcome, String> {
     if entries.is_empty() {
-        return Ok(0);
+        return Ok(VectorBatchWriteOutcome {
+            written_count: 0,
+            skipped_count: 0,
+            failed_count: 0,
+        });
     }
     #[cfg(test)]
     if let Some(result) = next_test_embed_batch_result() {
         match result {
-            Ok(written) => {
+            Ok(outcome) => {
                 let dummy_vec = vec![0.0_f32; 1024];
                 let mut actual = 0usize;
-                for (id, _, _, revision) in entries.iter().take(written) {
+                for (id, _, _, revision) in entries.iter().take(outcome.written_count) {
                     if store
                         .update_enrichment_fields(id, None, Some(&dummy_vec), None, None, *revision)
                         .map_err(|e| format!("test vector write failed: {e}"))?
@@ -352,7 +367,11 @@ pub(crate) async fn embed_and_write_batch(
                         actual += 1;
                     }
                 }
-                return Ok(actual);
+                return Ok(VectorBatchWriteOutcome {
+                    written_count: actual,
+                    skipped_count: outcome.skipped_count,
+                    failed_count: outcome.failed_count,
+                });
             }
             Err(message) => return Err(message),
         }
@@ -373,17 +392,36 @@ pub(crate) async fn embed_and_write_batch(
         .map_err(|e| format!("Voyage embed batch failed: {e}"))?;
 
     let mut written = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
     for (i, (id, _, _, revision)) in entries.iter().enumerate() {
         if i >= vecs.len() {
+            let dropped = entries.len().saturating_sub(i);
+            failed += dropped;
+            tracing::warn!(
+                "[vector-backfill] provider returned {} vector(s) for {} row(s); {dropped} row(s) failed",
+                vecs.len(),
+                entries.len()
+            );
             break;
         }
         match store.update_enrichment_fields(id, None, Some(&vecs[i]), None, None, *revision) {
             Ok(true) => written += 1,
-            Ok(false) => tracing::debug!("[vector-backfill] revision mismatch for {id}, skipped"),
-            Err(e) => tracing::warn!("[vector-backfill] DB write failed for {id}: {e}"),
+            Ok(false) => {
+                skipped += 1;
+                tracing::debug!("[vector-backfill] revision mismatch for {id}, skipped");
+            }
+            Err(e) => {
+                failed += 1;
+                tracing::warn!("[vector-backfill] DB write failed for {id}: {e}");
+            }
         }
     }
-    Ok(written)
+    Ok(VectorBatchWriteOutcome {
+        written_count: written,
+        skipped_count: skipped,
+        failed_count: failed,
+    })
 }
 
 /// Sweep one DB: at most `max_entries` missing rows embedded.
@@ -396,6 +434,8 @@ pub(crate) async fn sweep_db_vectors(
     let db_str = db_path.to_str().ok_or_else(|| VectorSweepError {
         embedded_count: 0,
         attempted_count: 0,
+        skipped_count: 0,
+        failed_count: 0,
         remaining_count: 0,
         message: format!("non-utf8 path: {}", db_path.display()),
     })?;
@@ -403,6 +443,8 @@ pub(crate) async fn sweep_db_vectors(
     let mut store = MemoryStore::open(db_str).map_err(|e| VectorSweepError {
         embedded_count: 0,
         attempted_count: 0,
+        skipped_count: 0,
+        failed_count: 0,
         remaining_count: 0,
         message: format!("open {}: {e}", db_path.display()),
     })?;
@@ -410,6 +452,8 @@ pub(crate) async fn sweep_db_vectors(
         vector_counts_filtered(&store, skip_recall_cache).map_err(|message| VectorSweepError {
             embedded_count: 0,
             attempted_count: 0,
+            skipped_count: 0,
+            failed_count: 0,
             remaining_count: 0,
             message,
         })?;
@@ -418,6 +462,8 @@ pub(crate) async fn sweep_db_vectors(
         return Ok(VectorSweepOutcome {
             embedded_count: 0,
             attempted_count: 0,
+            skipped_count: 0,
+            failed_count: 0,
             remaining_count: pending,
         });
     }
@@ -425,6 +471,8 @@ pub(crate) async fn sweep_db_vectors(
         .map_err(|message| VectorSweepError {
             embedded_count: 0,
             attempted_count: 0,
+            skipped_count: 0,
+            failed_count: 0,
             remaining_count: 0,
             message,
         })?;
@@ -432,6 +480,8 @@ pub(crate) async fn sweep_db_vectors(
         return Ok(VectorSweepOutcome {
             embedded_count: 0,
             attempted_count: 0,
+            skipped_count: 0,
+            failed_count: 0,
             remaining_count: 0,
         });
     }
@@ -439,36 +489,46 @@ pub(crate) async fn sweep_db_vectors(
 
     let batch_size = 32usize.min(todo.max(1));
     let mut done = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
     for chunk in missing.chunks(batch_size) {
         match embed_and_write_batch(&mut store, llm, chunk).await {
-            Ok(written) => done += written,
+            Ok(outcome) => {
+                done += outcome.written_count;
+                skipped += outcome.skipped_count;
+                failed += outcome.failed_count;
+            }
             Err(message) => {
                 return Err(VectorSweepError {
                     embedded_count: done,
                     attempted_count: todo,
+                    skipped_count: skipped,
+                    failed_count: failed + 1,
                     remaining_count: todo.saturating_sub(done),
                     message,
                 });
             }
         }
-        if done < todo {
+        if done + skipped + failed < todo {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
     Ok(VectorSweepOutcome {
         embedded_count: done,
         attempted_count: todo,
+        skipped_count: skipped,
+        failed_count: failed,
         remaining_count: todo.saturating_sub(done),
     })
 }
 
 #[cfg(test)]
 static TEST_EMBED_BATCH_RESULTS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::VecDeque<Result<usize, String>>>,
+    std::sync::Mutex<std::collections::VecDeque<Result<VectorBatchWriteOutcome, String>>>,
 > = std::sync::OnceLock::new();
 
 #[cfg(test)]
-pub(crate) fn set_test_embed_batch_results(results: Vec<Result<usize, String>>) {
+pub(crate) fn set_test_embed_batch_results(results: Vec<Result<VectorBatchWriteOutcome, String>>) {
     let mut guard = TEST_EMBED_BATCH_RESULTS
         .get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
         .lock()
@@ -477,7 +537,7 @@ pub(crate) fn set_test_embed_batch_results(results: Vec<Result<usize, String>>) 
 }
 
 #[cfg(test)]
-fn next_test_embed_batch_result() -> Option<Result<usize, String>> {
+fn next_test_embed_batch_result() -> Option<Result<VectorBatchWriteOutcome, String>> {
     TEST_EMBED_BATCH_RESULTS
         .get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
         .lock()

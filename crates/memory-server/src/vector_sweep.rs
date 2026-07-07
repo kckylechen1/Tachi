@@ -257,14 +257,17 @@ async fn run_vector_sweep_paths(
                     skip_cache,
                     outcome.embedded_count,
                     outcome.attempted_count,
+                    outcome.failed_count,
                     None,
                 );
                 total_done += outcome.embedded_count;
                 tracing::info!(
-                    "[vector-sweep] {} embedded {}/{}",
+                    "[vector-sweep] {} embedded {}/{} (skipped={}, failed={})",
                     path.display(),
                     outcome.embedded_count,
-                    outcome.attempted_count
+                    outcome.attempted_count,
+                    outcome.skipped_count,
+                    outcome.failed_count
                 );
             }
             Ok(outcome) => {
@@ -273,6 +276,7 @@ async fn run_vector_sweep_paths(
                     skip_cache,
                     outcome.embedded_count,
                     outcome.attempted_count,
+                    outcome.failed_count,
                     None,
                 );
             }
@@ -282,6 +286,7 @@ async fn run_vector_sweep_paths(
                     skip_cache,
                     e.embedded_count,
                     e.attempted_count,
+                    e.failed_count,
                     Some(e.message.clone()),
                 );
                 tracing::warn!("[vector-sweep] {} failed: {}", path.display(), e.message);
@@ -305,12 +310,13 @@ fn record_enabled_sweep_state(
     skip_recall_cache: bool,
     done: usize,
     todo: usize,
+    failed: usize,
     error: Option<String>,
 ) {
-    let failed_count = if error.is_some() {
-        todo.saturating_sub(done).max(1)
+    let failed_count = if error.is_some() && failed == 0 {
+        1
     } else {
-        todo.saturating_sub(done)
+        failed
     };
     let last_provider_error = error.as_deref().and_then(provider_error);
     let preserve_outcome = error.is_none() && todo == 0;
@@ -560,7 +566,11 @@ mod tests {
         drop(store);
 
         crate::vector_backfill::set_test_embed_batch_results(vec![
-            Ok(32),
+            Ok(crate::vector_backfill::VectorBatchWriteOutcome {
+                written_count: 32,
+                skipped_count: 0,
+                failed_count: 0,
+            }),
             Err("Voyage embed batch failed: provider 429".to_string()),
         ]);
         let llm = LlmClient::new().expect("llm client");
@@ -577,6 +587,46 @@ mod tests {
             state.last_provider_error.as_deref(),
             Some("Voyage embed batch failed: provider 429")
         );
+    }
+
+    #[test]
+    fn daemon_sweep_state_does_not_count_benign_skips_as_failures() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("benign-skip-state.db");
+        memory_core::MemoryStore::open(db_path.to_str().unwrap()).unwrap();
+
+        record_enabled_sweep_state(&db_path, true, 3, 5, 0, None);
+
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("state recorded");
+        assert_eq!(state.embedded_count, 3);
+        assert_eq!(
+            state.failed_count, 0,
+            "benign revision-mismatch skips remain pending, not failed"
+        );
+        assert_eq!(state.last_error, None);
+        assert_eq!(state.last_provider_error, None);
+    }
+
+    #[test]
+    fn daemon_sweep_state_counts_real_row_failures_without_error() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("row-failure-state.db");
+        memory_core::MemoryStore::open(db_path.to_str().unwrap()).unwrap();
+
+        record_enabled_sweep_state(&db_path, true, 3, 5, 1, None);
+
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("state recorded");
+        assert_eq!(state.embedded_count, 3);
+        assert_eq!(
+            state.failed_count, 1,
+            "real per-row failures are recorded even when the sweep completes"
+        );
+        assert_eq!(state.last_error, None);
+        assert_eq!(state.last_provider_error, None);
     }
 
     #[tokio::test]
