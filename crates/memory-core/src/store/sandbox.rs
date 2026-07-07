@@ -30,6 +30,16 @@ impl MemoryStore {
         db::check_sandbox_access(&self.conn, agent_role, path, operation)
     }
 
+    /// Fetch all `(path_pattern, access_level)` rules for `agent_role`, ordered by specificity
+    /// descending. Callers that check many paths for the same role can use this once and then
+    /// [`db::evaluate_sandbox_access`] in a loop to avoid an N+1 query per path.
+    pub fn list_sandbox_rules_for_role(
+        &self,
+        agent_role: &str,
+    ) -> Result<Vec<(String, String)>, MemoryError> {
+        db::list_sandbox_rules_for_role(&self.conn, agent_role)
+    }
+
     /// Set or update runtime sandbox policy for a capability.
     #[allow(clippy::too_many_arguments)]
     pub fn set_sandbox_policy(
