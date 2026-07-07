@@ -1,3 +1,16 @@
+//! # Security scope (read before trusting this as multi-tenant identity)
+//!
+//! C1 (`reject_unbound_cross_project_write`) closes ONE attack: an UNBOUND HTTP
+//! direct-connect session (no `X-Tachi-Project` header) targeting
+//! `project=victim` via a tool argument. It does NOT authenticate the
+//! `X-Tachi-Project` header itself — a direct HTTP client that claims
+//! `X-Tachi-Project: victim` at `initialize` still binds to victim's project,
+//! because project binding only verifies the project DB file exists
+//! (existence ≡ access). Full multi-tenant authorization (binding header claims
+//! to an authenticated identity via mTLS / local-only / vault-ACL) is tracked in
+//! #495 and is OUT OF SCOPE for the #809 fix. Until #495 lands, treat this
+//! module as "unbound-write rejection", NOT a complete identity spine.
+
 use rmcp::model::JsonObject;
 
 pub(crate) const HEADER_PROFILE: &str = "x-tachi-profile";

@@ -19,6 +19,7 @@ pub(super) async fn run_session_action(
                     &info,
                     "vault_status",
                     serde_json::Map::new(),
+                    None,
                 )
                 .await?;
                 println!("{out}");
@@ -90,6 +91,7 @@ pub(super) async fn run_session_action(
                     &info,
                     "vault_lock",
                     serde_json::Map::new(),
+                    None,
                 )
                 .await?;
                 println!("{out}");
@@ -152,9 +154,13 @@ pub(super) async fn run_session_action(
             insecure_password_file: _,
         } => {
             if let Some(info) = detect_matching_daemon(app_home, global_db_path).await {
-                if let Ok(out) =
-                    crate::cli_client::call_daemon_tool(&info, "vault_list", serde_json::Map::new())
-                        .await
+                if let Ok(out) = crate::cli_client::call_daemon_tool(
+                    &info,
+                    "vault_list",
+                    serde_json::Map::new(),
+                    None,
+                )
+                .await
                 {
                     print_vault_list_output(&out)?;
                     return Ok(());

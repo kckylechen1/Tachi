@@ -44,17 +44,29 @@ impl std::error::Error for DaemonCallError {}
 
 /// Call a tool over MCP-streamable-HTTP against a known daemon URL.
 /// Returns the first text content block from the tool result.
+///
+/// `proxy_project` lets a CLI invocation that already knows its named project
+/// declare that binding to the daemon by forwarding `X-Tachi-Project` via rmcp's
+/// `custom_headers` builder (same mechanism the stdio proxy uses through
+/// `call_daemon_tool_raw`). This is required for the CLI named-project
+/// forwarding path (`dispatch_cli_tool`): the CLI injects an explicit `project=`
+/// arg, and without a bound session the daemon-side C1 guard
+/// (`reject_unbound_cross_project_write`) would reject it as an unbound
+/// cross-tenant write. Global-only CLI invocations and vault actions pass `None`
+/// (no explicit `project=` arg → C1 allows). See `call_daemon_tool_raw` for the
+/// header injection details.
 pub(crate) async fn call_daemon_tool(
     info: &DaemonInfo,
     tool_name: &str,
     arguments: serde_json::Map<String, Value>,
+    proxy_project: Option<&str>,
 ) -> Result<String, DaemonCallError> {
     let (daemon_tool, daemon_args) = remap_daemon_tool(tool_name, arguments);
     let mut params = CallToolRequestParams::new(daemon_tool.clone());
     if !daemon_args.is_empty() {
         params = params.with_arguments(daemon_args);
     }
-    let result = call_daemon_tool_raw(info, params, None).await?;
+    let result = call_daemon_tool_raw(info, params, proxy_project).await?;
     if result.is_error.unwrap_or(false) {
         let err_text =
             first_text_block(&result.content).unwrap_or_else(|| "<no error text>".to_string());
