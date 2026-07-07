@@ -87,14 +87,14 @@ pub(super) async fn run_backfill_vectors(
         println!("Scope:   durable rows (recall cache excluded; pass --include-cache to include)");
     }
 
-    if missing == 0 {
-        record_cli_vector_sweep_state(db_path, skip_recall_cache, 0, 0, None);
-        println!("\n✅ All entries have vectors!");
+    if dry_run {
+        println!("\n(dry-run mode, no changes made)");
         return Ok(());
     }
 
-    if dry_run {
-        println!("\n(dry-run mode, no changes made)");
+    if missing == 0 {
+        record_cli_vector_sweep_state(db_path, skip_recall_cache, 0, 0, None);
+        println!("\n✅ All entries have vectors!");
         return Ok(());
     }
 
@@ -607,5 +607,45 @@ mod tests {
             !table_exists,
             "dry-run must not create or mutate vector_sweep_state"
         );
+    }
+
+    #[tokio::test]
+    async fn dry_run_all_vectored_db_does_not_update_existing_sweep_state() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("dry-run-complete.db");
+        let vault_path = dir.path().join("vault.db");
+        let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        insert_memory(&store, "durable-1", "manual", "note");
+        let dummy_vec = vec![0.0_f32; 1024];
+        store
+            .update_enrichment_fields("durable-1", None, Some(&dummy_vec), None, None, 1)
+            .expect("write vector");
+        drop(store);
+
+        crate::vector_backfill::record_vector_sweep_state(
+            &db_path,
+            crate::vector_backfill::VectorSweepStateUpdate {
+                enabled: true,
+                disabled_reason: None,
+                skip_recall_cache: true,
+                embedded_count: 7,
+                failed_count: 3,
+                last_error: Some("previous provider error".to_string()),
+                last_provider_error: Some("previous provider error".to_string()),
+                interval_secs: Some(1800),
+            },
+        )
+        .expect("seed existing state");
+
+        run_backfill_vectors(&db_path, &vault_path, 16, true, false)
+            .await
+            .expect("dry-run vector backfill");
+
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("existing state remains");
+        assert_eq!(state.embedded_count, 7);
+        assert_eq!(state.failed_count, 3);
+        assert_eq!(state.last_error.as_deref(), Some("previous provider error"));
     }
 }
