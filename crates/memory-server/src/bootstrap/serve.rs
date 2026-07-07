@@ -79,20 +79,44 @@ fn load_env_files(
     }
 }
 
-#[tokio::main]
-pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+struct StartupContext {
+    home: PathBuf,
+    app_home: PathBuf,
+    command: Commands,
+    defer_manifest_startup: bool,
+    git_root: Option<PathBuf>,
+}
+
+struct StartupHygiene {
+    gc_enabled: bool,
+    gc_initial_delay_secs: u64,
+    gc_interval_secs: u64,
+    project_db_path: Option<PathBuf>,
+}
+
+struct ServerState {
+    server: MemoryServer,
+    background_shutdown: tokio_util::sync::CancellationToken,
+    bg_handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+fn expand_user_path(raw: &str, home: &Path) -> PathBuf {
+    if raw == "~" {
+        home.to_path_buf()
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        home.join(rest)
+    } else {
+        PathBuf::from(raw)
+    }
+}
+
+fn expand_cli_path(raw: &Path, home: &Path) -> PathBuf {
+    expand_user_path(raw.to_string_lossy().as_ref(), home)
+}
+
+fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::error::Error>> {
     // Load config from dotenv files (same as before)
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let expand_user_path = |raw: &str| {
-        if raw == "~" {
-            home.clone()
-        } else if let Some(rest) = raw.strip_prefix("~/") {
-            home.join(rest)
-        } else {
-            PathBuf::from(raw)
-        }
-    };
-
     let app_home = crate::path_utils::tachi_home();
 
     // PR7 — install the tracing sink before doing anything else so early errors
@@ -125,8 +149,6 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         None
     };
 
-    let expand_cli_path = |raw: &PathBuf| expand_user_path(raw.to_string_lossy().as_ref());
-
     load_env_files(
         &home,
         &app_home,
@@ -134,18 +156,30 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         git_root.as_deref(),
     );
 
-    // Resolve global DB path
+    Ok(StartupContext {
+        home,
+        app_home,
+        command,
+        defer_manifest_startup,
+        git_root,
+    })
+}
+
+async fn resolve_global_db(
+    cli: &Cli,
+    ctx: &StartupContext,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let global_db_path = if let Some(p) = cli.global_db.as_ref() {
-        expand_cli_path(p)
+        expand_cli_path(p, &ctx.home)
     } else if let Ok(p) = std::env::var("MEMORY_DB_PATH") {
-        expand_user_path(&p)
+        expand_user_path(&p, &ctx.home)
     } else {
-        let default_global = app_home.join("global/memory.db");
+        let default_global = ctx.app_home.join("global/memory.db");
         // Migration: move legacy DBs into ${TACHI_HOME}/global/memory.db
         let legacy_candidates = vec![
-            app_home.join("memory.db"),
-            home.join(".sigil/global/memory.db"),
-            home.join(".sigil/memory.db"),
+            ctx.app_home.join("memory.db"),
+            ctx.home.join(".sigil/global/memory.db"),
+            ctx.home.join(".sigil/memory.db"),
         ];
         if !default_global.exists() {
             for legacy in legacy_candidates {
@@ -182,15 +216,15 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     //
     // Failure to read the manifest is non-fatal: we proceed with the heuristic
     // result so first-run installs still work without `tachi doctor`.
-    let manifest_path = app_home.join("manifest.json");
+    let manifest_path = ctx.app_home.join("manifest.json");
     // PR-2: hygiene pass before any manifest consumer reads. Idempotent.
     // Failures are logged and swallowed — startup must never block on GC.
-    if defer_manifest_startup {
+    if ctx.defer_manifest_startup {
         tracing::info!(
             target: "tachi::manifest::startup",
             "--daemon --no-project-db serve deferred manifest startup hygiene"
         );
-    } else if matches!(command, Commands::Serve) && manifest_path.exists() {
+    } else if matches!(ctx.command, Commands::Serve) && manifest_path.exists() {
         match crate::manifest::gc_manifest(&manifest_path) {
             Ok(report) => {
                 if report.aborted {
@@ -224,7 +258,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             }
         }
     }
-    let manifest_opt = if !defer_manifest_startup && manifest_path.exists() {
+    let manifest_opt = if !ctx.defer_manifest_startup && manifest_path.exists() {
         crate::manifest::Manifest::load(&manifest_path).ok()
     } else {
         None
@@ -268,7 +302,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                         //       file (the common case: editor/IDE spawned
                         //       tachi as a subprocess).
                         let daemon_alive = crate::cli_client::detect_daemon_for_global_db(
-                            &app_home,
+                            &ctx.app_home,
                             &manifest_global,
                         )
                         .await
@@ -308,9 +342,17 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         tokio::fs::create_dir_all(parent).await?;
     }
 
+    Ok(global_db_path)
+}
+
+async fn run_startup_hygiene(
+    cli: &Cli,
+    ctx: &StartupContext,
+    global_db_path: &PathBuf,
+) -> Result<Option<StartupHygiene>, Box<dyn std::error::Error>> {
     // Backfill commands need async LLM clients, so handle them before generic CLI dispatch.
-    if run_if_backfill_command(&command, &home, &global_db_path).await? {
-        return Ok(());
+    if run_if_backfill_command(&ctx.command, &ctx.home, global_db_path).await? {
+        return Ok(None);
     }
 
     let gc_enabled = cli
@@ -338,8 +380,8 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         }
         None
     } else if let Some(p) = cli.project_db.as_ref() {
-        Some(expand_cli_path(p))
-    } else if let Some(root) = git_root.as_ref() {
+        Some(expand_cli_path(p, &ctx.home))
+    } else if let Some(root) = ctx.git_root.as_ref() {
         let project_default = root.join(".tachi/memory.db");
         let project_legacy = root.join(".sigil/memory.db");
 
@@ -365,10 +407,10 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     // and must not rewrite the repo's global named-project alias.
     if should_refresh_plan_c_symlink(
         project_db_path.as_deref(),
-        git_root.as_deref(),
+        ctx.git_root.as_deref(),
         explicit_project_db,
     ) {
-        if let (Some(db_path), Some(root)) = (project_db_path.as_ref(), git_root.as_ref()) {
+        if let (Some(db_path), Some(root)) = (project_db_path.as_ref(), ctx.git_root.as_ref()) {
             if let crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) =
                 crate::path_utils::ensure_plan_c_symlink(db_path, root)
             {
@@ -377,12 +419,12 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         }
     }
 
-    if let Commands::Distill { action } = &command {
+    if let Commands::Distill { action } = &ctx.command {
         use tachi_bootstrap::cli::DistillAction;
         let DistillAction::Run { db } = action;
         let target_project = db
             .clone()
-            .map(|p| expand_user_path(p.to_string_lossy().as_ref()))
+            .map(|p| expand_user_path(p.to_string_lossy().as_ref(), &ctx.home))
             .or(project_db_path.clone())
             .ok_or_else(|| {
                 "distill run requires a project DB: pass --project-db PATH or `distill run --db PATH`"
@@ -391,10 +433,10 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         if !target_project.exists() {
             return Err(format!("project DB not found: {}", target_project.display()).into());
         }
-        let server = MemoryServer::new(global_db_path.clone(), Some(target_project.clone()))?;
+        let server = MemoryServer::new(global_db_path.to_path_buf(), Some(target_project.clone()))?;
         let report = crate::foundry_runtime_ops::run_daily_batch_distill(&server).await?;
         print_pretty_json(&serde_json::to_value(report)?)?;
-        return Ok(());
+        return Ok(None);
     }
 
     if cli.daemon && project_db_path.is_some() {
@@ -425,16 +467,16 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
 
     if run_pre_serve_command(
-        &command,
-        &home,
-        &app_home,
-        &global_db_path,
+        &ctx.command,
+        &ctx.home,
+        &ctx.app_home,
+        global_db_path,
         project_db_path.as_ref(),
-        git_root.as_ref(),
+        ctx.git_root.as_ref(),
     )
     .await?
     {
-        return Ok(());
+        return Ok(None);
     }
 
     // Ensure parent dirs exist
@@ -447,12 +489,26 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         }
     }
 
+    Ok(Some(StartupHygiene {
+        gc_enabled,
+        gc_initial_delay_secs,
+        gc_interval_secs,
+        project_db_path,
+    }))
+}
+
+async fn start_stdio_proxy_transport(
+    cli: &Cli,
+    ctx: &StartupContext,
+    global_db_path: &Path,
+    project_db_path: Option<&PathBuf>,
+) -> Result<bool, Box<dyn std::error::Error>> {
     // An explicit TACHI_PROJECT pin wins over the path-derived (git-hash) name so
     // the label injected into proxied WRITES matches the label used for reads —
     // otherwise briefing reads the pinned library while proxy writes still land
     // in the git-hash library (a silent read/write split). Only bind a label
     // when a project DB is bound, preserving the prior "global-only ⇒ no label".
-    let client_project_name = project_db_path.as_deref().and_then(|p| {
+    let client_project_name = project_db_path.and_then(|p| {
         crate::memory_search_ops::client_project_precedence(
             crate::memory_search_ops::explicit_workspace_project(),
             crate::memory_search_ops::named_project_from_db_path(p),
@@ -462,17 +518,17 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 
     if !cli.daemon {
         if let Some(info) = stdio::ensure_stdio_proxy_daemon(
-            &app_home,
-            &global_db_path,
-            project_db_path.as_deref(),
+            &ctx.app_home,
+            global_db_path,
+            project_db_path.map(|path| path.as_path()),
             client_project_name.as_deref(),
         )
         .await
         {
             if stdio::proxy_can_preserve_project_context(
                 &info,
-                &global_db_path,
-                project_db_path.as_deref(),
+                global_db_path,
+                project_db_path.map(|path| path.as_path()),
                 client_project_name.as_deref(),
             ) {
                 eprintln!(
@@ -482,18 +538,17 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                 );
                 stdio::serve_stdio_proxy(
                     info,
-                    app_home.clone(),
-                    global_db_path.clone(),
-                    project_db_path.clone(),
+                    ctx.app_home.clone(),
+                    global_db_path.to_path_buf(),
+                    project_db_path.cloned(),
                     client_project_name,
                 )
                 .await?;
-                return Ok(());
+                return Ok(true);
             }
             eprintln!(
                 "[stdio-proxy] local fallback: project DB {} has no named-project route and daemon project scope differs",
                 project_db_path
-                    .as_ref()
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| "<none>".to_string())
             );
@@ -509,13 +564,25 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             .into());
     }
 
+    Ok(false)
+}
+
+fn build_server_state(
+    cli: &Cli,
+    ctx: &StartupContext,
+    global_db_path: &Path,
+    hygiene: &StartupHygiene,
+) -> Result<ServerState, Box<dyn std::error::Error>> {
     if cli.daemon {
         std::env::set_var("TACHI_DAEMON", "1");
     } else {
         std::env::remove_var("TACHI_DAEMON");
     }
 
-    let server = MemoryServer::new(global_db_path.clone(), project_db_path.clone())?;
+    let server = MemoryServer::new(
+        global_db_path.to_path_buf(),
+        hygiene.project_db_path.clone(),
+    )?;
     match crate::signature_evidence::seed_signature_taxonomy_evidence(&server) {
         Ok(true) => eprintln!("[signatures] seeded 2026-07-05 error-signature taxonomy evidence"),
         Ok(false) => {}
@@ -565,19 +632,39 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         bg_handles.push(spawn_wal_checkpoint(&server, background_shutdown.clone()));
         bg_handles.push(spawn_background_gc(
             &server,
-            gc_enabled,
-            gc_initial_delay_secs,
-            gc_interval_secs,
+            hygiene.gc_enabled,
+            hygiene.gc_initial_delay_secs,
+            hygiene.gc_interval_secs,
             background_shutdown.clone(),
         ));
-        run_startup_integrity_checks(&server, project_db_path.is_some())?;
+        run_startup_integrity_checks(&server, hygiene.project_db_path.is_some())?;
         load_cached_hub_tools(&server);
         bg_handles.push(report_pipeline_and_spawn_daily_distill(
             &server,
-            &app_home,
+            &ctx.app_home,
             background_shutdown.clone(),
         ));
     }
+
+    Ok(ServerState {
+        server,
+        background_shutdown,
+        bg_handles,
+    })
+}
+
+async fn start_server_transport(
+    cli: &Cli,
+    ctx: &StartupContext,
+    global_db_path: &Path,
+    hygiene: &StartupHygiene,
+    state: ServerState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ServerState {
+        server,
+        background_shutdown,
+        bg_handles,
+    } = state;
 
     eprintln!("Starting Tachi MCP Server v{}", env!("CARGO_PKG_VERSION"));
     eprintln!(
@@ -589,7 +676,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         }
     );
     eprintln!("Global DB: {}", global_db_path.display());
-    if let Some(ref p) = project_db_path {
+    if let Some(ref p) = hygiene.project_db_path {
         eprintln!("Project DB: {}", p.display());
     } else {
         eprintln!("Project DB: none (not in a git repository)");
@@ -610,9 +697,9 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     let serve_result = if cli.daemon {
         serve_http_daemon(
             server,
-            app_home.clone(),
-            global_db_path.clone(),
-            project_db_path.clone(),
+            ctx.app_home.clone(),
+            global_db_path.to_path_buf(),
+            hygiene.project_db_path.clone(),
             cli.port,
         )
         .await
@@ -633,6 +720,29 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 
     serve_result?;
     Ok(())
+}
+
+#[tokio::main]
+pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = initialize_startup_context(&cli)?;
+    let global_db_path = resolve_global_db(&cli, &ctx).await?;
+    let Some(hygiene) = run_startup_hygiene(&cli, &ctx, &global_db_path).await? else {
+        return Ok(());
+    };
+
+    if start_stdio_proxy_transport(
+        &cli,
+        &ctx,
+        &global_db_path,
+        hygiene.project_db_path.as_ref(),
+    )
+    .await?
+    {
+        return Ok(());
+    }
+
+    let state = build_server_state(&cli, &ctx, &global_db_path, &hygiene)?;
+    start_server_transport(&cli, &ctx, &global_db_path, &hygiene, state).await
 }
 
 #[cfg(test)]
