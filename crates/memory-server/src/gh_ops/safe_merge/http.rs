@@ -217,6 +217,7 @@ impl HttpGhClient {
                   reviewDecision
                   isDraft
                   headRefOid
+                  headRefName
                   closingIssuesReferences(first: 100, after: $after) {
                     nodes {
                       number

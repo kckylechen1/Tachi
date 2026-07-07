@@ -1,6 +1,6 @@
 use super::*;
 
-/// Parse the `gh pr view --json number,state,mergeable,reviewDecision,isDraft,headRefOid,closingIssuesReferences`
+/// Parse the `gh pr view --json number,state,mergeable,reviewDecision,isDraft,headRefOid,headRefName,closingIssuesReferences`
 /// payload into a `PrState`. Pulled out as a free function so unit tests can
 /// exercise the JSON shape without spawning `gh`.
 pub(in crate::gh_ops) fn parse_pr_view_json(
@@ -42,6 +42,11 @@ pub(in crate::gh_ops) fn parse_pr_view_json(
         .and_then(|h| h.as_str())
         .unwrap_or_default()
         .to_string();
+    let head_ref = v
+        .get("headRefName")
+        .and_then(|h| h.as_str())
+        .filter(|h| !h.trim().is_empty())
+        .map(str::to_string);
     let linked_issue_refs = v
         .get("closingIssuesReferences")
         .and_then(|refs| refs.as_array())
@@ -68,6 +73,7 @@ pub(in crate::gh_ops) fn parse_pr_view_json(
         checks: ChecksState::aggregate(&checks),
         is_draft,
         head_sha,
+        head_ref,
         linked_issue_refs,
         closing_issue_labels: Vec::new(),
         head_consistent: None,

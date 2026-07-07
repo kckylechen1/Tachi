@@ -9,6 +9,7 @@ fn parse_pr_view_json_happy_path() {
         "reviewDecision": "APPROVED",
         "isDraft": false,
         "headRefOid": "abc123",
+        "headRefName": "feat/parser",
         "closingIssuesReferences": [
             {"number": 99, "url": "https://github.com/o/r/issues/99"}
         ],
@@ -21,6 +22,7 @@ fn parse_pr_view_json_happy_path() {
     assert_eq!(pr.checks, ChecksState::None);
     assert!(!pr.is_draft);
     assert_eq!(pr.head_sha, "abc123");
+    assert_eq!(pr.head_ref.as_deref(), Some("feat/parser"));
     assert_eq!(
         pr.linked_issue_refs,
         vec!["https://github.com/o/r/issues/99".to_string()]

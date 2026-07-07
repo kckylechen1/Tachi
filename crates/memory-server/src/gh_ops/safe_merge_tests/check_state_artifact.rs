@@ -229,12 +229,66 @@ async fn safe_merge_dry_run_records_red_check_state_artifact_without_merge_or_re
     let artifact: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(run_dir.join("check_state.json")).unwrap())
             .unwrap();
+    assert_eq!(artifact["pr"]["head_ref"], json!("feat/source-branch"));
     assert_eq!(artifact["aggregate"]["conclusion"], json!("failure"));
     assert_eq!(artifact["failed_checks_recorded_only"], json!(true));
     assert_eq!(artifact["repair_attempted"], json!(false));
     assert_eq!(artifact["merge_attempted"], json!(false));
     assert!(!run_dir.join("repair.json").exists());
     assert!(!run_dir.join("merge.json").exists());
+
+    if let Some(v) = original {
+        std::env::set_var("TACHI_RUN_ROOT", v);
+    } else {
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn safe_merge_already_merged_dry_run_still_records_check_state_artifact() {
+    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let original = std::env::var_os("TACHI_RUN_ROOT");
+    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+
+    let checks = vec![CheckRun {
+        name: "ci".to_string(),
+        status: "completed".to_string(),
+        conclusion: Some("success".to_string()),
+    }];
+    let client = MockGhClient::new()
+        .with_pr("o/r", already_merged_pr())
+        .with_checks("o/r", 42, checks);
+    let flow = "flow_already-merged-check-state";
+    let out = handle_github_safe_merge(
+        &client,
+        "o/r",
+        42,
+        MergeStrategy::Squash,
+        true,
+        Some(flow),
+        &[],
+        MergeGatePolicy::strict(),
+    )
+    .await
+    .expect("already merged dry run records check state");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["decision"]["decision"], json!("already_merged"));
+    assert_eq!(v["already_merged"], json!(true));
+    assert_eq!(v["check_state_ingest"]["persisted"], json!(true));
+
+    let run_dir = tmp.path().join(flow);
+    let artifact: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run_dir.join("check_state.json")).unwrap())
+            .unwrap();
+    assert_eq!(artifact["pr"]["head_ref"], json!("feat/source-branch"));
+    assert_eq!(artifact["source"], json!("safe_merge.dry_run"));
+    assert_eq!(artifact["aggregate"]["conclusion"], json!("success"));
+    assert_eq!(artifact["merge_attempted"], json!(false));
+    assert!(client.merge_calls().is_empty());
 
     if let Some(v) = original {
         std::env::set_var("TACHI_RUN_ROOT", v);

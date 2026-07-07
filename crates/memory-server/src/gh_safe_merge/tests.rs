@@ -9,6 +9,7 @@ fn open_pr() -> PrState {
         checks: ChecksState::Success,
         is_draft: false,
         head_sha: "abc123".to_string(),
+        head_ref: Some("feat/test-pr".to_string()),
         linked_issue_refs: Vec::new(),
         closing_issue_labels: Vec::new(),
         head_consistent: None,

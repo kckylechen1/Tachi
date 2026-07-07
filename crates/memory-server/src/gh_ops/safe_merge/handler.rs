@@ -25,9 +25,6 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         .pr_view(repo, pr_number)
         .await
         .map_err(|e| format!("pr_view failed: {e}"))?;
-    if matches!(pr.state, PrLifecycleState::Merged) {
-        return handle_already_merged_pr(repo, pr_number, &pr, dry_run, flow_id, policy).await;
-    }
     let check_state_ingest = if dry_run {
         let check_runs = client
             .checks_list(repo, pr_number)
@@ -41,7 +38,7 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
                 repo,
                 pr_number,
                 pr_ref: Some(pr_ref.as_str()),
-                head_ref: None,
+                head_ref: pr.head_ref.as_deref(),
                 observed_at: observed_at.as_str(),
                 source: "safe_merge.dry_run",
                 dry_run,
@@ -55,6 +52,18 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         .map(serde_json::to_value)
         .transpose()
         .map_err(|e| format!("serialize check_state_ingest: {e}"))?;
+    if matches!(pr.state, PrLifecycleState::Merged) {
+        return handle_already_merged_pr(
+            repo,
+            pr_number,
+            &pr,
+            dry_run,
+            flow_id,
+            policy,
+            check_state_ingest,
+        )
+        .await;
+    }
     let mut verification_gate = match evaluate_verification_gate(flow_id, &pr.head_sha) {
         Ok(gate) => gate,
         Err(err) if flow_id.is_some() => Some(json!({
@@ -310,6 +319,7 @@ async fn handle_already_merged_pr(
     dry_run: bool,
     flow_id: Option<&str>,
     policy: MergeGatePolicy,
+    check_state_ingest: Option<Value>,
 ) -> Result<String, String> {
     let flow_run_dir = match flow_id {
         Some(fid) => Some(run_dir_for_flow_id(fid)?),
@@ -412,6 +422,7 @@ async fn handle_already_merged_pr(
         "merge_executed": false,
         "already_merged": true,
         "flow_id": flow_id,
+        "check_state_ingest": check_state_ingest,
         "persisted": persisted,
         "status_patch": status_patch,
         "event": {
