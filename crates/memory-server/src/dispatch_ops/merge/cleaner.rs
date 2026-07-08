@@ -1,7 +1,7 @@
 use tokio::process::Command;
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub(in crate::dispatch_ops::merge) struct CleanerRemoveReport {
+pub(crate) struct CleanerRemoveReport {
     pub removed: bool,
     #[serde(default)]
     pub warnings: Vec<String>,
@@ -28,7 +28,7 @@ pub(crate) fn resolve_tachi_clean_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(bin_name)
 }
 
-pub(in crate::dispatch_ops::merge) async fn remove_worktree_with_cleaner(
+pub(crate) async fn remove_worktree_with_cleaner(
     worktree: &str,
 ) -> Result<CleanerRemoveReport, String> {
     let cleaner_bin = resolve_tachi_clean_bin();

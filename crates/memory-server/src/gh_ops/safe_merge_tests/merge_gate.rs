@@ -14,6 +14,8 @@ async fn safe_merge_dry_run_ready_does_not_call_pr_merge() {
         None,
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect("ok");
@@ -60,6 +62,8 @@ async fn safe_merge_ready_executes_merge_when_not_dry_run() {
         None,
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect("ok");
@@ -95,6 +99,8 @@ async fn safe_merge_observes_already_merged_pr_without_blocking() {
         None,
         &[],
         MergeGatePolicy::strict(),
+        None,
+        false,
     )
     .await
     .expect("ok");
@@ -132,6 +138,8 @@ async fn safe_merge_reports_head_sha_mismatch_from_merge_client() {
         None,
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect("ok");
@@ -154,6 +162,8 @@ async fn safe_merge_blocked_does_not_call_pr_merge_even_when_not_dry_run() {
         None,
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect("ok");
@@ -179,6 +189,8 @@ async fn safe_merge_pending_emits_checks_polled() {
         None,
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect("ok");
@@ -210,6 +222,8 @@ async fn safe_merge_skipped_checks_waits_and_labels_check_state() {
         None,
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect("ok");

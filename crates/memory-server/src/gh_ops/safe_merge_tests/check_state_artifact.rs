@@ -239,6 +239,8 @@ async fn safe_merge_dry_run_records_red_check_state_artifact_without_merge_or_re
         Some(flow),
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect("safe_merge dry run records check state");
@@ -300,6 +302,8 @@ async fn safe_merge_already_merged_dry_run_still_records_check_state_artifact() 
         Some(flow),
         &[],
         MergeGatePolicy::strict(),
+        None,
+        false,
     )
     .await
     .expect("already merged dry run records check state");
@@ -350,6 +354,8 @@ async fn safe_merge_dry_run_without_flow_id_reports_non_auditable_check_state() 
         None,
         &[],
         MergeGatePolicy::standard(),
+        None,
+        false,
     )
     .await
     .expect("safe_merge dry run should report non-auditable ingest");

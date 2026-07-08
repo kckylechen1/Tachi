@@ -79,5 +79,6 @@ mod check_state_artifact;
 mod flow_events;
 mod merge_gate;
 mod parsers;
+mod reclamation;
 mod review_digest;
 mod strict_verification;

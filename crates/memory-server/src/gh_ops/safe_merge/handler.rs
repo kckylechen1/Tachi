@@ -6,7 +6,12 @@ use super::*;
 /// 3. If `Ready` and `!dry_run`, call `pr_merge` (squash by default).
 /// 4. When `flow_id` is present, persist `merge_state` + reasons into
 ///    `status.json::github` and append the matching event to `events.jsonl`.
-/// 5. Return a JSON envelope the agent can render directly.
+/// 5. After a successful non-dry-run merge, when `reclaim_worktree` is true
+///    and `worktree` resolves to a local path, reclaim the worktree + branch +
+///    target via `tachi-clean wt-remove` (best-effort) and record a reclamation
+///    event (`github_safe_merge_reclaimed` on success, or
+///    `github_safe_merge_reclaim_skipped` on any skip/failure).
+/// 6. Return a JSON envelope the agent can render directly.
 pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
     client: &C,
     repo: &str,
@@ -16,6 +21,8 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
     flow_id: Option<&str>,
     tests_run: &[String],
     policy: MergeGatePolicy,
+    worktree: Option<&str>,
+    reclaim_worktree: bool,
 ) -> Result<String, String> {
     let flow_run_dir = match flow_id {
         Some(fid) => Some(run_dir_for_flow_id(fid)?),
@@ -308,6 +315,23 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         persisted = true;
     }
 
+    // Reclamation hook (disk governor, load-bearing slice for #484): after a
+    // successful non-dry-run GitHub PR merge, reclaim the local worktree +
+    // branch + target dir when the caller supplied a worktree path. This is
+    // best-effort: a missing worktree (PR opened from a non-Tachi checkout)
+    // logs a warning and never fails the merge. Mirrors the cleanup that
+    // `tachi_task(action='merge')`/`approve_merge` already performs on the
+    // local dispatch path.
+    let reclamation = reclaim_worktree_after_merge(
+        merged_sha.as_deref(),
+        dry_run,
+        worktree,
+        reclaim_worktree,
+        flow_id,
+        flow_run_dir.as_deref(),
+    )
+    .await;
+
     serde_json::to_string(&json!({
         "tool": "tachi_gh_safe_merge",
         "repo": repo,
@@ -329,6 +353,7 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
             "kind": event_kind,
             "payload": event_payload,
         },
+        "reclamation": reclamation,
     }))
     .map_err(|e| format!("serialize: {e}"))
 }
@@ -459,6 +484,130 @@ fn pr_lifecycle_state_label(state: PrLifecycleState) -> &'static str {
         PrLifecycleState::Open => "OPEN",
         PrLifecycleState::Closed => "CLOSED",
         PrLifecycleState::Merged => "MERGED",
+    }
+}
+
+/// Reclaim a local worktree after a successful GitHub PR merge. The reclamation
+/// is gated on all of: a real merge occurred (`merge_sha.is_some()` +
+/// `!dry_run`), `reclaim_worktree` is true, and the caller supplied a worktree
+/// path. The cleaner is best-effort: a worktree that does not exist locally
+/// (the PR was opened from a non-Tachi checkout) logs a warning and continues
+/// — it never fails the merge.
+///
+/// Returns a JSON object describing the outcome so the handler can surface it
+/// in the response envelope. When `run_dir` is present, also appends a
+/// reclamation event to the flow ledger: `github_safe_merge_reclaimed` for a
+/// genuine success (`reclaimed: true`), or `github_safe_merge_reclaim_skipped`
+/// for any skip or failure (worktree_missing, cleaner error, `reclaimed: false`).
+async fn reclaim_worktree_after_merge(
+    merge_sha: Option<&str>,
+    dry_run: bool,
+    worktree: Option<&str>,
+    reclaim_worktree: bool,
+    flow_id: Option<&str>,
+    run_dir: Option<&std::path::Path>,
+) -> Value {
+    // No merge happened (dry-run, blocked, pending, or already-merged): nothing
+    // to reclaim, and dry-run MUST NOT reclaim.
+    if dry_run || merge_sha.is_none() {
+        return json!({
+            "attempted": false,
+            "reclaimed": false,
+            "skipped": if dry_run { "dry_run" } else { "no_merge" },
+        });
+    }
+    // Operator opted out, or no worktree was supplied (no PR→worktree mapping).
+    if !reclaim_worktree {
+        return json!({
+            "attempted": false,
+            "reclaimed": false,
+            "skipped": "reclaim_disabled",
+        });
+    }
+    let Some(worktree_path) = worktree.map(str::trim).filter(|s| !s.is_empty()) else {
+        return json!({
+            "attempted": false,
+            "reclaimed": false,
+            "skipped": "no_worktree_mapped",
+        });
+    };
+
+    // Best-effort: a missing worktree is a warning, not an error. The PR may
+    // have been opened from a non-Tachi checkout with no local worktree to
+    // reclaim.
+    let path = std::path::Path::new(worktree_path);
+    if !path.exists() {
+        tracing::warn!(
+            worktree = worktree_path,
+            "safe_merge reclamation skipped: worktree does not exist locally (best-effort)"
+        );
+        let detail = json!({
+            "attempted": false,
+            "reclaimed": false,
+            "skipped": "worktree_missing",
+            "worktree": worktree_path,
+            "warning": "worktree does not exist locally; nothing to reclaim",
+        });
+        record_reclamation_event(flow_id, run_dir, &detail);
+        return detail;
+    }
+
+    let attempt = crate::dispatch_ops::remove_worktree_with_cleaner(worktree_path).await;
+    let detail = match attempt {
+        Ok(report) => json!({
+            "attempted": true,
+            "reclaimed": report.removed,
+            "worktree": worktree_path,
+            "warnings": report.warnings,
+            "errors": report.errors,
+        }),
+        Err(err) => {
+            tracing::warn!(
+                worktree = worktree_path,
+                error = %err,
+                "safe_merge reclamation failed (best-effort); merge already succeeded"
+            );
+            json!({
+                "attempted": true,
+                "reclaimed": false,
+                "worktree": worktree_path,
+                "error": err,
+            })
+        }
+    };
+    record_reclamation_event(flow_id, run_dir, &detail);
+    detail
+}
+
+/// Append a reclamation event to the flow ledger when a flow run dir is
+/// present. The event kind reflects the outcome so readers filtering by kind
+/// are not misled:
+///   - genuine success (`reclaimed: true`) → `github_safe_merge_reclaimed`
+///   - skip (`worktree_missing`) OR cleaner-error OR `reclaimed: false` →
+///     `github_safe_merge_reclaim_skipped`
+///
+/// Errors here are logged but never propagate — the merge already succeeded
+/// and reclamation is best-effort.
+fn record_reclamation_event(
+    flow_id: Option<&str>,
+    run_dir: Option<&std::path::Path>,
+    detail: &Value,
+) {
+    let (Some(fid), Some(dir)) = (flow_id, run_dir) else {
+        return;
+    };
+    let reclaimed = detail.get("reclaimed").and_then(Value::as_bool) == Some(true);
+    let kind = if reclaimed {
+        "github_safe_merge_reclaimed"
+    } else {
+        "github_safe_merge_reclaim_skipped"
+    };
+    if let Err(err) = append_github_event(dir, fid, kind, detail.clone()) {
+        tracing::warn!(
+            flow_id = fid,
+            error = %err,
+            "failed to append {kind} event (best-effort)"
+        );
     }
 }
 

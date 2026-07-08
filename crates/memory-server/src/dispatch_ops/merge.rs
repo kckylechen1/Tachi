@@ -4,6 +4,7 @@ mod preview;
 mod repo;
 mod safety;
 
+pub(crate) use cleaner::remove_worktree_with_cleaner;
 pub(crate) use handler::handle_approve_merge;
 
 #[cfg(test)]
