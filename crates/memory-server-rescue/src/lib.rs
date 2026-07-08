@@ -24,23 +24,20 @@
 //!      and conditionally populate them. Legacy source `persons` is folded into
 //!      `entities`; new target writes do not populate the physical column.
 
-mod apply;
-mod classify;
-mod plan;
-mod render;
-mod source;
-mod types;
+mod rescue {
+    pub mod apply;
+    pub mod classify;
+    pub mod plan;
+    pub mod render;
+    pub mod source;
+    pub mod types;
 
-#[cfg(test)]
-mod tests;
+    #[cfg(test)]
+    pub mod tests;
+}
 
-#[allow(unused_imports)]
-pub use self::apply::apply_rescue;
-#[allow(unused_imports)]
-pub use self::classify::classify;
-#[allow(unused_imports)]
-pub use self::plan::plan_rescue;
-#[allow(unused_imports)]
-pub use self::render::render_plan;
-#[allow(unused_imports)]
-pub use self::types::{RescueApplyReport, RescueAssignment, RescuePlan, SourceRow};
+pub use rescue::apply::apply_rescue;
+pub use rescue::classify::classify;
+pub use rescue::plan::plan_rescue;
+pub use rescue::render::render_plan;
+pub use rescue::types::{RescueApplyReport, RescueAssignment, RescuePlan, SourceRow};

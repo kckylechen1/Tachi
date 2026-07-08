@@ -1,0 +1,16 @@
+[package]
+name = "memory-server-rescue"
+version = "1.6.4"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Antigravity DB rescue tool — split a multi-project memory.db into per-project Tachi DBs. Extracted from memory-server (#833 slice 1)."
+
+[dependencies]
+chrono = { workspace = true }
+memory-core = { path = "../memory-core" }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

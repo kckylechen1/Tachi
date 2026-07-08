@@ -1271,468 +1271,460 @@ fn proxy_rejects_cross_project_override_even_with_global_scope() {
     );
 }
 
-    fn parse_http_mcp_payload(body: &str, expected_id: i64) -> serde_json::Value {
-        let data_lines = body
-            .lines()
-            .filter_map(|line| line.strip_prefix("data:").map(str::trim))
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>();
-        let payload = data_lines
-            .iter()
-            .rev()
-            .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .unwrap_or_else(|| {
-                serde_json::from_str(body).unwrap_or_else(|err| {
-                    panic!("HTTP MCP body is not JSON/SSE JSON: {err}; {body}")
-                })
-            });
-        assert_eq!(payload["jsonrpc"], serde_json::json!("2.0"), "{payload:#}");
-        assert_eq!(payload["id"], serde_json::json!(expected_id), "{payload:#}");
-        payload
-    }
-
-
-    async fn http_mcp_initialize(
-        url: &str,
-        headers: reqwest::header::HeaderMap,
-        meta: Option<serde_json::Value>,
-    ) -> (
-        reqwest::Client,
-        reqwest::header::HeaderMap,
-        serde_json::Value,
-    ) {
-        let client = reqwest::Client::new();
-        let mut params = serde_json::json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "tachi-test", "version": env!("CARGO_PKG_VERSION")},
+fn parse_http_mcp_payload(body: &str, expected_id: i64) -> serde_json::Value {
+    let data_lines = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:").map(str::trim))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let payload = data_lines
+        .iter()
+        .rev()
+        .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .unwrap_or_else(|| {
+            serde_json::from_str(body)
+                .unwrap_or_else(|err| panic!("HTTP MCP body is not JSON/SSE JSON: {err}; {body}"))
         });
-        if let Some(meta) = meta {
-            params
-                .as_object_mut()
-                .expect("initialize params object")
-                .insert("_meta".to_string(), meta);
-        }
-        let response = client
-            .post(url)
-            .headers(headers.clone())
-            .json(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": params,
-            }))
-            .send()
-            .await
-            .expect("send HTTP MCP initialize");
-        let init_headers = response.headers().clone();
-        let body = response.text().await.expect("initialize body");
-        let init = parse_http_mcp_payload(&body, 1);
-        let mut session_headers = headers;
-        if let Some(session_id) = init_headers
-            .get("mcp-session-id")
-            .and_then(|value| value.to_str().ok())
-        {
-            session_headers.insert(
-                reqwest::header::HeaderName::from_static("mcp-session-id"),
-                reqwest::header::HeaderValue::from_str(session_id)
-                    .expect("valid mcp-session-id header"),
-            );
-        }
-        (client, session_headers, init)
+    assert_eq!(payload["jsonrpc"], serde_json::json!("2.0"), "{payload:#}");
+    assert_eq!(payload["id"], serde_json::json!(expected_id), "{payload:#}");
+    payload
+}
+
+async fn http_mcp_initialize(
+    url: &str,
+    headers: reqwest::header::HeaderMap,
+    meta: Option<serde_json::Value>,
+) -> (
+    reqwest::Client,
+    reqwest::header::HeaderMap,
+    serde_json::Value,
+) {
+    let client = reqwest::Client::new();
+    let mut params = serde_json::json!({
+        "protocolVersion": "2024-11-05",
+        "capabilities": {},
+        "clientInfo": {"name": "tachi-test", "version": env!("CARGO_PKG_VERSION")},
+    });
+    if let Some(meta) = meta {
+        params
+            .as_object_mut()
+            .expect("initialize params object")
+            .insert("_meta".to_string(), meta);
     }
-
-
-    async fn http_mcp_initialized(
-        client: &reqwest::Client,
-        url: &str,
-        headers: reqwest::header::HeaderMap,
-    ) {
-        client
-            .post(url)
-            .headers(headers)
-            .json(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-                "params": {},
-            }))
-            .send()
-            .await
-            .expect("send HTTP MCP initialized")
-            .error_for_status()
-            .expect("initialized status");
-    }
-
-
-    async fn http_mcp_call_tool(
-        client: &reqwest::Client,
-        url: &str,
-        headers: reqwest::header::HeaderMap,
-        id: i64,
-        tool_name: &str,
-        arguments: serde_json::Map<String, serde_json::Value>,
-    ) -> serde_json::Value {
-        let response = client
-            .post(url)
-            .headers(headers)
-            .json(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "method": "tools/call",
-                "params": {
-                    "name": tool_name,
-                    "arguments": arguments,
-                },
-            }))
-            .send()
-            .await
-            .expect("send HTTP MCP tool call");
-        let body = response.text().await.expect("tool call body");
-        parse_http_mcp_payload(&body, id)
-    }
-
-
-    fn http_tool_text(response: &serde_json::Value) -> String {
-        let content = response["result"]["content"]
-            .as_array()
-            .unwrap_or_else(|| panic!("tool result should contain content: {response:#}"));
-        content
-            .iter()
-            .find_map(|entry| entry.get("text").and_then(|value| value.as_str()))
-            .unwrap_or_else(|| panic!("tool result should contain text content: {response:#}"))
-            .to_string()
-    }
-
-
-    fn http_headers(pairs: &[(&str, &str)]) -> reqwest::header::HeaderMap {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::CONTENT_TYPE,
-            reqwest::header::HeaderValue::from_static("application/json"),
+    let response = client
+        .post(url)
+        .headers(headers.clone())
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": params,
+        }))
+        .send()
+        .await
+        .expect("send HTTP MCP initialize");
+    let init_headers = response.headers().clone();
+    let body = response.text().await.expect("initialize body");
+    let init = parse_http_mcp_payload(&body, 1);
+    let mut session_headers = headers;
+    if let Some(session_id) = init_headers
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+    {
+        session_headers.insert(
+            reqwest::header::HeaderName::from_static("mcp-session-id"),
+            reqwest::header::HeaderValue::from_str(session_id)
+                .expect("valid mcp-session-id header"),
         );
-        headers.insert(
-            reqwest::header::ACCEPT,
-            reqwest::header::HeaderValue::from_static("application/json, text/event-stream"),
-        );
-        for (name, value) in pairs {
-            headers.insert(
-                reqwest::header::HeaderName::from_bytes(name.as_bytes()).expect("test header name"),
-                reqwest::header::HeaderValue::from_str(value).expect("test header value"),
-            );
-        }
-        headers
     }
+    (client, session_headers, init)
+}
 
-    #[test]
-    fn http_direct_connect_header_identity_binds_profile_and_project() {
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let saved_home = std::env::var_os("TACHI_HOME");
-        let saved_sigil = std::env::var_os("SIGIL_HOME");
-        let saved_app = std::env::var_os("TACHI_APP_HOME");
+async fn http_mcp_initialized(
+    client: &reqwest::Client,
+    url: &str,
+    headers: reqwest::header::HeaderMap,
+) {
+    client
+        .post(url)
+        .headers(headers)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {},
+        }))
+        .send()
+        .await
+        .expect("send HTTP MCP initialized")
+        .error_for_status()
+        .expect("initialized status");
+}
 
-        let temp = tempfile::tempdir().expect("tempdir");
-        let tachi_home = temp.path().join("home");
-        let global = tachi_home.join("global/memory.db");
-        let project_name = "Sigil-http-direct-e2e";
-        let project = tachi_home
-            .join("projects")
-            .join(project_name)
-            .join("memory.db");
-        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-        std::env::set_var("TACHI_HOME", &tachi_home);
-        std::env::remove_var("SIGIL_HOME");
-        std::env::remove_var("TACHI_APP_HOME");
-        seed_project_db(&tachi_home, &project);
+async fn http_mcp_call_tool(
+    client: &reqwest::Client,
+    url: &str,
+    headers: reqwest::header::HeaderMap,
+    id: i64,
+    tool_name: &str,
+    arguments: serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
+    let response = client
+        .post(url)
+        .headers(headers)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments,
+            },
+        }))
+        .send()
+        .await
+        .expect("send HTTP MCP tool call");
+    let body = response.text().await.expect("tool call body");
+    parse_http_mcp_payload(&body, id)
+}
 
-        let rt = test_runtime();
-        let (ct, daemon_task) = rt.block_on(async {
-            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
-            let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
-            let headers = http_headers(&[
-                (crate::session_identity::HEADER_PROFILE, "delegate"),
-                (crate::session_identity::HEADER_CLIENT, "codex-http-test"),
-                (crate::session_identity::HEADER_PROJECT, project_name),
-            ]);
-            let (client, session_headers, init) =
-                http_mcp_initialize(&daemon.url, headers, None).await;
-            assert!(init.get("error").is_none(), "initialize failed: {init:#}");
-            http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
+fn http_tool_text(response: &serde_json::Value) -> String {
+    let content = response["result"]["content"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tool result should contain content: {response:#}"));
+    content
+        .iter()
+        .find_map(|entry| entry.get("text").and_then(|value| value.as_str()))
+        .unwrap_or_else(|| panic!("tool result should contain text content: {response:#}"))
+        .to_string()
+}
 
-            let runtime = http_mcp_call_tool(
+fn http_headers(pairs: &[(&str, &str)]) -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        reqwest::header::HeaderValue::from_static("application/json"),
+    );
+    headers.insert(
+        reqwest::header::ACCEPT,
+        reqwest::header::HeaderValue::from_static("application/json, text/event-stream"),
+    );
+    for (name, value) in pairs {
+        headers.insert(
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()).expect("test header name"),
+            reqwest::header::HeaderValue::from_str(value).expect("test header value"),
+        );
+    }
+    headers
+}
+
+#[test]
+fn http_direct_connect_header_identity_binds_profile_and_project() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let saved_home = std::env::var_os("TACHI_HOME");
+    let saved_sigil = std::env::var_os("SIGIL_HOME");
+    let saved_app = std::env::var_os("TACHI_APP_HOME");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    let project_name = "Sigil-http-direct-e2e";
+    let project = tachi_home
+        .join("projects")
+        .join(project_name)
+        .join("memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    std::env::set_var("TACHI_HOME", &tachi_home);
+    std::env::remove_var("SIGIL_HOME");
+    std::env::remove_var("TACHI_APP_HOME");
+    seed_project_db(&tachi_home, &project);
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let headers = http_headers(&[
+            (crate::session_identity::HEADER_PROFILE, "delegate"),
+            (crate::session_identity::HEADER_CLIENT, "codex-http-test"),
+            (crate::session_identity::HEADER_PROJECT, project_name),
+        ]);
+        let (client, session_headers, init) = http_mcp_initialize(&daemon.url, headers, None).await;
+        assert!(init.get("error").is_none(), "initialize failed: {init:#}");
+        http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
+
+        let runtime = http_mcp_call_tool(
+            &client,
+            &daemon.url,
+            session_headers.clone(),
+            2,
+            "runtime_info",
+            serde_json::Map::new(),
+        )
+        .await;
+        assert!(
+            runtime["result"]["isError"] != serde_json::json!(true),
+            "runtime_info failed: {runtime:#}"
+        );
+        let runtime_text = http_tool_text(&runtime);
+        let runtime_json: serde_json::Value =
+            serde_json::from_str(&runtime_text).expect("runtime_info JSON");
+        assert_eq!(runtime_json["runtime"]["tool_profile"], "delegate");
+        assert_eq!(runtime_json["runtime"]["session_client"], "codex-http-test");
+        assert_eq!(runtime_json["runtime"]["session_project"], project_name);
+
+        for (id, scope, summary) in [
+            (
+                "http-direct-global-e2e",
+                "global",
+                "global DIRECTHTTPMERGE row",
+            ),
+            (
+                "http-direct-project-e2e",
+                "project",
+                "project DIRECTHTTPMERGE row",
+            ),
+        ] {
+            let saved = http_mcp_call_tool(
                 &client,
                 &daemon.url,
                 session_headers.clone(),
-                2,
-                "runtime_info",
-                serde_json::Map::new(),
-            )
-            .await;
-            assert!(
-                runtime["result"]["isError"] != serde_json::json!(true),
-                "runtime_info failed: {runtime:#}"
-            );
-            let runtime_text = http_tool_text(&runtime);
-            let runtime_json: serde_json::Value =
-                serde_json::from_str(&runtime_text).expect("runtime_info JSON");
-            assert_eq!(runtime_json["runtime"]["tool_profile"], "delegate");
-            assert_eq!(runtime_json["runtime"]["session_client"], "codex-http-test");
-            assert_eq!(runtime_json["runtime"]["session_project"], project_name);
-
-            for (id, scope, summary) in [
-                (
-                    "http-direct-global-e2e",
-                    "global",
-                    "global DIRECTHTTPMERGE row",
-                ),
-                (
-                    "http-direct-project-e2e",
-                    "project",
-                    "project DIRECTHTTPMERGE row",
-                ),
-            ] {
-                let saved = http_mcp_call_tool(
-                    &client,
-                    &daemon.url,
-                    session_headers.clone(),
-                    if scope == "global" { 3 } else { 4 },
-                    "tachi_memory",
-                    serde_json::Map::from_iter([
-                        ("action".to_string(), serde_json::json!("save")),
-                        ("id".to_string(), serde_json::json!(id)),
-                        (
-                            "text".to_string(),
-                            serde_json::json!(format!("{summary} lossless text")),
-                        ),
-                        ("summary".to_string(), serde_json::json!(summary)),
-                        (
-                            "path".to_string(),
-                            serde_json::json!("/tests/http-direct-e2e"),
-                        ),
-                        ("category".to_string(), serde_json::json!("fact")),
-                        ("scope".to_string(), serde_json::json!(scope)),
-                        ("force".to_string(), serde_json::json!(true)),
-                    ]),
-                )
-                .await;
-                assert!(
-                    saved["result"]["isError"] != serde_json::json!(true),
-                    "save {id} failed: {saved:#}"
-                );
-            }
-
-            let search = http_mcp_call_tool(
-                &client,
-                &daemon.url,
-                session_headers,
-                5,
-                "tachi_memory",
-                serde_json::Map::from_iter([
-                    ("action".to_string(), serde_json::json!("search")),
-                    ("query".to_string(), serde_json::json!("DIRECTHTTPMERGE")),
-                    ("scope".to_string(), serde_json::json!("memory")),
-                    ("top_k".to_string(), serde_json::json!(10)),
-                    ("format".to_string(), serde_json::json!("json")),
-                ]),
-            )
-            .await;
-            assert!(
-                search["result"]["isError"] != serde_json::json!(true),
-                "search failed: {search:#}"
-            );
-            let text = http_tool_text(&search);
-            assert!(
-                text.contains("http-direct-global-e2e"),
-                "HTTP search lost global row: {text}"
-            );
-            assert!(
-                text.contains("http-direct-project-e2e"),
-                "HTTP search lost bound project row: {text}"
-            );
-
-            (ct, daemon_task)
-        });
-
-        assert_eq!(
-            memory_text_count(&global, "global DIRECTHTTPMERGE row lossless text"),
-            1
-        );
-        assert_eq!(
-            memory_text_count(&project, "project DIRECTHTTPMERGE row lossless text"),
-            1
-        );
-        assert_eq!(
-            memory_text_count(&global, "project DIRECTHTTPMERGE row lossless text"),
-            0
-        );
-
-        ct.cancel();
-        rt.block_on(daemon_task).expect("daemon task");
-        restore_env("TACHI_HOME", saved_home);
-        restore_env("SIGIL_HOME", saved_sigil);
-        restore_env("TACHI_APP_HOME", saved_app);
-    }
-
-    #[test]
-    fn http_direct_connect_rejects_admin_profile_without_authorization_policy() {
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let saved_home = std::env::var_os("TACHI_HOME");
-        let saved_sigil = std::env::var_os("SIGIL_HOME");
-        let saved_app = std::env::var_os("TACHI_APP_HOME");
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let tachi_home = temp.path().join("home");
-        let global = tachi_home.join("global/memory.db");
-        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-        std::env::set_var("TACHI_HOME", &tachi_home);
-        std::env::remove_var("SIGIL_HOME");
-        std::env::remove_var("TACHI_APP_HOME");
-
-        let rt = test_runtime();
-        let (ct, daemon_task) = rt.block_on(async {
-            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
-            let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
-            let headers = http_headers(&[(crate::session_identity::HEADER_PROFILE, "admin")]);
-            let (_client, _session_headers, init) =
-                http_mcp_initialize(&daemon.url, headers, None).await;
-            let error = init
-                .get("error")
-                .unwrap_or_else(|| panic!("admin initialize should fail: {init:#}"));
-            let message = error["message"].as_str().unwrap_or_default();
-            assert!(
-                message.contains("requires explicit authorization"),
-                "unexpected admin rejection: {init:#}"
-            );
-            (ct, daemon_task)
-        });
-
-        ct.cancel();
-        rt.block_on(daemon_task).expect("daemon task");
-        restore_env("TACHI_HOME", saved_home);
-        restore_env("SIGIL_HOME", saved_sigil);
-        restore_env("TACHI_APP_HOME", saved_app);
-    }
-
-    #[test]
-
-    fn http_direct_connect_unbound_session_rejects_explicit_cross_project_write() {
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let saved_home = std::env::var_os("TACHI_HOME");
-        let saved_sigil = std::env::var_os("SIGIL_HOME");
-        let saved_app = std::env::var_os("TACHI_APP_HOME");
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        let tachi_home = temp.path().join("home");
-        let global = tachi_home.join("global/memory.db");
-        let attacker_project_name = "Sigil-http-unbound-attacker";
-        let victim_project_name = "Sigil-http-unbound-victim";
-        let attacker_project = tachi_home
-            .join("projects")
-            .join(attacker_project_name)
-            .join("memory.db");
-        let victim_project = tachi_home
-            .join("projects")
-            .join(victim_project_name)
-            .join("memory.db");
-        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-        std::env::set_var("TACHI_HOME", &tachi_home);
-        std::env::remove_var("SIGIL_HOME");
-        std::env::remove_var("TACHI_APP_HOME");
-        seed_project_db(&tachi_home, &attacker_project);
-        seed_project_db(&tachi_home, &victim_project);
-
-        let victim_text = "C1 victim row must stay unmutated";
-        let victim_id = "c1-victim-row";
-        assert_eq!(memory_text_count(&victim_project, victim_text), 0);
-
-        let rt = test_runtime();
-        let (ct, daemon_task) = rt.block_on(async {
-            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
-            let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
-            // Intentionally NO X-Tachi-Project header → unbound session.
-            let headers = http_headers(&[]);
-            let (client, session_headers, init) =
-                http_mcp_initialize(&daemon.url, headers, None).await;
-            assert!(init.get("error").is_none(), "initialize failed: {init:#}");
-            http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
-
-            // Cross-project write attempt: unbound session asks to save into the
-            // victim project explicitly. Must be rejected.
-            let save = http_mcp_call_tool(
-                &client,
-                &daemon.url,
-                session_headers.clone(),
-                2,
+                if scope == "global" { 3 } else { 4 },
                 "tachi_memory",
                 serde_json::Map::from_iter([
                     ("action".to_string(), serde_json::json!("save")),
-                    ("id".to_string(), serde_json::json!(victim_id)),
-                    ("text".to_string(), serde_json::json!(victim_text)),
+                    ("id".to_string(), serde_json::json!(id)),
                     (
-                        "summary".to_string(),
-                        serde_json::json!("C1 unbound cross-project attempt"),
+                        "text".to_string(),
+                        serde_json::json!(format!("{summary} lossless text")),
                     ),
+                    ("summary".to_string(), serde_json::json!(summary)),
                     (
                         "path".to_string(),
-                        serde_json::json!("/tests/http-unbound-c1"),
+                        serde_json::json!("/tests/http-direct-e2e"),
                     ),
                     ("category".to_string(), serde_json::json!("fact")),
-                    (
-                        "project".to_string(),
-                        serde_json::json!(victim_project_name),
-                    ),
+                    ("scope".to_string(), serde_json::json!(scope)),
                     ("force".to_string(), serde_json::json!(true)),
                 ]),
             )
             .await;
-
-            // The tool call must surface an MCP-level rejection. rmcp turns an
-            // invalid_params ErrorData from call_tool into a JSON-RPC error
-            // response (no "result" object).
-            let rejected = save
-                .get("error")
-                .map(|err| {
-                    let msg = err["message"].as_str().unwrap_or_default();
-                    msg.contains("not bound to a project")
-                })
-                .unwrap_or_else(|| {
-                    // If the daemon returned a result with isError, treat that as
-                    // a rejection too (defensive); extract the error text.
-                    if save["result"]["isError"] == serde_json::json!(true) {
-                        let text = http_tool_text(&save);
-                        text.contains("not bound to a project")
-                    } else {
-                        false
-                    }
-                });
             assert!(
-                rejected,
-                "unbound session should reject explicit cross-project write, got: {save:#}"
+                saved["result"]["isError"] != serde_json::json!(true),
+                "save {id} failed: {saved:#}"
             );
+        }
 
-            (ct, daemon_task)
-        });
-
-        // Victim project DB must be unmutated by the rejected write.
-        assert_eq!(
-            memory_text_count(&victim_project, victim_text),
-            0,
-            "victim project DB was mutated despite rejection"
+        let search = http_mcp_call_tool(
+            &client,
+            &daemon.url,
+            session_headers,
+            5,
+            "tachi_memory",
+            serde_json::Map::from_iter([
+                ("action".to_string(), serde_json::json!("search")),
+                ("query".to_string(), serde_json::json!("DIRECTHTTPMERGE")),
+                ("scope".to_string(), serde_json::json!("memory")),
+                ("top_k".to_string(), serde_json::json!(10)),
+                ("format".to_string(), serde_json::json!("json")),
+            ]),
+        )
+        .await;
+        assert!(
+            search["result"]["isError"] != serde_json::json!(true),
+            "search failed: {search:#}"
         );
-        assert_eq!(
-            memory_id_count(&victim_project, victim_id),
-            0,
-            "victim project DB contains the rejected row id"
+        let text = http_tool_text(&search);
+        assert!(
+            text.contains("http-direct-global-e2e"),
+            "HTTP search lost global row: {text}"
+        );
+        assert!(
+            text.contains("http-direct-project-e2e"),
+            "HTTP search lost bound project row: {text}"
         );
 
-        ct.cancel();
-        rt.block_on(daemon_task).expect("daemon task");
-        restore_env("TACHI_HOME", saved_home);
-        restore_env("SIGIL_HOME", saved_sigil);
-        restore_env("TACHI_APP_HOME", saved_app);
-    }
+        (ct, daemon_task)
+    });
+
+    assert_eq!(
+        memory_text_count(&global, "global DIRECTHTTPMERGE row lossless text"),
+        1
+    );
+    assert_eq!(
+        memory_text_count(&project, "project DIRECTHTTPMERGE row lossless text"),
+        1
+    );
+    assert_eq!(
+        memory_text_count(&global, "project DIRECTHTTPMERGE row lossless text"),
+        0
+    );
+
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
+    restore_env("TACHI_HOME", saved_home);
+    restore_env("SIGIL_HOME", saved_sigil);
+    restore_env("TACHI_APP_HOME", saved_app);
+}
+
+#[test]
+fn http_direct_connect_rejects_admin_profile_without_authorization_policy() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let saved_home = std::env::var_os("TACHI_HOME");
+    let saved_sigil = std::env::var_os("SIGIL_HOME");
+    let saved_app = std::env::var_os("TACHI_APP_HOME");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    std::env::set_var("TACHI_HOME", &tachi_home);
+    std::env::remove_var("SIGIL_HOME");
+    std::env::remove_var("TACHI_APP_HOME");
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let headers = http_headers(&[(crate::session_identity::HEADER_PROFILE, "admin")]);
+        let (_client, _session_headers, init) =
+            http_mcp_initialize(&daemon.url, headers, None).await;
+        let error = init
+            .get("error")
+            .unwrap_or_else(|| panic!("admin initialize should fail: {init:#}"));
+        let message = error["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("requires explicit authorization"),
+            "unexpected admin rejection: {init:#}"
+        );
+        (ct, daemon_task)
+    });
+
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
+    restore_env("TACHI_HOME", saved_home);
+    restore_env("SIGIL_HOME", saved_sigil);
+    restore_env("TACHI_APP_HOME", saved_app);
+}
+
+#[test]
+
+fn http_direct_connect_unbound_session_rejects_explicit_cross_project_write() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let saved_home = std::env::var_os("TACHI_HOME");
+    let saved_sigil = std::env::var_os("SIGIL_HOME");
+    let saved_app = std::env::var_os("TACHI_APP_HOME");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    let attacker_project_name = "Sigil-http-unbound-attacker";
+    let victim_project_name = "Sigil-http-unbound-victim";
+    let attacker_project = tachi_home
+        .join("projects")
+        .join(attacker_project_name)
+        .join("memory.db");
+    let victim_project = tachi_home
+        .join("projects")
+        .join(victim_project_name)
+        .join("memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    std::env::set_var("TACHI_HOME", &tachi_home);
+    std::env::remove_var("SIGIL_HOME");
+    std::env::remove_var("TACHI_APP_HOME");
+    seed_project_db(&tachi_home, &attacker_project);
+    seed_project_db(&tachi_home, &victim_project);
+
+    let victim_text = "C1 victim row must stay unmutated";
+    let victim_id = "c1-victim-row";
+    assert_eq!(memory_text_count(&victim_project, victim_text), 0);
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        // Intentionally NO X-Tachi-Project header → unbound session.
+        let headers = http_headers(&[]);
+        let (client, session_headers, init) = http_mcp_initialize(&daemon.url, headers, None).await;
+        assert!(init.get("error").is_none(), "initialize failed: {init:#}");
+        http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
+
+        // Cross-project write attempt: unbound session asks to save into the
+        // victim project explicitly. Must be rejected.
+        let save = http_mcp_call_tool(
+            &client,
+            &daemon.url,
+            session_headers.clone(),
+            2,
+            "tachi_memory",
+            serde_json::Map::from_iter([
+                ("action".to_string(), serde_json::json!("save")),
+                ("id".to_string(), serde_json::json!(victim_id)),
+                ("text".to_string(), serde_json::json!(victim_text)),
+                (
+                    "summary".to_string(),
+                    serde_json::json!("C1 unbound cross-project attempt"),
+                ),
+                (
+                    "path".to_string(),
+                    serde_json::json!("/tests/http-unbound-c1"),
+                ),
+                ("category".to_string(), serde_json::json!("fact")),
+                (
+                    "project".to_string(),
+                    serde_json::json!(victim_project_name),
+                ),
+                ("force".to_string(), serde_json::json!(true)),
+            ]),
+        )
+        .await;
+
+        // The tool call must surface an MCP-level rejection. rmcp turns an
+        // invalid_params ErrorData from call_tool into a JSON-RPC error
+        // response (no "result" object).
+        let rejected = save
+            .get("error")
+            .map(|err| {
+                let msg = err["message"].as_str().unwrap_or_default();
+                msg.contains("not bound to a project")
+            })
+            .unwrap_or_else(|| {
+                // If the daemon returned a result with isError, treat that as
+                // a rejection too (defensive); extract the error text.
+                if save["result"]["isError"] == serde_json::json!(true) {
+                    let text = http_tool_text(&save);
+                    text.contains("not bound to a project")
+                } else {
+                    false
+                }
+            });
+        assert!(
+            rejected,
+            "unbound session should reject explicit cross-project write, got: {save:#}"
+        );
+
+        (ct, daemon_task)
+    });
+
+    // Victim project DB must be unmutated by the rejected write.
+    assert_eq!(
+        memory_text_count(&victim_project, victim_text),
+        0,
+        "victim project DB was mutated despite rejection"
+    );
+    assert_eq!(
+        memory_id_count(&victim_project, victim_id),
+        0,
+        "victim project DB contains the rejected row id"
+    );
+
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
+    restore_env("TACHI_HOME", saved_home);
+    restore_env("SIGIL_HOME", saved_sigil);
+    restore_env("TACHI_APP_HOME", saved_app);
+}

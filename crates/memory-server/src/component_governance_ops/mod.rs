@@ -200,16 +200,18 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
             {
                 if let Some(target_id) = known_ids.iter().find(|c| consumer.contains(c.as_str())) {
                     let relation = if is_kernel { "owns" } else { "consumes" };
-                    store.add_edge(&MemoryEdge {
-                        source_id: entry_id.clone(),
-                        target_id: deterministic_component_id(target_id),
-                        relation: relation.to_string(),
-                        weight: 1.0,
-                        metadata: Value::Null,
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                        valid_from: chrono::Utc::now().to_rfc3339(),
-                        valid_to: None,
-                    }).map_err(|e| format!("seed {relation} edge: {e}"))?;
+                    store
+                        .add_edge(&MemoryEdge {
+                            source_id: entry_id.clone(),
+                            target_id: deterministic_component_id(target_id),
+                            relation: relation.to_string(),
+                            weight: 1.0,
+                            metadata: Value::Null,
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                            valid_from: chrono::Utc::now().to_rfc3339(),
+                            valid_to: None,
+                        })
+                        .map_err(|e| format!("seed {relation} edge: {e}"))?;
                 }
             }
             for drift in record
@@ -229,16 +231,18 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
                 };
                 if let Some(rel) = relation {
                     // self-edge documenting the drift classification on this record
-                    store.add_edge(&MemoryEdge {
-                        source_id: entry_id.clone(),
-                        target_id: entry_id.clone(),
-                        relation: rel.to_string(),
-                        weight: 0.5,
-                        metadata: json!({"drift": drift.clone()}),
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                        valid_from: chrono::Utc::now().to_rfc3339(),
-                        valid_to: None,
-                    }).map_err(|e| format!("seed {rel} drift edge: {e}"))?;
+                    store
+                        .add_edge(&MemoryEdge {
+                            source_id: entry_id.clone(),
+                            target_id: entry_id.clone(),
+                            relation: rel.to_string(),
+                            weight: 0.5,
+                            metadata: json!({"drift": drift.clone()}),
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                            valid_from: chrono::Utc::now().to_rfc3339(),
+                            valid_to: None,
+                        })
+                        .map_err(|e| format!("seed {rel} drift edge: {e}"))?;
                 }
             }
         }

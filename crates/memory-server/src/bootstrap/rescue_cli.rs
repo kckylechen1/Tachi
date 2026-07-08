@@ -1,5 +1,5 @@
 use super::print_pretty_json;
-use crate::rescue::{apply_rescue, plan_rescue, render_plan};
+use memory_server_rescue::{apply_rescue, plan_rescue, render_plan};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use tachi_bootstrap::cli::RescueAction;
