@@ -20,6 +20,7 @@ use std::process::Command;
 const DEFAULT_REVIEW_AUTHOR_FILTER: &str = "gemini";
 type GhPrCommentsBundle = (Vec<Value>, Vec<Value>, Vec<Value>);
 
+mod ci_watch;
 mod comments;
 mod issues;
 mod prs;
@@ -43,6 +44,7 @@ use self::safe_merge::*;
 use self::ship::*;
 use self::transport::*;
 
+pub(crate) use self::ci_watch::{daemon_ci_reader, spawn_ci_watch};
 pub(crate) use self::comments::{gh_comment_marker_present, handle_gh_comment};
 pub(crate) use self::router::handle_tachi_gh;
 pub(crate) use self::safe_merge::{gh_client_for_server, handle_github_safe_merge};

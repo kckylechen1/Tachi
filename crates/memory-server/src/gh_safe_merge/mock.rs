@@ -20,6 +20,10 @@ pub struct MockGhClient {
     checks: Mutex<HashMap<(String, u64), Vec<CheckRun>>>,
     checks_list_error: Mutex<Option<GhError>>,
     merge_calls: Mutex<Vec<(String, u64, MergeStrategy, String)>>,
+    /// Recorded `pr_view` calls so tests can prove the blanket
+    /// `CheckStateReader` gate (only fetch head SHA when there's an expected
+    /// SHA to compare against) actually skips `pr_view` on a first poll.
+    pr_view_calls: Mutex<Vec<(String, u64)>>,
     next_issue_number: Mutex<u64>,
 }
 
@@ -32,6 +36,7 @@ impl MockGhClient {
             checks: Mutex::new(HashMap::new()),
             checks_list_error: Mutex::new(None),
             merge_calls: Mutex::new(Vec::new()),
+            pr_view_calls: Mutex::new(Vec::new()),
             next_issue_number: Mutex::new(1000),
         }
     }
@@ -65,6 +70,12 @@ impl MockGhClient {
     pub fn merge_calls(&self) -> Vec<(String, u64, MergeStrategy, String)> {
         self.merge_calls.lock().unwrap().clone()
     }
+    /// Snapshot of recorded `pr_view` calls, in call order. Used to prove the
+    /// blanket `CheckStateReader` gate skips `pr_view` on a first poll (no
+    /// expected head SHA) and calls it on subsequent polls.
+    pub fn pr_view_calls(&self) -> Vec<(String, u64)> {
+        self.pr_view_calls.lock().unwrap().clone()
+    }
 
     pub async fn issue_view(&self, repo: &str, number: u64) -> Result<IssueState, GhError> {
         self.issues
@@ -79,6 +90,12 @@ impl MockGhClient {
 #[async_trait]
 impl GhClient for MockGhClient {
     async fn pr_view(&self, repo: &str, number: u64) -> Result<PrState, GhError> {
+        // Record the call before any state lookup so tests can assert the
+        // blanket reader gate did NOT skip into the call.
+        self.pr_view_calls
+            .lock()
+            .unwrap()
+            .push((repo.to_string(), number));
         let mut pr = self
             .prs
             .lock()

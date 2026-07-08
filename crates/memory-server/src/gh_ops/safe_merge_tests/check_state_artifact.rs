@@ -12,6 +12,7 @@ impl CheckStateReader for FixedCheckReader {
         &self,
         _repo: &str,
         _pr_number: u64,
+        _expected_head_sha: Option<&str>,
     ) -> Result<CheckStateRead, GhError> {
         self.result.clone()
     }

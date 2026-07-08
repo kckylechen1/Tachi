@@ -649,6 +649,15 @@ fn build_server_state(
             &ctx.app_home,
             background_shutdown.clone(),
         ));
+        // #605 background CI watcher: polls GitHub check state for tracked open
+        // PRs and records transitions into flow check_state ledgers. Observes +
+        // records only — no webhook, no repair, no merge. Self-gated on
+        // TACHI_CI_WATCH / TACHI_DAEMON, so stdio/CLI invocations no-op.
+        let ci_reader = crate::gh_ops::daemon_ci_reader(std::sync::Arc::new(server.clone()));
+        bg_handles.push(crate::gh_ops::spawn_ci_watch(
+            ci_reader,
+            background_shutdown.clone(),
+        ));
     }
 
     Ok(ServerState {
@@ -723,6 +732,7 @@ async fn start_server_transport(
             bg_handles.len()
         );
         for handle in bg_handles {
+            // Deliberately swallows task-panic JoinError so a panicking bg task doesn't take down the daemon.
             let _ = handle.await;
         }
     }
