@@ -588,6 +588,11 @@ fn build_server_state(
         Ok(false) => {}
         Err(err) => eprintln!("[signatures] taxonomy evidence seed skipped: {err}"),
     }
+    match crate::component_governance_ops::seed_component_records(&server) {
+        Ok(true) => eprintln!("[components] seeded v0 component governance records"),
+        Ok(false) => {}
+        Err(err) => eprintln!("[components] governance record seed skipped: {err}"),
+    }
     let recovered = crate::dispatch_ops::recover_orphaned_dispatch_runs();
     if !recovered.is_empty() {
         eprintln!(

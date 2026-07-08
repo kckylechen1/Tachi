@@ -234,6 +234,10 @@ fn native_tool_sources() -> Vec<(&'static str, &'static str)> {
             include_str!("continuity_facade.rs"),
         ),
         (
+            "src/tools/component_facade.rs",
+            include_str!("component_facade.rs"),
+        ),
+        (
             "src/tools/dispatch_facade.rs",
             include_str!("dispatch_facade.rs"),
         ),

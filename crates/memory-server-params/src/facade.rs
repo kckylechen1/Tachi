@@ -508,6 +508,38 @@ pub struct TachiWikiParams {
     pub pattern_top_k: Option<usize>,
 }
 
+// ─── Facade: component governance read model (Issue #796) ────────────────────
+
+fn tachi_component_action_schema(gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    string_enum_schema(&["list", "show"], "Component governance action.", gen)
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct TachiComponentParams {
+    /// Action: "list" (compact records) or "show" (full record + relation edges).
+    #[schemars(schema_with = "tachi_component_action_schema")]
+    pub action: String,
+    /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
+    #[serde(default)]
+    pub format: Option<String>,
+    /// Required for action="show": the component_id to fetch (e.g. "tachi-memory-kernel").
+    #[serde(default)]
+    pub component_id: Option<String>,
+    /// Optional filter for action="list": one of kernel, runtime_adapter, workflow_bridge, frontend_app_shell.
+    #[serde(default)]
+    pub component_type: Option<String>,
+    /// Include archived/stale records in list/show output. Defaults to false.
+    #[serde(default)]
+    pub include_archived: Option<bool>,
+    /// Cap on the number of records returned by action="list".
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Named project library under ~/.tachi/projects/<name>/memory.db. Component records are global;
+    /// this only scopes read-forward behavior, mirroring other read-only facade tools.
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
 // ─── Facade: workflow closure (Issue → Doc → Memory) ─────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

@@ -41,6 +41,7 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "tachi_search",
     "tachi_web_search",
     "tachi_browse",
+    "tachi_component",
 ];
 
 /// Tools that invalidate the cache (write operations)
