@@ -56,7 +56,7 @@ The consult is advisory in the T-tiering sense (the leader can override), but th
 
 ### 2.3 Packet freezing — the issue body IS the spec
 
-A T2 packet is a frozen leaf issue. Its body is the single text both implementer and reviewer read; it carries the goldens, the enumerated CI-gate list, an `Execution:` lane marker (`codex-solo` | `dual-track` | `mechanical`), and the twelve frozen-spec clauses. These clauses are simultaneously the packet template and the leader-side vaccination rules — they transfer verbatim to machine dispatch (`tachi execute`, #516):
+A T2 packet is a frozen leaf issue. Its body is the single text both implementer and reviewer read; it carries the goldens, the enumerated CI-gate list, an `Execution:` lane marker (`solo-frozen` | `dual-track` | `mechanical`), and the twelve frozen-spec clauses. These clauses are simultaneously the packet template and the leader-side vaccination rules — they transfer verbatim to machine dispatch (`tachi execute`, #516):
 
 1. **Never weaken a frozen assertion.** If a golden can't pass, STOP and report — a faithfully-executed flawed spec is the spec author's bug, not the lane's.
 2. **Do-not-touch zones carry the exception** "consistency fixes may be unlocked by adjudication" (a sealed zone once hid a real bug from the implementer).
