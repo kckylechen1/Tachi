@@ -33,7 +33,7 @@ brew tap kckylechen1/tachi && brew install tachi
 或颁此符诏：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.2/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.7.0/scripts/install.sh)"
 ```
 
 ---
@@ -63,7 +63,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.2
 
 ## 镇派绝学
 
-- **⚡ 玄铁剑心**：Rust 纯血核心，SQLite + sqlite-vec，亚毫秒级五脉混合检索。
+- **⚡ 玄铁剑心**：Rust 纯血核心，SQLite + sqlite-vec，亚十毫秒级五脉混合检索（设计目标）。
 - **🗂️ 藏经阁流**：以 `path` 分层（如 `/user/preferences`、`/project/architecture`），各阁互不沾染。
 - **🔍 五脉归元**：语义、词法、时间衰减、图谱激活蔓延、RRF 融合五路合一。
 - **🕸️ 因果千丝**：`add_edge` / `get_edges` 织就因果、时序、实体之缘。
@@ -71,7 +71,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.2
 - **🔐 藏经密室**：Argon2id + AES-256-GCM 本地加密宝库，逐秘 ACL，多钥轮换。
 - **🎯 万宝楼**：Skill、MCP、仙诀一次登录，诸路灵核共享。
 - **👻 跨界传信**：幽灵低语、看板、交接令牌，跨灵核协同。
-- **⚔️ 工务总枢**：`tachi_dispatch` 遣偏师，`tachi_arena` 记工籍，`tachi_verify` 存验据，`tachi_agent_eval` 评绩效，`tachi_complete` 录因果。
+- **⚔️ 工务总枢**：`tachi_task` 遣偏师（`action='dispatch'`），`tachi_arena` 记工籍，`tachi_verify` 存验据，`tachi_complete` 录因果。
 - **🏭 神经熔炉与维基**：上下文生灭、Agent 进化提案、薪火相传之典籍。
 
 ---
@@ -80,10 +80,10 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.2
 
 | 令旗 | 用途 |
 |------|------|
-| `standard` | IDE 灵核之默认，13+ 器门面集。 |
-| `coordinate` | 主尊调度，兼掌 ghost / kanban / handoff / dispatch / approve_merge。 |
+| `standard` | IDE 灵核之默认，14 器门面集。 |
+| `coordinate` | 主尊调度，兼掌 handoff / workflow / orchestrator / task / approve_merge / verify。 |
 | `operate` | 运行时适配与 OpenClaw，兼掌 Foundry / Vault 会话。 |
-| `delegate` | 小弟偏师，极简 7 器，无派发、无交接。 |
+| `delegate` | 小弟偏师，极简 9 器，无派发、无交接。 |
 | `admin` | 维护治理，全量法器。 |
 
 未设令旗者，自 v1.0.1 起默认 `standard`。

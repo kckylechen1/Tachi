@@ -23,7 +23,7 @@ OpenClaw Gateway (Node.js)
 ### 一键安装（推荐）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.4/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.7.0/scripts/install.sh | bash
 ```
 
 该脚本会：
@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.4/scripts/in
 ### 仅安装 OpenClaw 插件
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.4/scripts/install_openclaw_ext.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.7.0/scripts/install_openclaw_ext.sh | bash
 ```
 
 这是兼容旧流程的包装脚本，等价于执行 `scripts/install.sh --skip-brew`。

@@ -65,8 +65,14 @@ def main() -> int:
 
     cargo_files = [
         "crates/memory-core/Cargo.toml",
+        "crates/memory-server-capture-gate/Cargo.toml",
+        "crates/memory-server-hub-cli/Cargo.toml",
+        "crates/memory-server-i18n/Cargo.toml",
+        "crates/memory-server-manifest-audit/Cargo.toml",
         "crates/memory-server/Cargo.toml",
         "crates/memory-server-params/Cargo.toml",
+        "crates/memory-server-prompt-envelope/Cargo.toml",
+        "crates/memory-server-rescue/Cargo.toml",
         "crates/memory-server-runtime/Cargo.toml",
         "crates/memory-node/Cargo.toml",
         "crates/tachi-bootstrap/Cargo.toml",
@@ -74,6 +80,7 @@ def main() -> int:
         "crates/tachi-foundry/Cargo.toml",
         "crates/tachi-hub/Cargo.toml",
         "crates/tachi-llm/Cargo.toml",
+        "crates/tachi-merge-ops/Cargo.toml",
     ]
     for path in cargo_files:
         require_match(path, cargo_version(path), expected, errors)
@@ -81,8 +88,14 @@ def main() -> int:
     lock_versions = cargo_lock_versions(
         {
             "memory-core",
+            "memory-server-capture-gate",
+            "memory-server-hub-cli",
+            "memory-server-i18n",
+            "memory-server-manifest-audit",
             "memory-server",
             "memory-server-params",
+            "memory-server-prompt-envelope",
+            "memory-server-rescue",
             "memory-server-runtime",
             "memory-node",
             "tachi-bootstrap",
@@ -90,12 +103,19 @@ def main() -> int:
             "tachi-foundry",
             "tachi-hub",
             "tachi-llm",
+            "tachi-merge-ops",
         }
     )
     for name in [
         "memory-core",
+        "memory-server-capture-gate",
+        "memory-server-hub-cli",
+        "memory-server-i18n",
+        "memory-server-manifest-audit",
         "memory-server",
         "memory-server-params",
+        "memory-server-prompt-envelope",
+        "memory-server-rescue",
         "memory-server-runtime",
         "memory-node",
         "tachi-bootstrap",
@@ -103,6 +123,7 @@ def main() -> int:
         "tachi-foundry",
         "tachi-hub",
         "tachi-llm",
+        "tachi-merge-ops",
     ]:
         require_match(f"Cargo.lock {name}", lock_versions.get(name, ""), expected, errors)
 
