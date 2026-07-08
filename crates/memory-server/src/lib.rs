@@ -40,7 +40,6 @@ mod bootstrap;
 pub mod build_info;
 mod builtins;
 mod capability_ops;
-mod capture_gate;
 mod cli_client;
 mod complete_ops;
 mod component_governance_ops;
