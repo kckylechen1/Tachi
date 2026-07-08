@@ -10,6 +10,10 @@ notes:
   - Superpowers source text is upstream-managed.
   - Tachi-local native contracts are wrappers or compatibility shims and must not
     be treated as upstream text.
+  - Entries with source.kind: tachi_native_contract have no on-disk local_path.
+    Their content is the builtin contract compiled into
+    crates/memory-server/src/builtins/superpowers.rs. The local_path field is
+    vestigial for that source kind and must not be drift-checked against disk.
 skills:
   - id: skill:superpowers-brainstorming
     name: brainstorming
@@ -47,6 +51,8 @@ skills:
   - id: skill:superpowers-subagent-driven-development
     name: subagent-driven-development
     local_path: native/superpowers/subagent-driven-development
+    # native-contract: local_path does not resolve on disk. Content is the
+    # builtin contract in crates/memory-server/src/builtins/superpowers.rs.
     source:
       kind: tachi_native_contract
       repo: obra/superpowers
@@ -69,6 +75,8 @@ skills:
   - id: skill:superpowers-verification-before-completion
     name: verification-before-completion
     local_path: native/superpowers/verification-before-completion
+    # native-contract: local_path does not resolve on disk. Content is the
+    # builtin contract in crates/memory-server/src/builtins/superpowers.rs.
     source:
       kind: tachi_native_contract
       repo: obra/superpowers
