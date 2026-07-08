@@ -39,6 +39,4 @@ pub use plan::build_plan;
 pub use render::render_plan;
 #[cfg(test)]
 pub use resolve::resolve_owning_repo;
-#[cfg(test)]
-pub use types::{PlannedAction, ProjectDbClass};
-pub use types::{ProjectDbInput, RelocationItem, RelocationPlan};
+pub use types::{PlannedAction, ProjectDbClass, ProjectDbInput, RelocationItem, RelocationPlan};
