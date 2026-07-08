@@ -308,6 +308,16 @@ pub(crate) fn build_status_warnings(
                 ));
             }
         }
+        // A fresh failure marker (just failed, not yet stale) must still
+        // surface — otherwise a distill error is invisible for 36h until
+        // the marker ages past the stale threshold.
+        Some(marker) if marker.error_reason.is_some() => {
+            let reason = marker.error_reason.as_ref().unwrap();
+            warnings.push(format!(
+                "daily distill failed {} ago: {reason}; run `tachi doctor --run-daily`",
+                marker.age
+            ));
+        }
         None => {
             warnings.push(
                 "daily distill has never run (marker missing); run `tachi doctor --run-daily`"

@@ -415,3 +415,50 @@ fn missing_distill_marker_shows_never_run() {
         "missing marker should include remediation verb, got: {distill_warning}"
     );
 }
+
+#[test]
+fn fresh_failure_marker_still_warns_and_docks_health() {
+    // A just-failed distill writes ts=now, so is_stale=false. Without the
+    // error_reason branch the failure would be invisible for 36h. This test
+    // proves the fresh failure surfaces in both warnings and health deductions.
+    let fresh_failure = DistillMarkerStatus {
+        path: "/tmp/marker".to_string(),
+        last_run_at: "2026-07-09T00:00:00Z".to_string(),
+        age_seconds: 5,
+        age: "5s ago".to_string(),
+        is_stale: false, // fresh — the bug was that this hid the failure
+        groups_distilled: Some(0),
+        groups_skipped: Some(0),
+        fallback_used: Some(0),
+        errors: Some(0),
+        error_reason: Some("provider timeout".to_string()),
+    };
+
+    // Warning must surface even though is_stale is false.
+    let mut snapshot = empty_snapshot(vec![db_status("global", 0, 0, 1.0)]);
+    snapshot.distill_marker = Some(fresh_failure.clone());
+    let warnings = build_status_warnings(&snapshot, &daemon_running());
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("daily distill failed") && w.contains("provider timeout")),
+        "fresh failure marker must still warn, got: {warnings:?}"
+    );
+
+    // Health deduction must fire even though is_stale is false.
+    let deductions = status_health::calculate_health_deductions(
+        &DaemonStatus::Running {
+            pid: 1,
+            lock_path: PathBuf::from("/tmp/tachi.lock"),
+        },
+        &[db_status("global", 0, 0, 1.0)],
+        Some(&fresh_failure),
+        &[],
+        Some(&[]),
+        Some(&[]),
+    );
+    assert!(
+        deductions.iter().any(|d| d.code == "stale_distill_marker"),
+        "fresh failure marker must dock health score, got deductions: {deductions:?}"
+    );
+}
