@@ -100,11 +100,12 @@ impl MemoryStore {
 
     /// Count the distinct days on which a memory was accessed.
     pub fn distinct_access_days(&self, id: &str) -> Result<usize, MemoryError> {
-        Ok(self.conn.query_row(
+        let count: i64 = self.conn.query_row(
             "SELECT COUNT(DISTINCT date(accessed_at)) FROM access_history WHERE memory_id = ?1",
             rusqlite::params![id],
-            |row| row.get::<_, usize>(0),
-        )?)
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
     }
 
     /// Pin importance and durable retention once a memory passes the

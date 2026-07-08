@@ -196,12 +196,12 @@ pub fn count_distinct_access_days(
     conn: &Connection,
     memory_id: &str,
 ) -> Result<usize, MemoryError> {
-    conn.query_row(
+    let count: i64 = conn.query_row(
         "SELECT COUNT(DISTINCT date(accessed_at)) FROM access_history WHERE memory_id = ?1",
         params![memory_id],
         |row| row.get(0),
-    )
-    .map_err(MemoryError::from)
+    )?;
+    Ok(count as usize)
 }
 
 pub fn promote_memory_to_durable(conn: &Connection, memory_id: &str) -> Result<(), MemoryError> {
