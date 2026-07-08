@@ -74,6 +74,10 @@ async fn safe_merge_ready_executes_merge_when_not_dry_run() {
     assert_eq!(v["merge_attempted"], true);
     assert_eq!(v["merge_executed"], true);
     assert!(v["merged_sha"].is_string());
+    assert_eq!(v["status_patch"]["checks"]["state"], "success");
+    assert_eq!(v["status_patch"]["checks"]["source"], "gh_pr_checks");
+    assert_eq!(v["status_patch"]["checks"]["required"], true);
+    assert_eq!(v["status_patch"]["checks"]["allow_missing"], false);
     assert_eq!(v["event"]["kind"], "github_pr_merged");
     assert_eq!(v["event"]["payload"]["requested_mode"], "merge_requested");
     assert_eq!(v["event"]["payload"]["merge_attempted"], true);
