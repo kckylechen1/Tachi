@@ -146,6 +146,10 @@ pub(super) fn build_remote_mcp_http_client(
     validated: &ValidatedRemoteMcpUrl,
     timeout_secs: u64,
 ) -> Result<reqwest::Client, String> {
+    // reqwest is built with rustls-no-provider; install ring before building
+    // any HTTPS-capable client so the first request doesn't panic.
+    crate::ensure_tls_provider();
+
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(timeout_secs));

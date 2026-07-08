@@ -15,6 +15,7 @@ pub(super) async fn classify_kanban_message(
         "Classify this inter-agent message. Return JSON only.\\nTitle: {title}\\nBody: {body}\\nOutput: {{\"topic\":\"...\",\"keywords\":[\"...\"],\"priority_suggestion\":\"...\"}}"
     );
 
+    crate::ensure_tls_provider();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -110,4 +111,23 @@ pub(super) async fn enrich_kanban_card_classification(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn classifier_installs_tls_provider_before_building_reqwest_client() {
+        let source = include_str!("classify.rs");
+        let provider = source
+            .find("crate::ensure_tls_provider();")
+            .expect("classifier must install the rustls provider");
+        let builder = source
+            .find("reqwest::Client::builder()")
+            .expect("classifier must build a reqwest client");
+
+        assert!(
+            provider < builder,
+            "classifier must install the rustls provider before building an HTTPS-capable client"
+        );
+    }
 }

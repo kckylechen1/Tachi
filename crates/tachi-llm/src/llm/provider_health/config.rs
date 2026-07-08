@@ -44,6 +44,10 @@ impl super::super::LlmClient {
     pub fn new_with_vault_db(vault_db_path: Option<&Path>) -> Result<Self, String> {
         let vault_db_path = vault_db_path.map(|path| path.to_path_buf());
 
+        // Ensure a rustls crypto provider is installed before any HTTPS client
+        // is built. reqwest uses rustls-no-provider, so this is required.
+        crate::install_tls_provider();
+
         // ── Front-line LLM layer (Extract + Summary) ──
         // Extract: EXTRACT_* → SILICONFLOW_*
         let extract = Self::load_lane(
