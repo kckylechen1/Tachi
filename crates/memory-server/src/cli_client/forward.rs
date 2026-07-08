@@ -147,7 +147,7 @@ async fn maybe_forward_tool<T: serde::Serialize>(
     if !daemon_matches_requested_dbs(&info, global_db_path, project_db_path) {
         return Ok(None);
     }
-    match call_daemon_tool(&info, tool_name, args).await {
+    match call_daemon_tool(&info, tool_name, args, None).await {
         Ok(body) => Ok(Some(body)),
         Err(error) if fallback.allows_in_process_fallback(&error) => {
             eprintln!(

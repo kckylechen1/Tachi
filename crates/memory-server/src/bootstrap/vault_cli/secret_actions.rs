@@ -201,7 +201,8 @@ pub(super) async fn run_secret_action(
                     args.insert("env_name".to_string(), serde_json::json!(env_name));
                 }
                 let out =
-                    crate::cli_client::call_daemon_tool(&info, "vault_lease_api_key", args).await?;
+                    crate::cli_client::call_daemon_tool(&info, "vault_lease_api_key", args, None)
+                        .await?;
                 print_lease_output(&out, json)?;
                 return Ok(());
             }

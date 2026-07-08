@@ -36,8 +36,19 @@ async fn tachi_task_build_references_reuses_workflow_closure() {
             .any(|dest| dest["destination"] == json!("feedback_rule"))));
 }
 
+// Hold the process-wide home lock across the body: this test uses the
+// non-isolating make_server(), and its wiki-write path re-reads TACHI_HOME from
+// the env. A parallel TempHomeGuard test can repoint TACHI_HOME mid-test and
+// flake this. This is the same fix v2 applied to
+// tachi_wiki_write_can_attach_projected_pattern_refs (references.rs). The
+// current-thread tokio runtime makes holding a std MutexGuard across `.await`
+// sound here.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_task_close_loop_writes_wiki_with_references() {
+    let _home_lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = make_server();
     let mut params = task_params("close_loop");
     params.issue_ref = Some("kckylechen1/tachi#194".to_string());

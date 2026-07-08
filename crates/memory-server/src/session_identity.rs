@@ -1,0 +1,221 @@
+//! # Security scope (read before trusting this as multi-tenant identity)
+//!
+//! C1 (`reject_unbound_cross_project_write`) closes ONE attack: an UNBOUND HTTP
+//! direct-connect session (no `X-Tachi-Project` header) targeting
+//! `project=victim` via a tool argument. It does NOT authenticate the
+//! `X-Tachi-Project` header itself — a direct HTTP client that claims
+//! `X-Tachi-Project: victim` at `initialize` still binds to victim's project,
+//! because project binding only verifies the project DB file exists
+//! (existence ≡ access). Full multi-tenant authorization (binding header claims
+//! to an authenticated identity via mTLS / local-only / vault-ACL) is tracked in
+//! #495 and is OUT OF SCOPE for the #809 fix. Until #495 lands, treat this
+//! module as "unbound-write rejection", NOT a complete identity spine.
+
+use rmcp::model::JsonObject;
+
+pub(crate) const HEADER_PROFILE: &str = "x-tachi-profile";
+pub(crate) const HEADER_CLIENT: &str = "x-tachi-client";
+pub(crate) const HEADER_PROJECT: &str = "x-tachi-project";
+
+pub(crate) const META_PROFILE: &str = "tachiProfile";
+pub(crate) const META_CLIENT: &str = "tachiClient";
+pub(crate) const META_PROJECT: &str = "tachiProject";
+
+pub(crate) fn enforce_session_project(
+    tool_name: &str,
+    arguments: &mut Option<JsonObject>,
+    project: &str,
+    transport_label: &str,
+) -> Result<(), rmcp::ErrorData> {
+    let args = arguments.get_or_insert_with(serde_json::Map::new);
+    if let Some(explicit_project) = args.get("project") {
+        if explicit_project.as_str() == Some(project) {
+            return Ok(());
+        }
+        // Write isolation: reject routing into another project's DB. Cross-library
+        // reads are safe because daemon-side project stores are opened read-only.
+        if explicit_project.as_str().is_some()
+            && explicit_project_can_cross_binding(tool_name, args)
+        {
+            return Ok(());
+        }
+        return Err(rmcp::ErrorData::invalid_params(
+            format!(
+                "{transport_label} project binding mismatch: session is bound to '{project}', but tool call requested project={explicit_project}"
+            ),
+            None,
+        ));
+    }
+    if !project_defaults_to_bound_project(tool_name, args) {
+        return Ok(());
+    }
+    if tool_name == "tachi_memory"
+        && args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .map(|action| !tachi_memory_action_defaults_to_project(action))
+            .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    if args
+        .get("scope")
+        .and_then(|value| value.as_str())
+        .is_some_and(|scope| scope.eq_ignore_ascii_case("global"))
+    {
+        return Ok(());
+    }
+    args.insert("project".to_string(), serde_json::json!(project));
+    Ok(())
+}
+
+/// Returns true when an explicit `project` param may differ from the session
+/// binding. Protects write isolation only: daemon-side reads use read-only opens
+/// and do not threaten single-writer discipline.
+pub(crate) fn explicit_project_can_cross_binding(tool_name: &str, args: &JsonObject) -> bool {
+    match tool_name {
+        "search_memory"
+        | "find_similar_memory"
+        | "get_memory"
+        | "list_memories"
+        | "memory_graph"
+        | "get_edges"
+        | "tachi_search" => true,
+        "tachi_memory" => args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .is_some_and(tachi_memory_action_allows_cross_project_read),
+        "tachi_wiki" => args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .is_some_and(tachi_wiki_action_allows_cross_project_read),
+        "tachi_event" => args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .is_some_and(tachi_event_action_allows_cross_project_read),
+        _ => false,
+    }
+}
+
+pub(crate) fn project_defaults_to_bound_project(tool_name: &str, args: &JsonObject) -> bool {
+    if tool_name == "tachi_memory" {
+        return args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .is_none_or(tachi_memory_action_defaults_to_project);
+    }
+    matches!(
+        tool_name,
+        "search_memory"
+            | "find_similar_memory"
+            | "get_memory"
+            | "list_memories"
+            | "delete_memory"
+            | "archive_memory"
+            | "save_memory"
+            | "remember"
+            | "ingest"
+            | "ingest_event"
+            | "ingest_source"
+            | "extract_facts"
+            | "tachi_search"
+            | "tachi_save"
+            | "tachi_event"
+            | "tachi_domain_adapter"
+            | "tachi_task"
+            | "tachi_verify"
+            | "tachi_gh"
+            | "tachi_wiki"
+            | "wiki_write"
+            | "tachi_wiki_write"
+    ) || tool_name == "tachi_memory"
+}
+
+fn tachi_memory_action_defaults_to_project(action: &str) -> bool {
+    matches!(
+        action.to_ascii_lowercase().as_str(),
+        "alerts"
+            | "ask"
+            | "briefing"
+            | "checkpoint"
+            | "consolidate"
+            | "extract_facts"
+            | "get"
+            | "apply_recall_proposals"
+            | "pattern_feedback"
+            | "progress"
+            | "readiness"
+            | "recall_proposals"
+            | "recall_simulate"
+            | "review_recall_proposal"
+            | "save"
+            | "search"
+    )
+}
+
+fn tachi_memory_action_allows_cross_project_read(action: &str) -> bool {
+    matches!(
+        action.to_ascii_lowercase().as_str(),
+        "alerts"
+            | "ask"
+            | "briefing"
+            | "consolidate"
+            | "get"
+            | "readiness"
+            | "recall_simulate"
+            | "search"
+    )
+}
+
+fn tachi_event_action_allows_cross_project_read(action: &str) -> bool {
+    matches!(action.to_ascii_lowercase().as_str(), "metrics" | "query")
+}
+
+fn tachi_wiki_action_allows_cross_project_read(action: &str) -> bool {
+    matches!(
+        action.to_ascii_lowercase().as_str(),
+        "browse" | "read" | "search"
+    )
+}
+
+/// Reject explicit cross-project targeting from an UNBOUND session when the
+/// tool/action is not a read-only cross-project case. Bound sessions are
+/// handled by `enforce_session_project`. An unbound HTTP direct-connect session
+/// has no declared tenant, so an explicit `project=` on a mutating tool is a
+/// potential cross-tenant write and must be rejected. (C1 fix.)
+///
+/// Invariant protected: single-writer project isolation — an unbound session
+/// must not be able to route a write into an arbitrary project's DB. Read-only
+/// cross-project cases (handled by `explicit_project_can_cross_binding`) do not
+/// threaten single-writer discipline and remain allowed; this guard checks both
+/// sides so it does not over-reach into legitimate reads.
+pub(crate) fn reject_unbound_cross_project_write(
+    tool_name: &str,
+    arguments: &Option<JsonObject>,
+    bound_project: Option<&str>,
+    transport_label: &str,
+) -> Result<(), rmcp::ErrorData> {
+    if bound_project.is_some() {
+        return Ok(());
+    }
+    let Some(args) = arguments.as_ref() else {
+        return Ok(());
+    };
+    let Some(explicit) = args.get("project").and_then(|v| v.as_str()) else {
+        return Ok(());
+    };
+    if explicit_project_can_cross_binding(tool_name, args) {
+        return Ok(());
+    }
+    Err(rmcp::ErrorData::invalid_params(
+        format!(
+            "{transport_label} session is not bound to a project; refusing explicit project='{explicit}' on tool '{tool_name}' (cross-project writes require a bound session — send X-Tachi-Project at initialize)"
+        ),
+        None,
+    ))
+}
+
+pub(crate) fn normalize_identity_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}

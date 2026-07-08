@@ -194,6 +194,8 @@ impl MemoryServer {
             agent_runtime: Arc::new(StdRwLock::new(AgentRuntime {
                 agent_profile: None,
                 tool_profile: Some(tachi_hub::default_tool_profile()),
+                session_client: None,
+                session_project: None,
                 handoff_memos: Vec::new(),
             })),
             bound_agent_id: Arc::new(StdRwLock::new(bound_agent_id)),

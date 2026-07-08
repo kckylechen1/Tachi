@@ -10,7 +10,8 @@ use crate::shared_defs::{
 };
 use crate::utils::{lock_or_recover, stable_hash};
 use chrono::Utc;
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::model::{InitializeRequestParams, InitializeResult, ServerCapabilities, ServerInfo};
+use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ServerHandler;
 use std::future::Future;
 use std::time::{Duration, Instant};
@@ -111,10 +112,111 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
     tool.annotations = Some(annotations);
 }
 
+#[derive(Debug, Default)]
+struct HttpSessionIdentity {
+    profile: Option<String>,
+    client: Option<String>,
+    project: Option<String>,
+}
+
+impl MemoryServer {
+    fn apply_http_session_identity(
+        &self,
+        request: &InitializeRequestParams,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<(), rmcp::ErrorData> {
+        let identity = http_session_identity(request, context);
+        let profile = identity
+            .profile
+            .as_deref()
+            .map(parse_http_tool_profile)
+            .transpose()?;
+        if let Some(project) = identity.project.as_deref() {
+            Self::resolve_named_project_db_path(project).map_err(|err| {
+                rmcp::ErrorData::invalid_params(
+                    format!("invalid HTTP direct-connect project binding: {err}"),
+                    None,
+                )
+            })?;
+        }
+        self.set_session_identity(identity.client, identity.project, profile);
+        Ok(())
+    }
+}
+
+fn http_session_identity(
+    request: &InitializeRequestParams,
+    context: &RequestContext<RoleServer>,
+) -> HttpSessionIdentity {
+    let mut identity = HttpSessionIdentity::default();
+    if let Some(meta) = request.meta.as_ref() {
+        identity.profile = meta_string(meta, crate::session_identity::META_PROFILE)
+            .or_else(|| meta_string(meta, "tachi.profile"));
+        identity.client = meta_string(meta, crate::session_identity::META_CLIENT)
+            .or_else(|| meta_string(meta, "tachi.client"));
+        identity.project = meta_string(meta, crate::session_identity::META_PROJECT)
+            .or_else(|| meta_string(meta, "tachi.project"));
+    }
+    if let Some(parts) = context.extensions.get::<axum::http::request::Parts>() {
+        identity.profile =
+            header_string(parts, crate::session_identity::HEADER_PROFILE).or(identity.profile);
+        identity.client =
+            header_string(parts, crate::session_identity::HEADER_CLIENT).or(identity.client);
+        identity.project =
+            header_string(parts, crate::session_identity::HEADER_PROJECT).or(identity.project);
+    }
+    identity
+}
+
+fn meta_string(meta: &rmcp::model::Meta, key: &str) -> Option<String> {
+    meta.0
+        .get(key)
+        .and_then(|value| value.as_str())
+        .and_then(crate::session_identity::normalize_identity_value)
+}
+
+fn header_string(parts: &axum::http::request::Parts, name: &str) -> Option<String> {
+    parts
+        .headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(crate::session_identity::normalize_identity_value)
+}
+
+fn parse_http_tool_profile(raw: &str) -> Result<tachi_hub::ToolProfile, rmcp::ErrorData> {
+    let profile = tachi_hub::parse_tool_profile(raw).ok_or_else(|| {
+        rmcp::ErrorData::invalid_params(
+            format!(
+                "unknown HTTP direct-connect Tachi profile '{raw}'; expected standard, delegate, observe, remember, coordinate, operate, or a host alias"
+            ),
+            None,
+        )
+    })?;
+    if profile.as_str() == "admin" {
+        return Err(rmcp::ErrorData::invalid_params(
+            "HTTP direct-connect profile 'admin' requires explicit authorization; #495 must wire profile claims to an authorization policy before admin can be accepted over HTTP",
+            None,
+        ));
+    }
+    Ok(profile)
+}
+
 impl ServerHandler for MemoryServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(crate::server_instructions::mcp_server_instructions())
+    }
+
+    fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<InitializeResult, rmcp::ErrorData>> + Send + '_ {
+        async move {
+            self.apply_http_session_identity(&request, &context)?;
+            context.peer.set_peer_info(request);
+            Ok(self.get_info())
+        }
     }
 
     fn list_tools(
@@ -193,7 +295,7 @@ impl ServerHandler for MemoryServer {
 
     fn call_tool(
         &self,
-        params: rmcp::model::CallToolRequestParams,
+        mut params: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> impl Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>> + Send + '_
     {
@@ -202,7 +304,8 @@ impl ServerHandler for MemoryServer {
             // forwards to this daemon) counts as activity, so an idle daemon is
             // genuinely unused and safe to self-terminate.
             self.touch_activity();
-            let name = params.name.as_ref();
+            let name_owned = params.name.as_ref().to_string();
+            let name = name_owned.as_str();
             let env_patterns = current_exposed_tool_patterns();
 
             let visible =
@@ -211,6 +314,27 @@ impl ServerHandler for MemoryServer {
             if !visible {
                 return Ok(tool_not_found_result(name));
             }
+
+            let bound_project = self.session_project();
+            if let Some(project) = bound_project.as_deref() {
+                crate::session_identity::enforce_session_project(
+                    name,
+                    &mut params.arguments,
+                    project,
+                    "HTTP direct-connect",
+                )?;
+            }
+            // C1 fix (fail-closed): an unbound HTTP direct-connect session has no
+            // declared tenant, so an explicit `project=` on a mutating tool is a
+            // potential cross-tenant write and must be rejected. Bound sessions
+            // (including the stdio proxy, which forwards X-Tachi-Project) pass the
+            // bound_project check above and are not affected.
+            crate::session_identity::reject_unbound_cross_project_write(
+                name,
+                &params.arguments,
+                bound_project.as_deref(),
+                "HTTP direct-connect",
+            )?;
 
             // ─── Rate Limiter: throttle and loop detection ───────────────
             let stuck_warning: Option<String> = {

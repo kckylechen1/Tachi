@@ -1,7 +1,9 @@
 //! Streamable HTTP MCP transport calls used by CLI and stdio proxy surfaces.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
+use http::{HeaderName, HeaderValue};
 use rmcp::model::{CallToolRequestParams, ListToolsResult, RawContent};
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
@@ -42,17 +44,29 @@ impl std::error::Error for DaemonCallError {}
 
 /// Call a tool over MCP-streamable-HTTP against a known daemon URL.
 /// Returns the first text content block from the tool result.
+///
+/// `proxy_project` lets a CLI invocation that already knows its named project
+/// declare that binding to the daemon by forwarding `X-Tachi-Project` via rmcp's
+/// `custom_headers` builder (same mechanism the stdio proxy uses through
+/// `call_daemon_tool_raw`). This is required for the CLI named-project
+/// forwarding path (`dispatch_cli_tool`): the CLI injects an explicit `project=`
+/// arg, and without a bound session the daemon-side C1 guard
+/// (`reject_unbound_cross_project_write`) would reject it as an unbound
+/// cross-tenant write. Global-only CLI invocations and vault actions pass `None`
+/// (no explicit `project=` arg → C1 allows). See `call_daemon_tool_raw` for the
+/// header injection details.
 pub(crate) async fn call_daemon_tool(
     info: &DaemonInfo,
     tool_name: &str,
     arguments: serde_json::Map<String, Value>,
+    proxy_project: Option<&str>,
 ) -> Result<String, DaemonCallError> {
     let (daemon_tool, daemon_args) = remap_daemon_tool(tool_name, arguments);
     let mut params = CallToolRequestParams::new(daemon_tool.clone());
     if !daemon_args.is_empty() {
         params = params.with_arguments(daemon_args);
     }
-    let result = call_daemon_tool_raw(info, params).await?;
+    let result = call_daemon_tool_raw(info, params, proxy_project).await?;
     if result.is_error.unwrap_or(false) {
         let err_text =
             first_text_block(&result.content).unwrap_or_else(|| "<no error text>".to_string());
@@ -67,12 +81,32 @@ pub(crate) async fn call_daemon_tool(
 /// Call a daemon tool over Streamable HTTP without remapping the name or
 /// collapsing the result to text. stdio proxy mode uses this to stay a pure
 /// transport adapter while the daemon remains the semantic owner.
+///
+/// `proxy_project` lets the stdio proxy declare its bound project identity to
+/// the daemon by forwarding `X-Tachi-Project` via rmcp's `custom_headers`
+/// builder. The proxy already enforces the binding client-side
+/// (`prepare_proxy_tool_call` → `enforce_session_project`), so forwarding it
+/// keeps the daemon-side binding consistent with the already-enforced `project=`
+/// arg and lets the fail-closed C1 guard (`reject_unbound_cross_project_write`)
+/// accept the proxied write instead of rejecting it as unbound. CLI invocations
+/// have no proxy project and pass `None`.
 pub(crate) async fn call_daemon_tool_raw(
     info: &DaemonInfo,
     params: CallToolRequestParams,
+    proxy_project: Option<&str>,
 ) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
     let tool_name = params.name.as_ref().to_string();
-    let transport_config = StreamableHttpClientTransportConfig::with_uri(info.url.clone());
+    let mut transport_config = StreamableHttpClientTransportConfig::with_uri(info.url.clone());
+    if let Some(project) = proxy_project {
+        let mut headers = HashMap::new();
+        headers.insert(
+            HeaderName::from_static(crate::session_identity::HEADER_PROJECT),
+            HeaderValue::from_str(project).map_err(|e| {
+                DaemonCallError::BeforeDispatch(format!("invalid proxy project header value: {e}"))
+            })?,
+        );
+        transport_config = transport_config.custom_headers(headers);
+    }
     let transport = StreamableHttpClientTransport::from_config(transport_config);
     let client = ServiceExt::serve((), transport).await.map_err(|e| {
         DaemonCallError::BeforeDispatch(format!("daemon handshake failed at {}: {e}", info.url))

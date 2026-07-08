@@ -97,6 +97,7 @@ mod sandbox_ops;
 mod server_handler;
 mod server_instructions;
 mod server_methods;
+mod session_identity;
 mod shared_defs;
 mod shell_ops;
 mod signature_evidence;

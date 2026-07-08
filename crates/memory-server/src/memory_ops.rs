@@ -250,6 +250,8 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
     let app_home = crate::status_ops::resolve_app_home();
     let global_db_path = server.global_db_path_buf();
     let project_db_path = server.project_db_path_buf();
+    let session_client = server.session_client();
+    let session_project = server.session_project();
     let daemon = crate::status_ops::collect_daemon_status(&app_home, &global_db_path);
     let process =
         crate::status_ops::runtime_observability_json(server, &app_home, Some(&daemon), true);
@@ -273,6 +275,8 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
             "tool_profile": tool_profile,
             "requested_profile": requested_profile,
             "derivative_identity": derivative_identity,
+            "session_client": session_client,
+            "session_project": session_project,
         },
         "process": process,
         "databases": {

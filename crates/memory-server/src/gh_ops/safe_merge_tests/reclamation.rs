@@ -114,7 +114,7 @@ async fn safe_merge_reclaims_worktree_after_successful_merge() {
         .unwrap()
         .into_iter()
         .find(|e| {
-            e.get("event").and_then(|v| v.as_str()).map_or(false, |s| {
+            e.get("event").and_then(|v| v.as_str()).is_some_and(|s| {
                 s == "github_safe_merge_reclaimed" || s == "github_safe_merge_reclaim_skipped"
             })
         })
@@ -261,7 +261,7 @@ async fn safe_merge_missing_worktree_warns_does_not_fail_merge() {
         .unwrap()
         .into_iter()
         .find(|e| {
-            e.get("event").and_then(|v| v.as_str()).map_or(false, |s| {
+            e.get("event").and_then(|v| v.as_str()).is_some_and(|s| {
                 s == "github_safe_merge_reclaimed" || s == "github_safe_merge_reclaim_skipped"
             })
         })

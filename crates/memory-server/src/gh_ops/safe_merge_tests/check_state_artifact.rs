@@ -589,6 +589,8 @@ async fn safe_merge_dry_run_returns_ok_with_reader_error_marker_when_checks_list
         Some(flow),
         &[],
         MergeGatePolicy::permissive(),
+        None,
+        false,
     )
     .await
     .expect("dry-run must return Ok with a reader_error ledger state");
