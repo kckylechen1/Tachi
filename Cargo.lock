@@ -1332,6 +1332,7 @@ dependencies = [
  "libsimple",
  "memory-core",
  "memory-server-capture-gate",
+ "memory-server-hub-cli",
  "memory-server-manifest-audit",
  "memory-server-params",
  "memory-server-prompt-envelope",
@@ -1366,6 +1367,19 @@ name = "memory-server-capture-gate"
 version = "1.6.4"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "memory-server-hub-cli"
+version = "1.6.4"
+dependencies = [
+ "chrono",
+ "dirs",
+ "memory-core",
+ "rusqlite",
+ "serde_json",
+ "tachi-bootstrap",
+ "tempfile",
 ]
 
 [[package]]

@@ -284,7 +284,7 @@ pub(super) fn cmd_bindings(db: &PathBuf) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-pub(crate) fn cmd_stats(db: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+pub fn cmd_stats(db: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_ro(db)?;
 
     let count = |sql: &str| -> rusqlite::Result<i64> { conn.query_row(sql, [], |r| r.get(0)) };

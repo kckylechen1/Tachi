@@ -14,7 +14,7 @@ pub(super) async fn run_hub_command(
     action: HubAction,
     app_home: &PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let hub_db = crate::hub_cli::resolve_hub_db(None, app_home);
+    let hub_db = memory_server_hub_cli::resolve_hub_db(None, app_home);
     match action {
         HubAction::List {
             cap_type,
@@ -30,7 +30,7 @@ pub(super) async fn run_hub_command(
             all,
             json: false,
         } => {
-            crate::hub_cli::run(
+            memory_server_hub_cli::run(
                 &HubAction::List {
                     cap_type,
                     all,
@@ -43,12 +43,12 @@ pub(super) async fn run_hub_command(
             Ok(())
         }
         HubAction::Show { id } => {
-            crate::hub_cli::run(&HubAction::Show { id }, &hub_db, app_home)
+            memory_server_hub_cli::run(&HubAction::Show { id }, &hub_db, app_home)
                 .map_err(std::io::Error::other)?;
             Ok(())
         }
         HubAction::Packs { all } => {
-            crate::hub_cli::run(&HubAction::Packs { all }, &hub_db, app_home)
+            memory_server_hub_cli::run(&HubAction::Packs { all }, &hub_db, app_home)
                 .map_err(std::io::Error::other)?;
             Ok(())
         }
@@ -90,12 +90,12 @@ pub(super) async fn run_hub_command(
             print_pretty_json(&serde_json::from_str(&out)?)
         }
         HubAction::Bindings => {
-            crate::hub_cli::run(&HubAction::Bindings, &hub_db, app_home)
+            memory_server_hub_cli::run(&HubAction::Bindings, &hub_db, app_home)
                 .map_err(std::io::Error::other)?;
             Ok(())
         }
         HubAction::Doctor { fix } => {
-            crate::hub_cli::run(&HubAction::Doctor { fix }, &hub_db, app_home)
+            memory_server_hub_cli::run(&HubAction::Doctor { fix }, &hub_db, app_home)
                 .map_err(std::io::Error::other)?;
             Ok(())
         }
@@ -192,7 +192,8 @@ pub(super) async fn run_hub_command(
             }))
         }
         HubAction::Stats { json: false } => {
-            crate::hub_cli::cmd_stats(&hub_db).map_err(|e| std::io::Error::other(e.to_string()))?;
+            memory_server_hub_cli::cmd_stats(&hub_db)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
             Ok(())
         }
     }
@@ -228,7 +229,7 @@ pub(super) async fn run_mcp_command(
                 &headers,
                 vault_key_name.as_deref(),
             )?;
-            let hub_db = crate::hub_cli::resolve_hub_db(None, app_home);
+            let hub_db = memory_server_hub_cli::resolve_hub_db(None, app_home);
             let vault_key_created = if let Some(raw_key) = key {
                 Some(store_mcp_key_in_vault(
                     &hub_db,
