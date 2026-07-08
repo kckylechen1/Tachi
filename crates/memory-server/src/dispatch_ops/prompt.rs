@@ -38,7 +38,7 @@ pub(crate) async fn assemble_prompt_with_trace(
 
     let agent = params.agent.as_deref().unwrap_or("unknown");
     if let Some(overlay) =
-        crate::prompt_envelope::render_envelope_overlay(agent, params.stage.as_deref())
+        memory_server_prompt_envelope::render_envelope_overlay(agent, params.stage.as_deref())
     {
         parts.push(overlay);
     }

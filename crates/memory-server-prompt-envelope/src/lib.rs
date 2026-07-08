@@ -1,10 +1,11 @@
 //! Prompt envelope registry (#156) — structured instruction overlays per agent/mode.
+//! Extracted from memory-server (#833 slice 3).
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
-pub(crate) struct PromptEnvelope {
+pub struct PromptEnvelope {
     pub id: &'static str,
     pub identity: &'static str,
     pub constraints: &'static str,
@@ -48,7 +49,7 @@ fn registry() -> &'static HashMap<&'static str, PromptEnvelope> {
 }
 
 /// Resolve envelope id from agent + dispatch stage.
-pub(crate) fn resolve_envelope_id(agent: &str, stage: Option<&str>) -> &'static str {
+pub fn resolve_envelope_id(agent: &str, stage: Option<&str>) -> &'static str {
     let agent = agent.trim().to_ascii_lowercase();
     let stage = stage.unwrap_or("").trim().to_ascii_lowercase();
     match (agent.as_str(), stage.as_str()) {
@@ -61,7 +62,7 @@ pub(crate) fn resolve_envelope_id(agent: &str, stage: Option<&str>) -> &'static 
     }
 }
 
-pub(crate) fn render_envelope_overlay(agent: &str, stage: Option<&str>) -> Option<String> {
+pub fn render_envelope_overlay(agent: &str, stage: Option<&str>) -> Option<String> {
     let id = resolve_envelope_id(agent, stage);
     let envelope = registry().get(id)?;
     Some(format!(

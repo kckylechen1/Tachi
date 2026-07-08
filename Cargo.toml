@@ -5,6 +5,7 @@ members = [
     "crates/memory-server",
     "crates/memory-server-i18n",
     "crates/memory-server-params",
+    "crates/memory-server-prompt-envelope",
     "crates/memory-server-rescue",
     "crates/memory-server-runtime",
     "crates/tachi-bootstrap",
