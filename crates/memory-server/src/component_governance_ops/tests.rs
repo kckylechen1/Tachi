@@ -192,11 +192,32 @@ async fn component_check_classifies_tachi_checkout_as_kernel_drift() {
         .expect("check action");
     let parsed: Value = serde_json::from_str(&body).expect("json");
     assert_eq!(parsed["status"], json!("completed"));
+    // The remote matches kckylechen1/tachi. Both tachi-memory-kernel and
+    // tachi-event-projection-bridge share that owner_repo, so the classifier
+    // must tie-break to the strongest match. Since the remote matches BOTH
+    // equally (both Remote-strength), the kernel record wins by path-specificity:
+    // it declares crates/memory-core (which exists) and is the canonical surface.
+    // We assert it matched ONE of the two kckylechen1/tachi records (not a
+    // wrong owner) and that the matched_component_id is correct, with no
+    // evidence gaps (remote match = confident).
     let category = parsed["category"].as_str().expect("category");
+    let matched = parsed["matched_component_id"]
+        .as_str()
+        .unwrap_or("(none)");
     assert!(
         category == CATEGORY_KERNEL_DRIFT || category == CATEGORY_BRIDGE,
-        "tachi checkout must classify as kernel_drift or bridge, got {category} (gaps: {:?})",
-        parsed["evidence_gaps"]
+        "tachi checkout must classify as kernel_drift or bridge, got {category}"
+    );
+    assert!(
+        matched == "tachi-memory-kernel" || matched == "tachi-event-projection-bridge",
+        "must match a kckylechen1/tachi component, got {matched}"
+    );
+    // Remote match = confident: no path-only-fork evidence gap.
+    let empty = Vec::new();
+    let gaps = parsed["evidence_gaps"].as_array().unwrap_or(&empty);
+    assert!(
+        gaps.is_empty(),
+        "remote-matched checkout must have no evidence gaps, got {gaps:?}"
     );
 }
 
@@ -250,5 +271,14 @@ fn normalize_remote_handles_https_and_ssh_forms() {
     assert_eq!(
         normalize_remote_to_owner_repo("https://github.com/kckylechen1/RomanBath"),
         "kckylechen1/RomanBath"
+    );
+    // trailing slash must not survive normalization (would cause silent no-match)
+    assert_eq!(
+        normalize_remote_to_owner_repo("https://github.com/kckylechen1/tachi/"),
+        "kckylechen1/tachi"
+    );
+    assert_eq!(
+        normalize_remote_to_owner_repo("https://github.com/kckylechen1/tachi.git/"),
+        "kckylechen1/tachi"
     );
 }

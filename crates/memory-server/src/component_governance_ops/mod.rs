@@ -510,7 +510,10 @@ fn run_git_readonly(cwd: &std::path::Path, args: &[&str]) -> Result<String, Stri
 /// Normalize a git remote URL to `owner/repo` form (best-effort).
 /// Accepts `https://host/owner/repo(.git)`, `git@host:owner/repo(.git)`.
 pub(crate) fn normalize_remote_to_owner_repo(url: &str) -> String {
-    let url = url.trim().trim_end_matches(".git");
+    let url = url
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git");
     // ssh form git@host:owner/repo — only if there's no "://" scheme.
     if !url.contains("://") {
         if let Some(colon_idx) = url.find(':') {
@@ -568,21 +571,22 @@ fn classify_repo(
         })
         .collect();
 
+    // Score each candidate: remote-match (strong) ranks above path-only-match (weak).
+    // This tie-break prevents a path-sorted record (e.g. tachi-event-projection-bridge,
+    // which shares owner_repo kckylechen1/tachi with the kernel) from shadowing the
+    // correct record when both could match.
+    #[derive(Clone, Copy)]
+    enum MatchStrength {
+        None,
+        PathOnly,
+        Remote,
+    }
+    let mut best: Option<(&Value, MatchStrength)> = None;
     for record in &candidates {
-        let component_id = record
-            .get("component_id")
-            .and_then(Value::as_str)
-            .unwrap_or("");
         let owner_repo = record
             .get("owner_repo")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let component_type = record
-            .get("component_type")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-
-        // Evidence: does the remote match owner_repo?
         let remote_matches = remote_normalized
             .as_deref()
             .map(|rn| rn.eq_ignore_ascii_case(owner_repo))
@@ -604,24 +608,70 @@ fn classify_repo(
             .copied()
             .collect();
 
-        if remote_matches || !path_matches.is_empty() {
-            let category = match component_type {
-                "kernel" => CATEGORY_KERNEL_DRIFT,
-                "runtime_adapter" => CATEGORY_ALLOWED_ADAPTER_POLICY,
-                "workflow_bridge" => CATEGORY_BRIDGE,
-                "frontend_app_shell" => CATEGORY_FRONTEND_SHELL,
-                _ => CATEGORY_UNKNOWN,
-            };
-            return (
-                category.to_string(),
-                Some(component_id.to_string()),
-                Vec::new(),
-            );
+        let strength = if remote_matches {
+            MatchStrength::Remote
+        } else if !path_matches.is_empty() {
+            MatchStrength::PathOnly
+        } else {
+            MatchStrength::None
+        };
+
+        if matches!(strength, MatchStrength::None) {
+            continue;
+        }
+        // Prefer the strongest match; on ties keep the first (stable).
+        // best only ever holds PathOnly or Remote (None is skipped above).
+        let stronger = match (&best, strength) {
+            (None, _) => true,
+            (Some((_, MatchStrength::PathOnly)), MatchStrength::Remote) => true,
+            (Some((_, MatchStrength::Remote)), _) => false,
+            _ => false,
+        };
+        if stronger {
+            best = Some((record, strength));
         }
     }
 
+    if let Some((record, strength)) = best {
+        let component_id = record
+            .get("component_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let component_type = record
+            .get("component_type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let category = match component_type {
+            "kernel" => CATEGORY_KERNEL_DRIFT,
+            "runtime_adapter" => CATEGORY_ALLOWED_ADAPTER_POLICY,
+            "workflow_bridge" => CATEGORY_BRIDGE,
+            "frontend_app_shell" => CATEGORY_FRONTEND_SHELL,
+            _ => CATEGORY_UNKNOWN,
+        };
+        // Path-only matches (remote differs or absent) are weaker evidence:
+        // surface a gap so the caller knows this is not a confident canonical match
+        // (e.g. a fork whose owner_path dirs happen to exist).
+        let mut result_gaps: Vec<String> = Vec::new();
+        if matches!(strength, MatchStrength::PathOnly) {
+            result_gaps.push(
+                "matched by owner_path only; git origin remote differs from the declared owner_repo (possible fork / drift)".to_string(),
+            );
+        }
+        return (
+            category.to_string(),
+            Some(component_id.to_string()),
+            result_gaps,
+        );
+    }
+
     if let Some(rn) = remote_normalized.as_deref() {
-        gaps.push(format!("git origin remote ({rn}) matched no declared owner_repo"));
+        if scope_component_id.is_some() {
+            gaps.push(format!(
+                "git origin remote ({rn}) did not match the scoped component_id's owner_repo"
+            ));
+        } else {
+            gaps.push(format!("git origin remote ({rn}) matched no declared owner_repo"));
+        }
     }
     gaps.push("no declared component record matched this repo's remote or owner_path".to_string());
     (CATEGORY_UNKNOWN.to_string(), None, gaps)
