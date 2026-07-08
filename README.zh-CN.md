@@ -60,7 +60,7 @@ Tachi 不是通用向量数据库，也不是托管记忆云服务。它是面�
 | **外部依赖** | 零（embedding provider 可选） | 中等 | 中等 | 低到中 | 高 |
 | **默认数据位置** | 本地优先 | 云优先，可自托管 | 自托管 | 自托管 / Cloud | 依赖实现 |
 | **记忆组织** | `path` 层级 + 因果图谱 + 域 | Entity + session | Agent 状态 + memory block | Collection + metadata | 无 |
-| **工作流控制** | `dispatch` / `arena` / `verify` / `eval` | 无 | Agent 编排 | 无 | 无 |
+| **工作流控制** | `task` / `arena` / `verify` | 无 | Agent 编排 | 无 | 无 |
 | **目标用户** | 个人/小团队运行自主 Agent | 应用开发者集成记忆 | 构建有状态 Agent | 需要向量检索的系统 | 基础设施工程师 |
 
 ---
@@ -76,7 +76,7 @@ brew tap kckylechen1/tachi && brew install tachi
 或使用 shell 安装脚本（检测到 OpenClaw 时会自动安装插件）：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.4/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.7.0/scripts/install.sh)"
 ```
 
 验证：
@@ -104,7 +104,7 @@ tachi --version
 }
 ```
 
-- `VOYAGE_API_KEY` —— 向量嵌入，必填。
+- `VOYAGE_API_KEY` —— 混合语义检索所需（无此 key 时服务仍可启动，仅提供词法/图谱召回）。
 - `SILICONFLOW_API_KEY` —— 结构化抽取、摘要、熔炉蒸馏，建议填写。
 - `TACHI_PROFILE` —— 参见下方的 [工具暴露面 Profile](#工具暴露面-profile)。
 
@@ -260,6 +260,8 @@ graph TD
 - **看板** —— 跨 Agent 卡片，支持 `ack` / `progress` / `result` 状态（`post_card`、`check_inbox`、`update_card`）。
 - **交接令牌** —— Agent 会话之间结构化上下文传递（`handoff_leave`、`handoff_check`）。
 
+> 幽灵与看板工具属于 `admin` Profile 的原生门面（未纳入 `standard`/`coordinate` bundle）。大多数 Agent 通过 `tachi_handoff`、`tachi_workflow`、`tachi_orchestrator`、`tachi_task` 门面进行协调。
+
 ### 8. 工作流控制平面
 Tachi 不只是记忆库；它正在演变为 Agent 工程的持久控制平面：
 
@@ -272,6 +274,9 @@ Tachi 不只是记忆库；它正在演变为 Agent 工程的持久控制平面�
 - **Foundry** —— 服务端上下文生命周期：`recall_context`、`capture_session`、`compact_context`、`section_build`、`compact_rollup`、`compact_session_memory`，以及 Agent 进化提案。
 - **Wiki** —— Agent 维护的持久知识页：`tachi_wiki`、`tachi_browse`、`tachi_wiki_write`、`tachi_wiki_search`、`wiki_lint`。
 
+### 10. 便携 Memory Kernel
+Tachi 是下游产品（Hypermem 交易适配器、zeroclaw 通用 chat-agent 适配器、RomanBath 前端）的共享 memory kernel，而非让每个产品各自 fork。**便携 kernel manifest**（`docs/engineering/architecture/kernel-surface-v1.fixture.json`）将持久 schema、召回原语、向量/FTS 回退行为和就绪诊断冻结为产品无关的契约——下游适配器无需继承 Tachi 的 GitHub/派发/发布面。启动时运行兼容性门控；`TACHI_BYPASS_MANIFEST=1` 可在开发时跳过。
+
 ---
 
 ## 工具暴露面 Profile
@@ -281,7 +286,7 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 | Profile | 暴露内容 | 适用场景 |
 |---------|----------|----------|
 | `standard` | 日常门面：`tachi_save`、`tachi_memory`、`tachi_task`、`tachi_arena`、`tachi_verify`、`tachi_web_search`、`tachi_wiki`、`tachi_skill`、`tachi_gh`、`vault_status`，以及 `runtime_info`、`tachi_status`、`tachi_briefing` 和 `tachi_tools`。 | IDE Agent：Claude、Cursor、Codex、Windsurf、Trae、Antigravity。 |
-| `coordinate` | `remember` + `coordinate` bundles：增加 `handoff_*`、`post_card`、`check_inbox`、`update_card`、`approve_merge`、`tachi_handoff`、`tachi_workflow`、`tachi_orchestrator`；派发通过 `tachi_task(action='dispatch')`。 | 主控/编排 Agent，负责派发任务并协调多 Agent。 |
+| `coordinate` | `remember` + `coordinate` bundles：增加 `handoff_check`/`handoff_leave`、`tachi_handoff`、`tachi_workflow`、`tachi_orchestrator`、`tachi_agents`、`approve_merge`、`tachi_gh`、`tachi_shell`、`tachi_arena`、`tachi_verify`；派发通过 `tachi_task(action='dispatch')`。 | 主控/编排 Agent，负责派发任务并协调多 Agent。 |
 | `operate` | `remember` + `operate` bundles：增加 Foundry 生命周期、`agent_register`、`hub_call`、`vault_unlock`/`lock`/`status`、`wiki_lint`。 | 运行时适配器、OpenClaw、运维自动化。 |
 | `delegate` | 精选 worker 工具面：`tachi_tools`、`runtime_info`、`tachi_memory`、`tachi_web_search`、`tachi_browse`、`tachi_unstick`、`tachi_complete`、`tachi_skill(action='discover'|'run'|'bundle')`，以及旧兼容入口 `run_skill`。 | `tachi_task(action='dispatch')` 派生的工作 Agent。无派发、无交接、无技能候选注册。 |
 | `admin` | 完整目录。 | 维护、开发与治理。 |
@@ -355,7 +360,7 @@ cargo test --all
 cargo run -p memory-server -- --profile standard
 ```
 
-需要 Rust ≥ 1.75。Node 绑定和迭代开发建议安装 `maturin` 和 `cargo-watch`。
+需要 Rust ≥ 1.75。Node 绑定基于 napi-rs（打包为 `@chaoxlabs/tachi-node`），迭代开发建议安装 `@napi-rs/cli` 和 `cargo-watch`。
 
 ---
 

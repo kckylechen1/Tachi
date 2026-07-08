@@ -362,6 +362,9 @@ Tachi is not only a memory store; it is becoming the durable control plane for a
 - **Foundry** — server-owned context lifecycle: `recall_context`, `capture_session`, `compact_context`, `section_build`, `compact_rollup`, `compact_session_memory`, plus agent evolution proposals.
 - **Wiki** — durable knowledge pages maintained by agents: `tachi_wiki`, `tachi_browse`, `tachi_wiki_write`, `tachi_wiki_search`, `wiki_lint`.
 
+### 11. Portable Memory Kernel
+Tachi is the shared memory kernel for downstream products (Hypermem trading adapter, zeroclaw chat-agent adapter, RomanBath frontend) rather than a per-product fork. A **portable kernel manifest** (`docs/engineering/architecture/kernel-surface-v1.fixture.json`) freezes the durable schema, recall primitives, vector/FTS fallback behavior, and readiness diagnostics as a product-agnostic contract — downstream adapters consume it without inheriting Tachi's GitHub/dispatch/release surfaces. A compatibility gate runs at startup; `TACHI_BYPASS_MANIFEST=1` skips it for development.
+
 ---
 
 ## Tool Surface Profiles
