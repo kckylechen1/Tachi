@@ -130,8 +130,9 @@ pub(super) async fn handle_tachi_task_status(
         match std::fs::read_to_string(&result_path) {
             Ok(content) => {
                 const MAX_RESULT_CHARS: usize = 8_000;
-                let full_size = content.len();
-                let (body, truncated) = if full_size > MAX_RESULT_CHARS {
+                let char_count = content.chars().count();
+                let byte_count = content.len();
+                let (body, truncated) = if char_count > MAX_RESULT_CHARS {
                     (
                         content.chars().take(MAX_RESULT_CHARS).collect::<String>(),
                         true,
@@ -142,7 +143,8 @@ pub(super) async fn handle_tachi_task_status(
                 response["result"] = json!({
                     "body": body,
                     "truncated": truncated,
-                    "full_size_bytes": full_size,
+                    "full_size_chars": char_count,
+                    "full_size_bytes": byte_count,
                 });
             }
             Err(_) => {
@@ -364,6 +366,36 @@ mod tests {
         assert!(
             response.get("result").is_none(),
             "result field should be absent when include_result=false, got: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_include_result_multibyte_not_false_truncated() {
+        // A result.md with multibyte (Chinese) chars: char count under cap,
+        // but byte count over cap. Must NOT be marked truncated.
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-dispatch-multibyte";
+        // 100 Chinese chars = 300 bytes (UTF-8), well under 8000 char cap
+        // but if the old byte-based check were used, a longer string would
+        // falsely trigger truncated.
+        let body = "测试结果。".repeat(100); // 600 chars, ~1800 bytes
+        write_fake_run(&runs_dir, dispatch_id, Some(&body));
+
+        let params = status_params(dispatch_id, true);
+        let response_str = handle_tachi_task_status(&server, &params)
+            .await
+            .expect("status call");
+        let response: serde_json::Value =
+            serde_json::from_str(&response_str).expect("parse response");
+
+        assert_eq!(
+            response["result"]["truncated"], false,
+            "multibyte content under char cap must not be falsely truncated, got: {response}"
+        );
+        assert_eq!(
+            response["result"]["full_size_chars"], 500,
+            "char count should be 500, got: {response}"
         );
     }
 }
