@@ -1,8 +1,6 @@
 use tokio::process::Command;
 
-pub(in crate::dispatch_ops::merge) async fn resolve_worktree_top_level(
-    worktree: &str,
-) -> Result<String, String> {
+pub(crate) async fn resolve_worktree_top_level(worktree: &str) -> Result<String, String> {
     let out = Command::new("git")
         .args([
             "-C",
@@ -25,9 +23,7 @@ pub(in crate::dispatch_ops::merge) async fn resolve_worktree_top_level(
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-pub(in crate::dispatch_ops::merge) async fn resolve_repo_root_from_worktree(
-    worktree: &str,
-) -> Result<String, String> {
+pub(crate) async fn resolve_repo_root_from_worktree(worktree: &str) -> Result<String, String> {
     let repo_root_out = Command::new("git")
         .args([
             "-C",
@@ -57,9 +53,7 @@ pub(in crate::dispatch_ops::merge) async fn resolve_repo_root_from_worktree(
         .to_string())
 }
 
-pub(in crate::dispatch_ops::merge) async fn ensure_repo_root_is_clean(
-    repo_root: &str,
-) -> Result<(), String> {
+pub(crate) async fn ensure_repo_root_is_clean(repo_root: &str) -> Result<(), String> {
     let repo_check = Command::new("git")
         .args(["-C", repo_root, "rev-parse", "--is-inside-work-tree"])
         .output()
@@ -93,10 +87,7 @@ pub(in crate::dispatch_ops::merge) async fn ensure_repo_root_is_clean(
     Ok(())
 }
 
-pub(in crate::dispatch_ops::merge) async fn current_worktree_branch(
-    worktree: &str,
-    label: &str,
-) -> Result<String, String> {
+pub(crate) async fn current_worktree_branch(worktree: &str, label: &str) -> Result<String, String> {
     let out = Command::new("git")
         .args(["-C", worktree, "rev-parse", "--abbrev-ref", "HEAD"])
         .output()

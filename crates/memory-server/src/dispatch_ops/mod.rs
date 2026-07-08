@@ -7,7 +7,6 @@ mod harness;
 mod kanban_helpers;
 mod launcher;
 mod mcp_config;
-mod merge;
 mod prompt;
 mod subprocess;
 
@@ -28,12 +27,5 @@ pub(crate) use harness::{
 #[cfg(test)]
 pub(crate) use kanban_helpers::should_cleanup_run;
 pub(crate) use kanban_helpers::update_kanban_state;
-pub(crate) use merge::handle_approve_merge;
-pub(crate) use merge::remove_worktree_with_cleaner;
-#[cfg(test)]
-pub(crate) use merge::{
-    evaluate_delete_worktree_safety, resolve_tachi_clean_bin, validate_merge_branch_name,
-    validate_static_merge_safety, worktree_equals_repo_root,
-};
 #[cfg(test)]
 pub(crate) use prompt::{assemble_prompt, assemble_prompt_with_trace};

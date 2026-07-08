@@ -1,0 +1,15 @@
+[package]
+name = "tachi-merge-ops"
+version = "1.6.4"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Local worktree merge toolkit (approve_merge, safety gates, cleaner integration). Extracted from memory-server (#833)."
+
+[dependencies]
+memory-server-params = { path = "../memory-server-params" }
+tokio = { version = "1", features = ["process"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

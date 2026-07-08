@@ -1,6 +1,6 @@
 #[test]
 fn delete_worktree_is_blocked_when_branch_needs_human_review() {
-    let no_upstream = crate::dispatch_ops::evaluate_delete_worktree_safety(true, false, false);
+    let no_upstream = tachi_merge_ops::evaluate_delete_worktree_safety(true, false, false);
     assert!(
         !no_upstream.allow_delete_worktree,
         "delete should be disabled when upstream is missing"
@@ -17,7 +17,7 @@ fn delete_worktree_is_blocked_when_branch_needs_human_review() {
         "expected upstream warning"
     );
 
-    let local_only = crate::dispatch_ops::evaluate_delete_worktree_safety(true, true, true);
+    let local_only = tachi_merge_ops::evaluate_delete_worktree_safety(true, true, true);
     assert!(
         !local_only.allow_delete_worktree,
         "delete should be disabled when local-only commits exist"

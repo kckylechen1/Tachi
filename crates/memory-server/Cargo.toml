@@ -13,6 +13,7 @@ tachi-bootstrap = { path = "../tachi-bootstrap" }
 tachi-dispatch = { path = "../tachi-dispatch" }
 tachi-foundry = { path = "../tachi-foundry" }
 tachi-hub = { path = "../tachi-hub" }
+tachi-merge-ops = { path = "../tachi-merge-ops" }
 tachi-llm = { path = "../tachi-llm" }
 tachi-clean = { path = "../../tools/cleaner" }
 rmcp = { version = "1.2", features = ["server", "transport-io", "macros", "client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "server-side-http", "transport-streamable-http-server", "schemars"] }

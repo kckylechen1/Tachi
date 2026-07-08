@@ -28,15 +28,16 @@ async fn approve_merge_preview_does_not_touch_repo_merge_state() {
         ],
     );
 
-    let raw = crate::dispatch_ops::handle_approve_merge(crate::TachiApproveMergeParams {
-        worktree: worktree.to_string_lossy().to_string(),
-        branch: Some("feature-preview".to_string()),
-        strategy: None,
-        delete_worktree: false,
-        confirm: false,
-    })
-    .await
-    .expect("preview should succeed");
+    let raw =
+        tachi_merge_ops::handle_approve_merge(memory_server_params::TachiApproveMergeParams {
+            worktree: worktree.to_string_lossy().to_string(),
+            branch: Some("feature-preview".to_string()),
+            strategy: None,
+            delete_worktree: false,
+            confirm: false,
+        })
+        .await
+        .expect("preview should succeed");
     let json: serde_json::Value = serde_json::from_str(&raw).expect("preview JSON");
 
     assert_eq!(json["preview"], serde_json::json!(true));

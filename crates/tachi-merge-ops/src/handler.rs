@@ -7,12 +7,11 @@ use super::repo::{
 use super::safety::{
     detect_branch_safety_signals, validate_static_merge_safety, worktree_equals_repo_root,
 };
+use memory_server_params::TachiApproveMergeParams;
 use serde_json::json;
 use tokio::process::Command;
 
-pub(crate) async fn handle_approve_merge(
-    params: crate::TachiApproveMergeParams,
-) -> Result<String, String> {
+pub async fn handle_approve_merge(params: TachiApproveMergeParams) -> Result<String, String> {
     let worktree = resolve_worktree_top_level(&params.worktree).await?;
 
     let branch = if let Some(ref b) = params.branch {

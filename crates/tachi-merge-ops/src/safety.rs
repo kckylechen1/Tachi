@@ -3,7 +3,7 @@ use tokio::process::Command;
 const PROTECTED_BRANCHES: [&str; 3] = ["main", "master", "trunk"];
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct DeleteWorktreeSafety {
+pub struct DeleteWorktreeSafety {
     pub allow_delete_worktree: bool,
     pub requires_human_review: bool,
     pub safety_warnings: Vec<String>,
@@ -22,11 +22,11 @@ fn normalize_path_for_compare(path: &str) -> String {
         .unwrap_or_else(|_| std::path::PathBuf::from(path).to_string_lossy().to_string())
 }
 
-pub(crate) fn worktree_equals_repo_root(worktree: &str, repo_root: &str) -> bool {
+pub fn worktree_equals_repo_root(worktree: &str, repo_root: &str) -> bool {
     normalize_path_for_compare(worktree) == normalize_path_for_compare(repo_root)
 }
 
-pub(crate) fn validate_merge_branch_name(branch: &str) -> Result<(), String> {
+pub fn validate_merge_branch_name(branch: &str) -> Result<(), String> {
     let trimmed = branch.trim();
     if trimmed.is_empty() {
         return Err("Branch name must be non-empty.".to_string());
@@ -42,7 +42,7 @@ pub(crate) fn validate_merge_branch_name(branch: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn validate_static_merge_safety(
+pub fn validate_static_merge_safety(
     branch: &str,
     worktree: &str,
     repo_root: &str,
@@ -61,7 +61,7 @@ pub(crate) fn validate_static_merge_safety(
     Ok(())
 }
 
-pub(crate) fn evaluate_delete_worktree_safety(
+pub fn evaluate_delete_worktree_safety(
     delete_worktree_requested: bool,
     has_upstream: bool,
     has_local_only_commits: bool,
@@ -88,9 +88,7 @@ pub(crate) fn evaluate_delete_worktree_safety(
     safety
 }
 
-pub(in crate::dispatch_ops::merge) async fn detect_branch_safety_signals(
-    worktree: &str,
-) -> DeleteWorktreeSafety {
+pub(crate) async fn detect_branch_safety_signals(worktree: &str) -> DeleteWorktreeSafety {
     let upstream_out = Command::new("git")
         .args([
             "-C",
