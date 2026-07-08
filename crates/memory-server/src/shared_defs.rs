@@ -67,7 +67,6 @@ const NON_IDEMPOTENT_TOOL_NAMES: &[&str] = &[
     "vault_init",
     "vault_setup_rotation",
     "vault_set_api_key_pool",
-    "tachi_dispatch",
     "handoff_leave",
     "hub_call",
 ];

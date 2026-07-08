@@ -122,8 +122,6 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "set_state",
     "skill_evolve",
     "tachi_audit_log",
-    "tachi_board",
-    "tachi_dispatch",
     "tachi_init_project_db",
     "tachi_task_brief",
     "tachi_wiki_organize",
@@ -182,7 +180,10 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "wiki_browse",
 ];
 
-const FOLDED_NATIVE_COMPAT_TOOLS: &[&str] = &["get_memory", "tachi_board", "tachi_dispatch"];
+// Batch C (#757) removed `tachi_board` and `tachi_dispatch` — their canonical
+// replacements are tachi_task(action='board'/'dispatch'). Only `get_memory`
+// remains a folded admin-only compat tool here.
+const FOLDED_NATIVE_COMPAT_TOOLS: &[&str] = &["get_memory"];
 
 const PROFILE_RETIRED_DIRECT_TOOLS: &[&str] = &[
     "check_inbox",
