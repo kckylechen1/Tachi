@@ -39,9 +39,9 @@ pub(in crate::memory_search_ops::save_memory) fn validate_save_text(
                 "mcp",
             )
         });
-    let gate_mode = crate::capture_gate::GateMode::from_env();
-    let gate_decision = crate::capture_gate::evaluate(
-        &crate::capture_gate::GateInput::new(
+    let gate_mode = memory_server_capture_gate::GateMode::from_env();
+    let gate_decision = memory_server_capture_gate::evaluate(
+        &memory_server_capture_gate::GateInput::new(
             safe_text,
             &params.path,
             effective_domain.as_deref(),

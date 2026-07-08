@@ -6,6 +6,7 @@ license = "AGPL-3.0-only"
 
 [dependencies]
 memory-core = { path = "../memory-core" }
+memory-server-capture-gate = { path = "../memory-server-capture-gate" }
 memory-server-params = { path = "../memory-server-params" }
 memory-server-prompt-envelope = { path = "../memory-server-prompt-envelope" }
 memory-server-rescue = { path = "../memory-server-rescue" }

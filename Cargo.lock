@@ -1331,6 +1331,7 @@ dependencies = [
  "libc",
  "libsimple",
  "memory-core",
+ "memory-server-capture-gate",
  "memory-server-params",
  "memory-server-prompt-envelope",
  "memory-server-rescue",
@@ -1357,6 +1358,13 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "memory-server-capture-gate"
+version = "1.6.4"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
