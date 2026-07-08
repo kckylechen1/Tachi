@@ -127,9 +127,11 @@ This resolves the real-time-view-vs-evolving-snapshot question: soul is neither
 a stateless real-time read (no accumulated nurture) nor a static snapshot (no
 growth) — it is a **continuous digestion process plus its sediment**.
 
-(Note: the Global-Workspace mapping is used here as a framing analogy; the
-specific Anthropic write-up referenced in discussion has not been read verbatim
-and should be before this section is treated as more than analogy.)
+(Note: the Global-Workspace mapping is used here as a framing analogy, grounded
+in Anthropic's research note "A global workspace in language models"
+<https://www.anthropic.com/research/global-workspace>. We copy the systems
+lesson — small broadcast workspace over specialized memory/processes — not any
+claim about literal consciousness.)
 
 ## 6. The safety boundary — the nature core grows, but nobody edits it
 
