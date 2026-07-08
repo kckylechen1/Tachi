@@ -239,7 +239,7 @@ pub(crate) fn build_status_warnings(
     if let Some(cache) = &snapshot.provider_probe_cache {
         if cache.is_stale() {
             warnings.push(format!(
-                "provider key probe cache is older than {}h; run `tachi status --probe-keys` or wait for the daily pipeline",
+                "provider key probe cache is older than {}h; run `tachi doctor --run-daily`",
                 cache.ttl_seconds / 3600
             ));
         } else {
@@ -294,13 +294,27 @@ pub(crate) fn build_status_warnings(
             "{total_stuck} foundry job(s) stuck running for over {STUCK_THRESHOLD_SECS}s{db_list}"
         ));
     }
-    if snapshot
-        .distill_marker
-        .as_ref()
-        .map(|marker| marker.is_stale)
-        .unwrap_or(true)
-    {
-        warnings.push("daily distill marker is missing or stale".to_string());
+    match snapshot.distill_marker.as_ref() {
+        Some(marker) if marker.is_stale => {
+            if let Some(reason) = &marker.error_reason {
+                warnings.push(format!(
+                    "daily distill failed {} ago: {reason}; run `tachi doctor --run-daily`",
+                    marker.age
+                ));
+            } else {
+                warnings.push(format!(
+                    "daily distill marker is stale ({}); run `tachi doctor --run-daily`",
+                    marker.age
+                ));
+            }
+        }
+        None => {
+            warnings.push(
+                "daily distill has never run (marker missing); run `tachi doctor --run-daily`"
+                    .to_string(),
+            );
+        }
+        _ => {}
     }
     for key in &snapshot.api_keys {
         if key.required && key.status == "missing" {

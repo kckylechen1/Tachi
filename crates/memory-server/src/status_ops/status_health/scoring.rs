@@ -134,7 +134,13 @@ pub(crate) fn calculate_health_deductions(
             "stale distill marker",
             10,
             distill_marker
-                .map(|marker| format!("last distill marker is stale: {}", marker.age))
+                .map(|marker| {
+                    if let Some(reason) = &marker.error_reason {
+                        format!("last distill failed: {reason} ({})", marker.age)
+                    } else {
+                        format!("last distill marker is stale: {}", marker.age)
+                    }
+                })
                 .unwrap_or_else(|| "no distill marker found".to_string()),
         );
     }

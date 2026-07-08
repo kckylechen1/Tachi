@@ -80,6 +80,7 @@ pub(super) async fn run_pre_serve_command(
             roots,
             jobs,
             probe_keys,
+            run_daily,
         } => {
             super::super::manifest_cli::run_doctor_command(
                 *json,
@@ -87,8 +88,11 @@ pub(super) async fn run_pre_serve_command(
                 roots.clone(),
                 *jobs,
                 *probe_keys,
+                *run_daily,
                 home,
                 app_home,
+                global_db_path,
+                project_db_path.map(PathBuf::as_path),
                 git_root,
             )
             .await?;

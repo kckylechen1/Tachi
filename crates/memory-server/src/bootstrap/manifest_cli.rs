@@ -21,8 +21,11 @@ pub(super) async fn run_doctor_command(
     roots_override: Vec<PathBuf>,
     jobs_report: bool,
     probe_keys: bool,
+    run_daily: bool,
     home: &Path,
     app_home: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
     git_root: Option<&PathBuf>,
 ) -> Result<(), Box<dyn Error>> {
     let roots: Vec<PathBuf> = if !roots_override.is_empty() {
@@ -53,6 +56,16 @@ pub(super) async fn run_doctor_command(
         );
     }
 
+    // --run-daily: unified remediation verb for stale distill marker + probe cache.
+    // Runs the provider probe refresh and the daily distill batch, then writes the
+    // marker so the next `tachi status` sees a fresh (or failure-detailed) marker
+    // instead of a bare stale warning.
+    let daily_remediation = if run_daily {
+        Some(run_daily_pipeline_remediation(app_home, global_db_path, project_db_path).await)
+    } else {
+        None
+    };
+
     // Branch #5: optional foundry job-status histogram per manifest DB.
     let jobs_section = if jobs_report {
         Some(collect_job_histograms(&m))
@@ -78,6 +91,12 @@ pub(super) async fn run_doctor_command(
                 "models".into(),
                 serde_json::to_value(crate::status_ops::status_health::model_lanes_json())?,
             );
+            if let Some(remediation) = &daily_remediation {
+                obj.insert(
+                    "daily_remediation".into(),
+                    serde_json::Value::String(remediation.clone()),
+                );
+            }
         }
         print_pretty_json(&full)
     } else {
@@ -132,6 +151,10 @@ pub(super) async fn run_doctor_command(
         println!("  rerank: rerank-2.5, keys=VOYAGE_RERANK_API_KEY or VOYAGE_API_KEY");
         println!("  extract/summary: Qwen/Qwen3.5-27B via SiliconFlow-compatible chat");
         println!("  distill/reasoning: Claude CLI first, chat fallback lanes");
+        if let Some(remediation) = &daily_remediation {
+            println!("\n=== daily pipeline remediation ===");
+            println!("{remediation}");
+        }
         Ok(())
     }
 }
@@ -206,6 +229,92 @@ impl From<crate::status_ops::ApiKeyStatus> for ProviderKeyStatus {
             source: status.source,
         }
     }
+}
+
+/// Runs the daily pipeline remediation when `--run-daily` is passed:
+/// 1. Refreshes the provider key probe cache.
+/// 2. Runs the daily distill batch and writes the marker.
+///
+/// Returns a human-readable summary line for the doctor report.
+async fn run_daily_pipeline_remediation(
+    app_home: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> String {
+    // Step 1: refresh provider probe cache.
+    let probe_result =
+        crate::status_ops::status_health::refresh_provider_probe_cache(app_home, global_db_path)
+            .await;
+    let probe_summary = match &probe_result {
+        Ok(cache) => {
+            let failed = cache.probes.iter().filter(|p| p.status != "ok").count();
+            format!(
+                "probe cache refreshed ({} probes, {failed} failed)",
+                cache.probes.len()
+            )
+        }
+        Err(e) => format!("probe cache refresh failed: {e}"),
+    };
+
+    // Step 2: run distill batch (requires a project DB).
+    let distill_summary = match project_db_path {
+        Some(_) => {
+            let marker_path = app_home.join("foundry-runs").join(".last_distill_run");
+            match crate::MemoryServer::new(
+                global_db_path.to_path_buf(),
+                project_db_path.map(|p| p.to_path_buf()),
+            ) {
+                Ok(server) => {
+                    match crate::foundry_runtime_ops::run_daily_batch_distill(&server).await {
+                        Ok(report) => {
+                            // Write success marker (same shape as the scheduler).
+                            if let Some(parent) = marker_path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let marker_body = serde_json::json!({
+                                "ts": chrono::Utc::now().to_rfc3339(),
+                                "groups_distilled": report.groups_distilled,
+                                "groups_skipped": report.groups_skipped,
+                                "fallback_used": report.fallback_used,
+                                "errors": report.errors.len(),
+                            })
+                            .to_string();
+                            let _ = std::fs::write(&marker_path, marker_body);
+                            format!(
+                                "distill: dispatched={} distilled={} skipped={} fallback={} errors={}",
+                                report.batches_dispatched,
+                                report.groups_distilled,
+                                report.groups_skipped,
+                                report.fallback_used,
+                                report.errors.len()
+                            )
+                        }
+                        Err(e) => {
+                            // Write failure marker so status surfaces the reason.
+                            if let Some(parent) = marker_path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let marker_body = serde_json::json!({
+                                "ts": chrono::Utc::now().to_rfc3339(),
+                                "error": e.to_string(),
+                                "groups_distilled": 0,
+                                "groups_skipped": 0,
+                                "fallback_used": 0,
+                                "errors": 0,
+                            })
+                            .to_string();
+                            let _ = std::fs::write(&marker_path, marker_body);
+                            format!("distill batch failed: {e}")
+                        }
+                    }
+                }
+                Err(e) => format!("distill skipped (server init failed): {e}"),
+            }
+        }
+        None => "distill skipped (no project DB)".to_string(),
+    };
+
+    format!("  {probe_summary}\n  {distill_summary}")
 }
 
 async fn collect_provider_key_report(global_db_path: &Path, probe_keys: bool) -> ProviderKeyReport {

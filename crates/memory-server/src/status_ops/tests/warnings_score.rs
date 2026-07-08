@@ -68,6 +68,7 @@ fn fresh_distill_marker() -> DistillMarkerStatus {
         groups_skipped: Some(0),
         fallback_used: Some(0),
         errors: Some(0),
+        error_reason: None,
     }
 }
 
@@ -245,6 +246,7 @@ fn health_score_drops_for_background_enrichment_failures_and_orphans() {
             groups_skipped: Some(0),
             fallback_used: Some(0),
             errors: Some(0),
+            error_reason: None,
         }),
         &[],
         Some(&[]),
@@ -310,4 +312,106 @@ fn health_deductions_explain_enrichment_score_loss_without_daemon_noise() {
             && deduction.points == 5
             && deduction.detail.contains("quant")
     }));
+}
+
+fn stale_distill_marker_with_error(reason: &str) -> DistillMarkerStatus {
+    DistillMarkerStatus {
+        path: "/tmp/marker".to_string(),
+        last_run_at: "2026-06-01T00:00:00Z".to_string(),
+        age_seconds: 999_999,
+        age: "11d ago".to_string(),
+        is_stale: true,
+        groups_distilled: Some(0),
+        groups_skipped: Some(0),
+        fallback_used: Some(0),
+        errors: Some(0),
+        error_reason: Some(reason.to_string()),
+    }
+}
+
+fn stale_distill_marker_no_error() -> DistillMarkerStatus {
+    stale_distill_marker_with_error("dummy").map_error_reason_to_none()
+}
+
+// Small helper to null out error_reason without repeating the whole struct.
+impl DistillMarkerStatus {
+    fn map_error_reason_to_none(self) -> Self {
+        Self {
+            error_reason: None,
+            ..self
+        }
+    }
+}
+
+#[test]
+fn distill_failure_marker_shows_error_in_warning() {
+    let mut snapshot = empty_snapshot(vec![db_status("global", 0, 0, 1.0)]);
+    snapshot.distill_marker = Some(stale_distill_marker_with_error(
+        "provider timeout after 30s",
+    ));
+
+    let warnings = build_status_warnings(&snapshot, &daemon_running());
+    let distill_warning = warnings
+        .iter()
+        .find(|w| w.contains("daily distill"))
+        .expect("distill warning should be present");
+
+    assert!(
+        distill_warning.contains("failed"),
+        "failure marker should say 'failed', got: {distill_warning}"
+    );
+    assert!(
+        distill_warning.contains("provider timeout after 30s"),
+        "failure marker should include the error reason, got: {distill_warning}"
+    );
+    assert!(
+        distill_warning.contains("tachi doctor --run-daily"),
+        "failure marker should include remediation verb, got: {distill_warning}"
+    );
+}
+
+#[test]
+fn distill_stale_marker_without_error_shows_remediation_hint() {
+    let mut snapshot = empty_snapshot(vec![db_status("global", 0, 0, 1.0)]);
+    snapshot.distill_marker = Some(stale_distill_marker_no_error());
+
+    let warnings = build_status_warnings(&snapshot, &daemon_running());
+    let distill_warning = warnings
+        .iter()
+        .find(|w| w.contains("daily distill"))
+        .expect("distill warning should be present");
+
+    assert!(
+        !distill_warning.contains("failed"),
+        "stale-without-error should not say 'failed', got: {distill_warning}"
+    );
+    assert!(
+        distill_warning.contains("stale"),
+        "stale marker should say 'stale', got: {distill_warning}"
+    );
+    assert!(
+        distill_warning.contains("tachi doctor --run-daily"),
+        "stale marker should include remediation verb, got: {distill_warning}"
+    );
+}
+
+#[test]
+fn missing_distill_marker_shows_never_run() {
+    let snapshot = empty_snapshot(vec![db_status("global", 0, 0, 1.0)]);
+    // distill_marker is None by default in empty_snapshot
+
+    let warnings = build_status_warnings(&snapshot, &daemon_running());
+    let distill_warning = warnings
+        .iter()
+        .find(|w| w.contains("daily distill"))
+        .expect("distill warning should be present for missing marker");
+
+    assert!(
+        distill_warning.contains("never run"),
+        "missing marker should say 'never run', got: {distill_warning}"
+    );
+    assert!(
+        distill_warning.contains("tachi doctor --run-daily"),
+        "missing marker should include remediation verb, got: {distill_warning}"
+    );
 }

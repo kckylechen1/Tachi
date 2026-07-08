@@ -93,6 +93,10 @@ pub enum Commands {
         /// Probe configured provider keys with live embedding/chat smoke calls
         #[arg(long)]
         probe_keys: bool,
+        /// Run the daily pipeline remediation: distill batch + provider key probe
+        /// refresh. Unifies the two stale-marker warnings into one verb.
+        #[arg(long)]
+        run_daily: bool,
     },
     /// Manifest v1 — show/init/refresh ~/.tachi/manifest.json
     Manifest {
