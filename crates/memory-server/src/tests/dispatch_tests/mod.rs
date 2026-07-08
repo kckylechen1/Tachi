@@ -99,6 +99,7 @@ fn task_params(action: &str) -> TachiTaskParams {
         pr_ref: None,
         flow_id: None,
         dispatch_id: None,
+        include_result: false,
         risk: None,
         tool_profile: None,
         auto_capability_bundle: None,

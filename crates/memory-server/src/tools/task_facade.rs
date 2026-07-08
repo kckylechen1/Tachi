@@ -121,6 +121,38 @@ pub(super) async fn handle_tachi_task_status(
             Err(err) => response["acpx_status_error"] = json!(err),
         }
     }
+    // #878-C: when include_result is true, read the lane's result.md from the
+    // run directory and include its size-capped content in the response. This
+    // lets a leader whose FS access doesn't include ~/.tachi adjudicate the
+    // lane report without local file access.
+    if params.include_result {
+        let result_path = run_dir.join("result.md");
+        match std::fs::read_to_string(&result_path) {
+            Ok(content) => {
+                const MAX_RESULT_CHARS: usize = 8_000;
+                let full_size = content.len();
+                let (body, truncated) = if full_size > MAX_RESULT_CHARS {
+                    (
+                        content.chars().take(MAX_RESULT_CHARS).collect::<String>(),
+                        true,
+                    )
+                } else {
+                    (content, false)
+                };
+                response["result"] = json!({
+                    "body": body,
+                    "truncated": truncated,
+                    "full_size_bytes": full_size,
+                });
+            }
+            Err(_) => {
+                response["result"] = json!({
+                    "body": null,
+                    "note": "no result.md found in run directory (lane may not have produced a report)",
+                });
+            }
+        }
+    }
     serde_json::to_string(&response).map_err(|e| format!("serialize status response: {e}"))
 }
 
@@ -219,4 +251,119 @@ pub(crate) fn build_task_pr_status_gh_params(
         allow_umbrella_close: params.allow_umbrella_close,
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memory_server_params::TachiTaskParams;
+
+    fn make_server_with_runs_dir() -> (tempfile::TempDir, MemoryServer) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let global_dir = tmp.path().join("global");
+        std::fs::create_dir_all(&global_dir).expect("create global dir");
+        let global_db = global_dir.join("memory.db");
+        let server = MemoryServer::new(global_db, None).expect("server");
+        (tmp, server)
+    }
+
+    fn write_fake_run(runs_dir: &std::path::Path, dispatch_id: &str, result_body: Option<&str>) {
+        let run_dir = runs_dir.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+        let status = json!({
+            "dispatch_id": dispatch_id,
+            "agent": "claude",
+            "state": "TASK_STATE_COMPLETED",
+            "exit_code": 0,
+            "updated_at": Utc::now().to_rfc3339(),
+        });
+        std::fs::write(run_dir.join("status.json"), status.to_string()).expect("write status.json");
+        if let Some(body) = result_body {
+            std::fs::write(run_dir.join("result.md"), body).expect("write result.md");
+        }
+    }
+
+    fn status_params(dispatch_id: &str, include_result: bool) -> TachiTaskParams {
+        let json_str = format!(
+            r#"{{"action":"status","dispatch_id":"{}","include_result":{}}}"#,
+            dispatch_id, include_result
+        );
+        serde_json::from_str(&json_str).expect("deserialize status params")
+    }
+
+    #[tokio::test]
+    async fn status_include_result_returns_result_md_content() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-dispatch-with-result";
+        write_fake_run(
+            &runs_dir,
+            dispatch_id,
+            Some("# Verdict\n\nAll tests passed. OK."),
+        );
+
+        let params = status_params(dispatch_id, true);
+        let response_str = handle_tachi_task_status(&server, &params)
+            .await
+            .expect("status call");
+        let response: serde_json::Value =
+            serde_json::from_str(&response_str).expect("parse response");
+
+        assert_eq!(response["state"], "TASK_STATE_COMPLETED");
+        assert!(
+            response["result"]["body"]
+                .as_str()
+                .unwrap_or("")
+                .contains("All tests passed"),
+            "result body should contain the result.md content, got: {response}"
+        );
+        assert_eq!(response["result"]["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn status_include_result_handles_missing_result_md() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-dispatch-no-result";
+        write_fake_run(&runs_dir, dispatch_id, None);
+
+        let params = status_params(dispatch_id, true);
+        let response_str = handle_tachi_task_status(&server, &params)
+            .await
+            .expect("status call");
+        let response: serde_json::Value =
+            serde_json::from_str(&response_str).expect("parse response");
+
+        assert!(
+            response["result"]["body"].is_null(),
+            "missing result.md should produce null body, got: {response}"
+        );
+        assert!(
+            response["result"]["note"]
+                .as_str()
+                .unwrap_or("")
+                .contains("no result.md"),
+            "should explain missing result.md, got: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_without_include_result_omits_result_field() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-dispatch-no-include";
+        write_fake_run(&runs_dir, dispatch_id, Some("# Report\nVerdict: OK"));
+
+        let params = status_params(dispatch_id, false);
+        let response_str = handle_tachi_task_status(&server, &params)
+            .await
+            .expect("status call");
+        let response: serde_json::Value =
+            serde_json::from_str(&response_str).expect("parse response");
+
+        assert!(
+            response.get("result").is_none(),
+            "result field should be absent when include_result=false, got: {response}"
+        );
+    }
 }

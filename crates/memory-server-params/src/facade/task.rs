@@ -317,6 +317,12 @@ pub struct TachiTaskParams {
     /// [action=complete|wait|status|cancel] Dispatch id linked to this task lifecycle event.
     #[serde(default)]
     pub dispatch_id: Option<String>,
+    /// [action=status] When true, include the size-capped content of result.md
+    /// from the dispatch run directory in the response. Lets a leader whose FS
+    /// access doesn't include ~/.tachi read the lane's report without local
+    /// file access (#878-C).
+    #[serde(default)]
+    pub include_result: bool,
     #[serde(default)]
     #[schemars(
         description = "Risk override for recommendation/routing: low | medium | high | critical."
