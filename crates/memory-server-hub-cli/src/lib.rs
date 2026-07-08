@@ -1,5 +1,6 @@
 //! Read-only Hub registry inspection (formerly the standalone `tachi-hub` binary).
 //! Invoked via `tachi hub <subcommand>`.
+//! Extracted from memory-server (#833).
 
 use std::path::{Path, PathBuf};
 
@@ -7,7 +8,7 @@ use tachi_bootstrap::cli::HubAction;
 
 mod commands;
 
-pub(crate) use self::commands::cmd_stats;
+pub use self::commands::cmd_stats;
 use self::commands::{cmd_bindings, cmd_doctor, cmd_list, cmd_packs, cmd_show};
 
 pub(crate) fn expand_path(raw: &str) -> PathBuf {
@@ -21,7 +22,7 @@ pub(crate) fn expand_path(raw: &str) -> PathBuf {
     }
 }
 
-pub(crate) fn resolve_hub_db(db_override: Option<&PathBuf>, app_home: &Path) -> PathBuf {
+pub fn resolve_hub_db(db_override: Option<&Path>, app_home: &Path) -> PathBuf {
     if let Some(p) = db_override {
         return expand_path(p.to_string_lossy().as_ref());
     }
@@ -31,7 +32,7 @@ pub(crate) fn resolve_hub_db(db_override: Option<&PathBuf>, app_home: &Path) -> 
     app_home.join("global/memory.db")
 }
 
-pub(crate) fn run(action: &HubAction, db_path: &PathBuf, app_home: &Path) -> Result<(), String> {
+pub fn run(action: &HubAction, db_path: &PathBuf, app_home: &Path) -> Result<(), String> {
     if !matches!(action, HubAction::Doctor { .. }) && !db_path.exists() {
         return Err(format!(
             "DB not found: {}. Run `tachi setup` or set TACHI_HOME.",
