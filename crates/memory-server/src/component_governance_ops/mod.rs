@@ -265,8 +265,9 @@ pub(crate) async fn handle_tachi_component(
     match action.as_str() {
         "list" => handle_list(server, &params).await,
         "show" => handle_show(server, &params).await,
+        "check" => handle_check(server, &params).await,
         other => Err(format!(
-            "unknown tachi_component action '{other}'; expected 'list' or 'show'"
+            "unknown tachi_component action '{other}'; expected 'list', 'show', or 'check'"
         )),
     }
 }
@@ -472,6 +473,209 @@ fn extract_component_record(metadata: &Value) -> Option<Value> {
         .get(COMPONENT_METADATA_KEY)
         .filter(|v| v.is_object())
         .cloned()
+}
+
+// ─── Issue #797: read-only downstream classifier ─────────────────────────────
+
+/// Classification categories returned by `component check` (Issue #797).
+pub(crate) const CATEGORY_KERNEL_DRIFT: &str = "kernel_drift";
+pub(crate) const CATEGORY_ALLOWED_ADAPTER_POLICY: &str = "allowed_adapter_policy";
+pub(crate) const CATEGORY_BRIDGE: &str = "bridge";
+pub(crate) const CATEGORY_FRONTEND_SHELL: &str = "frontend_shell";
+pub(crate) const CATEGORY_UNKNOWN: &str = "unknown";
+
+/// Run `git -C <cwd> <args>` and return trimmed stdout (read-only commands only).
+fn run_git_readonly(cwd: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .map_err(|e| format!("run git {}: {e}", args.join(" ")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "git {} failed{}",
+            args.join(" "),
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Normalize a git remote URL to `owner/repo` form (best-effort).
+/// Accepts `https://host/owner/repo(.git)`, `git@host:owner/repo(.git)`.
+pub(crate) fn normalize_remote_to_owner_repo(url: &str) -> String {
+    let url = url.trim().trim_end_matches(".git");
+    // ssh form git@host:owner/repo — only if there's no "://" scheme.
+    if !url.contains("://") {
+        if let Some(colon_idx) = url.find(':') {
+            let after = &url[colon_idx + 1..];
+            if after.contains('/') {
+                return after.to_string();
+            }
+        }
+    }
+    // https://host/owner/repo
+    if let Some(scheme_idx) = url.find("://") {
+        let after_scheme = &url[scheme_idx + 3..];
+        if let Some(slash) = after_scheme.find('/') {
+            return after_scheme[slash + 1..].to_string();
+        }
+    }
+    url.to_string()
+}
+
+/// Read-only classification of a checked-out repo path against declared records.
+/// Returns `(category, matched_component_id, evidence_gaps)`.
+fn classify_repo(
+    records: &[Value],
+    repo_path: &std::path::Path,
+    scope_component_id: Option<&str>,
+) -> (String, Option<String>, Vec<String>) {
+    let mut gaps: Vec<String> = Vec::new();
+
+    if !repo_path.exists() {
+        gaps.push(format!(
+            "repo path does not exist: {}",
+            repo_path.display()
+        ));
+        return (CATEGORY_UNKNOWN.to_string(), None, gaps);
+    }
+
+    // Detect git remote (origin). Missing remote is evidence-weak but not fatal.
+    let remote = run_git_readonly(repo_path, &["remote", "get-url", "origin"]).ok();
+    let remote_normalized = remote.as_deref().map(normalize_remote_to_owner_repo);
+    if remote_normalized.is_none() {
+        gaps.push("no git origin remote detected (cannot match owner_repo)".to_string());
+    }
+
+    let candidates: Vec<&Value> = records
+        .iter()
+        .filter(|r| {
+            scope_component_id
+                .map(|sc| {
+                    r.get("component_id")
+                        .and_then(Value::as_str)
+                        .map(|id| id == sc)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(true)
+        })
+        .collect();
+
+    for record in &candidates {
+        let component_id = record
+            .get("component_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let owner_repo = record
+            .get("owner_repo")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let component_type = record
+            .get("component_type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+
+        // Evidence: does the remote match owner_repo?
+        let remote_matches = remote_normalized
+            .as_deref()
+            .map(|rn| rn.eq_ignore_ascii_case(owner_repo))
+            .unwrap_or(false);
+
+        // Evidence: do any owner_path subpaths exist under repo_path?
+        // owner_path is `;`-separated; skip prose phrases (contain spaces).
+        let owner_paths: Vec<&str> = record
+            .get("owner_path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.contains(' '))
+            .collect();
+        let path_matches: Vec<&str> = owner_paths
+            .iter()
+            .filter(|p| repo_path.join(p).exists())
+            .copied()
+            .collect();
+
+        if remote_matches || !path_matches.is_empty() {
+            let category = match component_type {
+                "kernel" => CATEGORY_KERNEL_DRIFT,
+                "runtime_adapter" => CATEGORY_ALLOWED_ADAPTER_POLICY,
+                "workflow_bridge" => CATEGORY_BRIDGE,
+                "frontend_app_shell" => CATEGORY_FRONTEND_SHELL,
+                _ => CATEGORY_UNKNOWN,
+            };
+            return (
+                category.to_string(),
+                Some(component_id.to_string()),
+                Vec::new(),
+            );
+        }
+    }
+
+    if let Some(rn) = remote_normalized.as_deref() {
+        gaps.push(format!("git origin remote ({rn}) matched no declared owner_repo"));
+    }
+    gaps.push("no declared component record matched this repo's remote or owner_path".to_string());
+    (CATEGORY_UNKNOWN.to_string(), None, gaps)
+}
+
+/// Handle `tachi_component(action="check")` — read-only downstream classifier.
+async fn handle_check(
+    server: &MemoryServer,
+    params: &crate::tool_params::TachiComponentParams,
+) -> Result<String, String> {
+    let repo = params
+        .repo
+        .as_deref()
+        .ok_or_else(|| "repo is required when action='check'".to_string())?;
+    let repo_path = std::path::Path::new(repo);
+
+    // Load declared records from the global store (read-only).
+    let records: Vec<Value> = server.with_global_store_read(|store| {
+        let entries = store
+            .list_by_path(COMPONENT_PATH_PREFIX, 500, false)
+            .map_err(|e| format!("list component records for check: {e}"))?;
+        Ok::<_, String>(
+            entries
+                .iter()
+                .filter_map(|e| extract_component_record(&e.metadata))
+                .collect(),
+        )
+    })?;
+
+    let (category, matched_id, gaps) =
+        classify_repo(&records, repo_path, params.component_id.as_deref());
+
+    if crate::facade_memory_ops::wants_json(params.format.as_deref()) {
+        return to_json_string(&json!({
+            "status": "completed",
+            "category": category,
+            "matched_component_id": matched_id,
+            "repo": repo,
+            "evidence_gaps": gaps,
+        }));
+    }
+
+    let matched = matched_id.as_deref().unwrap_or("(none)");
+    let mut out = format!("# Component classification\n\n");
+    out.push_str(&format!("**Repo:** `{repo}`\n"));
+    out.push_str(&format!("**Category:** `{category}`\n"));
+    out.push_str(&format!("**Matched component:** {matched}\n"));
+    if !gaps.is_empty() {
+        out.push_str("\n**Evidence gaps:**\n");
+        for g in &gaps {
+            out.push_str(&format!("- {g}\n"));
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

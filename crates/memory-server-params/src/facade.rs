@@ -511,12 +511,16 @@ pub struct TachiWikiParams {
 // ─── Facade: component governance read model (Issue #796) ────────────────────
 
 fn tachi_component_action_schema(gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    string_enum_schema(&["list", "show"], "Component governance action.", gen)
+    string_enum_schema(
+        &["list", "show", "check"],
+        "Component governance action.",
+        gen,
+    )
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub struct TachiComponentParams {
-    /// Action: "list" (compact records) or "show" (full record + relation edges).
+    /// Action: "list" (compact records), "show" (full record + relation edges), or "check" (read-only downstream classifier, Issue #797).
     #[schemars(schema_with = "tachi_component_action_schema")]
     pub action: String,
     /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
@@ -538,6 +542,10 @@ pub struct TachiComponentParams {
     /// this only scopes read-forward behavior, mirroring other read-only facade tools.
     #[serde(default)]
     pub project: Option<String>,
+    /// Required for action="check": filesystem path to the checked-out repo to classify against declared component records.
+    #[serde(default)]
+    #[schemars(description = "Required for action='check': filesystem path to the repo checkout to classify.")]
+    pub repo: Option<String>,
 }
 
 // ─── Facade: workflow closure (Issue → Doc → Memory) ─────────────────────────

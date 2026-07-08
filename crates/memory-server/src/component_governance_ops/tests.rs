@@ -14,6 +14,7 @@ fn list_params() -> TachiComponentParams {
         include_archived: None,
         limit: None,
         project: None,
+        repo: None,
     }
 }
 
@@ -26,6 +27,7 @@ fn show_params(component_id: &str) -> TachiComponentParams {
         include_archived: None,
         limit: None,
         project: None,
+        repo: None,
     }
 }
 
@@ -159,5 +161,94 @@ async fn component_show_unknown_returns_not_found() {
         parsed["status"],
         json!("not_found"),
         "unknown component must report not_found"
+    );
+}
+
+// ─── Issue #797: read-only downstream classifier tests ───────────────────────
+
+fn check_params(repo: &str) -> TachiComponentParams {
+    TachiComponentParams {
+        action: "check".to_string(),
+        format: Some("json".to_string()),
+        component_id: None,
+        component_type: None,
+        include_archived: None,
+        limit: None,
+        project: None,
+        repo: Some(repo.to_string()),
+    }
+}
+
+#[tokio::test]
+async fn component_check_classifies_tachi_checkout_as_kernel_drift() {
+    let server = make_server();
+    seed_component_records(&server).expect("seed");
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(1)
+        .unwrap();
+    let body = handle_tachi_component(&server, check_params(&repo_root.display().to_string()))
+        .await
+        .expect("check action");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(parsed["status"], json!("completed"));
+    let category = parsed["category"].as_str().expect("category");
+    assert!(
+        category == CATEGORY_KERNEL_DRIFT || category == CATEGORY_BRIDGE,
+        "tachi checkout must classify as kernel_drift or bridge, got {category} (gaps: {:?})",
+        parsed["evidence_gaps"]
+    );
+}
+
+#[tokio::test]
+async fn component_check_unknown_repo_returns_unknown_with_evidence_gaps() {
+    let server = make_server();
+    seed_component_records(&server).expect("seed");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let body = handle_tachi_component(
+        &server,
+        check_params(&temp.path().display().to_string()),
+    )
+    .await
+    .expect("check action");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(parsed["status"], json!("completed"));
+    assert_eq!(parsed["category"], json!(CATEGORY_UNKNOWN));
+    let gaps = parsed["evidence_gaps"].as_array().expect("evidence_gaps");
+    assert!(!gaps.is_empty(), "unknown must carry evidence gaps");
+}
+
+#[tokio::test]
+async fn component_check_nonexistent_path_returns_unknown() {
+    let server = make_server();
+    seed_component_records(&server).expect("seed");
+    let body = handle_tachi_component(
+        &server,
+        check_params("/tmp/nonexistent-component-check-path-xyz-797"),
+    )
+    .await
+    .expect("check action");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(parsed["category"], json!(CATEGORY_UNKNOWN));
+    let gaps = parsed["evidence_gaps"].as_array().expect("gaps");
+    assert!(
+        gaps.iter().any(|g| g.as_str().map(|s| s.contains("does not exist")).unwrap_or(false)),
+        "nonexistent path must report the missing-path gap: {gaps:?}"
+    );
+}
+
+#[test]
+fn normalize_remote_handles_https_and_ssh_forms() {
+    assert_eq!(
+        normalize_remote_to_owner_repo("https://github.com/kckylechen1/tachi.git"),
+        "kckylechen1/tachi"
+    );
+    assert_eq!(
+        normalize_remote_to_owner_repo("git@github.com:kckylechen1/Quant_Analyzer_2026.git"),
+        "kckylechen1/Quant_Analyzer_2026"
+    );
+    assert_eq!(
+        normalize_remote_to_owner_repo("https://github.com/kckylechen1/RomanBath"),
+        "kckylechen1/RomanBath"
     );
 }
