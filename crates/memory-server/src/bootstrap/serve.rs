@@ -666,7 +666,11 @@ async fn start_server_transport(
         bg_handles,
     } = state;
 
-    eprintln!("Starting Tachi MCP Server v{}", env!("CARGO_PKG_VERSION"));
+    eprintln!(
+        "Starting Tachi MCP Server v{} ({})",
+        crate::build_info::build_version_string(),
+        crate::build_info::GIT_SHA
+    );
     eprintln!(
         "Transport: {}",
         if cli.daemon {

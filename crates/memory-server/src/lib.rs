@@ -37,6 +37,7 @@ mod agent_profile_ops;
 mod agent_registry;
 mod arena_ops;
 mod bootstrap;
+pub mod build_info;
 mod builtins;
 mod capability_ops;
 mod capture_gate;

@@ -3,8 +3,30 @@ use std::path::PathBuf;
 
 // ─── CLI Arguments ────────────────────────────────────────────────────────────
 
+// clap 4.x: when `long_version` is set, `--version` emits the long form
+// (semver + "+git-" + full SHA + build time). There is no separate
+// short-form output on `--version`. Scripts extracting the bare semver
+// must split on the `+` boundary.
+//
+// `concat!` + `env!` evaluate at compile time, so this is a `&'static str`
+// as clap's attribute requires. The `GIT_SHA` / `BUILD_TIME` env values are
+// injected by `build.rs`.
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "+git-",
+    env!("GIT_SHA"),
+    " (built ",
+    env!("BUILD_TIME"),
+    ")"
+);
+
 #[derive(Parser, Debug)]
-#[command(name = "tachi", version, about = "Tachi — memory + Hub MCP server")]
+#[command(
+    name = "tachi",
+    version,
+    long_version = LONG_VERSION,
+    about = "Tachi — memory + Hub MCP server"
+)]
 pub struct Cli {
     /// Run as HTTP daemon instead of stdio transport
     #[arg(long)]
