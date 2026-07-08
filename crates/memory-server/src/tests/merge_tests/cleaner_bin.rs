@@ -6,7 +6,7 @@ fn approve_merge_uses_explicit_cleaner_binary_override() {
     let old_value = std::env::var_os("TACHI_CLEAN_BIN");
     std::env::set_var("TACHI_CLEAN_BIN", "/tmp/custom-tachi-clean");
 
-    let resolved = crate::dispatch_ops::resolve_tachi_clean_bin();
+    let resolved = tachi_merge_ops::resolve_tachi_clean_bin();
 
     match old_value {
         Some(value) => std::env::set_var("TACHI_CLEAN_BIN", value),

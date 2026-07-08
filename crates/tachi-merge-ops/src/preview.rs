@@ -1,13 +1,13 @@
 use tokio::process::Command;
 
-pub(in crate::dispatch_ops::merge) struct MergePreviewResult {
+pub(crate) struct MergePreviewResult {
     pub can_merge: bool,
     pub merge_output: String,
     pub error: Option<String>,
     pub diff_stat: Option<String>,
 }
 
-pub(in crate::dispatch_ops::merge) async fn preview_merge_without_touching_worktree(
+pub(crate) async fn preview_merge_without_touching_worktree(
     repo_root: &str,
     branch: &str,
 ) -> Result<MergePreviewResult, String> {

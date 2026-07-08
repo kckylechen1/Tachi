@@ -232,7 +232,7 @@ pub(super) async fn handle_tachi_task_facade(
                 delete_worktree: params.delete_worktree,
                 confirm: params.confirm,
             };
-            crate::dispatch_ops::handle_approve_merge(merge_params).await
+            tachi_merge_ops::handle_approve_merge(merge_params).await
         }
         "pr_status" => {
             let gh_params = build_task_pr_status_gh_params(&params)?;

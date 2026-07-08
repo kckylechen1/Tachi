@@ -577,7 +577,7 @@ async fn reclaim_worktree_after_merge(
         return detail;
     }
 
-    let attempt = crate::dispatch_ops::remove_worktree_with_cleaner(worktree_path).await;
+    let attempt = tachi_merge_ops::remove_worktree_with_cleaner(worktree_path).await;
     let detail = match attempt {
         Ok(report) => json!({
             "attempted": true,

@@ -16,6 +16,7 @@ members = [
     "crates/tachi-foundry",
     "crates/tachi-hub",
     "crates/tachi-llm",
+    "crates/tachi-merge-ops",
     "tools/cleaner",
 ]
 default-members = [

@@ -1352,6 +1352,7 @@ dependencies = [
  "tachi-foundry",
  "tachi-hub",
  "tachi-llm",
+ "tachi-merge-ops",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2415,6 +2416,17 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "tachi-merge-ops"
+version = "1.6.4"
+dependencies = [
+ "memory-server-params",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
