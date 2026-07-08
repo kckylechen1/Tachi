@@ -1332,6 +1332,7 @@ dependencies = [
  "libsimple",
  "memory-core",
  "memory-server-params",
+ "memory-server-prompt-envelope",
  "memory-server-rescue",
  "memory-server-runtime",
  "rand 0.8.6",
@@ -1374,6 +1375,10 @@ dependencies = [
  "tracing",
  "uuid",
 ]
+
+[[package]]
+name = "memory-server-prompt-envelope"
+version = "1.6.4"
 
 [[package]]
 name = "memory-server-rescue"
