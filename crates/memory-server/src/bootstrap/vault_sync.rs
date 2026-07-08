@@ -6,6 +6,28 @@ use serde::{Deserialize, Serialize};
 
 use super::{open_cli_store, open_cli_store_read_only};
 
+// ---------------------------------------------------------------------------
+// SECURITY: residual offline-guessing risk (#576)
+// ---------------------------------------------------------------------------
+// The sync bundle is *signed* (AES-256-GCM-AAD), not *encrypted*. It carries
+// `vault_config` (salt + verifier) in cleartext, and every entry's AEAD
+// ciphertext + signature tag also serves as a password-guess verification
+// oracle. Anyone who obtains the bundle can run offline password-guessing
+// attacks.
+//
+// File permissions (0600) and the `--allow-cloud` gate reduce accidental
+// exposure but do NOT eliminate the threat. The real fix requires
+// recipient-key encryption (X25519/HPKE/age) so that only the holder of a
+// private key can decrypt — this is tracked as a separate design effort.
+//
+// A password-derived AEAD wrapper is NOT sufficient: its tag is itself an
+// offline verification oracle (owner directive, #576).
+//
+// Until recipient-key encryption ships, this module operates under an
+// explicitly-accepted residual offline-guessing risk that must be
+// acknowledged by the owner/adjudicator, not self-ratified here.
+// ---------------------------------------------------------------------------
+
 const BUNDLE_TYPE: &str = "tachi.vault.bundle";
 const BUNDLE_VERSION: u32 = 1;
 const BUNDLE_SIGNATURE_ALGORITHM: &str = "aes-256-gcm-aad-v1";
@@ -15,7 +37,10 @@ struct VaultSyncBundle {
     bundle_type: String,
     version: u32,
     exported_at: String,
-    vault_config: VaultConfig,
+    /// `None` for entries-only bundles (see `--entries-only`), which omit the
+    /// salt/verifier to reduce the offline-guessing surface (#576).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    vault_config: Option<VaultConfig>,
     entries: Vec<VaultEntry>,
     rotations: Vec<VaultKeyRotation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -64,6 +89,7 @@ pub(super) fn export_vault_bundle(
     global_db_path: &PathBuf,
     output: &Path,
     allow_cloud: bool,
+    entries_only: bool,
     signing_key: &[u8; 32],
 ) -> Result<VaultSyncStatus, Box<dyn std::error::Error>> {
     ensure_cloud_export_allowed(output, allow_cloud)?;
@@ -80,11 +106,20 @@ pub(super) fn export_vault_bundle(
         .vault_list_rotations()
         .map_err(|e| format!("vault_list_rotations: {e}"))?;
 
+    // entries-only bundles omit vault_config (salt + verifier) to reduce the
+    // offline-guessing surface. The import side must already have a matching
+    // vault initialized; entries-only bundles cannot bootstrap a new vault.
+    let config_for_bundle = if entries_only {
+        None
+    } else {
+        Some(vault_config)
+    };
+
     let mut bundle = VaultSyncBundle {
         bundle_type: BUNDLE_TYPE.to_string(),
         version: BUNDLE_VERSION,
         exported_at: Utc::now().to_rfc3339(),
-        vault_config,
+        vault_config: config_for_bundle,
         entries,
         rotations,
         signature: None,
@@ -154,13 +189,23 @@ pub(super) fn import_vault_bundle(
     let local_config = store
         .vault_get_config()
         .map_err(|e| format!("vault_get_config: {e}"))?;
+
+    // entries-only bundles (no vault_config) cannot bootstrap a new vault.
+    // The target must already be initialized with a matching config.
+    let bundle_config = bundle.vault_config.as_ref().ok_or_else(|| {
+        "This is an entries-only sync bundle (no vault_config). \
+         Initialize the Vault on this machine first with `tachi vault init`, \
+         then re-run the import."
+            .to_string()
+    })?;
+
     let initialized_vault = local_config.is_none();
     if let Some(local_config) = local_config.as_ref() {
-        ensure_same_vault(local_config, &bundle.vault_config)?;
+        ensure_same_vault(local_config, bundle_config)?;
     }
 
     store
-        .vault_import_bundle(&bundle.vault_config, &bundle.entries, &bundle.rotations)
+        .vault_import_bundle(bundle_config, &bundle.entries, &bundle.rotations)
         .map_err(|e| format!("vault_import_bundle: {e}"))?;
 
     Ok(VaultSyncImportReport {
@@ -173,7 +218,7 @@ pub(super) fn import_vault_bundle(
 
 pub(super) fn read_bundle_vault_config(
     input: &Path,
-) -> Result<VaultConfig, Box<dyn std::error::Error>> {
+) -> Result<Option<VaultConfig>, Box<dyn std::error::Error>> {
     let raw = std::fs::read_to_string(input)
         .map_err(|e| format!("read sync bundle {}: {e}", input.display()))?;
     let bundle: VaultSyncBundle = serde_json::from_str(&raw)
@@ -275,9 +320,12 @@ fn validate_bundle(bundle: &VaultSyncBundle) -> Result<(), Box<dyn std::error::E
         )
         .into());
     }
-    if bundle.vault_config.salt.trim().is_empty() || bundle.vault_config.verifier.trim().is_empty()
-    {
-        return Err("Vault sync bundle is missing vault_config salt/verifier".into());
+    // vault_config is optional (entries-only bundles). When present, it must
+    // have non-empty salt/verifier.
+    if let Some(config) = &bundle.vault_config {
+        if config.salt.trim().is_empty() || config.verifier.trim().is_empty() {
+            return Err("Vault sync bundle vault_config has empty salt/verifier".into());
+        }
     }
     Ok(())
 }
@@ -421,7 +469,7 @@ mod tests {
             })
             .expect("set source rotation");
 
-        let status = export_vault_bundle(&source_db, &bundle_path, false, &[7u8; 32])
+        let status = export_vault_bundle(&source_db, &bundle_path, false, false, &[7u8; 32])
             .expect("export vault sync bundle");
         assert!(status.exists);
         #[cfg(unix)]
@@ -495,7 +543,7 @@ mod tests {
                 access_count: 0,
             })
             .expect("upsert source entry");
-        export_vault_bundle(&source_db, &bundle_path, false, &[7u8; 32])
+        export_vault_bundle(&source_db, &bundle_path, false, false, &[7u8; 32])
             .expect("export vault sync bundle");
 
         let raw = std::fs::read_to_string(&bundle_path).expect("read bundle");
@@ -547,7 +595,7 @@ mod tests {
                 updated_at: "2026-01-01T00:00:00Z".to_string(),
             })
             .expect("set source rotation");
-        export_vault_bundle(&source_db, &bundle_path, false, &[7u8; 32])
+        export_vault_bundle(&source_db, &bundle_path, false, false, &[7u8; 32])
             .expect("export vault sync bundle");
 
         let target = open_cli_store(&target_db).expect("target store");
@@ -596,7 +644,7 @@ mod tests {
             bundle_type: BUNDLE_TYPE.to_string(),
             version: BUNDLE_VERSION,
             exported_at: "2026-01-01T00:00:00Z".to_string(),
-            vault_config: sample_config(),
+            vault_config: Some(sample_config()),
             entries: Vec::new(),
             rotations: Vec::new(),
             signature: None,
@@ -616,6 +664,94 @@ mod tests {
         assert!(report.initialized_vault);
         assert_eq!(report.entries_imported, 0);
 
+        let _ = std::fs::remove_file(target_db);
+    }
+
+    #[test]
+    fn entries_only_bundle_omits_vault_config() {
+        let source_db = temp_db_path();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bundle_path = dir.path().join("vault.bundle.json");
+
+        let source = open_cli_store(&source_db).expect("source store");
+        source
+            .vault_set_config(&sample_config())
+            .expect("set source config");
+        source
+            .vault_upsert_entry(&VaultEntry {
+                name: "TEST_KEY_1".to_string(),
+                encrypted_value: "ciphertext".to_string(),
+                nonce: "nonce".to_string(),
+                secret_type: "api_key".to_string(),
+                description: "test".to_string(),
+                allowed_agents: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                accessed_at: String::new(),
+                access_count: 0,
+            })
+            .expect("upsert source entry");
+
+        let status = export_vault_bundle(&source_db, &bundle_path, false, true, &[7u8; 32])
+            .expect("export entries-only bundle");
+        assert!(status.exists);
+
+        // The bundle must NOT contain vault_config (no salt/verifier).
+        let raw = std::fs::read_to_string(&bundle_path).expect("read bundle");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse bundle json");
+        assert!(
+            json.get("vault_config").is_none() || json["vault_config"].is_null(),
+            "entries-only bundle must omit vault_config, got: {raw}"
+        );
+
+        // read_bundle_vault_config must return None for entries-only.
+        let config = read_bundle_vault_config(&bundle_path).expect("read config");
+        assert!(
+            config.is_none(),
+            "entries-only bundle should have None vault_config"
+        );
+
+        let _ = std::fs::remove_file(source_db);
+    }
+
+    #[test]
+    fn entries_only_bundle_cannot_bootstrap_new_vault() {
+        let source_db = temp_db_path();
+        let target_db = temp_db_path();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bundle_path = dir.path().join("vault.bundle.json");
+
+        let source = open_cli_store(&source_db).expect("source store");
+        source
+            .vault_set_config(&sample_config())
+            .expect("set source config");
+        source
+            .vault_upsert_entry(&VaultEntry {
+                name: "TEST_KEY_1".to_string(),
+                encrypted_value: "ciphertext".to_string(),
+                nonce: "nonce".to_string(),
+                secret_type: "api_key".to_string(),
+                description: "test".to_string(),
+                allowed_agents: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                accessed_at: String::new(),
+                access_count: 0,
+            })
+            .expect("upsert source entry");
+
+        export_vault_bundle(&source_db, &bundle_path, false, true, &[7u8; 32])
+            .expect("export entries-only bundle");
+
+        // Target has NO vault initialized — entries-only import must fail.
+        let err = import_vault_bundle(&target_db, &bundle_path, Some(&[7u8; 32]), false)
+            .expect_err("entries-only bundle should fail on uninitialized target");
+        assert!(
+            err.to_string().contains("entries-only"),
+            "error should explain entries-only constraint, got: {err}"
+        );
+
+        let _ = std::fs::remove_file(source_db);
         let _ = std::fs::remove_file(target_db);
     }
 }

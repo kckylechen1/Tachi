@@ -352,7 +352,8 @@ pub enum VaultAction {
     ///
     /// If this file is stolen, its verifier/ciphertext material permits offline
     /// password guessing. Keep it local, use a strong Vault password, and treat
-    /// --allow-cloud as an explicit risk acceptance.
+    /// --allow-cloud as an explicit risk acceptance. Use --entries-only to omit
+    /// the verifier (reduces but does not eliminate the guessing surface).
     SyncExport {
         /// Output bundle path. Defaults to ~/.tachi/sync/vault/vault.bundle.json.
         #[arg(long, value_name = "PATH")]
@@ -361,6 +362,12 @@ pub enum VaultAction {
         /// accepting offline password guessing risk if the synced file leaks.
         #[arg(long)]
         allow_cloud: bool,
+        /// Omit vault_config (salt + verifier) from the bundle. The import side
+        /// must already have a matching vault initialized. Reduces the offline
+        /// guessing surface but does not eliminate it (entry AEAD ciphertext
+        /// remains a verification oracle). Recommended for cloud-synced bundles.
+        #[arg(long)]
+        entries_only: bool,
         /// Read Vault password from stdin.
         #[arg(long)]
         stdin_password: bool,

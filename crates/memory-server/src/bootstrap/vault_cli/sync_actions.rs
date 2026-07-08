@@ -33,6 +33,7 @@ pub(super) fn run_sync_action(
         VaultAction::SyncExport {
             output,
             allow_cloud,
+            entries_only,
             stdin_password,
             keychain,
             password_file,
@@ -47,16 +48,30 @@ pub(super) fn run_sync_action(
                 password_file.as_deref(),
                 insecure_password_file,
             )?;
-            let status =
-                vault_sync::export_vault_bundle(global_db_path, &output, allow_cloud, key.bytes())?;
+            let status = vault_sync::export_vault_bundle(
+                global_db_path,
+                &output,
+                allow_cloud,
+                entries_only,
+                key.bytes(),
+            )?;
             println!("Vault sync export complete.");
             vault_sync::print_status(&status);
-            println!(
-                "  contents: signed Vault ciphertext, verifier material, and key-rotation metadata"
-            );
-            println!(
-                "  risk: possession of this bundle permits offline password guessing; keep it local or accept cloud-sync risk explicitly"
-            );
+            if entries_only {
+                println!(
+                    "  contents: signed Vault ciphertext and key-rotation metadata (no verifier)"
+                );
+                println!(
+                    "  risk: entries-only bundle omits the verifier but entry ciphertext still permits offline password guessing"
+                );
+            } else {
+                println!(
+                    "  contents: signed Vault ciphertext, verifier material, and key-rotation metadata"
+                );
+                println!(
+                    "  risk: possession of this bundle permits offline password guessing; keep it local or accept cloud-sync risk explicitly"
+                );
+            }
             Ok(())
         }
         VaultAction::SyncImport {
@@ -71,7 +86,9 @@ pub(super) fn run_sync_action(
             let key = if allow_unsigned && !vault_sync::bundle_has_signature(&input)? {
                 None
             } else {
-                let config = vault_sync::read_bundle_vault_config(&input)?;
+                let config = vault_sync::read_bundle_vault_config(&input)?
+                    .ok_or("Cannot verify an entries-only bundle without a local Vault password: \
+                            this bundle has no vault_config. Initialize the Vault on this machine first.")?;
                 Some(read_verified_vault_key(
                     &config,
                     stdin_password,
