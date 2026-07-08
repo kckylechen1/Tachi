@@ -1,19 +1,24 @@
 # AGENTS.md — backend-agent injection kernel
 
 > **Subordinate to and generated from [`docs/engineering/architecture/dispatch-lifecycle.md`](docs/engineering/architecture/dispatch-lifecycle.md)** (owner-ratified 2026-07-06).
-> This file is a thin injection surface: backend agents (codex etc.) auto-read it into their prompt at turn zero, so it inlines ONLY the non-negotiables an executing lane must obey. The doctrine body — tiering, card ontology, the closed loop, the porting guide — lives in exactly one kernel, the canon doc. If this file and the canon doc disagree, the canon doc wins.
+> This file is a thin injection surface: backend agents auto-read it into their prompt at turn zero, so it inlines ONLY the non-negotiables an executing lane must obey. The doctrine body — tiering, card ontology, the closed loop, the porting guide — lives in exactly one kernel, the canon doc. If this file and the canon doc disagree, the canon doc wins.
 >
-> **Relationship to per-vendor constitutions:** this is the repo-scoped execution kernel that every backend lane reads, whatever its vendor. A vendor with its own global constitution (e.g. codex's `~/.codex/AGENTS.md`) composes with this file — that constitution already declares repo-specific rules authoritative in the repo's own AGENTS.md, so where they overlap they agree, and this file is authoritative for repo-scoped execution. Lanes without a rich constitution (grok, opencode, droid) rely on this file alone.
+> **Relationship to per-carrier private manuals:** this is the repo-scoped execution kernel that every backend lane reads, whatever its carrier. A carrier with its own global private manual composes with this file — that manual already declares repo-specific rules authoritative in the repo's own AGENTS.md, so where they overlap they agree, and this file is authoritative for repo-scoped execution. Carriers without a rich private manual rely on this file alone. **Carrier-specific mechanism — which tool plays which role, concrete dispatch commands, current default vendor assignments — is never stated here; it lives in that carrier's own private manual**, if it has one (repo-root files named after a specific tool are that tool's private manual, not a public contract). If you don't have one, treat this file as the whole contract and do not invent mechanism it doesn't state.
 
-You are an executing lane in a dispatch loop. Obey these; everything else is in the canon doc.
+## Scope: are you a dispatched lane, or the sole session?
+
+Read the branch that applies to you before treating the rest of this file as literal instruction:
+
+- **You were explicitly handed a packet by a leader/dispatcher** — a background sub-task, a Tachi dispatch, or an equivalent mechanism that gave you a base SHA and a defined scope — → you are an executing lane in a dispatch loop. Obey the workspace law, report contract, and frozen-assertion law below; everything else is in the canon doc.
+- **You are the sole interactive session working this repo** — no external leader gave you a packet — → the sections below are not direct instructions to fabricate. Work in the current checkout as normal. Do not invent a packet, a base SHA, or a dispatch id you were never given. The frozen-assertion law and the STOP/never-merge rules still describe the standing engineering discipline for this repo and apply to your own changes regardless.
 
 ## Workspace law (restated every dispatch AND every resume)
 
-- Work in a **worktree cut from the leader-verified base SHA** given in the packet — never the primary checkout, never a base you fetched/derived yourself (no-network sandboxes make "cut from origin/main" a lie).
-- Before any `cargo`: `export CARGO_TARGET_DIR=$HOME/.cache/sigil-shared-target` (or the isolated target the packet names — the packet states which). The shared target is a speed path, not a correctness guarantee: concurrent same-crate worktrees can collide on metadata-hashed test binaries and produce phantom failures. Use an isolated target dir for reviewer/discrimination runs when another lane may be building the same crate.
+- **Dispatched-lane only:** work in a **worktree cut from the leader-verified base SHA** given in the packet — never the primary checkout, never a base you fetched/derived yourself (no-network sandboxes make "cut from origin/main" a lie). If you are the sole session, work in the current checkout.
+- Before any `cargo`: `export CARGO_TARGET_DIR=$HOME/.cache/sigil-shared-target`. This repo's multiple crates share one build-cache directory as a standing speed path — any session, dispatched or sole, can export it directly before building. It is a speed path, not a correctness guarantee: concurrent same-crate worktrees can collide on metadata-hashed test binaries and produce phantom failures. **Dispatched-lane only:** when you are a reviewer/discrimination-run lane and another lane may be building the same crate, use an isolated target dir instead — your packet states which path.
 - **Never touch another agent's dirty or untracked files.** Reconcile by commit tree, not by branch name.
 
-## Report contract (a delivery missing any of these is INCOMPLETE)
+## Report contract (a delivery missing any of these is INCOMPLETE, for dispatched lanes)
 
 - Paste **verbatim `test result:` lines** for every suite the packet enumerated — not a paraphrase, not a checkbox.
 - Paste the **exact output of every CI gate** the packet lists (fmt, `clippy -D warnings`, full suite, gitleaks/audit). Do NOT self-report CI status.
@@ -35,6 +40,7 @@ You are an executing lane in a dispatch loop. Obey these; everything else is in 
 - Implementers **open a PR and STOP.** Merging is the adjudicator's act, performed after they read the diff personally. You do not merge to main.
 - PRs use **`Refs` / `Related`, never `Closes`** — especially for umbrella and `agent:no-close` issues. Enumerate each acceptance criterion and mark done / not-done.
 - If you are the **reviewer**, you return numbered-checkpoint verdicts (OK / CONCERN / BUG + evidence + Not-checked). You **never self-fix your own findings into main** — a prescription finding goes back to an implementer lane; the leader adjudicates the rest.
+- The implementer lane and the adversarial-review lane **must be different vendors/models**; whoever leads never lets one side self-grade. Which concrete tool plays which role is a carrier-specific default — see that carrier's own private manual, not this file.
 
 ## Where the rest lives
 
