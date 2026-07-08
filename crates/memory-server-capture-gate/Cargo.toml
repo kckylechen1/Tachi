@@ -1,6 +1,6 @@
 [package]
 name = "memory-server-capture-gate"
-version = "1.6.4"
+version = "1.7.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Pre-write capture gate (domain/bucket/markdown/min-chars validation) for save_memory. Extracted from memory-server (#833 slice 4)."

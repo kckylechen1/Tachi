@@ -25,7 +25,7 @@ brew tap kckylechen1/tachi && brew install tachi
 ### macOS / Linux (Shell Installer)
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.4/scripts/install.sh)" -- --skip-plugin
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.7.0/scripts/install.sh)" -- --skip-plugin
 ```
 
 On macOS, the shell installer also installs and restarts a user LaunchAgent for
@@ -49,7 +49,7 @@ to auto-spawn short-lived daemons.
 
 ```bash
 tachi --version
-# Expected: tachi 1.6.4 (or later)
+# Expected: tachi 1.7.0 (or later)
 
 tachi daemon status
 # Expected on macOS after the full installer: daemon running
@@ -409,7 +409,7 @@ Live SQLite databases should stay local. Sync encrypted bundles, append-only eve
 If you use OpenClaw, the full installer configures both the binary and the plugin:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.4/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.7.0/scripts/install.sh)"
 ```
 
 This will:
