@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Quick Navigation
 
 - [Unreleased](#unreleased)
+- [1.7.0](#170---2026-07-08) — portable memory kernel, vector auditability, and dispatch canon
 - [1.6.4](#164---2026-07-06) — multi-project daemon stdio repair
 - [1.6.3](#163---2026-07-06) — recall quality overhaul and kernel reliability
 - [1.6.2](#162---2026-07-05) — release drift and CI guardrails
@@ -40,6 +41,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
+
+## [1.7.0] - 2026-07-08 — portable memory kernel, vector auditability, and dispatch canon
+
+Minor release. Tachi becomes the shared memory kernel for downstream products
+(Hypermem trading adapter, zeroclaw chat-agent adapter, RomanBath frontend)
+instead of being forked per product, makes vector backfill/sweep auditable and
+read-only in dry-run, and ratifies the dispatch canon so the law lives in files
+rather than the leader's head.
+
+### Added
+
+- **Portable memory kernel manifest** (`docs/engineering/architecture/kernel-surface-v1.fixture.json`) freezes the durable schema, recall primitives, vector/FTS fallback behavior, and readiness diagnostics as a product-agnostic contract. Downstream adapters consume it without inheriting Tachi's GitHub/dispatch/release surfaces. A dogfood harness proves downstreams can exercise the kernel without any product workflow dependencies. A separate manifest global-DB write-guard runs at startup (WalOrphan check); `TACHI_BYPASS_MANIFEST=1` skips that guard for development or crash-recovery.
+- **Portable chat-agent memory contract** documented (`docs/engineering/architecture/host-adapter-lifecycle-v1.md`) so generic chat-agent adapters assemble stable memory, immediate recall, and reflection around Tachi surfaces without importing product workflow tools.
+- **Hypermem kernel convergence gate** documented (`docs/engineering/architecture/hypermem-compatibility-gate.md`) bounding the trading adapter cutover: A-share decay and session policy stay downstream; the kernel stays product-agnostic.
+- **Harness-native subagent eval evidence** is now recorded without owning the subagent lifecycle, feeding per-agent/per-profile score attribution into routing.
+- **MCP surface death-list** (`docs/engineering/architecture/mcp-surface-death-list.md`) ratifies the keep/quarantine/delete decision for all routed tools, with a staged leaf queue.
+- `tachi_gh safe_merge` now records CI check state during dry-run previews as an auditable artifact.
+
+### Changed
+
+- **Dispatch canon ratified.** `AGENTS.md` is now the thin injection kernel every backend lane reads at turn zero, subordinate to the canon `docs/engineering/architecture/dispatch-lifecycle.md`. The #733 read/write-asymmetry rule is folded into clause 3 as law: a write-guard that also blocks reads the invariant doesn't require is over-reach.
+- **Vector backfill dry-run is now fully read-only** — returns before any write, proving no `vector_sweep_state` creation and no schema/metadata/migration-marker mutation on an already-compatible DB.
+- **Vector sweeps are auditable per database** with durable schedule, failure state, and truth preserved across no-op updates and failures; skipped rows are no longer counted as failures.
+- `tachi mcp add` reserves seat-policy fields so one-command MCP registration converges per-agent config safely.
+- Proxied cross-project reads are now allowed, merging global plus project results.
+- Workspace scope is routed from the real cwd before falling back to `PWD`.
+- CI runs `actions/setup-node` v5.
+
+### Fixed
+
+- **Plan C alias identity drift** (#736): a casefold hash change left old-hash alias dirs and manifest labels never reconciling to the new derived name, so one DB could appear under two names. Resolved via label-recompute + count-basis; the unsafe FS retirement was deliberately dropped.
+- **Rerank no longer evicts hybrid top hits** (#779) — promotions are preserved in flip reports so a strong lexical/symbolic match isn't displaced by a marginal vector rerank.
+- **Shared cargo target collision warning** (#727/#751): concurrent same-crate worktrees building into one `CARGO_TARGET_DIR` can collide on metadata-hashed test binaries; lanes are now warned to use isolated targets for reviewer/discrimination runs.
+- **Vault sync bundle offline guessing risk** (#780, refs #576, MEDIUM): the sync bundle contained the verifier, enabling offline password-guessing — surfaced and bounded.
+- `alias_drift` tests no longer skip on Linux `/tmp` paths; repo-local DB fixtures are guarded from tmp-root skips.
+- Stdio proxy search row shape is pinned; direct-read project selection is preserved after the proxy refactor.
 
 ## [1.6.4] - 2026-07-06 — multi-project daemon stdio repair
 

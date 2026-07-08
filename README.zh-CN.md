@@ -275,7 +275,7 @@ Tachi 不只是记忆库；它正在演变为 Agent 工程的持久控制平面�
 - **Wiki** —— Agent 维护的持久知识页：`tachi_wiki`、`tachi_browse`、`tachi_wiki_write`、`tachi_wiki_search`、`wiki_lint`。
 
 ### 10. 便携 Memory Kernel
-Tachi 是下游产品（Hypermem 交易适配器、zeroclaw 通用 chat-agent 适配器、RomanBath 前端）的共享 memory kernel，而非让每个产品各自 fork。**便携 kernel manifest**（`docs/engineering/architecture/kernel-surface-v1.fixture.json`）将持久 schema、召回原语、向量/FTS 回退行为和就绪诊断冻结为产品无关的契约——下游适配器无需继承 Tachi 的 GitHub/派发/发布面。启动时运行兼容性门控；`TACHI_BYPASS_MANIFEST=1` 可在开发时跳过。
+Tachi 是下游产品（Hypermem 交易适配器、zeroclaw 通用 chat-agent 适配器、RomanBath 前端）的共享 memory kernel，而非让每个产品各自 fork。**便携 kernel manifest**（`docs/engineering/architecture/kernel-surface-v1.fixture.json`）将持久 schema、召回原语、向量/FTS 回退行为和就绪诊断冻结为产品无关的契约——下游适配器无需继承 Tachi 的 GitHub/派发/发布面。启动时运行 manifest 全局 DB 写入防护（WalOrphan 检查）；`TACHI_BYPASS_MANIFEST=1` 可在开发或崩溃恢复时跳过该防护。
 
 ---
 

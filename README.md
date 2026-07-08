@@ -39,7 +39,7 @@ Named after the Tachikoma from *Ghost in the Shell*: agents that evolve through 
 
 ### Current Release
 
-Current release: `v1.6.4`.
+Current release: `v1.7.0`.
 
 This line makes Tachi's project-cycle direction explicit:
 
@@ -100,7 +100,7 @@ Tachi is not a general-purpose vector database or a managed memory cloud. It is 
 | **External dependencies** | Zero (embedding provider optional) | Medium | Medium | Low to medium | High |
 | **Default data locality** | Local-first | Cloud-first, self-hostable | Self-hosted | Self-hosted / Cloud | Depends |
 | **Memory organization** | `path` hierarchy + causal graph + domain | Entity + session | Agent state + memory blocks | Collection + metadata | None |
-| **Workflow control** | `dispatch` / `arena` / `verify` / `eval` | None | Agent orchestration | None | None |
+| **Workflow control** | `task` / `arena` / `verify` | None | Agent orchestration | None | None |
 | **Target user** | Individuals / small teams running autonomous agents | App developers adding memory | Builders of stateful agents | Systems needing vector search | Infrastructure engineers |
 
 ---
@@ -116,7 +116,7 @@ brew tap kckylechen1/tachi && brew install tachi
 Or use the shell installer (also installs the OpenClaw plugin when detected):
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.4/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.7.0/scripts/install.sh)"
 ```
 
 On macOS the shell installer also installs/restarts a user LaunchAgent at
@@ -155,7 +155,7 @@ Add Tachi to your agent's MCP config. The profile controls how many tools the ag
 }
 ```
 
-- `VOYAGE_API_KEY` — required for embeddings.
+- `VOYAGE_API_KEY` — required for hybrid semantic search (the server runs without it, serving lexical/graph recall only).
 - `SILICONFLOW_API_KEY` — recommended for extraction, summaries, and foundry distillation.
 - `TACHI_PROFILE` — see [Tool Surface Profiles](#tool-surface-profiles) below.
 
@@ -297,10 +297,10 @@ Memories are stored under `path` namespaces (e.g. `/user/preferences`, `/project
 - **RRF fusion** — reciprocal rank fusion blends all channels, with vector cosine weighted in to reduce rank inversions on highly semantic queries.
 
 ### 3. Causal Graph
-`add_edge` / `get_edges` create and traverse causal, temporal, and entity relationships. `save_memory` can automatically link entries sharing entities (`auto_link`).
+`add_edge` / `get_edges` create and traverse causal, temporal, and entity relationships. `save_memory` can automatically link entries sharing entities (`auto_link`). Direct edge tools are `admin`/native surfaces; the facade path is `tachi_save`/`tachi_memory` auto-linking and `tachi_task` graph traversal.
 
 ### 4. Domain-Aware Routing
-`register_domain` creates isolated scopes with per-domain GC thresholds (`gc_threshold_days`), default retention policies, and path prefixes. `save_memory` and `search_memory` can filter by domain.
+`register_domain` creates isolated scopes with per-domain GC thresholds (`gc_threshold_days`), default retention policies, and path prefixes. `save_memory` and `search_memory` can filter by domain. (Domain CRUD is an `admin`/operate surface.)
 
 ### 5. Encrypted Vault
 Local-first secret storage: Argon2id KDF + AES-256-GCM, per-secret nonces, auto-lock after inactivity, brute-force protection, per-secret agent ACLs, and multi-key rotation. Project-local agents can resolve Vault secrets via `.tachi/vault.env` aliases. See [`docs/INSTALL.md`](docs/INSTALL.md).
@@ -321,6 +321,8 @@ tachi skill-surface status --host claude,codex,gemini,cursor,antigravity
 - **Ghost Whispers** — persistent topic-based pub/sub between agents (`ghost_publish`, `ghost_subscribe`, `ghost_ack`, `ghost_reflect`, `ghost_promote`).
 - **Kanban** — cross-agent cards with `ack` / `progress` / `result` states (`post_card`, `check_inbox`, `update_card`).
 - **Handoff tokens** — structured context transfer between agent sessions (`handoff_leave`, `handoff_check`).
+
+> Ghost and Kanban tools are native `admin`-profile surfaces (not bundled into `standard`/`coordinate`). Most agents coordinate through the `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`, and `tachi_task` facades instead.
 
 ### 8. Continuity & Project Lifecycle Memory
 Continuity is the layer above raw recall. Tachi records typed project events,
@@ -363,7 +365,7 @@ Tachi is not only a memory store; it is becoming the durable control plane for a
 - **Wiki** — durable knowledge pages maintained by agents: `tachi_wiki`, `tachi_browse`, `tachi_wiki_write`, `tachi_wiki_search`, `wiki_lint`.
 
 ### 11. Portable Memory Kernel
-Tachi is the shared memory kernel for downstream products (Hypermem trading adapter, zeroclaw chat-agent adapter, RomanBath frontend) rather than a per-product fork. A **portable kernel manifest** (`docs/engineering/architecture/kernel-surface-v1.fixture.json`) freezes the durable schema, recall primitives, vector/FTS fallback behavior, and readiness diagnostics as a product-agnostic contract — downstream adapters consume it without inheriting Tachi's GitHub/dispatch/release surfaces. A compatibility gate runs at startup; `TACHI_BYPASS_MANIFEST=1` skips it for development.
+Tachi is the shared memory kernel for downstream products (Hypermem trading adapter, zeroclaw chat-agent adapter, RomanBath frontend) rather than a per-product fork. A **portable kernel manifest** (`docs/engineering/architecture/kernel-surface-v1.fixture.json`) freezes the durable schema, recall primitives, vector/FTS fallback behavior, and readiness diagnostics as a product-agnostic contract — downstream adapters consume it without inheriting Tachi's GitHub/dispatch/release surfaces. A manifest global-DB write-guard runs at startup; `TACHI_BYPASS_MANIFEST=1` skips that guard for development or crash-recovery.
 
 ---
 
@@ -374,7 +376,7 @@ Tachi exposes a filtered MCP surface based on `TACHI_PROFILE`. The full `admin` 
 | Profile | What is exposed | Best for |
 |---------|-----------------|----------|
 | `standard` | Daily facade surface: `tachi_save`, `tachi_memory`, `tachi_task`, `tachi_arena`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `vault_status`, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. | IDE agents: Claude, Cursor, Codex, Windsurf, Trae, Antigravity. |
-| `coordinate` | `remember` + `coordinate` bundles: adds `handoff_*`, `post_card`, `check_inbox`, `update_card`, `approve_merge`, `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`; dispatch runs through `tachi_task(action='dispatch')`. | Leader/orchestrator agents that dispatch work and coordinate across agents. |
+| `coordinate` | `remember` + `coordinate` bundles: adds `handoff_check`/`handoff_leave`, `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`, `tachi_agents`, `approve_merge`, `tachi_gh`, `tachi_shell`, `tachi_arena`, `tachi_verify`; dispatch runs through `tachi_task(action='dispatch')`. | Leader/orchestrator agents that dispatch work and coordinate across agents. |
 | `operate` | `remember` + `operate` bundles: adds Foundry lifecycle, `agent_register`, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters, OpenClaw, ops automation. |
 | `delegate` | Curated worker surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_complete`, `tachi_skill(action='discover'|'run'|'bundle')`, plus legacy compatibility `run_skill`. | Worker subagents spawned by `tachi_task(action='dispatch')`. No dispatch, no handoff, no skill candidate registration. |
 | `admin` | Full catalog. | Maintenance, development, and governance. |
@@ -408,20 +410,32 @@ Optional per-lane overrides (`EXTRACT_*`, `DISTILL_*`, `SUMMARY_*`, `REASONING_*
 Copy `.env.example` to `.env` in your project root:
 
 ```bash
-# Required
+# Required for hybrid semantic search (the server boots and serves lexical/graph
+# recall without it, but vector embeddings need a Voyage key).
 VOYAGE_API_KEY=your_voyage_key_here
 
-# Recommended
+# Recommended: powers extraction, summaries, and Foundry distillation.
 SILICONFLOW_API_KEY=your_siliconflow_key_here
 SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1/chat/completions
 SILICONFLOW_MODEL=Qwen/Qwen3.5-27B
 
-# Optional: override global DB path. Defaults to ~/.tachi/global/memory.db;
+# Optional: override the global DB path. Defaults to ~/.tachi/global/memory.db;
 # project DBs are auto-detected at <git-root>/.tachi/memory.db.
 MEMORY_DB_PATH=~/.tachi/global/memory.db
 ```
 
 The server loads `.env` from the project root automatically.
+
+### Other useful environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `TACHI_PROFILE` | Selects the MCP tool surface (`standard`, `coordinate`, `operate`, `delegate`, `admin`, or a host alias). Defaults to `standard`. |
+| `TACHI_HOME` | Overrides the Tachi home directory (default `~/.tachi`). The global DB path flows from this. |
+| `GH_TOKEN` | GitHub token for `tachi_gh`, `safe_merge`, and ship operations. |
+| `TACHI_DISABLE_STDIO_PROXY` | `1` forces a stdio process to serve locally instead of forwarding to a running daemon (for source-tree MCP debugging). |
+| `TACHI_DISABLE_AUTO_DAEMON` | `1` disables daemon spawn/replacement (may still reuse a compatible daemon). |
+| `TACHI_BYPASS_MANIFEST` | `1` skips the manifest global-DB write-guard (WalOrphan check) at startup, for development or crash-recovery. |
 
 ---
 
