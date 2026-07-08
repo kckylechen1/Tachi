@@ -107,7 +107,7 @@ pub fn get_all(
         )
     };
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![limit], row_to_entry)?;
+    let rows = stmt.query_map(params![limit as i64], row_to_entry)?;
 
     let mut out = Vec::new();
     for r in rows {
@@ -158,7 +158,7 @@ pub fn list_by_path(
     };
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![normalized, like_prefix, limit], row_to_entry)?;
+    let rows = stmt.query_map(params![normalized, like_prefix, limit as i64], row_to_entry)?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
@@ -188,7 +188,7 @@ pub fn list_wiki_duplicate_candidates(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
-        params![path, topic, parent_path, parent_like, limit],
+        params![path, topic, parent_path, parent_like, limit as i64],
         row_to_entry,
     )?;
     let mut out = Vec::new();

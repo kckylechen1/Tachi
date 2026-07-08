@@ -104,8 +104,16 @@ fn schema_version_fails_on_garbage_bytes() {
     let path = dir.path().join("garbage.db");
     std::fs::write(&path, b"not a sqlite file at all, just junk bytes").unwrap();
 
-    let conn = open_raw(&path).unwrap();
-    assert!(schema_version(&conn).is_err());
+    // The file is garbage, so every probe must fail. On SQLite >= 3.50 the
+    // failure can surface at open time (when a registered auto-extension like
+    // libsimple cannot initialise against the invalid header) or at query time
+    // (`pragma schema_version` returns SQLITE_NOTADB). Both prove the file is
+    // not a database; we assert the combined outcome rather than a single step.
+    let result = open_raw(&path).and_then(|conn| schema_version(&conn));
+    assert!(
+        result.is_err(),
+        "expected an error on a garbage file, got Ok"
+    );
 }
 
 #[test]
