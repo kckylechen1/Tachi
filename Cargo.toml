@@ -31,6 +31,19 @@ strip = true
 debug = "line-tables-only"
 
 [workspace.dependencies]
+# `bundled` compiles the SQLite C amalgamation (libsqlite3-sys, ~5.9s wall /
+# 2.1% of cold-build unit-time on arm64). Evaluated against system SQLite in
+# #833 and KEPT INTENTIONALLY — switching is unsafe for this repo:
+#   1. The CI/release matrix targets `x86_64-pc-windows-msvc` (no system SQLite),
+#      plus 4 *nix targets, with NO per-platform SQLite install step.
+#   2. Version drift: bundled pins SQLite 3.46.0; Ubuntu 24.04 ships 3.45 and
+#      macOS varies. DB migrations and the FTS5/JSON1/vec0 schema are validated
+#      against the bundled version — system builds can regress silently.
+#   3. `load_extension` + `vtab` (needed by libsimple + sqlite-vec) require
+#      build flags not guaranteed on every system SQLite.
+# The ~5.9s cost is low ROI vs the 31s memory-server crate bottleneck. A
+# build-time test (memory-core `sqlite_features_asserted`) locks the decision
+# by asserting bundled SQLite + FTS5 + JSON1 are present. See issue #833.
 rusqlite = { version = "0.32", features = ["backup", "bundled", "vtab"] }
 sqlite-vec = "0.1.7-alpha.10"
 serde = { version = "1", features = ["derive"] }
