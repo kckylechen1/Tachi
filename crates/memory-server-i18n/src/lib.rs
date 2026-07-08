@@ -1,4 +1,7 @@
-#![allow(dead_code)]
+//! Minimal i18n string lookup (`t()`) with en/zh locales, resolved from the
+//! `TACHI_LOCALE` env var. Extracted from memory-server (#833 slice 2).
+
+#![allow(dead_code, clippy::manual_pattern_char_comparison)]
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -58,7 +61,7 @@ fn current_locale() -> &'static str {
         .as_str()
 }
 
-pub(crate) fn t(key: &str) -> String {
+pub fn t(key: &str) -> String {
     let locale = current_locale();
     translations()
         .get(locale)
@@ -69,7 +72,7 @@ pub(crate) fn t(key: &str) -> String {
         .to_string()
 }
 
-pub(crate) fn available_locales() -> Vec<&'static str> {
+pub fn available_locales() -> Vec<&'static str> {
     translations().keys().copied().collect()
 }
 

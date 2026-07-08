@@ -1359,6 +1359,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "memory-server-i18n"
+version = "1.6.4"
+
+[[package]]
 name = "memory-server-params"
 version = "1.6.4"
 dependencies = [
