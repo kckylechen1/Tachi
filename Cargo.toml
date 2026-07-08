@@ -4,6 +4,7 @@ members = [
     "crates/memory-node",
     "crates/memory-server",
     "crates/memory-server-params",
+    "crates/memory-server-rescue",
     "crates/memory-server-runtime",
     "crates/tachi-bootstrap",
     "crates/tachi-dispatch",

@@ -93,7 +93,6 @@ mod prompts;
 mod provenance;
 mod provider_config;
 mod repair;
-mod rescue;
 mod sandbox_ops;
 mod server_handler;
 mod server_instructions;

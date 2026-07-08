@@ -1332,6 +1332,7 @@ dependencies = [
  "libsimple",
  "memory-core",
  "memory-server-params",
+ "memory-server-rescue",
  "memory-server-runtime",
  "rand 0.8.6",
  "regex",
@@ -1368,6 +1369,18 @@ dependencies = [
  "serde_json",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "memory-server-rescue"
+version = "1.6.4"
+dependencies = [
+ "chrono",
+ "memory-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
