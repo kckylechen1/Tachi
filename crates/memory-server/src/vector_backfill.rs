@@ -45,12 +45,19 @@ pub(crate) struct VectorSweepState {
     pub(crate) next_run_after: Option<String>,
     pub(crate) interval_secs: Option<u64>,
     pub(crate) updated_at: String,
+    /// Current status-time count using the same predicate as sweep selection.
+    pub(crate) current_total_count: usize,
+    pub(crate) current_with_vector_count: usize,
+    pub(crate) current_pending_count: usize,
+    pub(crate) current_pending_threshold: usize,
+    pub(crate) current_backfill_needed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VectorSweepOutcome {
     pub(crate) embedded_count: usize,
     pub(crate) attempted_count: usize,
+    /// Remaining rows from this sweep attempt's selected worklist, not a status read model.
     pub(crate) remaining_count: usize,
 }
 
@@ -58,6 +65,7 @@ pub(crate) struct VectorSweepOutcome {
 pub(crate) struct VectorSweepError {
     pub(crate) embedded_count: usize,
     pub(crate) attempted_count: usize,
+    /// Remaining rows from this sweep attempt's selected worklist, not a status read model.
     pub(crate) remaining_count: usize,
     pub(crate) message: String,
 }
@@ -232,33 +240,58 @@ pub(crate) fn read_vector_sweep_state_for_status(
     if !vector_sweep_state_table_exists(conn) {
         return Ok(None);
     }
-    conn.query_row(
-        &format!(
-            "SELECT enabled, disabled_reason, skip_recall_cache, last_run_at,
+    let mut state = conn
+        .query_row(
+            &format!(
+                "SELECT enabled, disabled_reason, skip_recall_cache, last_run_at,
                     embedded_count, failed_count, last_error, last_provider_error,
                     next_run_after, interval_secs, updated_at
              FROM {VECTOR_SWEEP_STATE_TABLE}
              WHERE key=?1"
-        ),
-        [VECTOR_SWEEP_STATE_KEY],
-        |row| {
-            Ok(VectorSweepState {
-                enabled: row.get::<_, bool>(0)?,
-                disabled_reason: row.get(1)?,
-                skip_recall_cache: row.get::<_, bool>(2)?,
-                last_run_at: row.get(3)?,
-                embedded_count: row.get::<_, i64>(4)?.max(0) as usize,
-                failed_count: row.get::<_, i64>(5)?.max(0) as usize,
-                last_error: row.get(6)?,
-                last_provider_error: row.get(7)?,
-                next_run_after: row.get(8)?,
-                interval_secs: row.get::<_, Option<i64>>(9)?.map(|n| n.max(0) as u64),
-                updated_at: row.get(10)?,
-            })
-        },
-    )
-    .optional()
-    .map_err(|e| format!("read vector sweep state: {e}"))
+            ),
+            [VECTOR_SWEEP_STATE_KEY],
+            |row| {
+                Ok(VectorSweepState {
+                    enabled: row.get::<_, bool>(0)?,
+                    disabled_reason: row.get(1)?,
+                    skip_recall_cache: row.get::<_, bool>(2)?,
+                    last_run_at: row.get(3)?,
+                    embedded_count: row.get::<_, i64>(4)?.max(0) as usize,
+                    failed_count: row.get::<_, i64>(5)?.max(0) as usize,
+                    last_error: row.get(6)?,
+                    last_provider_error: row.get(7)?,
+                    next_run_after: row.get(8)?,
+                    interval_secs: row.get::<_, Option<i64>>(9)?.map(|n| n.max(0) as u64),
+                    updated_at: row.get(10)?,
+                    current_total_count: 0,
+                    current_with_vector_count: 0,
+                    current_pending_count: 0,
+                    current_pending_threshold: 0,
+                    current_backfill_needed: false,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| format!("read vector sweep state: {e}"))?;
+    if let Some(state) = state.as_mut() {
+        populate_current_sweep_counts(&store, state)?;
+    }
+    Ok(state)
+}
+
+fn populate_current_sweep_counts(
+    store: &MemoryStore,
+    state: &mut VectorSweepState,
+) -> Result<(), String> {
+    let (total, with_vec) = vector_counts_filtered(store, state.skip_recall_cache)?;
+    let pending = total.saturating_sub(with_vec);
+    let threshold = auto_backfill_pending_threshold();
+    state.current_total_count = total;
+    state.current_with_vector_count = with_vec;
+    state.current_pending_count = pending;
+    state.current_pending_threshold = threshold;
+    state.current_backfill_needed = auto_backfill_needed(total, with_vec, pending, threshold);
+    Ok(())
 }
 
 fn vector_counts_filtered(
@@ -461,6 +494,29 @@ mod tests {
     use memory_core::MemoryStore;
     use rusqlite::params;
 
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     #[test]
     fn embedding_input_prefers_summary_for_long_text() {
         let long_text = "runtime details ".repeat(60);
@@ -563,6 +619,57 @@ mod tests {
         assert!(
             err.contains("read vector sweep state"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn status_sweep_state_recomputes_current_pending_after_threshold_change() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _initial_threshold = EnvGuard::set("TACHI_VECTOR_SWEEP_PENDING_THRESHOLD", "10");
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("threshold-drift.db");
+        let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        insert_memory(&store, "threshold-pending-1", "manual", "note");
+        insert_memory(&store, "threshold-pending-2", "manual", "note");
+        insert_memory(&store, "threshold-pending-3", "manual", "note");
+        super::record_vector_sweep_state(
+            &db_path,
+            super::VectorSweepStateUpdate {
+                enabled: true,
+                disabled_reason: None,
+                skip_recall_cache: true,
+                embedded_count: 0,
+                failed_count: 0,
+                last_error: None,
+                last_provider_error: None,
+                interval_secs: Some(1800),
+                preserve_schedule: false,
+                preserve_outcome: false,
+            },
+        )
+        .expect("seed state");
+        drop(_initial_threshold);
+
+        let _raised_threshold = EnvGuard::set("TACHI_VECTOR_SWEEP_PENDING_THRESHOLD", "1");
+        let state = read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("state exists");
+
+        assert_eq!(state.embedded_count, 0, "last attempt count is preserved");
+        assert_eq!(
+            state.failed_count, 0,
+            "last attempt failure count is preserved"
+        );
+        assert_eq!(state.current_total_count, 3);
+        assert_eq!(state.current_with_vector_count, 0);
+        assert_eq!(state.current_pending_count, 3);
+        assert_eq!(state.current_pending_threshold, 1);
+        assert!(
+            state.current_backfill_needed,
+            "status read model must reflect current threshold, not stale last attempt"
         );
     }
 }
