@@ -29,12 +29,20 @@ pub fn auto_fix_safe(findings: &[DoctorFinding], quarantine_root: &Path) -> Vec<
             _ => {}
         }
     }
-    actions.extend(plan_c_alias_retirement_actions(findings));
+    actions.extend(plan_c_alias_retirement_actions(findings.iter().filter(
+        |finding| plan_c_alias_retirement_allowed(finding.classification),
+    )));
     actions
 }
 
+fn plan_c_alias_retirement_allowed(classification: DbClassification) -> bool {
+    matches!(classification, DbClassification::Healthy)
+}
+
 #[cfg(unix)]
-fn plan_c_alias_retirement_actions(findings: &[DoctorFinding]) -> Vec<AutoFixAction> {
+fn plan_c_alias_retirement_actions<'a>(
+    findings: impl IntoIterator<Item = &'a DoctorFinding>,
+) -> Vec<AutoFixAction> {
     let mut actions = Vec::new();
     let mut seen = HashSet::new();
 
@@ -60,7 +68,9 @@ fn plan_c_alias_retirement_actions(findings: &[DoctorFinding]) -> Vec<AutoFixAct
 }
 
 #[cfg(not(unix))]
-fn plan_c_alias_retirement_actions(_findings: &[DoctorFinding]) -> Vec<AutoFixAction> {
+fn plan_c_alias_retirement_actions<'a>(
+    _findings: impl IntoIterator<Item = &'a DoctorFinding>,
+) -> Vec<AutoFixAction> {
     Vec::new()
 }
 
@@ -112,42 +122,56 @@ fn reconcile_plan_c_alias_for_local_db(local_db: &Path, project_root: &Path) -> 
     }
 
     for candidate in old_hash_aliases {
-        if !old_hash_alias_points_to_local_db(&candidate, local_db) {
-            actions.push(AutoFixAction {
-                path: candidate.display().to_string(),
-                action: "plan_c_alias_retire_old_hash".to_string(),
-                outcome: "skipped".to_string(),
-                note: "old-hash alias changed before removal; refused stale delete".to_string(),
-                destination: Some(current_db.display().to_string()),
-            });
-            continue;
-        }
-        match fs::remove_file(&candidate) {
-            Ok(()) => {
-                if let Some(parent) = candidate.parent() {
-                    let _ = fs::remove_dir(parent);
-                }
-                actions.push(AutoFixAction {
-                    path: candidate.display().to_string(),
-                    action: "plan_c_alias_retire_old_hash".to_string(),
-                    outcome: "ok".to_string(),
-                    note: format!(
-                        "retired old-hash Plan C alias after creating current alias {current_name}"
-                    ),
-                    destination: Some(current_db.display().to_string()),
-                });
-            }
-            Err(e) => actions.push(AutoFixAction {
-                path: candidate.display().to_string(),
-                action: "plan_c_alias_retire_old_hash".to_string(),
-                outcome: "error".to_string(),
-                note: format!("remove old-hash alias symlink: {e}"),
-                destination: Some(current_db.display().to_string()),
-            }),
-        }
+        actions.push(retire_old_hash_alias(
+            &candidate,
+            local_db,
+            &current_db,
+            &current_name,
+        ));
     }
 
     actions
+}
+
+#[cfg(unix)]
+fn retire_old_hash_alias(
+    candidate: &Path,
+    local_db: &Path,
+    current_db: &Path,
+    current_name: &str,
+) -> AutoFixAction {
+    if !old_hash_alias_points_to_local_db(candidate, local_db) {
+        return AutoFixAction {
+            path: candidate.display().to_string(),
+            action: "plan_c_alias_retire_old_hash".to_string(),
+            outcome: "skipped".to_string(),
+            note: "old-hash alias changed before removal; refused stale delete".to_string(),
+            destination: Some(current_db.display().to_string()),
+        };
+    }
+    match fs::remove_file(candidate) {
+        Ok(()) => {
+            if let Some(parent) = candidate.parent() {
+                let _ = fs::remove_dir(parent);
+            }
+            AutoFixAction {
+                path: candidate.display().to_string(),
+                action: "plan_c_alias_retire_old_hash".to_string(),
+                outcome: "ok".to_string(),
+                note: format!(
+                    "retired old-hash Plan C alias after creating current alias {current_name}"
+                ),
+                destination: Some(current_db.display().to_string()),
+            }
+        }
+        Err(e) => AutoFixAction {
+            path: candidate.display().to_string(),
+            action: "plan_c_alias_retire_old_hash".to_string(),
+            outcome: "error".to_string(),
+            note: format!("remove old-hash alias symlink: {e}"),
+            destination: Some(current_db.display().to_string()),
+        },
+    }
 }
 
 #[cfg(unix)]
@@ -236,6 +260,103 @@ fn looks_like_old_plan_c_hash_alias(name: &str, legacy_name: &str) -> bool {
         return false;
     };
     suffix.len() == 8 && suffix.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn plan_c_alias_retirement_allows_only_valid_safe_targets() {
+        assert!(plan_c_alias_retirement_allowed(DbClassification::Healthy));
+        // WalOrphan excluded: doctor validates via immutable-read (WAL ignored),
+        // and the alias points at the un-checkpointed original — not a proven-clean target.
+        assert!(!plan_c_alias_retirement_allowed(
+            DbClassification::WalOrphan
+        ));
+        assert!(!plan_c_alias_retirement_allowed(
+            DbClassification::VecExtensionMissing
+        ));
+        assert!(!plan_c_alias_retirement_allowed(DbClassification::Corrupt));
+        assert!(!plan_c_alias_retirement_allowed(
+            DbClassification::LegacySchema
+        ));
+        assert!(!plan_c_alias_retirement_allowed(
+            DbClassification::Placeholder
+        ));
+        assert!(!plan_c_alias_retirement_allowed(DbClassification::Backup));
+    }
+
+    #[test]
+    fn retire_old_hash_alias_refuses_stale_delete_when_target_changes() {
+        let dir = tempdir().unwrap();
+        let local_db = dir.path().join("repo/.tachi/memory.db");
+        let other_db = dir.path().join("other/.tachi/memory.db");
+        let candidate = dir.path().join("projects/Sigil-94c144a9/memory.db");
+        let current_db = dir.path().join("projects/Sigil-current/memory.db");
+        fs::create_dir_all(local_db.parent().unwrap()).unwrap();
+        fs::create_dir_all(other_db.parent().unwrap()).unwrap();
+        fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        fs::write(&local_db, b"local").unwrap();
+        fs::write(&other_db, b"other").unwrap();
+        std::os::unix::fs::symlink(&other_db, &candidate).unwrap();
+
+        let action = retire_old_hash_alias(&candidate, &local_db, &current_db, "Sigil-current");
+
+        assert_eq!(action.action, "plan_c_alias_retire_old_hash");
+        assert_eq!(action.outcome, "skipped");
+        assert!(action.note.contains("refused stale delete"));
+        assert_eq!(action.destination, Some(current_db.display().to_string()));
+        assert!(candidate.is_symlink(), "stale alias must not be deleted");
+        assert_eq!(
+            fs::canonicalize(&candidate).unwrap(),
+            fs::canonicalize(other_db).unwrap()
+        );
+    }
+
+    #[test]
+    fn ensure_current_hashed_alias_refuses_symlink_pointing_elsewhere() {
+        let dir = tempdir().unwrap();
+        let local_db = dir.path().join("repo/.tachi/memory.db");
+        let other_db = dir.path().join("other/.tachi/memory.db");
+        let current_db = dir.path().join("projects/Sigil-current/memory.db");
+        fs::create_dir_all(local_db.parent().unwrap()).unwrap();
+        fs::create_dir_all(other_db.parent().unwrap()).unwrap();
+        fs::create_dir_all(current_db.parent().unwrap()).unwrap();
+        fs::write(&local_db, b"local").unwrap();
+        fs::write(&other_db, b"other").unwrap();
+        std::os::unix::fs::symlink(&other_db, &current_db).unwrap();
+
+        let action = ensure_current_hashed_alias(&local_db, &current_db).unwrap_err();
+
+        assert_eq!(action.action, "plan_c_alias_create_hashed");
+        assert_eq!(action.outcome, "error");
+        assert!(action.note.contains("points elsewhere"));
+        assert!(current_db.is_symlink());
+        assert_eq!(
+            fs::canonicalize(&current_db).unwrap(),
+            fs::canonicalize(other_db).unwrap()
+        );
+    }
+
+    #[test]
+    fn ensure_current_hashed_alias_refuses_regular_file() {
+        let dir = tempdir().unwrap();
+        let local_db = dir.path().join("repo/.tachi/memory.db");
+        let current_db = dir.path().join("projects/Sigil-current/memory.db");
+        fs::create_dir_all(local_db.parent().unwrap()).unwrap();
+        fs::create_dir_all(current_db.parent().unwrap()).unwrap();
+        fs::write(&local_db, b"local").unwrap();
+        fs::write(&current_db, b"regular file").unwrap();
+
+        let action = ensure_current_hashed_alias(&local_db, &current_db).unwrap_err();
+
+        assert_eq!(action.action, "plan_c_alias_create_hashed");
+        assert_eq!(action.outcome, "error");
+        assert!(action.note.contains("not a symlink"));
+        assert!(current_db.is_file());
+    }
 }
 
 fn quarantine_placeholder(src: &str, dest_dir: &Path) -> AutoFixAction {
