@@ -78,13 +78,24 @@ pub(super) fn build_rerank_document(row: &Value) -> String {
         .join("\n")
 }
 
-fn apply_rerank_score(mut row: Value, score: f64) -> Value {
-    let score = round3(score);
+/// Provisional: minimum fraction of `top_k` hybrid-head items guaranteed to
+/// survive rerank. Lower = more promotion room for tail items; raise to protect
+/// more head items. Named threshold per AGENTS.md; tunable.
+const HYBRID_HEAD_FRACTION: f64 = 0.5;
+
+/// Stamp the relevance fields so the value rendered into agent context matches
+/// the actual sort key. `relevance`/`score.final` reflect `blend_score` (the key
+/// the output is ordered by); `rerank_score` keeps the raw provider signal for
+/// observability when present.
+fn apply_blend_relevance(mut row: Value, blend_score: f64, rerank_score: Option<f64>) -> Value {
+    let blend = round3(blend_score);
     if let Value::Object(map) = &mut row {
-        map.insert("relevance".into(), json!(score));
-        map.insert("rerank_score".into(), json!(score));
+        map.insert("relevance".into(), json!(blend));
+        if let Some(raw) = rerank_score {
+            map.insert("rerank_score".into(), json!(round3(raw)));
+        }
         if let Some(Value::Object(score_map)) = map.get_mut("score") {
-            score_map.insert("final".into(), json!(score));
+            score_map.insert("final".into(), json!(blend));
         }
     }
     row
@@ -100,7 +111,10 @@ pub(super) fn merge_rerank_order_with_hybrid_floor(
         return Vec::new();
     }
 
-    let mut rerank_by_index = std::collections::HashMap::new();
+    // rerank_by_index: index -> (rerank_rank, provider_score). Keep first
+    // occurrence per index; rerank_rank is the 1-based enumerate position.
+    let mut rerank_by_index: std::collections::HashMap<usize, (usize, f64)> =
+        std::collections::HashMap::new();
     for (rerank_rank, &(index, score)) in order.iter().enumerate() {
         if index < rows.len() {
             rerank_by_index
@@ -109,34 +123,56 @@ pub(super) fn merge_rerank_order_with_hybrid_floor(
         }
     }
     let missing_rerank_rank = rows.len() + 1;
-    let mut ranked = rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let original_rank = index + 1;
-            let rerank_rank = rerank_by_index
-                .get(&index)
-                .map(|(rank, _)| *rank)
-                .unwrap_or(missing_rerank_rank);
-            let blend_score = (1.0 / original_rank as f64) + (1.0 / rerank_rank as f64);
-            (index, blend_score, row)
-        })
-        .collect::<Vec<_>>();
-    ranked.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
+
+    // blend_score = reciprocal rank fusion of hybrid rank and rerank rank.
+    let blend_score = |index: usize| -> f64 {
+        let original_rank = index + 1;
+        let rerank_rank = rerank_by_index
+            .get(&index)
+            .map(|(rank, _)| *rank)
+            .unwrap_or(missing_rerank_rank);
+        (1.0 / original_rank as f64) + (1.0 / rerank_rank as f64)
+    };
+
+    // Seatbelt: a guaranteed prefix of the hybrid head always survives, but its
+    // position may shift down if tail items out-score it. head_floor is strictly
+    // <= output_len, leaving room for tail promotions.
+    let head_floor = ((output_len as f64) * HYBRID_HEAD_FRACTION).round() as usize;
+    let head_floor = head_floor.min(output_len);
+
+    // Guaranteed head indices 0..head_floor.
+    let mut selected: Vec<usize> = (0..head_floor).collect();
+
+    // Remaining slots filled by the top blend-scoring indices from the pool
+    // head_floor..rows.len() (tail + any non-guaranteed head).
+    let remaining = output_len.saturating_sub(head_floor);
+    if remaining > 0 {
+        let mut pool: Vec<usize> = (head_floor..rows.len()).collect();
+        pool.sort_by(|&a, &b| {
+            blend_score(b)
+                .partial_cmp(&blend_score(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.cmp(&b))
+        });
+        for index in pool.into_iter().take(remaining) {
+            selected.push(index);
+        }
+    }
+
+    // Order the selected set by blend_score descending (stable tiebreak: index
+    // ascending) for the final output sequence.
+    selected.sort_by(|&a, &b| {
+        blend_score(b)
+            .partial_cmp(&blend_score(a))
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.cmp(&b))
     });
 
-    ranked
+    selected
         .into_iter()
-        .take(output_len)
-        .map(|(index, _score, row)| {
-            if let Some((_, rerank_score)) = rerank_by_index.get(&index) {
-                apply_rerank_score(row.clone(), *rerank_score)
-            } else {
-                row.clone()
-            }
+        .map(|index| {
+            let rerank_score = rerank_by_index.get(&index).map(|(_, score)| *score);
+            apply_blend_relevance(rows[index].clone(), blend_score(index), rerank_score)
         })
         .collect()
 }
