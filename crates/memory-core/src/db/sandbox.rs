@@ -29,13 +29,27 @@ pub fn set_sandbox_rule(
 /// Returns (allowed, matching_rule_description).
 /// Logic: "deny" overrides everything (checked across ALL matching rules).
 /// Among non-deny rules, the most specific match wins. Default = allow if no rule matches.
+///
+/// Composed of [`list_sandbox_rules_for_role`] (the SQL fetch) + [`evaluate_sandbox_access`]
+/// (the pure decision) so callers that check many paths for the same role in a loop can fetch
+/// the rules once and reuse the in-memory evaluation, avoiding an N+1 query per result row.
 pub fn check_sandbox_access(
     conn: &Connection,
     agent_role: &str,
     path: &str,
     operation: &str,
 ) -> Result<(bool, Option<String>), MemoryError> {
-    // Fetch all rules for this role, ordered by specificity (longest pattern first)
+    let rules = list_sandbox_rules_for_role(conn, agent_role)?;
+    Ok(evaluate_sandbox_access(&rules, agent_role, path, operation))
+}
+
+/// Fetch all `(path_pattern, access_level)` rules for `agent_role`, ordered by specificity
+/// (longest pattern first, then alphabetical) — the same ordering [`evaluate_sandbox_access`]
+/// relies on to pick the most specific match.
+pub fn list_sandbox_rules_for_role(
+    conn: &Connection,
+    agent_role: &str,
+) -> Result<Vec<(String, String)>, MemoryError> {
     let mut stmt = conn.prepare(
         "SELECT path_pattern, access_level FROM sandbox_rules WHERE agent_role = ?1 ORDER BY LENGTH(path_pattern) DESC, path_pattern ASC"
     )?;
@@ -43,15 +57,31 @@ pub fn check_sandbox_access(
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
 
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Pure decision over pre-fetched rules: "deny" overrides everything; among non-deny rules
+/// the most specific match (longest pattern) wins; default = allow if no rule matches.
+/// `rules` must be ordered by specificity descending (longest pattern first) — i.e. the order
+/// produced by [`list_sandbox_rules_for_role`].
+pub fn evaluate_sandbox_access(
+    rules: &[(String, String)],
+    agent_role: &str,
+    path: &str,
+    operation: &str,
+) -> (bool, Option<String>) {
     let mut best_non_deny: Option<(String, String, usize)> = None;
 
-    for row in rows {
-        let (pattern, access_level) = row?;
-        if path_matches_pattern(path, &pattern) {
+    for (pattern, access_level) in rules {
+        if path_matches_pattern(path, pattern) {
             // deny overrides everything — return immediately
             if access_level == "deny" {
                 let rule_desc = format!("{}:{} -> deny", agent_role, pattern);
-                return Ok((false, Some(rule_desc)));
+                return (false, Some(rule_desc));
             }
             // Track best non-deny match by specificity
             let specificity = pattern.len();
@@ -60,7 +90,7 @@ pub fn check_sandbox_access(
                 Some((_, _, best_spec)) => specificity > *best_spec,
             };
             if is_better {
-                best_non_deny = Some((pattern, access_level, specificity));
+                best_non_deny = Some((pattern.clone(), access_level.clone(), specificity));
             }
         }
     }
@@ -68,14 +98,14 @@ pub fn check_sandbox_access(
     match best_non_deny {
         None => {
             // No rule matches — default: allow
-            Ok((true, None))
+            (true, None)
         }
         Some((pattern, access_level, _)) => {
             let rule_desc = format!("{}:{} -> {}", agent_role, pattern, access_level);
             if operation == "write" && access_level == "read" {
-                Ok((false, Some(rule_desc)))
+                (false, Some(rule_desc))
             } else {
-                Ok((true, Some(rule_desc)))
+                (true, Some(rule_desc))
             }
         }
     }
@@ -86,7 +116,7 @@ pub fn check_sandbox_access(
 /// - Exact match: "/domain-pack/reports" matches "/domain-pack/reports"
 /// - Wildcard suffix: "/domain-pack/*" matches "/domain-pack/anything"
 /// - Prefix match: "/domain-pack" matches "/domain-pack" and "/domain-pack/sub"
-fn path_matches_pattern(path: &str, pattern: &str) -> bool {
+pub fn path_matches_pattern(path: &str, pattern: &str) -> bool {
     if pattern == "*" || pattern == "/*" {
         return true;
     }
@@ -326,4 +356,108 @@ pub fn list_sandbox_exec_audit(
         out.push(r?);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── path_matches_pattern equivalence classes ────────────────────────────
+
+    #[test]
+    fn path_matches_wildcard_root() {
+        assert!(path_matches_pattern("/anything", "*"));
+        assert!(path_matches_pattern("/anything", "/*"));
+    }
+
+    #[test]
+    fn path_matches_glob_suffix() {
+        assert!(path_matches_pattern("/foo/bar", "/foo/*"));
+        assert!(path_matches_pattern("/foo", "/foo/*"));
+        assert!(!path_matches_pattern("/foobar", "/foo/*"));
+    }
+
+    #[test]
+    fn path_matches_trailing_star() {
+        assert!(path_matches_pattern("/foobar", "/foo*"));
+        assert!(path_matches_pattern("/foo", "/foo*"));
+        assert!(!path_matches_pattern("/bar/foo", "/foo*"));
+    }
+
+    #[test]
+    fn path_matches_exact_and_prefix() {
+        assert!(path_matches_pattern("/x", "/x"));
+        assert!(path_matches_pattern("/x/y", "/x"));
+        assert!(!path_matches_pattern("/xy", "/x"));
+    }
+
+    // ── evaluate_sandbox_access equivalence classes ────────────────────────
+    // Rules are ordered longest-pattern-first, matching list_sandbox_rules_for_role's ORDER BY.
+
+    const ROLE: &str = "tester";
+
+    #[test]
+    fn evaluate_no_rules_defaults_to_allow() {
+        assert_eq!(
+            evaluate_sandbox_access(&[], ROLE, "/secret/x", "read"),
+            (true, None)
+        );
+    }
+
+    #[test]
+    fn evaluate_deny_overrides_allow() {
+        // "/secret/*" deny is more specific than "/" read — deny wins.
+        let rules = vec![
+            ("/secret/*".to_string(), "deny".to_string()),
+            ("/".to_string(), "read".to_string()),
+        ];
+        let (allowed, rule) = evaluate_sandbox_access(&rules, ROLE, "/secret/x", "read");
+        assert!(!allowed);
+        assert_eq!(rule.as_deref(), Some("tester:/secret/* -> deny"));
+    }
+
+    #[test]
+    fn evaluate_most_specific_non_deny_wins() {
+        let rules = vec![
+            ("/secret/reports".to_string(), "write".to_string()),
+            ("/secret".to_string(), "read".to_string()),
+        ];
+        let (allowed, rule) = evaluate_sandbox_access(&rules, ROLE, "/secret/reports/q1", "read");
+        assert!(allowed);
+        assert_eq!(rule.as_deref(), Some("tester:/secret/reports -> write"));
+    }
+
+    #[test]
+    fn evaluate_equal_length_tie_breaker_is_alphabetical() {
+        // Same LENGTH(), ORDER BY path_pattern ASC → "/a/b" before "/a/c".
+        // Strict ">" tie-breaker keeps the first-encountered (alphabetical) match.
+        let rules = vec![
+            ("/a/b".to_string(), "deny".to_string()),
+            ("/a/c".to_string(), "read".to_string()),
+        ];
+        // /a/b matches its deny rule → denied.
+        let (allowed, rule) = evaluate_sandbox_access(&rules, ROLE, "/a/b", "read");
+        assert!(!allowed);
+        assert_eq!(rule.as_deref(), Some("tester:/a/b -> deny"));
+        // /a/c matches its read rule → allowed (deny rule doesn't match /a/c).
+        let (allowed, rule) = evaluate_sandbox_access(&rules, ROLE, "/a/c", "read");
+        assert!(allowed);
+        assert_eq!(rule.as_deref(), Some("tester:/a/c -> read"));
+    }
+
+    #[test]
+    fn evaluate_write_downgrades_read_rule_to_deny() {
+        let rules = vec![("/data".to_string(), "read".to_string())];
+        let (allowed, rule) = evaluate_sandbox_access(&rules, ROLE, "/data/x", "write");
+        assert!(!allowed);
+        assert_eq!(rule.as_deref(), Some("tester:/data -> read"));
+    }
+
+    #[test]
+    fn evaluate_unmatched_rule_falls_through_to_allow() {
+        let rules = vec![("/other".to_string(), "deny".to_string())];
+        let (allowed, rule) = evaluate_sandbox_access(&rules, ROLE, "/unmatched/x", "read");
+        assert!(allowed);
+        assert_eq!(rule, None);
+    }
 }
