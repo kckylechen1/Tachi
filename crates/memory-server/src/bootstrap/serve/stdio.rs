@@ -258,6 +258,10 @@ async fn replace_stale_daemon_if_needed(app_home: &Path, global_db_path: &Path) 
     );
     #[cfg(unix)]
     {
+        // SAFETY: `kill(pid, SIGTERM)` only sends a signal to an OS pid; it
+        // passes no pointers across the FFI boundary and aliases no Rust
+        // memory. `pid` is an integer read from the stale daemon lock above;
+        // an invalid/stale pid yields ESRCH, which the loop below tolerates.
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
         for _ in 0..30 {
             if !crate::daemon_lock::process_alive(pid as i32) {

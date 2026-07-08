@@ -159,6 +159,10 @@ fn terminate_process_group(child_pid: Option<u32>, signal: libc::c_int) {
         return;
     };
     let pgid = -(pid as libc::pid_t);
+    // SAFETY: `kill(pgid, signal)` sends a signal to an OS process group; it
+    // passes no pointers across the FFI boundary and aliases no Rust memory.
+    // `pgid` is a negative pid_t derived from the child pid; an invalid group
+    // yields ESRCH and is tolerated below.
     let rc = unsafe { libc::kill(pgid, signal) };
     if rc != 0 {
         let err = std::io::Error::last_os_error();
@@ -261,6 +265,9 @@ mod tests {
     async fn wait_for_process_exit(pid: libc::pid_t) -> bool {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while tokio::time::Instant::now() < deadline {
+            // SAFETY: `kill(pid, 0)` performs a signal-0 existence probe — it
+            // sends no signal, passes no pointers across the FFI boundary, and
+            // aliases no Rust memory.
             if unsafe { libc::kill(pid, 0) } != 0 {
                 return true;
             }

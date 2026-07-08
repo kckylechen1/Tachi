@@ -187,6 +187,11 @@ pub(super) fn read_unlock_password_fifo(path: &str) -> Result<String, String> {
     let result = (|| {
         let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
             .map_err(|e| format!("unlock FIFO path contains interior NUL: {e}"))?;
+        // SAFETY: `c_path` is a valid NUL-terminated CString that outlives the
+        // call. `open` only reads the path string and returns an integer fd; it
+        // hands no pointers back into Rust memory. The parent directory's mode
+        // was checked above (0o700, owner-only) so the path is not a symlink
+        // follow hazard (O_NOFOLLOW is also set).
         let fd = unsafe {
             libc::open(
                 c_path.as_ptr(),
@@ -200,21 +205,31 @@ pub(super) fn read_unlock_password_fifo(path: &str) -> Result<String, String> {
             ));
         }
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: `fd` is a valid open descriptor (checked ≥ 0 above).
+        // `stat.as_mut_ptr()` is a valid, exclusive `*mut MaybeUninit<stat>`;
+        // fstat writes a fully-initialized `stat` into it. No aliasing: the
+        // MaybeUninit is local and not referenced elsewhere.
         if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
             let err = std::io::Error::last_os_error();
+            // SAFETY: `fd` is a valid open descriptor owned only by this scope;
+            // closing it here releases the kernel resource. After this we
+            // neither read nor close `fd` again on this path.
             unsafe {
                 libc::close(fd);
             }
             return Err(format!("unlock FIFO fstat failed: {err}"));
         }
+        // SAFETY: fstat returned 0 above, so `stat` is fully initialized.
         let stat = unsafe { stat.assume_init() };
         if stat.st_mode & libc::S_IFMT != libc::S_IFIFO {
+            // SAFETY: same as the fstat-failure branch — valid, exclusively-owned fd.
             unsafe {
                 libc::close(fd);
             }
             return Err("unlock password path must be a FIFO".to_string());
         }
         if stat.st_mode & 0o077 != 0 {
+            // SAFETY: same as the fstat-failure branch — valid, exclusively-owned fd.
             unsafe {
                 libc::close(fd);
             }
@@ -222,6 +237,11 @@ pub(super) fn read_unlock_password_fifo(path: &str) -> Result<String, String> {
         }
         should_remove_fifo = true;
 
+        // SAFETY: `fd` is a valid, exclusively-owned open descriptor (opened
+        // and validated above, not yet wrapped in any `File`). `from_raw_fd`
+        // takes single ownership: after this the descriptor is managed by
+        // `file`, which will close it on drop — so there is no double-close
+        // hazard on this path.
         let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut bytes = Vec::new();

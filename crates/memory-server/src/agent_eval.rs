@@ -83,42 +83,14 @@ pub(crate) async fn handle_agent_eval(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct EnvRestore {
-        key: &'static str,
-        old: Option<String>,
-    }
-
-    impl EnvRestore {
-        fn unset(key: &'static str) -> Self {
-            let old = std::env::var(key).ok();
-            std::env::remove_var(key);
-            Self { key, old }
-        }
-
-        fn set(key: &'static str, value: &str) -> Self {
-            let old = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, old }
-        }
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            if let Some(old) = &self.old {
-                std::env::set_var(self.key, old);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
+    use crate::test_support::EnvRestore;
 
     #[test]
     fn fixture_replay_requires_explicit_env_opt_in() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let unset = EnvRestore::unset(AGENT_EVAL_FIXTURE_ENV);
+        let unset = EnvRestore::remove(AGENT_EVAL_FIXTURE_ENV);
         assert!(!eval_fixture_replay_allowed());
         drop(unset);
 
