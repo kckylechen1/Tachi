@@ -1331,6 +1331,7 @@ dependencies = [
  "libc",
  "libsimple",
  "memory-core",
+ "memory-server-i18n",
  "memory-server-params",
  "memory-server-rescue",
  "memory-server-runtime",
@@ -1357,6 +1358,10 @@ dependencies = [
  "url",
  "uuid",
 ]
+
+[[package]]
+name = "memory-server-i18n"
+version = "1.6.4"
 
 [[package]]
 name = "memory-server-params"

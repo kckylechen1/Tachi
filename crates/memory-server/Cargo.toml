@@ -6,6 +6,7 @@ license = "AGPL-3.0-only"
 
 [dependencies]
 memory-core = { path = "../memory-core" }
+memory-server-i18n = { path = "../memory-server-i18n" }
 memory-server-params = { path = "../memory-server-params" }
 memory-server-rescue = { path = "../memory-server-rescue" }
 memory-server-runtime = { path = "../memory-server-runtime" }
