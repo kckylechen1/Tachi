@@ -5,6 +5,7 @@ pub(super) async fn handle_tachi_skill_facade(
     params: TachiSkillParams,
 ) -> Result<String, String> {
     let action = params.action.to_ascii_lowercase();
+    reject_delegate_skill_action(server, &action)?;
     let raw = match action.as_str() {
         "discover" => {
             let discover_params = HubDiscoverParams {
@@ -161,6 +162,19 @@ pub(super) async fn handle_tachi_skill_facade(
         )),
     }?;
     normalize_skill_response(&action, &raw)
+}
+
+fn reject_delegate_skill_action(server: &MemoryServer, action: &str) -> Result<(), String> {
+    if server
+        .active_tool_profile()
+        .is_some_and(|profile| profile.as_str() == "delegate")
+        && !matches!(action, "discover" | "run" | "bundle")
+    {
+        return Err(format!(
+            "tachi_skill(action='{action}') is not available to delegate tool profiles; use 'discover', 'run', or 'bundle'."
+        ));
+    }
+    Ok(())
 }
 
 fn normalize_skill_response(action: &str, raw: &str) -> Result<String, String> {

@@ -180,6 +180,7 @@ fn delegate_profile_restricts_to_allow_list() {
             test_tool("tachi_browse"),
             test_tool("tachi_unstick"),
             test_tool("tachi_complete"),
+            test_tool("tachi_skill"),
             test_tool("run_skill"),
             // Old tools that should be excluded from delegate
             test_tool("tachi_search"),
@@ -213,6 +214,7 @@ fn delegate_profile_restricts_to_allow_list() {
             "tachi_browse".to_string(),
             "tachi_unstick".to_string(),
             "tachi_complete".to_string(),
+            "tachi_skill".to_string(),
             "run_skill".to_string(),
         ]
     );

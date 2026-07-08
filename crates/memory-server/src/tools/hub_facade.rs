@@ -110,7 +110,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Discover available capabilities (skills, plugins, MCP servers) in the Hub."
+        description = "Discover available Hub capabilities across skills, plugins, and MCP servers. For skill workflow discovery, prefer canonical tachi_skill(action='discover'); this direct hub_discover route remains callable for general Hub/backcompat use."
     )]
     pub(crate) async fn hub_discover(
         &self,

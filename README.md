@@ -306,7 +306,7 @@ Memories are stored under `path` namespaces (e.g. `/user/preferences`, `/project
 Local-first secret storage: Argon2id KDF + AES-256-GCM, per-secret nonces, auto-lock after inactivity, brute-force protection, per-secret agent ACLs, and multi-key rotation. Project-local agents can resolve Vault secrets via `.tachi/vault.env` aliases. See [`docs/INSTALL.md`](docs/INSTALL.md).
 
 ### 6. Tachi Hub & Skill Packs
-Register MCP servers, skills, and toolchains once; any connected agent can discover and call them. `pack_register` / `pack_project` install curated skill collections and project them to Claude, Cursor, Codex, Gemini, and OpenCode formats. `run_skill` executes a skill as a native MCP tool.
+Register MCP servers, skills, and toolchains once; any connected agent can discover and call them. `pack_register` / `pack_project` install curated skill collections and project them to Claude, Cursor, Codex, Gemini, and OpenCode formats. `tachi_skill(action="discover"|"run"|"bundle")` is the canonical skill facade; standalone `run_skill`, `prepare_capability_bundle`, and skill-focused `hub_discover` calls remain compatibility routes for older clients.
 
 Read-only diagnostics help keep those surfaces aligned:
 
@@ -373,7 +373,7 @@ Tachi exposes a filtered MCP surface based on `TACHI_PROFILE`. The full `admin` 
 | `standard` | Daily facade surface: `tachi_save`, `tachi_memory`, `tachi_task`, `tachi_arena`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `vault_status`, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. | IDE agents: Claude, Cursor, Codex, Windsurf, Trae, Antigravity. |
 | `coordinate` | `remember` + `coordinate` bundles: adds `handoff_*`, `post_card`, `check_inbox`, `update_card`, `approve_merge`, `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`; dispatch runs through `tachi_task(action='dispatch')`. | Leader/orchestrator agents that dispatch work and coordinate across agents. |
 | `operate` | `remember` + `operate` bundles: adds Foundry lifecycle, `agent_register`, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters, OpenClaw, ops automation. |
-| `delegate` | Curated 7-tool surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_complete`, `run_skill`. | Worker subagents spawned by `tachi_task(action='dispatch')`. No dispatch, no handoff. |
+| `delegate` | Curated worker surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_complete`, `tachi_skill(action='discover'|'run'|'bundle')`, plus legacy compatibility `run_skill`. | Worker subagents spawned by `tachi_task(action='dispatch')`. No dispatch, no handoff, no skill candidate registration. |
 | `admin` | Full catalog. | Maintenance, development, and governance. |
 
 Host aliases are resolved automatically: `claude`, `claude-code`, `codex`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity` → `standard`; `worker`, `subagent`, `delegate` → `delegate`; `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`.
