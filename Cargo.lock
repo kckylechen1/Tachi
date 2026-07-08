@@ -1332,6 +1332,7 @@ dependencies = [
  "libsimple",
  "memory-core",
  "memory-server-capture-gate",
+ "memory-server-manifest-audit",
  "memory-server-params",
  "memory-server-prompt-envelope",
  "memory-server-rescue",
@@ -1370,6 +1371,14 @@ dependencies = [
 [[package]]
 name = "memory-server-i18n"
 version = "1.6.4"
+
+[[package]]
+name = "memory-server-manifest-audit"
+version = "1.6.4"
+dependencies = [
+ "serde",
+ "tempfile",
+]
 
 [[package]]
 name = "memory-server-params"

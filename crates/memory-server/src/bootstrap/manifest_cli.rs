@@ -447,7 +447,7 @@ fn run_audit_projects(
     git_root: Option<&PathBuf>,
     manifest_path: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    use crate::manifest_audit::{build_plan, gather_project_inputs, render_plan};
+    use memory_server_manifest_audit::{build_plan, gather_project_inputs, render_plan};
 
     let projects_dir = app_home.join("projects");
 
