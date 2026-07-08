@@ -5,6 +5,7 @@ fn open_ro(db: &PathBuf) -> Result<Connection, Box<dyn std::error::Error>> {
     Ok(Connection::open(db)?)
 }
 
+#[allow(clippy::collapsible_str_replace)]
 fn truncate(s: &str, n: usize) -> String {
     let s = s.replace(['\n', '\r'], " ");
     if s.chars().count() <= n {

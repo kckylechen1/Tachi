@@ -2,8 +2,6 @@
 //! Invoked via `tachi hub <subcommand>`.
 //! Extracted from memory-server (#833).
 
-#![allow(clippy::collapsible_str_replace)]
-
 use std::path::{Path, PathBuf};
 
 use tachi_bootstrap::cli::HubAction;
@@ -24,7 +22,7 @@ pub(crate) fn expand_path(raw: &str) -> PathBuf {
     }
 }
 
-pub fn resolve_hub_db(db_override: Option<&PathBuf>, app_home: &Path) -> PathBuf {
+pub fn resolve_hub_db(db_override: Option<&Path>, app_home: &Path) -> PathBuf {
     if let Some(p) = db_override {
         return expand_path(p.to_string_lossy().as_ref());
     }
