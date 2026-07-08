@@ -327,20 +327,25 @@ pub(crate) fn read_distill_marker(app_home: &Path) -> Option<DistillMarkerStatus
     // Two on-disk formats. New: a JSON object `{"ts": <rfc3339>, "groups_distilled": …}`.
     // Legacy: a bare RFC3339 timestamp. A bare timestamp is not valid JSON (the `-`
     // after the year breaks number parsing), so `from_str` cleanly rejects it.
-    let (last_run_at, groups_distilled, groups_skipped, fallback_used, errors) =
+    let (last_run_at, groups_distilled, groups_skipped, fallback_used, errors, error_reason) =
         match serde_json::from_str::<serde_json::Value>(trimmed) {
             Ok(v) if v.get("ts").and_then(|t| t.as_str()).is_some() => {
                 let ts = v["ts"].as_str().unwrap_or_default().to_string();
                 let field = |k: &str| v.get(k).and_then(|x| x.as_u64()).map(|n| n as usize);
+                let err_reason = v
+                    .get("error")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
                 (
                     ts,
                     field("groups_distilled"),
                     field("groups_skipped"),
                     field("fallback_used"),
                     field("errors"),
+                    err_reason,
                 )
             }
-            _ => (trimmed.to_string(), None, None, None, None),
+            _ => (trimmed.to_string(), None, None, None, None, None),
         };
     let dt = DateTime::parse_from_rfc3339(&last_run_at)
         .ok()?
@@ -357,5 +362,6 @@ pub(crate) fn read_distill_marker(app_home: &Path) -> Option<DistillMarkerStatus
         groups_skipped,
         fallback_used,
         errors,
+        error_reason,
     })
 }

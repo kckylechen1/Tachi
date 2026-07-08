@@ -127,14 +127,26 @@ pub(crate) fn calculate_health_deductions(
             labels_for(dbs, |db| db.vector_orphans > 0)
         ),
     );
-    if distill_marker.map(|m| m.is_stale).unwrap_or(true) {
+    // Stale marker OR a fresh failure marker (error_reason present but not yet
+    // stale) both warrant a deduction. Without the error_reason branch, a just-
+    // failed distill would be invisible for 36h until the marker ages past stale.
+    let needs_deduction = distill_marker
+        .map(|m| m.is_stale || m.error_reason.is_some())
+        .unwrap_or(true);
+    if needs_deduction {
         push_deduction(
             &mut deductions,
             "stale_distill_marker",
             "stale distill marker",
             10,
             distill_marker
-                .map(|marker| format!("last distill marker is stale: {}", marker.age))
+                .map(|marker| {
+                    if let Some(reason) = &marker.error_reason {
+                        format!("last distill failed: {reason} ({})", marker.age)
+                    } else {
+                        format!("last distill marker is stale: {}", marker.age)
+                    }
+                })
                 .unwrap_or_else(|| "no distill marker found".to_string()),
         );
     }

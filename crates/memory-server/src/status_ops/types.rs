@@ -222,4 +222,9 @@ pub(crate) struct DistillMarkerStatus {
     /// whole run). These never surface as foundry_jobs rows, so they are the one
     /// distill failure signal that is otherwise invisible to health.
     pub(crate) errors: Option<usize>,
+    /// When the entire batch failed (e.g. provider down, lock contention), the
+    /// scheduler writes a failure marker with this error string. Lets
+    /// `tachi_status` distinguish "stale because it failed: <reason>" from a
+    /// bare "stale" — closing the remediation loop.
+    pub(crate) error_reason: Option<String>,
 }

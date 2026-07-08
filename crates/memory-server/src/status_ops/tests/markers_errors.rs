@@ -60,6 +60,7 @@ fn distill_hard_errors_dock_health_but_fallbacks_do_not() {
         groups_skipped: Some(4),
         fallback_used: Some(9),
         errors: Some(0),
+        error_reason: None,
     };
     let with_errors = DistillMarkerStatus {
         errors: Some(2),
@@ -115,5 +116,58 @@ fn infer_provider_from_auth_error_maps_real_failures() {
     assert_eq!(
         status_health::infer_provider_from_auth_error("network timeout"),
         None
+    );
+}
+
+#[test]
+fn read_distill_marker_parses_error_field() {
+    let app_home = tempfile::tempdir().expect("temp app home");
+    let runs = app_home.path().join("foundry-runs");
+    std::fs::create_dir_all(&runs).expect("runs dir");
+    // Failure marker written by the scheduler when the batch errors.
+    std::fs::write(
+        runs.join(".last_distill_run"),
+        serde_json::json!({
+            "ts": Utc::now().to_rfc3339(),
+            "error": "provider timeout after 30s",
+            "groups_distilled": 0,
+            "groups_skipped": 0,
+            "fallback_used": 0,
+            "errors": 0,
+        })
+        .to_string(),
+    )
+    .expect("write failure marker");
+
+    let marker = read_distill_marker(app_home.path()).expect("failure marker parsed");
+    assert_eq!(
+        marker.error_reason,
+        Some("provider timeout after 30s".to_string()),
+        "error_reason must be parsed from the failure marker"
+    );
+    assert_eq!(marker.groups_distilled, Some(0));
+    assert!(!marker.is_stale, "fresh failure marker is not stale by age");
+}
+
+#[test]
+fn read_distill_marker_error_field_absent_for_success_marker() {
+    let app_home = tempfile::tempdir().expect("temp app home");
+    let runs = app_home.path().join("foundry-runs");
+    std::fs::create_dir_all(&runs).expect("runs dir");
+    std::fs::write(
+        runs.join(".last_distill_run"),
+        serde_json::json!({
+            "ts": Utc::now().to_rfc3339(),
+            "groups_distilled": 5,
+            "errors": 0,
+        })
+        .to_string(),
+    )
+    .expect("write success marker");
+
+    let marker = read_distill_marker(app_home.path()).expect("success marker parsed");
+    assert_eq!(
+        marker.error_reason, None,
+        "success marker must have error_reason = None"
     );
 }

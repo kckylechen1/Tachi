@@ -354,7 +354,38 @@ pub(super) fn report_pipeline_and_spawn_daily_distill(
                                 );
                             }
                         }
-                        Err(err) => eprintln!("[distill] daily batch error: {err}"),
+                        Err(err) => {
+                            eprintln!("[distill] daily batch error: {err}");
+                            // Write a failure marker so `tachi_status` can surface
+                            // the *reason* the marker is stale instead of a bare
+                            // "stale" that repeats day after day with no owner.
+                            // Same JSON shape as the success marker plus `error`;
+                            // read_distill_marker is backward-compatible.
+                            if let Some(parent) = marker.parent() {
+                                if let Err(mk_err) = tokio::fs::create_dir_all(parent).await {
+                                    eprintln!(
+                                        "[distill] failed to create marker directory {}: {mk_err}",
+                                        parent.display()
+                                    );
+                                    return;
+                                }
+                            }
+                            let marker_body = serde_json::json!({
+                                "ts": chrono::Utc::now().to_rfc3339(),
+                                "error": err.to_string(),
+                                "groups_distilled": 0,
+                                "groups_skipped": 0,
+                                "fallback_used": 0,
+                                "errors": 0,
+                            })
+                            .to_string();
+                            if let Err(write_err) = tokio::fs::write(&marker, marker_body).await {
+                                eprintln!(
+                                    "[distill] failed to write failure marker {}: {write_err}",
+                                    marker.display()
+                                );
+                            }
+                        }
                     }
                 }
             };
