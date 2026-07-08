@@ -110,6 +110,8 @@ pub(super) async fn run_backfill_vectors(
     let batch_size = batch_size.min(128).max(1);
     let total_missing = entries.len();
     let mut processed = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
     let mut last_error = None;
 
     println!("\nBackfilling {total_missing} entries (batch_size={batch_size})...\n");
@@ -119,31 +121,28 @@ pub(super) async fn run_backfill_vectors(
 
     for chunk in entries.chunks(batch_size) {
         match embed_and_write_batch(&mut store, &llm, chunk).await {
-            Ok(n) => {
-                processed += n;
+            Ok(outcome) => {
+                processed += outcome.written_count;
+                skipped += outcome.skipped_count;
+                failed += outcome.failed_count;
                 println!("  [{processed}/{total_missing}] ✓ batch of {}", chunk.len());
             }
             Err(e) => {
                 eprintln!("  ERROR: {e}");
                 eprintln!("  Stopping. {processed} entries saved successfully.");
+                failed += 1;
                 last_error = Some(e);
                 break;
             }
         }
 
-        if processed < total_missing {
+        if processed + skipped + failed < total_missing {
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
     }
 
     let (total, final_vec) = store.vector_stats()?;
-    record_cli_vector_sweep_state(
-        db_path,
-        skip_recall_cache,
-        processed,
-        total_missing.saturating_sub(processed),
-        last_error,
-    );
+    record_cli_vector_sweep_state(db_path, skip_recall_cache, processed, failed, last_error);
     println!("\n✅ Done! Vectors: {with_vec} → {final_vec} / {total}");
     Ok(())
 }
@@ -155,6 +154,11 @@ fn record_cli_vector_sweep_state(
     failed_count: usize,
     last_error: Option<String>,
 ) {
+    let failed_count = if last_error.is_some() && failed_count == 0 {
+        1
+    } else {
+        failed_count
+    };
     let lower_error = last_error.as_deref().map(str::to_ascii_lowercase);
     let last_provider_error = lower_error
         .as_deref()
@@ -523,7 +527,7 @@ pub(super) async fn run_backfill_fts(
 
 #[cfg(test)]
 mod tests {
-    use super::{durable_vector_counts, run_backfill_vectors};
+    use super::{durable_vector_counts, record_cli_vector_sweep_state, run_backfill_vectors};
     use memory_core::MemoryStore;
     use rusqlite::params;
     use std::path::Path;
@@ -698,6 +702,46 @@ mod tests {
         assert_eq!(after.sqlite_master, before.sqlite_master);
         assert_eq!(after.hard_state, before.hard_state);
         assert_eq!(after.sibling_files, before.sibling_files);
+    }
+
+    #[test]
+    fn cli_sweep_state_does_not_count_benign_skips_as_failures() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("cli-benign-skip-state.db");
+        MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+
+        record_cli_vector_sweep_state(&db_path, true, 3, 0, None);
+
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("state recorded");
+        assert_eq!(state.embedded_count, 3);
+        assert_eq!(
+            state.failed_count, 0,
+            "benign skipped CLI rows remain pending, not failed"
+        );
+        assert_eq!(state.last_error, None);
+        assert_eq!(state.last_provider_error, None);
+    }
+
+    #[test]
+    fn cli_sweep_state_counts_real_row_failures_without_error() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("cli-row-failure-state.db");
+        MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+
+        record_cli_vector_sweep_state(&db_path, true, 3, 1, None);
+
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("state recorded");
+        assert_eq!(state.embedded_count, 3);
+        assert_eq!(
+            state.failed_count, 1,
+            "real CLI row failures are recorded even when the sweep completes"
+        );
+        assert_eq!(state.last_error, None);
+        assert_eq!(state.last_provider_error, None);
     }
 
     #[tokio::test]
