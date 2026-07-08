@@ -1,9 +1,7 @@
 use super::super::capture::persist_capture_entry;
 use super::super::helpers::{normalize_path_prefix_value, path_is_within_prefix, round3};
 use super::super::maintenance::with_foundry_store_read;
-use super::super::recall::{
-    rerank_rows_with_outcome, value_id, value_path, value_relevance, value_topic,
-};
+use super::super::recall::{value_id, value_path, value_relevance, value_topic};
 use super::super::{
     FoundryMaintenanceItem, FOUNDRY_RECALL_RERANK_CACHE_SOURCE,
     FOUNDRY_RECALL_RERANK_CANDIDATE_MULTIPLIER, FOUNDRY_RECALL_RERANK_TOP_K,
@@ -12,6 +10,7 @@ use super::config::{durable_recall_cache_enabled, recall_cache_write_path};
 use super::queries::resolve_recall_cache_queries;
 use super::search::search_rows_for_recall_cache;
 use super::text::build_recall_cache_text;
+use crate::memory_search_ops::rerank_rows_with_outcome;
 use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::SearchMemoryParams;
 use crate::utils::{sanitize_safe_path_name, stable_hash};

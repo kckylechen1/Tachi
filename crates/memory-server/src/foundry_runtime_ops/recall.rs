@@ -1,10 +1,10 @@
 use super::helpers::{
     build_foundry_agent_root, build_openclaw_agent_root, dedup_strings,
-    normalize_path_prefix_value, path_is_within_prefix, round3,
+    normalize_path_prefix_value, path_is_within_prefix,
 };
-use super::{CompactContextDraft, RecallScope, RerankOutcome, SessionCaptureDraft};
+use super::{CompactContextDraft, RecallScope, SessionCaptureDraft};
 use crate::server_state::MemoryServer;
-use serde_json::{json, Value};
+use serde_json::Value;
 use tachi_foundry::build_foundry_distill_root;
 
 fn value_text(row: &Value) -> String {
@@ -65,116 +65,6 @@ fn value_string_array(row: &Value, key: &str) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
-}
-
-pub(super) fn build_rerank_document(row: &Value) -> String {
-    let text = value_text(row);
-    let topic = value_topic(row);
-    let keywords = value_string_array(row, "keywords");
-    [text, topic, keywords.join(", ")]
-        .into_iter()
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Provisional: minimum fraction of `top_k` hybrid-head items guaranteed to
-/// survive rerank. Lower = more promotion room for tail items; raise to protect
-/// more head items. Named threshold per AGENTS.md; tunable.
-const HYBRID_HEAD_FRACTION: f64 = 0.5;
-
-/// Stamp the relevance fields so the value rendered into agent context matches
-/// the actual sort key. `relevance`/`score.final` reflect `blend_score` (the key
-/// the output is ordered by); `rerank_score` keeps the raw provider signal for
-/// observability when present.
-fn apply_blend_relevance(mut row: Value, blend_score: f64, rerank_score: Option<f64>) -> Value {
-    let blend = round3(blend_score);
-    if let Value::Object(map) = &mut row {
-        map.insert("relevance".into(), json!(blend));
-        if let Some(raw) = rerank_score {
-            map.insert("rerank_score".into(), json!(round3(raw)));
-        }
-        if let Some(Value::Object(score_map)) = map.get_mut("score") {
-            score_map.insert("final".into(), json!(blend));
-        }
-    }
-    row
-}
-
-pub(super) fn merge_rerank_order_with_hybrid_floor(
-    rows: &[Value],
-    order: &[(usize, f64)],
-    top_k: usize,
-) -> Vec<Value> {
-    let output_len = top_k.min(rows.len());
-    if output_len == 0 {
-        return Vec::new();
-    }
-
-    // rerank_by_index: index -> (rerank_rank, provider_score). Keep first
-    // occurrence per index; rerank_rank is the 1-based enumerate position.
-    let mut rerank_by_index: std::collections::HashMap<usize, (usize, f64)> =
-        std::collections::HashMap::new();
-    for (rerank_rank, &(index, score)) in order.iter().enumerate() {
-        if index < rows.len() {
-            rerank_by_index
-                .entry(index)
-                .or_insert((rerank_rank + 1, score));
-        }
-    }
-    let missing_rerank_rank = rows.len() + 1;
-
-    // blend_score = reciprocal rank fusion of hybrid rank and rerank rank.
-    let blend_score = |index: usize| -> f64 {
-        let original_rank = index + 1;
-        let rerank_rank = rerank_by_index
-            .get(&index)
-            .map(|(rank, _)| *rank)
-            .unwrap_or(missing_rerank_rank);
-        (1.0 / original_rank as f64) + (1.0 / rerank_rank as f64)
-    };
-
-    // Seatbelt: a guaranteed prefix of the hybrid head always survives, but its
-    // position may shift down if tail items out-score it. head_floor is strictly
-    // <= output_len, leaving room for tail promotions.
-    let head_floor = ((output_len as f64) * HYBRID_HEAD_FRACTION).round() as usize;
-    let head_floor = head_floor.min(output_len);
-
-    // Guaranteed head indices 0..head_floor.
-    let mut selected: Vec<usize> = (0..head_floor).collect();
-
-    // Remaining slots filled by the top blend-scoring indices from the pool
-    // head_floor..rows.len() (tail + any non-guaranteed head).
-    let remaining = output_len.saturating_sub(head_floor);
-    if remaining > 0 {
-        let mut pool: Vec<usize> = (head_floor..rows.len()).collect();
-        pool.sort_by(|&a, &b| {
-            blend_score(b)
-                .partial_cmp(&blend_score(a))
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.cmp(&b))
-        });
-        for index in pool.into_iter().take(remaining) {
-            selected.push(index);
-        }
-    }
-
-    // Order the selected set by blend_score descending (stable tiebreak: index
-    // ascending) for the final output sequence.
-    selected.sort_by(|&a, &b| {
-        blend_score(b)
-            .partial_cmp(&blend_score(a))
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.cmp(&b))
-    });
-
-    selected
-        .into_iter()
-        .map(|index| {
-            let rerank_score = rerank_by_index.get(&index).map(|(_, score)| *score);
-            apply_blend_relevance(rows[index].clone(), blend_score(index), rerank_score)
-        })
-        .collect()
 }
 
 pub(super) fn build_prepend_context(rows: &[Value]) -> String {
@@ -341,45 +231,6 @@ pub(super) fn parse_session_capture_response(
         .into_iter()
         .filter(|draft| !draft.text.trim().is_empty())
         .collect())
-}
-
-pub(crate) async fn rerank_rows_with_outcome(
-    server: &MemoryServer,
-    query: &str,
-    rows: Vec<Value>,
-    top_k: usize,
-) -> (Vec<Value>, RerankOutcome) {
-    if rows.len() <= 1 {
-        return (
-            rows.into_iter().take(top_k).collect(),
-            RerankOutcome::NotNeeded,
-        );
-    }
-
-    let docs = rows.iter().map(build_rerank_document).collect::<Vec<_>>();
-    match server.llm.rerank_voyage(query, &docs, top_k).await {
-        Ok(order) => {
-            let out = merge_rerank_order_with_hybrid_floor(&rows, &order, top_k);
-            let outcome = if out.is_empty() {
-                RerankOutcome::Fallback
-            } else {
-                RerankOutcome::Applied
-            };
-            let rows = if out.is_empty() {
-                rows.into_iter().take(top_k).collect()
-            } else {
-                out
-            };
-            (rows, outcome)
-        }
-        Err(err) => {
-            tracing::warn!("[recall_context] rerank failed, falling back to hybrid ranking: {err}");
-            (
-                rows.into_iter().take(top_k).collect(),
-                RerankOutcome::Fallback,
-            )
-        }
-    }
 }
 
 pub(super) fn resolve_recall_scope(
