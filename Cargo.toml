@@ -5,6 +5,7 @@ members = [
     "crates/memory-server",
     "crates/memory-server-capture-gate",
     "crates/memory-server-i18n",
+    "crates/memory-server-manifest-audit",
     "crates/memory-server-params",
     "crates/memory-server-prompt-envelope",
     "crates/memory-server-rescue",
