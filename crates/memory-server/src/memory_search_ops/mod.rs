@@ -12,7 +12,8 @@ mod text_scrub;
 pub(crate) use confidence_reinforce::apply_confidence_reinforcement_links;
 pub(crate) use contradiction::apply_auto_contradiction_detection;
 pub(crate) use rerank::{
-    apply_search_rerank_policy, expand_search_params_for_rerank, SearchRerankPolicy,
+    apply_search_rerank_policy, expand_search_params_for_rerank, rerank_rows_with_outcome,
+    RerankOutcome, SearchRerankPolicy,
 };
 pub(crate) use save_memory::handle_remember;
 pub(crate) use save_memory::handle_save_memory;

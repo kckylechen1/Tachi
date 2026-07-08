@@ -11,15 +11,7 @@ mod recall;
 mod recall_cache;
 pub(crate) mod wiki_evolver;
 
-pub(crate) use recall::rerank_rows_with_outcome;
 pub(crate) use tachi_foundry::FOUNDRY_DISTILL_SOURCE;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RerankOutcome {
-    Applied,
-    Fallback,
-    NotNeeded,
-}
 
 #[cfg(test)]
 mod tests;

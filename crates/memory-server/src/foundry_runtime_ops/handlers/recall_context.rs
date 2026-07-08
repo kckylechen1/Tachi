@@ -1,10 +1,9 @@
 use super::super::helpers::path_is_within_prefix;
 use super::super::recall::{
-    build_prepend_context, build_wiki_context, rerank_rows_with_outcome, resolve_recall_scope,
-    value_id, value_path, value_relevance, value_topic,
+    build_prepend_context, build_wiki_context, resolve_recall_scope, value_id, value_path,
+    value_relevance, value_topic,
 };
-use super::super::RerankOutcome;
-use crate::memory_search_ops::search_memory_rows;
+use crate::memory_search_ops::{rerank_rows_with_outcome, search_memory_rows, RerankOutcome};
 use crate::server_state::MemoryServer;
 use crate::tool_params::{RecallContextParams, SearchMemoryParams};
 use crate::utils::stable_hash;
