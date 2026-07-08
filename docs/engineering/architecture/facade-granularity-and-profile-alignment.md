@@ -136,7 +136,7 @@ Two important nuances:
 
 | dispatch profile | worker's tool_profile |
 | :--- | :--- |
-| claude_plan / glm_51_impl / opencode_builder | `delegate` (doers) |
+| claude_plan / glm_impl / opencode_builder | `delegate` (doers) |
 | codex_55_review | `standard` (needs to see more) |
 | kimi_arch / deepseek_explore / kimi_ux | `observe` (read-only review/exploration) |
 

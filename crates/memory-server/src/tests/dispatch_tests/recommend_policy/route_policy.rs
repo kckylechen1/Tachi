@@ -108,7 +108,7 @@ async fn tachi_task_route_simulate_compares_policy_variants_from_live_eval() {
         .expect("quality-first fix route");
 
     assert_eq!(cost_choice["profile"], json!("opencode_builder"));
-    assert_eq!(quality_choice["profile"], json!("glm_51_impl"));
+    assert_eq!(quality_choice["profile"], json!("glm_impl"));
     assert!(
         cost_sensitive["caveats"]
             .as_array()

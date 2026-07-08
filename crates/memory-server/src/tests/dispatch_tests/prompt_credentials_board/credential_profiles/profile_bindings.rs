@@ -167,7 +167,7 @@ async fn dispatch_profile_declared_credentials_respect_profile_allowlist() {
         .expect("vault_set should succeed");
 
     let mut params = dispatch_params(None, "should fail before spawn");
-    params.profile = Some("glm_51_impl".to_string());
+    params.profile = Some("glm_impl".to_string());
     params.cwd = Some(project.path().to_string_lossy().to_string());
     params.credential_profiles = vec!["opencode_shared".to_string()];
     params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
@@ -176,7 +176,7 @@ async fn dispatch_profile_declared_credentials_respect_profile_allowlist() {
         .await
         .expect_err("non-allowed selected profile should be denied before spawn");
     assert!(err.contains("denied_consumer"), "unexpected error: {err}");
-    assert!(err.contains("glm_51_impl"), "unexpected error: {err}");
+    assert!(err.contains("glm_impl"), "unexpected error: {err}");
     assert!(
         !err.contains("denied-profile-secret-value"),
         "error must not leak secret value: {err}"
@@ -232,7 +232,7 @@ async fn dispatch_profile_credentials_can_allow_backend_agent_name() {
         .expect("vault_set should succeed");
 
     let mut params = dispatch_params(None, "profile selected but agent allowlist is backend");
-    params.profile = Some("glm_51_impl".to_string());
+    params.profile = Some("glm_impl".to_string());
     params.cwd = Some(project.path().to_string_lossy().to_string());
     params.credential_profiles = vec!["backend_agent_profile".to_string()];
     params.command = vec![

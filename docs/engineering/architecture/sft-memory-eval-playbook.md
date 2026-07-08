@@ -73,8 +73,10 @@ Use production eval rows for actual agent outcomes:
 
 ```json
 {
-  "agent": "glm-5.1",
-  "model": "zhipuai-coding-plan/glm-5.1",
+  "agent": "glm",
+  "profile": "glm_impl",
+  "model_alias": "glm_coding",
+  "model": "zhipuai-coding-plan/glm-5.2",
   "task_type": "execution",
   "completion_status": "completed",
   "verification_present": true,
@@ -176,7 +178,7 @@ Treat this as an initial policy, not a final leaderboard:
 | Role | Primary | Fallback |
 |---|---|---|
 | search/explore/librarian | DeepSeek V4 Flash | Kimi K2P6 |
-| execution/worker | GLM 5.1 | DeepSeek V4 Pro |
+| execution/worker | GLM coding lane (`glm_coding`, currently GLM-5.2) | DeepSeek V4 Pro |
 | quick | Kimi K2P6 | GPT Spark |
 | architecture/long-context challenge | Kimi K2P6 / kimi-for-coding | GPT frontier |
 | critic/reviewer | DeepSeek V4 Pro | GPT frontier |

@@ -68,7 +68,7 @@ fn resolve_vaccination_lane(params: &TachiDispatchParams) -> Option<(String, Str
         .as_deref()
         .filter(|s| !s.trim().is_empty())
         .map(str::to_string)
-        .or_else(|| profile_def.and_then(|p| p.model).map(str::to_string));
+        .or_else(|| profile_def.and_then(tachi_dispatch::profile_resolved_model));
     let vendor = tachi_dispatch::normalize_vendor(&backend, model.as_deref());
     if vendor == "unknown" {
         return None;

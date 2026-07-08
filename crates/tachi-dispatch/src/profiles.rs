@@ -41,6 +41,7 @@ pub struct DispatchProfileDef {
     pub role: &'static str,
     pub stage: Option<&'static str>,
     pub model: Option<&'static str>,
+    pub model_alias: Option<&'static str>,
     pub tool_profile: &'static str,
     pub inject_tachi_mcp: bool,
     pub inject_hub_mcps: bool,
@@ -67,6 +68,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         role: "planner",
         stage: Some("plan"),
         model: None,
+        model_alias: None,
         tool_profile: "delegate",
         inject_tachi_mcp: true,
         inject_hub_mcps: false,
@@ -94,12 +96,13 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         weak_against: &["direct_execution", "merge"],
     },
     DispatchProfileDef {
-        name: "glm_51_impl",
-        display_name: "GLM 5.1 Implementer",
+        name: "glm_impl",
+        display_name: "GLM Implementer",
         backend: "custom",
         role: "executor",
         stage: Some("execute"),
-        model: Some("zhipuai-coding-plan/glm-5.1"),
+        model: None,
+        model_alias: Some(crate::GLM_CODING_MODEL_ALIAS),
         tool_profile: "delegate",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -123,7 +126,8 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         backend: "opencode",
         role: "executor",
         stage: Some("execute"),
-        model: Some("zhipuai-coding-plan/glm-5.1"),
+        model: None,
+        model_alias: Some(crate::GLM_CODING_MODEL_ALIAS),
         tool_profile: "delegate",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -152,6 +156,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         role: "senior_reviewer",
         stage: Some("review"),
         model: None,
+        model_alias: None,
         tool_profile: "standard",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -190,6 +195,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         role: "fast_checker",
         stage: Some("review_light"),
         model: None,
+        model_alias: None,
         tool_profile: "observe",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -214,6 +220,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         role: "architect",
         stage: Some("plan_review"),
         model: None,
+        model_alias: None,
         tool_profile: "observe",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -238,6 +245,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         role: "explore",
         stage: Some("explore"),
         model: Some("deepseek/deepseek-v4-flash"),
+        model_alias: None,
         tool_profile: "observe",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -262,6 +270,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         role: "ux_researcher",
         stage: Some("review_light"),
         model: None,
+        model_alias: None,
         tool_profile: "observe",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -301,6 +310,21 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
     },
 ];
 
+#[derive(Debug, Clone, Copy)]
+pub struct DispatchProfileAlias {
+    pub alias: &'static str,
+    pub replacement: &'static str,
+    pub reason: &'static str,
+    pub release_window: &'static str,
+}
+
+pub const DISPATCH_PROFILE_ALIASES: &[DispatchProfileAlias] = &[DispatchProfileAlias {
+    alias: "glm_51_impl",
+    replacement: "glm_impl",
+    reason: "deprecated compatibility alias; GLM executor profiles now resolve through the glm_coding model card",
+    release_window: "one_release_window",
+}];
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ResolvedDispatchProfile {
     pub selected_profile: Option<String>,
@@ -318,10 +342,45 @@ pub struct ResolvedDispatchProfile {
 }
 
 pub fn resolve_dispatch_profile(raw: &str) -> Option<&'static DispatchProfileDef> {
-    let norm = raw.trim().to_ascii_lowercase();
+    let norm = canonical_profile_name(raw)?;
     DISPATCH_PROFILES
         .iter()
         .find(|profile| profile.name == norm)
+}
+
+pub fn dispatch_profile_alias(raw: &str) -> Option<&'static DispatchProfileAlias> {
+    let norm = raw.trim().to_ascii_lowercase();
+    DISPATCH_PROFILE_ALIASES
+        .iter()
+        .find(|alias| alias.alias == norm)
+}
+
+fn canonical_profile_name(raw: &str) -> Option<String> {
+    let norm = raw.trim().to_ascii_lowercase();
+    if norm.is_empty() {
+        return None;
+    }
+    Some(
+        dispatch_profile_alias(&norm)
+            .map(|alias| alias.replacement)
+            .unwrap_or(norm.as_str())
+            .to_string(),
+    )
+}
+
+pub fn profile_deprecated_aliases(profile: &DispatchProfileDef) -> Vec<&'static str> {
+    DISPATCH_PROFILE_ALIASES
+        .iter()
+        .filter(|alias| alias.replacement == profile.name)
+        .map(|alias| alias.alias)
+        .collect()
+}
+
+pub fn profile_resolved_model(profile: &DispatchProfileDef) -> Option<String> {
+    profile
+        .model_alias
+        .and_then(crate::resolve_dispatch_model)
+        .or_else(|| profile.model.map(str::to_string))
 }
 
 pub fn profile_host_adapter(profile: &DispatchProfileDef) -> Option<&'static str> {
@@ -329,7 +388,7 @@ pub fn profile_host_adapter(profile: &DispatchProfileDef) -> Option<&'static str
         "opencode" => Some("opencode"),
         // Compatibility path: older custom profiles with a model but no command
         // are still materialized as OpenCode CLI/serve commands by routing.
-        "custom" if profile.model.is_some() => Some("opencode"),
+        "custom" if profile.model.is_some() || profile.model_alias.is_some() => Some("opencode"),
         _ => None,
     }
 }
@@ -361,14 +420,17 @@ where
 {
     let mut route_explanation = Vec::new();
     let requested_agent = params.agent.clone().filter(|s| !s.trim().is_empty());
-    let profile = match params.profile.as_deref().filter(|s| !s.trim().is_empty()) {
+    let requested_profile = params.profile.clone().filter(|s| !s.trim().is_empty());
+    let alias = requested_profile
+        .as_deref()
+        .and_then(dispatch_profile_alias);
+    let profile = match requested_profile.as_deref() {
         Some(raw) => Some(resolve_dispatch_profile(raw).ok_or_else(|| {
             format!(
                 "Unknown dispatch profile '{}'. Supported: {}",
                 raw.trim(),
-                DISPATCH_PROFILES
-                    .iter()
-                    .map(|p| p.name)
+                supported_dispatch_profile_names()
+                    .into_iter()
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -376,7 +438,18 @@ where
         None => None,
     };
 
+    if let Some(alias) = alias {
+        params.profile = Some(alias.replacement.to_string());
+        route_explanation.push(format!(
+            "deprecated dispatch profile alias '{}' resolved to '{}'; {} ({})",
+            alias.alias, alias.replacement, alias.reason, alias.release_window
+        ));
+    }
+
     if let Some(profile) = profile {
+        if params.profile.as_deref() != Some(profile.name) {
+            params.profile = Some(profile.name.to_string());
+        }
         route_explanation.push(format!(
             "selected DispatchProfile '{}' ({})",
             profile.name, profile.role
@@ -395,7 +468,7 @@ where
             params.stage = profile.stage.map(str::to_string);
         }
         if params.model.is_none() {
-            params.model = profile.model.map(str::to_string);
+            params.model = profile_resolved_model(profile);
         }
         if profile_uses_opencode_adapter(profile) && params.command.is_empty() {
             apply_opencode_profile_command(
@@ -551,8 +624,7 @@ fn apply_opencode_profile_command<F>(
 where
     F: FnMut(&str) -> bool,
 {
-    let model = profile
-        .model
+    let model = profile_resolved_model(profile)
         .ok_or_else(|| format!("profile '{}' uses OpenCode but has no model", profile.name))?;
     let transport = params
         .harness_transport
@@ -588,7 +660,7 @@ where
                 "--agent".to_string(),
                 profile.role.to_string(),
                 "--model".to_string(),
-                model.to_string(),
+                model.clone(),
             ];
             route_explanation.push(format!(
                 "profile selected typed OpenCode serve transport for model '{}'",
@@ -602,7 +674,7 @@ where
                 "--pure".to_string(),
                 "run".to_string(),
                 "--model".to_string(),
-                model.to_string(),
+                model.clone(),
             ];
             route_explanation.push(format!(
                 "requested opencode serve at {server_url}, but readiness probe failed; falling back to opencode CLI for model '{model}'"
@@ -615,7 +687,7 @@ where
             "--pure".to_string(),
             "run".to_string(),
             "--model".to_string(),
-            model.to_string(),
+            model.clone(),
         ];
         route_explanation.push(format!(
             "profile selected typed OpenCode CLI transport for model '{}'",
@@ -623,6 +695,16 @@ where
         ));
     }
     Ok(())
+}
+
+fn supported_dispatch_profile_names() -> Vec<&'static str> {
+    let mut names = DISPATCH_PROFILES
+        .iter()
+        .map(|profile| profile.name)
+        .collect::<Vec<_>>();
+    names.extend(DISPATCH_PROFILE_ALIASES.iter().map(|alias| alias.alias));
+    names.sort_unstable();
+    names
 }
 
 pub fn profile_required_skill_ids(profile: &DispatchProfileDef) -> Vec<String> {
@@ -816,6 +898,31 @@ pub fn profile_json_with_loadout_and_evidence_contract(
     let moves = profile_card_moves_json(&skill_loadout);
     let personality = profile_card_personality_json(&stats);
     let archetype = profile_card_archetype(profile);
+    let model_card = profile
+        .model_alias
+        .and_then(crate::dispatch_model_card)
+        .map(|card| {
+            json!({
+                "alias": card.alias,
+                "vendor": card.vendor,
+                "role": card.role,
+                "default_model": card.default_model,
+                "env_override": card.env_override,
+            })
+        });
+    let deprecated_aliases = profile_deprecated_aliases(profile);
+    let deprecation_aliases = DISPATCH_PROFILE_ALIASES
+        .iter()
+        .filter(|alias| alias.replacement == profile.name)
+        .map(|alias| {
+            json!({
+                "alias": alias.alias,
+                "replacement": alias.replacement,
+                "reason": alias.reason,
+                "release_window": alias.release_window,
+            })
+        })
+        .collect::<Vec<_>>();
     let card_projection = json!({
         "status": if projected_weak_against.is_empty() && demotion_targets.is_empty() {
             "baseline"
@@ -833,7 +940,13 @@ pub fn profile_json_with_loadout_and_evidence_contract(
         "role": profile.role,
         "stage": profile.stage,
         "card_archetype": archetype,
-        "model": profile.model,
+        "model": profile_resolved_model(profile),
+        "model_alias": profile.model_alias,
+        "model_card": model_card,
+        "deprecated_aliases": deprecated_aliases,
+        "deprecation": {
+            "aliases": deprecation_aliases,
+        },
         "tool_profile": profile.tool_profile,
         "mcp_access": {
             "inject_tachi_mcp": profile.inject_tachi_mcp,
@@ -1009,7 +1122,7 @@ pub fn profile_card_archetype(profile: &DispatchProfileDef) -> &'static str {
 pub fn profile_mbit_stats(profile: &DispatchProfileDef) -> Value {
     let (precision, speed, cost, creativity, risk_control) = match profile.name {
         "claude_plan" => (86, 58, 65, 82, 88),
-        "glm_51_impl" => (78, 76, 52, 70, 72),
+        "glm_impl" => (78, 76, 52, 70, 72),
         "opencode_builder" => (74, 82, 48, 68, 70),
         "codex_55_review" => (95, 55, 72, 60, 95),
         "codex_53_fast" => (72, 92, 35, 52, 58),
@@ -1110,6 +1223,81 @@ pub fn dedupe_preserve_order(items: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn remove(key: &'static str) -> Self {
+            let original = std::env::var_os(key);
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, original }
+        }
+
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(value) = self.original.as_ref() {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn params(profile: &str) -> TachiDispatchParams {
+        TachiDispatchParams {
+            agent: None,
+            profile: Some(profile.to_string()),
+            task: "dispatch test".to_string(),
+            cwd: None,
+            skills: Vec::new(),
+            context_query: None,
+            model: None,
+            timeout_secs: 5,
+            permission_profile: None,
+            allowed_tools: Vec::new(),
+            max_turns: None,
+            sandbox: None,
+            inject_tachi_mcp: None,
+            inject_hub_mcps: None,
+            command: Vec::new(),
+            harness_transport: None,
+            harness_server_url: None,
+            project: None,
+            stage: None,
+            credential_profiles: Vec::new(),
+            issue_ref: None,
+            pr_ref: None,
+            flow_id: None,
+            tool_profile: None,
+            auto_capability_bundle: None,
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
+        }
+    }
 
     #[test]
     fn overlay_projection_preserves_profile_card_payload_shape() {
@@ -1154,5 +1342,86 @@ mod tests {
             card["mbit_card"]["demotion_targets"],
             json!([SUPERPOWER_EXECUTING_PLANS])
         );
+    }
+
+    #[test]
+    fn glm_profile_alias_resolves_to_current_model_card_profile() {
+        let _lock = env_lock();
+        let _env = EnvGuard::remove("TACHI_DISPATCH_GLM_CODING_MODEL");
+
+        let profile = resolve_dispatch_profile("glm_impl").expect("glm profile");
+        assert_eq!(profile.name, "glm_impl");
+        assert_eq!(profile.role, "executor");
+
+        let alias_profile = resolve_dispatch_profile("glm_51_impl").expect("compat alias");
+        assert_eq!(alias_profile.name, "glm_impl");
+
+        let mut params = params("glm_51_impl");
+        let resolved = resolve_and_apply_dispatch_profile(
+            &mut params,
+            |profile| Ok(profile_required_skill_ids(profile)),
+            |profile| Ok(profile_evidence_required(profile)),
+            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
+            |_| false,
+        )
+        .expect("compat alias should resolve");
+
+        assert_eq!(params.profile.as_deref(), Some("glm_impl"));
+        assert_eq!(params.model.as_deref(), Some("zhipuai-coding-plan/glm-5.2"));
+        assert_eq!(resolved.selected_profile.as_deref(), Some("glm_impl"));
+        assert!(resolved.route_explanation.iter().any(|line| {
+            line.contains("deprecated dispatch profile alias 'glm_51_impl'")
+                && line.contains("glm_impl")
+        }));
+    }
+
+    #[test]
+    fn glm_model_registry_supports_env_override_and_profile_json_metadata() {
+        let _lock = env_lock();
+        let _env = EnvGuard::set("TACHI_DISPATCH_GLM_CODING_MODEL", "zhipuai/glm-5.2-custom");
+
+        let profile = resolve_dispatch_profile("opencode_builder").expect("opencode profile");
+        let card = profile_json(profile);
+
+        assert_eq!(card["model"], json!("zhipuai/glm-5.2-custom"));
+        assert_eq!(card["model_alias"], json!("glm_coding"));
+        assert_eq!(card["model_card"]["vendor"], json!("glm"));
+        assert_eq!(
+            card["model_card"]["default_model"],
+            json!("zhipuai-coding-plan/glm-5.2")
+        );
+        assert_eq!(card["deprecated_aliases"], json!([]));
+
+        let glm_card = profile_json(resolve_dispatch_profile("glm_impl").unwrap());
+        assert_eq!(glm_card["name"], json!("glm_impl"));
+        assert_eq!(glm_card["model"], json!("zhipuai/glm-5.2-custom"));
+        assert_eq!(glm_card["model_card"]["role"], json!("executor"));
+        assert_eq!(glm_card["deprecated_aliases"], json!(["glm_51_impl"]));
+        assert_eq!(
+            glm_card["deprecation"]["aliases"][0]["replacement"],
+            json!("glm_impl")
+        );
+    }
+
+    #[test]
+    fn opencode_profile_command_materializes_registry_model() {
+        let _lock = env_lock();
+        let _env = EnvGuard::set("TACHI_DISPATCH_GLM_CODING_MODEL", "zhipuai/glm-5.2[1m]");
+        let mut params = params("opencode_builder");
+
+        resolve_and_apply_dispatch_profile(
+            &mut params,
+            |profile| Ok(profile_required_skill_ids(profile)),
+            |profile| Ok(profile_evidence_required(profile)),
+            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
+            |_| false,
+        )
+        .expect("opencode builder should resolve");
+
+        assert_eq!(params.model.as_deref(), Some("zhipuai/glm-5.2[1m]"));
+        assert!(params
+            .command
+            .windows(2)
+            .any(|pair| pair == ["--model", "zhipuai/glm-5.2[1m]"]));
     }
 }

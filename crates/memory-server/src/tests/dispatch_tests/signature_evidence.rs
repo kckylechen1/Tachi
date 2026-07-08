@@ -34,7 +34,7 @@ async fn g1_discrimination_glm_carries_security_clauses_codex_does_not() {
     // carries no vaccination clauses. This is the discrimination check — the
     // green assertions below fail if projection is a no-op.
     let mut glm = dispatch_params(None, "Security fix: harden the vault access check");
-    glm.profile = Some("glm_51_impl".to_string());
+    glm.profile = Some("glm_impl".to_string());
     glm.stage = Some("execute".to_string());
     let pre = crate::dispatch_ops::assemble_prompt(&server, &glm).await;
     assert!(
@@ -166,8 +166,7 @@ async fn g3_trust_flag_surfaces_for_glm_not_codex() {
     let server = make_server();
     seed_signature_taxonomy_evidence(&server).expect("seed taxonomy");
 
-    let glm =
-        crate::dispatch_profile::resolve_dispatch_profile("glm_51_impl").expect("glm profile");
+    let glm = crate::dispatch_profile::resolve_dispatch_profile("glm_impl").expect("glm profile");
     let codex = crate::dispatch_profile::resolve_dispatch_profile("codex_55_review")
         .expect("codex profile");
 

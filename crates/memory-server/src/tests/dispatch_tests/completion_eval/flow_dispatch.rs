@@ -12,7 +12,7 @@ async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
         dispatch_id,
         json!({
             "agent": "custom",
-            "profile": "glm_51_impl",
+            "profile": "glm_impl",
             "task": "implementation",
         }),
     )
@@ -24,7 +24,7 @@ async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
     complete_params.outcome = Some("success".to_string());
     complete_params.task_id = Some("eval-link-002".to_string());
     complete_params.task_type = Some("fix_request".to_string());
-    complete_params.profile = Some("glm_51_impl".to_string());
+    complete_params.profile = Some("glm_impl".to_string());
     complete_params.risk = Some("medium".to_string());
     complete_params.duration_ms = Some(1200);
     complete_params.skills_used = vec!["skill:superpowers-executing-plans".to_string()];
@@ -103,7 +103,7 @@ async fn tachi_complete_infers_task_agent_and_profile_from_dispatch_card() {
         dispatch_id,
         json!({
             "agent": "custom",
-            "profile": "glm_51_impl",
+            "profile": "glm_impl",
             "task": "implementation from card",
         }),
     )
@@ -129,7 +129,7 @@ async fn tachi_complete_infers_task_agent_and_profile_from_dispatch_card() {
         "{bundle:#}"
     );
     assert_eq!(bundle["dispatch_id"], json!(dispatch_id), "{bundle:#}");
-    assert_eq!(bundle["profile"], json!("glm_51_impl"), "{bundle:#}");
+    assert_eq!(bundle["profile"], json!("glm_impl"), "{bundle:#}");
     assert_eq!(
         bundle["pipeline"]["dispatch_completion_link"]["recorded"],
         json!(true),

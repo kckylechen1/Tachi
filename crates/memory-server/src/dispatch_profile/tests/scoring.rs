@@ -89,7 +89,7 @@ fn score_profile_candidate_keeps_role_correct_profile_above_role_wrong_competito
         blocked_profiles: Vec::new(),
     };
 
-    let executor = resolve_dispatch_profile("glm_51_impl").expect("executor profile");
+    let executor = resolve_dispatch_profile("glm_impl").expect("executor profile");
     let competitor = resolve_dispatch_profile("codex_55_review").expect("reviewer profile");
 
     // Sparse failures (3) for the role-correct executor. Under the old bare
@@ -123,7 +123,7 @@ fn research_request_prefers_read_role_over_executor_even_with_better_eval() {
     // contract is unsatisfiable. Give the EXECUTOR the better live history
     // (two verified successes) and the explorer NONE, then assert the explorer
     // still wins on role/task fit — the routing-policy gap surfaced live where
-    // glm_51_impl(executor)=23.8 beat deepseek_explore(explore)=-0.2.
+    // glm_impl(executor)=23.8 beat deepseek_explore(explore)=-0.2.
     let risk = DispatchRisk {
         task_type: "research_request".to_string(),
         risk: "low".to_string(),
@@ -132,7 +132,7 @@ fn research_request_prefers_read_role_over_executor_even_with_better_eval() {
         blocked_profiles: Vec::new(),
     };
 
-    let executor = resolve_dispatch_profile("glm_51_impl").expect("executor profile");
+    let executor = resolve_dispatch_profile("glm_impl").expect("executor profile");
     let explorer = resolve_dispatch_profile("deepseek_explore").expect("explore profile");
 
     let executor_rows = vec![
@@ -160,9 +160,7 @@ fn research_request_prefers_read_role_over_executor_even_with_better_eval() {
     let explain_candidates = recommended_candidates(&server, &explain_risk, &[]);
     let explain_executor = candidate(
         &explain_candidates,
-        resolve_dispatch_profile("glm_51_impl")
-            .expect("executor")
-            .name,
+        resolve_dispatch_profile("glm_impl").expect("executor").name,
     );
     let explain_explorer = candidate(
         &explain_candidates,
