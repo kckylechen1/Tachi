@@ -59,7 +59,7 @@ async fn handle_propose(
         .clone()
         .unwrap_or_else(|| SCRATCH_PREFIX.to_string());
     let generated = generate_and_persist_proposals(server, params, &path_prefix)?;
-    let proposals = list_proposals(server, params.state_filter.as_deref())?;
+    let proposals = list_proposals(server, params)?;
     let response = json!({
         "status": "dry_run",
         "action": "consolidate",
@@ -300,8 +300,8 @@ fn generate_and_persist_proposals(
     })?;
 
     let mut proposals = Vec::new();
-    proposals.extend(propose_same_path_supersedes(&entries));
-    proposals.extend(propose_stale_archives(&entries));
+    proposals.extend(propose_same_path_supersedes(&entries, path_prefix));
+    proposals.extend(propose_stale_archives(&entries, path_prefix));
 
     if proposals.is_empty() {
         return Ok(proposals);
@@ -338,13 +338,13 @@ fn generate_and_persist_proposals(
     Ok(proposals)
 }
 
-fn propose_same_path_supersedes(entries: &[MemoryEntry]) -> Vec<Value> {
+fn propose_same_path_supersedes(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Value> {
     let mut by_path: HashMap<String, Vec<&MemoryEntry>> = HashMap::new();
     for entry in entries {
         if is_protected(entry) {
             continue;
         }
-        if !entry.path.starts_with(SCRATCH_PREFIX) {
+        if !entry.path.starts_with(path_prefix) {
             continue;
         }
         by_path.entry(entry.path.clone()).or_default().push(entry);
@@ -355,7 +355,10 @@ fn propose_same_path_supersedes(entries: &[MemoryEntry]) -> Vec<Value> {
         if group.len() < 2 {
             continue;
         }
-        group.sort_by(|a, b| b.timestamp.cmp(&a.timestamp).then_with(|| a.id.cmp(&b.id)));
+        // Prefer parsed timestamps so Z vs +00:00 offsets do not invert order.
+        group.sort_by(|a, b| {
+            cmp_entry_timestamp_desc(a, b).then_with(|| a.id.cmp(&b.id))
+        });
         let survivor = group[0];
         for older in group.iter().skip(1) {
             if older.id == survivor.id {
@@ -363,8 +366,8 @@ fn propose_same_path_supersedes(entries: &[MemoryEntry]) -> Vec<Value> {
             }
             let id = format!(
                 "lifecycle:supersede:{}:{}",
-                &older.id[..8.min(older.id.len())],
-                &survivor.id[..8.min(survivor.id.len())]
+                id_prefix(&older.id),
+                id_prefix(&survivor.id)
             );
             out.push(json!({
                 "proposal_id": id,
@@ -377,7 +380,7 @@ fn propose_same_path_supersedes(entries: &[MemoryEntry]) -> Vec<Value> {
                 "target_id": survivor.id,
                 "path": path,
                 "rationale": format!(
-                    "Same scratch path `{}` has multiple active rows; supersede older `{}` with newer `{}`.",
+                    "Same path `{}` has multiple active rows; supersede older `{}` with newer `{}`.",
                     path, older.id, survivor.id
                 ),
                 "evidence": {
@@ -394,14 +397,14 @@ fn propose_same_path_supersedes(entries: &[MemoryEntry]) -> Vec<Value> {
     out
 }
 
-fn propose_stale_archives(entries: &[MemoryEntry]) -> Vec<Value> {
-    let cutoff = (Utc::now() - Duration::days(STALE_DAYS_DEFAULT)).to_rfc3339();
+fn propose_stale_archives(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Value> {
+    let cutoff = Utc::now() - Duration::days(STALE_DAYS_DEFAULT);
     let mut out = Vec::new();
     for entry in entries {
         if is_protected(entry) {
             continue;
         }
-        if !entry.path.starts_with(SCRATCH_PREFIX) {
+        if !entry.path.starts_with(path_prefix) {
             continue;
         }
         if entry.importance > ARCHIVE_IMPORTANCE_MAX {
@@ -410,13 +413,10 @@ fn propose_stale_archives(entries: &[MemoryEntry]) -> Vec<Value> {
         if entry.access_count > 0 || entry.recall_count > 0 {
             continue;
         }
-        if entry.timestamp >= cutoff {
+        if !entry_timestamp_before(entry, cutoff) {
             continue;
         }
-        let id = format!(
-            "lifecycle:archive:{}",
-            &entry.id[..8.min(entry.id.len())]
-        );
+        let id = format!("lifecycle:archive:{}", id_prefix(&entry.id));
         out.push(json!({
             "proposal_id": id,
             "kind": "memory_lifecycle",
@@ -428,7 +428,7 @@ fn propose_stale_archives(entries: &[MemoryEntry]) -> Vec<Value> {
             "target_id": Value::Null,
             "path": entry.path,
             "rationale": format!(
-                "Stale low-value scratch `{}` (importance={}, access=0, older than {STALE_DAYS_DEFAULT}d).",
+                "Stale low-value row `{}` (importance={}, access=0, older than {STALE_DAYS_DEFAULT}d).",
                 entry.id, entry.importance
             ),
             "evidence": {
@@ -442,6 +442,32 @@ fn propose_stale_archives(entries: &[MemoryEntry]) -> Vec<Value> {
         }));
     }
     out
+}
+
+/// Safe 8-char prefix for proposal ids (char-based; never panics on non-ASCII ids).
+fn id_prefix(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+fn cmp_entry_timestamp_desc(a: &MemoryEntry, b: &MemoryEntry) -> std::cmp::Ordering {
+    match (parse_entry_utc(&a.timestamp), parse_entry_utc(&b.timestamp)) {
+        (Some(ta), Some(tb)) => tb.cmp(&ta),
+        _ => b.timestamp.cmp(&a.timestamp),
+    }
+}
+
+fn entry_timestamp_before(entry: &MemoryEntry, cutoff: chrono::DateTime<Utc>) -> bool {
+    match parse_entry_utc(&entry.timestamp) {
+        Some(ts) => ts < cutoff,
+        // Fall back to lexicographic RFC3339 when parse fails (legacy/odd rows).
+        None => entry.timestamp < cutoff.to_rfc3339(),
+    }
+}
+
+fn parse_entry_utc(raw: &str) -> Option<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
 }
 
 fn is_protected(entry: &MemoryEntry) -> bool {
@@ -464,32 +490,18 @@ fn is_protected(entry: &MemoryEntry) -> bool {
     )
 }
 
-fn list_proposals(server: &MemoryServer, state_filter: Option<&str>) -> Result<Vec<Value>, String> {
-    // Prefer project store for lifecycle proposals when a project DB exists;
-    // fall back to global.
-    let rows = if server.has_project_db() {
-        server
-            .with_project_store_read(|store| {
-                store
-                    .list_state(LIFECYCLE_PROPOSAL_NS)
-                    .map_err(|e| format!("list lifecycle proposals: {e}"))
-            })
-            .or_else(|_| {
-                server.with_global_store_read(|store| {
-                    store
-                        .list_state(LIFECYCLE_PROPOSAL_NS)
-                        .map_err(|e| format!("list lifecycle proposals (global): {e}"))
-                })
-            })?
-    } else {
-        server.with_global_store_read(|store| {
-            store
-                .list_state(LIFECYCLE_PROPOSAL_NS)
-                .map_err(|e| format!("list lifecycle proposals: {e}"))
-        })?
-    };
+fn list_proposals(server: &MemoryServer, params: &TachiMemoryParams) -> Result<Vec<Value>, String> {
+    // Same store resolution as propose/review/apply so named `project=` pins
+    // see the proposals they just generated (Gemini #904 review).
+    let rows = with_proposal_store_read(server, params, |store| {
+        store
+            .list_state(LIFECYCLE_PROPOSAL_NS)
+            .map_err(|e| format!("list lifecycle proposals: {e}"))
+    })?;
 
-    let filter = state_filter
+    let filter = params
+        .state_filter
+        .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.to_ascii_lowercase());

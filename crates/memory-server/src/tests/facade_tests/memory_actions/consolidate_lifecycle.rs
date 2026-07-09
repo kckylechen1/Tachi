@@ -168,6 +168,50 @@ async fn consolidate_propose_review_apply_supersedes_older_scratch_duplicate() {
 }
 
 #[tokio::test]
+async fn consolidate_custom_path_prefix_proposes_supersede_outside_scratch() {
+    // Discrimination: custom path_prefix must not be hard-locked to /scratch
+    // (Gemini #904 review). Pre-fix silently dropped non-/scratch rows.
+    let server = make_server();
+    let older = seed_scratch(
+        "life-review-old",
+        "/code-review/sigil/lifecycle-note",
+        "Older code-review note about consolidate custom prefix",
+        12,
+    );
+    let newer = seed_scratch(
+        "life-review-new",
+        "/code-review/sigil/lifecycle-note",
+        "Newer code-review note about consolidate custom prefix",
+        2,
+    );
+    server
+        .with_global_store(|store| {
+            store.upsert(&older).map_err(|e| e.to_string())?;
+            store.upsert(&newer).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed code-review duplicates");
+
+    let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
+    propose.path_prefix = Some("/code-review".to_string());
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, propose)
+        .await
+        .expect("propose custom prefix");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    let proposals = parsed["generated"].as_array().cloned().unwrap_or_default();
+    let supersede = proposals.iter().find(|p| {
+        p.get("lifecycle_action").and_then(Value::as_str) == Some("supersede")
+            && p.get("source_id").and_then(Value::as_str) == Some("life-review-old")
+            && p.get("target_id").and_then(Value::as_str) == Some("life-review-new")
+    });
+    assert!(
+        supersede.is_some(),
+        "custom path_prefix=/code-review must yield supersede for same-path dups: {parsed}"
+    );
+}
+
+#[tokio::test]
 async fn consolidate_refuses_to_propose_archive_for_protected_wiki() {
     let server = make_server();
     let mut wiki = make_entry("life-wiki-1");
