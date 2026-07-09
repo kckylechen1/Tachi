@@ -220,7 +220,11 @@ async fn recommend_skill_uses_active_patterns_as_ranking_context() {
         .expect("recommend_skill should succeed");
     let json: Value = serde_json::from_str(&result).expect("json");
     let top = &json["skills"][0];
-    assert_eq!(top["id"], json!("skill:marmalade-closure"));
+    assert_eq!(
+        top["id"],
+        json!("skill:marmalade-closure"),
+        "expected pattern-bridged marmalade skill to rank first, got {json}"
+    );
     assert_eq!(
         top["pattern_refs"][0]["projection_key"],
         json!("alignment-bridge-closure")

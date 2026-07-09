@@ -86,7 +86,7 @@ async fn delegate_profile_rejects_skill_candidate_writes() {
         .await
         .expect_err("delegate tachi_skill must not register skill candidates");
 
-    assert!(error.contains("not available to delegate tool profiles"));
+    assert!(error.contains("not available to the active tool profile"));
     assert!(error.contains("discover"));
     assert!(error.contains("run"));
     assert!(error.contains("bundle"));
@@ -125,7 +125,7 @@ async fn delegate_profile_rejects_skill_loadout_but_keeps_bundle_available() {
         }))
         .await
         .expect_err("delegate tachi_skill should not expose loadout internals");
-    assert!(loadout_error.contains("not available to delegate tool profiles"));
+    assert!(loadout_error.contains("not available to the active tool profile"));
 
     let bundle_response = server
         .tachi_skill(Parameters(TachiSkillParams {
