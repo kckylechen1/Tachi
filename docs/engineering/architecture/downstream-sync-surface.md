@@ -97,7 +97,7 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 | `tachi-capture-gate` | Gate policy is good; Hypermem still has in-tree `capture_gate.rs`. Prefer **shared logic in core or a tiny no-product crate**, not a server-only leaf that Hypermem must vend. |
 | `tachi-llm` / `tachi-foundry` | Needed for embed/rerank/backfill. Hypermem may keep a thinner LLM client; do not force full Foundry product surfaces. |
 | `tachi-params` | OK if limited to memory/readiness param types; not if it becomes a dump of every facade enum. |
-| `memory-server-i18n` | Optional strings only. |
+| `tachi-i18n` | Optional strings only. |
 
 ## 5. What GLM cratesplit already did (downstream lens)
 
@@ -140,7 +140,7 @@ Concrete Tachi-side work:
 |---|---|---|
 | 1.1 | Define Cargo feature or package set `memcore` (default-features = false) that builds **only** whitelist crates + a server binary **without** linking dispatch/gh/merge | HyperTachi can depend on that package set instead of whole tree |
 | 1.2 | Move or keep all **schema/scorer/store** changes in `memcore` first | Single merge surface for HyperTachi |
-| 1.3 | Document HyperTachi catch-up procedure: merge `memcore` → rebuild Hypermem binary → run hypermem gate fixture + Quant trading smoke | Stops “sync whole memory-server” |
+| 1.3 | Document HyperTachi catch-up procedure: merge `memcore` → rebuild Hypermem binary → run hypermem gate fixture + Quant trading smoke | Stops “sync whole tachi-server” |
 | 1.4 | Explicitly delete/ignore operator modules on HyperTachi when catching up (`dispatch_ops` product lanes, ship, etc.) unless product still needs them | Aligns with #793 “no operator surface dependency” |
 
 **Do not** start Phase 1 by extracting more 100-LOC leaves.
@@ -194,7 +194,7 @@ Only extract clusters that HyperTachi would also want as units:
 |---|---|
 | Rsync entire Tachi `tachi-server` into HyperTachi after each cratesplit | Reintroduces operator surfaces; multiplies conflicts |
 | Path-depending Quant or RomanBath on `~/Desktop/Sigil/crates/*` | Breaks CI, packaging, and multi-machine builds |
-| Putting portable APIs only in `memory-server-*` product crates | Forces Hypermem to depend on operator graph |
+| Putting portable APIs only in `tachi-*` product crates | Forces Hypermem to depend on operator graph |
 | Assuming RomanBath zeroclaw == Projects zeroclaw | RB has `zeroclaw-memory-sigil` + memory-sigil commits; Projects pin does not |
 | Closing #833 because leaves extracted | Main crate still huge; portable cutover unfinished |
 

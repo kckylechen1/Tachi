@@ -284,7 +284,7 @@ fn test_invalid_references() {
 | 8 | — | Update MCP tool schema JSON | 5 min |
 | 9 | — | Write unit tests for validation | 15 min |
 | 10 | — | Write integration tests for write + export | 20 min |
-| 11 | — | `cargo test --package memory-server` | 5 min |
+| 11 | — | `cargo test --package tachi-server` | 5 min |
 
 **Total estimate:** ~1.5 hours
 

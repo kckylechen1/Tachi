@@ -3,7 +3,7 @@ name = "tachi-merge-ops"
 version = "1.7.0"
 edition = "2021"
 license = "AGPL-3.0-only"
-description = "Local worktree merge toolkit (approve_merge, safety gates, cleaner integration). Extracted from memory-server (#833)."
+description = "Tachi merge-ops — local worktree merge toolkit (approve_merge, safety gates, cleaner integration)."
 
 [dependencies]
 tachi-params = { path = "../tachi-params" }

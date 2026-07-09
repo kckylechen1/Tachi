@@ -31,7 +31,7 @@ resolver = "2"
 lto = true
 strip = true
 
-# Trim debug symbols in dev to speed up cold compile of the large memory-server
+# Trim debug symbols in dev to speed up cold compile of the large tachi-server
 # crate (~165K LOC). `line-tables-only` keeps panic backtraces (file:line) while
 # dropping full variable debuginfo, which is the bulk of the linker cost.
 [profile.dev]
