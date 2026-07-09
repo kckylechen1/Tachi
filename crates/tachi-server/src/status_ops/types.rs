@@ -55,6 +55,7 @@ pub(crate) struct StatusSnapshot {
     pub(crate) plan_c_split_brain: Vec<crate::path_utils::PlanCSplitBrain>,
     pub(crate) health_deductions: Vec<status_health::HealthDeduction>,
     pub(crate) health_score: u8,
+    pub(crate) disk: disk::DiskStatus,
 }
 
 #[derive(Debug, serde::Serialize)]
