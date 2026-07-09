@@ -34,6 +34,10 @@ struct SweepCandidate {
     marker_path: String,
     age_days: u64,
     active: bool,
+    /// Fail-closed: true unless `git status --porcelain` positively proves
+    /// the worktree has no outstanding changes (besides the marker file).
+    /// A candidate we cannot verify as clean is treated as dirty.
+    dirty: bool,
 }
 
 pub fn run_sweep(options: SweepOptions) -> Result<(), String> {
@@ -156,7 +160,20 @@ fn candidate_from_marker(
         marker_path: marker_path.display().to_string(),
         age_days: age.as_secs() / (24 * 60 * 60),
         active: has_active_processes(worktree_root),
+        dirty: worktree_is_dirty(worktree_root),
     })
+}
+
+/// Same dirty guard as the direct `wt-remove` close path
+/// (`wt_clean::dirty_entries_excluding_marker`) so sweep/reclaim can never
+/// clobber uncommitted work just because a marker aged out. Anything we
+/// cannot positively verify as clean (git status fails, not a worktree,
+/// etc.) is treated as dirty — fail closed, never fail open on a delete path.
+fn worktree_is_dirty(path: &Path) -> bool {
+    match crate::wt_clean::dirty_entries_excluding_marker(path) {
+        Ok(entries) => !entries.is_empty(),
+        Err(_) => true,
+    }
 }
 
 fn execute_sweep(report: &mut SweepReport) {
@@ -165,6 +182,16 @@ fn execute_sweep(report: &mut SweepReport) {
             report
                 .warnings
                 .push(format!("skipped active worktree {}", candidate.path));
+            continue;
+        }
+        // Ownership to reclaim = marker AND clean AND not-active. `--force`
+        // only waives the age/dry-run gate above it, never this one: a
+        // dirty worktree is NEVER removed by sweep, no override.
+        if candidate.dirty {
+            report.warnings.push(format!(
+                "skipped dirty worktree {} (uncommitted changes; commit, stash, or discard before reclaim)",
+                candidate.path
+            ));
             continue;
         }
         let Some(repo_root) = &candidate.repo_root else {
@@ -210,7 +237,13 @@ fn default_roots() -> Vec<PathBuf> {
     roots.push(PathBuf::from("/private/tmp"));
     roots.push(std::env::temp_dir());
     // Managed worktree root (#484): default open placement + GC scan target.
-    roots.push(crate::wt_open::default_worktrees_root());
+    // If HOME/USERPROFILE and TACHI_WORKTREES_ROOT are both unset, there is
+    // no safe managed root to scan (see wt_open::default_worktrees_root's
+    // doc comment on why it refuses to fall back to cwd); just omit that
+    // candidate root rather than propagating the error into every sweep.
+    if let Ok(managed_root) = crate::wt_open::default_worktrees_root() {
+        roots.push(managed_root);
+    }
     roots.sort();
     roots.dedup();
     roots

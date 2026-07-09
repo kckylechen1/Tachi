@@ -48,17 +48,28 @@ pub struct OpenReport {
 }
 
 /// Default managed worktrees root (not under Desktop / primary repo).
-pub fn default_worktrees_root() -> PathBuf {
+///
+/// Fails cleanly (`Err`) rather than falling back to the current directory
+/// when neither `TACHI_WORKTREES_ROOT` nor `HOME`/`USERPROFILE` is set: a
+/// cwd fallback here would make the managed root (and therefore the sweep
+/// GC root and the path-boundary fence) silently resolve to wherever the
+/// caller happens to be running from.
+pub fn default_worktrees_root() -> Result<PathBuf, String> {
     if let Some(raw) = std::env::var_os("TACHI_WORKTREES_ROOT") {
         if !raw.is_empty() {
-            return PathBuf::from(raw);
+            return Ok(PathBuf::from(raw));
         }
     }
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".cache").join("tachi").join("worktrees")
+    match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        Some(home) if !home.is_empty() => {
+            Ok(PathBuf::from(home).join(".cache").join("tachi").join("worktrees"))
+        }
+        _ => Err(
+            "cannot determine managed worktrees root: HOME (and USERPROFILE) is unset and \
+             TACHI_WORKTREES_ROOT is not set; refusing to fall back to the current directory"
+                .to_string(),
+        ),
+    }
 }
 
 /// Stable short slug for a repository path.
@@ -70,10 +81,10 @@ pub fn repo_slug(repo_root: &Path) -> String {
     sanitize_segment(name)
 }
 
-pub fn plan_managed_worktree_path(repo_root: &Path, leaf_name: &str) -> PathBuf {
-    default_worktrees_root()
+pub fn plan_managed_worktree_path(repo_root: &Path, leaf_name: &str) -> Result<PathBuf, String> {
+    Ok(default_worktrees_root()?
         .join(repo_slug(repo_root))
-        .join(sanitize_segment(leaf_name))
+        .join(sanitize_segment(leaf_name)))
 }
 
 /// Return a human reason when `path` must not host a managed worktree.
@@ -116,13 +127,20 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
         .filter(|s| !s.is_empty())
         .unwrap_or("HEAD")
         .to_string();
-    let base_sha = git_stdout(&repo_root, &["rev-parse", "--verify", &base_ref])?;
+    validate_ref(&base_ref)?;
+    // `--end-of-options` (documented git-rev-parse idiom) stops a
+    // maliciously option-shaped ref (e.g. "--upload-pack=...") from being
+    // interpreted as a rev-parse flag instead of a literal revision.
+    let base_sha = git_stdout(
+        &repo_root,
+        &["rev-parse", "--verify", "--end-of-options", &base_ref],
+    )?;
 
     let (branch, leaf) = resolve_names(&options)?;
-    let managed_root = default_worktrees_root();
+    let managed_root = default_worktrees_root()?;
     let path = match options.path {
         Some(p) => p,
-        None => plan_managed_worktree_path(&repo_root, &leaf),
+        None => plan_managed_worktree_path(&repo_root, &leaf)?,
     };
 
     let mut report = OpenReport {
@@ -140,6 +158,17 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
         warnings: Vec::new(),
         errors: Vec::new(),
     };
+
+    // Path governor boundary (CP3/CP6): every managed worktree — explicit
+    // `--path` included — must resolve inside the managed root. Rejects
+    // lexical `..` traversal outright and boundary-checks the
+    // symlink-resolved (ancestor-canonicalized) form by path components, not
+    // by string prefix, so `~/.cache/tachi/worktrees-evil` can't pass a
+    // naive `starts_with` check against `~/.cache/tachi/worktrees`.
+    if let Some(reason) = path_outside_managed_root_reason(&path, &managed_root) {
+        report.errors.push(reason);
+        return Ok(report);
+    }
 
     if let Some(reason) = forbidden_location_reason(&path, &repo_root) {
         report.errors.push(reason);
@@ -278,6 +307,17 @@ fn resolve_names(options: &OpenOptions) -> Result<(String, String), String> {
     Ok((branch, leaf))
 }
 
+/// Reject refs that could be interpreted as git options instead of
+/// revisions (defense in depth alongside `--end-of-options`).
+fn validate_ref(raw: &str) -> Result<(), String> {
+    if raw.starts_with('-') {
+        return Err(format!(
+            "refusing base ref '{raw}': refs beginning with '-' can be interpreted as git options"
+        ));
+    }
+    Ok(())
+}
+
 fn short_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -308,8 +348,15 @@ fn sanitize_segment(raw: &str) -> String {
 }
 
 fn normalize_for_policy(path: &Path) -> String {
-    // Prefer real path when it exists; otherwise keep lexical form.
-    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // Canonicalize the longest existing ancestor (resolving symlinks) and
+    // lexically append whatever doesn't exist yet, rather than only
+    // canonicalizing when the *entire* path already exists. A worktree
+    // path is expected to not exist yet, so a whole-path-only canonicalize
+    // silently degrades to pure lexical normalization for almost every
+    // call, which does not defend against a symlinked intermediate
+    // directory (e.g. an existing ancestor that is itself a symlink
+    // pointing outside the managed root).
+    let resolved = canonicalize_prefix(path);
     let mut parts = Vec::new();
     for component in resolved.components() {
         match component {
@@ -345,6 +392,83 @@ fn path_is_within(path_norm: &str, parent_norm: &str) -> bool {
         format!("{parent_norm}/")
     };
     path_norm.starts_with(&prefix)
+}
+
+/// Canonicalize the longest existing ancestor of `path` (resolving
+/// symlinks) and lexically re-append the remaining, not-yet-created
+/// components. Falls back to the raw lexical path only when no ancestor
+/// exists at all (e.g. a bare relative path with nothing on disk yet).
+fn canonicalize_prefix(path: &Path) -> PathBuf {
+    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+    let mut probe = path.to_path_buf();
+    loop {
+        if let Ok(canon) = std::fs::canonicalize(&probe) {
+            let mut result = canon;
+            for part in trailing.iter().rev() {
+                result.push(part);
+            }
+            return result;
+        }
+        let name = probe.file_name().map(|n| n.to_os_string());
+        let parent = probe.parent().map(Path::to_path_buf);
+        match (name, parent) {
+            (Some(name), Some(parent)) if parent != probe => {
+                trailing.push(name);
+                probe = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// True if `path` contains a lexical `..` component anywhere. Explicit
+/// `--path` values are never allowed to traverse, even if the traversal
+/// would lexically stay inside the managed root — path fencing should not
+/// have to reason about that; refuse it outright.
+fn contains_parent_traversal(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::ParentDir))
+}
+
+/// Component-wise "is `path` inside `boundary`" check (not a string
+/// `starts_with`, which would wrongly accept a sibling like
+/// `~/.cache/tachi/worktrees-evil` against boundary
+/// `~/.cache/tachi/worktrees`).
+fn path_is_within_components(path: &Path, boundary: &Path) -> bool {
+    if path == boundary {
+        return true;
+    }
+    let mut path_components = path.components();
+    for boundary_component in boundary.components() {
+        match path_components.next() {
+            Some(component) if component == boundary_component => continue,
+            _ => return false,
+        }
+    }
+    path_components.next().is_some()
+}
+
+/// Return a human reason when `path` does not resolve inside the managed
+/// worktree root `managed_root` — the CP3/CP6 governor boundary. Applies to
+/// both explicit `--path` and (harmlessly, since it always passes) the
+/// auto-planned path, so there is exactly one enforcement point.
+fn path_outside_managed_root_reason(path: &Path, managed_root: &Path) -> Option<String> {
+    if contains_parent_traversal(path) {
+        return Some(format!(
+            "refusing worktree path containing '..' (path traversal): {}",
+            path.display()
+        ));
+    }
+    let path_canon = canonicalize_prefix(path);
+    let boundary_canon = canonicalize_prefix(managed_root);
+    if !path_is_within_components(&path_canon, &boundary_canon) {
+        return Some(format!(
+            "refusing worktree path outside managed root '{}': {}",
+            managed_root.display(),
+            path.display()
+        ));
+    }
+    None
 }
 
 fn canonicalize_existing(path: &Path, label: &str) -> Result<PathBuf, String> {
@@ -526,7 +650,8 @@ mod tests {
         let root = unique_temp("tachi-wt-root");
         std::env::set_var("TACHI_WORKTREES_ROOT", &root);
 
-        let planned = plan_managed_worktree_path(Path::new("/tmp/my-repo"), "484-executor-aa");
+        let planned = plan_managed_worktree_path(Path::new("/tmp/my-repo"), "484-executor-aa")
+            .expect("managed root resolves when TACHI_WORKTREES_ROOT is set");
         assert_eq!(
             planned,
             root.join("my-repo").join("484-executor-aa")

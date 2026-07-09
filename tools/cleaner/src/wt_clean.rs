@@ -254,7 +254,11 @@ fn is_registered_or_marked(worktree_root: &Path) -> bool {
         || registry::registry_contains(worktree_root)
 }
 
-fn dirty_entries_excluding_marker(worktree_root: &Path) -> Result<Vec<String>, String> {
+/// `git status --porcelain` entries for `worktree_root`, excluding the
+/// Tachi marker file itself. `pub(crate)` so the sweep/reclaim path
+/// (`sweep.rs`) can apply the SAME dirty guard as this direct-close path
+/// instead of re-deriving its own (weaker) notion of "clean".
+pub(crate) fn dirty_entries_excluding_marker(worktree_root: &Path) -> Result<Vec<String>, String> {
     let worktree_str = canonical_string(worktree_root);
     let out = Command::new("git")
         .args(["-C", worktree_str.as_str(), "status", "--porcelain"])
