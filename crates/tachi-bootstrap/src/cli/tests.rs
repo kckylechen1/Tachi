@@ -195,6 +195,45 @@ fn clean_sweep_uses_cli_default_max_age() {
 }
 
 #[test]
+fn worktree_open_parses_managed_flags() {
+    use crate::cli::WorktreeAction;
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "worktree",
+        "open",
+        "--repo",
+        "/tmp/repo",
+        "--task",
+        "484",
+        "--role",
+        "executor",
+        "--dry-run",
+        "--json",
+    ])
+    .expect("worktree open should parse");
+    match parsed.command.expect("command") {
+        Commands::Worktree {
+            action:
+                WorktreeAction::Open {
+                    repo,
+                    task,
+                    role,
+                    dry_run,
+                    json,
+                    ..
+                },
+        } => {
+            assert_eq!(repo, std::path::PathBuf::from("/tmp/repo"));
+            assert_eq!(task.as_deref(), Some("484"));
+            assert_eq!(role.as_deref(), Some("executor"));
+            assert!(dry_run);
+            assert!(json);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
 fn vault_sync_help_names_offline_guessing_risk() {
     let mut export_cmd = Cli::command();
     let export_help = export_cmd

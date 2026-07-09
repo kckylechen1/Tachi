@@ -1,14 +1,85 @@
 use std::path::PathBuf;
-use tachi_bootstrap::cli::CleanAction;
+use tachi_bootstrap::cli::{CleanAction, WorktreeAction};
 use tachi_clean::sweep::SweepOptions;
 use tachi_clean::tachi_clean::TachiCleanOptions;
 use tachi_clean::target_clean::TargetCleanOptions;
 use tachi_clean::wt_clean::{OutputFormat, WtRemoveOptions};
+use tachi_clean::wt_open::{self, OpenOptions};
 
 pub(crate) async fn run_clean_command(
     action: CleanAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
     run_clean_command_sync(action).map_err(|err| err.into())
+}
+
+pub(crate) async fn run_worktree_command(
+    action: WorktreeAction,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_worktree_command_sync(action).map_err(|err| err.into())
+}
+
+fn run_worktree_command_sync(action: WorktreeAction) -> Result<(), String> {
+    match action {
+        WorktreeAction::Open {
+            repo,
+            path,
+            branch,
+            base,
+            task,
+            role,
+            dispatch_id,
+            name,
+            dry_run,
+            json,
+        } => wt_open::run_wt_open(OpenOptions {
+            repo_root: repo,
+            path,
+            branch,
+            base,
+            task,
+            role,
+            dispatch_id,
+            name,
+            dry_run,
+            output: output_format(json),
+        }),
+        WorktreeAction::Close {
+            path,
+            force,
+            dry_run: _,
+            json,
+        } => tachi_clean::wt_clean::run_wt_remove(WtRemoveOptions {
+            path,
+            force,
+            output: output_format(json),
+        }),
+        WorktreeAction::List { json } => {
+            let listed = tachi_clean::registry::list_registered_worktrees()?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&listed)
+                        .map_err(|err| format!("serialize list: {err}"))?
+                );
+            } else if listed.is_empty() {
+                println!("no registered Tachi-managed worktrees");
+            } else {
+                println!("tachi worktree list ({} entries)", listed.len());
+                for item in listed {
+                    let exists = if item.path_exists {
+                        "exists"
+                    } else {
+                        "missing"
+                    };
+                    println!(
+                        "  [{exists}] {}  branch={}  repo={}",
+                        item.path, item.branch, item.repo_root
+                    );
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 fn output_format(json: bool) -> OutputFormat {
