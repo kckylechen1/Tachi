@@ -54,12 +54,32 @@ pub struct SaveParams {
     pub keywords: Vec<String>,
 }
 
+/// Default `top_k` when the caller omits it, mirroring `SearchOptions::default()`.
+const DEFAULT_SEARCH_TOP_K: usize = 6;
+
+/// Upper bound on `top_k`, mirroring `tachi-params::MAX_SEARCH_TOP_K` (100). Not
+/// depended on directly: `tachi-params` pulls in full `memcore` (admin on),
+/// which would reintroduce admin-feature unification into this crate's build
+/// graph and defeat the portable isolation guarantee, so the cap is mirrored
+/// as a plain constant instead of imported.
+const MAX_SEARCH_TOP_K: usize = 100;
+
+/// Clamp a caller-supplied `top_k` into `[1, MAX_SEARCH_TOP_K]`, defaulting to
+/// `DEFAULT_SEARCH_TOP_K` when absent. An unbounded `top_k` would let a caller
+/// force `hybrid_search` to rank/return an unbounded result set — a cheap DoS
+/// lever over a store containing arbitrarily many rows.
+fn normalized_top_k(requested: Option<usize>) -> usize {
+    requested
+        .unwrap_or(DEFAULT_SEARCH_TOP_K)
+        .clamp(1, MAX_SEARCH_TOP_K)
+}
+
 /// Params for the `search` tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SearchParams {
     /// Query string (hybrid text + FTS + optional vector).
     pub query: String,
-    /// Max results to return. Defaults to 6.
+    /// Max results to return. Defaults to 6, clamped to at most 100.
     #[serde(default)]
     pub top_k: Option<usize>,
     /// Optional path-prefix filter, e.g. "/trading".
@@ -163,7 +183,7 @@ impl PortableServer {
         Parameters(params): Parameters<SearchParams>,
     ) -> Result<String, String> {
         let opts = SearchOptions {
-            top_k: params.top_k.unwrap_or(6),
+            top_k: normalized_top_k(params.top_k),
             path_prefix: params.path,
             decay_policy: self.decay_policy.clone(),
             ..Default::default()
@@ -320,5 +340,48 @@ mod tests {
             .expect("status");
         let status: serde_json::Value = serde_json::from_str(&status).expect("status json");
         assert_eq!(status["decay_policy"], serde_json::json!("flat"));
+    }
+
+    /// Pure clamp logic: absent -> default; in-range passes through; huge or
+    /// zero values clamp into `[1, MAX_SEARCH_TOP_K]`.
+    #[test]
+    fn normalized_top_k_clamps_range() {
+        assert_eq!(normalized_top_k(None), DEFAULT_SEARCH_TOP_K);
+        assert_eq!(normalized_top_k(Some(3)), 3);
+        assert_eq!(normalized_top_k(Some(0)), 1);
+        assert_eq!(normalized_top_k(Some(999_999)), MAX_SEARCH_TOP_K);
+        assert_eq!(normalized_top_k(Some(MAX_SEARCH_TOP_K)), MAX_SEARCH_TOP_K);
+    }
+
+    /// A caller-forced `top_k=999999` (the DoS lever an uncapped value would
+    /// open) must not error and must not be forwarded raw into
+    /// `SearchOptions`: the search tool call succeeds and the result set is
+    /// bounded by `MAX_SEARCH_TOP_K`, not by the requested value.
+    #[tokio::test]
+    async fn search_clamps_huge_top_k_without_error() {
+        let server = boot(None, "default");
+        server
+            .save(Parameters(save_params(
+                "uncapped top_k dos regression fact",
+                "/scratch/dos",
+            )))
+            .await
+            .expect("save");
+
+        let hits = server
+            .search(Parameters(SearchParams {
+                query: "uncapped top_k dos regression fact".to_string(),
+                top_k: Some(999_999),
+                path: None,
+            }))
+            .await
+            .expect("search must not error on an oversized top_k");
+        let hits: serde_json::Value = serde_json::from_str(&hits).expect("search json");
+        let arr = hits.as_array().expect("search returns array");
+        assert!(
+            arr.len() <= MAX_SEARCH_TOP_K,
+            "expected at most {MAX_SEARCH_TOP_K} results, got {}",
+            arr.len()
+        );
     }
 }
