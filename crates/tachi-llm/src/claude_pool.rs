@@ -45,7 +45,6 @@ mod lifecycle;
 #[cfg(test)]
 mod tests;
 
-#[allow(unused_imports)]
 pub use self::fallback::{pool_call_with_fallback, PoolCallSource};
 
 /// Default bounded concurrency for Claude CLI invocations.

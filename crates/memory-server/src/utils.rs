@@ -24,7 +24,8 @@ pub(super) use self::text::{
 pub(super) use self::validation::{
     is_shell_env_name, is_trusted_command, is_trusted_mcp_command, normalize_supported_values,
 };
-#[allow(unused_imports)]
+// Re-exported for unit tests only (`utils/tests` uses `super::*`).
+#[cfg(test)]
 pub(super) use self::workspace::find_git_root_from;
 pub(super) use self::workspace::{
     find_git_root, find_project_git_root, is_active_global_rule, resolve_home_arg,

@@ -41,14 +41,12 @@ mod mock;
 mod tests;
 mod types;
 
-#[allow(unused_imports)]
 pub use client::{GhClient, GhError, IssueState, MergeResult, MergeStrategy};
 #[cfg(test)]
 pub(crate) use gate::evaluate_merge_gate;
 pub use gate::evaluate_merge_gate_with_policy;
 #[cfg(test)]
 pub(crate) use mock::MockGhClient;
-#[allow(unused_imports)]
 pub use types::{
     CheckRun, ChecksState, ClosingIssueLabels, MergeDecision, MergeGatePolicy, MergeGatePolicyMode,
     Mergeable, PrLifecycleState, PrState, ReviewDecision,
