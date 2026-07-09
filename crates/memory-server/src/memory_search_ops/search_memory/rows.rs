@@ -390,24 +390,11 @@ pub(crate) async fn search_memory_rows_with_recall_config(
     // #899: when global+project both contribute, prefer project rows enough that
     // recent project decisions are not buried under older global noise. Also
     // provides Project-before-Global tie-break. Skips wiki-scoped queries.
-    super::cross_library::apply_cross_library_project_preference(
+    // If preference does not sort (single-scope / wiki / empty), plain score sort.
+    if !super::cross_library::apply_cross_library_project_preference(
         &mut combined_results,
         &params,
-    );
-
-    // Preference already sorts when multi-scope; keep a plain score sort for
-    // single-scope / wiki-skip paths that leave order from extend order.
-    if !combined_results
-        .iter()
-        .any(|(_, s)| matches!(s, DbScope::Project))
-        || !combined_results
-            .iter()
-            .any(|(_, s)| matches!(s, DbScope::Global))
-        || params
-            .path_prefix
-            .as_deref()
-            .is_some_and(|p| p == "/wiki" || p.starts_with("/wiki/"))
-    {
+    ) {
         combined_results.sort_by(|a, b| {
             b.0.score
                 .final_score

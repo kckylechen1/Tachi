@@ -26,13 +26,20 @@ use memory_core::SearchResult;
 pub(crate) const DEFAULT_CROSS_LIBRARY_PROJECT_BOOST: f64 = 0.85;
 
 /// Read provisional boost from env, falling back to the calibrated default.
+///
+/// Cached via `OnceLock` so search hot paths do not re-parse env on every call
+/// (Gemini #902 review). Tests that mutate the env must re-run in a fresh
+/// process or accept the first-read value for the process lifetime.
 pub(crate) fn cross_library_project_boost() -> f64 {
-    std::env::var("TACHI_RECALL_CROSS_LIBRARY_PROJECT_BOOST")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v >= 0.0)
-        .unwrap_or(DEFAULT_CROSS_LIBRARY_PROJECT_BOOST)
-        .min(10.0)
+    static BOOST: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *BOOST.get_or_init(|| {
+        std::env::var("TACHI_RECALL_CROSS_LIBRARY_PROJECT_BOOST")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(DEFAULT_CROSS_LIBRARY_PROJECT_BOOST)
+            .min(10.0)
+    })
 }
 
 fn wiki_scoped(params: &SearchMemoryParams) -> bool {
@@ -45,25 +52,33 @@ fn wiki_scoped(params: &SearchMemoryParams) -> bool {
 
 /// Apply project-row score preference + stable Project-before-Global tie-break.
 ///
-/// No-op when boost is 0, wiki-scoped, or the candidate set is single-scope.
+/// Returns `true` when preference sorting was applied (multi-scope, non-wiki).
+/// Returns `false` when the caller must fall back to a plain score sort
+/// (empty, single-scope, or wiki-scoped). Centralizing this avoids path_prefix
+/// trim mismatches between this module and `rows.rs` (Gemini #902).
 pub(crate) fn apply_cross_library_project_preference(
     results: &mut [(SearchResult, DbScope)],
     params: &SearchMemoryParams,
-) {
+) -> bool {
     if results.is_empty() || wiki_scoped(params) {
-        return;
+        return false;
     }
-    let boost = cross_library_project_boost();
-    let has_project = results
-        .iter()
-        .any(|(_, scope)| matches!(scope, DbScope::Project));
-    let has_global = results
-        .iter()
-        .any(|(_, scope)| matches!(scope, DbScope::Global));
+    let mut has_project = false;
+    let mut has_global = false;
+    for (_, scope) in results.iter() {
+        match scope {
+            DbScope::Project => has_project = true,
+            DbScope::Global => has_global = true,
+        }
+        if has_project && has_global {
+            break;
+        }
+    }
     if !has_project || !has_global {
-        return;
+        return false;
     }
 
+    let boost = cross_library_project_boost();
     if boost > 0.0 {
         let factor = 1.0 + boost;
         for (result, scope) in results.iter_mut() {
@@ -85,6 +100,7 @@ pub(crate) fn apply_cross_library_project_preference(
             .then_with(|| b.0.entry.timestamp.cmp(&a.0.entry.timestamp))
             .then_with(|| a.0.entry.id.cmp(&b.0.entry.id))
     });
+    true
 }
 
 /// Lower key sorts earlier on ties after score (Project preferred over Global).
@@ -190,8 +206,26 @@ mod tests {
         ];
         let mut params = bare_params();
         params.path_prefix = Some("/wiki".to_string());
-        apply_cross_library_project_preference(&mut results, &params);
+        assert!(!apply_cross_library_project_preference(
+            &mut results, &params
+        ));
         // Unchanged order: global still first
+        assert_eq!(results[0].0.entry.id, "global-wiki");
+    }
+
+    #[test]
+    fn wiki_path_prefix_trims_whitespace_before_skip() {
+        // Discrimination: leading/trailing spaces must still count as wiki-scoped
+        // so rows.rs fallback sort path is taken (Gemini #902 path_prefix mismatch).
+        let mut results = vec![
+            row("global-wiki", 1.0, DbScope::Global),
+            row("project-wiki", 0.6, DbScope::Project),
+        ];
+        let mut params = bare_params();
+        params.path_prefix = Some("  /wiki/  ".to_string());
+        assert!(!apply_cross_library_project_preference(
+            &mut results, &params
+        ));
         assert_eq!(results[0].0.entry.id, "global-wiki");
     }
 
@@ -201,8 +235,24 @@ mod tests {
             row("p1", 0.5, DbScope::Project),
             row("p2", 0.9, DbScope::Project),
         ];
-        apply_cross_library_project_preference(&mut results, &bare_params());
+        assert!(!apply_cross_library_project_preference(
+            &mut results,
+            &bare_params()
+        ));
         assert_eq!(results[0].0.entry.id, "p1"); // order unchanged (no re-sort without both scopes)
         assert_eq!(results[0].0.score.final_score, 0.5);
+    }
+
+    #[test]
+    fn multi_scope_returns_true_when_preference_sorted() {
+        let mut results = vec![
+            row("global-heavy", 1.0, DbScope::Global),
+            row("project-decision", 0.6, DbScope::Project),
+        ];
+        assert!(apply_cross_library_project_preference(
+            &mut results,
+            &bare_params()
+        ));
+        assert_eq!(results[0].0.entry.id, "project-decision");
     }
 }
