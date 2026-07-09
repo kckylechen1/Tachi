@@ -32,7 +32,7 @@ pub(super) fn push_project_work_record(
         "authority": "project_work_record",
         "source_of_truth": true,
         "status": "ref_only",
-        "retrieval": "Call tachi_task(action='intake') for issue snapshots or tachi_task(action='link_pr'/'pr_status') for PR state.",
+        "retrieval": "Call tachi_task(action='intake') for issue snapshots or tachi_gh(action='link_pr'/'pr_status') for PR state.",
     }));
 }
 

@@ -80,6 +80,110 @@ pub(super) fn shape_record_response(
     })
 }
 
+/// F1 (#527/#913): default `status`/`board` responses omit the full ledger.
+/// Use `format=full` for the complete verification board (including passed rows).
+pub(super) fn shape_status_response(raw: &Value, params: &TachiVerifyParams) -> Value {
+    if wants_full_format(params.format.as_deref()) {
+        return raw.clone();
+    }
+
+    // Multi-run board listing (no flow_id): keep compact row summaries.
+    if let Some(runs) = raw.get("runs").and_then(Value::as_array) {
+        let compact_runs: Vec<Value> = runs
+            .iter()
+            .map(|row| {
+                json!({
+                    "flow_id": row.get("flow_id").cloned().unwrap_or(Value::Null),
+                    "overall": row.get("overall").cloned().unwrap_or(json!("pending")),
+                    "total": row.get("total").cloned().unwrap_or(json!(0)),
+                    "failed": row.get("failed").cloned().unwrap_or(json!(0)),
+                    "pending": row.get("pending").cloned().unwrap_or(json!(0)),
+                    "pr_ref": row.get("pr_ref").cloned().unwrap_or(Value::Null),
+                })
+            })
+            .collect();
+        return json!({
+            "ok": true,
+            "action": raw.get("action").cloned().unwrap_or(json!("status")),
+            "runs": compact_runs,
+            "note": "compact board; format=full for full ledgers",
+        });
+    }
+
+    let ledger = raw
+        .get("verification")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    let flow_id = raw
+        .get("flow_id")
+        .and_then(Value::as_str)
+        .or_else(|| ledger.get("flow_id").and_then(Value::as_str))
+        .unwrap_or("");
+    let overall = ledger
+        .get("overall")
+        .and_then(Value::as_str)
+        .unwrap_or("pending");
+
+    let items = ledger
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut passed = 0u64;
+    let mut failed = 0u64;
+    let mut pending = 0u64;
+    let mut problems: Vec<Value> = Vec::new();
+    for item in &items {
+        let status = item
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("pending");
+        match status {
+            "passed" | "skipped" => passed += 1,
+            "failed" | "stale" => {
+                failed += 1;
+                problems.push(json!({
+                    "id": item.get("id").cloned().unwrap_or(json!("check")),
+                    "status": status,
+                    "summary": item.get("summary").cloned().unwrap_or(Value::Null),
+                }));
+            }
+            _ => {
+                pending += 1;
+                problems.push(json!({
+                    "id": item.get("id").cloned().unwrap_or(json!("check")),
+                    "status": status,
+                    "summary": item.get("summary").cloned().unwrap_or(Value::Null),
+                }));
+            }
+        }
+    }
+
+    let mut out = json!({
+        "ok": true,
+        "flow_id": flow_id,
+        "overall": overall,
+        "counts": {
+            "total": items.len() as u64,
+            "passed_or_skipped": passed,
+            "failed_or_stale": failed,
+            "pending": pending,
+        },
+        "problems": problems,
+        "note": "compact status (problems only); format=full for full verification board",
+    });
+    if let Some(gate) = raw.get("gate") {
+        out.as_object_mut().expect("object").insert(
+            "gate".to_string(),
+            json!({
+                "overall": gate.get("overall").cloned().unwrap_or(json!("unknown")),
+                "reasons": gate.get("reasons").cloned().unwrap_or(json!([])),
+            }),
+        );
+    }
+    out
+}
+
 fn single_recorded_status(ledger: &Value, check_id: &str) -> Option<String> {
     ledger
         .get("items")

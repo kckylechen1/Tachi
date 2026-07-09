@@ -169,14 +169,21 @@ fn tachi_task_action_schema_declares_feature_briefing() {
     assert!(values.contains(&json!("status")));
     assert!(values.contains(&json!("cancel")));
     assert!(values.contains(&json!("intake")));
-    assert!(values.contains(&json!("link_pr")));
-    assert!(values.contains(&json!("pr_status")));
     assert!(values.contains(&json!("cycle_plan")));
-    assert!(values.contains(&json!("pr_handoff")));
-    assert!(values.contains(&json!("release_note")));
     assert!(values.contains(&json!("ux_matrix")));
     assert!(values.contains(&json!("build_references")));
     assert!(values.contains(&json!("close_loop")));
+    // F2 (#495/#913): GH PR lifecycle is canonical on tachi_gh, not primary task schema.
+    for deprecated in ["link_pr", "pr_status", "pr_handoff", "release_note"] {
+        assert!(
+            !values.contains(&json!(deprecated)),
+            "tachi_task primary schema must not advertise {deprecated}"
+        );
+    }
+    assert_eq!(
+        values.len(),
+        crate::tool_params::TACHI_TASK_PRIMARY_ACTIONS.len()
+    );
 }
 
 #[test]

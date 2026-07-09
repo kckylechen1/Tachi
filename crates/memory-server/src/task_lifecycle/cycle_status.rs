@@ -472,7 +472,7 @@ fn spec_drift(
             drift.push(drift_item(
                 "pr_ref_mismatch",
                 &format!("Requested pr_ref {requested} differs from flow pr_ref {current}."),
-                "Use the flow's pr_ref or link the intended PR with tachi_task(action='link_pr').",
+                "Use the flow's pr_ref or link the intended PR with tachi_gh(action='link_pr').",
             ));
         }
     }
@@ -541,7 +541,7 @@ fn spec_drift(
         drift.push(drift_item(
             "release_note_before_ready_pr",
             "Release note exists but PR merge state is not ready or merged.",
-            "Run tachi_task(action='pr_status', flow_id=..., pr_ref=...) and resolve the PR gate.",
+            "Run tachi_gh(action='pr_status', flow_id=..., pr_ref=...) and resolve the PR gate.",
         ));
     }
     drift
@@ -578,7 +578,7 @@ fn next_action(
         return "Attach linked spec refs or confirm docs are the contract source.".to_string();
     }
     if pr_ref.is_none() {
-        return "Prepare or link a PR with tachi_task(action='pr_handoff') and tachi_task(action='link_pr')."
+        return "Prepare or link a PR with tachi_gh(action='pr_handoff') and tachi_gh(action='link_pr')."
             .to_string();
     }
     match verification
@@ -592,11 +592,11 @@ fn next_action(
         Some(other) => return format!("Resolve verification state `{other}` before PR gate."),
     }
     if !matches!(merge_state, Some("ready" | "merged")) {
-        return "Run tachi_task(action='pr_status', flow_id=..., pr_ref=...) and resolve PR gate."
+        return "Run tachi_gh(action='pr_status', flow_id=..., pr_ref=...) and resolve PR gate."
             .to_string();
     }
     if !release_note_present {
-        return "Run tachi_task(action='release_note', flow_id=...) after PR gate is ready/merged."
+        return "Run tachi_gh(action='release_note', flow_id=...) after PR gate is ready/merged."
             .to_string();
     }
     if close_loop.is_none() {

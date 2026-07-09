@@ -1,9 +1,10 @@
 use super::ledger::{read_verification_ledger, record_items};
 use super::receipt::{
-    recorded_check_ids, render_record_receipt, shape_record_response, validate_record_params,
+    recorded_check_ids, render_record_receipt, shape_record_response, shape_status_response,
+    validate_record_params,
 };
 use super::recent::recent_verification_summaries;
-use super::render::{gate_for_status, render_status};
+use super::render::{gate_for_status, render_compact_status, render_status};
 use super::storage::{empty_ledger, normalize_status};
 use super::*;
 use crate::facade_memory_ops::wants_full_format;
@@ -65,13 +66,24 @@ pub(crate) async fn handle_tachi_verify(
         return Ok(render_record_receipt(&shaped));
     }
 
-    if params
-        .format
-        .as_deref()
-        .is_some_and(|format| format.eq_ignore_ascii_case("json"))
-    {
-        serde_json::to_string(&raw).map_err(|e| format!("serialize tachi_verify: {e}"))
-    } else {
-        Ok(render_status(&raw))
+    // status / board — F1 compact by default (#527)
+    let human = params.format.as_deref().is_some_and(|format| {
+        matches!(
+            format.to_ascii_lowercase().as_str(),
+            "markdown" | "md" | "text" | "plain" | "human"
+        )
+    });
+    if wants_full_format(params.format.as_deref()) {
+        if human {
+            return Ok(render_status(&raw));
+        }
+        // format=full → full JSON board
+        return serde_json::to_string(&raw).map_err(|e| format!("serialize tachi_verify: {e}"));
     }
+    let shaped = shape_status_response(&raw, &params);
+    if human {
+        return Ok(render_compact_status(&shaped));
+    }
+    // Default + format=json → compact JSON receipt (no full ledger echo).
+    serde_json::to_string(&shaped).map_err(|e| format!("serialize tachi_verify: {e}"))
 }

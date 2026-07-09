@@ -650,6 +650,13 @@ pub struct TachiSkillParams {
 mod task;
 pub use task::TachiTaskParams;
 
+mod action_inventory;
+pub use action_inventory::{
+    TACHI_GH_ACTIONS, TACHI_GH_ACTION_SOFT_MAX, TACHI_MEMORY_ACTIONS, TACHI_MEMORY_ACTION_SOFT_MAX,
+    TACHI_TASK_COMPAT_GH_LIFECYCLE_ACTIONS, TACHI_TASK_PRIMARY_ACTIONS,
+    TACHI_TASK_PRIMARY_ACTION_SOFT_MAX, TACHI_VERIFY_ACTIONS,
+};
+
 mod orchestration;
 pub use orchestration::{
     TachiAgentEvalParams, TachiAgentsParams, TachiArenaParams, TachiBoardParams,
