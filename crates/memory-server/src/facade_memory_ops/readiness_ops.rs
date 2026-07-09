@@ -1,4 +1,5 @@
-//! Alert, ask, consolidate, and readiness handlers for `tachi_memory`.
+//! Alert, ask, and readiness handlers for `tachi_memory`.
+//! Consolidate lifecycle lives in `consolidate_ops` (#775).
 
 use super::evidence_format::{
     build_thinking_scaffold, evidence_rows, format_agent_status, json_string, parse_json_or_empty,
@@ -154,89 +155,11 @@ fn inject_project_tags(evidence: Value) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Consolidate
-// ---------------------------------------------------------------------------
-
-pub(crate) async fn handle_memory_consolidate(
-    server: &MemoryServer,
-    params: &TachiMemoryParams,
-) -> Result<String, String> {
-    let query = params
-        .query
-        .clone()
-        .or_else(|| params.topic.clone())
-        .unwrap_or_else(|| "duplicate stale superseded related memories".to_string());
-    let search_params = TachiSearchParams {
-        query,
-        scope: params.scope.clone().unwrap_or_else(|| "all".to_string()),
-        top_k: params.top_k.max(5).min(20),
-        path_prefix: params.path_prefix.clone(),
-        project: params.project.clone(),
-        domain: params.domain.clone(),
-        file_context: params.file_context.clone(),
-        error_context: params.error_context.clone(),
-        context_symbols: Vec::new(),
-        agent_role: params.agent_role.clone(),
-        category: params.category.clone(),
-        include_archived: params.include_archived,
-        include_training: params.include_training,
-        enable_rerank: params.enable_rerank,
-        as_of: params.as_of.clone(),
-    };
-    let (sections, _, _) = collect_tachi_search_sections(server, &search_params).await;
-    let candidates = sections_to_evidence(&sections)?;
-    let thinking = build_thinking_scaffold(
-        "consolidate",
-        "Identify duplicate, stale, superseded, or merge-worthy memory consolidation candidates.",
-        &candidates,
-    );
-    let synthesis = if params.synthesize {
-        Some(
-            synthesize_answer(
-                server,
-                "Identify duplicate, stale, superseded, or merge-worthy memory consolidation candidates. Return concise actions only.",
-                &candidates,
-                params.model.as_deref(),
-            )
-            .await,
-        )
-    } else {
-        None
-    };
-    if wants_json(params.format.as_deref()) {
-        return json_string(&json!({
-            "status": "dry_run",
-            "candidates": candidates,
-            "thinking": thinking,
-            "synthesis": synthesis,
-        }));
-    }
-    let synthesis_text = synthesis.as_ref().and_then(synthesis_markdown_text);
-    Ok(format_agent_status(
-        "Tachi consolidate",
-        &[
-            ("status", "dry_run".to_string()),
-            (
-                "candidates",
-                format!("{} hit(s)", evidence_rows(&candidates).len()),
-            ),
-            (
-                "confidence",
-                thinking
-                    .get("confidence")
-                    .and_then(Value::as_str)
-                    .unwrap_or("none")
-                    .to_string(),
-            ),
-        ],
-        Some(&candidates),
-        synthesis_text.as_deref(),
-    ))
-}
-
-// ---------------------------------------------------------------------------
 // Readiness
 // ---------------------------------------------------------------------------
+// Note: consolidate lifecycle (propose/review/apply) lives in consolidate_ops.rs
+// (#775). The old dry_run-only search scaffold was replaced.
+
 
 pub(crate) async fn handle_memory_readiness(
     server: &MemoryServer,
