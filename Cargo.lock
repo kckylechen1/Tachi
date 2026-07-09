@@ -1237,7 +1237,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memcore"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "chrono",
  "libsimple",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "memory-node"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "memcore",
  "napi",
@@ -1265,14 +1265,14 @@ dependencies = [
 
 [[package]]
 name = "memory-server-capture-gate"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "memory-server-hub-cli"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "chrono",
  "dirs",
@@ -1285,11 +1285,11 @@ dependencies = [
 
 [[package]]
 name = "memory-server-i18n"
-version = "1.7.0"
+version = "1.8.0"
 
 [[package]]
 name = "memory-server-manifest-audit"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "serde",
  "tempfile",
@@ -1297,11 +1297,11 @@ dependencies = [
 
 [[package]]
 name = "memory-server-prompt-envelope"
-version = "1.7.0"
+version = "1.8.0"
 
 [[package]]
 name = "memory-server-rescue"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "chrono",
  "memcore",
@@ -1313,7 +1313,7 @@ dependencies = [
 
 [[package]]
 name = "memory-server-runtime"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "memcore",
  "serde",
@@ -1505,7 +1505,7 @@ dependencies = [
 
 [[package]]
 name = "portable-kernel"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "memcore",
  "serde_json",
@@ -2260,7 +2260,7 @@ dependencies = [
 
 [[package]]
 name = "tachi-bootstrap"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "clap",
 ]
@@ -2276,7 +2276,7 @@ dependencies = [
 
 [[package]]
 name = "tachi-dispatch"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2285,7 +2285,7 @@ dependencies = [
 
 [[package]]
 name = "tachi-foundry"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "memcore",
  "regex",
@@ -2296,7 +2296,7 @@ dependencies = [
 
 [[package]]
 name = "tachi-hub"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "chrono",
  "memcore",
@@ -2306,7 +2306,7 @@ dependencies = [
 
 [[package]]
 name = "tachi-llm"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "axum",
  "chrono",
@@ -2325,7 +2325,7 @@ dependencies = [
 
 [[package]]
 name = "tachi-merge-ops"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2336,7 +2336,7 @@ dependencies = [
 
 [[package]]
 name = "tachi-params"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "chrono",
  "memcore",
@@ -2349,7 +2349,7 @@ dependencies = [
 
 [[package]]
 name = "tachi-server"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "aes-gcm",
  "argon2",

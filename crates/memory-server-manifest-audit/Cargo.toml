@@ -1,6 +1,6 @@
 [package]
 name = "memory-server-manifest-audit"
-version = "1.7.0"
+version = "1.8.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Project-DB relocation audit (dry-run planning). Extracted from tachi-server (#833)."

@@ -1,6 +1,6 @@
 [package]
 name = "memory-server-i18n"
-version = "1.7.0"
+version = "1.8.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Minimal i18n string lookup for Tachi tachi-server. Extracted from tachi-server (#833 slice 2)."
