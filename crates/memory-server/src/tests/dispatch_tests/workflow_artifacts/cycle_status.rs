@@ -66,6 +66,7 @@ fn write_passed_verification(flow_id: &str) {
 }
 
 mod cycle_plan;
+mod f2_gh_lifecycle_coaching;
 mod flow_read_model;
 mod issue_lookup;
 mod spec_drift;

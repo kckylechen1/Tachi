@@ -240,7 +240,8 @@ pub(crate) fn handle_task_ux_matrix(params: &TachiTaskParams) -> Result<String, 
     matrix.push(ux_step(
         "link_pr",
         "PR linkage",
-        "tachi_task(action='link_pr')",
+        // F2 (#495/#913): GH PR lifecycle is canonical on tachi_gh.
+        "tachi_gh(action='link_pr')",
         if pr_ref.is_some() {
             "passed"
         } else if flow_id.is_some() {
@@ -259,7 +260,7 @@ pub(crate) fn handle_task_ux_matrix(params: &TachiTaskParams) -> Result<String, 
     matrix.push(ux_step(
         "pr_status",
         "PR safe-merge preview",
-        "tachi_task(action='pr_status')",
+        "tachi_gh(action='pr_status')",
         if matches!(merge_state.as_deref(), Some("blocked")) {
             "blocked"
         } else if pr_status_seen {
@@ -280,7 +281,7 @@ pub(crate) fn handle_task_ux_matrix(params: &TachiTaskParams) -> Result<String, 
     matrix.push(ux_step(
         "release_note",
         "Release note",
-        "tachi_task(action='release_note')",
+        "tachi_gh(action='release_note')",
         if release_note_exists {
             "passed"
         } else if flow_id.is_some() {
