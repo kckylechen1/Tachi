@@ -13,6 +13,8 @@ const DEFAULT_ID_LIKE_EXACT_MATCH_BOOST: f64 = 12.0;
 // adversarial corpus: 0 hit→miss, 1 miss→hit, 30 unchanged.
 const DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR: f64 = 0.55;
 const DEFAULT_OR_FALLBACK_FTS_MAX_TERMS: usize = 8;
+// Phase C lever (#708): lower k sharpens RRF so single-channel precision wins more often.
+const DEFAULT_RRF_K: f64 = 20.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallConfig {
@@ -28,6 +30,8 @@ pub struct RecallConfig {
     pub id_like_exact_match_boost: f64,
     pub or_fallback_fts_score_factor: f64,
     pub or_fallback_fts_max_terms: usize,
+    /// Reciprocal Rank Fusion k (classic is 60). Lower values amplify top ranks.
+    pub rrf_k: f64,
 }
 
 impl Default for RecallConfig {
@@ -63,6 +67,7 @@ impl Default for RecallConfig {
             id_like_exact_match_boost: DEFAULT_ID_LIKE_EXACT_MATCH_BOOST,
             or_fallback_fts_score_factor: DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR,
             or_fallback_fts_max_terms: DEFAULT_OR_FALLBACK_FTS_MAX_TERMS,
+            rrf_k: DEFAULT_RRF_K,
         }
     }
 }
@@ -159,6 +164,7 @@ impl RecallConfig {
             "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS",
             &mut self.or_fallback_fts_max_terms,
         );
+        apply_f64(values, "TACHI_RECALL_RRF_K", &mut self.rrf_k);
     }
 
     pub fn sanitized(mut self) -> Self {
@@ -194,6 +200,10 @@ impl RecallConfig {
         )
         .clamp(0.0, 1.0);
         self.or_fallback_fts_max_terms = self.or_fallback_fts_max_terms.clamp(1, 32);
+        if !self.rrf_k.is_finite() || self.rrf_k < 1.0 {
+            self.rrf_k = DEFAULT_RRF_K;
+        }
+        self.rrf_k = self.rrf_k.clamp(1.0, 200.0);
         self
     }
 }

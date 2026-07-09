@@ -116,6 +116,7 @@ pub(super) fn rank_candidate_entries(
     apply_tier_boosts(&entries_ref, &mut scores);
     apply_entity_recency_boosts(&entries_ref, &superseded_ids, &mut scores);
     apply_decision_and_research_boosts(query, &entries_ref, &mut scores);
+    apply_lexical_overlap_boost(query, opts.path_prefix.as_deref(), &entries_ref, &mut scores);
 
     // Decorate each candidate with its parsed instant once (epoch millis), then
     // sort — the comparator compares the pre-parsed key, never the raw string
@@ -289,6 +290,136 @@ fn is_research_wiki_path(path: &str) -> bool {
     path.as_bytes()
         .windows(9)
         .any(|w| w.eq_ignore_ascii_case(b"/research"))
+}
+
+
+/// Phase C (#708): lexical-overlap precision boost via soft-stem token coverage
+/// and char 4-gram Jaccard. Lifts paraphrase-heavy summary queries without
+/// needing external rerank.
+fn apply_lexical_overlap_boost(
+    query: &str,
+    path_prefix: Option<&str>,
+    entries_ref: &HashMap<String, &MemoryEntry>,
+    scores: &mut HashMap<String, HybridScore>,
+) {
+    let wiki_scoped = path_prefix.is_some_and(|p| p == "/wiki" || p.starts_with("/wiki/"));
+    let guide_scoped = path_prefix.is_some_and(|p| p == "/guide" || p.starts_with("/guide/"));
+
+    // Calibrated on golden_corpus summary misses under rrf_k=20; re-measure
+    // ops_audit + golden before changing.
+    const TOKEN_COVERAGE_FLOOR: f64 = 0.40;
+    const NGRAM_JACCARD_FLOOR: f64 = 0.12;
+    const MAX_BOOST: f64 = 2.4;
+
+    let q_tokens = soft_token_set(query);
+    let q_ngrams = char_ngrams(query, 4);
+    if q_tokens.len() < 3 && q_ngrams.len() < 8 {
+        return;
+    }
+
+    for (id, entry) in entries_ref {
+        // Unscoped mixed search: do not let dense wiki/guide bags steal paraphrase
+        // boost from notes (ops-audit adjacent-wiki + golden summary).
+        if entry.is_wiki() && !wiki_scoped {
+            continue;
+        }
+        if entry.is_guide() && !guide_scoped {
+            continue;
+        }
+        let mut text = String::new();
+        text.push_str(&entry.summary);
+        text.push(' ');
+        text.push_str(&entry.text);
+        for kw in &entry.keywords {
+            text.push(' ');
+            text.push_str(kw);
+        }
+        let e_tokens = soft_token_set(&text);
+        let e_ngrams = char_ngrams(&text, 4);
+        if e_tokens.is_empty() && e_ngrams.is_empty() {
+            continue;
+        }
+
+        let token_cov = if q_tokens.is_empty() {
+            0.0
+        } else {
+            q_tokens.intersection(&e_tokens).count() as f64 / q_tokens.len() as f64
+        };
+        let jaccard = if q_ngrams.is_empty() || e_ngrams.is_empty() {
+            0.0
+        } else {
+            let inter = q_ngrams.intersection(&e_ngrams).count() as f64;
+            let union = q_ngrams.union(&e_ngrams).count() as f64;
+            inter / union.max(1.0)
+        };
+
+        if token_cov < TOKEN_COVERAGE_FLOOR && jaccard < NGRAM_JACCARD_FLOOR {
+            continue;
+        }
+
+        // Blend: stronger signal wins; clamp boost.
+        let strength = (token_cov * 1.2 + jaccard * 3.0).clamp(0.0, 1.5);
+        let boost = 1.0 + (MAX_BOOST - 1.0) * (strength / 1.5);
+        if boost > 1.0 + f64::EPSILON {
+            if let Some(score) = scores.get_mut(id) {
+                if score.final_score.is_finite() && score.final_score > 0.0 {
+                    score.final_score *= boost;
+                }
+            }
+        }
+    }
+}
+
+fn soft_token_set(text: &str) -> std::collections::HashSet<String> {
+    crate::scorer::tokenize(text)
+        .into_iter()
+        .map(|t| soft_stem_token(&t))
+        .filter(|t| t.chars().count() >= 2)
+        .collect()
+}
+
+fn soft_stem_token(token: &str) -> String {
+    let mut s = token.to_ascii_lowercase();
+    if !s.chars().all(|c| c.is_ascii_alphabetic()) {
+        return s;
+    }
+    for _ in 0..2 {
+        let before = s.clone();
+        if s.len() > 5 && s.ends_with("tion") {
+            s.truncate(s.len() - 4);
+        } else if s.len() > 5 && s.ends_with("ing") {
+            s.truncate(s.len() - 3);
+        } else if s.len() > 5 && s.ends_with("ies") {
+            s.truncate(s.len() - 3);
+            s.push('y');
+        } else if s.len() > 4 && (s.ends_with("ed") || s.ends_with("es")) {
+            s.truncate(s.len() - 2);
+        } else if s.len() > 5 && s.ends_with("ure") {
+            // failure → fail
+            s.truncate(s.len() - 3);
+        } else if s.len() > 3 && s.ends_with('s') {
+            s.truncate(s.len() - 1);
+        }
+        if s == before {
+            break;
+        }
+    }
+    s
+}
+
+fn char_ngrams(text: &str, n: usize) -> std::collections::HashSet<String> {
+    let chars: Vec<char> = text
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || crate::noise::is_cjk(*c))
+        .collect();
+    if chars.len() < n {
+        return std::collections::HashSet::new();
+    }
+    chars
+        .windows(n)
+        .map(|w| w.iter().collect::<String>())
+        .collect()
 }
 
 fn apply_access_feedback(

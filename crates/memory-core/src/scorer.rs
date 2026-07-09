@@ -484,7 +484,7 @@ pub fn hybrid_score_with_policy(
         let final_score = if weights.use_rrf {
             // Reciprocal Rank Fusion: rewards agreement across channels
             // without overtrusting raw score calibration differences.
-            let rrf_k = 60.0;
+            let rrf_k = decay_policy_context.recall_config.rrf_k.max(1.0);
             let retrieval_weight_total =
                 (weights.semantic + weights.fts + weights.symbolic).max(0.0);
             let vec_weight = retrieval_rrf_weight(weights.semantic, retrieval_weight_total);

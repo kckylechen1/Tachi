@@ -17,22 +17,17 @@
 //!   code as it stands when this file landed*. These lock in current behavior so
 //!   any future regression turns CI red, and the floors ratchet upward as each
 //!   repair phase lands.
-//! - **Target layer** (`#[ignore]`, RED on current main): records the spec's
-//!   quality goal (recall@10 / MRR >= 0.9). It currently FAILS — that failure is
-//!   the discriminating evidence that the known recall defects (M1 conjunctive
-//!   all-or-nothing + CJK or-fallback exclusion, M2 RRF flattening, M3 wiki
-//!   dilution) are real. `#[ignore]` keeps it out of the CI gate (nextest's ci
-//!   profile never runs ignored tests) so it documents the target without
-//!   blocking; run it with `--run-ignored all`.
+//! - **Target layer** (plain `#[test]` once #708 Phase C is green): records the
+//!   spec's quality goal (recall@10 / MRR >= 0.9). Landed green via `rrf_k=20`
+//!   + lexical-overlap precision boost (soft-stem token coverage + char 4-gram
+//!   Jaccard). The historical RED baseline is preserved in git history and in
+//!   the ratchet floors below.
 //!
 //! # Metric split (important)
-//! On this corpus recall@10 SATURATES at 1.000 for every slice on current main —
-//! not because recall is healthy but because defect M2 (RRF k=60 flattening)
-//! leaves the right answer PRESENT in top-10 yet ranked low. So recall@10 is the
-//! regression *floor*, and the *discrimination* lives in the rank-sensitive
-//! metrics: the summary slice's recall@3 (<= 0.6) and MRR (<= 0.54), the CJK
-//! slice's MRR (<= 0.864), and the overall MRR (<= 0.868) all sit far under the
-//! 0.9 target. See the `golden_corpus_report` #[ignore] test for the live table.
+//! On this corpus recall@10 has long saturated at 1.000 for every slice — defect
+//! M2 (RRF flattening) left the right answer PRESENT in top-10 yet ranked low.
+//! So recall@10 remains the regression *floor*, and the rank-sensitive metrics
+//! (summary/CJK/overall MRR) are the quality gate. See `golden_corpus_report`.
 //!
 //! # Determinism
 //! All timestamps derive from a fixed base instant minus a per-entry day offset
@@ -692,14 +687,15 @@ fn recall10_floor(slice: Slice) -> f64 {
         Slice::WikiScoped => 1.0,
     }
 }
-/// Overall-MRR regression floor. 20-run min was 0.852; floor set below with
-/// margin so tie-order jitter can never turn the ratchet red.
-const BASELINE_MRR_FLOOR: f64 = 0.80;
-
-// ---- Spec quality target (spec §4.1 / §7): recall@10 / MRR >= 0.9. RED now. ----
-// 20-run maxima that make these reliably red: summary recall@3 <= 0.6,
-// summary MRR <= 0.540, CJK MRR <= 0.864, overall MRR <= 0.868.
+// ---- Spec quality target (spec §4.1 / §7): recall@10 / MRR >= 0.9. ----
+// Green after #708 Phase C (`rrf_k=20` + lexical-overlap boost). Pre-fix
+// 20-run maxima that made this red: summary MRR <= 0.540, CJK MRR <= 0.864,
+// overall MRR <= 0.868.
 const TARGET_QUALITY: f64 = 0.9;
+
+/// Overall-MRR regression floor. Raised after Phase C (measured ~0.947). Keep a
+/// margin under the live number so tiny score jitter cannot flap CI; never lower.
+const BASELINE_MRR_FLOOR: f64 = 0.90;
 
 /// RATCHET LAYER — green on current main; the regression net. No slice's
 /// recall@10 and no overall MRR may drop below the measured floor.
@@ -722,16 +718,10 @@ fn golden_corpus_slices_do_not_regress() {
     );
 }
 
-/// TARGET LAYER — the spec's quality goal (recall@10 / MRR >= 0.9). RED on
-/// current main: this is the discriminating evidence that the known defects are
-/// real. Because recall@10 saturates (M2 buries rather than drops the answer),
-/// the discrimination is carried by the rank-sensitive metrics — the summary
-/// slice's recall@3 and MRR, the pure-CJK slice's MRR, and the overall MRR are
-/// all far below 0.9. `#[ignore]` keeps this out of the CI gate (nextest's ci
-/// profile never runs ignored tests); run it with
-/// `cargo test -p memory-core -- --ignored` or `--run-ignored all`.
+/// TARGET LAYER — the spec's quality goal (recall@10 / MRR >= 0.9).
+/// Green after #708 Phase C; remains a CI gate so rank regressions cannot hide
+/// behind saturated recall@10.
 #[test]
-#[ignore = "spec target — currently red on main; discriminating evidence for tachi#708 Phase A"]
 fn golden_corpus_meets_spec_targets() {
     let mut conn = setup();
     seed_corpus(&mut conn);
