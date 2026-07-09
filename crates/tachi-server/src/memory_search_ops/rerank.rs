@@ -2,8 +2,8 @@
 //!
 //! This module owns the rerank decision layer: it decides *whether* to rerank
 //! (policy gate on score gap / exact-token / row count) and, when it decides
-//! yes, calls the Voyage rerank model via `server.llm` and merges the model's
-//! order with a hybrid-score floor (pure math in `memcore::search`).
+//! yes, calls the configured rerank provider via `server.llm` and merges the
+//! model's order with a hybrid-score floor (pure math in `memcore::search`).
 //!
 //! History:
 //! - Lived in `foundry_runtime_ops::recall`; relocated here to cut the
@@ -115,7 +115,7 @@ pub(crate) enum RerankOutcome {
     NotNeeded,
 }
 
-/// Run the Voyage rerank model over `rows` and merge its ordering with a
+/// Run the configured rerank provider over `rows` and merge its ordering with a
 /// hybrid-score floor so the top-K always contains the strongest lexical
 /// candidates. Returns the reranked rows (truncated to `top_k`) and whether
 /// the model's order was applied, fell back, or was not needed.
@@ -133,7 +133,7 @@ pub(crate) async fn rerank_rows_with_outcome(
     }
 
     let docs = rows.iter().map(build_rerank_document).collect::<Vec<_>>();
-    match server.llm.rerank_voyage(query, &docs, top_k).await {
+    match server.llm.rerank(query, &docs, top_k).await {
         Ok(order) => {
             let out = merge_rerank_order_with_hybrid_floor(&rows, &order, top_k);
             let outcome = if out.is_empty() {

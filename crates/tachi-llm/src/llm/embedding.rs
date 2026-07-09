@@ -1,4 +1,6 @@
-// embedding.rs — Voyage embedding & rerank API calls on LlmClient
+// embedding.rs — Voyage embedding API calls on LlmClient
+//
+// Rerank lives in `rerank.rs` (provider-selectable seam).
 
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
@@ -7,22 +9,13 @@ use serde_json::{json, Value};
 /// overrides it (same `*_BASE_URL` idiom as the chat lanes). This is the seam
 /// the recall fail-safe test (#926) uses to point embed/rerank at a local
 /// blackhole listener.
-fn voyage_endpoint(path: &str) -> String {
+pub(in crate::llm) fn voyage_endpoint(path: &str) -> String {
     let base = std::env::var("VOYAGE_BASE_URL")
         .ok()
         .map(|v| v.trim().trim_end_matches('/').to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "https://api.voyageai.com".to_string());
     format!("{base}{path}")
-}
-
-pub(super) fn non_empty_rerank_documents(documents: &[String]) -> (Vec<&String>, Vec<usize>) {
-    documents
-        .iter()
-        .enumerate()
-        .filter(|(_, doc)| !doc.trim().is_empty())
-        .map(|(idx, doc)| (doc, idx))
-        .unzip()
 }
 
 pub(super) fn parse_voyage_batch_embeddings(
@@ -205,144 +198,5 @@ impl super::LlmClient {
         }
 
         Ok(all_embeddings)
-    }
-
-    /// Call Voyage rerank API and return (original_index, relevance_score) pairs.
-    pub async fn rerank_voyage(
-        &self,
-        query: &str,
-        documents: &[String],
-        top_k: usize,
-    ) -> Result<Vec<(usize, f64)>, String> {
-        let (filtered_docs, index_map) = non_empty_rerank_documents(documents);
-        if filtered_docs.is_empty() {
-            return Ok(vec![]);
-        }
-        let effective_top_k = top_k.max(1).min(filtered_docs.len());
-
-        let body = json!({
-            "model": "rerank-2.5",
-            "query": query,
-            "documents": filtered_docs,
-            "top_k": effective_top_k,
-        });
-
-        let mut json: Option<Value> = None;
-        let mut last_err = String::new();
-        // Recall-path bounds (#926): mirror the embed path's attempt cap and
-        // per-request deadline.
-        let max_attempts = Self::recall_max_attempts();
-        for attempt in 1..=max_attempts {
-            let Some(selected) = self
-                .required_selected_secret_or_wait(
-                    &["VOYAGE_RERANK_API_KEY", "VOYAGE_API_KEY"],
-                    attempt,
-                    "Voyage rerank",
-                )
-                .await?
-            else {
-                continue;
-            };
-            let response = self
-                .http_client()
-                .post(voyage_endpoint("/v1/rerank"))
-                .timeout(Self::recall_request_timeout())
-                .header(CONTENT_TYPE, "application/json")
-                .header(AUTHORIZATION, format!("Bearer {}", selected.value))
-                .json(&body)
-                .send()
-                .await;
-            let response = match response {
-                // Connect/send outcome only proves headers *might* arrive —
-                // it does not prove the connection is healthy end to end.
-                // Pool-hygiene accounting (#926 review) waits for the body
-                // read below so a provider that sends headers then stalls
-                // the body forever isn't recorded as a success.
-                Ok(response) => response,
-                Err(err) => {
-                    self.note_recall_provider_outcome(err.is_timeout());
-                    last_err = format!("Voyage rerank API request failed: {err}");
-                    if attempt < max_attempts {
-                        tokio::time::sleep(Self::retry_delay(attempt)).await;
-                        continue;
-                    }
-                    return Err(last_err);
-                }
-            };
-
-            let status = response.status();
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok());
-            let text = response.text().await.map_err(|e| {
-                // Headers-then-stall (#926 review): the body read carries its
-                // own share of the request's `.timeout()` budget and can time
-                // out even though `send()` already returned Ok. Record it as
-                // timeout-class so the pool-rebuild streak isn't reset by a
-                // connection that only *looked* healthy at the header stage.
-                self.note_recall_provider_outcome(e.is_timeout());
-                format!("Voyage rerank response body read failed: {e}")
-            })?;
-            // Full response body received without stalling: the pooled
-            // connection is proven healthy regardless of HTTP status (#926
-            // review). Not gated on JSON deserialize below — parse
-            // correctness is orthogonal to connection/pool health, and
-            // gating on it would silently skip accounting on the common 429
-            // rate-limit path (which returns before reaching parse).
-            self.note_recall_provider_outcome(false);
-            if status.as_u16() == 429 {
-                self.mark_secret_rate_limited(&selected, retry_after);
-                last_err = format!("Voyage rerank API error: {} - {}", status, text);
-                if attempt < max_attempts {
-                    continue;
-                }
-                return Err(last_err);
-            }
-            if status.as_u16() == 401 || status.as_u16() == 403 {
-                self.mark_secret_auth_failed(
-                    &selected,
-                    Some(&format!("Voyage rerank auth failure {status}")),
-                );
-                return Err(format!("Voyage rerank API error: {} - {}", status, text));
-            }
-            if !status.is_success() {
-                return Err(format!("Voyage rerank API error: {} - {}", status, text));
-            }
-            json = Some(
-                serde_json::from_str(&text)
-                    .map_err(|e| format!("Failed to parse Voyage rerank response: {}", e))?,
-            );
-            self.mark_secret_success(&selected);
-            break;
-        }
-        let json = json.ok_or_else(|| {
-            if last_err.is_empty() {
-                "Voyage rerank API failed without a response".to_string()
-            } else {
-                last_err
-            }
-        })?;
-        let data = json["data"]
-            .as_array()
-            .ok_or("Invalid Voyage rerank response: missing data array")?;
-
-        let mut out = Vec::with_capacity(data.len());
-        for item in data {
-            let filtered_index = item["index"]
-                .as_u64()
-                .ok_or("Invalid Voyage rerank response: missing index")?
-                as usize;
-            let relevance = item["relevance_score"]
-                .as_f64()
-                .ok_or("Invalid Voyage rerank response: missing relevance_score")?;
-            let orig_index = index_map
-                .get(filtered_index)
-                .copied()
-                .unwrap_or(filtered_index);
-            out.push((orig_index, relevance));
-        }
-        Ok(out)
     }
 }

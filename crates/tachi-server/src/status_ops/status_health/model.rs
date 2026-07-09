@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use serde_json::json;
+use tachi_llm::RerankConfig;
 
 use super::api_keys::collect_api_key_status;
 use crate::status_ops::EXPECTED_EMBEDDING_DIM;
@@ -10,6 +11,62 @@ pub(crate) fn provider_key_status_json(global_db_path: &Path) -> serde_json::Val
 }
 
 pub(crate) fn model_lanes_json() -> serde_json::Value {
+    // Report the actually configured rerank provider (not a hardcoded "voyage").
+    // Invalid config surfaces as a status error field rather than lying.
+    let rerank_cfg = RerankConfig::from_env();
+    let (rerank_provider, rerank_model, rerank_keys, local_endpoint, rerank_config_error) =
+        match &rerank_cfg {
+            Ok(cfg) => {
+                let keys: serde_json::Value = match cfg.provider {
+                    tachi_llm::RerankProviderKind::Voyage => {
+                        json!(["VOYAGE_RERANK_API_KEY", "VOYAGE_API_KEY"])
+                    }
+                    tachi_llm::RerankProviderKind::Local => json!([]),
+                };
+                (
+                    cfg.provider_name(),
+                    cfg.model_name().map(str::to_string),
+                    keys,
+                    cfg.local_endpoint.clone(),
+                    None::<String>,
+                )
+            }
+            Err(err) => (
+                "invalid",
+                None,
+                json!([]),
+                None,
+                Some(err.clone()),
+            ),
+        };
+
+    let mut rerank_lane = json!({
+        "provider": rerank_provider,
+        "model": rerank_model,
+        "keys": rerank_keys,
+    });
+    if let Some(endpoint) = local_endpoint {
+        rerank_lane
+            .as_object_mut()
+            .expect("rerank_lane object")
+            .insert("local_endpoint".into(), json!(endpoint));
+    }
+    if let Some(err) = rerank_config_error {
+        rerank_lane
+            .as_object_mut()
+            .expect("rerank_lane object")
+            .insert("config_error".into(), json!(err));
+    }
+
+    let auth_failure_hint = match rerank_cfg.as_ref().map(|c| c.provider) {
+        Ok(tachi_llm::RerankProviderKind::Local) => {
+            "403 during query generation points to SILICONFLOW_API_KEY; local rerank uses TACHI_RERANK_LOCAL_ENDPOINT (no Voyage key)"
+        }
+        _ => {
+            "403 during query generation points to SILICONFLOW_API_KEY; 403 during Voyage rerank points to VOYAGE_RERANK_API_KEY or VOYAGE_API_KEY"
+        }
+    };
+
     json!({
         "embedding": {
             "provider": "voyage",
@@ -17,15 +74,11 @@ pub(crate) fn model_lanes_json() -> serde_json::Value {
             "expected_dimension": EXPECTED_EMBEDDING_DIM,
             "key": "VOYAGE_API_KEY",
         },
-        "rerank": {
-            "provider": "voyage",
-            "model": "rerank-2.5",
-            "keys": ["VOYAGE_RERANK_API_KEY", "VOYAGE_API_KEY"],
-        },
+        "rerank": rerank_lane,
         "recall_rerank_cache": {
             "query_generation_provider": "extract/SiliconFlow",
-            "rerank_provider": "voyage",
-            "auth_failure_hint": "403 during query generation points to SILICONFLOW_API_KEY; 403 during Voyage rerank points to VOYAGE_RERANK_API_KEY or VOYAGE_API_KEY",
+            "rerank_provider": rerank_provider,
+            "auth_failure_hint": auth_failure_hint,
         },
         "extract": {
             "provider": "openai-compatible",

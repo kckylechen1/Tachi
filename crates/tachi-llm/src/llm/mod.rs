@@ -12,9 +12,11 @@ mod circuit_breaker;
 mod embedding;
 mod helpers;
 mod provider_health;
+mod rerank;
 
 pub(crate) use circuit_breaker::CircuitBreakerRegistry;
 pub use provider_health::ProviderSecret;
+pub use rerank::{RerankConfig, RerankProviderKind, RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV};
 use provider_health::{
     ChatLaneConfig, ClaudeCliFailure, ProviderHealthPersistState, ProviderHealthReloadState,
     ProviderState,

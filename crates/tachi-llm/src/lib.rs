@@ -11,7 +11,10 @@ mod runtime_files;
 #[cfg(test)]
 mod test_support;
 
-pub use llm::{LlmClient, ProviderSecret};
+pub use llm::{
+    LlmClient, ProviderSecret, RerankConfig, RerankProviderKind, RERANK_LOCAL_ENDPOINT_ENV,
+    RERANK_PROVIDER_ENV,
+};
 pub use provider_materialization::{
     group_api_key_values_by_configured_rotations, materialize_provider_secrets, MaterializeReport,
 };

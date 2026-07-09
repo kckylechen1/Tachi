@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 
 fn api_key_row<'a>(rows: &'a [ApiKeyStatus], name: &str) -> &'a ApiKeyStatus {
     rows.iter()
@@ -392,4 +393,55 @@ fn provider_probe_client_loads_target_db_key_health() {
         None,
         "provider probes must honor fresh auth_failed health from the target global DB"
     );
+}
+
+#[test]
+fn model_lanes_reports_default_voyage_rerank_provider() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _provider = EnvGuard::set(tachi_llm::RERANK_PROVIDER_ENV, "");
+    // Empty string is treated as unset by RerankProviderKind::parse → voyage.
+    // Also clear any leftover local endpoint so the lane shape stays default.
+    let original_endpoint = std::env::var_os(tachi_llm::RERANK_LOCAL_ENDPOINT_ENV);
+    std::env::remove_var(tachi_llm::RERANK_LOCAL_ENDPOINT_ENV);
+    // EnvGuard with empty string still sets the var; remove for true default.
+    std::env::remove_var(tachi_llm::RERANK_PROVIDER_ENV);
+
+    let lanes = model_lanes_json();
+    assert_eq!(lanes["rerank"]["provider"], json!("voyage"));
+    assert_eq!(lanes["rerank"]["model"], json!("rerank-2.5"));
+    assert_eq!(
+        lanes["recall_rerank_cache"]["rerank_provider"],
+        json!("voyage")
+    );
+
+    restore_env(
+        tachi_llm::RERANK_LOCAL_ENDPOINT_ENV,
+        original_endpoint,
+    );
+}
+
+#[test]
+fn model_lanes_reports_configured_local_rerank_provider() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _provider = EnvGuard::set(tachi_llm::RERANK_PROVIDER_ENV, "local");
+    let _endpoint = EnvGuard::set(
+        tachi_llm::RERANK_LOCAL_ENDPOINT_ENV,
+        "http://127.0.0.1:9/rerank",
+    );
+
+    let lanes = model_lanes_json();
+    assert_eq!(lanes["rerank"]["provider"], json!("local"));
+    assert_eq!(
+        lanes["rerank"]["local_endpoint"],
+        json!("http://127.0.0.1:9/rerank")
+    );
+    assert_eq!(
+        lanes["recall_rerank_cache"]["rerank_provider"],
+        json!("local")
+    );
+    assert!(lanes["rerank"]["model"].is_null());
 }
