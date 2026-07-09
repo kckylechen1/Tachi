@@ -11,8 +11,10 @@ use super::{
     release_event_claim, schema_version, search_fts, search_symbolic_candidates, search_vec,
     serialize_f32, set_sandbox_policy, stats, supersede_memory, table_exists, try_claim_event,
     try_load_sqlite_vec, update_agent_known_state, update_enrichment_fields, update_with_revision,
-    upsert, vault_touch_entry, vault_upsert_entry, AccessUpdate, FoundryJobStatusCounts,
+    upsert, AccessUpdate, FoundryJobStatusCounts,
 };
+#[cfg(feature = "admin")]
+use super::{vault_touch_entry, vault_upsert_entry};
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde_json::json;

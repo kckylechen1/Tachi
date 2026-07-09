@@ -61,7 +61,7 @@ The portable bundle includes:
 
 | Surface | Layer | Portable contract |
 |---|---|---|
-| `memory-core` | `kernel` | Canonical memory rows, graph edges, store/open/read/write contracts, access history, and scorer types. |
+| `memory-core` (feature `admin` **off**) / crate `portable-kernel` | `kernel` | Canonical memory rows, graph edges, store/open/read/write contracts, access history, and scorer types. Build with `default-features = false` or depend on `portable-kernel`. Admin (vault/hub/foundry/pack) stays out of the portable graph — see [`portable-kernel-split.md`](./portable-kernel-split.md). |
 | Memory DB/schema contracts | `kernel` | Stable schema expectations for `memories`, FTS, `memory_edges`, access history, event ledger, and migration-owned columns. |
 | Recall/scorer/RRF | `kernel` | Hybrid search, symbolic/FTS/vector scoring, RRF/MMR ranking, decay scoring, and recall diagnostics inputs. |
 | Vector/backfill | `kernel` | Embedding readiness, vector coverage, backfill state, and degraded-mode reporting. |

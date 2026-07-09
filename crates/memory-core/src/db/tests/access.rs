@@ -156,6 +156,7 @@ fn record_access_repeats_accumulate_on_access_history() {
     );
 }
 
+#[cfg(feature = "admin")]
 #[test]
 fn vault_touch_entry_returns_post_touch_count() {
     use crate::vault::VaultEntry;
