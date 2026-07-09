@@ -251,7 +251,7 @@ pub(crate) async fn handle_memory_briefing(
     let checkpoints = json!(checkpoints_res);
     let verification = crate::verify_ops::recent_verification_summaries(verification_cap);
     let wiki_counts: Value = wiki_counts_res?;
-    let health_summary = if compact {
+    let mut health_summary = if compact {
         compact_health_summary(server, wiki_counts).await
     } else {
         // Report the REAL health score — the same value tachi_status computes —
@@ -280,6 +280,40 @@ pub(crate) async fn handle_memory_briefing(
     // feature briefing (which only sees the flow already in scope).
     let open_loops = crate::shell_ops::scan_open_loops(8);
 
+    // Component governance for the active workspace (#799): registry-only,
+    // never presented as memory-derived current truth.
+    let component_governance = crate::component_governance_ops::component_governance_context(
+        server,
+        named_project.as_deref(),
+        None,
+    )
+    .unwrap_or_else(|e| {
+        json!({
+            "status": "error",
+            "matches": [],
+            "note": format!("component governance context unavailable: {e}"),
+        })
+    });
+    // Fold governance warnings into health so compact status remains glanceable.
+    if let Some(health_warnings) = health_summary
+        .get_mut("warnings")
+        .and_then(Value::as_array_mut)
+    {
+        for line in crate::component_governance_ops::component_governance_warning_lines(
+            &component_governance,
+        ) {
+            if health_warnings.len() >= 8 {
+                break;
+            }
+            if !health_warnings
+                .iter()
+                .any(|w| w.as_str() == Some(line.as_str()))
+            {
+                health_warnings.push(json!(line));
+            }
+        }
+    }
+
     if wants_json(params.format.as_deref()) {
         if compact {
             let mut response = Map::new();
@@ -295,6 +329,13 @@ pub(crate) async fn handle_memory_briefing(
             insert_non_empty_compact_section(&mut response, "kanban", board);
             insert_non_empty_compact_section(&mut response, "open_loops", json!(open_loops));
             insert_non_empty_compact_section(&mut response, "recent_checkpoints", checkpoints);
+            if component_governance
+                .get("matches")
+                .and_then(Value::as_array)
+                .is_some_and(|m| !m.is_empty())
+            {
+                response.insert("component_governance".to_string(), component_governance);
+            }
             response.insert("compact".to_string(), json!(true));
             return json_string(&Value::Object(response));
         }
@@ -311,13 +352,15 @@ pub(crate) async fn handle_memory_briefing(
             "kanban": board,
             "open_loops": open_loops,
             "recent_checkpoints": checkpoints,
+            "component_governance": component_governance,
             "layer_authority": {
                 "docs_specs": "highest; use tachi_task(action='briefing') for feature-scoped canonical docs/specs",
                 "guide_sop": "high; procedural workflow guidance",
                 "wiki": "medium-high; synthesized durable knowledge",
                 "memory": "low-medium; fragmented decisions/checkpoints/evidence",
                 "eval_verification": "evidence; supports routing/review but does not override docs/specs",
-                "kanban": "workflow state; current task board and dispatch ledger"
+                "kanban": "workflow state; current task board and dispatch ledger",
+                "component_governance": "governance registry; stale/unknown are not memory truth"
             },
             "compact": compact,
             "limits": {
@@ -342,6 +385,7 @@ pub(crate) async fn handle_memory_briefing(
         &board,
         &checkpoints,
         &open_loops,
+        &component_governance,
         compact,
     ))
 }

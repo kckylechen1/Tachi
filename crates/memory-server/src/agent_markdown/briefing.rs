@@ -11,6 +11,7 @@ pub(crate) fn format_briefing(
     kanban: &Value,
     checkpoints: &Value,
     open_loops: &[Value],
+    component_governance: &Value,
     compact: bool,
 ) -> String {
     let memory_cap = if compact { 6 } else { 12 };
@@ -115,6 +116,54 @@ pub(crate) fn format_briefing(
         }
     }
 
+    if let Some(matches) = component_governance
+        .get("matches")
+        .and_then(Value::as_array)
+    {
+        if !matches.is_empty() {
+            out.push("\n### Component governance [AUTHORITY: GOVERNANCE REGISTRY]".to_string());
+            out.push(
+                "_Declared registry only — stale/unknown are not memory truth. Use `tachi_component(action='show'|'plan')` for detail._"
+                    .to_string(),
+            );
+            let cap = if compact { 3 } else { 6 };
+            for m in matches.iter().take(cap) {
+                let id = m.get("component_id").and_then(Value::as_str).unwrap_or("?");
+                let ctype = m
+                    .get("component_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                let freshness = m
+                    .get("freshness")
+                    .and_then(|f| f.get("state"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let category = m.get("category").and_then(Value::as_str).unwrap_or("?");
+                out.push(format!(
+                    "- `{id}` ({ctype}) category=`{category}` freshness=`{freshness}`"
+                ));
+                if let Some(drift) = m.get("known_drift").and_then(Value::as_array) {
+                    for d in drift.iter().take(2) {
+                        let area = d.get("area").and_then(Value::as_str).unwrap_or("?");
+                        let class = d
+                            .get("classification")
+                            .and_then(Value::as_str)
+                            .unwrap_or("?");
+                        out.push(format!("  - drift `{area}` — {class}"));
+                    }
+                }
+                if let Some(prereqs) = m.get("upstream_prereqs").and_then(Value::as_array) {
+                    if !prereqs.is_empty() && freshness != "current" {
+                        out.push(format!(
+                            "  - {} upstream prereq(s) on record (verify before cutover)",
+                            prereqs.len()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     if let Some(rows) = verification.as_array() {
         if !rows.is_empty() {
             out.push("\n### Verification gates [AUTHORITY: EVAL EVIDENCE]".to_string());
@@ -174,7 +223,14 @@ pub(crate) fn format_briefing(
     out.push("\n### Suggested next step".to_string());
     out.push(format!(
         "- {}",
-        briefing_next_step(query, wiki, health_summary, verification, kanban)
+        briefing_next_step(
+            query,
+            wiki,
+            health_summary,
+            verification,
+            kanban,
+            component_governance,
+        )
     ));
     out.push(
         "\n> Save only new decisions/outcomes as they happen → `tachi_memory(action='save', text=…, keywords=[…], project='…')`. Windsurf/Cursor have no auto-capture."
@@ -190,6 +246,7 @@ fn briefing_next_step(
     health_summary: &Value,
     verification: &Value,
     kanban: &Value,
+    component_governance: &Value,
 ) -> String {
     if verification.as_array().is_some_and(|rows| {
         rows.iter().any(|row| {
@@ -199,6 +256,26 @@ fn briefing_next_step(
         })
     }) {
         return "`tachi_verify(action='board')` to inspect background verification gates before merge."
+            .to_string();
+    }
+    if component_governance
+        .get("matches")
+        .and_then(Value::as_array)
+        .is_some_and(|rows| {
+            rows.iter().any(|m| {
+                matches!(
+                    m.get("freshness")
+                        .and_then(|f| f.get("state"))
+                        .and_then(Value::as_str),
+                    Some("stale" | "unknown")
+                ) || m
+                    .get("blocked_forks")
+                    .and_then(Value::as_array)
+                    .is_some_and(|b| !b.is_empty())
+            })
+        })
+    {
+        return "`tachi_component(action='show' or 'plan')` to inspect stale/blocked shared-component governance before cutover."
             .to_string();
     }
     let has_warnings = health_summary

@@ -515,6 +515,28 @@ async fn handle_tachi_status_detail(
         );
     }
 
+    // Component governance for active workspace (#799) — registry only.
+    let named_project = crate::memory_search_ops::resolve_workspace_named_project();
+    let component_governance = crate::component_governance_ops::component_governance_context(
+        server,
+        named_project.as_deref(),
+        None,
+    )
+    .unwrap_or_else(|e| {
+        json!({
+            "status": "error",
+            "matches": [],
+            "note": format!("component governance unavailable: {e}"),
+        })
+    });
+    for line in
+        crate::component_governance_ops::component_governance_warning_lines(&component_governance)
+    {
+        if !warnings.iter().any(|w| w == &line) {
+            warnings.push(line);
+        }
+    }
+
     if full {
         serde_json::to_string(&json!({
             "daemon": daemon_state,
@@ -541,6 +563,7 @@ async fn handle_tachi_status_detail(
                 "provider_auth_failures": auth_failures,
                 "latest_failed_jobs": failed_jobs,
             },
+            "component_governance": component_governance,
             "warnings": warnings,
             "daily_pipeline": snapshot.last_daily_report,
             "distill": snapshot.distill_marker,
@@ -611,6 +634,7 @@ async fn handle_tachi_status_detail(
             },
             "provider_probe_cache": snapshot.provider_probe_cache,
             "doctor_hint": readiness.get("doctor_hint"),
+            "component_governance": component_governance,
         });
         if total_outcome_events > 0 {
             response
