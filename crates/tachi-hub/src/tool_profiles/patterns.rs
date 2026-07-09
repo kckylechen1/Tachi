@@ -141,24 +141,28 @@ pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
 ];
 
 /// Delegate profile allow-list. For worker agents spawned by tachi_dispatch.
-/// No dispatch (prevent recursion), no handoff, no hub_discover. Delegate
-/// runtime policy limits `tachi_skill` to discover/run/bundle; `run_skill`
-/// remains for backcompat with injected/recommended skills that still call the
-/// standalone route.
+///
+/// F3 (#495/#913): `tachi_task` is now on the list; recursive `dispatch` is
+/// denied by [`super::action_policy::facade_action_allowed`] (plan/complete/
+/// status/board/wait/briefing/doc_index only). `tachi_skill` is limited to
+/// discover/run/bundle by the same gate. `run_skill` / `tachi_complete` remain
+/// for backcompat with injected/recommended skills and older workers.
 pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_tools",
     "runtime_info",
-    // Unified memory facade (search + save)
+    // Unified memory facade (daily actions only under action policy)
     "tachi_memory",
-    // Continuity events (query + append)
+    // Continuity events (query + append; no promote under action policy)
     "tachi_event",
     "tachi_web_search",
     "tachi_browse",
     // Self-rescue when stuck
     "tachi_unstick",
-    // Declare task completion
+    // Task facade — action policy denies dispatch/recommend/merge/…
+    "tachi_task",
+    // Declare task completion (standalone backcompat; prefer tachi_task complete)
     "tachi_complete",
-    // Canonical skill workflow facade (discover/run/bundle under delegate)
+    // Canonical skill workflow facade (discover/run/bundle under action policy)
     "tachi_skill",
     // Backcompat execution route for injected/recommended skills
     "run_skill",

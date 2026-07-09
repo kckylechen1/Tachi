@@ -35,6 +35,17 @@ fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {
     ))])
 }
 
+/// F3 (#495/#913): action denied by ToolProfile (distinct from tool-not-found).
+fn tool_action_denied_result(
+    tool_name: &str,
+    action: &str,
+    profile_label: &str,
+) -> rmcp::model::CallToolResult {
+    rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text(format!(
+        "action '{action}' on tool '{tool_name}' is not allowed for ToolProfile '{profile_label}'. Use a permitted action for this profile, or call tachi_tools() to inspect the active surface."
+    ))])
+}
+
 pub(crate) fn split_proxy_tool_name<'a>(
     name: &str,
     server_names: impl Iterator<Item = &'a str>,
@@ -317,11 +328,27 @@ impl ServerHandler for MemoryServer {
             let name = name_owned.as_str();
             let env_patterns = current_exposed_tool_patterns();
 
-            let visible =
-                tachi_hub::tool_visible(name, self.active_tool_profile(), env_patterns.as_deref());
+            let active_profile = self.active_tool_profile();
+            let visible = tachi_hub::tool_visible(name, active_profile, env_patterns.as_deref());
 
             if !visible {
                 return Ok(tool_not_found_result(name));
+            }
+
+            // F3 (#495/#913): action-level ToolProfile gate for facade tools.
+            // Runs after tool_visible so delegate can list tachi_task while still
+            // denying recursive dispatch.
+            let action_arg = params
+                .arguments
+                .as_ref()
+                .and_then(|args| args.get("action"))
+                .and_then(|value| value.as_str());
+            if !tachi_hub::facade_action_allowed(name, action_arg, active_profile) {
+                let profile_label = active_profile
+                    .map(|p| p.as_str())
+                    .unwrap_or_else(|| "standard".to_string());
+                let action_label = action_arg.unwrap_or("");
+                return Ok(tool_action_denied_result(name, action_label, &profile_label));
             }
 
             let bound_project = self.session_project();

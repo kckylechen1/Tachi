@@ -5,7 +5,8 @@ pub(super) async fn handle_tachi_task_facade(
     server: &MemoryServer,
     params: TachiTaskParams,
 ) -> Result<String, String> {
-    let action = params.action.to_ascii_lowercase();
+    // F4: typed action enum; match on wire string for stable arm labels.
+    let action = params.action.as_str().to_string();
     let raw = match action.as_str() {
         "plan" => {
             let task = params

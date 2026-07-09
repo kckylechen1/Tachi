@@ -644,7 +644,7 @@ fn record_tests_run_verification(
     tests_run: &[String],
 ) -> Result<(), String> {
     let params = TachiVerifyParams {
-        action: "record".to_string(),
+        action: crate::tool_params::TachiVerifyAction::Record,
         format: Some("json".to_string()),
         flow_id: Some(flow_id.to_string()),
         pr_ref: Some(format!("{repo}#{pr_number}")),

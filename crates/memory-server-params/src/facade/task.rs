@@ -1,6 +1,6 @@
 use super::{
     string_enum_schema, CompletionPredicate, DispatchMcpAccessParams, SignatureRecordParams,
-    TachiSubagentEvalParams,
+    TachiSubagentEvalParams, TachiTaskAction,
 };
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
@@ -9,7 +9,7 @@ fn tachi_task_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     // F2 (#495/#913): primary schema omits GH PR lifecycle actions — use tachi_gh.
-    // Router still accepts them for compatibility with a deprecation notice.
+    // Router still accepts them for compatibility with a deprecation notice (F4 enum deserializes them).
     string_enum_schema(
         super::action_inventory::TACHI_TASK_PRIMARY_ACTIONS,
         "Required Tachi task facade action (primary). Prefer tachi_gh for GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note). action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'wait'/'board'/'cancel' manage dispatches; action='complete' records eval; action='recommend'/'route_simulate'/'proposals' manage routing; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs).",
@@ -21,16 +21,20 @@ fn tachi_task_action_schema(
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiTaskParams {
-    /// Primary actions: see `TACHI_TASK_PRIMARY_ACTIONS` / MCP schema enum.
+    /// Primary actions (F4 enum / `TACHI_TASK_PRIMARY_ACTIONS`): plan, briefing,
+    /// doc_index, recommend, dispatch, complete, profiles, profile, card,
+    /// route_simulate, proposals, review_proposal, apply_proposals, status,
+    /// cancel, board, wait, merge, intake, cycle_status, cycle_plan, ux_matrix,
+    /// build_references, close_loop.
     /// action="merge" is local dispatched worktree git merge only; use
     /// tachi_gh(action='safe_merge') for GitHub PR merges.
     /// action="intake" binds a GitHub issue to a flow.
     /// action="cycle_status" / "cycle_plan" are read-only lifecycle models.
     /// action="ux_matrix" / "build_references" / "close_loop" close the issue loop.
     /// GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note): **canonical is tachi_gh**.
-    /// Those strings remain accepted on this router for compatibility only and return a deprecation notice.
+    /// Those variants remain accepted on this router for compatibility only and return a deprecation notice.
     #[schemars(schema_with = "tachi_task_action_schema")]
-    pub action: String,
+    pub action: TachiTaskAction,
     /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
     #[serde(default)]
     pub format: Option<String>,
