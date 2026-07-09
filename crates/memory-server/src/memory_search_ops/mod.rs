@@ -1,6 +1,7 @@
 mod auto_link;
 mod confidence_reinforce;
 mod contradiction;
+mod library_binding;
 mod rerank;
 mod routing_config;
 mod save_memory;
@@ -11,6 +12,7 @@ mod text_scrub;
 // Re-export all pub/pub(crate) items that external modules use.
 pub(crate) use confidence_reinforce::apply_confidence_reinforcement_links;
 pub(crate) use contradiction::apply_auto_contradiction_detection;
+pub(crate) use library_binding::{format_binding_markdown, library_binding_receipt};
 pub(crate) use rerank::{
     apply_search_rerank_policy, expand_search_params_for_rerank, rerank_rows_with_outcome,
     RerankOutcome, SearchRerankPolicy,

@@ -102,7 +102,18 @@ pub(crate) async fn handle_tachi_search(
     }
 
     let (sections, scope_remapped, scope) = collect_tachi_search_sections(server, &params).await;
+    let binding =
+        crate::memory_search_ops::library_binding_receipt(server, params.project.as_deref());
+    let binding_md = crate::memory_search_ops::format_binding_markdown(&binding);
     let mut output = agent_markdown::format_search_sections(&params.query, &sections);
+    // #898 / #900 follow-up: surface binding on standalone tachi_search markdown
+    // so agents not using tachi_memory still see single_db_mode warnings.
+    if let Some(idx) = output.find('\n') {
+        output.insert_str(idx + 1, &format!("{binding_md}\n"));
+    } else {
+        output.push('\n');
+        output.push_str(&binding_md);
+    }
     if scope_remapped {
         output = format!(
             "> **Note**: scope='{}' was interpreted as 'all'. Use `project` to target a named library under `~/.tachi/projects/<name>/memory.db`.\n\n{output}",

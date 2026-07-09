@@ -265,6 +265,7 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
     let plan_c_split_brain = project_db_path
         .as_ref()
         .and_then(|path| crate::path_utils::plan_c_split_brain_for_local_db(path.as_path()));
+    let binding = crate::memory_search_ops::library_binding_receipt(server, None);
 
     serde_json::to_string(&json!({
         "runtime": {
@@ -288,6 +289,7 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
             "single_db_mode": !server.has_project_db(),
             "plan_c_split_brain": plan_c_split_brain,
         },
+        "binding": binding,
         "env": {
             "TACHI_HOME": std::env::var("TACHI_HOME").ok(),
             "SIGIL_HOME": std::env::var("SIGIL_HOME").ok(),

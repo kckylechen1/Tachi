@@ -314,6 +314,31 @@ pub(crate) async fn handle_memory_briefing(
         }
     }
 
+    let binding = crate::memory_search_ops::library_binding_receipt(
+        server,
+        params.project.as_deref(),
+    );
+    // Surface binding warnings inside health so compact agents cannot miss them.
+    // Ensure `warnings` exists even if health summary shape drifts (Gemini #900).
+    if let Some(health_obj) = health_summary.as_object_mut() {
+        let health_warnings = health_obj
+            .entry("warnings".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut();
+        if let Some(health_warnings) = health_warnings {
+            if let Some(binding_warnings) = binding.get("warnings").and_then(Value::as_array) {
+                for w in binding_warnings {
+                    if health_warnings.len() >= 10 {
+                        break;
+                    }
+                    if !health_warnings.contains(w) {
+                        health_warnings.push(w.clone());
+                    }
+                }
+            }
+        }
+    }
+
     if wants_json(params.format.as_deref()) {
         if compact {
             let mut response = Map::new();
@@ -321,6 +346,7 @@ pub(crate) async fn handle_memory_briefing(
             response.insert("query".to_string(), json!(query));
             response.insert("project".to_string(), json!(named_project));
             response.insert("available_projects".to_string(), json!(available_projects));
+            response.insert("binding".to_string(), binding);
             response.insert("health".to_string(), health_summary);
             insert_non_empty_compact_section(&mut response, "memories", memories);
             insert_non_empty_compact_section(&mut response, "wiki", wiki);
@@ -344,6 +370,7 @@ pub(crate) async fn handle_memory_briefing(
             "query": query,
             "project": named_project,
             "available_projects": available_projects,
+            "binding": binding,
             "memories": memories,
             "wiki": wiki,
             "cross_project": cross_project,
@@ -374,7 +401,7 @@ pub(crate) async fn handle_memory_briefing(
         }));
     }
 
-    Ok(agent_markdown::format_briefing(
+    let mut markdown = agent_markdown::format_briefing(
         &query,
         named_project.as_deref(),
         &memories,
@@ -387,7 +414,16 @@ pub(crate) async fn handle_memory_briefing(
         &open_loops,
         &component_governance,
         compact,
-    ))
+    );
+    // Insert binding receipt after the project-focus line so unscoped sessions are obvious.
+    let binding_md = crate::memory_search_ops::format_binding_markdown(&binding);
+    if let Some(idx) = markdown.find('\n') {
+        markdown.insert_str(idx + 1, &format!("{binding_md}\n"));
+    } else {
+        markdown.push('\n');
+        markdown.push_str(&binding_md);
+    }
+    Ok(markdown)
 }
 
 #[cfg(test)]
