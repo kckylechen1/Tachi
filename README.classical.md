@@ -33,7 +33,7 @@ brew tap kckylechen1/tachi && brew install tachi
 或颁此符诏：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.7.0/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.8.0/scripts/install.sh)"
 ```
 
 ---

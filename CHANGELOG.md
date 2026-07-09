@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Quick Navigation
 
 - [Unreleased](#unreleased)
+- [1.8.0](#180---2026-07-10) — Tachi crate branding, action-level profiles, recall discrimination, CI-state ingest
 - [1.7.0](#170---2026-07-08) — portable memory kernel, vector auditability, and dispatch canon
 - [1.6.4](#164---2026-07-06) — multi-project daemon stdio repair
 - [1.6.3](#163---2026-07-06) — recall quality overhaul and kernel reliability
@@ -45,6 +46,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **`memcore` `SearchOptions` gains a `decay_policy` field and `DecayPolicy` now requires `Send + Sync`** (#891), so downstream policy injection can reach the live hybrid search path without forking `scorer.rs`. This is a source-breaking change for downstream code that builds `SearchOptions` via a full struct literal (add `decay_policy: None` or use `..Default::default()`) or implements `DecayPolicy` on a non-`Send`/non-`Sync` type — intentional, by design, to keep the trait usable behind `Arc<dyn DecayPolicy>` on the ranking hot path.
+
+## [1.8.0] - 2026-07-10
+
+### Added
+
+- Native personal recall eval gate: `eval recall` CLI replaying `/eval` cases through `recall_simulate`, aggregate-only status artifact, `--min-recall`/`--min-mrr` fail-closed gate (#920, #922).
+- Library binding receipts with loud `single_db_mode` warning across search, briefing, runtime_info, and `tachi_search` (#896, #898, #900).
+- Cross-library project rank preference for project-bound sessions, env-tunable boost (#899, #902) with same-store precision guards (#903).
+- Ops-audit recall discrimination suite with permanent red-baseline fixtures (#897, #901).
+- Memory consolidation propose/review/apply lifecycle (#775, #904); `auto_link` related_to floor raised (#773, #905).
+- GitHub CI-state ingest: background `ci-watch` poller writes check-state transitions; `safe_merge` consumes ingested state instead of re-polling (#605, #816).
+- Managed worktree open outside TCC-protected paths + reclaim-on-merge disk-governor slice (#484, #910).
+- Component cutover planner and briefing/status surfacing for stale component governance (#798, #799, #883).
+- HTTP direct-connect cookbook and health reconnect for capable MCP clients (#732, #889); library identity runtime contract (#746, #888).
+- Portable hybrid-floor RRF rerank blend and injectable `DecayPolicy` for downstream kernels (#891, #893).
+- Action-level `ToolProfile` gating at the `call_tool` choke-point with fail-closed defaults and compile-checked action enums (#495, #918, #919).
+
+### Changed
+
+- MemCore / Tachi crate branding: `memory-server` → `tachi-server`, `memory-core` → `memcore`, `memory-server-params` → `tachi-params`, with a `memory-server` PATH-compat bin alias (#890, #912, #923).
+- Skill-pack system retired (#908); vendored skill corpus decoupled from the git tree via central-library resolution at seed time (#894, #895, #909).
+- Facade response economics F0–F2: tool inventory, compact verify responses, GH lifecycle dedup between `tachi_task` and `tachi_gh` (#527, #918).
+- Deslop S0: removed `unused_imports`/`dead_code` allows across the workspace (#913, #916, #917).
+
+### Fixed
+
+- Memory hermeticity and exact-rank-preservation fixes from the #900–#909 batch cross-vendor review (#911, #915).
+- Dispatch verification lanes: completion predicate, headless verify, leader-readable run artifacts, char-count truncation (#878, #881, #882, #885).
+
+### Security
+
+- Supply-chain hardening for the release pipeline: pinned third-party actions, fatal binary version probe, newline-anchored Homebrew formula regex (#907, #914).
+- Worktree cleaner hardened: fail-closed dirty-guard, path boundary fencing, `--end-of-options` ref validation, TOCTOU shrink (#910).
 
 ## [1.7.0] - 2026-07-08 — portable memory kernel, vector auditability, and dispatch canon
 
