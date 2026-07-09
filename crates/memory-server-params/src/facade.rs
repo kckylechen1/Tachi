@@ -512,7 +512,7 @@ pub struct TachiWikiParams {
 
 fn tachi_component_action_schema(gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
     string_enum_schema(
-        &["list", "show", "check"],
+        &["list", "show", "check", "plan"],
         "Component governance action.",
         gen,
     )
@@ -520,13 +520,13 @@ fn tachi_component_action_schema(gen: &mut schemars::SchemaGenerator) -> schemar
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub struct TachiComponentParams {
-    /// Action: "list" (compact records), "show" (full record + relation edges), or "check" (read-only downstream classifier, Issue #797).
+    /// Action: "list" (compact records), "show" (full record + relation edges), "check" (read-only downstream classifier, Issue #797), or "plan" (read-only cutover checklist, Issue #798).
     #[schemars(schema_with = "tachi_component_action_schema")]
     pub action: String,
     /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
     #[serde(default)]
     pub format: Option<String>,
-    /// Required for action="show": the component_id to fetch (e.g. "tachi-memory-kernel").
+    /// Required for action="show" and action="plan" (--from): the component_id (e.g. "tachi-memory-kernel").
     #[serde(default)]
     pub component_id: Option<String>,
     /// Optional filter for action="list": one of kernel, runtime_adapter, workflow_bridge, frontend_app_shell.
@@ -542,10 +542,10 @@ pub struct TachiComponentParams {
     /// this only scopes read-forward behavior, mirroring other read-only facade tools.
     #[serde(default)]
     pub project: Option<String>,
-    /// Required for action="check": filesystem path to the checked-out repo to classify against declared component records.
+    /// action="check": filesystem path to classify. action="plan" (--to): target checkout path, consumer component_id, or owner_repo.
     #[serde(default)]
     #[schemars(
-        description = "Required for action='check': filesystem path to the repo checkout to classify."
+        description = "For action='check': repo checkout path. For action='plan': --to target (path, component_id, or owner_repo)."
     )]
     pub repo: Option<String>,
 }

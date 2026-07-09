@@ -1,8 +1,9 @@
-//! Component governance read model (Issue #796).
+//! Component governance read model (Issues #796–#799).
 //!
 //! Persists v0 component records from the governance fixture as a governed
 //! Tachi read model under `/components/v0/<component_id>` and exposes low-risk
-//! `list`/`show` access via the `tachi_component` facade tool.
+//! `list`/`show`/`check`/`plan` access via the `tachi_component` facade tool.
+//! Briefing/status surfaces matching records for the active workspace (#799).
 //!
 //! Records live in the GLOBAL store (they are cross-project governance
 //! artifacts, not per-project memories). Relations (`owns`, `consumes`,
@@ -270,10 +271,34 @@ pub(crate) async fn handle_tachi_component(
         "list" => handle_list(server, &params).await,
         "show" => handle_show(server, &params).await,
         "check" => handle_check(server, &params).await,
+        "plan" => handle_plan(server, &params).await,
         other => Err(format!(
-            "unknown tachi_component action '{other}'; expected 'list', 'show', or 'check'"
+            "unknown tachi_component action '{other}'; expected 'list', 'show', 'check', or 'plan'"
         )),
     }
+}
+
+/// Load declared component records from the global store (read-only).
+fn load_component_records(server: &MemoryServer) -> Result<Vec<Value>, String> {
+    server.with_global_store_read(|store| {
+        let entries = store
+            .list_by_path(COMPONENT_PATH_PREFIX, 500, false)
+            .map_err(|e| format!("list component records: {e}"))?;
+        Ok(entries
+            .iter()
+            .filter_map(|e| extract_component_record(&e.metadata))
+            .collect())
+    })
+}
+
+/// Find a record by exact component_id.
+fn find_record_by_id<'a>(records: &'a [Value], component_id: &str) -> Option<&'a Value> {
+    records.iter().find(|r| {
+        r.get("component_id")
+            .and_then(Value::as_str)
+            .map(|id| id == component_id)
+            .unwrap_or(false)
+    })
 }
 
 async fn handle_list(
@@ -687,19 +712,7 @@ async fn handle_check(
         .as_deref()
         .ok_or_else(|| "repo is required when action='check'".to_string())?;
     let repo_path = std::path::Path::new(repo);
-
-    // Load declared records from the global store (read-only).
-    let records: Vec<Value> = server.with_global_store_read(|store| {
-        let entries = store
-            .list_by_path(COMPONENT_PATH_PREFIX, 500, false)
-            .map_err(|e| format!("list component records for check: {e}"))?;
-        Ok::<_, String>(
-            entries
-                .iter()
-                .filter_map(|e| extract_component_record(&e.metadata))
-                .collect(),
-        )
-    })?;
+    let records = load_component_records(server)?;
 
     let (category, matched_id, gaps) =
         classify_repo(&records, repo_path, params.component_id.as_deref());
@@ -726,6 +739,770 @@ async fn handle_check(
         }
     }
     Ok(out)
+}
+
+// ─── Issue #798: read-only cutover planner ───────────────────────────────────
+
+pub(crate) const OUTCOME_PULL: &str = "pull";
+pub(crate) const OUTCOME_ADAPT: &str = "adapt";
+pub(crate) const OUTCOME_BACKFLOW: &str = "backflow";
+pub(crate) const OUTCOME_DELETE_RETIRE: &str = "delete_retire";
+
+/// Days after which a governance record's last_verified_at is labeled stale (#799).
+pub(crate) const GOVERNANCE_STALE_AFTER_DAYS: i64 = 14;
+
+fn string_array_field(record: &Value, key: &str) -> Vec<String> {
+    record
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect()
+}
+
+fn plan_item(outcome: &str, action: &str, detail: &str, source: &str) -> Value {
+    json!({
+        "outcome": outcome,
+        "action": action,
+        "detail": detail,
+        "source": source,
+    })
+}
+
+/// Resolve the plan `--to` target: filesystem path, component_id, or owner_repo.
+fn resolve_plan_target(
+    records: &[Value],
+    to: &str,
+) -> (Option<Value>, String, Option<String>, Vec<String>) {
+    let path = std::path::Path::new(to);
+    if path.exists() {
+        let (category, matched_id, gaps) = classify_repo(records, path, None);
+        let target = matched_id
+            .as_deref()
+            .and_then(|id| find_record_by_id(records, id))
+            .cloned();
+        return (target, category, matched_id, gaps);
+    }
+
+    // Exact component_id match.
+    if let Some(record) = find_record_by_id(records, to) {
+        let component_type = record
+            .get("component_type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let category = match component_type {
+            "kernel" => CATEGORY_KERNEL_DRIFT,
+            "runtime_adapter" => CATEGORY_ALLOWED_ADAPTER_POLICY,
+            "workflow_bridge" => CATEGORY_BRIDGE,
+            "frontend_app_shell" => CATEGORY_FRONTEND_SHELL,
+            _ => CATEGORY_UNKNOWN,
+        };
+        return (
+            Some(record.clone()),
+            category.to_string(),
+            Some(to.to_string()),
+            Vec::new(),
+        );
+    }
+
+    // owner_repo match (case-insensitive). Prefer non-bridge when ambiguous.
+    let owner_matches: Vec<&Value> = records
+        .iter()
+        .filter(|r| {
+            r.get("owner_repo")
+                .and_then(Value::as_str)
+                .map(|owner| owner.eq_ignore_ascii_case(to) || owner.ends_with(&format!("/{to}")))
+                .unwrap_or(false)
+        })
+        .collect();
+    if !owner_matches.is_empty() {
+        let mut gaps = Vec::new();
+        if owner_matches.len() > 1 {
+            gaps.push(format!(
+                "{} records share owner_repo matching '{}'; picked first by type priority",
+                owner_matches.len(),
+                to
+            ));
+        }
+        let preferred = owner_matches
+            .iter()
+            .find(|r| r.get("component_type").and_then(Value::as_str) != Some("workflow_bridge"))
+            .or(owner_matches.first())
+            .copied();
+        if let Some(record) = preferred {
+            let component_type = record
+                .get("component_type")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let category = match component_type {
+                "kernel" => CATEGORY_KERNEL_DRIFT,
+                "runtime_adapter" => CATEGORY_ALLOWED_ADAPTER_POLICY,
+                "workflow_bridge" => CATEGORY_BRIDGE,
+                "frontend_app_shell" => CATEGORY_FRONTEND_SHELL,
+                _ => CATEGORY_UNKNOWN,
+            };
+            let id = record
+                .get("component_id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            return (Some(record.clone()), category.to_string(), id, gaps);
+        }
+    }
+
+    (
+        None,
+        CATEGORY_UNKNOWN.to_string(),
+        None,
+        vec![format!(
+            "plan --to '{to}' matched no checkout path, component_id, or owner_repo"
+        )],
+    )
+}
+
+/// RomanBath defaults to frontend shell unless drift proves product-owned memory policy.
+fn romanbath_shell_note(target: Option<&Value>, category: &str) -> Option<String> {
+    let record = target?;
+    let id = record
+        .get("component_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if id != "romanbath-frontend-app-shell" && category != CATEGORY_FRONTEND_SHELL {
+        return None;
+    }
+    let has_product_memory_policy = record
+        .get("known_drift")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|d| {
+            let class = d
+                .get("classification")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let area = d.get("area").and_then(Value::as_str).unwrap_or("");
+            let summary = d.get("summary").and_then(Value::as_str).unwrap_or("");
+            class == "accepted_local_policy"
+                && (area.contains("memory")
+                    || summary.to_ascii_lowercase().contains("memory policy")
+                    || summary
+                        .to_ascii_lowercase()
+                        .contains("product-owned memory"))
+        });
+    if has_product_memory_policy {
+        Some(
+            "RomanBath shows accepted_local_policy memory-adjacent drift; treat as product-owned memory policy only for those declared areas — shell remains non-kernel."
+                .to_string(),
+        )
+    } else {
+        Some(
+            "RomanBath treated as frontend/app shell unless evidence proves product-owned memory policy; UI/persona stay local."
+                .to_string(),
+        )
+    }
+}
+
+/// Build ordered cutover checklist items from source + optional target records.
+fn build_cutover_items(source: &Value, target: Option<&Value>) -> Vec<Value> {
+    let mut items: Vec<Value> = Vec::new();
+
+    for prereq in string_array_field(source, "upstream_prereqs") {
+        items.push(plan_item(
+            OUTCOME_PULL,
+            "satisfy_upstream_prereq",
+            &prereq,
+            "upstream_prereqs",
+        ));
+    }
+
+    // Target-side gates that must hold before pull (consumer view of the source).
+    if let Some(t) = target {
+        for prereq in string_array_field(t, "upstream_prereqs") {
+            items.push(plan_item(
+                OUTCOME_PULL,
+                "satisfy_target_gate",
+                &prereq,
+                "target.upstream_prereqs",
+            ));
+        }
+        // Hypermem-specific gates: aliases / direct-reader / trading policy.
+        let target_id = t.get("component_id").and_then(Value::as_str).unwrap_or("");
+        if target_id == "hypermemory-trading-adapter"
+            || t.get("owner_repo")
+                .and_then(Value::as_str)
+                .is_some_and(|r| {
+                    r.contains("Quant_Analyzer") || r.to_ascii_lowercase().contains("hyper")
+                })
+        {
+            items.push(plan_item(
+                OUTCOME_PULL,
+                "gate_aliases",
+                "Compatibility aliases (hypermemory_*/legacy facade names) must be adapter shims only — not permanent upstream API",
+                "hypermem.aliases",
+            ));
+            items.push(plan_item(
+                OUTCOME_PULL,
+                "gate_direct_reader",
+                "Direct table readers must be shimmed and retired rather than preserved as a fork",
+                "hypermem.direct_reader",
+            ));
+            items.push(plan_item(
+                OUTCOME_ADAPT,
+                "gate_trading_policy",
+                "A-share freshness and session decay remain downstream trading policy through reviewed hooks",
+                "hypermem.trading_policy",
+            ));
+        }
+        if target_id == "zeroclaw-chat-memory-adapter"
+            || t.get("owner_repo")
+                .and_then(Value::as_str)
+                .is_some_and(|r| r.to_ascii_lowercase().contains("zeroclaw"))
+        {
+            items.push(plan_item(
+                OUTCOME_PULL,
+                "gate_chat_agent_adapter",
+                "Generic chat-agent adapter contract must stay product-agnostic (no RomanBath fields)",
+                "zeroclaw.chat_agent_adapter",
+            ));
+            items.push(plan_item(
+                OUTCOME_PULL,
+                "gate_event_projection",
+                "Event projection bridge must record recall/reflection lifecycle without product sync",
+                "zeroclaw.event_projection",
+            ));
+        }
+    }
+
+    for variation in string_array_field(source, "allowed_variation") {
+        items.push(plan_item(
+            OUTCOME_ADAPT,
+            "keep_allowed_variation",
+            &variation,
+            "allowed_variation",
+        ));
+    }
+    for forbidden in string_array_field(source, "forbidden_variation") {
+        items.push(plan_item(
+            OUTCOME_DELETE_RETIRE,
+            "reject_forbidden_variation",
+            &forbidden,
+            "forbidden_variation",
+        ));
+    }
+
+    let drift_sources: Vec<(&str, Option<&Value>)> = vec![
+        ("source.known_drift", Some(source)),
+        ("target.known_drift", target),
+    ];
+    for (label, rec) in drift_sources {
+        let Some(record) = rec else { continue };
+        for drift in record
+            .get("known_drift")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let area = drift.get("area").and_then(Value::as_str).unwrap_or("?");
+            let class = drift
+                .get("classification")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let summary = drift.get("summary").and_then(Value::as_str).unwrap_or("");
+            let detail = if summary.is_empty() {
+                format!("{area} ({class})")
+            } else {
+                format!("{area}: {summary}")
+            };
+            match class {
+                "accepted_local_policy" => items.push(plan_item(
+                    OUTCOME_ADAPT,
+                    "retain_accepted_local_policy",
+                    &detail,
+                    label,
+                )),
+                "backflow_candidate" => items.push(plan_item(
+                    OUTCOME_BACKFLOW,
+                    "propose_backflow",
+                    &detail,
+                    label,
+                )),
+                "retire_delete" => items.push(plan_item(
+                    OUTCOME_DELETE_RETIRE,
+                    "delete_or_retire",
+                    &detail,
+                    label,
+                )),
+                "blocked_fork" => items.push(plan_item(
+                    OUTCOME_DELETE_RETIRE,
+                    "block_or_retire_fork",
+                    &detail,
+                    label,
+                )),
+                "unknown" => items.push(plan_item(
+                    OUTCOME_ADAPT,
+                    "inspect_unknown_drift",
+                    &detail,
+                    label,
+                )),
+                _ => {}
+            }
+        }
+    }
+
+    for candidate in string_array_field(source, "backflow_candidates") {
+        items.push(plan_item(
+            OUTCOME_BACKFLOW,
+            "evaluate_backflow_candidate",
+            &candidate,
+            "backflow_candidates",
+        ));
+    }
+    if let Some(t) = target {
+        for candidate in string_array_field(t, "backflow_candidates") {
+            items.push(plan_item(
+                OUTCOME_BACKFLOW,
+                "evaluate_target_backflow_candidate",
+                &candidate,
+                "target.backflow_candidates",
+            ));
+        }
+    }
+
+    items
+}
+
+fn group_plan_outcomes(items: &[Value]) -> Vec<Value> {
+    let order = [
+        OUTCOME_PULL,
+        OUTCOME_ADAPT,
+        OUTCOME_BACKFLOW,
+        OUTCOME_DELETE_RETIRE,
+    ];
+    order
+        .iter()
+        .filter_map(|outcome| {
+            let group: Vec<&Value> = items
+                .iter()
+                .filter(|i| i.get("outcome").and_then(Value::as_str) == Some(*outcome))
+                .collect();
+            if group.is_empty() {
+                None
+            } else {
+                Some(json!({
+                    "outcome": outcome,
+                    "count": group.len(),
+                    "items": group,
+                }))
+            }
+        })
+        .collect()
+}
+
+/// Handle `tachi_component(action="plan")` — read-only cutover checklist (#798).
+async fn handle_plan(
+    server: &MemoryServer,
+    params: &crate::tool_params::TachiComponentParams,
+) -> Result<String, String> {
+    let from = params
+        .component_id
+        .as_deref()
+        .ok_or_else(|| "component_id is required when action='plan' (--from)".to_string())?;
+    let to = params.repo.as_deref().ok_or_else(|| {
+        "repo is required when action='plan' (--to path, component_id, or owner_repo)".to_string()
+    })?;
+
+    let records = load_component_records(server)?;
+    let Some(source) = find_record_by_id(&records, from) else {
+        return to_json_string(&json!({
+            "status": "not_found",
+            "component_id": from,
+            "message": format!("unknown source component_id '{from}'"),
+        }));
+    };
+
+    let (target, category, matched_id, mut gaps) = resolve_plan_target(&records, to);
+    let items = build_cutover_items(source, target.as_ref());
+    let outcomes = group_plan_outcomes(&items);
+    let shell_note = romanbath_shell_note(target.as_ref(), &category);
+    if let Some(note) = &shell_note {
+        // Surface as an evidence note, not a hard gap.
+        gaps.push(format!("policy_note: {note}"));
+    }
+
+    let freshness = record_freshness(source);
+    let target_freshness = target.as_ref().map(record_freshness);
+
+    let body = json!({
+        "status": "completed",
+        "from": {
+            "component_id": from,
+            "component_type": source.get("component_type"),
+            "owner_repo": source.get("owner_repo"),
+            "freshness": freshness,
+        },
+        "to": {
+            "input": to,
+            "matched_component_id": matched_id,
+            "category": category,
+            "component_type": target.as_ref().and_then(|t| t.get("component_type").cloned()),
+            "owner_repo": target.as_ref().and_then(|t| t.get("owner_repo").cloned()),
+            "freshness": target_freshness,
+        },
+        "outcomes": outcomes,
+        "items": items,
+        "evidence_gaps": gaps,
+        "romanbath_note": shell_note,
+        "non_goals": [
+            "no automatic code changes",
+            "no automatic repo sync",
+            "no package-manager behavior",
+        ],
+    });
+
+    if crate::facade_memory_ops::wants_json(params.format.as_deref()) {
+        return to_json_string(&body);
+    }
+
+    let mut out = format!("# Component cutover plan\n\n");
+    out.push_str(&format!("**From:** `{from}`\n"));
+    out.push_str(&format!("**To:** `{to}`"));
+    if let Some(id) = matched_id.as_deref() {
+        out.push_str(&format!(" → matched `{id}` ({category})"));
+    } else {
+        out.push_str(&format!(" → category `{category}`"));
+    }
+    out.push_str("\n\n");
+    if let Some(note) = shell_note {
+        out.push_str(&format!("_{note}_\n\n"));
+    }
+    for group in &outcomes {
+        let outcome = group.get("outcome").and_then(Value::as_str).unwrap_or("?");
+        out.push_str(&format!("## Outcome: `{outcome}`\n"));
+        if let Some(group_items) = group.get("items").and_then(Value::as_array) {
+            for item in group_items {
+                let action = item.get("action").and_then(Value::as_str).unwrap_or("?");
+                let detail = item.get("detail").and_then(Value::as_str).unwrap_or("");
+                out.push_str(&format!("- **{action}:** {detail}\n"));
+            }
+        }
+        out.push('\n');
+    }
+    if !gaps.is_empty() {
+        out.push_str("## Evidence gaps / notes\n");
+        for g in &gaps {
+            out.push_str(&format!("- {g}\n"));
+        }
+    }
+    out.push_str("\n_Read-only plan: no code changes, sync, or package operations._\n");
+    Ok(out)
+}
+
+// ─── Issue #799: briefing/status integration ─────────────────────────────────
+
+/// Freshness label for a governance record (registry evidence, not memory truth).
+fn record_freshness(record: &Value) -> Value {
+    let last = record
+        .get("last_verified_at")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if last.is_empty() {
+        return json!({
+            "state": "unknown",
+            "last_verified_at": null,
+            "label": "unverified — do not treat as current truth",
+        });
+    }
+    let parsed = chrono::DateTime::parse_from_rfc3339(last)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .or_else(|_| {
+            // Accept date-only timestamps from fixtures.
+            chrono::NaiveDate::parse_from_str(last, "%Y-%m-%d").map(|d| {
+                d.and_hms_opt(0, 0, 0)
+                    .map(|ndt| ndt.and_utc())
+                    .unwrap_or_else(chrono::Utc::now)
+            })
+        });
+    match parsed {
+        Ok(when) => {
+            let age_days = (chrono::Utc::now() - when).num_days();
+            if age_days > GOVERNANCE_STALE_AFTER_DAYS {
+                json!({
+                    "state": "stale",
+                    "last_verified_at": last,
+                    "age_days": age_days,
+                    "label": format!("stale ({age_days}d > {GOVERNANCE_STALE_AFTER_DAYS}d) — re-verify before treating as current"),
+                })
+            } else {
+                json!({
+                    "state": "current",
+                    "last_verified_at": last,
+                    "age_days": age_days,
+                    "label": "registry-verified (governance fixture; not memory-derived)",
+                })
+            }
+        }
+        Err(_) => json!({
+            "state": "unknown",
+            "last_verified_at": last,
+            "label": "unparseable last_verified_at — treat as unknown",
+        }),
+    }
+}
+
+fn compact_drift_summary(record: &Value) -> Vec<Value> {
+    record
+        .get("known_drift")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|d| {
+            let class = d.get("classification").and_then(Value::as_str)?;
+            if class == "none" {
+                return None;
+            }
+            Some(json!({
+                "area": d.get("area"),
+                "classification": class,
+                "summary": d.get("summary"),
+            }))
+        })
+        .collect()
+}
+
+/// Resolve the active workspace git root for governance matching (read-only).
+fn resolve_workspace_git_root() -> Option<std::path::PathBuf> {
+    for var in ["TACHI_PROJECT_ROOT", "TACHI_WORKSPACE_ROOT"] {
+        if let Ok(value) = std::env::var(var) {
+            if value.is_empty() {
+                continue;
+            }
+            let candidate = std::path::PathBuf::from(value);
+            if candidate.join(".git").exists() {
+                return Some(candidate);
+            }
+            // Walk up from the env path in case it points mid-tree.
+            let mut dir = candidate;
+            loop {
+                if dir.join(".git").exists() {
+                    return Some(dir);
+                }
+                if !dir.pop() {
+                    break;
+                }
+            }
+        }
+    }
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// Match component records relevant to the current workspace / project context.
+///
+/// Returns a JSON array of matching component summaries with freshness labels.
+/// Used by briefing (#799) and status. Never invents memory-derived claims —
+/// only surfaces declared registry records.
+pub(crate) fn component_governance_context(
+    server: &MemoryServer,
+    project: Option<&str>,
+    repo_path: Option<&std::path::Path>,
+) -> Result<Value, String> {
+    let records = load_component_records(server)?;
+    if records.is_empty() {
+        return Ok(json!({
+            "status": "empty",
+            "matches": [],
+            "note": "no component governance records seeded",
+        }));
+    }
+
+    let path = repo_path
+        .map(std::path::Path::to_path_buf)
+        .or_else(resolve_workspace_git_root);
+
+    let mut matches: Vec<Value> = Vec::new();
+    let mut evidence_gaps: Vec<String> = Vec::new();
+
+    if let Some(ref root) = path {
+        let (category, matched_id, gaps) = classify_repo(&records, root, None);
+        evidence_gaps.extend(gaps);
+        if let Some(id) = matched_id.as_deref() {
+            if let Some(record) = find_record_by_id(&records, id) {
+                matches.push(component_match_summary(
+                    record,
+                    &category,
+                    "repo_remote_or_path",
+                ));
+            }
+        }
+        // Also surface other records that list this path's origin as a consumer
+        // context when the remote matches a known owner_repo of a related component.
+        if let Ok(remote) = run_git_readonly(root, &["remote", "get-url", "origin"]) {
+            let owner = normalize_remote_to_owner_repo(&remote);
+            for record in &records {
+                let id = record
+                    .get("component_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if matches
+                    .iter()
+                    .any(|m| m.get("component_id").and_then(Value::as_str) == Some(id))
+                {
+                    continue;
+                }
+                let owner_repo = record
+                    .get("owner_repo")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if owner_repo.eq_ignore_ascii_case(&owner) {
+                    let component_type = record
+                        .get("component_type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let cat = match component_type {
+                        "kernel" => CATEGORY_KERNEL_DRIFT,
+                        "runtime_adapter" => CATEGORY_ALLOWED_ADAPTER_POLICY,
+                        "workflow_bridge" => CATEGORY_BRIDGE,
+                        "frontend_app_shell" => CATEGORY_FRONTEND_SHELL,
+                        _ => CATEGORY_UNKNOWN,
+                    };
+                    matches.push(component_match_summary(record, cat, "shared_owner_repo"));
+                }
+            }
+        }
+    }
+
+    // Project-name hint (named library) — match owner_repo suffix or component_id.
+    if let Some(proj) = project.filter(|p| !p.is_empty()) {
+        let proj_lc = proj.to_ascii_lowercase();
+        for record in &records {
+            let id = record
+                .get("component_id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if matches
+                .iter()
+                .any(|m| m.get("component_id").and_then(Value::as_str) == Some(id))
+            {
+                continue;
+            }
+            let owner = record
+                .get("owner_repo")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let id_lc = id.to_ascii_lowercase();
+            if owner.ends_with(&format!("/{proj_lc}"))
+                || owner.contains(&proj_lc)
+                || id_lc.contains(&proj_lc)
+            {
+                let component_type = record
+                    .get("component_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let cat = match component_type {
+                    "kernel" => CATEGORY_KERNEL_DRIFT,
+                    "runtime_adapter" => CATEGORY_ALLOWED_ADAPTER_POLICY,
+                    "workflow_bridge" => CATEGORY_BRIDGE,
+                    "frontend_app_shell" => CATEGORY_FRONTEND_SHELL,
+                    _ => CATEGORY_UNKNOWN,
+                };
+                matches.push(component_match_summary(record, cat, "project_name_hint"));
+            }
+        }
+    }
+
+    Ok(json!({
+        "status": "completed",
+        "authority": "governance_registry",
+        "note": "Registry records only — stale/unknown must not be presented as memory-derived current truth",
+        "workspace_path": path.as_ref().map(|p| p.display().to_string()),
+        "project": project,
+        "matches": matches,
+        "evidence_gaps": evidence_gaps,
+    }))
+}
+
+fn component_match_summary(record: &Value, category: &str, match_reason: &str) -> Value {
+    let freshness = record_freshness(record);
+    let drift = compact_drift_summary(record);
+    let blocked: Vec<Value> = record
+        .get("known_drift")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|d| {
+            matches!(
+                d.get("classification").and_then(Value::as_str),
+                Some("blocked_fork")
+            )
+        })
+        .cloned()
+        .collect();
+    json!({
+        "component_id": record.get("component_id"),
+        "component_type": record.get("component_type"),
+        "owner_repo": record.get("owner_repo"),
+        "category": category,
+        "match_reason": match_reason,
+        "freshness": freshness,
+        "upstream_prereqs": record.get("upstream_prereqs").cloned().unwrap_or_else(|| json!([])),
+        "known_drift": drift,
+        "blocked_forks": blocked,
+        "backflow_candidates": record.get("backflow_candidates").cloned().unwrap_or_else(|| json!([])),
+        "last_checked_ref": record.get("last_checked_ref"),
+    })
+}
+
+/// Compact warning lines for status/briefing when governance is stale or blocked.
+pub(crate) fn component_governance_warning_lines(context: &Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    let Some(matches) = context.get("matches").and_then(Value::as_array) else {
+        return lines;
+    };
+    for m in matches {
+        let id = m.get("component_id").and_then(Value::as_str).unwrap_or("?");
+        let state = m
+            .get("freshness")
+            .and_then(|f| f.get("state"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        if state == "stale" || state == "unknown" {
+            let label = m
+                .get("freshness")
+                .and_then(|f| f.get("label"))
+                .and_then(Value::as_str)
+                .unwrap_or(state);
+            lines.push(format!("component governance `{id}` is {state}: {label}"));
+        }
+        if let Some(blocked) = m.get("blocked_forks").and_then(Value::as_array) {
+            for b in blocked {
+                let area = b.get("area").and_then(Value::as_str).unwrap_or("?");
+                lines.push(format!(
+                    "component `{id}` blocked_fork: {area} — do not cut over until resolved"
+                ));
+            }
+        }
+        if let Some(drift) = m.get("known_drift").and_then(Value::as_array) {
+            for d in drift.iter().take(3) {
+                let class = d
+                    .get("classification")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if class == "backflow_candidate" || class == "retire_delete" {
+                    let area = d.get("area").and_then(Value::as_str).unwrap_or("?");
+                    lines.push(format!("component `{id}` {class}: {area}"));
+                }
+            }
+        }
+    }
+    lines
 }
 
 #[cfg(test)]

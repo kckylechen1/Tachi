@@ -50,6 +50,7 @@ mod tests {
             &kanban,
             &checkpoints,
             &[],
+            &serde_json::json!({"matches": []}),
             false,
         );
 
@@ -97,6 +98,7 @@ mod tests {
         let kanban = serde_json::json!({"tasks": []});
 
         let cross = serde_json::json!([]);
+        let empty_gov = serde_json::json!({"matches": []});
         let compact = format_briefing(
             "q",
             None,
@@ -108,6 +110,7 @@ mod tests {
             &kanban,
             &serde_json::json!(checkpoints),
             &[],
+            &empty_gov,
             true,
         );
         let full = format_briefing(
@@ -121,6 +124,7 @@ mod tests {
             &kanban,
             &serde_json::json!(checkpoints),
             &[],
+            &empty_gov,
             false,
         );
 
@@ -202,6 +206,7 @@ mod tests {
             &kanban,
             &empty,
             &[],
+            &serde_json::json!({"matches": []}),
             true,
         );
         let gate_rows = compact
