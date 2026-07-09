@@ -1284,10 +1284,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "memory-server-i18n"
-version = "1.8.0"
-
-[[package]]
 name = "memory-server-manifest-audit"
 version = "1.8.0"
 dependencies = [

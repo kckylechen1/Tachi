@@ -5,7 +5,6 @@ members = [
     "crates/tachi-server",
     "crates/memory-server-capture-gate",
     "crates/memory-server-hub-cli",
-    "crates/memory-server-i18n",
     "crates/memory-server-manifest-audit",
     "crates/tachi-params",
     "crates/memory-server-prompt-envelope",
