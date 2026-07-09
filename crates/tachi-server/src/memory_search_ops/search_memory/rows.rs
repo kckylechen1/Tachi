@@ -171,6 +171,11 @@ pub(crate) async fn search_memory_rows_with_recall_config(
 
     let mut searched_default_wiki = false;
 
+    // #926: when query embedding fails/times out we fall back to lexical-only
+    // recall. Capture a short reason so the response can carry a machine-
+    // readable `recall_quality.degraded = "lexical_only: <reason>"` marker.
+    let mut embed_degraded: Option<String> = None;
+
     if params.query_vec.is_none()
         && !parse_env_bool("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING").unwrap_or(false)
         && (server.global_vec_available()
@@ -185,6 +190,8 @@ pub(crate) async fn search_memory_rows_with_recall_config(
                 params.query_vec = Some(query_vec);
             }
             Err(e) => {
+                embed_degraded =
+                    Some(crate::memory_search_ops::recall_short_reason(&e));
                 eprintln!(
                     "[search_memory] query embedding failed, falling back to lexical-only search: {e}"
                 );
@@ -465,9 +472,19 @@ pub(crate) async fn search_memory_rows_with_recall_config(
                 DbScope::Global => global_recall_quality.as_ref(),
                 DbScope::Project => project_recall_quality.as_ref(),
             };
-            if let Some(recall_quality) = recall_quality {
+            // #926: when embedding failed the row carries the lexical-only
+            // marker (merged with any vector-coverage recall_quality). Absent a
+            // provider failure, only the coverage object is attached.
+            let effective_recall_quality = match embed_degraded.as_deref() {
+                Some(reason) => Some(crate::memory_search_ops::merge_lexical_only_marker(
+                    recall_quality.cloned(),
+                    reason,
+                )),
+                None => recall_quality.cloned(),
+            };
+            if let Some(recall_quality) = effective_recall_quality {
                 if let Some(obj) = row.as_object_mut() {
-                    obj.insert("recall_quality".to_string(), recall_quality.clone());
+                    obj.insert("recall_quality".to_string(), recall_quality);
                 }
             }
             if memcore::scorer::is_id_like_exact_query(&params.query)

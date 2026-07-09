@@ -3,6 +3,19 @@
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 
+/// Voyage API base URL. Defaults to the public endpoint; `VOYAGE_BASE_URL`
+/// overrides it (same `*_BASE_URL` idiom as the chat lanes). This is the seam
+/// the recall fail-safe test (#926) uses to point embed/rerank at a local
+/// blackhole listener.
+fn voyage_endpoint(path: &str) -> String {
+    let base = std::env::var("VOYAGE_BASE_URL")
+        .ok()
+        .map(|v| v.trim().trim_end_matches('/').to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "https://api.voyageai.com".to_string());
+    format!("{base}{path}")
+}
+
 pub(super) fn non_empty_rerank_documents(documents: &[String]) -> (Vec<&String>, Vec<usize>) {
     documents
         .iter()
@@ -91,7 +104,10 @@ impl super::LlmClient {
             });
             let mut response_json: Option<Value> = None;
             let mut last_err = String::new();
-            for attempt in 1..=Self::MAX_ATTEMPTS {
+            // Recall-path bounds (#926): fewer attempts + a per-request deadline
+            // so a blackholed provider cannot freeze recall for minutes.
+            let max_attempts = Self::recall_max_attempts();
+            for attempt in 1..=max_attempts {
                 let Some(selected) = self
                     .required_selected_secret_or_wait(&["VOYAGE_API_KEY"], attempt, "Voyage batch")
                     .await?
@@ -99,18 +115,23 @@ impl super::LlmClient {
                     continue;
                 };
                 let response = self
-                    .http
-                    .post("https://api.voyageai.com/v1/embeddings")
+                    .http_client()
+                    .post(voyage_endpoint("/v1/embeddings"))
+                    .timeout(Self::recall_request_timeout())
                     .header(CONTENT_TYPE, "application/json")
                     .header(AUTHORIZATION, format!("Bearer {}", selected.value))
                     .json(&body)
                     .send()
                     .await;
                 let response = match response {
-                    Ok(response) => response,
+                    Ok(response) => {
+                        self.note_recall_provider_outcome(false);
+                        response
+                    }
                     Err(err) => {
+                        self.note_recall_provider_outcome(err.is_timeout());
                         last_err = format!("Voyage batch API request failed: {err}");
-                        if attempt < Self::MAX_ATTEMPTS {
+                        if attempt < max_attempts {
                             tokio::time::sleep(Self::retry_delay(attempt)).await;
                             continue;
                         }
@@ -131,7 +152,7 @@ impl super::LlmClient {
                 if status.as_u16() == 429 {
                     self.mark_secret_rate_limited(&selected, retry_after);
                     last_err = format!("Voyage batch API error: {} - {}", status, text);
-                    if attempt < Self::MAX_ATTEMPTS {
+                    if attempt < max_attempts {
                         continue;
                     }
                     return Err(last_err);
@@ -193,7 +214,10 @@ impl super::LlmClient {
 
         let mut json: Option<Value> = None;
         let mut last_err = String::new();
-        for attempt in 1..=Self::MAX_ATTEMPTS {
+        // Recall-path bounds (#926): mirror the embed path's attempt cap and
+        // per-request deadline.
+        let max_attempts = Self::recall_max_attempts();
+        for attempt in 1..=max_attempts {
             let Some(selected) = self
                 .required_selected_secret_or_wait(
                     &["VOYAGE_RERANK_API_KEY", "VOYAGE_API_KEY"],
@@ -205,18 +229,23 @@ impl super::LlmClient {
                 continue;
             };
             let response = self
-                .http
-                .post("https://api.voyageai.com/v1/rerank")
+                .http_client()
+                .post(voyage_endpoint("/v1/rerank"))
+                .timeout(Self::recall_request_timeout())
                 .header(CONTENT_TYPE, "application/json")
                 .header(AUTHORIZATION, format!("Bearer {}", selected.value))
                 .json(&body)
                 .send()
                 .await;
             let response = match response {
-                Ok(response) => response,
+                Ok(response) => {
+                    self.note_recall_provider_outcome(false);
+                    response
+                }
                 Err(err) => {
+                    self.note_recall_provider_outcome(err.is_timeout());
                     last_err = format!("Voyage rerank API request failed: {err}");
-                    if attempt < Self::MAX_ATTEMPTS {
+                    if attempt < max_attempts {
                         tokio::time::sleep(Self::retry_delay(attempt)).await;
                         continue;
                     }
@@ -237,7 +266,7 @@ impl super::LlmClient {
             if status.as_u16() == 429 {
                 self.mark_secret_rate_limited(&selected, retry_after);
                 last_err = format!("Voyage rerank API error: {} - {}", status, text);
-                if attempt < Self::MAX_ATTEMPTS {
+                if attempt < max_attempts {
                     continue;
                 }
                 return Err(last_err);

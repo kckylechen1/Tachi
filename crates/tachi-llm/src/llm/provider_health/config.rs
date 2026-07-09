@@ -37,6 +37,96 @@ impl super::super::LlmClient {
     pub(in crate::llm) const RETRY_JITTER_PERCENT: u64 = 20;
     pub(in crate::llm) const KEY_HEALTH_RELOAD_TTL: Duration = Duration::from_secs(30);
 
+    // ── Recall-path fail-safe bounds (#926) ─────────────────────────────────
+    // A blackholed embedding provider (dead proxy fake-IP with a live TCP
+    // accept) once froze every embed-requiring recall for minutes. These caps
+    // bound the recall path only (embed + rerank); distill/extract/chat keep
+    // the client-wide 60s budget so long reasoning calls are not truncated.
+    /// TCP connect timeout applied to the shared client — safe globally because
+    /// no lane legitimately spends minutes *connecting*.
+    pub(in crate::llm) const RECALL_CONNECT_TIMEOUT_SECS: u64 = 3;
+    /// Per-request read/response deadline for embed & rerank. Overridable via
+    /// `TACHI_RECALL_PROVIDER_TIMEOUT_SECS` (see `recall_request_timeout`).
+    pub(in crate::llm) const RECALL_PROVIDER_TIMEOUT_SECS: u64 = 10;
+    /// Attempt cap for embed & rerank (vs. the global `MAX_ATTEMPTS = 3`) so
+    /// worst-case ≈ attempts × timeout stays bounded. Overridable via
+    /// `TACHI_RECALL_PROVIDER_ATTEMPTS` (see `recall_max_attempts`).
+    pub(in crate::llm) const RECALL_PROVIDER_ATTEMPTS: usize = 2;
+    /// Consecutive recall-path timeouts that trigger a pooled-client rebuild.
+    pub(in crate::llm) const POOL_TIMEOUT_REBUILD_THRESHOLD: usize = 3;
+
+    /// Build the shared pooled HTTP client. Factored so the recall-path pool
+    /// hygiene (#926) can rebuild an identically-configured client after a run
+    /// of timeouts poisons the connection pool.
+    pub(in crate::llm) fn build_http_client() -> Result<reqwest::Client, String> {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(Self::RECALL_CONNECT_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {e}"))
+    }
+
+    /// Clone the current pooled client out from behind the swap lock. reqwest
+    /// clients are cheap to clone (internally `Arc`), and releasing the read
+    /// lock before `.await` keeps a rebuild from being blocked by in-flight
+    /// requests.
+    pub(in crate::llm) fn http_client(&self) -> reqwest::Client {
+        self.http
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Per-request deadline for embed & rerank, honouring the same env-override
+    /// idiom as `CLAUDE_POOL_TIMEOUT_SECS`.
+    pub(in crate::llm) fn recall_request_timeout() -> Duration {
+        let secs = std::env::var("TACHI_RECALL_PROVIDER_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .unwrap_or(Self::RECALL_PROVIDER_TIMEOUT_SECS);
+        Duration::from_secs(secs)
+    }
+
+    /// Attempt cap for embed & rerank, honouring `TACHI_RECALL_PROVIDER_ATTEMPTS`.
+    pub(in crate::llm) fn recall_max_attempts() -> usize {
+        std::env::var("TACHI_RECALL_PROVIDER_ATTEMPTS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|a| *a >= 1)
+            .unwrap_or(Self::RECALL_PROVIDER_ATTEMPTS)
+    }
+
+    /// Record the outcome of a recall-path provider request for pool hygiene.
+    /// A timeout grows the consecutive-timeout streak; once it reaches
+    /// `POOL_TIMEOUT_REBUILD_THRESHOLD` the pooled client is rebuilt (dropping
+    /// the poisoned connection + forcing fresh DNS) and the streak resets. Any
+    /// success resets the streak.
+    pub(in crate::llm) fn note_recall_provider_outcome(&self, timed_out: bool) {
+        use std::sync::atomic::Ordering;
+        if !timed_out {
+            self.http_timeout_streak.store(0, Ordering::Relaxed);
+            return;
+        }
+        let streak = self.http_timeout_streak.fetch_add(1, Ordering::Relaxed) + 1;
+        if streak >= Self::POOL_TIMEOUT_REBUILD_THRESHOLD {
+            match Self::build_http_client() {
+                Ok(fresh) => {
+                    if let Ok(mut guard) = self.http.write() {
+                        *guard = fresh;
+                    }
+                    self.http_timeout_streak.store(0, Ordering::Relaxed);
+                    tracing::warn!(
+                        "[provider] rebuilt pooled HTTP client after {streak} consecutive recall-path timeouts (#926)"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("[provider] pooled HTTP client rebuild failed: {e}");
+                }
+            }
+        }
+    }
+
     pub fn new() -> Result<Self, String> {
         Self::new_with_vault_db(None)
     }
@@ -153,10 +243,7 @@ impl super::super::LlmClient {
             Some(&DEEPSEEK_DISTILL_DEFAULT),
         )?;
 
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+        let http = Self::build_http_client()?;
 
         let (provider_health, provider_health_reload) =
             Self::initial_key_health_from_db(vault_db_path.as_deref());
@@ -174,7 +261,8 @@ impl super::super::LlmClient {
         }
 
         Ok(Self {
-            http,
+            http: Arc::new(RwLock::new(http)),
+            http_timeout_streak: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             extract,
             distill,
             reasoning,
