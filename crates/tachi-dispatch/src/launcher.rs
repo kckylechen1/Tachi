@@ -62,8 +62,16 @@ impl LaunchCommand {
 /// Resolve the effective permission profile.
 ///
 /// Defaults to `default`. `allowlist` requires at least one audited allowed
-/// tool. `full` is dangerous and requires explicit administrator opt-in via
-/// `TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE=true`.
+/// tool. `full` / `verify` are dangerous (headless non-interactive tool use)
+/// and require explicit administrator opt-in via
+/// `TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE=true` (or the verify alias
+/// `TACHI_DISPATCH_VERIFY_HEADLESS=true`).
+///
+/// #878-B: verification lanes that must run cargo/git without an interactive
+/// TTY should use `permission_profile="verify"` with that opt-in. A plain
+/// `allowlist` still maps only allowed tools but Claude may still block on
+/// first-use permission UX depending on host CLI version — `verify` is the
+/// documented non-interactive path.
 pub fn resolve_permission_profile(
     params: &DispatchLaunchParams,
 ) -> Result<PermissionProfile, String> {
@@ -74,12 +82,16 @@ pub fn resolve_permission_profile(
         "allowlist" => Err(
             "permission_profile 'allowlist' requires at least one allowed_tool".to_string(),
         ),
-        "full" => {
-            let allowed = std::env::var("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            if allowed {
+        "full" | "verify" => {
+            let full_ok = env_flag_true("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE");
+            let verify_ok = env_flag_true("TACHI_DISPATCH_VERIFY_HEADLESS");
+            if full_ok || (profile == "verify" && verify_ok) {
                 Ok(PermissionProfile::Full)
+            } else if profile == "verify" {
+                Err(
+                    "permission_profile 'verify' (headless verification lane) requires opt-in via TACHI_DISPATCH_VERIFY_HEADLESS=true or TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE=true (#878-B)"
+                        .to_string(),
+                )
             } else {
                 Err(
                     "permission_profile 'full' requires explicit opt-in via TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE=true"
@@ -88,9 +100,15 @@ pub fn resolve_permission_profile(
             }
         }
         other => Err(format!(
-            "unsupported permission_profile '{other}'; allowed: default, allowlist, full (with opt-in)"
+            "unsupported permission_profile '{other}'; allowed: default, allowlist, verify (headless, with opt-in), full (with opt-in)"
         )),
     }
+}
+
+fn env_flag_true(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 fn reject_non_claude_allowlist(agent: &str, profile: PermissionProfile) -> Result<(), String> {
@@ -394,6 +412,39 @@ mod tests {
         assert!(build_codex_launch(&params, "hello", None).is_err());
         assert!(build_grok_launch(&params, "hello", None).is_err());
         assert!(build_kimi_launch(&params, "hello").is_err());
+    }
+
+    #[test]
+    fn verify_profile_requires_headless_opt_in_and_maps_to_full_flags() {
+        let _guard = env_lock();
+        let prev_full = std::env::var("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE").ok();
+        let prev_verify = std::env::var("TACHI_DISPATCH_VERIFY_HEADLESS").ok();
+        std::env::remove_var("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE");
+        std::env::remove_var("TACHI_DISPATCH_VERIFY_HEADLESS");
+
+        let mut params = params();
+        params.permission_profile = Some("verify".to_string());
+        assert!(resolve_permission_profile(&params).is_err());
+
+        std::env::set_var("TACHI_DISPATCH_VERIFY_HEADLESS", "true");
+        assert_eq!(
+            resolve_permission_profile(&params).unwrap(),
+            PermissionProfile::Full
+        );
+        let cmd = build_claude_launch(&params, "hello", None).expect("verify claude");
+        assert!(cmd
+            .args
+            .iter()
+            .any(|a| a == "--dangerously-skip-permissions"));
+
+        match prev_full {
+            Some(v) => std::env::set_var("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE", v),
+            None => std::env::remove_var("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE"),
+        }
+        match prev_verify {
+            Some(v) => std::env::set_var("TACHI_DISPATCH_VERIFY_HEADLESS", v),
+            None => std::env::remove_var("TACHI_DISPATCH_VERIFY_HEADLESS"),
+        }
     }
 
     #[test]

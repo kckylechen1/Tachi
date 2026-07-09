@@ -143,7 +143,7 @@ pub(crate) async fn rerank_rows_with_outcome(
             (rows, outcome)
         }
         Err(err) => {
-            tracing::warn!("[recall_context] rerank failed, falling back to hybrid ranking: {err}");
+            tracing::warn!("[rerank] failed, falling back to hybrid ranking: {err}");
             (
                 rows.into_iter().take(top_k).collect(),
                 RerankOutcome::Fallback,
@@ -156,11 +156,18 @@ fn build_rerank_document(row: &Value) -> String {
     let text = value_text(row);
     let topic = value_topic(row);
     let keywords = value_string_array(row, "keywords");
-    [text, topic, keywords.join(", ")]
+    let doc = [text, topic, keywords.join(", ")]
         .into_iter()
         .filter(|part| !part.trim().is_empty())
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    // Voyage (and similar) reject empty documents with HTTP 400; fall back to a
+    // non-empty placeholder so one blank row cannot poison the whole batch (#876).
+    if doc.trim().is_empty() {
+        "(empty memory entry)".to_string()
+    } else {
+        doc
+    }
 }
 
 /// Provisional: minimum fraction of `top_k` hybrid-head items guaranteed to

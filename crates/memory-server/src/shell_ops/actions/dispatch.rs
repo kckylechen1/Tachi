@@ -79,6 +79,7 @@ pub(super) async fn handle_dispatch_action(
             timeout_secs: 600,
             permission_profile: None,
             allowed_tools: Vec::new(),
+            completion_predicate: None,
             max_turns: None,
             sandbox: None,
             inject_tachi_mcp: None,

@@ -431,8 +431,8 @@ pub struct TachiHandoffParams {
 
 mod dispatch;
 pub use dispatch::{
-    DispatchMcpAccessParams, SignatureRecordParams, TachiApproveMergeParams, TachiCompleteParams,
-    TachiDispatchParams, TachiSubagentEvalParams,
+    CompletionPredicate, DispatchMcpAccessParams, SignatureRecordParams, TachiApproveMergeParams,
+    TachiCompleteParams, TachiDispatchParams, TachiSubagentEvalParams,
 };
 
 // ─── Facade: wiki (search / browse / write) ──────────────────────────────────

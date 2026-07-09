@@ -18,6 +18,7 @@ fn params() -> TachiDispatchParams {
         timeout_secs: 5,
         permission_profile: None,
         allowed_tools: Vec::new(),
+        completion_predicate: None,
         max_turns: None,
         sandbox: None,
         inject_tachi_mcp: None,

@@ -1,5 +1,6 @@
 use super::{
-    string_enum_schema, DispatchMcpAccessParams, SignatureRecordParams, TachiSubagentEvalParams,
+    string_enum_schema, CompletionPredicate, DispatchMcpAccessParams, SignatureRecordParams,
+    TachiSubagentEvalParams,
 };
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
@@ -230,6 +231,11 @@ pub struct TachiTaskParams {
         description = "[action=dispatch] Tool allowlist when permission_profile=allowlist."
     )]
     pub allowed_tools: Vec<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=dispatch] Machine-checkable completion predicate. When set, self-reported success must satisfy it to land a reviewed TASK_STATE_COMPLETED; otherwise the run is intercepted as a false success and routed to TASK_STATE_FAILED (#878-A)."
+    )]
+    pub completion_predicate: Option<CompletionPredicate>,
     #[serde(
         default,
         deserialize_with = "crate::coerce::opt_u32_from_string_or_number"

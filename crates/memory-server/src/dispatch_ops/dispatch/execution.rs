@@ -241,30 +241,48 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
 
             if exited_ok {
                 // exit_code=0 but no tachi_complete: sub-agent forgot to
-                // close the loop, but we have no real evaluation. Do NOT
-                // synthesize a `success` eval — that would poison the nightly
-                // routing analysis with records whose agent is "watchdog/*"
-                // and whose quality/trajectory/diff are empty. Instead just
-                // close the kanban row as COMPLETED but leave `reviewed=false`
-                // so the status dashboard surfaces it as "unreviewed" and
-                // operators can decide whether to write a real eval.
+                // close the loop. Apply the #878-A completion predicate when
+                // declared — an unsatisfied artifact/output contract is a
+                // FALSE SUCCESS and must land FAILED, not COMPLETED. When no
+                // predicate is declared, keep the conservative unreviewed
+                // COMPLETED (no synthesized success eval for routing stats).
                 let tail = tail_chars(&full_output, 500);
-                eprintln!(
-                    "[watchdog] dispatch {} exited 0 without tachi_complete; marking kanban COMPLETED as unreviewed. tail={}",
-                    d_id, tail
+                let (run_dir_opt, declared_pred, pred_cwd) =
+                    crate::dispatch_ops::resolve_completion_predicate_context(&d_id);
+                let empty_run = std::path::PathBuf::new();
+                let run_dir = run_dir_opt.as_deref().unwrap_or(&empty_run);
+                let output_for_pred = run_dir
+                    .join("result.md")
+                    .exists()
+                    .then(|| std::fs::read_to_string(run_dir.join("result.md")).ok())
+                    .flatten()
+                    .unwrap_or_else(|| full_output.clone());
+                let verdict = crate::dispatch_ops::evaluate_completion_predicate(
+                    declared_pred.as_ref(),
+                    run_dir,
+                    pred_cwd.as_deref(),
+                    &output_for_pred,
                 );
-                if let Err(error) = update_kanban_state(
-                    &server_clone,
-                    &d_id,
-                    "TASK_STATE_COMPLETED",
-                    None,
-                    Some(false),
-                )
-                .await
+                let (kanban_state, reviewed, override_reason) =
+                    crate::dispatch_ops::resolve_completion_state("success", &verdict);
+                eprintln!(
+                    "[watchdog] dispatch {} exited 0 without tachi_complete; predicate={} → {} reviewed={} tail={}",
+                    d_id,
+                    verdict.tag(),
+                    kanban_state,
+                    reviewed,
+                    tail
+                );
+                if let Some(reason) = override_reason {
+                    eprintln!("[watchdog] false-success intercepted: {reason}");
+                }
+                if let Err(error) =
+                    update_kanban_state(&server_clone, &d_id, kanban_state, None, Some(reviewed))
+                        .await
                 {
                     eprintln!(
-                        "[watchdog] failed to mark dispatch {} COMPLETED in kanban: {}",
-                        d_id, error
+                        "[watchdog] failed to mark dispatch {} {} in kanban: {}",
+                        d_id, kanban_state, error
                     );
                 }
             } else {
@@ -383,6 +401,21 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             }),
         );
 
+        // Preserve dispatch-time contract fields across the final status rewrite
+        // so complete/watchdog can still evaluate the #878-A predicate after exit.
+        let prev_status =
+            crate::task_lifecycle::read_json_file(&workspace_dir_for_spawn.join("status.json"))
+                .ok()
+                .flatten();
+        let preserved_predicate = prev_status
+            .as_ref()
+            .and_then(|v| v.get("completion_predicate").cloned())
+            .unwrap_or(Value::Null);
+        let preserved_cwd = prev_status
+            .as_ref()
+            .and_then(|v| v.get("cwd").cloned())
+            .unwrap_or(Value::Null);
+
         write_status_json(
             &workspace_dir_for_spawn,
             &d_id,
@@ -404,12 +437,13 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "updated_at": Utc::now().to_rfc3339(),
                 "run_dir": workspace_dir_for_spawn.to_string_lossy(),
                 "result_written": true,
+                "completion_predicate": preserved_predicate,
+                "cwd": preserved_cwd,
                 "harness_transport": harness_transport_for_spawn.clone(),
                 "harness_server_url": harness_server_url_for_spawn.clone(),
                 "host_adapter": host_adapter_for_spawn.clone(),
                 "execution_backend": if is_acpx_transport(&harness_transport_for_spawn) {
-                    Some("acpx")
-                } else if is_native_acp_transport(&harness_transport_for_spawn) {
+                    Some("acpx")                } else if is_native_acp_transport(&harness_transport_for_spawn) {
                     Some("acp_native")
                 } else {
                     None

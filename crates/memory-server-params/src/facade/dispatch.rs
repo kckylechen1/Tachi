@@ -46,6 +46,21 @@ pub struct DispatchMcpAccessParams {
     pub fallback: Option<String>,
 }
 
+/// Machine-checkable completion predicate for a dispatch. When declared, a
+/// self-reported `outcome="success"` (and a watchdog exit-code-0 auto-close)
+/// only lands `TASK_STATE_COMPLETED` + `reviewed=true` if the predicate is
+/// satisfied; an unsatisfied predicate intercepts the false success and routes
+/// the run to `TASK_STATE_FAILED`. Two forms are supported (#878-A).
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CompletionPredicate {
+    /// Passes iff the file at `path` (resolved against the dispatch cwd, path
+    /// traversal rejected) exists and is non-empty.
+    ArtifactNonEmpty { path: String },
+    /// Passes iff `pattern` (a regex) matches the run's `result.md` contents.
+    OutputMatches { pattern: String },
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiDispatchParams {
     /// Agent backend: "claude" | "codex" | "grok" | "kimi" | "custom" (aliases accepted)
@@ -96,6 +111,13 @@ pub struct TachiDispatchParams {
     /// e.g. ["Bash(git*)", "Read", "Write", "Edit", "Glob", "Grep"]
     #[serde(default)]
     pub allowed_tools: Vec<String>,
+
+    /// Machine-checkable contract predicate. When set, self-reported success
+    /// (and watchdog exit-0 auto-close) must satisfy this predicate to land a
+    /// reviewed `TASK_STATE_COMPLETED`; otherwise the run is intercepted as a
+    /// false success and routed to `TASK_STATE_FAILED` (#878-A).
+    #[serde(default)]
+    pub completion_predicate: Option<CompletionPredicate>,
 
     /// Maximum conversation turns for the dispatched agent (prevents infinite loops).
     #[serde(

@@ -1,11 +1,10 @@
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
-fn open_ro(db: &PathBuf) -> Result<Connection, Box<dyn std::error::Error>> {
+fn open_ro(db: &Path) -> Result<Connection, Box<dyn std::error::Error>> {
     Ok(Connection::open(db)?)
 }
 
-#[allow(clippy::collapsible_str_replace)]
 fn truncate(s: &str, n: usize) -> String {
     let s = s.replace(['\n', '\r'], " ");
     if s.chars().count() <= n {
@@ -30,7 +29,7 @@ type CapabilityRow = (
 );
 
 pub(super) fn cmd_list(
-    db: &PathBuf,
+    db: &Path,
     type_filter: Option<&str>,
     show_all: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -113,7 +112,7 @@ pub(super) fn cmd_list(
     Ok(())
 }
 
-pub(super) fn cmd_show(db: &PathBuf, id: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn cmd_show(db: &Path, id: &str) -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_ro(db)?;
     let mut stmt = conn.prepare(
         "SELECT id, type, name, version, description, enabled, review_status, health_status,
@@ -198,7 +197,7 @@ pub(super) fn cmd_show(db: &PathBuf, id: &str) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-pub(super) fn cmd_packs(db: &PathBuf, show_all: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn cmd_packs(db: &Path, show_all: bool) -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_ro(db)?;
     let sql = if show_all {
         "SELECT id, name, source, version, skill_count, enabled, installed_at FROM packs ORDER BY name"
@@ -245,7 +244,7 @@ pub(super) fn cmd_packs(db: &PathBuf, show_all: bool) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-pub(super) fn cmd_bindings(db: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) fn cmd_bindings(db: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_ro(db)?;
     let mut stmt = conn.prepare(
         "SELECT vc_id, capability_id, priority, enabled, created_at
@@ -285,7 +284,7 @@ pub(super) fn cmd_bindings(db: &PathBuf) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-pub fn cmd_stats(db: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+pub fn cmd_stats(db: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_ro(db)?;
 
     let count = |sql: &str| -> rusqlite::Result<i64> { conn.query_row(sql, [], |r| r.get(0)) };

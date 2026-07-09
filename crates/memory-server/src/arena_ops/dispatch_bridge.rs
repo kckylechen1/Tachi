@@ -69,6 +69,7 @@ pub(super) fn dispatch_params_for_mission(
         timeout_secs: params.timeout_secs.unwrap_or(600),
         permission_profile: params.permission_profile.clone(),
         allowed_tools: Vec::new(),
+        completion_predicate: None,
         max_turns: None,
         sandbox: params.sandbox.clone(),
         inject_tachi_mcp: None,

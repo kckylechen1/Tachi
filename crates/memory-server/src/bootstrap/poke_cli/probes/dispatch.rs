@@ -24,6 +24,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_dispatch_mock(
             timeout_secs: 10,
             permission_profile: None,
             allowed_tools: Vec::new(),
+            completion_predicate: None,
             max_turns: None,
             sandbox: None,
             inject_tachi_mcp: None,

@@ -7,6 +7,7 @@ mod harness;
 mod kanban_helpers;
 mod launcher;
 mod mcp_config;
+mod predicate;
 mod prompt;
 mod subprocess;
 
@@ -27,5 +28,8 @@ pub(crate) use harness::{
 #[cfg(test)]
 pub(crate) use kanban_helpers::should_cleanup_run;
 pub(crate) use kanban_helpers::update_kanban_state;
+pub(crate) use predicate::{
+    evaluate_completion_predicate, resolve_completion_predicate_context, resolve_completion_state,
+};
 #[cfg(test)]
 pub(crate) use prompt::{assemble_prompt, assemble_prompt_with_trace};
