@@ -30,18 +30,6 @@ pub(crate) struct CapabilityRecommendation {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(super) struct PackRecommendation {
-    pub(super) id: String,
-    pub(super) name: String,
-    pub(super) description: String,
-    pub(super) version: String,
-    pub(super) projected_to_host: bool,
-    pub(super) projected_path: Option<String>,
-    pub(super) score: f64,
-    pub(super) reasons: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub(super) struct CapabilityBundleSection {
     pub(super) title: String,
     pub(super) estimated_tokens: usize,
@@ -52,7 +40,6 @@ pub(super) struct CapabilityBundleSection {
 pub(super) struct CapabilityBundle {
     pub(super) primary_skill: Option<CapabilityRecommendation>,
     pub(super) supporting_capabilities: Vec<CapabilityRecommendation>,
-    pub(super) packs: Vec<PackRecommendation>,
     pub(super) host_tools: Vec<String>,
     pub(super) activation_steps: Vec<String>,
     pub(super) rationale: Vec<String>,

@@ -264,7 +264,6 @@ async fn create_skill_candidate(
             host: None,
             skill_limit: None,
             capability_limit: None,
-            pack_limit: None,
             include_section: None,
         },
     )

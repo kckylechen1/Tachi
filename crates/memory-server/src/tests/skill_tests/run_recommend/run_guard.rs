@@ -15,7 +15,6 @@ fn tachi_skill_run_params(skill_id: &str, args: Value) -> TachiSkillParams {
         host: None,
         skill_limit: None,
         capability_limit: None,
-        pack_limit: None,
         include_section: None,
     }
 }

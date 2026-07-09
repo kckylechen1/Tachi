@@ -1,4 +1,4 @@
-use super::types::{CapabilityBundleSection, CapabilityRecommendation, PackRecommendation};
+use super::types::{CapabilityBundleSection, CapabilityRecommendation};
 
 pub(super) fn infer_host_tools(query: &str) -> Vec<String> {
     let query = query.to_ascii_lowercase();
@@ -58,7 +58,6 @@ pub(super) fn build_bundle_section(
     query: &str,
     primary_skill: Option<&CapabilityRecommendation>,
     capabilities: &[CapabilityRecommendation],
-    packs: &[PackRecommendation],
     host_tools: &[String],
     activation_steps: &[String],
 ) -> CapabilityBundleSection {
@@ -86,16 +85,6 @@ pub(super) fn build_bundle_section(
             capabilities
                 .iter()
                 .map(|cap| cap.id.clone())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    if !packs.is_empty() {
-        lines.push(format!(
-            "Relevant packs: {}",
-            packs
-                .iter()
-                .map(|pack| pack.id.clone())
                 .collect::<Vec<_>>()
                 .join(", ")
         ));

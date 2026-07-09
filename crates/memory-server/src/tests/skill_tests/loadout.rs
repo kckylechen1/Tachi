@@ -89,7 +89,6 @@ async fn tachi_skill_loadout_resolves_dispatch_profile_skills_and_bundle() {
             host: Some("codex".to_string()),
             skill_limit: Some(3),
             capability_limit: Some(2),
-            pack_limit: Some(1),
             include_section: Some(true),
         }))
         .await
@@ -153,7 +152,6 @@ async fn tachi_skill_loadout_rejects_unknown_profile() {
             host: None,
             skill_limit: None,
             capability_limit: None,
-            pack_limit: None,
             include_section: None,
         }))
         .await

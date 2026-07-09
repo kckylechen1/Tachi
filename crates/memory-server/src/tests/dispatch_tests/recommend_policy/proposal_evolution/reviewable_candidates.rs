@@ -269,7 +269,6 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
             host: Some("codex".to_string()),
             skill_limit: Some(3),
             capability_limit: Some(2),
-            pack_limit: Some(1),
             include_section: Some(false),
         }))
         .await

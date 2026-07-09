@@ -17,7 +17,6 @@ async fn tachi_skill_bundle_requires_query() {
             host: Some("codex".to_string()),
             skill_limit: None,
             capability_limit: None,
-            pack_limit: None,
             include_section: None,
         }))
         .await

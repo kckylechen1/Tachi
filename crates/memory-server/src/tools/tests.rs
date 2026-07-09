@@ -254,7 +254,6 @@ fn native_tool_sources() -> Vec<(&'static str, &'static str)> {
             "src/tools/memory_facade.rs",
             include_str!("memory_facade.rs"),
         ),
-        ("src/tools/pack_facade.rs", include_str!("pack_facade.rs")),
         (
             "src/tools/pipeline_facade.rs",
             include_str!("pipeline_facade.rs"),

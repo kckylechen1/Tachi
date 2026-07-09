@@ -1,5 +1,5 @@
 use crate::hub_ops::handle_hub_quick_add;
-use crate::tool_params::{HubQuickAddParams, PackProjectParams, PackRegisterParams};
+use crate::tool_params::HubQuickAddParams;
 use memory_core::HubCapability;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -46,48 +46,6 @@ pub(super) async fn run_hub_command(
             memory_server_hub_cli::run(&HubAction::Show { id }, &hub_db, app_home)
                 .map_err(std::io::Error::other)?;
             Ok(())
-        }
-        HubAction::Packs { all } => {
-            memory_server_hub_cli::run(&HubAction::Packs { all }, &hub_db, app_home)
-                .map_err(std::io::Error::other)?;
-            Ok(())
-        }
-        HubAction::PackRegister {
-            id,
-            local_path,
-            name,
-            source,
-            version,
-            description,
-        } => {
-            let server = crate::cli_client::build_in_process_server(&hub_db, None)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            let out = crate::pack_ops::handle_pack_register(
-                &server,
-                PackRegisterParams {
-                    id,
-                    name,
-                    source,
-                    version,
-                    description,
-                    local_path: Some(local_path.display().to_string()),
-                    metadata: None,
-                },
-            )
-            .await
-            .map_err(std::io::Error::other)?;
-            print_pretty_json(&serde_json::from_str(&out)?)
-        }
-        HubAction::PackProject { pack_id, agents } => {
-            let server = crate::cli_client::build_in_process_server(&hub_db, None)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            let out = crate::pack_ops::handle_pack_project(
-                &server,
-                PackProjectParams { pack_id, agents },
-            )
-            .await
-            .map_err(std::io::Error::other)?;
-            print_pretty_json(&serde_json::from_str(&out)?)
         }
         HubAction::Bindings => {
             memory_server_hub_cli::run(&HubAction::Bindings, &hub_db, app_home)

@@ -105,7 +105,7 @@ pub enum Commands {
     },
     /// Run garbage collection
     Gc,
-    /// Hub registry (list/show/packs/bindings/stats/doctor) and capability management
+    /// Hub registry (list/show/bindings/stats/doctor) and capability management
     Hub {
         #[command(subcommand)]
         action: HubAction,

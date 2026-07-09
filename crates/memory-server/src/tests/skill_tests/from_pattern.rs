@@ -17,7 +17,6 @@ fn skill_params(action: &str) -> TachiSkillParams {
         host: None,
         skill_limit: None,
         capability_limit: None,
-        pack_limit: None,
         include_section: None,
     }
 }
@@ -122,7 +121,6 @@ async fn delegate_profile_rejects_skill_loadout_but_keeps_bundle_available() {
             host: None,
             skill_limit: None,
             capability_limit: None,
-            pack_limit: None,
             include_section: None,
         }))
         .await
@@ -142,7 +140,6 @@ async fn delegate_profile_rejects_skill_loadout_but_keeps_bundle_available() {
             host: Some("codex".to_string()),
             skill_limit: Some(1),
             capability_limit: Some(1),
-            pack_limit: Some(1),
             include_section: Some(false),
         }))
         .await

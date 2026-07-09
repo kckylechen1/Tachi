@@ -21,7 +21,6 @@ pub(in crate::bootstrap::poke_cli) async fn probe_skill_surface(
             host: None,
             skill_limit: None,
             capability_limit: None,
-            pack_limit: None,
             include_section: None,
         }))
         .await?;
@@ -40,7 +39,6 @@ pub(in crate::bootstrap::poke_cli) async fn probe_skill_surface(
             host: Some("codex".to_string()),
             skill_limit: Some(8),
             capability_limit: Some(8),
-            pack_limit: Some(4),
             include_section: Some(true),
         }))
         .await?;
