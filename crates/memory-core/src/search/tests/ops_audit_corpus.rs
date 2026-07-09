@@ -17,15 +17,11 @@
 //! 3. **Governance miss@10**: task framing / governance decision missing from
 //!    top-10 when component-registry stubs and old roadmap dominate.
 //!
-//! # Two assertion layers
-//! - **Ratchet layer** (plain `#[test]`, green on current main): locks the
-//!   measured floors (presence@10 where it holds, rank upper-bounds where the
-//!   defect only buries) so regressions are caught. Floors only ratchet *up*
-//!   after a legitimate ranking fix.
-//! - **Target layer** (`#[ignore]`, RED on current main): records the product
-//!   goal (rank-1 for decision/research; hit@5 for governance). The failure is
-//!   discriminating evidence that Phase 2 ranking must not ship without
-//!   red→green on these cases. nextest ci skips ignored tests.
+//! # Assertion layers (post same-store precision fix)
+//! - **Ratchet / product layers** (plain `#[test]`): rank-1 for decision +
+//!   research; hit@5 for governance. Pre-fix red baseline was ranks 6 / 7 /
+//!   miss@10 — do not re-introduce those shapes.
+//! - **Report** (`#[ignore]` diagnostic): prints ranks for floor refresh.
 //!
 //! # Determinism
 //! Fixed base timestamps (`BASE − days_ago`), no `Utc::now()` for entry ages,
@@ -552,17 +548,13 @@ fn returned_ids(conn: &Connection, query: &str) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Measured floors on current main (refresh via `ops_audit_corpus_report`).
-// These are regression floors — never lower after a legitimate fix; raise only.
+// Floors after same-store precision (#708 Phase D + decision/research boosts).
+// Pre-fix red baseline (report on pre-#708 branch): ranks 6 / 7 / miss@10.
+// Post-fix floors ratchet upward — never re-introduce the buried shapes.
 // ---------------------------------------------------------------------------
 
-/// Governance case: on current main this is a miss@10 — the green ratchet
-/// asserts the expected id is absent from top-10 (the defect shape) and that
-/// registry/roadmap distractors dominate the head of the list.
-const GOVERNANCE_DISTRACTOR_TOP10_MIN: usize = 8;
-
-/// RATCHET LAYER — green on current main. Locks measured floors so ranking
-/// regressions turn CI red. Does **not** assert product-quality rank-1.
+/// RATCHET LAYER — green after the same-store precision fix. Locks product
+/// ranks so regressions re-burying decisions/research turn CI red.
 #[test]
 fn ops_audit_corpus_ratchet_floors() {
     let mut conn = setup();
@@ -574,43 +566,19 @@ fn ops_audit_corpus_ratchet_floors() {
         let top10: Vec<&str> = ids.iter().take(10).map(String::as_str).collect();
 
         match case.class {
-            DefectClass::RankDilution => {
-                // Floor: presence@10. Product rank-1 lives in the ignored target.
-                assert!(
-                    matches!(rank, Some(r) if r <= 10),
-                    "rank-dilution case `{}`: expected `{}` present in top-10, got rank={rank:?}; top10={top10:?}",
-                    case.name,
-                    case.expected
-                );
-            }
-            DefectClass::AdjacentWikiSteal => {
-                // Floor: presence@10. Product rank-1 lives in the ignored target.
-                assert!(
-                    matches!(rank, Some(r) if r <= 10),
-                    "adjacent-wiki case `{}`: expected `{}` present in top-10, got rank={rank:?}; top10={top10:?}",
+            DefectClass::RankDilution | DefectClass::AdjacentWikiSteal => {
+                assert_eq!(
+                    rank,
+                    Some(1),
+                    "case `{}`: expected `{}` at rank 1 (post #708 same-store precision), got {rank:?}; top10={top10:?}",
                     case.name,
                     case.expected
                 );
             }
             DefectClass::GovernanceMiss => {
-                let distractor_hits = top10
-                    .iter()
-                    .filter(|id| {
-                        id.starts_with("ops-registry-stub-")
-                            || id.starts_with("ops-roadmap-old-")
-                            || id.starts_with("ops-noise-gov-")
-                    })
-                    .count();
                 assert!(
-                    distractor_hits >= GOVERNANCE_DISTRACTOR_TOP10_MIN,
-                    "governance case `{}`: expected >= {GOVERNANCE_DISTRACTOR_TOP10_MIN} registry/roadmap distractors in top-10, got {distractor_hits}; top10={top10:?}",
-                    case.name
-                );
-                // Defect shape floor: expected is miss@10 on current main.
-                // (Product target hit@5 lives in the ignored layer.)
-                assert!(
-                    !matches!(rank, Some(r) if r <= 10),
-                    "governance case `{}`: expected miss@10 for `{}` on current main (discrimination floor), got rank={rank:?}; top10={top10:?}",
+                    matches!(rank, Some(r) if r <= 5),
+                    "governance case `{}`: expected `{}` hit@5 (post fix), got rank={rank:?}; top10={top10:?}",
                     case.name,
                     case.expected
                 );
@@ -619,12 +587,9 @@ fn ops_audit_corpus_ratchet_floors() {
     }
 }
 
-/// TARGET LAYER — product goals for Phase 2 ranking. RED on current main:
-/// rank-1 for decision + research; hit@5 for governance framing.
-/// `#[ignore]` so nextest ci stays green while the failure remains runnable
-/// evidence (`cargo test -p memory-core ops_audit -- --ignored`).
+/// PRODUCT LAYER — same assertions as the ratchet after the fix; kept as a
+/// named product target so Phase reports can still point at one entry.
 #[test]
-#[ignore = "ops-audit targets — red on main; discriminating evidence for tachi#897 / #896 Phase 2"]
 fn ops_audit_corpus_meets_product_targets() {
     let mut conn = setup();
     seed_corpus(&mut conn);
@@ -636,8 +601,7 @@ fn ops_audit_corpus_meets_product_targets() {
                 assert_eq!(
                     rank,
                     Some(1),
-                    "case `{}`: expected `{}` at rank 1, got {rank:?} \
-                     (ops-audit defect still live — Phase 2 must red→green this)",
+                    "case `{}`: expected `{}` at rank 1, got {rank:?}",
                     case.name,
                     case.expected
                 );
@@ -645,8 +609,7 @@ fn ops_audit_corpus_meets_product_targets() {
             DefectClass::GovernanceMiss => {
                 assert!(
                     matches!(rank, Some(r) if r <= 5),
-                    "case `{}`: expected `{}` hit@5, got rank={rank:?} \
-                     (ops-audit governance miss@10 still live)",
+                    "case `{}`: expected `{}` hit@5, got rank={rank:?}",
                     case.name,
                     case.expected
                 );
@@ -655,15 +618,10 @@ fn ops_audit_corpus_meets_product_targets() {
     }
 }
 
-/// DISCRIMINATION SHAPE — documents that on current main at least one case is
-/// *not* product-green. This is a green test that locks the defect is still
-/// observable (rank > 1 or miss), so a silent "fix" that only raises floors
-/// without curing the shape cannot claim the suite is satisfied.
-///
-/// When Phase 2 legitimately cures all three, rewrite this into an all-green
-/// product assertion and drop the `#[ignore]` target layer (or flip it green).
+/// Documents that all three product goals are currently green (post-fix).
+/// If a regression re-introduces a red case, this fails — re-open discrimination.
 #[test]
-fn ops_audit_corpus_documents_red_baseline_shape() {
+fn ops_audit_corpus_documents_product_green_shape() {
     let mut conn = setup();
     seed_corpus(&mut conn);
 
@@ -680,20 +638,9 @@ fn ops_audit_corpus_documents_red_baseline_shape() {
     }
 
     assert!(
-        !red_cases.is_empty(),
-        "expected at least one ops-audit case still red on current ranking; \
-         all cases are product-green — raise floors / retire this shape lock \
-         after Phase 2 lands with measured red→green evidence"
-    );
-
-    // Rank-sensitive discrimination: at least one present-but-buried or miss.
-    let has_rank_sensitive = red_cases.iter().any(|(_, rank)| match rank {
-        Some(r) => *r > 1,
-        None => true,
-    });
-    assert!(
-        has_rank_sensitive,
-        "red cases should be rank-sensitive (rank>1 or miss), got {red_cases:?}"
+        red_cases.is_empty(),
+        "ops-audit product goals regressed to red: {red_cases:?} \
+         (pre-fix ranks were 6 / 7 / miss@10; same-store precision must keep them green)"
     );
 }
 
