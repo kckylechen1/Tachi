@@ -80,6 +80,20 @@ impl MemoryStore {
         db::list_by_path(&self.conn, path_prefix, limit, include_archived)
     }
 
+    /// List entries under a path (exact + descendants), newest-first by
+    /// `timestamp`. Use this instead of `list_by_path` when the caller wants
+    /// a recency-first view and applies `limit` as a hard cutoff — see
+    /// `list_by_path_recent`'s doc comment for why `list_by_path`'s
+    /// `path ASC` primary sort can silently drop the newest rows.
+    pub fn list_by_path_recent(
+        &self,
+        path_prefix: &str,
+        limit: usize,
+        include_archived: bool,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        db::list_by_path_recent(&self.conn, path_prefix, limit, include_archived)
+    }
+
     /// Delete a memory entry by ID. Returns true if found and deleted.
     pub fn delete(&mut self, id: &str) -> Result<bool, MemoryError> {
         db::retry_memory_locked(|| db::delete(&mut self.conn, id, self.vec_available))

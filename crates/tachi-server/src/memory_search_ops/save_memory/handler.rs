@@ -45,6 +45,15 @@ pub(crate) async fn handle_save_memory(
     } else {
         server.resolve_write_scope(&requested_scope)
     };
+    // #925: `resolve_write_scope` already detects a silent scope downgrade
+    // (requested != "global" but no project DB, so it falls back to global)
+    // via `warning`, but that generic `warning` string gets stripped out of
+    // the compact save/checkpoint receipt (`save_receipt_value`). Surface a
+    // dedicated, stable `scope`/`scope_warning` pair so the fallback stays
+    // loud through every response shape.
+    let scope_warning = warning.as_ref().map(|_| {
+        crate::memory_search_ops::scope_downgrade_warning(&requested_scope, target_db.as_str())
+    });
     if !params.force && params.id.is_none() {
         if let Some(existing_id) = find_exact_path_text_duplicate(
             server,
@@ -122,6 +131,8 @@ pub(crate) async fn handle_save_memory(
         warning,
         gate_warnings,
         secret_redactions,
+        &requested_scope,
+        scope_warning,
     );
     if let Some(event) = continuity_event {
         response.insert("continuity_event".into(), event);

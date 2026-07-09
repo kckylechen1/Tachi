@@ -166,6 +166,65 @@ pub fn list_by_path(
     Ok(out)
 }
 
+/// Fetch entries under a path prefix, newest-first by `timestamp`.
+///
+/// Unlike [`list_by_path`], which orders `path ASC, timestamp DESC` (so that
+/// sibling-path grouping wins over recency and a `LIMIT` can truncate before
+/// ever reaching a more-recent entry that happens to sort under a
+/// lexicographically later path — e.g. `/agent/checkpoints/2026-07-09` sorts
+/// after `/agent/checkpoints/2026-05-30`), this orders purely by recency so
+/// the `LIMIT` always keeps the truly newest rows. Callers that want a
+/// recency-first view over a path prefix (recent checkpoints, recent kanban
+/// entries, etc.) should use this instead of `list_by_path`.
+pub fn list_by_path_recent(
+    conn: &Connection,
+    path_prefix: &str,
+    limit: usize,
+    include_archived: bool,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let mut normalized = path_prefix.trim().to_string();
+    if normalized.is_empty() {
+        normalized = "/".to_string();
+    }
+    if !normalized.starts_with('/') {
+        normalized = format!("/{normalized}");
+    }
+    if normalized.len() > 1 {
+        normalized = normalized.trim_end_matches('/').to_string();
+    }
+    let like_prefix = if normalized == "/" {
+        "/%".to_string()
+    } else {
+        format!("{normalized}/%")
+    };
+
+    let sql = if include_archived {
+        format!(
+            "SELECT {MEMORY_SELECT_COLUMNS}
+         FROM memories
+         WHERE path = ?1 OR path LIKE ?2
+         ORDER BY timestamp DESC
+         LIMIT ?3"
+        )
+    } else {
+        format!(
+            "SELECT {MEMORY_SELECT_COLUMNS}
+         FROM memories
+         WHERE (path = ?1 OR path LIKE ?2) AND archived = 0
+         ORDER BY timestamp DESC
+         LIMIT ?3"
+        )
+    };
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![normalized, like_prefix, limit as i64], row_to_entry)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 pub fn list_wiki_duplicate_candidates(
     conn: &Connection,
     path: &str,

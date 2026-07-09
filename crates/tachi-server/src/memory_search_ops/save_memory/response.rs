@@ -12,6 +12,8 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_response(
     warning: Option<String>,
     gate_warnings: Option<serde_json::Value>,
     secret_redactions: usize,
+    requested_scope: &str,
+    scope_warning: Option<String>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut response = serde_json::Map::new();
     response.insert("id".into(), json!(entry.id.clone()));
@@ -34,6 +36,15 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_response(
     );
     if let Some(warning) = warning {
         response.insert("warning".into(), json!(warning));
+    }
+    // #925: loud, dedicated fallback signal — only present when the
+    // effective scope differs from what was requested (e.g. `scope=project`
+    // silently downgraded to global on a single-DB daemon). Absent entirely
+    // when the requested scope was honored, so callers can treat presence
+    // of `scope_warning` as the mismatch signal.
+    if let Some(scope_warning) = scope_warning {
+        response.insert("scope".into(), json!(requested_scope));
+        response.insert("scope_warning".into(), json!(scope_warning));
     }
     if let Some(violations) = gate_warnings {
         response.insert("capture_gate_warnings".into(), violations);
