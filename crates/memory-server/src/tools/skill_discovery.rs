@@ -58,7 +58,6 @@ pub(super) fn skill_bundle_params(
         host,
         skill_limit: params.skill_limit.unwrap_or(3).max(1),
         capability_limit: params.capability_limit.unwrap_or(3).max(1),
-        pack_limit: params.pack_limit.unwrap_or(3).max(1),
         include_section: params.include_section.unwrap_or(true),
     }
 }

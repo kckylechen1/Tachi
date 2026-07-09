@@ -11,13 +11,11 @@ pub mod foundry_config;
 pub mod foundry_jobs;
 mod gc_candidates;
 mod graph;
-#[cfg(feature = "admin")]
-mod hub_db;
 mod memory_crud;
 pub mod migrations;
 mod open;
 #[cfg(feature = "admin")]
-mod pack_db;
+mod hub_db;
 mod recall_cache;
 mod sandbox;
 mod schema;
@@ -76,10 +74,6 @@ pub use memory_crud::{
 pub(crate) use open::{
     acquire_startup_lock, configure_connection, open_read_only, open_read_write,
     retry_memory_locked, sqlite_error_is_locked,
-};
-#[cfg(feature = "admin")]
-pub use pack_db::{
-    pack_delete, pack_get, pack_list, pack_upsert, projection_list, projection_upsert,
 };
 pub use recall_cache::{
     recall_cache_get, recall_cache_purge_stale, recall_cache_put, recall_cache_record_hit,

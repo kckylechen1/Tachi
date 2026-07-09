@@ -120,7 +120,6 @@ pub(crate) async fn assemble_prompt_with_trace(
                 host: Some(agent.to_string()),
                 skill_limit: 2,
                 capability_limit: 2,
-                pack_limit: 1,
                 include_section: true,
             },
         )

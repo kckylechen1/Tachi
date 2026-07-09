@@ -27,7 +27,6 @@ async fn tachi_skill_bundle_wraps_capability_bundle_under_skill_facade() {
             host: Some("codex".to_string()),
             skill_limit: Some(3),
             capability_limit: Some(3),
-            pack_limit: Some(1),
             include_section: Some(true),
         }))
         .await

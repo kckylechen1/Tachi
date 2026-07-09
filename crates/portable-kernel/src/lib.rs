@@ -8,7 +8,7 @@
 //! | `MemoryStore` open/CRUD | Vault secrets |
 //! | Hybrid search / scorer | Hub capability catalog |
 //! | Schema + migrations | Foundry job queue types |
-//! | Graph / events / sandbox | Pack / agent_profile APIs |
+//! | Graph / events / sandbox | agent_profile APIs |
 //!
 //! Downstream rule of thumb:
 //! - Hyperion-HyperTachi / HyperMemory: depend on this crate (or copy

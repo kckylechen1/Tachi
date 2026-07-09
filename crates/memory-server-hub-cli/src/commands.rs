@@ -197,53 +197,6 @@ pub(super) fn cmd_show(db: &Path, id: &str) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-pub(super) fn cmd_packs(db: &Path, show_all: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let conn = open_ro(db)?;
-    let sql = if show_all {
-        "SELECT id, name, source, version, skill_count, enabled, installed_at FROM packs ORDER BY name"
-    } else {
-        "SELECT id, name, source, version, skill_count, enabled, installed_at FROM packs WHERE enabled = 1 ORDER BY name"
-    };
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, i32>(5)?,
-                r.get::<_, String>(6)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    if rows.is_empty() {
-        println!("(no packs installed)");
-        return Ok(());
-    }
-
-    println!(
-        "{:<28} {:<24} {:<14} {:>6}  source",
-        "id", "name", "version", "skills"
-    );
-    println!("{}", "─".repeat(110));
-    for (id, name, src, ver, count, enabled, _at) in &rows {
-        let mark = if *enabled == 0 { " (off)" } else { "" };
-        println!(
-            "{:<28} {:<24} {:<14} {:>6}  {}{}",
-            truncate(id, 28),
-            truncate(name, 24),
-            truncate(ver, 14),
-            count,
-            truncate(src, 40),
-            mark
-        );
-    }
-    Ok(())
-}
-
 pub(super) fn cmd_bindings(db: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_ro(db)?;
     let mut stmt = conn.prepare(
@@ -297,7 +250,6 @@ pub fn cmd_stats(db: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let skills = count("SELECT COUNT(*) FROM hub_capabilities WHERE type='skill'").unwrap_or(0);
     let plugins = count("SELECT COUNT(*) FROM hub_capabilities WHERE type='plugin'").unwrap_or(0);
     let mcps = count("SELECT COUNT(*) FROM hub_capabilities WHERE type='mcp'").unwrap_or(0);
-    let packs = count("SELECT COUNT(*) FROM packs").unwrap_or(0);
     let bindings = count("SELECT COUNT(*) FROM virtual_capability_bindings").unwrap_or(0);
 
     println!("Tachi Hub stats — {}", db.display());
@@ -307,7 +259,6 @@ pub fn cmd_stats(db: &Path) -> Result<(), Box<dyn std::error::Error>> {
     println!("    └─ skill  : {skills}");
     println!("    └─ plugin : {plugins}");
     println!("    └─ mcp    : {mcps}");
-    println!("  packs             : {packs}");
     println!("  virtual bindings  : {bindings}");
     Ok(())
 }

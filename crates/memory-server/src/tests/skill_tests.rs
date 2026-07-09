@@ -10,7 +10,7 @@ use crate::tool_params::{
     SynthesizeAgentEvolutionParams, TachiCompleteParams, TachiSkillParams,
 };
 use chrono::Utc;
-use memory_core::{AgentProjection, MemoryEntry, Pack};
+use memory_core::MemoryEntry;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 use std::time::Duration;

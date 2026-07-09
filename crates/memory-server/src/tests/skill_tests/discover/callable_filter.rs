@@ -52,7 +52,6 @@ async fn tachi_skill_discover_defaults_to_callable_approved_skills() {
             host: None,
             skill_limit: None,
             capability_limit: None,
-            pack_limit: None,
             include_section: None,
         }))
         .await

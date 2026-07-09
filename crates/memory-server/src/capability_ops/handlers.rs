@@ -1,5 +1,4 @@
 use super::bundle::{build_bundle_section, infer_host_tools};
-use super::packs::recommend_packs_inner;
 use super::scoring::{normalize_host_label, recommend_capabilities_inner};
 use super::types::CapabilityBundle;
 use crate::tool_params::{
@@ -82,7 +81,6 @@ pub(crate) async fn handle_recommend_toolchain(
     .filter(|rec| rec.cap_type != "skill")
     .take(params.capability_limit.max(1))
     .collect::<Vec<_>>();
-    let packs = recommend_packs_inner(server, &params.query, host.as_deref(), params.pack_limit)?;
     let host_tools = infer_host_tools(&params.query);
 
     let mut rationale = Vec::new();
@@ -91,9 +89,6 @@ pub(crate) async fn handle_recommend_toolchain(
     }
     if let Some(top) = capabilities.first() {
         rationale.push(format!("Supporting capability: {}", top.id));
-    }
-    if let Some(top) = packs.first() {
-        rationale.push(format!("Relevant pack: {}", top.id));
     }
     if !host_tools.is_empty() {
         rationale.push(format!("Suggested host tools: {}", host_tools.join(", ")));
@@ -104,7 +99,6 @@ pub(crate) async fn handle_recommend_toolchain(
         "host": host,
         "skills": skills,
         "capabilities": capabilities,
-        "packs": packs,
         "host_tools": host_tools,
         "rationale": rationale,
     }))
@@ -139,7 +133,6 @@ pub(crate) async fn handle_prepare_capability_bundle(
     .filter(|rec| rec.cap_type != "skill")
     .take(params.capability_limit.max(1))
     .collect::<Vec<_>>();
-    let packs = recommend_packs_inner(server, &params.query, host.as_deref(), params.pack_limit)?;
     let host_tools = infer_host_tools(&params.query);
 
     let mut activation_steps = Vec::new();
@@ -150,22 +143,6 @@ pub(crate) async fn handle_prepare_capability_bundle(
             ));
         } else {
             activation_steps.push(format!("Start with skill {}.", skill.id));
-        }
-    }
-    if let Some(pack) = packs.first() {
-        if pack.projected_to_host {
-            activation_steps.push(format!(
-                "Use projected pack {} at {}.",
-                pack.id,
-                pack.projected_path
-                    .clone()
-                    .unwrap_or_else(|| "(projected path unknown)".to_string())
-            ));
-        } else {
-            activation_steps.push(format!(
-                "Project or activate pack {} before running the task.",
-                pack.id
-            ));
         }
     }
     if !host_tools.is_empty() {
@@ -185,9 +162,6 @@ pub(crate) async fn handle_prepare_capability_bundle(
     if let Some(skill) = primary_skill.as_ref() {
         rationale.push(format!("Primary skill match: {}", skill.id));
     }
-    if let Some(pack) = packs.first() {
-        rationale.push(format!("Best pack candidate: {}", pack.id));
-    }
     if !host_tools.is_empty() {
         rationale.push(format!("Host tool fit: {}", host_tools.join(", ")));
     }
@@ -203,7 +177,6 @@ pub(crate) async fn handle_prepare_capability_bundle(
             &params.query,
             primary_skill.as_ref(),
             &supporting_capabilities,
-            &packs,
             &host_tools,
             &activation_steps,
         ))
@@ -214,7 +187,6 @@ pub(crate) async fn handle_prepare_capability_bundle(
     let bundle = CapabilityBundle {
         primary_skill,
         supporting_capabilities,
-        packs,
         host_tools,
         activation_steps,
         rationale,

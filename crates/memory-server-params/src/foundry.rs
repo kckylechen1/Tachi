@@ -464,10 +464,6 @@ pub struct RecommendToolchainParams {
     /// Max supporting capability recommendations to include
     #[serde(default = "default_recommend_limit")]
     pub capability_limit: usize,
-
-    /// Max pack recommendations to include
-    #[serde(default = "default_recommend_limit")]
-    pub pack_limit: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -486,10 +482,6 @@ pub struct PrepareCapabilityBundleParams {
     /// Max supporting capability recommendations to consider
     #[serde(default = "default_recommend_limit")]
     pub capability_limit: usize,
-
-    /// Max projected pack recommendations to consider
-    #[serde(default = "default_recommend_limit")]
-    pub pack_limit: usize,
 
     /// If true, include a rendered section artifact in the response
     #[serde(default = "default_true")]

@@ -26,11 +26,13 @@ use super::common::now_utc_iso;
 mod basic;
 mod cross_db;
 mod legacy_columns;
+mod pack_retire;
 mod sentinel;
 
 use basic::*;
 use cross_db::*;
 use legacy_columns::*;
+use pack_retire::*;
 pub use legacy_columns::{
     fold_and_drop_legacy_persons_column, migrate_v9_relocate_and_drop_location,
 };
@@ -52,6 +54,7 @@ pub struct MigrationReport {
     pub persons_columns_dropped: usize,
     pub locations_relocated: usize,
     pub location_columns_dropped: usize,
+    pub pack_tables_dropped: usize,
 }
 
 /// Run all data-fix migrations in order. Idempotent.
@@ -116,6 +119,11 @@ pub fn run_data_migrations(
         report.locations_relocated = relocated;
         report.location_columns_dropped = dropped;
         mark_run(conn, "v9_relocate_and_drop_location")?;
+    }
+
+    if !was_run(conn, "v10_drop_pack_tables")? {
+        report.pack_tables_dropped = migrate_v10_drop_pack_tables(conn)?;
+        mark_run(conn, "v10_drop_pack_tables")?;
     }
 
     Ok(report)
@@ -529,5 +537,48 @@ mod tests {
 
         let relocated = relocate_location_rows(&conn).unwrap();
         assert_eq!(relocated, 0);
+    }
+
+    fn table_present(conn: &Connection, name: &str) -> bool {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                rusqlite::params![name],
+                |row| row.get(0),
+            )
+            .unwrap();
+        n > 0
+    }
+
+    #[test]
+    fn v10_drops_legacy_pack_tables() {
+        let (mut conn, tmp) = open_test_db();
+        // init_schema no longer creates the pack tables; emulate a legacy DB
+        // that still carries them by creating them manually.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS packs (id TEXT PRIMARY KEY, name TEXT);
+             CREATE TABLE IF NOT EXISTS agent_projections (agent TEXT, pack_id TEXT);",
+        )
+        .unwrap();
+        assert!(table_present(&conn, "packs"));
+        assert!(table_present(&conn, "agent_projections"));
+
+        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+        assert_eq!(report.pack_tables_dropped, 2);
+        assert!(!table_present(&conn, "packs"));
+        assert!(!table_present(&conn, "agent_projections"));
+
+        // Idempotent: re-running is a no-op (sentinel guards it).
+        let report2 = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+        assert_eq!(report2.pack_tables_dropped, 0);
+    }
+
+    #[test]
+    fn v10_is_a_noop_on_db_without_pack_tables() {
+        let (mut conn, tmp) = open_test_db();
+        assert!(!table_present(&conn, "packs"));
+        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+        assert_eq!(report.pack_tables_dropped, 0);
+        assert!(!table_present(&conn, "packs"));
     }
 }

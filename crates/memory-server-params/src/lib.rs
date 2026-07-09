@@ -6,7 +6,7 @@ mod foundry;
 mod gh;
 mod hub;
 mod memory;
-mod pack;
+mod project_db;
 mod sandbox;
 
 pub use agent::*;
@@ -16,5 +16,5 @@ pub use foundry::*;
 pub use gh::*;
 pub use hub::*;
 pub use memory::*;
-pub use pack::*;
+pub use project_db::*;
 pub use sandbox::*;

@@ -80,7 +80,6 @@ mod memory_search_ops;
 mod network_safety;
 mod notes_ops;
 mod orchestrator_ops;
-mod pack_ops;
 mod path_utils;
 mod pipeline_ops;
 mod project_db_ops;

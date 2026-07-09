@@ -642,9 +642,6 @@ pub struct TachiSkillParams {
     /// Max supporting capabilities in a capability bundle.
     #[serde(default)]
     pub capability_limit: Option<usize>,
-    /// Max projected packs in a capability bundle.
-    #[serde(default)]
-    pub pack_limit: Option<usize>,
     /// Include a ready-to-inject markdown section in bundle responses.
     #[serde(default)]
     pub include_section: Option<bool>,

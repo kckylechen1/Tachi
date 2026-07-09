@@ -30,7 +30,6 @@ async fn tachi_skill_discover_matches_tokenized_query_and_compacts_output() {
             host: None,
             skill_limit: None,
             capability_limit: None,
-            pack_limit: None,
             include_section: None,
         }))
         .await

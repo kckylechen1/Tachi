@@ -9,7 +9,7 @@ use tachi_bootstrap::cli::HubAction;
 mod commands;
 
 pub use self::commands::cmd_stats;
-use self::commands::{cmd_bindings, cmd_doctor, cmd_list, cmd_packs, cmd_show};
+use self::commands::{cmd_bindings, cmd_doctor, cmd_list, cmd_show};
 
 pub(crate) fn expand_path(raw: &str) -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -48,13 +48,10 @@ pub fn run(action: &HubAction, db_path: &Path, app_home: &Path) -> Result<(), St
         } => cmd_list(db_path, cap_type.as_deref(), *all).map_err(|e| e.to_string()),
         HubAction::List { json: true, .. } => Err("JSON hub list is handled in cli_tool".into()),
         HubAction::Show { id } => cmd_show(db_path, id).map_err(|e| e.to_string()),
-        HubAction::Packs { all } => cmd_packs(db_path, *all).map_err(|e| e.to_string()),
         HubAction::Bindings => cmd_bindings(db_path).map_err(|e| e.to_string()),
         HubAction::Stats { json: false } => cmd_stats(db_path).map_err(|e| e.to_string()),
         HubAction::Doctor { fix } => cmd_doctor(app_home, *fix).map_err(|e| e.to_string()),
         HubAction::Register { .. }
-        | HubAction::PackRegister { .. }
-        | HubAction::PackProject { .. }
         | HubAction::Enable { .. }
         | HubAction::Disable { .. }
         | HubAction::Stats { json: true } => Err("handled by MemoryStore in cli_tool".into()),

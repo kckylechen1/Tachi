@@ -48,7 +48,6 @@ mod graph_state_facade;
 mod handoff_facade;
 mod hub_facade;
 mod memory_facade;
-mod pack_facade;
 mod pipeline_facade;
 mod runtime_context_facade;
 mod sandbox_facade;

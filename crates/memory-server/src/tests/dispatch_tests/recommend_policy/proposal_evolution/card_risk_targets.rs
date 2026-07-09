@@ -141,7 +141,6 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
             host: Some("codex".to_string()),
             skill_limit: Some(3),
             capability_limit: Some(2),
-            pack_limit: Some(1),
             include_section: Some(false),
         }))
         .await

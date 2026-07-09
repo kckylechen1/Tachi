@@ -14,7 +14,7 @@
 //
 // 2. **Admin / operator** (`feature = "admin"`, on by default for Tachi):
 //    vault secrets, Hub capability catalog, Foundry job queue types,
-//    Pack / agent_profile product surfaces. Downstream memory forks do
+//    agent_profile product surfaces. Downstream memory forks do
 //    not need these to open a DB or run save/search/readiness.
 
 #[cfg(feature = "admin")]
@@ -27,8 +27,6 @@ pub mod foundry;
 pub mod hub;
 pub mod namespace;
 pub mod noise;
-#[cfg(feature = "admin")]
-pub mod pack;
 pub mod path_router;
 pub mod recall_config;
 pub mod scorer;
@@ -71,8 +69,6 @@ pub use namespace::{
     RECALL_CACHE_SQL_WHERE_M,
 };
 pub use noise::{is_noise_text, should_skip_query};
-#[cfg(feature = "admin")]
-pub use pack::{AgentKind, AgentProjection, Pack, PackAssetRef, PackManifest, PackOverlay};
 pub use recall_config::RecallConfig;
 pub use scorer::{generic_precision_multiplier, surprise_score, HybridWeights, PrecisionMatcher};
 pub use search::{hybrid_search, SearchOptions};
@@ -100,7 +96,7 @@ use rusqlite::Connection;
 /// `pub(crate)` so those sibling modules can construct `MemoryStore` and access
 /// the connection directly; they remain private to the crate.
 ///
-/// Admin-only methods (vault/hub/pack) live in `store::{vault,hub,pack}` and
+/// Admin-only methods (vault/hub) live in `store::{vault,hub}` and
 /// are compiled only when the `admin` feature is enabled.
 pub struct MemoryStore {
     pub(crate) conn: Connection,
