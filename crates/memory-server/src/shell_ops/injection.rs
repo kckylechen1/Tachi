@@ -19,8 +19,58 @@ pub(super) const STAGE_ACTIONS: &[&str] = &["brainstorm", "plan", "dispatch", "r
 
 // ─── Meta skill injection ────────────────────────────────────────────────────
 
-/// Resolve the meta skill SOP file, falling back through several roots.
+/// Central vendored-skills library root.
+///
+/// Order:
+/// 1. `$TACHI_SKILLS_ROOT`
+/// 2. `$HOME/.agents/vendored-skills`
+///
+/// The vendored skill corpora (superpowers / waza / …) are mounted from this
+/// central library so they no longer have to live in every git worktree /
+/// clone. A `rel_path` here is `<central>/skill/<corpus>/…`, i.e. the central
+/// root already contains the `skill/` prefix the rel_path carries. This is a
+/// robustness fallback: on this host the in-repo `skill/` entry is an absolute
+/// symlink into the same central library, so paths 1–3 normally already win.
+fn central_skills_root() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("TACHI_SKILLS_ROOT") {
+        if !p.is_empty() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return Some(PathBuf::from(home).join(".agents").join("vendored-skills"));
+        }
+    }
+    None
+}
+
+/// A meta-skill `rel_path` must be repo-relative. Reject absolute paths and any
+/// `..` traversal component so neither a caller nor a future stage mapping can
+/// coax the resolver into reading outside a known skills root — defence in
+/// depth, independent of the calling convention.
+fn is_safe_meta_skill_rel_path(rel_path: &str) -> bool {
+    let p = Path::new(rel_path);
+    if p.is_absolute() {
+        return false;
+    }
+    !p.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
+/// Resolve a vendored-skill file by its repo-relative path (e.g.
+/// `skill/superpowers/skills/writing-plans/SKILL.md`), falling back through
+/// several roots.
+///
+/// The central vendored-skills library is checked **last** so an in-repo copy
+/// (or the in-repo symlink into that same library) keeps taking priority; a
+/// fresh worktree / clone with no `skill/` on disk falls through to the central
+/// library.
 pub(super) fn resolve_meta_skill(rel_path: &str) -> Option<PathBuf> {
+    // Defence in depth: only ever resolve repo-relative paths.
+    if !is_safe_meta_skill_rel_path(rel_path) {
+        return None;
+    }
     // 1. repo root (git toplevel)
     if let Some(root) = cached_git_root() {
         let p = root.join(rel_path);
@@ -36,6 +86,13 @@ pub(super) fn resolve_meta_skill(rel_path: &str) -> Option<PathBuf> {
     // 3. cargo manifest dir (for tests)
     if let Ok(d) = std::env::var("CARGO_MANIFEST_DIR") {
         let p = PathBuf::from(d).join("..").join("..").join(rel_path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    // 4. central vendored-skills library (mounted, not tracked in-repo)
+    if let Some(central) = central_skills_root() {
+        let p = central.join(rel_path);
         if p.exists() {
             return Some(p);
         }
