@@ -218,6 +218,7 @@ pub(super) fn capture_search_options(
         record_access: false,
         domain: None,
         recall_config: None,
+        decay_policy: None,
     }
 }
 

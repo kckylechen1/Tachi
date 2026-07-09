@@ -10,6 +10,7 @@ use serde_json::json;
 mod access;
 mod baseline;
 mod config;
+mod decay_policy;
 mod expansion;
 mod golden_corpus;
 mod graph;

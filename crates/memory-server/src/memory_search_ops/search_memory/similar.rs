@@ -51,6 +51,7 @@ pub(crate) async fn handle_find_similar_memory(
         as_of: None,
         precision_matchers: Vec::new(),
         recall_config: None,
+        decay_policy: None,
     };
 
     if let Some(ref project_name) = params.project {
@@ -81,6 +82,7 @@ pub(crate) async fn handle_find_similar_memory(
             as_of: None,
             precision_matchers: Vec::new(),
             recall_config: None,
+            decay_policy: None,
         };
         let project_results = server.with_named_project_store_read(project_name, |store| {
             store
@@ -115,6 +117,7 @@ pub(crate) async fn handle_find_similar_memory(
             as_of: None,
             precision_matchers: Vec::new(),
             recall_config: None,
+            decay_policy: None,
         };
 
         let project_results = server.with_project_store_read(|store| {
