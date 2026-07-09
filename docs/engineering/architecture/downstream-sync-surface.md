@@ -97,7 +97,6 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 | `memory-server-capture-gate` | Gate policy is good; Hypermem still has in-tree `capture_gate.rs`. Prefer **shared logic in core or a tiny no-product crate**, not a server-only leaf that Hypermem must vend. |
 | `tachi-llm` / `tachi-foundry` | Needed for embed/rerank/backfill. Hypermem may keep a thinner LLM client; do not force full Foundry product surfaces. |
 | `tachi-params` | OK if limited to memory/readiness param types; not if it becomes a dump of every facade enum. |
-| `memory-server-i18n` | Optional strings only. |
 
 ## 5. What GLM cratesplit already did (downstream lens)
 
