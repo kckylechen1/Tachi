@@ -1,4 +1,4 @@
-use memory_core::HubCapability;
+use memcore::HubCapability;
 use serde_json::{json, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

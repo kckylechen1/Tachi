@@ -137,7 +137,7 @@ def detect_server_bin(raw):
     if which:
         return which
 
-    fallback = Path(__file__).resolve().parents[1] / "target/release/memory-server"
+    fallback = Path(__file__).resolve().parents[1] / "target/release/tachi-server"
     if fallback.is_file():
         return str(fallback)
 

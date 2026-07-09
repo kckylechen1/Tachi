@@ -1,6 +1,6 @@
 //! Build script — compile-time build provenance stamping (tachi-bootstrap twin).
 //!
-//! This is the twin of `crates/memory-server/build.rs`. The `tachi-bootstrap`
+//! This is the twin of `crates/tachi-server/build.rs`. The `tachi-bootstrap`
 //! crate renders the `--version` CLI output, so it needs the same `GIT_SHA`
 //! stamp at compile time to print the sha alongside the version. Keep the two
 //! scripts in sync.

@@ -1,5 +1,5 @@
 # Cargo build configuration.
-# See issue #833 — these settings cut cold-compile time of memory-server.
+# See issue #833 — these settings cut cold-compile time of tachi-server.
 
 [build]
 # Pipelining lets rustc emit rmeta early so downstream crates can start
@@ -10,7 +10,7 @@ pipelining = true
 
 # Optional faster linker. Uncomment after `brew install mold` (arm64) or
 # installing lld. This is NOT required — the default linker works fine.
-# mold shaves link time off the 165K-LOC memory-server crate on debug builds.
+# mold shaves link time off the 165K-LOC tachi-server crate on debug builds.
 #
 # [target.aarch64-apple-darwin]
 # linker = "clang"

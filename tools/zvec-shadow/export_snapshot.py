@@ -8,20 +8,20 @@ connection, URI form) so it cannot corrupt or lock out the live daemon that
 owns that DB -- it takes a momentary shared read lock exactly like any other
 SQLite reader, which is safe to run against a live WAL-mode writer.
 
-Schema note (verified by reading crates/memory-core source, not guessed):
-  - `memories` table: crates/memory-core/src/db/schema/ddl.rs -- there is no
+Schema note (verified by reading crates/memcore source, not guessed):
+  - `memories` table: crates/memcore/src/db/schema/ddl.rs -- there is no
     `domain` column on `memories` itself (a separate `domains` config table
     exists for per-domain GC settings, unrelated to per-row tagging). The
     per-row taxonomy fields actually present are `category` and `topic`.
     This script exports the REAL columns, not the ones a spec might guess.
   - Vector storage: `memories_vec` is a sqlite-vec `vec0` virtual table
-    (crates/memory-core/src/db/sqlite_vec.rs), schema
+    (crates/memcore/src/db/sqlite_vec.rs), schema
     `vec0(id TEXT PRIMARY KEY, embedding float[1024])`, joined to `memories`
     on `id` (no separate FK column). Embedding blob format is raw
     little-endian float32, no header (`serialize_f32` in the same file) --
     i.e. exactly `numpy.frombuffer(blob, dtype='<f4')`.
   - Embedding dimension is 1024 (Voyage-4), per
-    crates/memory-server/src/status_ops/mod.rs EXPECTED_EMBEDDING_DIM.
+    crates/tachi-server/src/status_ops/mod.rs EXPECTED_EMBEDDING_DIM.
 
 Corpus-alignment note (adjudication of PR #700, CP1/CP3): the exported
 snapshot must match what `tachi search` can actually return BY DEFAULT,
@@ -116,24 +116,24 @@ def unpack_embedding(blob: bytes | None) -> list[float] | None:
 # ---------------------------------------------------------------------------
 
 def _meta_bool(metadata: dict, key: str) -> bool:
-    # crates/memory-core/src/namespace.rs:10-16 (metadata_bool)
+    # crates/memcore/src/namespace.rs:10-16 (metadata_bool)
     return metadata.get(key) is True
 
 
 def _meta_str_eq(metadata: dict, key: str, expected: str) -> bool:
-    # crates/memory-core/src/namespace.rs:18-24 (metadata_str_eq)
+    # crates/memcore/src/namespace.rs:18-24 (metadata_str_eq)
     v = metadata.get(key)
     return isinstance(v, str) and v.lower() == expected.lower()
 
 
 def _path_in_namespace(path: str, namespace: str) -> bool:
-    # crates/memory-core/src/namespace.rs:26-29 (path_in_namespace)
+    # crates/memcore/src/namespace.rs:26-29 (path_in_namespace)
     namespace = namespace.rstrip("/")
     return path == namespace or path.startswith(namespace + "/")
 
 
 def _path_contains_recall_cache(path: str) -> bool:
-    # crates/memory-core/src/namespace.rs:31-36 (path_contains_recall_cache)
+    # crates/memcore/src/namespace.rs:31-36 (path_contains_recall_cache)
     return (
         path == "/recall-cache"
         or path.endswith("/recall-cache")
@@ -143,9 +143,9 @@ def _path_contains_recall_cache(path: str) -> bool:
 
 
 def _is_training_seed(rec: dict, metadata: dict) -> bool:
-    # crates/memory-server/src/memory_search_ops/auto_link.rs:16-27
+    # crates/tachi-server/src/memory_search_ops/auto_link.rs:16-27
     # (is_training_seed), applied to every non-opted-in search at
-    # crates/memory-server/src/memory_search_ops/search_memory/rows.rs:359-361.
+    # crates/tachi-server/src/memory_search_ops/search_memory/rows.rs:359-361.
     return (
         rec["path"] == "/sft"
         or rec["path"].startswith("/sft/")
@@ -156,7 +156,7 @@ def _is_training_seed(rec: dict, metadata: dict) -> bool:
 
 
 def _is_recall_cache_entry(rec: dict, metadata: dict) -> bool:
-    # crates/memory-core/src/namespace.rs:45-57 (is_recall_cache_entry),
+    # crates/memcore/src/namespace.rs:45-57 (is_recall_cache_entry),
     # applied at .../search_memory/rows.rs:362-364.
     src = "foundry_recall_rerank_cache"
     return (
@@ -170,18 +170,18 @@ def _is_recall_cache_entry(rec: dict, metadata: dict) -> bool:
 
 
 def _is_eval_entry(rec: dict) -> bool:
-    # crates/memory-core/src/namespace.rs:82-84 (is_eval_entry) UNION
-    # crates/memory-server/src/memory_search_ops/search_memory/filters.rs:9-15
+    # crates/memcore/src/namespace.rs:82-84 (is_eval_entry) UNION
+    # crates/tachi-server/src/memory_search_ops/search_memory/filters.rs:9-15
     # (is_eval_path wrapper), applied at .../search_memory/rows.rs:365-366.
     return _path_in_namespace(rec["path"], "/eval") or rec["category"].lower() == "eval"
 
 
 def _is_namespace_search_noise(rec: dict, metadata: dict) -> bool:
-    # crates/memory-core/src/namespace.rs:88-99 (is_namespace_search_noise)
+    # crates/memcore/src/namespace.rs:88-99 (is_namespace_search_noise)
     # for the UNSCOPED case (path_prefix=None -- the compare harness never
     # passes a path prefix), applied inside core ranking at
-    # crates/memory-core/src/search/ranking.rs:57 via
-    # crates/memory-core/src/search/filtering.rs:115-117. NOTE: this filter
+    # crates/memcore/src/search/ranking.rs:57 via
+    # crates/memcore/src/search/filtering.rs:115-117. NOTE: this filter
     # is NOT part of the rows.rs:359-366 set the PR #700 adjudication cited,
     # but it demonstrably makes kanban/handoff/wiki_log rows non-retrievable
     # in a default search, and the adjudication's own labeled-set invariant
@@ -192,13 +192,13 @@ def _is_namespace_search_noise(rec: dict, metadata: dict) -> bool:
         or _meta_bool(metadata, "wiki_log")
         or rec["topic"].lower() == "wiki_log"
     )
-    # crates/memory-core/src/namespace.rs:70-74 (is_kanban_entry)
+    # crates/memcore/src/namespace.rs:70-74 (is_kanban_entry)
     kanban = (
         _path_in_namespace(rec["path"], "/kanban")
         or rec["source"].lower() == "kanban"
         or rec["category"].lower() == "kanban"
     )
-    # crates/memory-core/src/namespace.rs:76-80 (is_handoff_entry)
+    # crates/memcore/src/namespace.rs:76-80 (is_handoff_entry)
     handoff = (
         _path_in_namespace(rec["path"], "/handoff")
         or rec["source"].lower() == "handoff"
@@ -217,9 +217,9 @@ def tachi_default_retrievable(rec: dict) -> str | None:
             metadata = {}
     except json.JSONDecodeError:
         metadata = {}
-    # Default include_superseded=false: crates/memory-core/src/search.rs:74-92
+    # Default include_superseded=false: crates/memcore/src/search.rs:74-92
     # (SearchOptions::default); enforced in SQL at
-    # crates/memory-core/src/db/memory_crud/search.rs:30-35.
+    # crates/memcore/src/db/memory_crud/search.rs:30-35.
     if rec.get("superseded_by") is not None:
         return "superseded"
     if _is_training_seed(rec, metadata):

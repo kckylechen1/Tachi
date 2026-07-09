@@ -195,9 +195,9 @@ latency, cost, verification, human override, plan delta, and failure mode.
 
 The June 5 implementation was verified with:
 
-- `cargo test -p memory-server`
-- `cargo build -p memory-server --release`
-- `target/release/memory-server --help`
+- `cargo test -p tachi-server`
+- `cargo build -p tachi-server --release`
+- `target/release/tachi-server --help`
 - Release-binary `remember/search` smoke with temporary DB overrides
 - Tachi MCP save using explicit `project="Sigil"`
 
@@ -205,4 +205,4 @@ The relevant commits are:
 
 - `010b77a` Make subagent work measurable in eval memory
 - `29ada83` Close the live subagent eval loop
-- `e0744ca` Make memory-server package tests deterministic
+- `e0744ca` Make tachi-server package tests deterministic

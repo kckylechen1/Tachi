@@ -1,5 +1,5 @@
 //! Local worktree merge toolkit — `approve_merge`, safety gates, and cleaner
-//! integration. Extracted from `memory-server` `dispatch_ops/merge` (#833).
+//! integration. Extracted from `tachi-server` `dispatch_ops/merge` (#833).
 //!
 //! This is the one slice that also weakens the cyclic SCC: `gh_ops` previously
 //! reached into `dispatch_ops` only via `remove_worktree_with_cleaner`; after

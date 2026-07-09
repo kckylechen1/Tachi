@@ -5,16 +5,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-INSTALL_BIN="${INSTALL_BIN:-${HOME}/.cargo/bin/memory-server}"
+INSTALL_BIN="${INSTALL_BIN:-${HOME}/.cargo/bin/tachi-server}"
 INSTALL_CLEAN_BIN="${INSTALL_CLEAN_BIN:-${HOME}/.cargo/bin/tachi-clean}"
 TACHI_LINK="${TACHI_LINK:-${HOME}/bin/tachi}"
 CLEAN_LINK="${CLEAN_LINK:-${HOME}/bin/tachi-clean}"
 SKIP_LINK="${SKIP_LINK:-0}"
 
-echo ">> cargo build --release -p memory-server -p tachi-clean --locked"
-cargo build --release -p memory-server -p tachi-clean --locked
+echo ">> cargo build --release -p tachi-server -p tachi-clean --locked"
+cargo build --release -p tachi-server -p tachi-clean --locked
 
-SRC="$SCRIPT_DIR/target/release/memory-server"
+SRC="$SCRIPT_DIR/target/release/tachi-server"
 if [[ ! -f "$SRC" ]]; then
   echo "error: release binary missing at $SRC" >&2
   exit 1

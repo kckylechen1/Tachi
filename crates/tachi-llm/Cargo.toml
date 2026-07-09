@@ -9,7 +9,7 @@ default = []
 test-support = []
 
 [dependencies]
-memory-core = { path = "../memory-core" }
+memcore = { path = "../memcore" }
 chrono = { workspace = true }
 dirs = "5.0"
 reqwest = { package = "reqwest", version = "0.13", default-features = false, features = ["charset", "json", "rustls-no-provider", "system-proxy"] }

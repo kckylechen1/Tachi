@@ -2,7 +2,7 @@
 //!
 //! This crate intentionally contains policy and command construction only.
 //! Runtime orchestration, MCP config generation, run artifacts, and database
-//! writes stay in `memory-server`.
+//! writes stay in `tachi-server`.
 
 mod launcher;
 mod model_registry;

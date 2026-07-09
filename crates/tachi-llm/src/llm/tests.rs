@@ -7,7 +7,7 @@ use super::provider_health::{
 };
 use super::{LlmClient, ProviderSecret};
 use chrono::Utc;
-use memory_core::vault::VaultKeyHealth;
+use memcore::vault::VaultKeyHealth;
 use reqwest::header::AUTHORIZATION;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};

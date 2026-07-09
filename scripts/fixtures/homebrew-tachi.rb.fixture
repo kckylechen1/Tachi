@@ -15,9 +15,9 @@ class Tachi < Formula
   depends_on "rust" => :build
 
   def install
-    system "cargo", "install", *std_cargo_args(path: "crates/memory-server"),
-           "--bin", "memory-server"
-    mv bin/"memory-server", bin/"tachi"
+    system "cargo", "install", *std_cargo_args(path: "crates/tachi-server"),
+           "--bin", "tachi-server"
+    mv bin/"tachi-server", bin/"tachi"
   end
 
   service do

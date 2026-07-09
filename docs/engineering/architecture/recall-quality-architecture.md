@@ -130,7 +130,7 @@ degradation path.
 ## 5. Scheduling constraint
 
 Phases B/C/D are small surgical diffs on `scorer.rs`/`search/` — the same hot
-zone as the #501 memory-server split and the #697 convergence surface. They
+zone as the #501 tachi-server split and the #697 convergence surface. They
 must land **entirely before or entirely after** #501's restructure, never
 interleaved. Recommendation: before (tiny diffs, high value, and they give
 #501 a regression net). Phase A touches no kernel code and starts immediately

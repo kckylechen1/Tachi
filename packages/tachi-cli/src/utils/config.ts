@@ -84,10 +84,10 @@ function findOnPath(name: string): string | undefined {
 
 /**
  * Resolve the real `tachi` binary (installed as `tachi`, usually a symlink to
- * `memory-server`). The previous default — `~/.tachi/bin/tachi-daemon` — was a
+ * `tachi-server`). The previous default — `~/.tachi/bin/tachi-daemon` — was a
  * path nothing installs, so every daemon command failed. Resolution order:
  *   1. `TACHI_BINARY` env override
- *   2. `tachi` / `memory-server` on `PATH`
+ *   2. `tachi` / `tachi-server` on `PATH`
  *   3. common cargo / home install locations
  *   4. bare `tachi`, leaving final resolution to the OS at spawn time
  */
@@ -95,11 +95,11 @@ export function getBinaryPath(): string {
   const override = process.env.TACHI_BINARY;
   if (override && existsSync(override)) return override;
 
-  const onPath = findOnPath('tachi') ?? findOnPath('memory-server');
+  const onPath = findOnPath('tachi') ?? findOnPath('tachi-server');
   if (onPath) return onPath;
 
   const candidates = [
-    join(homedir(), '.cargo', 'bin', 'memory-server'),
+    join(homedir(), '.cargo', 'bin', 'tachi-server'),
     join(homedir(), 'bin', 'tachi'),
     join(homedir(), '.tachi', 'bin', 'tachi'),
   ];

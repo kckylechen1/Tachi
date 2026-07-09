@@ -44,7 +44,7 @@ jobs:
           python3 scripts/check_release_versions.py
           version="${{ inputs.version }}"
           version="${version#v}"
-          cargo_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/memory-server/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
+          cargo_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/tachi-server/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
           if [ -z "$version" ]; then
             echo "version input required"
             exit 1

@@ -63,10 +63,10 @@ def extract_text(response):
         pass
     return response
 
-def test_memory_server():
+def test_tachi_server():
     print("Starting Memory Server...")
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    binary_path = os.path.join(SCRIPT_DIR, "..", "target", "release", "memory-server")
+    binary_path = os.path.join(SCRIPT_DIR, "..", "target", "release", "tachi-server")
     proc = subprocess.Popen(
         [os.path.abspath(binary_path)],
         stdin=subprocess.PIPE,
@@ -387,5 +387,5 @@ def test_memory_server():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 if __name__ == "__main__":
-    success = test_memory_server()
+    success = test_tachi_server()
     sys.exit(0 if success else 1)

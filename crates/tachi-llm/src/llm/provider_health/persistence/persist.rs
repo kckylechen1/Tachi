@@ -72,7 +72,7 @@ impl super::super::super::LlmClient {
                 "persist vault key health for {target}: invalid db path"
             ));
         };
-        match memory_core::MemoryStore::open(db_path) {
+        match memcore::MemoryStore::open(db_path) {
             Ok(store) => {
                 store
                     .vault_upsert_key_health(&health)

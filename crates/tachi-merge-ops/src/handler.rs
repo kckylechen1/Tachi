@@ -7,7 +7,7 @@ use super::repo::{
 use super::safety::{
     detect_branch_safety_signals, validate_static_merge_safety, worktree_equals_repo_root,
 };
-use memory_server_params::TachiApproveMergeParams;
+use tachi_params::TachiApproveMergeParams;
 use serde_json::json;
 use tokio::process::Command;
 

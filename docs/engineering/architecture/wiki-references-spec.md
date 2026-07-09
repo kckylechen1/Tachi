@@ -3,7 +3,7 @@
 **Issue:** [#149](https://github.com/kckylechen1/tachi/issues/149)  
 **Status:** Draft → Ready for implementation  
 **Date:** 2026-06-03  
-**Scope:** `crates/memory-server` — Wiki write tools  
+**Scope:** `crates/tachi-server` — Wiki write tools  
 
 ---
 
@@ -17,11 +17,11 @@ Add a first-class `references` parameter to Wiki write tools so agents and users
 
 | File | Change |
 |------|--------|
-| `crates/memory-server-params/src/memory/wiki.rs` | Add `references: Vec<String>` to `WikiWriteParams` |
-| `crates/memory-server-params/src/facade.rs` | Add `references: Vec<String>` to `TachiWikiParams` |
-| `crates/memory-server/src/tools.rs` | Forward `references` from facade to memory params |
-| `crates/memory-server/src/wiki_ops.rs` | Add `validate_reference_format`, wire into write path, render in `markdown_for_obsidian` |
-| `crates/memory-server/src/types.rs` | (No change — `metadata` already supports `source_refs`) |
+| `crates/tachi-params/src/memory/wiki.rs` | Add `references: Vec<String>` to `WikiWriteParams` |
+| `crates/tachi-params/src/facade.rs` | Add `references: Vec<String>` to `TachiWikiParams` |
+| `crates/tachi-server/src/tools.rs` | Forward `references` from facade to memory params |
+| `crates/tachi-server/src/wiki_ops.rs` | Add `validate_reference_format`, wire into write path, render in `markdown_for_obsidian` |
+| `crates/tachi-server/src/types.rs` | (No change — `metadata` already supports `source_refs`) |
 
 ---
 
@@ -30,7 +30,7 @@ Add a first-class `references` parameter to Wiki write tools so agents and users
 ### 3.1 `WikiWriteParams`
 
 ```rust
-// crates/memory-server-params/src/memory/wiki.rs
+// crates/tachi-params/src/memory/wiki.rs
 pub struct WikiWriteParams {
     pub title: String,
     pub content: String,
@@ -44,7 +44,7 @@ pub struct WikiWriteParams {
 ### 3.2 `TachiWikiParams`
 
 ```rust
-// crates/memory-server-params/src/facade.rs
+// crates/tachi-params/src/facade.rs
 pub struct TachiWikiParams {
     pub action: String,
     pub title: Option<String>,
@@ -66,7 +66,7 @@ Both use `#[serde(default)]` so existing callers (no `references` field) get `Ve
 
 ### 4.1 `validate_reference_format`
 
-Location: `crates/memory-server/src/wiki_ops.rs` (private helper)
+Location: `crates/tachi-server/src/wiki_ops.rs` (private helper)
 
 ```rust
 use std::sync::OnceLock;
@@ -159,7 +159,7 @@ This lands in `MemoryEntry.metadata` as `"source_refs": ["https://...", "#69", .
 
 ### 6.1 Location
 
-`markdown_for_obsidian` in `crates/memory-server/src/wiki_ops.rs` (around line 455).
+`markdown_for_obsidian` in `crates/tachi-server/src/wiki_ops.rs` (around line 455).
 
 ### 6.2 Rendering Logic
 
@@ -284,7 +284,7 @@ fn test_invalid_references() {
 | 8 | — | Update MCP tool schema JSON | 5 min |
 | 9 | — | Write unit tests for validation | 15 min |
 | 10 | — | Write integration tests for write + export | 20 min |
-| 11 | — | `cargo test --package memory-server` | 5 min |
+| 11 | — | `cargo test --package tachi-server` | 5 min |
 
 **Total estimate:** ~1.5 hours
 
@@ -301,7 +301,7 @@ Agents often mention issues, docs, and wiki paths in natural language (e.g. "see
 A lightweight background module (local ollama `qwen2.5:32b`, configurable) that scans agent output and auto-suggests references:
 
 ```rust
-// crates/memory-server/src/qwen_secretary/ref_extractor.rs
+// crates/tachi-server/src/qwen_secretary/ref_extractor.rs
 pub async fn extract_references_from_text(text: &str) -> Vec<String> {
     // Qwen prompt: "Extract all GitHub issues, file paths, and wiki paths from this text.
     // Return JSON array of strings."

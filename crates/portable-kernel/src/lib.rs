@@ -1,6 +1,6 @@
 //! Portable memory kernel for downstream forks.
 //!
-//! Re-exports the `memory-core` public API built with
+//! Re-exports the `memcore` public API built with
 //! `default-features = false` (no `admin` feature). That means:
 //!
 //! | Included (portable) | Excluded (Tachi admin) |
@@ -12,18 +12,18 @@
 //!
 //! Downstream rule of thumb:
 //! - Hyperion-HyperTachi / HyperMemory: depend on this crate (or copy
-//!   `memory-core` with `default-features = false`).
-//! - Full Tachi monorepo product: depend on `memory-core` with default
+//!   `memcore` with `default-features = false`).
+//! - Full Tachi monorepo product: depend on `memcore` with default
 //!   features (admin on).
 //!
 //! See `docs/engineering/architecture/portable-kernel-split.md` and
 //! `docs/engineering/architecture/downstream-sync-surface.md`.
 
-pub use memory_core::*;
+pub use memcore::*;
 
 /// True when this facade was built without the admin surface.
 /// Always true for `portable-kernel` (by construction).
-pub const IS_PORTABLE_BUILD: bool = !memory_core::ADMIN_SURFACE_ENABLED;
+pub const IS_PORTABLE_BUILD: bool = !memcore::ADMIN_SURFACE_ENABLED;
 
 #[cfg(test)]
 mod tests {

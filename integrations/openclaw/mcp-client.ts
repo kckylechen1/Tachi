@@ -280,7 +280,7 @@ function extractErrorMessage(result: RawToolResult, toolName: string): string {
 }
 
 // Branch #7 — tolerant JSON parser for MCP tool payloads.
-// Sigil's memory-server occasionally returns text blocks with a UTF-8 BOM,
+// Sigil's tachi-server occasionally returns text blocks with a UTF-8 BOM,
 // trailing whitespace/newlines, or a stray log line prepended. The MCP
 // SDK hands us those blocks verbatim. Try strict parse first, then fall
 // back to BOM/whitespace strip + braces/brackets substring recovery so a
@@ -382,7 +382,7 @@ export class MemoryMcpClient {
     }
 
     const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-    const localBinary = path.resolve(moduleDir, "../../target/release/memory-server");
+    const localBinary = path.resolve(moduleDir, "../../target/release/tachi-server");
     if (fs.existsSync(localBinary)) {
       return localBinary;
     }
@@ -396,7 +396,7 @@ export class MemoryMcpClient {
       }
     }
 
-    // Prefer "tachi" (brew install name) over "memory-server" (dev name)
+    // Prefer "tachi" (brew install name) over "tachi-server" (dev name)
     return "tachi";
   }
 
@@ -428,10 +428,10 @@ export class MemoryMcpClient {
         cwd: process.cwd(),
       },
     ];
-    // If primary command is "tachi", also try "memory-server" as last resort
+    // If primary command is "tachi", also try "tachi-server" as last resort
     if (command === "tachi") {
       candidates.push({
-        command: "memory-server",
+        command: "tachi-server",
         args: ["--global-db", this.globalDbPath, "--project-db", this.projectDbPath],
         env,
         cwd: os.tmpdir(),

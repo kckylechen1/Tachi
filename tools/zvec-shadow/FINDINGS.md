@@ -59,7 +59,7 @@ Done!
   tier 6 (auto-clone `alibaba/zvec` + CMake) is untested here and is a
   separate, larger feasibility question.
 - This says nothing about whether the Rust binding is *safe to link
-  in-process into the memory-server daemon* -- that question is closed by
+  in-process into the tachi-server daemon* -- that question is closed by
   the tachi#683 decision already: never in-process, sidecar only, because a
   C++ `abort()` inside zvec takes the whole host process down with it,
   Rust FFI included. G1 is scoped purely to "can a Rust *sidecar* process
@@ -166,14 +166,14 @@ The first version of `export_snapshot.py` filtered only `archived = 0`.
 Codex's adversarial review of PR #700 correctly flagged that this is NOT
 equivalent to Tachi's default retrievable corpus: a default `tachi search`
 also excludes superseded rows
-(`crates/memory-core/src/search.rs:74-92` SearchOptions::default
+(`crates/memcore/src/search.rs:74-92` SearchOptions::default
 `include_superseded=false`, enforced in SQL at
-`crates/memory-core/src/db/memory_crud/search.rs:30-35`), training-seed /
+`crates/memcore/src/db/memory_crud/search.rs:30-35`), training-seed /
 recall-cache / eval rows
-(`crates/memory-server/src/memory_search_ops/search_memory/rows.rs:359-366`),
+(`crates/tachi-server/src/memory_search_ops/search_memory/rows.rs:359-366`),
 and -- one layer deeper, in core ranking
-(`crates/memory-core/src/search/ranking.rs:57` via
-`crates/memory-core/src/namespace.rs:88-99`) -- wiki_log/kanban/handoff
+(`crates/memcore/src/search/ranking.rs:57` via
+`crates/memcore/src/namespace.rs:88-99`) -- wiki_log/kanban/handoff
 namespace-noise rows. The last group was not in the adjudication's cited
 set but is required by its own labeled-set invariant ("expected hits must
 all be Tachi-default-retrievable"): the live DB has 59 kanban + 6 handoff

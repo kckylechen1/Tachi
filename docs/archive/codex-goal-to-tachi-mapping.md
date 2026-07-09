@@ -202,9 +202,9 @@ A: Codex 的做法是停止新工作 + 总结进度。Tachi 可以：
 - Codex: `codex-rs/core/src/goals.rs` — Goal 运行时状态管理
 - Codex: `codex-rs/core/templates/goals/continuation.md` — Continuation prompt 模板
 - Codex: `codex-rs/core/templates/goals/budget_limit.md` — Budget limit prompt 模板
-- Tachi: `crates/memory-server/src/dispatch_ops/prompt.rs` — Prompt 组装
-- Tachi: `crates/memory-server/src/dispatch_ops/kanban_helpers.rs` — Kanban 状态管理
-- Tachi: `crates/memory-server/src/dispatch_ops/dispatch.rs` — Dispatch 主流程
+- Tachi: `crates/tachi-server/src/dispatch_ops/prompt.rs` — Prompt 组装
+- Tachi: `crates/tachi-server/src/dispatch_ops/kanban_helpers.rs` — Kanban 状态管理
+- Tachi: `crates/tachi-server/src/dispatch_ops/dispatch.rs` — Dispatch 主流程
 - Prototype: `docs/codex-goal/prototype.rs` — 原型数据结构与工具函数
 - Example: `docs/codex-goal/integration-example.rs` — 集成示例代码
 - Templates: `docs/codex-goal/templates/` — continuation / budget-limit 模板

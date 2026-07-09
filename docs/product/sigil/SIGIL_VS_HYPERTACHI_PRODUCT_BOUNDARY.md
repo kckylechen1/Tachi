@@ -65,8 +65,8 @@ Sigil (藏经阁/Tachi) and HyperTachi share Rust crates but serve **different p
 ## Related (Sigil)
 
 - `wiki/agent/tachi/Tachi-图书馆架构设计.md` — Notes / Wiki / Skill
-- `crates/memory-server/src/docs_ops.rs` — organize implementation
-- `crates/memory-server/src/tools.rs` — `tachi_wiki_organize` MCP registration
+- `crates/tachi-server/src/docs_ops.rs` — organize implementation
+- `crates/tachi-server/src/tools.rs` — `tachi_wiki_organize` MCP registration
 
 ## Related (Hyperion)
 

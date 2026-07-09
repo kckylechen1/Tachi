@@ -70,14 +70,14 @@ Strategy: [Auto-tidy / Interactive / Dry-run report]
 
 **实现指引（给 Codex）：**
 
-1. 在 `crates/memory-server/src/` 下搜索 `recommend` 关键词，找到 `recommend_skill` / `recommend_capability` 的实现（可能在 `capability_ops.rs` 或 `hub_ops/` 子目录）
+1. 在 `crates/tachi-server/src/` 下搜索 `recommend` 关键词，找到 `recommend_skill` / `recommend_capability` 的实现（可能在 `capability_ops.rs` 或 `hub_ops/` 子目录）
 2. 阅读当前评分公式，定位 `score` 的计算逻辑
 3. 修改评分：
    - **方案 A（推荐）**：给 query 和每个 skill 的 description 做关键词 token 化（空格+标点分词，转小写），计算 **token overlap ratio**（交集/并集，Jaccard 系数），作为主排序信号
    - **方案 B（更好但更重）**：调 `self.llm.embed_voyage_batch()` 对 query 做 embedding，与 Hub 里 skill description 的 embedding 做 cosine similarity。需要给 `hub_capabilities` 表加 `description_vec BLOB` 列，注册时自动 embed
    - 无论哪个方案，`uses` 计数在 `uses=0` 时权重应为 0，不应影响排序
-4. `cargo check -p memory-server` 通过
-5. `cargo test -p memory-server` 通过
+4. `cargo check -p tachi-server` 通过
+5. `cargo test -p tachi-server` 通过
 6. 验证上述三个 case 排序正确
 
 **验收标准：**

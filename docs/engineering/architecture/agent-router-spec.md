@@ -1522,7 +1522,7 @@ tachi dispatch auto "Build a REST API" --strategy orchestrator-worker \
 
 ### 15.1 Current Backend Map
 
-Tachi's `LlmClient` (`crates/memory-server/src/llm.rs`) already uses a **lane-based architecture** with multiple model tiers:
+Tachi's `LlmClient` (`crates/tachi-server/src/llm.rs`) already uses a **lane-based architecture** with multiple model tiers:
 
 | Lane | Default Model | Backend | Usage |
 |------|--------------|---------|-------|
@@ -1718,7 +1718,7 @@ gemini -p --output-format json \
 
 # MCP: Already configured to connect to Tachi!
 #   ~/.gemini/config/mcp_config.json contains:
-#     { "tachi": { "command": ".../bin/memory-server", "args": [...] } }
+#     { "tachi": { "command": ".../bin/tachi-server", "args": [...] } }
 ```
 
 ### D. Qwen Code (v0.17.0) — Node.js chunked

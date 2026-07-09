@@ -1,5 +1,5 @@
 //! Prompt envelope registry (#156) — structured instruction overlays per agent/mode.
-//! Extracted from memory-server (#833 slice 3).
+//! Extracted from tachi-server (#833 slice 3).
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

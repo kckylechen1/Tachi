@@ -1,5 +1,5 @@
 //! Capture gate — pre-write validation for `save_memory` and friends.
-//! Extracted from memory-server (#833 slice 4).
+//! Extracted from tachi-server (#833 slice 4).
 //!
 //! Branch #4 of the memory governance series. Goals (per project owner):
 //!   1. Reject saves with empty / missing `domain` UNLESS the path is under

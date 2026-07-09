@@ -1,0 +1,836 @@
+use crate::provider_config::materialize_standalone;
+use crate::vector_backfill::{
+    embed_and_write_batch, list_missing_vector_entries, record_vector_sweep_state,
+    VectorSweepStateUpdate,
+};
+use futures::{stream, StreamExt};
+use memcore::MemoryStore;
+use std::error::Error;
+use std::fmt::Display;
+use std::io::{Error as IoError, ErrorKind};
+use std::path::PathBuf;
+use std::time::Duration;
+use tachi_llm::LlmClient;
+
+const DEFAULT_BACKFILL_LLM_CONCURRENCY: usize = 4;
+const MAX_BACKFILL_LLM_CONCURRENCY: usize = 32;
+
+/// Total / with-vector counts for `tachi backfill-vectors`'s Total/Missing
+/// report, over "durable" rows.
+///
+/// #736 requirement 3: this MUST use the SAME durable-row predicate `tachi
+/// status`'s vector-coverage warning uses
+/// (`crate::status_ops::RECALL_CACHE_WHERE[_M]`), not a narrower
+/// single-condition `source != 'foundry_recall_rerank_cache'` filter. The two
+/// surfaces previously counted different bases: the narrow filter only
+/// excludes rows whose `source` column is exactly the recall-cache marker
+/// string, while the broad predicate also excludes rows identified by
+/// id/topic/path pattern or a metadata flag. A DB with recall-cache rows
+/// shaped the second way could show, say, 39 missing under `tachi status`
+/// and 0 missing here for the identical file. Sharing the constant makes the
+/// two surfaces agree by construction (see
+/// `bootstrap::backfill::tests::g3_counting_basis_matches_status_recall_cache_predicate`).
+fn durable_vector_counts(
+    store: &MemoryStore,
+    skip_recall_cache: bool,
+) -> Result<(i64, i64), Box<dyn Error>> {
+    if !skip_recall_cache {
+        return Ok(store.vector_stats()?);
+    }
+    let total: i64 = store.connection().query_row(
+        &format!(
+            "SELECT COUNT(*) FROM memories WHERE NOT ({})",
+            crate::status_ops::RECALL_CACHE_WHERE
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    let with_vec: i64 = store.connection().query_row(
+        &format!(
+            "SELECT COUNT(DISTINCT v.id)
+             FROM memories_vec v
+             JOIN memories m ON m.id = v.id
+             WHERE NOT ({})",
+            crate::status_ops::RECALL_CACHE_WHERE_M
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    Ok((total, with_vec))
+}
+
+/// Backfill missing vector embeddings for a given DB.
+pub(super) async fn run_backfill_vectors(
+    db_path: &PathBuf,
+    vault_db_path: &PathBuf,
+    batch_size: usize,
+    dry_run: bool,
+    include_cache: bool,
+) -> Result<(), Box<dyn Error>> {
+    let db_str = db_path.to_str().ok_or_else(|| {
+        IoError::new(
+            ErrorKind::InvalidInput,
+            format!("DB path contains invalid UTF-8: {}", db_path.display()),
+        )
+    })?;
+
+    let store = if dry_run {
+        MemoryStore::open_read_only(db_str)?
+    } else {
+        MemoryStore::open(db_str)?
+    };
+    let skip_recall_cache = !include_cache;
+    let (total, with_vec) = durable_vector_counts(&store, skip_recall_cache)?;
+    let missing = total - with_vec;
+
+    println!("DB:      {}", db_path.display());
+    println!("Total:   {total}");
+    println!("Vectors: {with_vec}");
+    println!("Missing: {missing}");
+    if skip_recall_cache {
+        println!("Scope:   durable rows (recall cache excluded; pass --include-cache to include)");
+    }
+
+    if dry_run {
+        println!("\n(dry-run mode, opened read-only; no changes made)");
+        return Ok(());
+    }
+
+    if missing == 0 {
+        record_cli_vector_sweep_state(db_path, skip_recall_cache, 0, 0, None);
+        println!("\n✅ All entries have vectors!");
+        return Ok(());
+    }
+
+    let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
+    materialize_standalone(&llm, vault_db_path).map_err(|e| IoError::new(ErrorKind::Other, e))?;
+    let entries = list_missing_vector_entries(&store, skip_recall_cache, None)
+        .map_err(|e| IoError::new(ErrorKind::Other, e))?;
+
+    let batch_size = batch_size.min(128).max(1);
+    let total_missing = entries.len();
+    let mut processed = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+    let mut last_error = None;
+
+    println!("\nBackfilling {total_missing} entries (batch_size={batch_size})...\n");
+
+    drop(store);
+    let mut store = MemoryStore::open(db_str)?;
+
+    for chunk in entries.chunks(batch_size) {
+        match embed_and_write_batch(&mut store, &llm, chunk).await {
+            Ok(outcome) => {
+                processed += outcome.written_count;
+                skipped += outcome.skipped_count;
+                failed += outcome.failed_count;
+                println!("  [{processed}/{total_missing}] ✓ batch of {}", chunk.len());
+            }
+            Err(e) => {
+                eprintln!("  ERROR: {e}");
+                eprintln!("  Stopping. {processed} entries saved successfully.");
+                failed += 1;
+                last_error = Some(e);
+                break;
+            }
+        }
+
+        if processed + skipped + failed < total_missing {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+
+    let (total, final_vec) = store.vector_stats()?;
+    record_cli_vector_sweep_state(db_path, skip_recall_cache, processed, failed, last_error);
+    println!("\n✅ Done! Vectors: {with_vec} → {final_vec} / {total}");
+    Ok(())
+}
+
+fn record_cli_vector_sweep_state(
+    db_path: &PathBuf,
+    skip_recall_cache: bool,
+    embedded_count: usize,
+    failed_count: usize,
+    last_error: Option<String>,
+) {
+    let failed_count = if last_error.is_some() && failed_count == 0 {
+        1
+    } else {
+        failed_count
+    };
+    let lower_error = last_error.as_deref().map(str::to_ascii_lowercase);
+    let last_provider_error = lower_error
+        .as_deref()
+        .is_some_and(|err| {
+            err.contains("provider") || err.contains("voyage") || err.contains("embed")
+        })
+        .then(|| last_error.clone())
+        .flatten();
+    if let Err(err) = record_vector_sweep_state(
+        db_path,
+        VectorSweepStateUpdate {
+            enabled: true,
+            disabled_reason: None,
+            skip_recall_cache,
+            embedded_count,
+            failed_count,
+            last_error,
+            last_provider_error,
+            interval_secs: None,
+            preserve_schedule: true,
+            preserve_outcome: false,
+        },
+    ) {
+        eprintln!("  WARN: vector sweep state write failed: {err}");
+    }
+}
+
+/// Backfill missing summaries for a given DB.
+pub(super) async fn run_backfill_summaries(
+    db_path: &PathBuf,
+    vault_db_path: &PathBuf,
+    dry_run: bool,
+) -> Result<(), Box<dyn Error>> {
+    let db_str = db_path.to_str().ok_or_else(|| {
+        IoError::new(
+            ErrorKind::InvalidInput,
+            format!("DB path contains invalid UTF-8: {}", db_path.display()),
+        )
+    })?;
+
+    let store = MemoryStore::open(db_str)?;
+    let total = store.stats(false)?.total;
+    let entries = store.entries_missing_summaries()?;
+    let missing = entries.len();
+    let with_summary = total.saturating_sub(missing as u64);
+
+    println!("DB:        {}", db_path.display());
+    println!("Total:     {total}");
+    println!("Summaries: {with_summary}");
+    println!("Missing:   {missing}");
+
+    if missing == 0 {
+        println!("\n✅ All entries have summaries!");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!("\n(dry-run mode, no changes made)");
+        return Ok(());
+    }
+
+    let llm = LlmClient::new_with_vault_db(Some(vault_db_path))
+        .map_err(|e| format!("LLM client init failed: {e}"))?;
+    materialize_standalone(&llm, vault_db_path).map_err(|e| IoError::new(ErrorKind::Other, e))?;
+    let concurrency = backfill_llm_concurrency();
+
+    println!("\nBackfilling {missing} entries (concurrency={concurrency})...\n");
+
+    drop(store);
+    let mut store = MemoryStore::open(db_str)?;
+    let tasks = stream::iter(entries.into_iter().map(|(id, text, revision)| {
+        let llm = llm.clone();
+        let input: String = text.chars().take(8000).collect();
+        async move {
+            let result = generate_summary_with_retry(&llm, &input).await;
+            (id, revision, result)
+        }
+    }))
+    .buffer_unordered(concurrency);
+    tokio::pin!(tasks);
+
+    let mut attempted = 0usize;
+    let mut processed = 0usize;
+    let mut failed = 0usize;
+
+    while let Some((id, revision, result)) = tasks.next().await {
+        attempted += 1;
+        let summary = match result {
+            Ok(summary) => summary,
+            Err(error) => {
+                failed += 1;
+                eprintln!("  WARN: summary failed for {id}: {error}");
+                record_backfill_failure(&store, &id, "summary", &error);
+                continue;
+            }
+        };
+
+        match store.update_enrichment_fields(&id, Some(&summary), None, None, None, revision) {
+            Ok(true) => {
+                processed += 1;
+                println!("  [{attempted}/{missing}] ✓ {id}");
+            }
+            Ok(false) => eprintln!("  WARN: revision mismatch for {id}, skipped"),
+            Err(error) => {
+                failed += 1;
+                eprintln!("  WARN: DB write failed for {id}: {error}");
+                record_backfill_failure(&store, &id, "db_update", &error);
+            }
+        }
+    }
+
+    let final_missing = store.entries_missing_summaries()?.len();
+    let final_with_summary = total.saturating_sub(final_missing as u64);
+    if failed == 0 {
+        println!("\n✅ Done! Summaries: {with_summary} → {final_with_summary} / {total}");
+    } else {
+        println!(
+            "\n⚠ Done with {failed} failure(s). Summaries: {with_summary} → {final_with_summary} / {total}; updated {processed}/{missing}"
+        );
+    }
+    Ok(())
+}
+
+/// Backfill missing recall keywords using the configured extract LLM.
+pub(super) async fn run_backfill_metadata(
+    db_path: &PathBuf,
+    vault_db_path: &PathBuf,
+    dry_run: bool,
+) -> Result<(), Box<dyn Error>> {
+    let db_str = db_path.to_str().ok_or_else(|| {
+        IoError::new(
+            ErrorKind::InvalidInput,
+            format!("DB path contains invalid UTF-8: {}", db_path.display()),
+        )
+    })?;
+
+    let store = MemoryStore::open(db_str)?;
+    let (total, with_metadata) = store.metadata_stats()?;
+    let entries = store.entries_missing_metadata()?;
+    let missing = entries.len();
+
+    println!("DB:       {}", db_path.display());
+    println!("Total:    {total}");
+    println!("Metadata: {with_metadata}");
+    println!("Missing:  {missing}");
+
+    if missing == 0 {
+        println!("\n✅ All entries have recall keywords!");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!("\n(dry-run mode, no changes made)");
+        return Ok(());
+    }
+
+    let llm = LlmClient::new_with_vault_db(Some(vault_db_path))
+        .map_err(|e| format!("LLM client init failed: {e}"))?;
+    materialize_standalone(&llm, vault_db_path).map_err(|e| IoError::new(ErrorKind::Other, e))?;
+    let concurrency = backfill_llm_concurrency();
+
+    println!("\nBackfilling metadata for {missing} entries (concurrency={concurrency})...\n");
+
+    drop(store);
+    let mut store = MemoryStore::open(db_str)?;
+    let tasks = stream::iter(entries.into_iter().map(|(id, text, _summary, revision)| {
+        let llm = llm.clone();
+        let input: String = text.chars().take(8000).collect();
+        async move {
+            let result = extract_metadata_with_retry(&llm, &input).await;
+            (id, revision, result)
+        }
+    }))
+    .buffer_unordered(concurrency);
+    tokio::pin!(tasks);
+
+    let mut attempted = 0usize;
+    let mut processed = 0usize;
+    let mut failed = 0usize;
+
+    while let Some((id, revision, result)) = tasks.next().await {
+        attempted += 1;
+        let (keywords, entities) = match result {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                failed += 1;
+                eprintln!("  WARN: metadata failed for {id}: {error}");
+                record_backfill_failure(&store, &id, "metadata", &error);
+                continue;
+            }
+        };
+        // Domain-specific deterministic tagging was removed from the generic
+        // engine; use the LLM-extracted keywords/entities directly.
+
+        match store.update_enrichment_fields(
+            &id,
+            None,
+            None,
+            if keywords.is_empty() {
+                None
+            } else {
+                Some(&keywords)
+            },
+            if entities.is_empty() {
+                None
+            } else {
+                Some(&entities)
+            },
+            revision,
+        ) {
+            Ok(true) => {
+                processed += 1;
+                println!("  [{attempted}/{missing}] ✓ {id}");
+            }
+            Ok(false) => eprintln!("  WARN: revision mismatch for {id}, skipped"),
+            Err(error) => {
+                failed += 1;
+                eprintln!("  WARN: DB write failed for {id}: {error}");
+                record_backfill_failure(&store, &id, "db_update", &error);
+            }
+        }
+    }
+
+    let (_, final_with_metadata) = store.metadata_stats()?;
+    if failed == 0 {
+        println!("\n✅ Done! Metadata coverage: {with_metadata} → {final_with_metadata} / {total}");
+    } else {
+        println!(
+            "\n⚠ Done with {failed} failure(s). Metadata coverage: {with_metadata} → {final_with_metadata} / {total}; updated {processed}/{missing}"
+        );
+    }
+    Ok(())
+}
+
+fn backfill_llm_concurrency() -> usize {
+    std::env::var("TACHI_BACKFILL_LLM_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_BACKFILL_LLM_CONCURRENCY)
+        .clamp(1, MAX_BACKFILL_LLM_CONCURRENCY)
+}
+
+async fn generate_summary_with_retry(llm: &LlmClient, input: &str) -> Result<String, String> {
+    retry_llm_call("summary", || llm.generate_summary(input)).await
+}
+
+async fn extract_metadata_with_retry(
+    llm: &LlmClient,
+    input: &str,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    retry_llm_call("metadata", || llm.extract_metadata(input)).await
+}
+
+async fn retry_llm_call<F, Fut, T>(stage: &str, mut call: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    const MAX_ATTEMPTS: usize = 5;
+    let mut last_error = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match call().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let delay = retry_delay_for_error(&error, attempt);
+                last_error = Some(error);
+                if attempt < MAX_ATTEMPTS {
+                    eprintln!(
+                        "  WARN: {stage} attempt {attempt}/{MAX_ATTEMPTS} failed; retrying in {}s",
+                        delay.as_secs_f32()
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| format!("{stage} failed without an error")))
+}
+
+fn retry_delay_for_error(error: &str, attempt: usize) -> Duration {
+    provider_cooldown_delay(error).unwrap_or_else(|| Duration::from_millis(500 * attempt as u64))
+}
+
+fn provider_cooldown_delay(error: &str) -> Option<Duration> {
+    let marker = "retry after about ";
+    let tail = error.split(marker).nth(1)?;
+    let seconds: u64 = tail
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(seconds.saturating_add(1).min(300)))
+}
+
+fn record_backfill_failure(store: &MemoryStore, id: &str, stage: &str, error: impl Display) {
+    let error = bounded_error(error);
+    if let Err(record_error) = store.record_enrichment_failure(id, stage, &error) {
+        eprintln!("  WARN: failed to record enrichment failure for {id}: {record_error}");
+    }
+}
+
+fn bounded_error(error: impl Display) -> String {
+    let error = error.to_string();
+    const MAX_ERROR_CHARS: usize = 1_000;
+    if error.chars().count() <= MAX_ERROR_CHARS {
+        return error;
+    }
+    let mut truncated: String = error.chars().take(MAX_ERROR_CHARS).collect();
+    truncated.push_str("...");
+    truncated
+}
+
+/// Rebuild or backfill FTS5 full-text search index for a given DB.
+pub(super) async fn run_backfill_fts(
+    db_path: &PathBuf,
+    full: bool,
+    dry_run: bool,
+) -> Result<(), Box<dyn Error>> {
+    let db_str = db_path.to_str().ok_or_else(|| {
+        IoError::new(
+            ErrorKind::InvalidInput,
+            format!("DB path contains invalid UTF-8: {}", db_path.display()),
+        )
+    })?;
+
+    let store = MemoryStore::open(db_str)?;
+    let (total, with_fts) = store.fts_stats()?;
+    let missing = total.saturating_sub(with_fts);
+
+    println!("DB:      {}", db_path.display());
+    println!("Total:   {total}");
+    println!("FTS:     {with_fts}");
+    println!("Missing: {missing}");
+    println!(
+        "Mode:    {}",
+        if full { "full rebuild" } else { "incremental" }
+    );
+
+    if !full && missing == 0 {
+        println!("\n✅ All entries have FTS index!");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!("\n(dry-run mode, no changes made)");
+        return Ok(());
+    }
+
+    drop(store);
+    let mut store = MemoryStore::open(db_str)?;
+
+    if full {
+        println!("\nDropping and rebuilding FTS table...");
+        let inserted = store.rebuild_fts_full()?;
+        println!("\n✅ Full rebuild done! {inserted} entries indexed.");
+    } else {
+        println!("\nBackfilling {missing} missing FTS entries...");
+        let inserted = store.backfill_fts_missing()?;
+        let (_, final_fts) = store.fts_stats()?;
+        println!("\n✅ Done! FTS: {with_fts} → {final_fts} / {total} (+{inserted})");
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{durable_vector_counts, record_cli_vector_sweep_state, run_backfill_vectors};
+    use memcore::MemoryStore;
+    use rusqlite::params;
+    use std::path::Path;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct DryRunDbSnapshot {
+        schema_version: i64,
+        user_version: i64,
+        sqlite_master: Vec<(String, String, String)>,
+        hard_state: Vec<(String, String, String, i64, String, String)>,
+        sibling_files: Vec<String>,
+    }
+
+    fn insert_memory(store: &MemoryStore, id: &str, source: &str, topic: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memories (
+                    id, path, summary, text, importance, timestamp, category, topic,
+                    keywords, entities, source, scope, archived,
+                    created_at, updated_at, access_count, revision, metadata
+                 ) VALUES (?1, '/p', '', 'body', 0.5, ?2, 'fact', ?3,
+                           '[]', '[]', ?4, 'project', 0,
+                           ?2, ?2, 0, 1, '{}')",
+                params![id, now, topic, source],
+            )
+            .expect("insert memory");
+    }
+
+    fn dry_run_db_snapshot(db_path: &Path) -> DryRunDbSnapshot {
+        let conn = rusqlite::Connection::open(db_path).expect("open sqlite snapshot");
+        let schema_version = conn
+            .query_row("PRAGMA schema_version", [], |row| row.get(0))
+            .expect("schema_version");
+        let user_version = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user_version");
+        let sqlite_master = query_string_triples(
+            &conn,
+            "SELECT type, name, COALESCE(sql, '')
+             FROM sqlite_master
+             WHERE name NOT LIKE 'sqlite_%'
+             ORDER BY type, name",
+        );
+        let hard_state = conn
+            .prepare(
+                "SELECT namespace, key, value_json, version, created_at, updated_at
+                 FROM hard_state
+                 ORDER BY namespace, key",
+            )
+            .expect("prepare hard_state snapshot")
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .expect("query hard_state snapshot")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect hard_state snapshot");
+        let db_file_name = db_path
+            .file_name()
+            .expect("db file name")
+            .to_string_lossy()
+            .to_string();
+        let mut sibling_files = std::fs::read_dir(db_path.parent().expect("db parent"))
+            .expect("read db parent")
+            .map(|entry| {
+                entry
+                    .expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .filter(|name| name == &db_file_name || name.starts_with(&format!("{db_file_name}.")))
+            .collect::<Vec<_>>();
+        sibling_files.sort();
+
+        DryRunDbSnapshot {
+            schema_version,
+            user_version,
+            sqlite_master,
+            hard_state,
+            sibling_files,
+        }
+    }
+
+    fn query_string_triples(
+        conn: &rusqlite::Connection,
+        sql: &str,
+    ) -> Vec<(String, String, String)> {
+        conn.prepare(sql)
+            .expect("prepare snapshot query")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query snapshot")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect snapshot")
+    }
+
+    /// G3 (counting basis): a row shaped like recall-cache content by `topic`
+    /// (not by the literal `source` marker string) must be excluded from the
+    /// durable-row basis by BOTH `tachi status`'s vector-coverage warning
+    /// and `tachi backfill-vectors`'s Total/Missing counters — the two
+    /// surfaces must agree on what "durable" means. Before #736's fix,
+    /// `durable_vector_counts` only excluded rows whose `source` column was
+    /// exactly `'foundry_recall_rerank_cache'`; a row shaped like recall
+    /// cache in every OTHER way (topic here) slipped through as a "missing"
+    /// durable row, while `tachi status`'s broader predicate already
+    /// excluded it — the two surfaces counted different bases for the
+    /// identical DB.
+    #[test]
+    fn g3_counting_basis_matches_status_recall_cache_predicate() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("g3.db");
+        let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+
+        // Durable row: source unrelated to recall cache, no vector -> must
+        // always count as 1 missing.
+        insert_memory(&store, "durable-1", "manual", "note");
+
+        // Recall-cache-shaped row identified by `topic`, not by `source` ->
+        // must be excluded from the durable basis (matches
+        // `status_ops::db_probe::RECALL_CACHE_WHERE`'s `topic = 'recall_rerank_cache'`
+        // arm), even though its `source` is NOT the literal marker string
+        // the pre-fix narrow filter checked.
+        insert_memory(&store, "cache-1", "auto", "recall_rerank_cache");
+
+        let (total, with_vec) = durable_vector_counts(&store, true).expect("durable_vector_counts");
+        let missing = total - with_vec;
+
+        assert_eq!(
+            total, 1,
+            "the recall-cache-shaped row must not count toward the durable total"
+        );
+        assert_eq!(
+            missing, 1,
+            "only the genuinely durable row is missing a vector"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_vector_backfill_does_not_write_sweep_state() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("dry-run.db");
+        let vault_path = dir.path().join("vault.db");
+        let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        insert_memory(&store, "durable-1", "manual", "note");
+        drop(store);
+        let migration_marker = dir.path().join("dry-run.db.migration-marker");
+        std::fs::remove_file(&migration_marker).expect("remove migration marker");
+        let before = dry_run_db_snapshot(&db_path);
+
+        run_backfill_vectors(&db_path, &vault_path, 16, true, false)
+            .await
+            .expect("dry-run vector backfill");
+
+        let after = dry_run_db_snapshot(&db_path);
+        assert!(
+            !after
+                .sqlite_master
+                .iter()
+                .any(|(_, name, _)| name == "vector_sweep_state"),
+            "dry-run must not create vector_sweep_state"
+        );
+        assert_eq!(after.schema_version, before.schema_version);
+        assert_eq!(after.user_version, before.user_version);
+        assert_eq!(after.sqlite_master, before.sqlite_master);
+        assert_eq!(after.hard_state, before.hard_state);
+        assert_eq!(after.sibling_files, before.sibling_files);
+    }
+
+    #[test]
+    fn cli_sweep_state_does_not_count_benign_skips_as_failures() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("cli-benign-skip-state.db");
+        MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+
+        record_cli_vector_sweep_state(&db_path, true, 3, 0, None);
+
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("state recorded");
+        assert_eq!(state.embedded_count, 3);
+        assert_eq!(
+            state.failed_count, 0,
+            "benign skipped CLI rows remain pending, not failed"
+        );
+        assert_eq!(state.last_error, None);
+        assert_eq!(state.last_provider_error, None);
+    }
+
+    #[test]
+    fn cli_sweep_state_counts_real_row_failures_without_error() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("cli-row-failure-state.db");
+        MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+
+        record_cli_vector_sweep_state(&db_path, true, 3, 1, None);
+
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("state recorded");
+        assert_eq!(state.embedded_count, 3);
+        assert_eq!(
+            state.failed_count, 1,
+            "real CLI row failures are recorded even when the sweep completes"
+        );
+        assert_eq!(state.last_error, None);
+        assert_eq!(state.last_provider_error, None);
+    }
+
+    #[tokio::test]
+    async fn dry_run_all_vectored_db_does_not_update_existing_sweep_state() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("dry-run-complete.db");
+        let vault_path = dir.path().join("vault.db");
+        let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        insert_memory(&store, "durable-1", "manual", "note");
+        let dummy_vec = vec![0.0_f32; 1024];
+        store
+            .update_enrichment_fields("durable-1", None, Some(&dummy_vec), None, None, 1)
+            .expect("write vector");
+        drop(store);
+
+        crate::vector_backfill::record_vector_sweep_state(
+            &db_path,
+            crate::vector_backfill::VectorSweepStateUpdate {
+                enabled: true,
+                disabled_reason: None,
+                skip_recall_cache: true,
+                embedded_count: 7,
+                failed_count: 3,
+                last_error: Some("previous provider error".to_string()),
+                last_provider_error: Some("previous provider error".to_string()),
+                interval_secs: Some(1800),
+                preserve_schedule: false,
+                preserve_outcome: false,
+            },
+        )
+        .expect("seed existing state");
+
+        run_backfill_vectors(&db_path, &vault_path, 16, true, false)
+            .await
+            .expect("dry-run vector backfill");
+
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("existing state remains");
+        assert_eq!(state.embedded_count, 7);
+        assert_eq!(state.failed_count, 3);
+        assert_eq!(state.last_error.as_deref(), Some("previous provider error"));
+    }
+
+    #[tokio::test]
+    async fn cli_vector_backfill_preserves_daemon_schedule_metadata() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("cli-schedule.db");
+        let vault_path = dir.path().join("vault.db");
+        let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+        insert_memory(&store, "durable-1", "manual", "note");
+        let dummy_vec = vec![0.0_f32; 1024];
+        store
+            .update_enrichment_fields("durable-1", None, Some(&dummy_vec), None, None, 1)
+            .expect("write vector");
+        drop(store);
+
+        crate::vector_backfill::record_vector_sweep_state(
+            &db_path,
+            crate::vector_backfill::VectorSweepStateUpdate {
+                enabled: true,
+                disabled_reason: None,
+                skip_recall_cache: true,
+                embedded_count: 0,
+                failed_count: 0,
+                last_error: None,
+                last_provider_error: None,
+                interval_secs: Some(1800),
+                preserve_schedule: false,
+                preserve_outcome: false,
+            },
+        )
+        .expect("seed daemon schedule");
+
+        run_backfill_vectors(&db_path, &vault_path, 16, false, false)
+            .await
+            .expect("cli vector backfill");
+
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
+            .expect("read state")
+            .expect("state remains");
+        assert_eq!(
+            state.interval_secs,
+            Some(1800),
+            "manual CLI backfill must not clear daemon interval_secs"
+        );
+        assert!(
+            state.next_run_after.is_some(),
+            "manual CLI backfill must not clear daemon next_run_after"
+        );
+    }
+}

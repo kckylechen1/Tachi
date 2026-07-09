@@ -33,21 +33,21 @@ same auth logic.
 
 Tachi already has the primitives needed for the first version:
 
-- `crates/memory-core/src/vault.rs`
+- `crates/memcore/src/vault.rs`
   - encrypted entries with `api_key`, `oauth_token`, `json_blob`, `cookie`, and
     `other` secret types;
   - `allowed_agents` on `VaultEntry`;
   - provider key rotation and health metadata.
-- `crates/memory-server/src/tools/vault_facade.rs`
+- `crates/tachi-server/src/tools/vault_facade.rs`
   - MCP tools for `vault_set`, `vault_get`, `vault_list`,
     `vault_lease_api_key`, and key-result health recording.
-- `crates/memory-server/src/credential_profile/`
+- `crates/tachi-server/src/credential_profile/`
   - opt-in credential profiles;
   - env/config/file materialization;
   - redacted reports and cleanup metadata.
-- `crates/memory-server/src/dispatch_ops/dispatch/credentials.rs`
+- `crates/tachi-server/src/dispatch_ops/dispatch/credentials.rs`
   - dispatch-time materialization into worker env/config before spawning.
-- `crates/memory-server/src/gh_ops/transport.rs`
+- `crates/tachi-server/src/gh_ops/transport.rs`
   - a narrow example of "prefer Vault token, fall back to env" for `GH_TOKEN`.
 - `integrations/openclaw/`
   - OpenClaw already exposes Tachi Vault passthrough tools;

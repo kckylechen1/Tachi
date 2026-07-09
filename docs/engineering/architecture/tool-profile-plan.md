@@ -69,7 +69,7 @@ The target split is:
 
 There are also two curated minimal profiles for common hosts:
 
-- `standard` — default for IDE agents. Intersects the bundles with a daily facade surface (`tachi_tools`, `runtime_info`, `tachi_status`, `tachi_task`, `tachi_arena`, `tachi_verify`, `tachi_memory`, `tachi_briefing`, `tachi_save`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `vault_status`, `tachi_gh`). `tachi_arena` remains in this surface because main agents need a tracked subagent/advisor mission ledger, and `tachi_web_search` remains because some hosts lack native search and future wiki/research-ledger flows need a canonical search intake. The canonical list is `STANDARD_MINIMAL_TOOL_PATTERNS` in `crates/memory-server/src/profiles/patterns.rs`.
+- `standard` — default for IDE agents. Intersects the bundles with a daily facade surface (`tachi_tools`, `runtime_info`, `tachi_status`, `tachi_task`, `tachi_arena`, `tachi_verify`, `tachi_memory`, `tachi_briefing`, `tachi_save`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `vault_status`, `tachi_gh`). `tachi_arena` remains in this surface because main agents need a tracked subagent/advisor mission ledger, and `tachi_web_search` remains because some hosts lack native search and future wiki/research-ledger flows need a canonical search intake. The canonical list is `STANDARD_MINIMAL_TOOL_PATTERNS` in `crates/tachi-server/src/profiles/patterns.rs`.
 - `delegate` — for worker subagents spawned by `tachi_task(action='dispatch')`. A 7-tool surface with no dispatch and no handoff.
 
 Selection paths:
@@ -179,6 +179,6 @@ It also avoids the old mutually exclusive trap where a client needed a workflow 
 ## Verification
 
 ```bash
-cargo test -p memory-server
+cargo test -p tachi-server
 npm --prefix integrations/openclaw run build
 ```
