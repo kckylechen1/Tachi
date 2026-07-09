@@ -127,6 +127,18 @@ impl super::super::LlmClient {
         }
     }
 
+    /// Test-only accessor for the recall-path consecutive-timeout streak.
+    /// Used by the #926-review regression coverage to assert the streak only
+    /// grows on a genuine timeout-class outcome (including a body-read
+    /// timeout on a provider that already sent headers), not on
+    /// headers-received alone.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn recall_timeout_streak_for_tests(&self) -> usize {
+        use std::sync::atomic::Ordering;
+        self.http_timeout_streak.load(Ordering::Relaxed)
+    }
+
     pub fn new() -> Result<Self, String> {
         Self::new_with_vault_db(None)
     }

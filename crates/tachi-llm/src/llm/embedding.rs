@@ -124,10 +124,12 @@ impl super::LlmClient {
                     .send()
                     .await;
                 let response = match response {
-                    Ok(response) => {
-                        self.note_recall_provider_outcome(false);
-                        response
-                    }
+                    // Connect/send outcome only proves headers *might* arrive —
+                    // it does not prove the connection is healthy end to end.
+                    // Pool-hygiene accounting (#926 review) waits for the body
+                    // read below so a provider that sends headers then stalls
+                    // the body forever isn't recorded as a success.
+                    Ok(response) => response,
                     Err(err) => {
                         self.note_recall_provider_outcome(err.is_timeout());
                         last_err = format!("Voyage batch API request failed: {err}");
@@ -145,10 +147,23 @@ impl super::LlmClient {
                     .get("retry-after")
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse::<u64>().ok());
-                let text = response
-                    .text()
-                    .await
-                    .map_err(|e| format!("Voyage batch response body read failed: {e}"))?;
+                let text = response.text().await.map_err(|e| {
+                    // Headers-then-stall (#926 review): the body read carries
+                    // its own share of the request's `.timeout()` budget and
+                    // can time out even though `send()` already returned Ok.
+                    // Record it as timeout-class so the pool-rebuild streak
+                    // isn't reset by a connection that only *looked* healthy
+                    // at the header stage.
+                    self.note_recall_provider_outcome(e.is_timeout());
+                    format!("Voyage batch response body read failed: {e}")
+                })?;
+                // Full response body received without stalling: the pooled
+                // connection is proven healthy regardless of HTTP status
+                // (#926 review). Not gated on JSON deserialize below — parse
+                // correctness is orthogonal to connection/pool health, and
+                // gating on it would silently skip accounting on the common
+                // 429 rate-limit path (which returns before reaching parse).
+                self.note_recall_provider_outcome(false);
                 if status.as_u16() == 429 {
                     self.mark_secret_rate_limited(&selected, retry_after);
                     last_err = format!("Voyage batch API error: {} - {}", status, text);
@@ -238,10 +253,12 @@ impl super::LlmClient {
                 .send()
                 .await;
             let response = match response {
-                Ok(response) => {
-                    self.note_recall_provider_outcome(false);
-                    response
-                }
+                // Connect/send outcome only proves headers *might* arrive —
+                // it does not prove the connection is healthy end to end.
+                // Pool-hygiene accounting (#926 review) waits for the body
+                // read below so a provider that sends headers then stalls
+                // the body forever isn't recorded as a success.
+                Ok(response) => response,
                 Err(err) => {
                     self.note_recall_provider_outcome(err.is_timeout());
                     last_err = format!("Voyage rerank API request failed: {err}");
@@ -259,10 +276,22 @@ impl super::LlmClient {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok());
-            let text = response
-                .text()
-                .await
-                .map_err(|e| format!("Voyage rerank response body read failed: {e}"))?;
+            let text = response.text().await.map_err(|e| {
+                // Headers-then-stall (#926 review): the body read carries its
+                // own share of the request's `.timeout()` budget and can time
+                // out even though `send()` already returned Ok. Record it as
+                // timeout-class so the pool-rebuild streak isn't reset by a
+                // connection that only *looked* healthy at the header stage.
+                self.note_recall_provider_outcome(e.is_timeout());
+                format!("Voyage rerank response body read failed: {e}")
+            })?;
+            // Full response body received without stalling: the pooled
+            // connection is proven healthy regardless of HTTP status (#926
+            // review). Not gated on JSON deserialize below — parse
+            // correctness is orthogonal to connection/pool health, and
+            // gating on it would silently skip accounting on the common 429
+            // rate-limit path (which returns before reaching parse).
+            self.note_recall_provider_outcome(false);
             if status.as_u16() == 429 {
                 self.mark_secret_rate_limited(&selected, retry_after);
                 last_err = format!("Voyage rerank API error: {} - {}", status, text);
