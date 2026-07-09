@@ -102,10 +102,27 @@ pub const SHARED_CARGO_TARGET_DIR_ENV: &str = "TACHI_SHARED_CARGO_TARGET_DIR";
 /// when `TACHI_SHARED_CARGO_TARGET_DIR` is unset. Same fail-closed shape as
 /// [`default_worktrees_root`]: refuses to fall back to the current working
 /// directory when neither the env override nor `HOME`/`USERPROFILE` is set.
+///
+/// A *relative* `TACHI_SHARED_CARGO_TARGET_DIR` is rejected outright, same
+/// discipline as `TACHI_WORKTREES_ROOT` above: `cargo` resolves a relative
+/// `target-dir` in `.cargo/config.toml` against whatever cwd the build was
+/// invoked from, not the worktree root — a relative override would silently
+/// defeat the entire point of a *shared* target dir (each invocation cwd
+/// would resolve to its own directory instead of the one shared cache).
 pub fn default_shared_cargo_target_dir() -> Result<PathBuf, String> {
     if let Some(raw) = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV) {
         if !raw.is_empty() {
-            return Ok(PathBuf::from(raw));
+            let path = PathBuf::from(&raw);
+            if !path.is_absolute() {
+                return Err(format!(
+                    "{SHARED_CARGO_TARGET_DIR_ENV} must be an absolute path, got relative \
+                     path '{}': cargo resolves a relative target-dir against the \
+                     per-invocation cwd, not the worktree root, which would silently \
+                     defeat the shared-target-dir purpose",
+                    path.display()
+                ));
+            }
+            return Ok(path);
         }
     }
     match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
@@ -1131,6 +1148,165 @@ mod tests {
         assert_eq!(contents, custom, "existing config.toml must be untouched");
 
         match old {
+            Some(v) => std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, v),
+            None => std::env::remove_var(SHARED_CARGO_TARGET_DIR_ENV),
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provision_rejects_relative_override_and_writes_no_config() {
+        // A relative TACHI_SHARED_CARGO_TARGET_DIR would make cargo resolve
+        // target-dir against whatever cwd the build happens to run from,
+        // defeating the whole point of a *shared* target dir. Must be
+        // rejected outright rather than silently written relative.
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp("tachi-cargo-provision-relative");
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+
+        let old = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV);
+        std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, "relative/shared-target");
+
+        let err = provision_shared_cargo_target_config(&root)
+            .expect_err("relative override must be rejected");
+        assert!(
+            err.contains("must be an absolute path"),
+            "error should explain the absolute-path requirement, got: {err}"
+        );
+        assert!(
+            !root.join(".cargo").join("config.toml").exists(),
+            "no config.toml should be written for a rejected relative override"
+        );
+
+        match old {
+            Some(v) => std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, v),
+            None => std::env::remove_var(SHARED_CARGO_TARGET_DIR_ENV),
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provision_writes_absolute_override_verbatim() {
+        // Companion to the relative-rejection test above: an absolute
+        // override must be written into config.toml exactly as given, not
+        // normalized/canonicalized.
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp("tachi-cargo-provision-absolute-verbatim");
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let target = root.join("nested").join("shared-target");
+        assert!(target.is_absolute());
+
+        let old = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV);
+        std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, &target);
+
+        let outcome = provision_shared_cargo_target_config(&root).expect("provision ok");
+        assert_eq!(outcome, CargoTargetProvision::Written(target.clone()));
+        let contents =
+            std::fs::read_to_string(root.join(".cargo").join("config.toml")).unwrap();
+        assert!(
+            contents.contains(&format!("target-dir = \"{}\"", target.display())),
+            "absolute override should be written verbatim, got: {contents}"
+        );
+
+        match old {
+            Some(v) => std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, v),
+            None => std::env::remove_var(SHARED_CARGO_TARGET_DIR_ENV),
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn open_worktree_warns_and_skips_provisioning_for_relative_override() {
+        // End-to-end: a relative TACHI_SHARED_CARGO_TARGET_DIR must not
+        // fail the worktree open (non-fatal, same style as other
+        // provisioning failures) but must surface a warning and leave no
+        // config.toml behind.
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp("tachi-wt-open-cargo-relative");
+        let home = root.join("home");
+        let cache = root.join("cache-worktrees");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "Cargo.toml"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "add Cargo.toml"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+
+        let old_home = std::env::var_os("HOME");
+        let old_root = std::env::var_os("TACHI_WORKTREES_ROOT");
+        let old_target = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("TACHI_WORKTREES_ROOT", &cache);
+        std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, "relative/shared-target");
+
+        let report = open_worktree(OpenOptions {
+            repo_root: repo.clone(),
+            path: None,
+            branch: Some("tachi/484/executor-cargo-relative".into()),
+            base: Some("HEAD".into()),
+            task: Some("484".into()),
+            role: Some("executor".into()),
+            dispatch_id: Some("dispatch-484-cargo-relative".into()),
+            name: Some("484-executor-cargo-relative".into()),
+            dry_run: false,
+            output: OutputFormat::Json,
+        })
+        .unwrap();
+
+        assert!(report.errors.is_empty(), "open errors: {:?}", report.errors);
+        assert!(report.opened);
+        assert!(
+            report.cargo_target_dir.is_none(),
+            "no cargo_target_dir should be reported for a rejected relative override"
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("must be an absolute path")),
+            "expected a warning about the relative override, got: {:?}",
+            report.warnings
+        );
+
+        let path = PathBuf::from(&report.path);
+        assert!(
+            !path.join(".cargo").join("config.toml").exists(),
+            "no config.toml should be written when the override is relative"
+        );
+
+        // Cleanup worktree from the temp repo so the test dir can be removed.
+        let _ = Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "worktree",
+                "remove",
+                "--force",
+                path.to_str().unwrap(),
+            ])
+            .status();
+
+        match old_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match old_root {
+            Some(v) => std::env::set_var("TACHI_WORKTREES_ROOT", v),
+            None => std::env::remove_var("TACHI_WORKTREES_ROOT"),
+        }
+        match old_target {
             Some(v) => std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, v),
             None => std::env::remove_var(SHARED_CARGO_TARGET_DIR_ENV),
         }
