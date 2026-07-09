@@ -1,6 +1,42 @@
 use super::*;
 
 #[tokio::test]
+async fn tachi_search_markdown_includes_library_binding_receipt() {
+    use crate::tool_params::TachiSearchParams;
+    use rmcp::handler::server::wrapper::Parameters;
+
+    let server = make_server();
+    let body = server
+        .tachi_search(Parameters(TachiSearchParams {
+            query: "binding receipt smoke".to_string(),
+            scope: "all".to_string(),
+            top_k: 3,
+            path_prefix: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            context_symbols: Vec::new(),
+            agent_role: None,
+            category: None,
+            include_archived: false,
+            include_training: false,
+            enable_rerank: false,
+            as_of: None,
+        }))
+        .await
+        .expect("tachi_search should succeed");
+    assert!(
+        body.contains("Library binding:"),
+        "tachi_search markdown must include binding receipt; got:\n{body}"
+    );
+    assert!(
+        body.contains("single_db_mode="),
+        "binding receipt must report single_db_mode; got:\n{body}"
+    );
+}
+
+#[tokio::test]
 async fn runtime_info_reports_identity_and_db_routing() {
     let server = make_server();
     server.set_tool_profile(Some(

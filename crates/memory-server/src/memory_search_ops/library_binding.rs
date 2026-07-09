@@ -8,13 +8,9 @@
 //!
 //! ## Scope (in / out)
 //!
-//! **In scope:** JSON `tachi_memory` search responses, briefing (JSON +
-//! markdown), and `runtime_info` — the surfaces agents use to decide "which
-//! library am I talking to?".
-//!
-//! **Out of scope for binding receipts:** `tachi_search` markdown rendering and
-//! the standalone search CLI. Those remain presentation-only; do not expand
-//! receipts there without a separate campaign leaf.
+//! **In scope:** JSON `tachi_memory` search, briefing (JSON + markdown),
+//! `runtime_info`, and standalone `tachi_search` markdown (so agents that only
+//! call `tachi_search` still see single_db_mode warnings).
 
 use crate::MemoryServer;
 use serde_json::{json, Value};
