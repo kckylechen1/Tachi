@@ -201,6 +201,20 @@ fn execute_sweep(report: &mut SweepReport) {
             ));
             continue;
         };
+        // CP1/CP2 defense-in-depth: re-check dirtiness immediately before
+        // removal rather than trusting only the snapshot taken during
+        // candidate collection, shrinking (not closing) the window between
+        // "we decided this is clean" and "we ran `git worktree remove`". A
+        // same-user check-then-act race in that shrunk window is accepted
+        // residual risk for this single-user local tool; full TOCTOU-safety
+        // (locking / openat) is deliberately out of scope.
+        if worktree_is_dirty(Path::new(&candidate.path)) {
+            report.warnings.push(format!(
+                "skipped dirty worktree {} (became dirty since snapshot; commit, stash, or discard before reclaim)",
+                candidate.path
+            ));
+            continue;
+        }
         match Command::new("git")
             .args([
                 "-C",

@@ -54,10 +54,27 @@ pub struct OpenReport {
 /// cwd fallback here would make the managed root (and therefore the sweep
 /// GC root and the path-boundary fence) silently resolve to wherever the
 /// caller happens to be running from.
+///
+/// A *relative* `TACHI_WORKTREES_ROOT` is rejected outright (CP3) rather
+/// than resolved against some implicit base: the managed root doubles as
+/// the sweep GC root and the path-boundary fence, and a relative value
+/// would make both silently float with whatever cwd the caller happens to
+/// be running from — the same failure mode the cwd-fallback comment above
+/// already refuses. There's no non-arbitrary base to resolve a relative
+/// root against, so refusing is the unambiguous fix.
 pub fn default_worktrees_root() -> Result<PathBuf, String> {
     if let Some(raw) = std::env::var_os("TACHI_WORKTREES_ROOT") {
         if !raw.is_empty() {
-            return Ok(PathBuf::from(raw));
+            let path = PathBuf::from(&raw);
+            if !path.is_absolute() {
+                return Err(format!(
+                    "TACHI_WORKTREES_ROOT must be an absolute path, got relative path \
+                     '{}': a relative managed root would resolve against the current \
+                     working directory, letting the GC/fence root float with cwd",
+                    path.display()
+                ));
+            }
+            return Ok(path);
         }
     }
     match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
@@ -197,6 +214,19 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
         report.warnings.push(
             "dry-run: would run git worktree add and register the managed worktree".to_string(),
         );
+        return Ok(report);
+    }
+
+    // CP1/CP2/CP6 defense-in-depth: re-run the boundary check immediately
+    // before we touch the filesystem, shrinking (not closing) the window
+    // between the earlier check and this create/add — a symlink or other
+    // filesystem change to an ancestor directory in between could otherwise
+    // let a since-altered path resolve outside the managed root. A
+    // same-user check-then-act race in that shrunk window is accepted
+    // residual risk for this single-user local tool; full TOCTOU-safety
+    // (locking / openat / O_NOFOLLOW) is deliberately out of scope.
+    if let Some(reason) = path_outside_managed_root_reason(&path, &managed_root) {
+        report.errors.push(format!("re-check before create: {reason}"));
         return Ok(report);
     }
 
@@ -818,6 +848,107 @@ mod tests {
             Some(v) => std::env::set_var("TACHI_WORKTREES_ROOT", v),
             None => std::env::remove_var("TACHI_WORKTREES_ROOT"),
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn default_worktrees_root_rejects_relative_env_value() {
+        // CP3 discrimination: a relative TACHI_WORKTREES_ROOT must never
+        // silently resolve against cwd — the managed root doubles as the
+        // sweep GC root and the path-boundary fence.
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var_os("TACHI_WORKTREES_ROOT");
+        std::env::set_var("TACHI_WORKTREES_ROOT", "relative/worktrees");
+
+        let result = default_worktrees_root();
+        assert!(
+            result.is_err(),
+            "relative TACHI_WORKTREES_ROOT must be rejected, got {result:?}"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("absolute"),
+            "error should explain the absolute-path requirement: {err}"
+        );
+
+        match old {
+            Some(v) => std::env::set_var("TACHI_WORKTREES_ROOT", v),
+            None => std::env::remove_var("TACHI_WORKTREES_ROOT"),
+        }
+    }
+
+    #[test]
+    fn open_rejects_option_shaped_base_ref() {
+        // CP6 discrimination: a base ref shaped like a git option must be
+        // rejected before it ever reaches `git rev-parse`, not just relying
+        // on `--end-of-options`. RED if `validate_ref`'s leading-`-` check
+        // (or its call site) is removed.
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp("tachi-wt-open-ref-injection");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+
+        let result = open_worktree(OpenOptions {
+            repo_root: repo,
+            path: None,
+            branch: Some("tachi/test/ref-injection".into()),
+            base: Some("--upload-pack=/bin/sh".into()),
+            task: Some("484".into()),
+            role: Some("executor".into()),
+            dispatch_id: None,
+            name: None,
+            dry_run: false,
+            output: OutputFormat::Json,
+        });
+
+        assert!(
+            result.is_err(),
+            "option-shaped base ref must be rejected before git rev-parse, got {result:?}"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("refusing base ref"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn open_rejects_leading_dash_base_ref() {
+        // CP6 discrimination, second shape: a bare leading-dash ref (no
+        // '=' payload) must also be rejected, not just the `--flag=value`
+        // form.
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp("tachi-wt-open-ref-injection-dash");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+
+        let result = open_worktree(OpenOptions {
+            repo_root: repo,
+            path: None,
+            branch: Some("tachi/test/ref-injection-dash".into()),
+            base: Some("-x".into()),
+            task: Some("484".into()),
+            role: Some("executor".into()),
+            dispatch_id: None,
+            name: None,
+            dry_run: false,
+            output: OutputFormat::Json,
+        });
+
+        assert!(
+            result.is_err(),
+            "leading-dash base ref must be rejected, got {result:?}"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("refusing base ref"),
+            "unexpected error: {err}"
+        );
+
         let _ = std::fs::remove_dir_all(root);
     }
 }
