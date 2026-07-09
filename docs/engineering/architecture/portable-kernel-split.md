@@ -66,6 +66,27 @@ prerequisite for memory quality. Prefer:
 3. Run hypermem compatibility gate + trading smoke
 ```
 
+## Product policy injection (MemCore hooks)
+
+Downstream product policy stays **outside** the kernel. MemCore exposes hooks:
+
+| Hook | On | Default |
+|---|---|---|
+| `SearchOptions::precision_matchers` | `Vec<Arc<dyn PrecisionMatcher>>` | empty |
+| `SearchOptions::decay_policy` | `Option<Arc<dyn DecayPolicy>>` | `None` → `DEFAULT_DECAY_POLICY` |
+
+Example (HyperMemory trading half-lives):
+
+```rust
+let opts = SearchOptions {
+    decay_policy: Some(Arc::new(TradingDecayPolicy)),
+    ..Default::default()
+};
+store.search(query, Some(opts))?;
+```
+
+Do not re-hardcode A-share / character-card decay constants into `memory-core`.
+
 ## Targeted issue lanes (after this split)
 
 | Lane | Scope | Examples |

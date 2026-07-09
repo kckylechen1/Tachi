@@ -11,7 +11,7 @@ use crate::{
     db::{fetch_by_ids, record_access_with_updates},
     error::MemoryError,
     recall_config::RecallConfig,
-    scorer::{HybridWeights, PrecisionMatcher},
+    scorer::{DecayPolicy, HybridWeights, PrecisionMatcher, DEFAULT_DECAY_POLICY},
     types::SearchResult,
 };
 
@@ -69,6 +69,11 @@ pub struct SearchOptions {
     /// Optional per-call recall config override for simulation/eval. Production
     /// callers normally leave this unset so the process-wide config is used.
     pub recall_config: Option<RecallConfig>,
+    /// Library-specific decay policy injected by the caller (MemCore portable
+    /// hook). When `None`, the engine uses [`DEFAULT_DECAY_POLICY`]. Downstream
+    /// products (HyperMemory trading half-lives, chat affect decay) supply an
+    /// `Arc<dyn DecayPolicy>` without forking the kernel scorer.
+    pub decay_policy: Option<Arc<dyn DecayPolicy>>,
 }
 
 impl Default for SearchOptions {
@@ -90,6 +95,7 @@ impl Default for SearchOptions {
             as_of: None,
             precision_matchers: Vec::new(),
             recall_config: None,
+            decay_policy: None,
         }
     }
 }
@@ -98,6 +104,14 @@ pub(super) fn recall_config(opts: &SearchOptions) -> &RecallConfig {
     opts.recall_config
         .as_ref()
         .unwrap_or_else(|| RecallConfig::get())
+}
+
+/// Resolve the decay policy for this search call (caller inject or default).
+pub(super) fn decay_policy(opts: &SearchOptions) -> &dyn DecayPolicy {
+    opts.decay_policy
+        .as_ref()
+        .map(|p| p.as_ref() as &dyn DecayPolicy)
+        .unwrap_or(&DEFAULT_DECAY_POLICY)
 }
 
 pub(super) fn resolve_weights(opts: &SearchOptions) -> HybridWeights {

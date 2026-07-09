@@ -36,7 +36,12 @@ fn tier_actr_d(tier: &str) -> f64 {
 ///
 /// The kernel owns the scorer call site; downstream libraries may adapt their
 /// own semantics into this trait without hardcoding product behavior here.
-pub trait DecayPolicy {
+///
+/// Inject via [`crate::SearchOptions::decay_policy`] (`Arc<dyn DecayPolicy>`) so
+/// HyperMemory trading half-lives / chat affect decay stay out of the kernel.
+/// `Send + Sync` matches [`PrecisionMatcher`] so policies can cross thread
+/// boundaries with `Arc`.
+pub trait DecayPolicy: Send + Sync {
     fn score_decay(
         &self,
         entry: &MemoryEntry,

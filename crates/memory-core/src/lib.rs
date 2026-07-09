@@ -74,7 +74,10 @@ pub use noise::{is_noise_text, should_skip_query};
 #[cfg(feature = "admin")]
 pub use pack::{AgentKind, AgentProjection, Pack, PackAssetRef, PackManifest, PackOverlay};
 pub use recall_config::RecallConfig;
-pub use scorer::{generic_precision_multiplier, surprise_score, HybridWeights, PrecisionMatcher};
+pub use scorer::{
+    generic_precision_multiplier, surprise_score, DecayPolicy, DecayPolicyContext,
+    DefaultDecayPolicy, HybridWeights, PrecisionMatcher, DEFAULT_DECAY_POLICY,
+};
 pub use search::{hybrid_search, SearchOptions};
 pub use types::{
     AuthorityLevel, ContinuityCandidate, ContinuityCandidateBatch, ContinuityMetrics,

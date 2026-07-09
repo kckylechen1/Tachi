@@ -6,11 +6,12 @@ use std::collections::HashMap;
 use crate::{
     db::{get_access_times, get_superseded_ids},
     error::MemoryError,
-    scorer::{cosine_similarity, is_id_like_exact_query},
+    scorer::{cosine_similarity, is_id_like_exact_query, DecayPolicyContext},
     types::{HybridScore, MemoryEntry, SearchResult},
 };
 
 use super::{
+    decay_policy,
     expansion::symbolic_query_with_expansion,
     filtering::{is_search_noise_entry, newest_by_shared_entity, quality_multiplier, valid_at},
     recall_config, resolve_weights, SearchOptions,
@@ -80,14 +81,14 @@ pub(super) fn rank_candidate_entries(
     let candidate_ids_vec: Vec<String> = entries_ref.keys().cloned().collect();
     let access_times = get_access_times(conn, &candidate_ids_vec)?;
     let weights = resolve_weights(opts);
-    let mut scores = crate::scorer::hybrid_score_with_config(
+    let mut scores = crate::scorer::hybrid_score_with_policy(
         &entries_ref,
         vec_scores,
         fts_scores,
         &symbolic_scores,
         &weights,
         &access_times,
-        recall_config(opts),
+        DecayPolicyContext::new(recall_config(opts), decay_policy(opts)),
     );
     if let Some(exact_id) = exact_id.filter(|id| entries_ref.contains_key(*id)) {
         scores.insert(
