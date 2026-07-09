@@ -74,7 +74,8 @@ and other workflow/product automation. Those tools can use the kernel; the
 kernel must not require them.
 
 The machine-readable fixture for this contract is
-[`kernel-surface-v1.fixture.json`](./kernel-surface-v1.fixture.json). Downstream
+[`kernel-surface-v1.fixture.json`](./kernel-surface-v1.fixture.json). Downstream crate-sync and cratesplit continuation rules live in
+[`downstream-sync-surface.md`](./downstream-sync-surface.md). Downstream
 agents should cite that fixture when deciding whether a change belongs upstream
 in Tachi or downstream in an adapter/product layer.
 
