@@ -109,9 +109,22 @@ pub(crate) fn runtime_observability_json(
         })
     };
 
+    // Deploy verification (#728): always surface THIS process's stamped build
+    // identity. Agents must compare the *serving* daemon's git_sha (pid file /
+    // health) against the intended release, never a local `cargo build` artifact
+    // that is not on the launchd/brew path.
+    let build = json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "git_sha": crate::build_info::GIT_SHA,
+        "git_sha_short": crate::build_info::git_sha_short(),
+        "build_time": crate::build_info::BUILD_TIME,
+        "build_id": crate::build_info::build_version_string(),
+    });
+
     let mut out = json!({
         "pid": current_pid,
         "binary": binary,
+        "build": build,
         "mode": mode,
         "process_role": process_role,
         "authoritative_runtime": authoritative_runtime,
