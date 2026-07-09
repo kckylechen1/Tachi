@@ -6,7 +6,7 @@ export const APP_NAME = "tachi";
 
 // Load secrets that may not be in process.env when the gateway launches
 // without direnv (e.g. launchd, cron, non-interactive shells).
-// Mirrors the Rust memory-server's env chain: ~/.secrets/master.env first,
+// Mirrors the Rust tachi-server's env chain: ~/.secrets/master.env first,
 // then TACHI_HOME/config.env for overrides.  Only backfills missing vars.
 function loadEnvFile(filePath: string, override = false): void {
   try {

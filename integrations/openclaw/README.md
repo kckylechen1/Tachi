@@ -7,7 +7,7 @@ OpenClaw 统一记忆插件 — 作为 Tachi kernel 的轻量 host adapter，负
 ```
 OpenClaw Gateway (Node.js)
   └─ tachi plugin (this package)
-       └─ MCP client ──→ tachi / memory-server (Rust binary, stdio transport)
+       └─ MCP client ──→ tachi / tachi-server (Rust binary, stdio transport)
              ├─ continuity event ledger / work graph projections
              └─ SQLite + sqlite-vec (memory.db)
 ```
@@ -57,7 +57,7 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.7.0/scripts/in
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `TACHI_BIN` / `OPENCLAW_MEMORY_SERVER_BIN` | 否 | 显式指定 `tachi` / `memory-server` 二进制路径；未设置时会优先使用 Homebrew 安装，其次才回退到本地构建与 PATH |
+| `TACHI_BIN` / `OPENCLAW_MEMORY_SERVER_BIN` | 否 | 显式指定 `tachi` / `tachi-server` 二进制路径；未设置时会优先使用 Homebrew 安装，其次才回退到本地构建与 PATH |
 | `TACHI_GLOBAL_DB_PATH` | 否 | 显式指定 Tachi 全局记忆库；默认 `~/.tachi/global/memory.db` |
 | `TACHI_PROJECT_DB_PATH` / `MEMORY_DB_PATH` | 否 | 显式指定 OpenClaw 插件的 project/workspace 记忆库；`MEMORY_DB_PATH` 仅作为旧别名保留 |
 | `TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS` | 否 | 设为 `1` / `true` 时，重新暴露 `memory_delete`、`compact_context` 与一组直通 Tachi 的 passthrough tools |

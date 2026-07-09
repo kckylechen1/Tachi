@@ -1,4 +1,4 @@
-//! NAPI-RS binding for memory-core.
+//! NAPI-RS binding for memcore.
 //!
 //! Exposes `MemoryStore` as a Node.js class with sync `search` and `upsert`.
 //! All data is passed as JSON strings for maximum NAPI compatibility.
@@ -7,7 +7,7 @@
 
 #![deny(clippy::all)]
 
-use memory_core::{
+use memcore::{
     is_noise_text, should_skip_query, MemoryEntry, MemoryStore as RustStore, SearchOptions,
 };
 use napi_derive::napi;
@@ -171,7 +171,7 @@ impl JsMemoryStore {
     /// Add or update an edge in the memory graph. `edge_json` is a JSON string of MemoryEdge.
     #[napi]
     pub fn add_edge(&self, edge_json: String) -> napi::Result<()> {
-        let edge: memory_core::MemoryEdge = serde_json::from_str(&edge_json)
+        let edge: memcore::MemoryEdge = serde_json::from_str(&edge_json)
             .map_err(|e| napi::Error::from_reason(format!("invalid edge JSON: {e}")))?;
         self.inner
             .lock()
@@ -244,7 +244,7 @@ impl JsMemoryStore {
     /// Register a hub capability. `cap_json` is a JSON string of HubCapability.
     #[napi]
     pub fn hub_register(&self, cap_json: String) -> napi::Result<()> {
-        let cap: memory_core::HubCapability = serde_json::from_str(&cap_json)
+        let cap: memcore::HubCapability = serde_json::from_str(&cap_json)
             .map_err(|e| napi::Error::from_reason(format!("invalid capability JSON: {e}")))?;
         self.inner
             .lock()

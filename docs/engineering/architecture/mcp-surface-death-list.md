@@ -38,7 +38,7 @@ Relevant checks:
 
 - `codegraph query tachi_dispatch --path .` shows
   `MemoryServer::tachi_dispatch` at
-  `crates/memory-server/src/tools/dispatch_facade.rs:18`, plus many
+  `crates/tachi-server/src/tools/dispatch_facade.rs:18`, plus many
   `tachi_dispatch` crate/module imports. Deletion leaves must target the MCP
   wrapper route, not broad string matches against the dispatch implementation
   crate.
@@ -88,10 +88,10 @@ routes or CLI compatibility once internal callers move to canonical facades.
 
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
-| `search_memory` | Still in observe patterns at `crates/tachi-hub/src/tool_profiles/patterns.rs:10`; daemon CLI remaps to `tachi_memory(action="search")` at `crates/memory-server/src/cli_client/tool_map.rs:18`. | `tachi_memory(action="search")` | Hard-retire direct MCP name. | Profile-hide in #756, then migrate direct tests/callers and delete wrapper. |
+| `search_memory` | Still in observe patterns at `crates/tachi-hub/src/tool_profiles/patterns.rs:10`; daemon CLI remaps to `tachi_memory(action="search")` at `crates/tachi-server/src/cli_client/tool_map.rs:18`. | `tachi_memory(action="search")` | Hard-retire direct MCP name. | Profile-hide in #756, then migrate direct tests/callers and delete wrapper. |
 | `save_memory` | Still in remember patterns at `patterns.rs:38`; daemon CLI remaps to `tachi_memory(action="save")` at `tool_map.rs:17`. | `tachi_memory(action="save")` | Hard-retire direct MCP name. | Same batch as `search_memory`. |
 | `remember` | Still in remember patterns at `patterns.rs:39`; remaps with `save_memory` at `tool_map.rs:17`. | `tachi_memory(action="save")` | Hard-retire direct MCP name and keep only CLI prose if needed. | Same batch as `save_memory`. |
-| `get_memory` | Already folded admin-only in `FOLDED_NATIVE_COMPAT_TOOLS` at `crates/memory-server/src/tests/profile_tests/tool_profile_router_coverage.rs:155`; daemon CLI remaps to `tachi_memory(action="get")` at `tool_map.rs:19`. | `tachi_memory(action="get")` | Delete candidate after caller migration. | Remove direct wrapper once tests stop using it as public MCP. |
+| `get_memory` | Already folded admin-only in `FOLDED_NATIVE_COMPAT_TOOLS` at `crates/tachi-server/src/tests/profile_tests/tool_profile_router_coverage.rs:155`; daemon CLI remaps to `tachi_memory(action="get")` at `tool_map.rs:19`. | `tachi_memory(action="get")` | Delete candidate after caller migration. | Remove direct wrapper once tests stop using it as public MCP. |
 | `extract_facts` | Still a standalone remember tool and remaps to `tachi_memory(action="extract_facts")` at `tool_map.rs:16`. | `tachi_memory(action="extract_facts")` | Fold candidate, not first cut. | Decide whether high-frequency use justifies standalone entry. |
 
 ### Batch A2: Fold Wiki Duplicate Aliases
@@ -115,7 +115,7 @@ the agent workflow.
 
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
-| `check_inbox` | Direct tool in `crates/memory-server/src/tools.rs:109`; in coordinate profile at `patterns.rs:61`. | `tachi_task(action="board")` or `tachi_arena(action="collect")` depending final board model. | Profile-retire, then delete public route. | Move kanban tests to handlers or canonical facade; remove MCP route. |
+| `check_inbox` | Direct tool in `crates/tachi-server/src/tools.rs:109`; in coordinate profile at `patterns.rs:61`. | `tachi_task(action="board")` or `tachi_arena(action="collect")` depending final board model. | Profile-retire, then delete public route. | Move kanban tests to handlers or canonical facade; remove MCP route. |
 | `post_card` | Direct tool in `tools.rs:101`; in coordinate profile at `patterns.rs:64`. | `tachi_task(action="dispatch")`, `tachi_arena(action="spawn")`, or internal board write. | Profile-retire, then delete public route. | Same kanban route deletion leaf. |
 | `update_card` | Direct tool in `tools.rs:117`; in coordinate profile at `patterns.rs:65`. | `tachi_task(action="complete"/"cancel"/"status")` or internal board update. | Profile-retire, then delete public route. | Same kanban route deletion leaf. |
 
@@ -128,7 +128,7 @@ These already admit they are compatibility routes.
 
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
-| `tachi_dispatch` | Description says deprecated and points to `tachi_task(action="dispatch")` at `crates/memory-server/src/tools/dispatch_facade.rs:15`; warning at `dispatch_facade.rs:22`. | `tachi_task(action="dispatch")` | Hard-delete after one release with profile-hidden route. | Remove route and `FOLDED_NATIVE_COMPAT_TOOLS` entry. |
+| `tachi_dispatch` | Description says deprecated and points to `tachi_task(action="dispatch")` at `crates/tachi-server/src/tools/dispatch_facade.rs:15`; warning at `dispatch_facade.rs:22`. | `tachi_task(action="dispatch")` | Hard-delete after one release with profile-hidden route. | Remove route and `FOLDED_NATIVE_COMPAT_TOOLS` entry. |
 | `tachi_board` | Description says deprecated and points to `tachi_task(action="board")` at `dispatch_facade.rs:38`; warning at `dispatch_facade.rs:45`. | `tachi_task(action="board")` | Hard-delete after one release with profile-hidden route. | Same deprecated dispatch facade leaf. |
 | `approve_merge` | Direct coordination tool at `dispatch_facade.rs:49`; `tachi_task(action="merge")` forwards to the same operation at `task_router.rs:217`. | `tachi_task(action="merge")` for local worktrees; `tachi_gh(action="safe_merge")` for PRs. | Fold candidate. | Move out of non-admin profiles once action-level filtering exists. |
 
@@ -139,7 +139,7 @@ to the correct facade, then deleting duplicate action aliases.
 
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
-| `tachi_task` PR actions | `pr_status`, `pr_handoff`, `release_note`, and related lifecycle branches live inside `crates/memory-server/src/tools/task_router.rs:237-242`; `docs/engineering/architecture/facade-granularity-and-profile-alignment.md:49-60` identifies duplicated PR lifecycle and self-tuning overload. | `tachi_gh` for PR/GitHub work; `tachi_flow` if lifecycle gets split. | Delete duplicate task actions after migration. | Leaf: remove PR lifecycle duplication from `tachi_task`. |
+| `tachi_task` PR actions | `pr_status`, `pr_handoff`, `release_note`, and related lifecycle branches live inside `crates/tachi-server/src/tools/task_router.rs:237-242`; `docs/engineering/architecture/facade-granularity-and-profile-alignment.md:49-60` identifies duplicated PR lifecycle and self-tuning overload. | `tachi_gh` for PR/GitHub work; `tachi_flow` if lifecycle gets split. | Delete duplicate task actions after migration. | Leaf: remove PR lifecycle duplication from `tachi_task`. |
 | `tachi_task` tuning actions | `route_simulate`, `proposals`, `review_proposal`, `apply_proposals` live at `task_router.rs:177-215`. | Future `tachi_tune`, admin-only. | Extract/quarantine. | Leaf: extract route policy tuning from daily task facade. |
 | `tachi_memory` tuning actions | Existing architecture notes identify recall tuning overload; implementation lives under facade memory ops. | Future `tachi_tune`, admin-only. | Extract/quarantine. | Leaf: extract recall tuning from daily memory facade. |
 | `tachi_save` shorthand | Standard allow-list includes it at `patterns.rs:130`. | `tachi_memory(action="save")`. | Fold candidate, keep only if dogfood proves value. | Dogfood decision after Batch A. |

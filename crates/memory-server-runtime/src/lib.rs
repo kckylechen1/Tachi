@@ -1,4 +1,4 @@
-use memory_core::MemoryStore;
+use memcore::MemoryStore;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -63,7 +63,7 @@ pub struct ReadStorePool {
 }
 
 impl ReadStorePool {
-    pub fn open_read_only(db_path: &str, size: usize) -> Result<Self, memory_core::MemoryError> {
+    pub fn open_read_only(db_path: &str, size: usize) -> Result<Self, memcore::MemoryError> {
         let size = size.clamp(1, MAX_MEMORY_READ_POOL_SIZE);
         let mut stores = Vec::with_capacity(size);
         for _ in 0..size {

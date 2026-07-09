@@ -1,4 +1,4 @@
-use memory_core::MemoryEntry;
+use memcore::MemoryEntry;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;

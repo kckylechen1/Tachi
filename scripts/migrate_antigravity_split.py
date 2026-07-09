@@ -95,7 +95,7 @@ def classify(path: str, text: str) -> str:
     )
     if any(m in t for m in hapi_markers) or any(m in (p or "").lower() for m in ("v8", "hapi")):
         return "hapi"
-    sigil_markers = ("sigil", "memory-core", "memory-server", "tachi-mcp")
+    sigil_markers = ("sigil", "memcore", "tachi-server", "tachi-mcp")
     if any(m in t for m in sigil_markers):
         return "sigil"
     openclaw_markers = ("openclaw", "open-claw")

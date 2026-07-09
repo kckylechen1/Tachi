@@ -1,8 +1,8 @@
 //! Shared Hub capability rules and response helpers.
 //!
-//! This crate intentionally stays below `memory-server`: it owns pure Hub
+//! This crate intentionally stays below `tachi-server`: it owns pure Hub
 //! policy and MCP shape helpers, while DB access, LLM calls, proxy routing, and
-//! CLI handlers remain in `memory-server`.
+//! CLI handlers remain in `tachi-server`.
 
 mod capability;
 mod security_scan;

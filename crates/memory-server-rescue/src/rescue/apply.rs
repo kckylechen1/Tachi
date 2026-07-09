@@ -1,6 +1,6 @@
 use super::source::read_source_rows;
 use super::types::{RescueApplyReport, RescuePlan, SourceRow};
-use memory_core::types::{MemoryCategory, MemoryScope, MemorySource};
+use memcore::types::{MemoryCategory, MemoryScope, MemorySource};
 use rusqlite::{params, Connection};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +21,7 @@ struct TargetCaps {
 fn merge_legacy_persons_into_entities(persons_raw: &str, entities_raw: &str) -> String {
     let persons: Vec<String> = serde_json::from_str(persons_raw).unwrap_or_default();
     let mut entities: Vec<String> = serde_json::from_str(entities_raw).unwrap_or_default();
-    memory_core::types::fold_person_names_into_entities(&mut entities, persons);
+    memcore::types::fold_person_names_into_entities(&mut entities, persons);
     serde_json::to_string(&entities).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -147,7 +147,7 @@ pub fn apply_rescue(
         let category_final = MemoryCategory::normalize(&row.category).to_string();
         let entities_final = merge_legacy_persons_into_entities(&row.persons, &row.entities);
         let path_final =
-            memory_core::types::apply_location_relocation(&row.path, &row.location, &mut meta_val);
+            memcore::types::apply_location_relocation(&row.path, &row.location, &mut meta_val);
         let meta_str = meta_val.to_string();
 
         let result = if caps.has_domain && caps.has_retention_policy {

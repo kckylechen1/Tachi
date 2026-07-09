@@ -1,5 +1,5 @@
 //! Minimal i18n string lookup (`t()`) with en/zh locales, resolved from the
-//! `TACHI_LOCALE` env var. Extracted from memory-server (#833 slice 2).
+//! `TACHI_LOCALE` env var. Extracted from tachi-server (#833 slice 2).
 
 #![allow(clippy::manual_pattern_char_comparison)]
 

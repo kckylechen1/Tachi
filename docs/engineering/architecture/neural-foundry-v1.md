@@ -115,7 +115,7 @@ The branch has already landed the first Foundry foundations and the first online
 
 Completed:
 
-- canonical Foundry schema in `memory-core`
+- canonical Foundry schema in `memcore`
 - manual `synthesize_agent_evolution` tool
 - first-pass `Kernel Surface V1` docs
 - first-pass capability recommendation APIs: `recommend_capability`, `recommend_skill`, `recommend_toolchain`

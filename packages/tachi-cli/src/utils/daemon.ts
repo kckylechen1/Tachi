@@ -72,7 +72,7 @@ export async function startDaemon(): Promise<{ success: boolean; error?: string 
   if ((bin.includes('/') || bin.includes('\\')) && !existsSync(bin)) {
     return {
       success: false,
-      error: `tachi binary not found at ${bin}. Install it (e.g. \`cargo install --path crates/memory-server\`) or set TACHI_BINARY.`,
+      error: `tachi binary not found at ${bin}. Install it (e.g. \`cargo install --path crates/tachi-server\`) or set TACHI_BINARY.`,
     };
   }
 

@@ -20,7 +20,7 @@
 
 ## 一句话介绍
 
-Tachi 是一个单二进制、本地优先的 Agent 记忆与协调后端。它以 [MCP](https://modelcontextprotocol.io/) 服务器形态（`memory-server`）运行，为 Agent 提供：
+Tachi 是一个单二进制、本地优先的 Agent 记忆与协调后端。它以 [MCP](https://modelcontextprotocol.io/) 服务器形态（`tachi-server`）运行，为 Agent 提供：
 
 - **持久记忆**，支持混合语义 + 词法 + 图谱检索
 - **层级命名空间**（`/user/preferences`、`/project/architecture`）
@@ -112,7 +112,7 @@ tachi --version
 
 ### 3. 使用
 
-以下示例展示传给 MCP 工具的 JSON 参数。门面工具暴露的字段与其底层原生工具一致；完整 schema 见 `crates/memory-server-params/src/facade.rs` 及其 `facade/` 子模块。
+以下示例展示传给 MCP 工具的 JSON 参数。门面工具暴露的字段与其底层原生工具一致；完整 schema 见 `crates/tachi-params/src/facade.rs` 及其 `facade/` 子模块。
 
 ```json
 // tachi_save —— 结构化记忆
@@ -190,7 +190,7 @@ graph TD
         GC["垃圾回收"]
     end
 
-    subgraph Core["核心 (Rust memory-core)"]
+    subgraph Core["核心 (Rust memcore)"]
         API["存储 API"]
         SEARCH["五通道混合检索"]
         GRAPH["记忆图谱"]
@@ -219,8 +219,8 @@ graph TD
 
 | 路径 | 说明 |
 |------|------|
-| `crates/memory-core` | Rust 核心：SQLite 存储、迁移、混合检索、图谱、域、Vault 元数据、sqlite-vec。 |
-| `crates/memory-server` | MCP/CLI 二进制、Profile 过滤、Hub 路由、派发/工作流工具、Wiki、Vault 加密、守护锁、Foundry 后台任务。 |
+| `crates/memcore` | Rust 核心：SQLite 存储、迁移、混合检索、图谱、域、Vault 元数据、sqlite-vec。 |
+| `crates/tachi-server` | MCP/CLI 二进制、Profile 过滤、Hub 路由、派发/工作流工具、Wiki、Vault 加密、守护锁、Foundry 后台任务。 |
 | `crates/memory-node` | Node.js 原生绑定（`@chaoxlabs/tachi-node`）。 |
 | `packages/tachi-cli` | TypeScript CLI 与 npm 封装。 |
 | `tools/cleaner` | `tachi-clean` 清理工具，用于安全的 target / worktree / temp 清理。 |
@@ -357,7 +357,7 @@ cargo build --release
 cargo test --all
 
 # 从源码运行 MCP 服务器，使用 standard profile
-cargo run -p memory-server -- --profile standard
+cargo run -p tachi-server -- --profile standard
 ```
 
 需要 Rust ≥ 1.75。Node 绑定基于 napi-rs（打包为 `@chaoxlabs/tachi-node`），迭代开发建议安装 `@napi-rs/cli` 和 `cargo-watch`。

@@ -5,6 +5,6 @@ edition = "2021"
 license = "AGPL-3.0-only"
 
 [dependencies]
-memory-server-params = { path = "../memory-server-params" }
+tachi-params = { path = "../tachi-params" }
 serde = { workspace = true }
 serde_json = { workspace = true }

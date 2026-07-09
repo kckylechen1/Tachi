@@ -121,7 +121,7 @@ isolated fixture before it can affect production routing.
 
 ### 2.2 Dispatch Prompt Assembly — Few-Shot + 结构化模板
 
-**现状：** `crates/memory-server/src/dispatch_ops/prompt.rs` 的 `assemble_prompt()` 拼接 briefing + skills + avoidance + task，但缺乏动态示例。
+**现状：** `crates/tachi-server/src/dispatch_ops/prompt.rs` 的 `assemble_prompt()` 拼接 briefing + skills + avoidance + task，但缺乏动态示例。
 
 **数据价值：** 样本展示了高质量 assistant 的回复模式：
 - 先给结论，再给根因，最后给方案
@@ -129,7 +129,7 @@ isolated fixture before it can affect production routing.
 - Tool chain：`rg` → `cat` → `cargo test`
 
 **实现方式：**
-1. 按意图分类（fix/review/plan/refactor/test/explain）建立 `crates/memory-server/src/dispatch_ops/prompt_examples/` 目录
+1. 按意图分类（fix/review/plan/refactor/test/explain）建立 `crates/tachi-server/src/dispatch_ops/prompt_examples/` 目录
 2. `assemble_prompt()` 根据 task 类型注入对应的 few-shot example（2-3 条）
 3. 强制要求 agent 输出 `[结论]/[根因]/[方案]/[反方案]/[验证]` 结构
 
@@ -189,7 +189,7 @@ fn few_shot_for_intent(intent: &str) -> Vec<&str> {
 
 ### 2.4 Shell Ops — 5-Stage Lifecycle 的动态示例
 
-**现状：** `crates/memory-server/src/shell_ops/mod.rs` 的 `meta_skill_for_stage()` 硬编码 5 个静态 skill path。
+**现状：** `crates/tachi-server/src/shell_ops/mod.rs` 的 `meta_skill_for_stage()` 硬编码 5 个静态 skill path。
 
 **数据价值：** 样本就是 **动态生成的 stage 示例**。
 
@@ -315,7 +315,7 @@ huggingface-cli download Qwen/Qwen2.5-32B-Instruct
 - [ ] 将 SFT 数据加载到隔离的 `/sft` scope 或 run-scoped fixture（用于显式检索；不得进入普通 recall）
 - [ ] 定义 `[结论]/[根因]/[方案]/[反方案]/[验证]` 的解析规则（regex）
 - [ ] 更新 `wiki-references-spec.md` 加入结构化输出章节
-- [ ] 创建 `crates/memory-server/src/dispatch_ops/prompt_examples/` 目录，按 intent 分类存放样本
+- [ ] 创建 `crates/tachi-server/src/dispatch_ops/prompt_examples/` 目录，按 intent 分类存放样本
 
 ### Phase 2: Agent Router Classifier（historical; deferred to #262）
 
@@ -328,9 +328,9 @@ huggingface-cli download Qwen/Qwen2.5-32B-Instruct
 ### Phase 3: Wiki / Memory Format（下周）
 
 - [ ] 更新 `tachi_wiki_write` prompt 强制要求 5 段式结构
-- [ ] 更新 `crates/memory-server/src/wiki_ops.rs`：`markdown_for_obsidian` 解析 5 段标记
-- [ ] 更新 `crates/memory-server/src/memory_ops.rs`：自动提取 `[结论]`/`[方案]` 作为 keywords
-- [ ] 更新 `crates/memory-server/src/briefing_ops.rs`：采用 5 段式 briefing 格式
+- [ ] 更新 `crates/tachi-server/src/wiki_ops.rs`：`markdown_for_obsidian` 解析 5 段标记
+- [ ] 更新 `crates/tachi-server/src/memory_ops.rs`：自动提取 `[结论]`/`[方案]` 作为 keywords
+- [ ] 更新 `crates/tachi-server/src/briefing_ops.rs`：采用 5 段式 briefing 格式
 
 ### Phase 4: Foundry Integration（本月）
 

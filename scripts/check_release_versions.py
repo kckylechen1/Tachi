@@ -59,18 +59,18 @@ def require_contains(label: str, text: str, needle: str, errors: list[str]) -> N
 
 
 def main() -> int:
-    expected = cargo_version("crates/memory-server/Cargo.toml")
+    expected = cargo_version("crates/tachi-server/Cargo.toml")
     tag = f"v{expected}"
     errors: list[str] = []
 
     cargo_files = [
-        "crates/memory-core/Cargo.toml",
+        "crates/memcore/Cargo.toml",
         "crates/memory-server-capture-gate/Cargo.toml",
         "crates/memory-server-hub-cli/Cargo.toml",
         "crates/memory-server-i18n/Cargo.toml",
         "crates/memory-server-manifest-audit/Cargo.toml",
-        "crates/memory-server/Cargo.toml",
-        "crates/memory-server-params/Cargo.toml",
+        "crates/tachi-server/Cargo.toml",
+        "crates/tachi-params/Cargo.toml",
         "crates/memory-server-prompt-envelope/Cargo.toml",
         "crates/memory-server-rescue/Cargo.toml",
         "crates/memory-server-runtime/Cargo.toml",
@@ -87,13 +87,13 @@ def main() -> int:
 
     lock_versions = cargo_lock_versions(
         {
-            "memory-core",
+            "memcore",
             "memory-server-capture-gate",
             "memory-server-hub-cli",
             "memory-server-i18n",
             "memory-server-manifest-audit",
-            "memory-server",
-            "memory-server-params",
+            "tachi-server",
+            "tachi-params",
             "memory-server-prompt-envelope",
             "memory-server-rescue",
             "memory-server-runtime",
@@ -107,13 +107,13 @@ def main() -> int:
         }
     )
     for name in [
-        "memory-core",
+        "memcore",
         "memory-server-capture-gate",
         "memory-server-hub-cli",
         "memory-server-i18n",
         "memory-server-manifest-audit",
-        "memory-server",
-        "memory-server-params",
+        "tachi-server",
+        "tachi-params",
         "memory-server-prompt-envelope",
         "memory-server-rescue",
         "memory-server-runtime",

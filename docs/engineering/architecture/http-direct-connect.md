@@ -79,7 +79,7 @@ With HTTP direct-connect configured and the session idle:
 
 ```bash
 # Expect: one daemon (or zero if idle-reaped), no extra `tachi serve` children
-pgrep -fl 'tachi|memory-server' || true
+pgrep -fl 'tachi|tachi-server' || true
 curl -sS http://127.0.0.1:6919/health | jq '{status,bind,auth_posture,transport,reconnect}'
 ```
 

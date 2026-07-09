@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """zvec shadow sidecar (tachi#683 Phase 0, G3).
 
-A standalone process (never in-process with the memory-server daemon -- see
+A standalone process (never in-process with the tachi-server daemon -- see
 tools/zvec-shadow/README.md for why) that loads a JSONL snapshot produced by
 export_snapshot.py into an in-process zvec collection and serves it over a
 plain HTTP endpoint on localhost. It never opens the live memory.db; it only

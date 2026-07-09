@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use memory_core::vault::VaultKeyHealth;
+use memcore::vault::VaultKeyHealth;
 
 mod config;
 mod persistence;

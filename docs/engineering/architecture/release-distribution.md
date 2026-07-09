@@ -40,7 +40,7 @@
 private main (reviewed)
   → tag vX.Y.Z  (Cargo.toml version must match; scripts/check_release_versions.py)
   → GitHub Actions: release-cli-binaries.yml
-      · cargo build --release -p memory-server (stamped GIT_SHA)
+      · cargo build --release -p tachi-server (stamped GIT_SHA)
       · scripts/package_release_binary.sh
           → tachi-vX.Y.Z-aarch64-apple-darwin.tar.gz  (layout: <dir>/tachi)
       · attach assets to private GitHub Release vX.Y.Z

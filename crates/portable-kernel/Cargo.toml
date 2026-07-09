@@ -6,7 +6,7 @@ description = "Portable Tachi memory kernel for downstream forks (HyperTachi / H
 license = "AGPL-3.0-only"
 publish = false
 
-# This facade depends on memory-core *without* the admin feature.
+# This facade depends on memcore *without* the admin feature.
 # Operator surfaces (vault secrets, Hub catalog, Foundry job queue, Pack)
 # are intentionally absent so HyperTachi and similar forks can sync one
 # crate graph without pulling Tachi product APIs.
@@ -14,7 +14,7 @@ publish = false
 # Schema DDL still creates admin tables so a portable consumer can open
 # DBs written by full Tachi; those tables simply stay unused.
 [dependencies]
-memory-core = { path = "../memory-core", default-features = false }
+memcore = { path = "../memcore", default-features = false }
 
 [dev-dependencies]
 serde_json = { workspace = true }

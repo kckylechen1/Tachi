@@ -1,5 +1,5 @@
 //! Project-DB relocation audit (DRY-RUN by default).
-//! Extracted from memory-server (#833).
+//! Extracted from tachi-server (#833).
 //!
 //! Background: most `~/.tachi/projects/<name>/memory.db` files are *symlinks*
 //! into a repo-local `<repo>/.tachi/memory.db`. A handful are **real files**
@@ -9,7 +9,7 @@
 //!
 //! This module enumerates each centralized project DB, classifies it, and emits
 //! a **relocation plan**. It performs NO filesystem mutation by itself — the CLI
-//! layer (`bootstrap::manifest_cli` in `memory-server`) decides whether to print the plan
+//! layer (`bootstrap::manifest_cli` in `tachi-server`) decides whether to print the plan
 //! (default) or, behind an explicit `--apply` flag, act on it with a backup and
 //! an ambiguity refusal.
 //!

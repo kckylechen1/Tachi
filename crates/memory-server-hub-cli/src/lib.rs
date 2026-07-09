@@ -1,6 +1,6 @@
 //! Read-only Hub registry inspection (formerly the standalone `tachi-hub` binary).
 //! Invoked via `tachi hub <subcommand>`.
-//! Extracted from memory-server (#833).
+//! Extracted from tachi-server (#833).
 
 use std::path::{Path, PathBuf};
 
@@ -67,7 +67,7 @@ mod tests {
     fn doctor_vector_count_uses_memories_vec_table() {
         let dir = tempfile::tempdir().expect("temp db dir");
         let db = dir.path().join("memory.db");
-        let store = memory_core::MemoryStore::open(db.to_str().expect("db path"))
+        let store = memcore::MemoryStore::open(db.to_str().expect("db path"))
             .expect("open memory store");
         let now = Utc::now().to_rfc3339();
 
@@ -90,7 +90,7 @@ mod tests {
     fn doctor_vector_count_ignores_recall_cache_rows() {
         let dir = tempfile::tempdir().expect("temp db dir");
         let db = dir.path().join("memory.db");
-        let store = memory_core::MemoryStore::open(db.to_str().expect("db path"))
+        let store = memcore::MemoryStore::open(db.to_str().expect("db path"))
             .expect("open memory store");
         let now = Utc::now().to_rfc3339();
 

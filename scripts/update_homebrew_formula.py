@@ -232,9 +232,9 @@ def ensure_binary_install(text: str) -> str:
 def ensure_source_install(text: str) -> str:
     """Legacy/source install for authenticated bottle rebuilds only."""
     install_block = """  def install
-    system "cargo", "install", *std_cargo_args(path: "crates/memory-server"),
-           "--bin", "memory-server"
-    mv bin/"memory-server", bin/"tachi"
+    system "cargo", "install", *std_cargo_args(path: "crates/tachi-server"),
+           "--bin", "tachi-server"
+    mv bin/"tachi-server", bin/"tachi"
   end"""
     text = replace_block(text, "install", install_block)
     if 'depends_on "rust" => :build' not in text:

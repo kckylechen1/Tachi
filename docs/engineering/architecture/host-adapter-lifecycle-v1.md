@@ -103,7 +103,7 @@ Tachi should make this first-class in the project-cycle spine:
   "evidence": [
     {
       "kind": "cargo_test",
-      "command": "cargo test -p memory-server opencode_transport --locked",
+      "command": "cargo test -p tachi-server opencode_transport --locked",
       "artifact": ".tachi/runs/<flow_id>/verification.json",
       "status": "passed"
     }
@@ -547,11 +547,11 @@ append-only event ledger plus project-cycle artifacts.
 
 Run targeted Rust tests as the implementation lands:
 
-- `cargo test -p memory-server opencode_transport --locked`
-- `cargo test -p memory-server profile_resolution --locked`
-- `cargo test -p memory-server cycle_plan --locked`
-- `cargo test -p memory-server verify --locked`
-- `cargo test -p memory-server agent_profile --locked`
+- `cargo test -p tachi-server opencode_transport --locked`
+- `cargo test -p tachi-server profile_resolution --locked`
+- `cargo test -p tachi-server cycle_plan --locked`
+- `cargo test -p tachi-server verify --locked`
+- `cargo test -p tachi-server agent_profile --locked`
 
 Run product smokes after the slices are integrated:
 

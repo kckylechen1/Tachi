@@ -33,16 +33,16 @@ background workers: Codex / Claude / OpenCode / Hermes / Cursor
 
 The repo already has most of the substrate pieces:
 
-- `crates/memory-core/src/types/continuity.rs` defines event authority,
+- `crates/memcore/src/types/continuity.rs` defines event authority,
   effect scopes, projection kinds, outcome labels, and continuity candidates.
-- `crates/memory-core/src/db/event_ledger.rs` persists append-only
+- `crates/memcore/src/db/event_ledger.rs` persists append-only
   `tachi_events`.
-- `crates/memory-server/src/event_ops.rs` exposes `tachi_event` actions:
+- `crates/tachi-server/src/event_ops.rs` exposes `tachi_event` actions:
   `emit`, `query`, `metrics`, `project`, `promote`, `context`, `a2a`, and
   `label_eval`.
-- `crates/memory-server/src/continuity_ops/` projects events into read models
+- `crates/tachi-server/src/continuity_ops/` projects events into read models
   such as patterns, timelines, project-cycle context, and A2A handoff bundles.
-- `crates/memory-server-params/src/facade/task.rs` already exposes dispatch,
+- `crates/tachi-params/src/facade/task.rs` already exposes dispatch,
   board, status, wait, complete, lifecycle, and PR/issue-oriented surfaces.
 - `integrations/openclaw` already has MCP-only memory tools and lifecycle hooks,
   but it previously treated OpenClaw mostly as a memory-using agent rather than

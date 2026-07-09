@@ -104,7 +104,7 @@ tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `no such column: retention_policy` | 老库 schema drift | 重启 memory-server（启动会 migrate），或 `tachi doctor --fix` |
+| `no such column: retention_policy` | 老库 schema drift | 重启 tachi-server（启动会 migrate），或 `tachi doctor --fix` |
 | `vec0 module not loaded` | sqlite-vec 扩展未装 | brew 安装的二进制自带；裸 `sqlite3` CLI 没有 |
 | `distill produced empty` | bucket 不满 `FOUNDRY_DISTILL_MIN_BATCH=3` | 正常，等够 3 条同 topic/entity 的记忆再触发 |
 | `tool not found` | Profile 隐藏了该工具 | 检查 `TACHI_PROFILE`，必要时切 `admin` 或加 `TACHI_EXTRA_TOOLS` |

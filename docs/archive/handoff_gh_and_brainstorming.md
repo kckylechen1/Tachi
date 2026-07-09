@@ -14,7 +14,7 @@
 正如 `docs/TACHI_HUB_MCP_AND_HOST_PLAYBOOK.md` 所述，我们必须彻底剥夺子 Agent 的 `gh` Shell 权限，防止供应链攻击和不可控的命令行注入。所有的 GitHub 操作必须收口至 Tachi。
 
 ### 开发任务 (Next Steps)
-1. **新建文件**：在 `crates/memory-server/src/` 下创建 `gh_ops.rs`。
+1. **新建文件**：在 `crates/tachi-server/src/` 下创建 `gh_ops.rs`。
 2. **凭据注入**：实现一个安全的执行外壳，从 `vault_ops.rs` 中提取 `GH_TOKEN`，并严格控制子进程环境。
 3. **强类型工具**：暴露语义化的 MCP 工具（如 `tachi_gh_pr_create` 和 `tachi_gh_issue_read`）。
 

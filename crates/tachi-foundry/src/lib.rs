@@ -1,4 +1,4 @@
-use memory_core::MemoryEntry;
+use memcore::MemoryEntry;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
@@ -469,9 +469,9 @@ pub fn build_daily_distill_candidate_groups(
 pub fn should_skip_daily_distill_candidate(entry: &MemoryEntry, wiki_project: bool) -> bool {
     entry.archived
         || entry.source.eq_ignore_ascii_case(FOUNDRY_DISTILL_SOURCE)
-        || memory_core::is_recall_cache_entry(entry)
+        || memcore::is_recall_cache_entry(entry)
         || is_quarantine_entry(entry)
-        || (!wiki_project && memory_core::is_wiki_entry(entry))
+        || (!wiki_project && memcore::is_wiki_entry(entry))
 }
 
 pub fn should_archive_daily_distill_source(entry: &MemoryEntry) -> bool {
@@ -521,7 +521,7 @@ pub fn plan_distill_edges(
     source_entries: &[MemoryEntry],
     guide_type: &str,
     created_at: &str,
-) -> Vec<memory_core::MemoryEdge> {
+) -> Vec<memcore::MemoryEdge> {
     build_distill_edges(distill_entry, source_entries, guide_type, created_at)
 }
 
@@ -837,7 +837,7 @@ fn build_distill_edges(
     source_entries: &[MemoryEntry],
     guide_type: &str,
     created_at: &str,
-) -> Vec<memory_core::MemoryEdge> {
+) -> Vec<memcore::MemoryEdge> {
     let mut edges = Vec::new();
     let mut seen = HashSet::new();
     for source in source_entries {
@@ -849,7 +849,7 @@ fn build_distill_edges(
                 _ => (source.id.clone(), distill_entry.id.clone(), 0.7),
             };
             if seen.insert((source_id.clone(), target_id.clone(), relation.to_string())) {
-                edges.push(memory_core::MemoryEdge {
+                edges.push(memcore::MemoryEdge {
                     source_id,
                     target_id,
                     relation: relation.to_string(),
@@ -890,7 +890,7 @@ pub fn infer_memory_insight(
     dense_related_limit: usize,
 ) -> serde_json::Value {
     let surprise =
-        memory_core::surprise_score(entry, avg_importance, contradiction_count, same_topic_count);
+        memcore::surprise_score(entry, avg_importance, contradiction_count, same_topic_count);
     let mut reasons = Vec::new();
 
     if contradiction_count > 0 {
@@ -1115,7 +1115,7 @@ mod tests {
             last_access: None,
             revision: 1,
             metadata: json!({
-                "file_path": "crates/memory-server/src/tools.rs"
+                "file_path": "crates/tachi-server/src/tools.rs"
             }),
             vector: None,
             retention_policy: None,
@@ -1225,7 +1225,7 @@ mod tests {
             "cache",
             vec![],
         );
-        recall_cache.source = memory_core::FOUNDRY_RECALL_CACHE_SOURCE.to_string();
+        recall_cache.source = memcore::FOUNDRY_RECALL_CACHE_SOURCE.to_string();
         recall_cache.metadata = json!({"recall_rerank_cache": true});
         let mut wiki = entry("wiki", "/wiki/page", "wiki", "wiki", vec![]);
         wiki.domain = Some("wiki".to_string());
@@ -1313,9 +1313,9 @@ mod tests {
     fn guide_planning_emits_edges_and_patterns() {
         let source = entry(
             "source-1",
-            "/project/tachi/crates/memory-server/src/tools.rs",
+            "/project/tachi/crates/tachi-server/src/tools.rs",
             "guide-layer",
-            "error: linker failed in crates/memory-server/src/tools.rs",
+            "error: linker failed in crates/tachi-server/src/tools.rs",
             vec!["Tachi".to_string()],
         );
         let guide = MemoryEntry {
@@ -1338,7 +1338,7 @@ mod tests {
             "fix_pattern"
         );
         assert!(infer_file_patterns(std::slice::from_ref(&source))
-            .contains(&"crates/memory-server/src/tools.rs".to_string()));
+            .contains(&"crates/tachi-server/src/tools.rs".to_string()));
         assert!(
             infer_error_patterns(&guide.text, std::slice::from_ref(&source))
                 .iter()
