@@ -104,6 +104,31 @@ cargo test -p portable-kernel
 - [x] `memory-core` has documented `admin` feature; default keeps Tachi green.
 - [x] `portable-kernel` builds and tests with admin off.
 - [x] Portable build still opens a schema that includes admin tables.
-- [ ] HyperTachi catch-up experiment: merge only portable `memory-core` (follow-up).
+- [x] HyperTachi catch-up experiment: portable `memory-core` only (2026-07-09).
+      See § Catch-up experiment results below.
 - [ ] Optional later: extract admin into `memory-admin` crate if feature gate
       proves insufficient for packaging.
+
+## Catch-up experiment results (2026-07-09)
+
+Isolated worktree on Hyperion-HyperTachi pin `21a43095` → branch
+`experiment/portable-memory-core-catchup` → draft PR
+[Hyperion-HyperTachi#20](https://github.com/kckylechen1/Hyperion-HyperTachi/pull/20).
+
+| Metric | Result |
+|---|---|
+| HT-only files under old `memory-core` | **0** (pure older subset) |
+| Compile errors in HT `memory-server` after core replace | **14 → 0** (mechanical API) |
+| `memory-core` portable tests in HT tree | **254** passed |
+| `memory-core` full (admin) tests in HT tree | **278** passed |
+| `portable-kernel` in HT tree | **2** passed |
+| `cargo check -p memory-server` (HT) | **green** |
+
+Product policy that correctly stayed out of the kernel:
+
+- A-share trading half-lives + session age → HT `hypermem_policy::TradingDecayPolicy`
+- Ticker metadata heuristics → HT `hypermem_policy::heuristic_metadata_from_text`
+
+**Conclusion:** portable-only catch-up is viable. Do not rsync operator crates.
+Full procedure: HyperTachi
+`docs/engineering/portable-memory-core-catchup.md` on that experiment branch.

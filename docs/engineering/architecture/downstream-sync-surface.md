@@ -182,7 +182,7 @@ Only extract clusters that HyperTachi would also want as units:
 
 1. **Stop leaf-only cratesplit** unless the leaf is clearly Tachi-operator quarantine.  
 2. **✅ Landed: portable packaging (Phase 1.1)** — `memory-core` feature `admin` (default on) + facade crate `portable-kernel` (`default-features = false`). See [`portable-kernel-split.md`](./portable-kernel-split.md).  
-3. **HyperTachi catch-up experiment:** merge **only** portable `memory-core` / `portable-kernel` from a recent Tachi tag into Hyperion-HyperTachi; measure conflict volume; document.  
+3. **✅ HyperTachi catch-up experiment (2026-07-09):** portable `memory-core` only on pin `21a43095` → branch `experiment/portable-memory-core-catchup` / [HyperTachi#20](https://github.com/kckylechen1/Hyperion-HyperTachi/pull/20). Result: **0** HT-only core files; **14** mechanical server API fixes; core tests 254/278 green; `memory-server` check green; trading policy lifted to `hypermem_policy`. See [`portable-kernel-split.md`](./portable-kernel-split.md) § results.
 4. **Next large extract:** recall/search stack **without** foundry product deps (extends #876).  
 5. **RomanBath:** keep `zeroclaw-memory-sigil` as the chat owner; open an issue there for “sync scorer behavior from Tachi kernel surface” rather than monorepo merge.  
 6. **zeroclaw Projects:** no cratesplit work required; only MCP/adapter contract when #792 consumers need updates.  
