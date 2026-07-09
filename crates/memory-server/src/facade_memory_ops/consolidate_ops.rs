@@ -3,14 +3,19 @@
 //! Turns dry-run-only `tachi_memory(action="consolidate")` into a
 //! **propose → review → apply** loop (mirror of `recall_proposals`):
 //!
-//! 1. **Propose** (default consolidate call): scan project (or global) scratch
-//!    rows; emit durable proposals for `supersede` (same path, older→newer) and
-//!    `archive` (stale low-value scratch). Always non-mutating until apply.
+//! 1. **Propose** (default consolidate call): scan under `path_prefix` (default
+//!    `/scratch`); emit durable proposals for:
+//!    - `merge_into` — same path, high summary overlap → fold older into newer
+//!    - `supersede` — same path, low overlap → newer wins without text merge
+//!    - `archive` — stale low-value rows
+//!    - `promote_distilled` — raw rows that earned diverse recall (≥3 / ≥3)
+//!
+//!    Always non-mutating until apply.
 //! 2. **Review**: `proposal_id` + `review_status=approved|rejected`.
 //! 3. **Apply**: `proposal_id` + `confirm=true` after approval; mutates via
-//!    `supersede_memory` / `archive_memory` and keeps provenance.
+//!    store primitives and keeps provenance.
 //!
-//! Protected rows (never auto-proposed for archive/supersede as *targets*):
+//! Protected rows (never auto-proposed/applied as sources):
 //! permanent/pinned/durable retention, wiki paths/categories, pattern tier.
 
 use super::evidence_format::{json_string, wants_json};
@@ -25,6 +30,11 @@ const LIFECYCLE_PROPOSAL_NS: &str = "memory_lifecycle_proposals";
 const SCRATCH_PREFIX: &str = "/scratch";
 const STALE_DAYS_DEFAULT: i64 = 30;
 const ARCHIVE_IMPORTANCE_MAX: f64 = 0.55;
+/// Same gate as `MemoryStore::promote_diversely_recalled_raw_memories`.
+const PROMOTE_RECALL_MIN: i64 = 3;
+const PROMOTE_DIVERSITY_MIN: i64 = 3;
+/// Minimum summary-token Jaccard to prefer `merge_into` over plain `supersede`.
+const MERGE_SUMMARY_JACCARD_MIN: f64 = 0.50;
 
 pub(crate) async fn handle_memory_consolidate(
     server: &MemoryServer,
@@ -236,17 +246,7 @@ fn apply_lifecycle_action(
                 "supersede proposal requires target_id (canonical survivor)".to_string()
             })?;
             with_memory_store(server, params, |store| {
-                // Refuse protected sources.
-                if let Some(entry) = store
-                    .get(source_id)
-                    .map_err(|e| format!("load source: {e}"))?
-                {
-                    if is_protected(&entry) {
-                        return Err(format!(
-                            "refusing to supersede protected memory {source_id} (retention/wiki/pattern)"
-                        ));
-                    }
-                }
+                refuse_if_protected(store, source_id, "supersede")?;
                 let changed = store
                     .supersede_memory(source_id, target)
                     .map_err(|e| format!("supersede_memory: {e}"))?;
@@ -262,17 +262,58 @@ fn apply_lifecycle_action(
                 }))
             })
         }
-        "archive" => with_memory_store(server, params, |store| {
-            if let Some(entry) = store
-                .get(source_id)
-                .map_err(|e| format!("load source: {e}"))?
-            {
-                if is_protected(&entry) {
-                    return Err(format!(
-                        "refusing to archive protected memory {source_id} (retention/wiki/pattern)"
-                    ));
+        "merge_into" => {
+            let target = target_id.ok_or_else(|| {
+                "merge_into proposal requires target_id (canonical survivor)".to_string()
+            })?;
+            with_memory_store(server, params, |store| {
+                refuse_if_protected(store, source_id, "merge_into")?;
+                let source = store
+                    .get(source_id)
+                    .map_err(|e| format!("load source: {e}"))?
+                    .ok_or_else(|| format!("source not found: {source_id}"))?;
+                let mut survivor = store
+                    .get(target)
+                    .map_err(|e| format!("load target: {e}"))?
+                    .ok_or_else(|| format!("target not found: {target}"))?;
+                // Fold unique keywords/entities; keep survivor text as canonical.
+                let mut kw: std::collections::BTreeSet<String> =
+                    survivor.keywords.iter().cloned().collect();
+                for k in &source.keywords {
+                    kw.insert(k.clone());
                 }
-            }
+                survivor.keywords = kw.into_iter().collect();
+                let mut ents: std::collections::BTreeSet<String> =
+                    survivor.entities.iter().cloned().collect();
+                for e in &source.entities {
+                    ents.insert(e.clone());
+                }
+                survivor.entities = ents.into_iter().collect();
+                if survivor.importance < source.importance {
+                    survivor.importance = source.importance;
+                }
+                store
+                    .upsert(&survivor)
+                    .map_err(|e| format!("upsert merged survivor: {e}"))?;
+                let changed = store
+                    .supersede_memory(source_id, target)
+                    .map_err(|e| format!("supersede_memory after merge: {e}"))?;
+                let archived = store
+                    .archive_memory(source_id)
+                    .map_err(|e| format!("archive after merge: {e}"))?;
+                Ok(json!({
+                    "lifecycle_action": "merge_into",
+                    "source_id": source_id,
+                    "target_id": target,
+                    "merged_keywords": survivor.keywords.len(),
+                    "merged_entities": survivor.entities.len(),
+                    "superseded": changed,
+                    "archived": archived,
+                }))
+            })
+        }
+        "archive" => with_memory_store(server, params, |store| {
+            refuse_if_protected(store, source_id, "archive")?;
             let archived = store
                 .archive_memory(source_id)
                 .map_err(|e| format!("archive_memory: {e}"))?;
@@ -282,10 +323,61 @@ fn apply_lifecycle_action(
                 "archived": archived,
             }))
         }),
+        "promote_distilled" => with_memory_store(server, params, |store| {
+            refuse_if_protected(store, source_id, "promote_distilled")?;
+            let mut entry = store
+                .get(source_id)
+                .map_err(|e| format!("load source: {e}"))?
+                .ok_or_else(|| format!("source not found: {source_id}"))?;
+            let prev_tier = entry.tier.clone();
+            if !entry.tier.eq_ignore_ascii_case("raw") && !entry.tier.is_empty() {
+                // Idempotent if already consolidated; still allow re-apply.
+                if entry.tier.eq_ignore_ascii_case("consolidated")
+                    || entry.tier.eq_ignore_ascii_case("pattern")
+                {
+                    return Ok(json!({
+                        "lifecycle_action": "promote_distilled",
+                        "source_id": source_id,
+                        "tier_before": prev_tier,
+                        "tier_after": entry.tier,
+                        "changed": false,
+                    }));
+                }
+            }
+            entry.tier = "consolidated".to_string();
+            store
+                .upsert(&entry)
+                .map_err(|e| format!("upsert promoted: {e}"))?;
+            Ok(json!({
+                "lifecycle_action": "promote_distilled",
+                "source_id": source_id,
+                "tier_before": prev_tier,
+                "tier_after": "consolidated",
+                "changed": true,
+            }))
+        }),
         other => Err(format!(
-            "unsupported lifecycle_action '{other}'; expected supersede|archive"
+            "unsupported lifecycle_action '{other}'; expected supersede|merge_into|archive|promote_distilled"
         )),
     }
+}
+
+fn refuse_if_protected(
+    store: &mut memory_core::MemoryStore,
+    source_id: &str,
+    action: &str,
+) -> Result<(), String> {
+    if let Some(entry) = store
+        .get(source_id)
+        .map_err(|e| format!("load source: {e}"))?
+    {
+        if is_protected(&entry) {
+            return Err(format!(
+                "refusing to {action} protected memory {source_id} (retention/wiki/pattern)"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn generate_and_persist_proposals(
@@ -300,8 +392,9 @@ fn generate_and_persist_proposals(
     })?;
 
     let mut proposals = Vec::new();
-    proposals.extend(propose_same_path_supersedes(&entries, path_prefix));
+    proposals.extend(propose_same_path_lifecycle(&entries, path_prefix));
     proposals.extend(propose_stale_archives(&entries, path_prefix));
+    proposals.extend(propose_promote_distilled(&entries, path_prefix));
 
     if proposals.is_empty() {
         return Ok(proposals);
@@ -338,7 +431,9 @@ fn generate_and_persist_proposals(
     Ok(proposals)
 }
 
-fn propose_same_path_supersedes(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Value> {
+/// Same-path duplicates → `merge_into` when summaries overlap enough, else
+/// plain `supersede` (newer wins without folding keywords).
+fn propose_same_path_lifecycle(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Value> {
     let mut by_path: HashMap<String, Vec<&MemoryEntry>> = HashMap::new();
     for entry in entries {
         if is_protected(entry) {
@@ -355,7 +450,6 @@ fn propose_same_path_supersedes(entries: &[MemoryEntry], path_prefix: &str) -> V
         if group.len() < 2 {
             continue;
         }
-        // Prefer parsed timestamps so Z vs +00:00 offsets do not invert order.
         group.sort_by(|a, b| {
             cmp_entry_timestamp_desc(a, b).then_with(|| a.id.cmp(&b.id))
         });
@@ -364,30 +458,46 @@ fn propose_same_path_supersedes(entries: &[MemoryEntry], path_prefix: &str) -> V
             if older.id == survivor.id {
                 continue;
             }
+            let jaccard = summary_token_jaccard(&older.summary, &survivor.summary);
+            let (action, rationale) = if jaccard + f64::EPSILON >= MERGE_SUMMARY_JACCARD_MIN {
+                (
+                    "merge_into",
+                    format!(
+                        "Same path `{}` has near-duplicate summaries (jaccard={jaccard:.2}); merge older `{}` into newer `{}`.",
+                        path, older.id, survivor.id
+                    ),
+                )
+            } else {
+                (
+                    "supersede",
+                    format!(
+                        "Same path `{}` has multiple active rows with divergent summaries (jaccard={jaccard:.2}); supersede older `{}` with newer `{}`.",
+                        path, older.id, survivor.id
+                    ),
+                )
+            };
             let id = format!(
-                "lifecycle:supersede:{}:{}",
+                "lifecycle:{action}:{}:{}",
                 id_prefix(&older.id),
                 id_prefix(&survivor.id)
             );
             out.push(json!({
                 "proposal_id": id,
                 "kind": "memory_lifecycle",
-                "lifecycle_action": "supersede",
+                "lifecycle_action": action,
                 "status": "pending",
                 "requires_human_approval": true,
                 "created_or_refreshed_at": Utc::now().to_rfc3339(),
                 "source_id": older.id,
                 "target_id": survivor.id,
                 "path": path,
-                "rationale": format!(
-                    "Same path `{}` has multiple active rows; supersede older `{}` with newer `{}`.",
-                    path, older.id, survivor.id
-                ),
+                "rationale": rationale,
                 "evidence": {
                     "source_timestamp": older.timestamp,
                     "target_timestamp": survivor.timestamp,
                     "source_summary": older.summary,
                     "target_summary": survivor.summary,
+                    "summary_token_jaccard": jaccard,
                     "source_access_count": older.access_count,
                     "target_access_count": survivor.access_count,
                 },
@@ -395,6 +505,65 @@ fn propose_same_path_supersedes(entries: &[MemoryEntry], path_prefix: &str) -> V
         }
     }
     out
+}
+
+fn propose_promote_distilled(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for entry in entries {
+        if is_protected(entry) {
+            continue;
+        }
+        if !entry.path.starts_with(path_prefix) {
+            continue;
+        }
+        if !entry.tier.eq_ignore_ascii_case("raw") {
+            continue;
+        }
+        if entry.recall_count < PROMOTE_RECALL_MIN
+            || entry.query_diversity < PROMOTE_DIVERSITY_MIN
+        {
+            continue;
+        }
+        let id = format!("lifecycle:promote:{}", id_prefix(&entry.id));
+        out.push(json!({
+            "proposal_id": id,
+            "kind": "memory_lifecycle",
+            "lifecycle_action": "promote_distilled",
+            "status": "pending",
+            "requires_human_approval": true,
+            "created_or_refreshed_at": Utc::now().to_rfc3339(),
+            "source_id": entry.id,
+            "target_id": Value::Null,
+            "path": entry.path,
+            "rationale": format!(
+                "Raw row `{}` earned diverse recall (recall_count={}, query_diversity={}); promote to consolidated.",
+                entry.id, entry.recall_count, entry.query_diversity
+            ),
+            "evidence": {
+                "tier": entry.tier,
+                "recall_count": entry.recall_count,
+                "query_diversity": entry.query_diversity,
+                "access_count": entry.access_count,
+                "importance": entry.importance,
+                "summary": entry.summary,
+            },
+        }));
+    }
+    out
+}
+
+fn summary_token_jaccard(a: &str, b: &str) -> f64 {
+    // `tokenize` is re-exported from the scorer module path used by memory-core.
+    let ta: std::collections::HashSet<String> =
+        memory_core::scorer::tokenize(a).into_iter().collect();
+    let tb: std::collections::HashSet<String> =
+        memory_core::scorer::tokenize(b).into_iter().collect();
+    if ta.is_empty() || tb.is_empty() {
+        return 0.0;
+    }
+    let inter = ta.intersection(&tb).count() as f64;
+    let union = ta.union(&tb).count() as f64;
+    inter / union.max(1.0)
 }
 
 fn propose_stale_archives(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Value> {

@@ -62,15 +62,16 @@ async fn consolidate_propose_review_apply_supersedes_older_scratch_duplicate() {
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let supersede = proposals
+    // Near-duplicate summaries → merge_into (not plain supersede).
+    let merge = proposals
         .iter()
         .find(|p| {
-            p.get("lifecycle_action").and_then(Value::as_str) == Some("supersede")
+            p.get("lifecycle_action").and_then(Value::as_str) == Some("merge_into")
                 && p.get("source_id").and_then(Value::as_str) == Some("life-old-1")
                 && p.get("target_id").and_then(Value::as_str) == Some("life-new-1")
         })
-        .expect("supersede older→newer proposal");
-    let proposal_id = supersede["proposal_id"]
+        .expect("merge_into older→newer proposal for near-dup summaries");
+    let proposal_id = merge["proposal_id"]
         .as_str()
         .expect("proposal_id")
         .to_string();
@@ -120,7 +121,10 @@ async fn consolidate_propose_review_apply_supersedes_older_scratch_duplicate() {
         .expect("apply");
     let apply_json: Value = serde_json::from_str(&apply_body).expect("apply json");
     assert_eq!(apply_json["status"], json!("completed"));
-    assert_eq!(apply_json["apply_result"]["lifecycle_action"], json!("supersede"));
+    assert_eq!(
+        apply_json["apply_result"]["lifecycle_action"],
+        json!("merge_into")
+    );
     assert_eq!(apply_json["apply_result"]["archived"], json!(true));
     assert_eq!(apply_json["apply_result"]["target_id"], json!("life-new-1"));
 
@@ -200,15 +204,84 @@ async fn consolidate_custom_path_prefix_proposes_supersede_outside_scratch() {
         .expect("propose custom prefix");
     let parsed: Value = serde_json::from_str(&body).expect("json");
     let proposals = parsed["generated"].as_array().cloned().unwrap_or_default();
-    let supersede = proposals.iter().find(|p| {
-        p.get("lifecycle_action").and_then(Value::as_str) == Some("supersede")
-            && p.get("source_id").and_then(Value::as_str) == Some("life-review-old")
+    let lifecycle = proposals.iter().find(|p| {
+        matches!(
+            p.get("lifecycle_action").and_then(Value::as_str),
+            Some("supersede" | "merge_into")
+        ) && p.get("source_id").and_then(Value::as_str) == Some("life-review-old")
             && p.get("target_id").and_then(Value::as_str) == Some("life-review-new")
     });
     assert!(
-        supersede.is_some(),
-        "custom path_prefix=/code-review must yield supersede for same-path dups: {parsed}"
+        lifecycle.is_some(),
+        "custom path_prefix=/code-review must yield supersede/merge_into for same-path dups: {parsed}"
     );
+}
+
+#[tokio::test]
+async fn consolidate_promote_distilled_after_diverse_recall() {
+    let server = make_server();
+    let mut entry = seed_scratch(
+        "life-promote-1",
+        "/scratch/sigil/promote-me",
+        "Raw scratch that earned diverse recall about promote distilled lifecycle",
+        5,
+    );
+    entry.recall_count = 3;
+    entry.query_diversity = 3;
+    entry.tier = "raw".to_string();
+    entry.importance = 0.7;
+    server
+        .with_global_store(|store| store.upsert(&entry).map_err(|e| e.to_string()))
+        .expect("seed promote candidate");
+
+    let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
+    propose.path_prefix = Some("/scratch".to_string());
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, propose)
+        .await
+        .expect("propose");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    let proposals = parsed["generated"].as_array().cloned().unwrap_or_default();
+    let promote = proposals
+        .iter()
+        .find(|p| {
+            p.get("lifecycle_action").and_then(Value::as_str) == Some("promote_distilled")
+                && p.get("source_id").and_then(Value::as_str) == Some("life-promote-1")
+        })
+        .expect("promote_distilled proposal");
+    let proposal_id = promote["proposal_id"].as_str().unwrap().to_string();
+
+    let mut review = tachi_memory_params("consolidate");
+    review.format = Some("json".to_string());
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("review");
+
+    let mut apply = tachi_memory_params("consolidate");
+    apply.format = Some("json".to_string());
+    apply.proposal_id = Some(proposal_id);
+    apply.confirm = true;
+    let apply_body = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect("apply");
+    let apply_json: Value = serde_json::from_str(&apply_body).expect("json");
+    assert_eq!(
+        apply_json["apply_result"]["lifecycle_action"],
+        json!("promote_distilled")
+    );
+    assert_eq!(apply_json["apply_result"]["tier_after"], json!("consolidated"));
+
+    let after = server
+        .with_global_store_read(|store| {
+            store
+                .get("life-promote-1")
+                .map_err(|e| e.to_string())
+                .map(|e| e.expect("exists"))
+        })
+        .expect("read");
+    assert_eq!(after.tier, "consolidated");
 }
 
 #[tokio::test]
