@@ -88,18 +88,33 @@ pub(in crate::bootstrap::poke_cli) async fn probe_verify_ledger(
     let unrelated_json: Value =
         serde_json::from_str(&unrelated).map_err(|e| format!("parse unrelated verify: {e}"))?;
     let overall = status_json
-        .get("verification")
+        .get("overall")
+        .or_else(|| {
+            status_json
+                .get("verification")
+                .and_then(|value| value.get("overall"))
+        })
+        .and_then(Value::as_str);
+    let gate_overall = status_json
+        .get("gate")
         .and_then(|value| value.get("overall"))
         .and_then(Value::as_str);
     let unrelated_items = unrelated_json
-        .get("verification")
-        .and_then(|value| value.get("items"))
-        .and_then(Value::as_array)
-        .map(Vec::len)
+        .get("counts")
+        .and_then(|value| value.get("total"))
+        .and_then(Value::as_u64)
+        .map(|count| count as usize)
+        .or_else(|| {
+            unrelated_json
+                .get("verification")
+                .and_then(|value| value.get("items"))
+                .and_then(Value::as_array)
+                .map(Vec::len)
+        })
         .unwrap_or(0);
-    if overall != Some("passed") || unrelated_items != 0 {
+    if overall != Some("passed") || gate_overall != Some("passed") || unrelated_items != 0 {
         return Err(format!(
-            "verification ledger probe failed: overall={overall:?} unrelated_items={unrelated_items} status={status_json} unrelated={unrelated_json}"
+            "verification ledger probe failed: overall={overall:?} gate_overall={gate_overall:?} unrelated_items={unrelated_items} status={status_json} unrelated={unrelated_json}"
         ));
     }
     Ok(json!({

@@ -25,7 +25,28 @@ async fn compact_briefing_uses_status_warnings_and_omits_doctrine_metadata() {
         .expect("status should serialize");
     let status: Value = serde_json::from_str(&status_body).expect("status JSON");
 
-    assert_eq!(briefing["health"]["warnings"], status["warnings"]);
+    let briefing_warnings = briefing["health"]["warnings"]
+        .as_array()
+        .expect("briefing health warnings array");
+    let status_warnings = status["warnings"]
+        .as_array()
+        .expect("status warnings array");
+    for warning in status_warnings {
+        assert!(
+            briefing_warnings.contains(warning),
+            "compact briefing should include status warning {warning}; got {briefing_warnings:?}"
+        );
+    }
+
+    let binding = crate::memory_search_ops::library_binding_receipt(&server, None);
+    if let Some(binding_warnings) = binding.get("warnings").and_then(Value::as_array) {
+        for warning in binding_warnings {
+            assert!(
+                briefing_warnings.contains(warning),
+                "compact briefing should include binding warning {warning}; got {briefing_warnings:?}"
+            );
+        }
+    }
     assert!(
         !include_str!("../../../facade_memory_ops/briefing_ops.rs").contains("\"warnings\": []"),
         "compact briefing must not hardcode an empty warnings array"

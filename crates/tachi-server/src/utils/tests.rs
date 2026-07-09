@@ -78,7 +78,7 @@ fn clear_workspace_root_env() -> Vec<EnvGuard> {
 
 #[test]
 fn find_project_git_root_prefers_real_cwd_over_stale_pwd() {
-    let _lock = global_test_lock().lock().expect("global test lock");
+    let _lock = lock_or_recover(global_test_lock(), "global test lock");
     let _env = clear_workspace_root_env();
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd_root = make_git_root(dir.path(), "cwd-repo");
@@ -98,7 +98,7 @@ fn find_project_git_root_prefers_real_cwd_over_stale_pwd() {
 
 #[test]
 fn find_project_git_root_prefers_explicit_tachi_root_over_cwd_and_pwd() {
-    let _lock = global_test_lock().lock().expect("global test lock");
+    let _lock = lock_or_recover(global_test_lock(), "global test lock");
     let _env = clear_workspace_root_env();
     let dir = tempfile::tempdir().expect("tempdir");
     let explicit_root = make_git_root(dir.path(), "explicit-repo");
