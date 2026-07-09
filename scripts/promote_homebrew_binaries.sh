@@ -66,8 +66,30 @@ gh_source release download "$PRIVATE_TAG" \
   -p "$ASSET_NAME" \
   -D "$WORK"
 
+# #911 follow-up (was #907): verify the downloaded tarball against the
+# CI-produced SHASUMS256 manifest before blessing it. Without this, a
+# private-release asset swapped out-of-band (compromised token, race,
+# manual re-upload) would get promoted to the public tap unnoticed.
+SHASUMS_NAME="tachi-v${VERSION}-SHASUMS256.txt"
+echo ">> download + verify CI checksum manifest ($SHASUMS_NAME)"
+gh_source release download "$PRIVATE_TAG" \
+  --repo "$SOURCE_REPO" \
+  -p "$SHASUMS_NAME" \
+  -D "$WORK"
+
 SHA="$(shasum -a 256 "$WORK/$ASSET_NAME" | awk '{print $1}')"
 echo "   sha256=$SHA"
+
+EXPECTED_SHA="$(awk -v f="$ASSET_NAME" '$2 == f { print $1 }' "$WORK/$SHASUMS_NAME")"
+if [[ -z "$EXPECTED_SHA" ]]; then
+  echo "!! no SHASUMS256 entry for $ASSET_NAME in $SHASUMS_NAME — refusing to promote" >&2
+  exit 1
+fi
+if [[ "$SHA" != "$EXPECTED_SHA" ]]; then
+  echo "!! sha256 mismatch: downloaded=$SHA CI-manifest=$EXPECTED_SHA — refusing to promote a possibly-replaced asset" >&2
+  exit 1
+fi
+echo "   sha256 verified against CI SHASUMS256 manifest"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo ">> dry-run: skip upload / formula push"
@@ -154,16 +176,31 @@ fi
 pushd "$TAP_DIR" >/dev/null
 git config user.name "tachi-promote"
 git config user.email "promote@users.noreply.github.com"
-# Ensure push auth for public tap (HTTPS remote).
-if [[ -n "${TAP_GH_TOKEN}" ]]; then
-  git remote set-url origin "https://x-access-token:${TAP_GH_TOKEN}@github.com/${TAP_REPO}.git"
-fi
 git add Formula/tachi.rb README.md
 if git diff --cached --quiet; then
   echo ">> formula already up to date"
 else
   git commit -m "bump tachi to v${VERSION} (public binary, arm64)"
-  git push origin HEAD:main
+  if [[ -n "${TAP_GH_TOKEN}" ]]; then
+    # #911 follow-up (was #907): push via GIT_ASKPASS instead of embedding
+    # the tap token in the remote URL. `git remote set-url` (the prior
+    # approach) writes the token into .git/config in plaintext, where it
+    # can be leaked by `git remote -v`, error messages, or a later `rm -rf`
+    # miss. GIT_ASKPASS supplies the credential only for this one push
+    # invocation and it never touches git config or the remote URL.
+    ASKPASS_SCRIPT="$WORK/git-askpass.sh"
+    cat > "$ASKPASS_SCRIPT" <<'ASKPASS_EOF'
+#!/usr/bin/env bash
+# Invoked by git for the HTTPS password prompt only; username is already
+# embedded as x-access-token in the push URL below.
+printf '%s' "$TAP_GH_TOKEN"
+ASKPASS_EOF
+    chmod 700 "$ASKPASS_SCRIPT"
+    GIT_ASKPASS="$ASKPASS_SCRIPT" GIT_TERMINAL_PROMPT=0 TAP_GH_TOKEN="$TAP_GH_TOKEN" \
+      git -c credential.helper= push "https://x-access-token@github.com/${TAP_REPO}.git" HEAD:main
+  else
+    git push origin HEAD:main
+  fi
   echo ">> pushed formula to $TAP_REPO"
 fi
 popd >/dev/null

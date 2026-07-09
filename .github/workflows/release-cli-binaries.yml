@@ -22,8 +22,11 @@ on:
         default: false
         type: boolean
 
+# #911 follow-up (was #907): scope contents:write to only the job that
+# actually creates/uploads the private GitHub Release. Every other job runs
+# with the read-only default.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   resolve-version:
@@ -32,7 +35,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Resolve version
         id: version
@@ -72,7 +75,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     name: Build CLI ${{ matrix.triple }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
@@ -87,7 +90,7 @@ jobs:
             --triple "${{ matrix.triple }}"
 
       - name: Upload tarball artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cli-${{ matrix.triple }}
           path: |
@@ -98,11 +101,15 @@ jobs:
   publish-private-release:
     needs: [resolve-version, build]
     runs-on: ubuntu-24.04
+    # Only this job creates/uploads the private GitHub Release, so only it
+    # needs contents:write (#911 follow-up to #907).
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Download all CLI artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           pattern: cli-*
@@ -164,7 +171,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Promote arm64 binary to public tap
         env:
