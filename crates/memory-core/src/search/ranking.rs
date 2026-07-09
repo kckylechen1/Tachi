@@ -112,10 +112,11 @@ pub(super) fn rank_candidate_entries(
     }
 
     apply_precision_boosts(query, opts, &entries_ref, &weights, &mut scores);
-    apply_quality_boosts(&entries_ref, &mut scores);
+    apply_quality_boosts(opts.path_prefix.as_deref(), &entries_ref, &mut scores);
     apply_access_feedback(&entries_ref, &mut scores);
     apply_tier_boosts(&entries_ref, &mut scores);
     apply_entity_recency_boosts(&entries_ref, &superseded_ids, &mut scores);
+    apply_decision_and_research_boosts(query, &entries_ref, &mut scores);
 
     // Decorate each candidate with its parsed instant once (epoch millis), then
     // sort — the comparator compares the pre-parsed key, never the raw string
@@ -203,6 +204,7 @@ fn apply_precision_boosts(
 }
 
 fn apply_quality_boosts(
+    path_prefix: Option<&str>,
     entries_ref: &HashMap<String, &MemoryEntry>,
     scores: &mut HashMap<String, HybridScore>,
 ) {
@@ -213,7 +215,7 @@ fn apply_quality_boosts(
         .fold(0.0_f64, f64::max);
     let quality_boost_floor = top_pre_quality_score * 0.85;
     for (id, entry) in entries_ref {
-        let multiplier = quality_multiplier(entry);
+        let multiplier = quality_multiplier(entry, path_prefix);
         if (multiplier - 1.0).abs() > f64::EPSILON {
             if let Some(score) = scores.get_mut(id) {
                 if multiplier > 1.0 && score.final_score < quality_boost_floor {
@@ -223,6 +225,71 @@ fn apply_quality_boosts(
             }
         }
     }
+}
+
+/// Same-store precision helpers for ops-audit / #708 Phase D follow-ons.
+///
+/// - High-importance **decisions** must surface over keyword-flooded wiki/stubs.
+/// - When the **query** looks research-shaped, `/wiki/**/research/**` notes
+///   get a path boost so denser architecture wikis do not always steal rank 1.
+///
+/// Provisional multipliers — calibrate only via ops_audit + golden_corpus.
+fn apply_decision_and_research_boosts(
+    query: &str,
+    entries_ref: &HashMap<String, &MemoryEntry>,
+    scores: &mut HashMap<String, HybridScore>,
+) {
+    /// importance floor for decision promotion (matches ops-audit decision seeds).
+    const DECISION_IMPORTANCE_FLOOR: f64 = 0.85;
+    /// provisional decision boost (tachi#708/#896 same-store precision).
+    const DECISION_BOOST: f64 = 1.55;
+    /// provisional research-path boost under /wiki/**/research/**
+    /// (calibrated so labeled research notes beat denser architecture wikis
+    /// on the ops-audit adjacent-wiki case).
+    const RESEARCH_PATH_BOOST: f64 = 2.85;
+
+    let research_query = query_looks_research_shaped(query);
+
+    for (id, entry) in entries_ref {
+        let mut mult = 1.0_f64;
+        if entry.category.eq_ignore_ascii_case("decision")
+            && entry.importance >= DECISION_IMPORTANCE_FLOOR
+        {
+            mult *= DECISION_BOOST;
+        }
+        if research_query && is_research_wiki_path(&entry.path) {
+            mult *= RESEARCH_PATH_BOOST;
+        }
+        if mult > 1.0 {
+            if let Some(score) = scores.get_mut(id) {
+                if score.final_score.is_finite() && score.final_score > 0.0 {
+                    score.final_score *= mult;
+                }
+            }
+        }
+    }
+}
+
+fn query_looks_research_shaped(query: &str) -> bool {
+    let q = query.to_ascii_lowercase();
+    q.contains("research")
+        || q.contains("hindsight")
+        || q.contains("study")
+        || q.contains("paper")
+        || q.contains("arxiv")
+        || q.contains("evaluation protocol")
+}
+
+fn is_research_wiki_path(path: &str) -> bool {
+    // Allocation-free case-insensitive scan (Gemini #903): avoid
+    // `to_ascii_lowercase()` per candidate under load. Match any path segment
+    // whose name starts with `research` (covers /research, /research-*, /research_*).
+    if path.len() < 6 || !path.as_bytes()[..6].eq_ignore_ascii_case(b"/wiki/") {
+        return false;
+    }
+    path.as_bytes()
+        .windows(9)
+        .any(|w| w.eq_ignore_ascii_case(b"/research"))
 }
 
 fn apply_access_feedback(
@@ -244,9 +311,14 @@ fn apply_tier_boosts(
     scores: &mut HashMap<String, HybridScore>,
 ) {
     for (id, entry) in entries_ref {
-        let tier_multiplier = match entry.tier.as_str() {
-            "pattern" => 1.15,
-            "consolidated" => 1.08,
+        // Wiki pattern/consolidated pages already carry dense keyword bags; keep
+        // tier boosts milder so labeled research notes can compete (ops-audit
+        // adjacent-wiki). Non-wiki pattern knowledge retains the stronger lift.
+        let tier_multiplier = match (entry.tier.as_str(), entry.is_wiki()) {
+            ("pattern", true) => 1.05,
+            ("pattern", false) => 1.15,
+            ("consolidated", true) => 1.03,
+            ("consolidated", false) => 1.08,
             _ => 1.0,
         };
         if tier_multiplier > 1.0 {

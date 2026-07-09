@@ -126,7 +126,19 @@ pub(super) fn is_search_noise_entry(entry: &MemoryEntry, path_prefix: Option<&st
     crate::namespace::is_namespace_search_noise(entry, path_prefix)
 }
 
-pub(super) fn quality_multiplier(entry: &MemoryEntry) -> f64 {
+/// Path-scoped quality multipliers (tachi#708 Phase D / ops-audit same-store).
+///
+/// Wiki ×1.15 and guide ×1.12 apply only when the search is scoped to that
+/// bucket via `path_prefix`. Unscoped mixed search (`path_prefix = None`) keeps
+/// them at 1.0 so older wiki/roadmap pages do not systematically bury fresh
+/// project decisions (ops-audit rank-dilution / adjacent-wiki shapes).
+pub(super) fn quality_multiplier(
+    entry: &MemoryEntry,
+    path_prefix: Option<&str>,
+) -> f64 {
+    let wiki_scoped = path_prefix.is_some_and(|p| p == "/wiki" || p.starts_with("/wiki/"));
+    let guide_scoped = path_prefix.is_some_and(|p| p == "/guide" || p.starts_with("/guide/"));
+
     let base = if is_sft_training_entry(entry) {
         0.45
     } else if is_openclaw_low_signal_entry(entry) {
@@ -134,9 +146,17 @@ pub(super) fn quality_multiplier(entry: &MemoryEntry) -> f64 {
     } else if entry.is_foundry_distill() {
         0.75
     } else if entry.is_wiki() {
-        1.15
+        if wiki_scoped {
+            1.15
+        } else {
+            1.0
+        }
     } else if entry.is_guide() {
-        1.12
+        if guide_scoped {
+            1.12
+        } else {
+            1.0
+        }
     } else if entry.is_kanban() || entry.is_handoff() {
         0.65
     } else {
