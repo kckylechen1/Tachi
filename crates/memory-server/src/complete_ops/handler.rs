@@ -163,23 +163,52 @@ pub(crate) async fn handle_tachi_complete(
 
     // --- Kanban Hook: auto-update task board ---
     if let Some(ref did) = params.dispatch_id {
-        let new_state = match params.outcome.as_str() {
-            "success" => "TASK_STATE_COMPLETED",
-            "failure" => "TASK_STATE_FAILED",
-            "partial" => "TASK_STATE_INPUT_REQUIRED",
-            "aborted" => "TASK_STATE_CANCELED",
-            _ => "TASK_STATE_FAILED",
-        };
-        // Explicit tachi_complete represents a deliberate close — mark the
-        // kanban row reviewed so the status dashboard stops flagging it as
-        // an auto-closed, unreviewed dispatch. Watchdog auto-close keeps
-        // reviewed=false.
+        // #878-A: gate the COMPLETED/reviewed write behind a machine-checkable
+        // completion predicate declared at dispatch time. A self-reported
+        // outcome="success" only earns a *reviewed* COMPLETED when the declared
+        // predicate is satisfied (Pass). An unsatisfied predicate (Fail)
+        // intercepts the false success and routes the row to FAILED. No
+        // predicate (Unverified) still lands COMPLETED, but reviewed=false —
+        // success could not be machine-verified, matching the watchdog's
+        // conservative posture. failure/partial/aborted keep their mapping and
+        // stay reviewed (an explicit tachi_complete is a deliberate close).
+        let (predicate_run_dir, declared_predicate, predicate_cwd) =
+            crate::dispatch_ops::resolve_completion_predicate_context(did);
+        let predicate_output = predicate_run_dir
+            .as_deref()
+            .and_then(|dir| std::fs::read_to_string(dir.join("result.md")).ok())
+            .unwrap_or_default();
+        let empty_run_dir = std::path::PathBuf::new();
+        let verdict = crate::dispatch_ops::evaluate_completion_predicate(
+            declared_predicate.as_ref(),
+            predicate_run_dir.as_deref().unwrap_or(&empty_run_dir),
+            predicate_cwd.as_deref(),
+            &predicate_output,
+        );
+        let (new_state, reviewed_flag, predicate_override_reason) =
+            crate::dispatch_ops::resolve_completion_state(params.outcome.as_str(), &verdict);
+
+        pipeline_status["completion_predicate"] = json!({
+            "declared": declared_predicate.is_some(),
+            "verdict": verdict.tag(),
+            "outcome_reported": params.outcome.clone(),
+            "resolved_state": new_state,
+            "reviewed": reviewed_flag,
+            "reason": predicate_override_reason.clone(),
+        });
+        if let Some(reason) = predicate_override_reason.clone() {
+            eprintln!(
+                "[tachi_complete] completion predicate intercepted false success for dispatch_id={did}: {reason}"
+            );
+            completion_warning = Some(reason);
+        }
+
         match crate::dispatch_ops::update_kanban_state(
             server,
             did,
             new_state,
             Some(&eval_memory_id),
-            Some(true),
+            Some(reviewed_flag),
         )
         .await
         {
@@ -187,7 +216,7 @@ pub(crate) async fn handle_tachi_complete(
                 Ok(Some(snapshot))
                     if snapshot.state.as_deref() == Some(new_state)
                         && snapshot.eval_ledger_id.as_deref() == Some(eval_memory_id.as_str())
-                        && snapshot.reviewed == Some(true) =>
+                        && snapshot.reviewed == Some(reviewed_flag) =>
                 {
                     pipeline_status["kanban_update"] = json!({
                         "status": "updated",
@@ -195,12 +224,12 @@ pub(crate) async fn handle_tachi_complete(
                         "scope": snapshot.scope,
                         "state": new_state,
                         "eval_memory_id": eval_memory_id,
-                        "reviewed": true,
+                        "reviewed": reviewed_flag,
                     });
                 }
                 Ok(Some(snapshot)) => {
                     let warning = format!(
-                            "kanban update verification failed after eval persistence for dispatch_id={did}, task_id={}, task={}: expected state={new_state}, eval_memory_id={}, reviewed=true but found scope={}, state={:?}, eval_memory_id={:?}, reviewed={:?}",
+                            "kanban update verification failed after eval persistence for dispatch_id={did}, task_id={}, task={}: expected state={new_state}, eval_memory_id={}, reviewed={reviewed_flag} but found scope={}, state={:?}, eval_memory_id={:?}, reviewed={:?}",
                             task_id,
                             safe_task,
                             eval_memory_id,
@@ -234,7 +263,7 @@ pub(crate) async fn handle_tachi_complete(
                         "dispatch_id": did,
                         "expected_state": new_state,
                         "expected_eval_memory_id": eval_memory_id,
-                        "reviewed": true,
+                        "reviewed": reviewed_flag,
                     });
                 }
                 Err(error) => {
@@ -249,7 +278,7 @@ pub(crate) async fn handle_tachi_complete(
                         "dispatch_id": did,
                         "expected_state": new_state,
                         "expected_eval_memory_id": eval_memory_id,
-                        "reviewed": true,
+                        "reviewed": reviewed_flag,
                         "error": error,
                     });
                 }
@@ -266,7 +295,7 @@ pub(crate) async fn handle_tachi_complete(
                     "dispatch_id": did,
                     "state": new_state,
                     "eval_memory_id": eval_memory_id,
-                    "reviewed": true,
+                    "reviewed": reviewed_flag,
                     "error": error,
                 });
             }

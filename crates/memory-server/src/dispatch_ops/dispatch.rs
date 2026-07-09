@@ -252,6 +252,12 @@ pub(crate) async fn handle_tachi_dispatch(
             "capability_bundle": capability_bundle_card.clone(),
             "feedback_rules": feedback_rules_trace.clone(),
             "timeout_secs": timeout_secs_for_status,
+            // #878-A: persist the working directory + completion predicate so
+            // the complete gate (handler.rs) and the watchdog (execution.rs) can
+            // machine-verify self-reported / exit-0 success against a contract.
+            "cwd": params.cwd.clone(),
+            "completion_predicate":
+                serde_json::to_value(&params.completion_predicate).unwrap_or(Value::Null),
         })),
     );
 

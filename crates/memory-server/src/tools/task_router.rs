@@ -45,6 +45,7 @@ pub(super) async fn handle_tachi_task_facade(
                 timeout_secs: params.timeout_secs.unwrap_or(600),
                 permission_profile: params.permission_profile.clone(),
                 allowed_tools: params.allowed_tools.clone(),
+                completion_predicate: params.completion_predicate.clone(),
                 max_turns: params.max_turns,
                 sandbox: params.sandbox.clone(),
                 inject_tachi_mcp: params.inject_tachi_mcp,

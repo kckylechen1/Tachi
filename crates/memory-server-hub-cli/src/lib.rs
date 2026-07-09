@@ -32,7 +32,7 @@ pub fn resolve_hub_db(db_override: Option<&Path>, app_home: &Path) -> PathBuf {
     app_home.join("global/memory.db")
 }
 
-pub fn run(action: &HubAction, db_path: &PathBuf, app_home: &Path) -> Result<(), String> {
+pub fn run(action: &HubAction, db_path: &Path, app_home: &Path) -> Result<(), String> {
     if !matches!(action, HubAction::Doctor { .. }) && !db_path.exists() {
         return Err(format!(
             "DB not found: {}. Run `tachi setup` or set TACHI_HOME.",
