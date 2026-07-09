@@ -495,6 +495,11 @@ fn cycle_command(
     pr_ref: Option<&str>,
 ) -> String {
     let mut args = vec![format!("action='{action}'")];
+    // F2: GitHub PR lifecycle coaching points at tachi_gh (canonical).
+    let tool = match action {
+        "link_pr" | "pr_status" | "pr_handoff" | "release_note" => "tachi_gh",
+        _ => "tachi_task",
+    };
     match action {
         "intake" => args.push(format!(
             "issue_ref='{}'",
@@ -522,5 +527,5 @@ fn cycle_command(
         }
         _ => {}
     }
-    format!("tachi_task({})", args.join(", "))
+    format!("{tool}({})", args.join(", "))
 }

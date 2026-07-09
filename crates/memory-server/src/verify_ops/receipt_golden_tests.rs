@@ -114,13 +114,24 @@ async fn g2_batch_record_receipt_lists_both_ids() {
     assert_eq!(receipt["check_ids"], json!(["gitleaks", "clippy"]));
     assert_eq!(receipt["overall"], json!("failed"));
 
+    // F1: default status is compact (problems only); full board via format=full.
     let mut status_params = verify_params("status");
     status_params.format = Some("json".to_string());
     let status_resp = handle_tachi_verify(&server, status_params)
         .await
         .expect("status");
     let status: Value = serde_json::from_str(&status_resp).expect("status JSON");
-    let ids: Vec<String> = status["verification"]["items"]
+    assert!(status.get("verification").is_none());
+    assert_eq!(status["overall"], json!("failed"));
+    assert!(status["problems"].as_array().unwrap().iter().any(|p| {
+        p.get("id").and_then(Value::as_str) == Some("clippy")
+    }));
+
+    let mut full = verify_params("status");
+    full.format = Some("full".to_string());
+    let full_resp = handle_tachi_verify(&server, full).await.expect("full status");
+    let full_status: Value = serde_json::from_str(&full_resp).expect("full JSON");
+    let ids: Vec<String> = full_status["verification"]["items"]
         .as_array()
         .expect("items")
         .iter()
@@ -156,6 +167,52 @@ async fn g2b_legacy_commands_receipt_lists_both_derived_ids() {
     let receipt: Value = serde_json::from_str(&resp).expect("receipt JSON");
     assert_eq!(receipt["check_ids"], json!(["cargo-test", "cargo-clippy"]));
     assert_eq!(receipt["overall"], json!("passed"));
+
+    if let Some(v) = original {
+        std::env::set_var("TACHI_RUN_ROOT", v);
+    } else {
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn f1_status_compact_omits_passed_rows_and_stays_small() {
+    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let original = std::env::var_os("TACHI_RUN_ROOT");
+    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+
+    let server = test_server();
+    // Seed a passed check then a failed one; compact status must not re-echo gitleaks.
+    let mut seed = verify_params("record");
+    seed.kind = Some("gitleaks".to_string());
+    seed.status = Some("passed".to_string());
+    seed.summary = Some("ok".to_string());
+    handle_tachi_verify(&server, seed).await.expect("seed");
+
+    let mut fail = verify_params("record");
+    fail.kind = Some("clippy".to_string());
+    fail.status = Some("failed".to_string());
+    fail.summary = Some("lint".to_string());
+    handle_tachi_verify(&server, fail).await.expect("fail");
+
+    let mut status = verify_params("status");
+    status.format = Some("json".to_string());
+    let resp = handle_tachi_verify(&server, status)
+        .await
+        .expect("compact status");
+    assert!(
+        resp.len() < 600,
+        "compact status too large: {} bytes: {resp}",
+        resp.len()
+    );
+    let lower = resp.to_ascii_lowercase();
+    assert!(!lower.contains("gitleaks"), "passed check must not be echoed: {resp}");
+    assert!(lower.contains("clippy"));
+    assert!(lower.contains("problems"));
 
     if let Some(v) = original {
         std::env::set_var("TACHI_RUN_ROOT", v);

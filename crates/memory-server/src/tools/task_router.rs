@@ -157,7 +157,10 @@ pub(super) async fn handle_tachi_task_facade(
         )
         .map_err(|e| format!("serialize dispatch profiles: {e}")),
         "intake" => crate::task_lifecycle::handle_task_intake(server, &params).await,
-        "link_pr" => crate::task_lifecycle::handle_task_link_pr(server, &params).await,
+        "link_pr" => Ok(with_gh_lifecycle_deprecation(
+            "link_pr",
+            crate::task_lifecycle::handle_task_link_pr(server, &params).await?,
+        )),
         "cycle_status" => crate::task_lifecycle::handle_task_cycle_status(server, &params).await,
         "cycle_plan" => crate::task_lifecycle::handle_task_cycle_plan(server, &params).await,
         "recommend" => {
@@ -237,10 +240,19 @@ pub(super) async fn handle_tachi_task_facade(
         }
         "pr_status" => {
             let gh_params = build_task_pr_status_gh_params(&params)?;
-            crate::gh_ops::handle_tachi_gh(server, gh_params).await
+            Ok(with_gh_lifecycle_deprecation(
+                "pr_status",
+                crate::gh_ops::handle_tachi_gh(server, gh_params).await?,
+            ))
         }
-        "pr_handoff" => crate::task_lifecycle::handle_task_pr_handoff(&params),
-        "release_note" => crate::task_lifecycle::handle_task_release_note(server, &params).await,
+        "pr_handoff" => Ok(with_gh_lifecycle_deprecation(
+            "pr_handoff",
+            crate::task_lifecycle::handle_task_pr_handoff(&params)?,
+        )),
+        "release_note" => Ok(with_gh_lifecycle_deprecation(
+            "release_note",
+            crate::task_lifecycle::handle_task_release_note(server, &params).await?,
+        )),
         "ux_matrix" => crate::task_lifecycle::handle_task_ux_matrix(&params),
         "build_references" | "close_loop" => {
             let workflow_params = TachiWorkflowParams {
@@ -280,7 +292,7 @@ pub(super) async fn handle_tachi_task_facade(
             Ok(result)
         }
         _ => Err(format!(
-            "Invalid action '{}'. Use 'briefing', 'doc_index', 'plan', 'dispatch', 'complete', 'status', 'cancel', 'board', 'wait', 'profiles', 'profile', 'card', 'recommend', 'route_simulate', 'proposals', 'review_proposal', 'apply_proposals', 'intake', 'link_pr', 'cycle_status', 'cycle_plan', 'pr_status', 'pr_handoff', 'release_note', 'ux_matrix', 'build_references', 'close_loop', or 'merge'.",
+            "Invalid action '{}'. Primary task actions: briefing/doc_index/plan/dispatch/complete/status/cancel/board/wait/profiles/profile/card/recommend/route_simulate/proposals/review_proposal/apply_proposals/intake/cycle_status/cycle_plan/ux_matrix/build_references/close_loop/merge. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is accepted for compatibility — prefer tachi_gh.",
             params.action
         )),
     }?;
@@ -294,4 +306,30 @@ pub(super) async fn handle_tachi_task_facade(
         &raw,
         params.format.as_deref(),
     )
+}
+
+/// F2 (#495/#913): keep compat execution on `tachi_task` but mark GH lifecycle
+/// as non-primary. Canonical surface is `tachi_gh(action=...)`.
+fn with_gh_lifecycle_deprecation(action: &str, body: String) -> String {
+    let notice = format!(
+        "tachi_task(action='{action}') is a compatibility alias; prefer tachi_gh(action='{action}')"
+    );
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&body) {
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("deprecated_surface".to_string(), serde_json::json!(true));
+            obj.insert(
+                "canonical_tool".to_string(),
+                serde_json::json!("tachi_gh"),
+            );
+            obj.insert(
+                "deprecation_notice".to_string(),
+                serde_json::json!(notice),
+            );
+            if let Ok(serialized) = serde_json::to_string(&value) {
+                return serialized;
+            }
+        }
+    }
+    // Non-JSON responses: prefix a one-line notice.
+    format!("DEPRECATION: {notice}\n{body}")
 }
