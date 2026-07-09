@@ -96,7 +96,10 @@ if [[ ! -x "$BIN_PATH" ]]; then
 fi
 
 echo ">> binary: $BIN_PATH"
-"$BIN_PATH" --version || true
+if ! "$BIN_PATH" --version; then
+  echo "error: smoke test failed — '$BIN_PATH --version' did not run cleanly; refusing to package a broken binary" >&2
+  exit 1
+fi
 
 rm -rf "$STAGE"
 mkdir -p "$STAGE"

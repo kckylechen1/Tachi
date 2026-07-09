@@ -442,7 +442,7 @@ def apply_binary_urls(
     text = re.sub(r"^\s*url \".*\"\s*\n", "", text, flags=re.MULTILINE)
     text = re.sub(r"^\s*sha256 \".*\"\s*\n", "", text, flags=re.MULTILINE)
     text = re.sub(
-        r"\n  on_macos do\n.*?  end\n",
+        r"\n  on_macos do\n.*?\n  end\n",
         "\n",
         text,
         count=1,
@@ -561,7 +561,7 @@ def apply_source_url(text: str, *, repo: str, version: str, sha256: str) -> str:
         )
     # Strip binary-only on_macos url blocks if present.
     text = re.sub(
-        r"\n  on_macos do\n.*?  end\n",
+        r"\n  on_macos do\n.*?\n  end\n",
         "\n",
         text,
         count=1,
