@@ -183,9 +183,7 @@ mod tests {
 
     #[test]
     fn materialize_provider_secrets_preserves_vault_alias_env() {
-        let _guard = crate::test_support::global_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::test_support::global_test_lock().lock();
         let _env = EnvGuard::set("VOYAGE_API_KEY", "vault:VOYAGE_API_KEY");
         let llm = LlmClient::new().expect("llm client");
         let vault_pools = HashMap::from([(
@@ -214,9 +212,7 @@ mod tests {
 
     #[test]
     fn materialize_provider_secrets_preserves_duplicate_plaintext_env_when_vault_wins() {
-        let _guard = crate::test_support::global_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::test_support::global_test_lock().lock();
         let _env = EnvGuard::set("OPENAI_API_KEY", "env-secret");
         let llm = LlmClient::new().expect("llm client");
         let vault_pools = HashMap::from([(
@@ -242,9 +238,7 @@ mod tests {
 
     #[test]
     fn materialize_provider_secrets_reports_neutral_missing_alias() {
-        let _guard = crate::test_support::global_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::test_support::global_test_lock().lock();
         let _env = EnvGuard::set("TACHI_TEST_PROVIDER_ALIAS_KEY", "vault:MISSING_ALIAS");
         let llm = LlmClient::new().expect("llm client");
         let err =

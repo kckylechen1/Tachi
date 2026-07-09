@@ -13,6 +13,7 @@ mod test_support;
 
 pub use llm::{
     LlmClient, ProviderSecret, RerankConfig, RerankProviderKind, RERANK_LOCAL_ENDPOINT_ENV,
+    RERANK_VOYAGE_ENDPOINT_ENV,
     RERANK_PROVIDER_ENV,
 };
 pub use provider_materialization::{

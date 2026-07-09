@@ -272,6 +272,15 @@ impl super::super::LlmClient {
             );
         }
 
+        // Eager rerank-config validation: unknown provider / local without
+        // endpoint fail at construction, never mid-search as a silent hybrid
+        // fallback (R2 review: config errors must not be swallowed).
+        // Under cfg(test), take the process-wide test lock so we don't race
+        // with embedding_rerank tests that temporarily set invalid providers.
+        #[cfg(test)]
+        let _test_lock = crate::test_support::global_test_lock().lock();
+        let rerank_config = super::super::RerankConfig::from_env()?;
+
         Ok(Self {
             http: Arc::new(RwLock::new(http)),
             http_timeout_streak: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -279,12 +288,15 @@ impl super::super::LlmClient {
             distill,
             reasoning,
             summary,
+            rerank_config,
             vault_db_path,
             provider_state: Arc::new(RwLock::new(ProviderState::with_health(provider_health))),
             provider_health_reload: Arc::new(RwLock::new(provider_health_reload)),
             provider_health_persist: Arc::new(RwLock::new(ProviderHealthPersistState::default())),
             claude_cli_failure: Arc::new(RwLock::new(None)),
             circuit_breakers: super::super::CircuitBreakerRegistry::new(),
+            #[cfg(test)]
+            last_rerank_dispatch: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 

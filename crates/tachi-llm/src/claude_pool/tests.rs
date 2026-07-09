@@ -370,9 +370,7 @@ fn foundry_runs_dir_is_created_with_0o700() {
 
 #[test]
 fn foundry_runs_dir_honors_tachi_home() {
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = crate::test_support::global_test_lock().lock();
     let tmp = tempfile::tempdir().expect("temp home");
     let custom_home = tmp.path().join("custom-tachi-home");
     let default_home = tmp.path().join("home");

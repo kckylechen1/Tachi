@@ -149,11 +149,14 @@ pub(crate) async fn rerank_rows_with_outcome(
             (rows, outcome)
         }
         Err(err) => {
+            // Runtime provider errors keep graceful hybrid fallback, but the
+            // response must carry a degraded marker (config errors fail at
+            // LlmClient construction and never reach this path).
             tracing::warn!("[rerank] failed, falling back to hybrid ranking: {err}");
-            (
-                rows.into_iter().take(top_k).collect(),
-                RerankOutcome::Fallback,
-            )
+            let mut fallback_rows: Vec<Value> = rows.into_iter().take(top_k).collect();
+            // Rides #926's recall_degradation plumbing (lexical_only wins if both apply).
+            super::attach_rerank_fallback_degraded(&mut fallback_rows, &err);
+            (fallback_rows, RerankOutcome::Fallback)
         }
     }
 }

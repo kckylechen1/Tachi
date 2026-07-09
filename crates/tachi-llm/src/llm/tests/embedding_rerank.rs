@@ -49,9 +49,7 @@ fn rerank_document_filter_preserves_original_indices() {
 
 #[test]
 fn default_rerank_provider_is_voyage() {
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::test_support::global_test_lock().lock();
     let _provider = EnvRestore::unset(RERANK_PROVIDER_ENV);
     let _endpoint = EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV);
 
@@ -63,9 +61,7 @@ fn default_rerank_provider_is_voyage() {
 
 #[test]
 fn voyage_provider_selected_explicitly() {
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::test_support::global_test_lock().lock();
     let _provider = EnvRestore::set(RERANK_PROVIDER_ENV, "voyage");
 
     let cfg = RerankConfig::from_env().expect("voyage config");
@@ -73,8 +69,9 @@ fn voyage_provider_selected_explicitly() {
 }
 
 #[test]
-fn voyage_request_shape_unchanged() {
-    // Frozen request body for the voyage arm (pre-seam parity).
+fn voyage_request_helper_shape_frozen() {
+    // Helper-level freeze (pure). Wire-level parity is in
+    // `voyage_request_shape_unchanged` (mock endpoint capture).
     let docs = ["alpha".to_string(), "beta".to_string()];
     let refs: Vec<&String> = docs.iter().collect();
     let body = voyage_rerank_request_body("probe query", &refs, 2);
@@ -87,52 +84,140 @@ fn voyage_request_shape_unchanged() {
     assert_eq!(obj.len(), 4);
 }
 
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn voyage_request_shape_unchanged() {
+    // Wire-level: mock Voyage endpoint captures the actual POST body from
+    // `rerank_voyage` (not just the pure helper). RED if the live request
+    // shape drifts from the frozen pre-seam body.
+    use axum::{extract::State, routing::post, Json, Router};
+    use std::sync::{Arc, Mutex};
+
+    let _guard = crate::test_support::global_test_lock().lock();
+
+    #[derive(Clone, Default)]
+    struct Capture {
+        hits: usize,
+        last_body: Option<Value>,
+        last_auth: Option<String>,
+    }
+    let capture = Arc::new(Mutex::new(Capture::default()));
+    let app = Router::new()
+        .route(
+            "/v1/rerank",
+            post(
+                |State(cap): State<Arc<Mutex<Capture>>>,
+                 headers: axum::http::HeaderMap,
+                 body: Json<Value>| async move {
+                    let mut g = cap.lock().unwrap_or_else(|e| e.into_inner());
+                    g.hits += 1;
+                    g.last_body = Some(body.0);
+                    g.last_auth = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    Json(json!({
+                        "data": [
+                            {"index": 0, "relevance_score": 0.9},
+                            {"index": 1, "relevance_score": 0.1},
+                        ]
+                    }))
+                },
+            ),
+        )
+        .with_state(capture.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind voyage mock");
+    let port = listener.local_addr().expect("addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock serve");
+    });
+
+    let endpoint = format!("http://127.0.0.1:{port}/v1/rerank");
+    let _provider = EnvRestore::unset(RERANK_PROVIDER_ENV);
+    let _endpoint = EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV);
+    let _voyage_url = EnvRestore::set(RERANK_VOYAGE_ENDPOINT_ENV, &endpoint);
+    let _vk = EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
+    let _vrk = EnvRestore::unset("VOYAGE_RERANK_API_KEY");
+
+    let client = LlmClient::new().expect("client");
+    let docs = vec!["alpha".to_string(), "beta".to_string()];
+    let out = client
+        .rerank("probe query", &docs, 2)
+        .await
+        .expect("voyage mock should succeed");
+    assert_eq!(out, vec![(0, 0.9), (1, 0.1)]);
+    assert_eq!(
+        client.last_rerank_dispatch_for_tests(),
+        Some(RerankProviderKind::Voyage),
+        "default path must enter voyage arm via provider enum"
+    );
+
+    let g = capture.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(g.hits, 1, "request must hit the voyage mock endpoint");
+    let body = g.last_body.as_ref().expect("captured body");
+    assert_eq!(body["model"], json!("rerank-2.5"));
+    assert_eq!(body["query"], json!("probe query"));
+    assert_eq!(body["documents"], json!(["alpha", "beta"]));
+    assert_eq!(body["top_k"], json!(2));
+    let obj = body.as_object().expect("object");
+    assert_eq!(obj.len(), 4, "wire body must keep exactly four pre-seam keys");
+    assert_eq!(
+        g.last_auth.as_deref(),
+        Some("Bearer test-voyage-key"),
+        "wire auth must use the voyage bearer key"
+    );
+
+    server_task.abort();
+}
+
 #[test]
 fn unknown_rerank_provider_fails_closed() {
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::test_support::global_test_lock().lock();
     let _provider = EnvRestore::set(RERANK_PROVIDER_ENV, "cohere");
 
     let err = RerankConfig::from_env().expect_err("unknown provider must fail");
     assert!(err.contains("unknown rerank provider"));
+    // Eager: construction must also refuse unknown provider (never mid-search).
+    let client_err = match LlmClient::new() {
+        Ok(_) => panic!("unknown provider must fail at construction"),
+        Err(e) => e,
+    };
+    assert!(client_err.contains("unknown rerank provider"));
 }
 
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn local_rerank_unconfigured_returns_typed_error() {
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+#[test]
+fn local_rerank_unconfigured_fails_at_construction() {
+    // Eager config validation: local without endpoint must fail at
+    // provider construction, never mid-search as a silent hybrid fallback.
+    let _guard = crate::test_support::global_test_lock().lock();
     let _provider = EnvRestore::set(RERANK_PROVIDER_ENV, "local");
     let _endpoint = EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV);
 
-    let client = LlmClient::new().expect("client");
-    let docs = vec!["a".to_string(), "b".to_string()];
-    let err = client
-        .rerank("q", &docs, 1)
-        .await
-        .expect_err("unconfigured local must error");
+    let err = RerankConfig::from_env().expect_err("local without endpoint must fail");
     assert_eq!(err, "local rerank provider not configured");
+    let client_err = match LlmClient::new() {
+        Ok(_) => panic!("unconfigured local must fail at construction"),
+        Err(e) => e,
+    };
+    assert_eq!(client_err, "local rerank provider not configured");
 }
 
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn local_rerank_unconfigured_does_not_fall_back_to_voyage() {
-    // Fail closed: even with a voyage key present, local without endpoint errors.
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+#[test]
+fn local_rerank_unconfigured_does_not_fall_back_to_voyage() {
+    // Fail closed at construction: even with a voyage key present, local
+    // without endpoint never constructs a client that could hit voyage.
+    let _guard = crate::test_support::global_test_lock().lock();
     let _provider = EnvRestore::set(RERANK_PROVIDER_ENV, "local");
     let _endpoint = EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV);
     let _voyage = EnvRestore::set("VOYAGE_API_KEY", "should-not-be-used");
 
-    let client = LlmClient::new().expect("client");
-    let docs = vec!["a".to_string(), "b".to_string()];
-    let err = client
-        .rerank("q", &docs, 1)
-        .await
-        .expect_err("must not silent-fallback to voyage");
+    let err = match LlmClient::new() {
+        Ok(_) => panic!("must not silent-fallback to voyage"),
+        Err(e) => e,
+    };
     assert_eq!(err, "local rerank provider not configured");
     assert!(!err.to_ascii_lowercase().contains("voyage"));
 }
@@ -143,9 +228,7 @@ async fn local_rerank_hits_configured_endpoint() {
     use axum::{extract::State, routing::post, Json, Router};
     use std::sync::{Arc, Mutex};
 
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::test_support::global_test_lock().lock();
 
     #[derive(Clone, Default)]
     struct Capture {
@@ -197,6 +280,11 @@ async fn local_rerank_hits_configured_endpoint() {
         .expect("configured local should succeed");
 
     assert_eq!(out, vec![(2, 0.91), (0, 0.12)]);
+    assert_eq!(
+        client.last_rerank_dispatch_for_tests(),
+        Some(RerankProviderKind::Local),
+        "local config must enter local arm via provider enum"
+    );
 
     let g = capture.lock().unwrap_or_else(|e| e.into_inner());
     assert_eq!(g.hits, 1, "request must hit the configured endpoint");
@@ -215,17 +303,22 @@ async fn local_rerank_hits_configured_endpoint() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn default_path_dispatches_to_voyage_arm() {
-    // Without provider override, `rerank` selects voyage — which requires a
-    // voyage key. Missing key proves the voyage arm (not local) was chosen.
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    // Discrimination: must RED if the provider enum match is bypassed.
+    // Asserts the arm actually entered (dispatch counter), not just "no error"
+    // or a missing-key string that a hardcoded voyage call could also produce.
+    let _guard = crate::test_support::global_test_lock().lock();
     let _provider = EnvRestore::unset(RERANK_PROVIDER_ENV);
     let _endpoint = EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV);
+    let _voyage_url = EnvRestore::unset(RERANK_VOYAGE_ENDPOINT_ENV);
     let _vk = EnvRestore::unset("VOYAGE_API_KEY");
     let _vrk = EnvRestore::unset("VOYAGE_RERANK_API_KEY");
 
     let client = LlmClient::new().expect("client");
+    assert_eq!(
+        client.rerank_config().provider,
+        RerankProviderKind::Voyage,
+        "default construction must resolve voyage provider"
+    );
     // Clear any vault-backed secrets that might exist on the host.
     client.clear_provider_secrets();
     let docs = vec!["a".to_string(), "b".to_string()];
@@ -233,6 +326,12 @@ async fn default_path_dispatches_to_voyage_arm() {
         .rerank("q", &docs, 1)
         .await
         .expect_err("voyage arm without key must fail with missing-key error");
+    assert_eq!(
+        client.last_rerank_dispatch_for_tests(),
+        Some(RerankProviderKind::Voyage),
+        "dispatch must go through provider enum voyage arm (counter would be \
+         None/Local if the seam were bypassed or mis-routed)"
+    );
     assert!(
         err.contains("Missing API key") || err.contains("VOYAGE"),
         "default path must enter voyage arm, got: {err}"

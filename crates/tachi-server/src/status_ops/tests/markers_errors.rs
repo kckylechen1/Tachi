@@ -1,5 +1,34 @@
 use super::*;
 
+struct EnvGuard {
+    name: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn set(name: &'static str, value: &str) -> Self {
+        let original = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self { name, original }
+    }
+
+    fn unset(name: &'static str) -> Self {
+        let original = std::env::var_os(name);
+        std::env::remove_var(name);
+        Self { name, original }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        if let Some(value) = self.original.take() {
+            std::env::set_var(self.name, value);
+        } else {
+            std::env::remove_var(self.name);
+        }
+    }
+}
+
 #[test]
 fn truncate_honors_max() {
     assert_eq!(truncate("abc", 5), "abc");
@@ -93,6 +122,10 @@ fn distill_hard_errors_dock_health_but_fallbacks_do_not() {
 
 #[test]
 fn infer_provider_from_auth_error_maps_real_failures() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Explicit reason text still wins (SiliconFlow named in the error).
     assert_eq!(
         status_health::infer_provider_from_failed_job(
             "recall_rerank_cache",
@@ -116,6 +149,35 @@ fn infer_provider_from_auth_error_maps_real_failures() {
     assert_eq!(
         status_health::infer_provider_from_auth_error("network timeout"),
         None
+    );
+
+    // Generic auth failure on the rerank lane consults configured provider
+    // (default voyage → VOYAGE; local → None, no API key to flag).
+    let _provider = EnvGuard::unset(tachi_llm::RERANK_PROVIDER_ENV);
+    let _endpoint = EnvGuard::unset(tachi_llm::RERANK_LOCAL_ENDPOINT_ENV);
+    assert_eq!(
+        status_health::infer_provider_from_failed_job(
+            "recall_rerank_cache",
+            Some("rerank"),
+            "403 Forbidden"
+        ),
+        Some("VOYAGE".to_string()),
+        "default rerank config must infer VOYAGE (not hardcoded only when reason names it)"
+    );
+
+    let _local = EnvGuard::set(tachi_llm::RERANK_PROVIDER_ENV, "local");
+    let _local_ep = EnvGuard::set(
+        tachi_llm::RERANK_LOCAL_ENDPOINT_ENV,
+        "http://127.0.0.1:9/rerank",
+    );
+    assert_eq!(
+        status_health::infer_provider_from_failed_job(
+            "recall_rerank_cache",
+            Some("rerank"),
+            "403 Forbidden"
+        ),
+        None,
+        "local rerank has no cloud API key to mark invalid"
     );
 }
 

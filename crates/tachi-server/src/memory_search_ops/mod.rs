@@ -22,7 +22,8 @@ pub(crate) use rerank::{
     RerankOutcome, SearchRerankPolicy,
 };
 pub(crate) use recall_degradation::{
-    attach_lexical_only_marker, merge_lexical_only_marker, short_reason as recall_short_reason,
+    attach_lexical_only_marker, attach_rerank_fallback_degraded, merge_lexical_only_marker,
+    merge_rerank_fallback_marker, short_reason as recall_short_reason,
 };
 pub(crate) use save_memory::handle_remember;
 pub(crate) use save_memory::handle_save_memory;

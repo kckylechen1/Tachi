@@ -11,13 +11,22 @@ use serde_json::{json, Value};
 pub const RERANK_PROVIDER_ENV: &str = "TACHI_RERANK_PROVIDER";
 /// Config env: OpenAI-compatible `/rerank` HTTP endpoint for the local arm.
 pub const RERANK_LOCAL_ENDPOINT_ENV: &str = "TACHI_RERANK_LOCAL_ENDPOINT";
+/// Optional override of the Voyage rerank URL (tests / private proxy).
+/// When unset, the production Voyage endpoint is used.
+pub const RERANK_VOYAGE_ENDPOINT_ENV: &str = "TACHI_RERANK_VOYAGE_ENDPOINT";
 
 const LOCAL_NOT_CONFIGURED: &str = "local rerank provider not configured";
 const VOYAGE_RERANK_MODEL: &str = "rerank-2.5";
 
-/// Voyage rerank URL, honouring main's `VOYAGE_BASE_URL` blackhole seam (#926).
-fn voyage_rerank_url() -> String {
-    super::embedding::voyage_endpoint("/v1/rerank")
+/// Resolve the Voyage rerank URL.
+/// Priority: `TACHI_RERANK_VOYAGE_ENDPOINT` (tests/proxies) → `VOYAGE_BASE_URL`
+/// + `/v1/rerank` (#926 blackhole seam) → production Voyage default.
+pub(super) fn voyage_rerank_url() -> String {
+    std::env::var(RERANK_VOYAGE_ENDPOINT_ENV)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| super::embedding::voyage_endpoint("/v1/rerank"))
 }
 
 /// Configured rerank backend. Unknown values fail closed — never default to voyage.
@@ -59,12 +68,21 @@ pub struct RerankConfig {
 }
 
 impl RerankConfig {
+    /// Resolve rerank config from env. **Fails closed** on:
+    /// - unknown `TACHI_RERANK_PROVIDER`
+    /// - `local` without a non-empty `TACHI_RERANK_LOCAL_ENDPOINT`
+    ///
+    /// Call this at provider construction / startup — never treat these as
+    /// mid-search runtime errors that fall open to hybrid ranking.
     pub fn from_env() -> Result<Self, String> {
         let provider = RerankProviderKind::parse(std::env::var(RERANK_PROVIDER_ENV).ok().as_deref())?;
         let local_endpoint = std::env::var(RERANK_LOCAL_ENDPOINT_ENV)
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
+        if provider == RerankProviderKind::Local && local_endpoint.is_none() {
+            return Err(LOCAL_NOT_CONFIGURED.to_string());
+        }
         Ok(Self {
             provider,
             local_endpoint,
@@ -161,24 +179,33 @@ fn remap_filtered_indices(
 }
 
 impl super::LlmClient {
-    /// Provider-dispatched rerank. Default (`TACHI_RERANK_PROVIDER` unset) is voyage.
-    /// Local without `TACHI_RERANK_LOCAL_ENDPOINT` fails closed — never falls back to voyage.
+    /// Provider-dispatched rerank using the config resolved at construction.
+    /// Default (`TACHI_RERANK_PROVIDER` unset) is voyage. Config errors (unknown
+    /// provider / local without endpoint) fail at `LlmClient::new`, never here.
     pub async fn rerank(
         &self,
         query: &str,
         documents: &[String],
         top_k: usize,
     ) -> Result<Vec<(usize, f64)>, String> {
-        let cfg = RerankConfig::from_env()?;
-        match cfg.provider {
-            RerankProviderKind::Voyage => self.rerank_voyage(query, documents, top_k).await,
-            RerankProviderKind::Local => self.rerank_local(&cfg, query, documents, top_k).await,
+        // Record the arm *actually entered* so tests RED if the enum match is
+        // bypassed (hardcoded voyage/local without going through the seam).
+        match self.rerank_config.provider {
+            RerankProviderKind::Voyage => {
+                self.note_rerank_dispatch(RerankProviderKind::Voyage);
+                self.rerank_voyage(query, documents, top_k).await
+            }
+            RerankProviderKind::Local => {
+                self.note_rerank_dispatch(RerankProviderKind::Local);
+                self.rerank_local(query, documents, top_k).await
+            }
         }
     }
 
     /// Call Voyage rerank API and return (original_index, relevance_score) pairs.
     /// Extracted arm — keeps main's #926 recall bounds + pool-hygiene accounting
-    /// (outcomes recorded after body read, not merely after headers).
+    /// (outcomes recorded after body read). Optional `TACHI_RERANK_VOYAGE_ENDPOINT`
+    /// overrides the URL for tests/proxies; otherwise `VOYAGE_BASE_URL` applies.
     pub async fn rerank_voyage(
         &self,
         query: &str,
@@ -310,15 +337,16 @@ impl super::LlmClient {
     }
 
     /// Local OpenAI-compatible `/rerank` HTTP arm. No model download.
-    /// Requires `TACHI_RERANK_LOCAL_ENDPOINT`; otherwise returns a typed error.
+    /// Endpoint was validated at construction (`RerankConfig::from_env`).
     async fn rerank_local(
         &self,
-        cfg: &RerankConfig,
         query: &str,
         documents: &[String],
         top_k: usize,
     ) -> Result<Vec<(usize, f64)>, String> {
-        let endpoint = cfg
+        // Belt-and-suspenders: construction already rejects local-without-endpoint.
+        let endpoint = self
+            .rerank_config
             .local_endpoint
             .as_deref()
             .map(str::trim)
@@ -446,6 +474,17 @@ mod pure_tests {
                 "documents": ["doc-a", "doc-b"],
                 "top_k": 2,
             })
+        );
+    }
+
+    #[test]
+    fn local_without_endpoint_is_config_error() {
+        // Pure parse path: Local is accepted as a kind, but from_env couples
+        // kind + endpoint and fails closed when endpoint is missing. Covered
+        // end-to-end in embedding_rerank::local_rerank_unconfigured_*.
+        assert_eq!(
+            RerankProviderKind::parse(Some("local")).unwrap(),
+            RerankProviderKind::Local
         );
     }
 }

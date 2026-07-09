@@ -3,7 +3,7 @@
 use super::embedding::parse_voyage_batch_embeddings;
 use super::rerank::{
     non_empty_rerank_documents, voyage_rerank_request_body, RerankConfig, RerankProviderKind,
-    RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV,
+    RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV, RERANK_VOYAGE_ENDPOINT_ENV,
 };
 use super::provider_health::{
     ChatLane, ClaudeCliFailureKind, KeyAvailability, CLAUDE_CLI_FAILURE_COOLDOWN, HEALTH_OK,

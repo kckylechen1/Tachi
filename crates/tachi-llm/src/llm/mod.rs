@@ -16,7 +16,10 @@ mod rerank;
 
 pub(crate) use circuit_breaker::CircuitBreakerRegistry;
 pub use provider_health::ProviderSecret;
-pub use rerank::{RerankConfig, RerankProviderKind, RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV};
+pub use rerank::{
+    RerankConfig, RerankProviderKind, RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV,
+    RERANK_VOYAGE_ENDPOINT_ENV,
+};
 use provider_health::{
     ChatLaneConfig, ClaudeCliFailure, ProviderHealthPersistState, ProviderHealthReloadState,
     ProviderState,
@@ -39,12 +42,48 @@ pub struct LlmClient {
     distill: ChatLaneConfig,
     reasoning: ChatLaneConfig,
     summary: ChatLaneConfig,
+    /// Rerank provider config resolved at construction (eager fail-closed).
+    rerank_config: RerankConfig,
     vault_db_path: Option<PathBuf>,
     provider_state: Arc<RwLock<ProviderState>>,
     provider_health_reload: Arc<RwLock<ProviderHealthReloadState>>,
     provider_health_persist: Arc<RwLock<ProviderHealthPersistState>>,
     claude_cli_failure: Arc<RwLock<Option<ClaudeCliFailure>>>,
     pub(crate) circuit_breakers: CircuitBreakerRegistry,
+    /// Test-only: last provider arm entered by `rerank()` (dispatch seam probe).
+    #[cfg(test)]
+    last_rerank_dispatch: Arc<std::sync::Mutex<Option<RerankProviderKind>>>,
+}
+
+impl LlmClient {
+    /// Record which rerank arm `rerank()` actually entered (test discrimination).
+    #[inline]
+    fn note_rerank_dispatch(&self, kind: RerankProviderKind) {
+        #[cfg(test)]
+        {
+            if let Ok(mut slot) = self.last_rerank_dispatch.lock() {
+                *slot = Some(kind);
+            }
+        }
+        #[cfg(not(test))]
+        {
+            let _ = kind;
+        }
+    }
+
+    /// Last provider arm entered by `rerank()`. Test discrimination only.
+    #[cfg(test)]
+    pub fn last_rerank_dispatch_for_tests(&self) -> Option<RerankProviderKind> {
+        self.last_rerank_dispatch
+            .lock()
+            .ok()
+            .and_then(|slot| *slot)
+    }
+
+    /// Configured rerank provider (resolved at construction).
+    pub fn rerank_config(&self) -> &RerankConfig {
+        &self.rerank_config
+    }
 }
 
 #[cfg(test)]

@@ -3,9 +3,7 @@ use super::*;
 #[test]
 #[allow(clippy::await_holding_lock)]
 fn foundry_lanes_use_deepseek_defaults_when_only_deepseek_key_is_configured() {
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::test_support::global_test_lock().lock();
     let _env_guards = [
         EnvRestore::unset("DISTILL_API_KEY"),
         EnvRestore::unset("REASONING_API_KEY"),
@@ -63,9 +61,7 @@ fn foundry_lanes_use_deepseek_defaults_when_only_deepseek_key_is_configured() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn generate_summary_propagates_llm_failures() {
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::test_support::global_test_lock().lock();
     let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
     std::env::remove_var("SUMMARY_API_KEY");
     std::env::remove_var("SILICONFLOW_API_KEY");
@@ -95,9 +91,7 @@ async fn generate_summary_propagates_llm_failures() {
 async fn chat_lane_reports_response_body_read_errors() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::test_support::global_test_lock().lock();
     let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -146,9 +140,7 @@ async fn chat_lane_waits_for_temporarily_unavailable_pool_key() {
     use axum::{extract::State, routing::post, Json, Router};
     use std::sync::{Arc, Mutex};
 
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::test_support::global_test_lock().lock();
 
     let seen = Arc::new(Mutex::new(0usize));
     let app = Router::new()
@@ -209,9 +201,7 @@ async fn chat_lane_waits_for_temporarily_unavailable_pool_key() {
 async fn chat_lane_records_success_usage_to_vault_db() {
     use axum::{routing::post, Json, Router};
 
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::test_support::global_test_lock().lock();
     let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
 
     let app = Router::new().route(
@@ -334,9 +324,7 @@ async fn chat_lane_records_success_usage_to_vault_db() {
 async fn chat_lane_marks_insufficient_balance_as_exhausted() {
     use axum::{http::StatusCode, response::IntoResponse, routing::post, Router};
 
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::test_support::global_test_lock().lock();
     let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
 
     let app = Router::new().route(
@@ -415,9 +403,7 @@ async fn chat_lane_retries_with_next_pool_key_after_429() {
     };
     use std::sync::{Arc, Mutex};
 
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::test_support::global_test_lock().lock();
 
     let seen_auth = Arc::new(Mutex::new(Vec::<String>::new()));
     let app = Router::new()
