@@ -22,6 +22,7 @@ use evidence_format::{format_extract_result, json_string, parse_json_or_empty};
 pub(crate) use evidence_format::{
     shape_complete_response, shape_save_facade_response, wants_full_format, wants_json,
 };
+pub(crate) use recall_simulate_ops::build_recall_simulation_report;
 use serde_json::json;
 
 pub(crate) async fn handle_tachi_memory(

@@ -1,6 +1,6 @@
 use super::{
-    CardAction, CleanAction, DaemonAction, DistillAction, EnvAction, FoundryAction, HarnessAction,
-    HubAction, ManifestAction, McpAction, PokeAction, RepairAction, RescueAction,
+    CardAction, CleanAction, DaemonAction, DistillAction, EnvAction, EvalAction, FoundryAction,
+    HarnessAction, HubAction, ManifestAction, McpAction, PokeAction, RepairAction, RescueAction,
     SkillSurfaceAction, VaultAction, WatcherAction, WikiAction, WorktreeAction,
 };
 use clap::Subcommand;
@@ -139,6 +139,11 @@ pub enum Commands {
     Poke {
         #[command(subcommand)]
         action: PokeAction,
+    },
+    /// Local eval corpus automation.
+    Eval {
+        #[command(subcommand)]
+        action: EvalAction,
     },
     /// Backfill missing vector embeddings using Voyage API
     BackfillVectors {

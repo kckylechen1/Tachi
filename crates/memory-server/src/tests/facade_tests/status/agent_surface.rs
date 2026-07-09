@@ -70,3 +70,49 @@ async fn tachi_status_slims_healthy_provider_health_and_omits_empty_continuity()
         "empty continuity block should be omitted from agent status: {body}"
     );
 }
+
+#[tokio::test]
+async fn tachi_status_surfaces_recall_eval_health_without_private_case_data() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let status_path = temp_home
+        .temp_home
+        .join(".tachi/status/recall_eval.latest.json");
+    std::fs::create_dir_all(status_path.parent().expect("status parent")).expect("status dir");
+    std::fs::write(
+        &status_path,
+        json!({
+            "schema_version": "tachi.recall_eval.status.v1",
+            "status": "failed",
+            "generated_at": "2026-07-09T00:00:00Z",
+            "case_count": 2,
+            "top_k": 10,
+            "thresholds": {"min_recall": 1.0, "min_mrr": 0.0},
+            "current": {"hit_count": 1, "miss_count": 1, "recall_at_k": 0.5, "mrr": 0.5},
+            "per_slice": {"summary": {"n": 2, "hits": 1}},
+            "variants": [{"name": "current", "recall_at_k": 0.5}],
+            "query": "private query",
+            "expected_ids": ["private-id"]
+        })
+        .to_string(),
+    )
+    .expect("write recall eval status");
+
+    let body = crate::status_ops::handle_tachi_status_agent(&server)
+        .await
+        .expect("agent status should serialize");
+    let parsed: Value = serde_json::from_str(&body).expect("agent status JSON");
+
+    assert_eq!(parsed["recall_eval"]["status"], json!("failed"));
+    assert_eq!(parsed["recall_eval"]["current"]["recall_at_k"], json!(0.5));
+    assert!(
+        parsed["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("personal recall eval failed")))
+    );
+    assert!(!body.contains("private query"));
+    assert!(!body.contains("private-id"));
+}

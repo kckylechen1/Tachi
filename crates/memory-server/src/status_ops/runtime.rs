@@ -481,6 +481,10 @@ async fn handle_tachi_status_detail(
     // the provider detail there, so the arrays don't need repeating).
     let runtime = runtime_observability_json(server, &app_home, Some(&snapshot.daemon), full);
     let mut warnings = build_status_warnings(&snapshot, &daemon_state);
+    let recall_eval = crate::status_ops::recall_eval::read_recall_eval_status(&app_home);
+    if let Some(warning) = crate::status_ops::recall_eval::recall_eval_warning(&recall_eval) {
+        warnings.push(warning);
+    }
     let running_daemons = snapshot
         .daemon_inventory
         .iter()
@@ -565,6 +569,7 @@ async fn handle_tachi_status_detail(
             },
             "component_governance": component_governance,
             "warnings": warnings,
+            "recall_eval": recall_eval,
             "daily_pipeline": snapshot.last_daily_report,
             "distill": snapshot.distill_marker,
             "api_keys": snapshot.api_keys,
@@ -612,6 +617,7 @@ async fn handle_tachi_status_detail(
             "health_score": snapshot.health_score,
             "health_deductions": snapshot.health_deductions,
             "warnings": warnings.into_iter().take(8).collect::<Vec<_>>(),
+            "recall_eval": recall_eval,
             "jobs": {
                 "active": total_active,
                 "failed": total_failed,

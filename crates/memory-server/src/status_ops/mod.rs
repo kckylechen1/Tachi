@@ -18,6 +18,7 @@
 pub(crate) mod daemon;
 pub(crate) mod db_probe;
 pub(crate) mod ledger;
+pub(crate) mod recall_eval;
 pub(crate) mod status_cli;
 pub(crate) mod status_health;
 pub(crate) mod warnings;

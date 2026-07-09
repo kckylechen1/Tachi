@@ -41,6 +41,43 @@ fn poke_cli_parses_smoke_run() {
 }
 
 #[test]
+fn eval_cli_parses_recall_gate() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "eval",
+        "recall",
+        "--top-k",
+        "12",
+        "--min-recall",
+        "0.95",
+        "--enable-rerank",
+        "--json",
+    ])
+    .expect("eval recall should parse");
+    match parsed.command.expect("command") {
+        Commands::Eval {
+            action:
+                EvalAction::Recall {
+                    cases,
+                    top_k,
+                    min_recall,
+                    min_mrr,
+                    enable_rerank,
+                    json,
+                },
+        } => {
+            assert!(cases.is_none());
+            assert_eq!(top_k, 12);
+            assert_eq!(min_recall, 0.95);
+            assert_eq!(min_mrr, 0.0);
+            assert!(enable_rerank);
+            assert!(json);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
 fn mcp_cli_parses_add_with_vault_header() {
     let parsed = Cli::try_parse_from([
         "tachi",
