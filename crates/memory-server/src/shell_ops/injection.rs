@@ -66,7 +66,14 @@ fn is_safe_meta_skill_rel_path(rel_path: &str) -> bool {
 /// (or the in-repo symlink into that same library) keeps taking priority; a
 /// fresh worktree / clone with no `skill/` on disk falls through to the central
 /// library.
-pub(super) fn resolve_meta_skill(rel_path: &str) -> Option<PathBuf> {
+///
+/// `pub(crate)`: also called from `builtins::helpers` at capability-seed time
+/// and from `bootstrap::skill_surface_cli` at manifest-read time, so neither
+/// of those `include_str!`s a git-tree-relative `skill/...` path at compile
+/// time (see kckylechen1/tachi#895 — `skill/` is a host-absolute symlink into
+/// the central library, so compile-time embedding is neither hermetic nor
+/// portable).
+pub(crate) fn resolve_meta_skill(rel_path: &str) -> Option<PathBuf> {
     // Defence in depth: only ever resolve repo-relative paths.
     if !is_safe_meta_skill_rel_path(rel_path) {
         return None;

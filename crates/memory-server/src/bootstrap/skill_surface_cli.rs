@@ -19,22 +19,44 @@ const SOURCE_STATUS_NOT_CHECKED_REASON: &str =
 
 struct SkillSourceManifestSpec {
     corpus: &'static str,
+    /// Repo-relative path of the corpus manifest. Read at *runtime* through
+    /// `shell_ops::resolve_meta_skill` (see `sources::read_skill_source_manifest`),
+    /// not embedded at compile time — `skill/` is a host-absolute git symlink
+    /// (kckylechen1/tachi#895), so `include_str!` against it is neither
+    /// hermetic (same SHA, different binary per host) nor portable (a
+    /// checkout without that host path can't build at all).
     path: &'static str,
-    content: &'static str,
 }
 
 const SKILL_SOURCE_MANIFESTS: &[SkillSourceManifestSpec] = &[
     SkillSourceManifestSpec {
         corpus: "superpowers",
         path: "skill/superpowers/manifest.yaml",
-        content: include_str!("../../../../skill/superpowers/manifest.yaml"),
     },
     SkillSourceManifestSpec {
         corpus: "waza",
         path: "skill/waza/manifest.yaml",
-        content: include_str!("../../../../skill/waza/manifest.yaml"),
     },
 ];
+
+/// Resolve + read a `SkillSourceManifestSpec`'s manifest content at call
+/// time, through the same runtime resolver `shell_ops`'s flow-stage
+/// injection and `builtins::helpers` capability-seed path already use.
+///
+/// Unlike builtin-capability seeding, this is an on-demand CLI read (`tachi
+/// skill-surface sources` / `sync-plan`), not a server-boot seed pass — an
+/// unresolvable manifest here surfaces as a clear command error, not a
+/// silently-degraded stub.
+fn read_skill_source_manifest_content(spec: &SkillSourceManifestSpec) -> Result<String, String> {
+    let resolved = crate::shell_ops::resolve_meta_skill(spec.path).ok_or_else(|| {
+        format!(
+            "manifest {} not found in repo root, cwd, cargo manifest dir, or the central \
+             vendored-skills library (set $TACHI_SKILLS_ROOT, or mount ~/.agents/vendored-skills)",
+            spec.path
+        )
+    })?;
+    std::fs::read_to_string(&resolved).map_err(|e| format!("read {}: {e}", resolved.display()))
+}
 
 #[derive(Debug, Clone)]
 struct SkillStoreSpec {

@@ -8,7 +8,8 @@ pub(super) fn build_skill_source_report() -> Result<SkillSourceReport, String> {
     let mut corpora = Vec::new();
 
     for spec in SKILL_SOURCE_MANIFESTS {
-        let parsed = parse_skill_source_manifest(spec.content)
+        let content = read_skill_source_manifest_content(spec)?;
+        let parsed = parse_skill_source_manifest(&content)
             .map_err(|e| format!("parse {}: {e}", spec.path))?;
         let corpus = build_skill_source_corpus_status(spec, parsed);
         accumulate_source_summary(&mut summary, &corpus.summary);
