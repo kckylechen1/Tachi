@@ -1,7 +1,7 @@
 use super::{
     CardAction, CleanAction, DaemonAction, DistillAction, EnvAction, FoundryAction, HarnessAction,
     HubAction, ManifestAction, McpAction, PokeAction, RepairAction, RescueAction,
-    SkillSurfaceAction, VaultAction, WatcherAction, WikiAction,
+    SkillSurfaceAction, VaultAction, WatcherAction, WikiAction, WorktreeAction,
 };
 use clap::Subcommand;
 use std::path::PathBuf;
@@ -72,6 +72,11 @@ pub enum Commands {
     Clean {
         #[command(subcommand)]
         action: CleanAction,
+    },
+    /// Managed worktree lifecycle: open under ~/.cache/tachi/worktrees, close, list (#484).
+    Worktree {
+        #[command(subcommand)]
+        action: WorktreeAction,
     },
     /// Doctor v2 — extension-aware DB classification (read-only by default)
     Doctor {

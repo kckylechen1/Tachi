@@ -37,17 +37,24 @@ struct WorktreeRecord {
 }
 
 #[derive(Debug, serde::Serialize)]
-struct RegisterReport {
-    action: &'static str,
-    path: String,
-    repo_root: String,
-    branch: String,
-    registry_path: String,
-    marker_path: String,
-    registered: bool,
+pub struct RegisterReport {
+    pub action: &'static str,
+    pub path: String,
+    pub repo_root: String,
+    pub branch: String,
+    pub registry_path: String,
+    pub marker_path: String,
+    pub registered: bool,
 }
 
 pub fn run_wt_register(options: RegisterOptions) -> Result<(), String> {
+    let output = options.output;
+    let report = register_worktree(options)?;
+    emit_register_report(&report, output)
+}
+
+/// Register without printing (used by `wt-open` so the open report stays the single surface).
+pub fn register_worktree(options: RegisterOptions) -> Result<RegisterReport, String> {
     let path = canonicalize_existing(&options.path, "worktree path")?;
     let repo_root = canonicalize_existing(&options.repo_root, "repo root")?;
     if path == repo_root {
@@ -74,7 +81,7 @@ pub fn run_wt_register(options: RegisterOptions) -> Result<(), String> {
     write_registry(&registry_path, &registry)?;
     write_marker(&marker_path, &record)?;
 
-    let report = RegisterReport {
+    Ok(RegisterReport {
         action: "wt-register",
         path: path_string,
         repo_root: repo_root.display().to_string(),
@@ -82,8 +89,44 @@ pub fn run_wt_register(options: RegisterOptions) -> Result<(), String> {
         registry_path: registry_path.display().to_string(),
         marker_path: marker_path.display().to_string(),
         registered: true,
-    };
-    emit_register_report(&report, options.output)
+    })
+}
+
+/// Snapshot of registered managed worktrees (for `tachi worktree list`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ListedWorktree {
+    pub path: String,
+    pub repo_root: String,
+    pub branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispatch_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub path_exists: bool,
+}
+
+pub fn list_registered_worktrees() -> Result<Vec<ListedWorktree>, String> {
+    let registry_path = registry_path()?;
+    let registry = read_registry(&registry_path)?;
+    Ok(registry
+        .worktrees
+        .into_iter()
+        .map(|record| {
+            let path_exists = Path::new(&record.path).exists();
+            ListedWorktree {
+                path: record.path,
+                repo_root: record.repo_root,
+                branch: record.branch,
+                dispatch_id: record.dispatch_id,
+                pr: record.pr,
+                created_at: record.created_at,
+                updated_at: record.updated_at,
+                path_exists,
+            }
+        })
+        .collect())
 }
 
 pub fn registry_contains(worktree_root: &Path) -> bool {

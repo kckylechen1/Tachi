@@ -209,6 +209,8 @@ fn default_roots() -> Vec<PathBuf> {
     }
     roots.push(PathBuf::from("/private/tmp"));
     roots.push(std::env::temp_dir());
+    // Managed worktree root (#484): default open placement + GC scan target.
+    roots.push(crate::wt_open::default_worktrees_root());
     roots.sort();
     roots.dedup();
     roots

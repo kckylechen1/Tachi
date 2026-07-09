@@ -3,6 +3,64 @@ use std::path::PathBuf;
 
 pub const DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS: u64 = 7;
 
+/// Managed worktree lifecycle (#484 disk governor open/close).
+#[derive(Subcommand, Debug, Clone)]
+pub enum WorktreeAction {
+    /// Open a linked git worktree under the managed cache root (not Desktop/repo).
+    Open {
+        /// Primary repository root (main worktree).
+        #[arg(long, value_name = "PATH")]
+        repo: PathBuf,
+        /// Explicit worktree path. Defaults to $TACHI_WORKTREES_ROOT/<repo-slug>/...
+        #[arg(long, value_name = "PATH")]
+        path: Option<PathBuf>,
+        /// Branch to create (or attach if it already exists and is free).
+        #[arg(long)]
+        branch: Option<String>,
+        /// Base ref/SHA for the new branch (default: HEAD of --repo).
+        #[arg(long, value_name = "REF")]
+        base: Option<String>,
+        /// Task / issue / flow id used in generated names.
+        #[arg(long)]
+        task: Option<String>,
+        /// Role label (executor, reviewer, ...).
+        #[arg(long)]
+        role: Option<String>,
+        /// Optional dispatch id stored on the registry record.
+        #[arg(long, value_name = "ID")]
+        dispatch_id: Option<String>,
+        /// Directory leaf name under the managed root.
+        #[arg(long)]
+        name: Option<String>,
+        /// Plan only; do not create the worktree.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Close (remove) a Tachi-managed worktree after safety checks.
+    Close {
+        /// Worktree path to remove.
+        path: PathBuf,
+        /// Actually remove. Without this flag, only prints the plan.
+        #[arg(long, conflicts_with = "dry_run")]
+        force: bool,
+        /// Preview only (default).
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List registered managed worktrees.
+    List {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum CleanAction {
     /// Clean Cargo target artifacts while preserving top-level release binaries.

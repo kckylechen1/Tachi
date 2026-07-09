@@ -3,6 +3,7 @@ mod sweep;
 mod tachi_clean;
 mod target_clean;
 mod wt_clean;
+mod wt_open;
 
 use std::path::PathBuf;
 
@@ -11,6 +12,7 @@ use sweep::{SweepOptions, DEFAULT_SWEEP_MAX_AGE_DAYS};
 use tachi_clean::TachiCleanOptions;
 use target_clean::TargetCleanOptions;
 use wt_clean::{OutputFormat, WtRemoveOptions};
+use wt_open::OpenOptions;
 
 fn main() {
     let code = match run() {
@@ -37,8 +39,10 @@ fn run() -> Result<(), String> {
         "target" | "target-clean" => run_target_clean(args),
         "wt-register" => run_wt_register(args),
         "wt-remove" => run_wt_remove(args),
+        "wt-open" => run_wt_open(args),
+        "wt-list" => run_wt_list(args),
         _ => Err(format!(
-            "unknown command '{command}'. Expected: sweep, tachi, target, wt-register, or wt-remove"
+            "unknown command '{command}'. Expected: sweep, tachi, target, wt-register, wt-remove, wt-open, or wt-list"
         )),
     }
 }
@@ -258,9 +262,149 @@ fn run_wt_remove(args: Vec<String>) -> Result<(), String> {
     wt_clean::run_wt_remove(options)
 }
 
+fn run_wt_open(args: Vec<String>) -> Result<(), String> {
+    let mut dry_run = false;
+    let mut json = false;
+    let mut repo_root: Option<PathBuf> = None;
+    let mut path: Option<PathBuf> = None;
+    let mut branch: Option<String> = None;
+    let mut base: Option<String> = None;
+    let mut task: Option<String> = None;
+    let mut role: Option<String> = None;
+    let mut dispatch_id: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut iter = args.into_iter();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--dry-run" => dry_run = true,
+            "--json" => json = true,
+            "--repo" => {
+                repo_root = Some(PathBuf::from(
+                    iter.next()
+                        .ok_or_else(|| "--repo requires a value".to_string())?,
+                ));
+            }
+            "--path" => {
+                path = Some(PathBuf::from(
+                    iter.next()
+                        .ok_or_else(|| "--path requires a value".to_string())?,
+                ));
+            }
+            "--branch" => {
+                branch = Some(
+                    iter.next()
+                        .ok_or_else(|| "--branch requires a value".to_string())?,
+                );
+            }
+            "--base" => {
+                base = Some(
+                    iter.next()
+                        .ok_or_else(|| "--base requires a value".to_string())?,
+                );
+            }
+            "--task" => {
+                task = Some(
+                    iter.next()
+                        .ok_or_else(|| "--task requires a value".to_string())?,
+                );
+            }
+            "--role" => {
+                role = Some(
+                    iter.next()
+                        .ok_or_else(|| "--role requires a value".to_string())?,
+                );
+            }
+            "--dispatch-id" => {
+                dispatch_id = Some(
+                    iter.next()
+                        .ok_or_else(|| "--dispatch-id requires a value".to_string())?,
+                );
+            }
+            "--name" => {
+                name = Some(
+                    iter.next()
+                        .ok_or_else(|| "--name requires a value".to_string())?,
+                );
+            }
+            "-h" | "--help" => {
+                print_wt_open_help();
+                return Ok(());
+            }
+            _ if arg.starts_with('-') => return Err(format!("unknown option '{arg}'")),
+            _ => return Err(format!("unexpected argument '{arg}'")),
+        }
+    }
+
+    wt_open::run_wt_open(OpenOptions {
+        repo_root: repo_root.ok_or_else(|| "wt-open requires --repo".to_string())?,
+        path,
+        branch,
+        base,
+        task,
+        role,
+        dispatch_id,
+        name,
+        dry_run,
+        output: if json {
+            OutputFormat::Json
+        } else {
+            OutputFormat::Text
+        },
+    })
+}
+
+fn run_wt_list(args: Vec<String>) -> Result<(), String> {
+    let mut json = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            "-h" | "--help" => {
+                print_wt_list_help();
+                return Ok(());
+            }
+            _ if arg.starts_with('-') => return Err(format!("unknown option '{arg}'")),
+            _ => return Err(format!("unexpected argument '{arg}'")),
+        }
+    }
+
+    let listed = registry::list_registered_worktrees()?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&listed)
+                .map_err(|err| format!("serialize list: {err}"))?
+        );
+    } else if listed.is_empty() {
+        println!("no registered Tachi-managed worktrees");
+    } else {
+        println!("tachi-clean wt-list ({} entries)", listed.len());
+        for item in listed {
+            let exists = if item.path_exists { "exists" } else { "missing" };
+            println!(
+                "  [{exists}] {}  branch={}  repo={}",
+                item.path, item.branch, item.repo_root
+            );
+        }
+    }
+    Ok(())
+}
+
 fn print_help() {
     println!(
-        "tachi-clean\n\nUsage:\n  tachi-clean sweep [--root <path>] [--max-age-days <days>] [--dry-run|--force] [--json]\n  tachi-clean tachi [--home <path>] [--dry-run|--force] [--json]\n  tachi-clean target [path] [--dry-run|--force] [--json]\n  tachi-clean wt-register <path> --repo <repo-root> --branch <branch> [--dispatch-id <id>] [--pr <number>] [--json]\n  tachi-clean wt-remove <path> [--dry-run|--force] [--json]\n"
+        "tachi-clean\n\nUsage:\n  tachi-clean sweep [--root <path>] [--max-age-days <days>] [--dry-run|--force] [--json]\n  tachi-clean tachi [--home <path>] [--dry-run|--force] [--json]\n  tachi-clean target [path] [--dry-run|--force] [--json]\n  tachi-clean wt-register <path> --repo <repo-root> --branch <branch> [--dispatch-id <id>] [--pr <number>] [--json]\n  tachi-clean wt-remove <path> [--dry-run|--force] [--json]\n  tachi-clean wt-open --repo <repo-root> [--branch <name>] [--base <ref>] [--task <id>] [--role <name>] [--path <path>] [--dry-run] [--json]\n  tachi-clean wt-list [--json]\n"
+    );
+}
+
+fn print_wt_open_help() {
+    println!(
+        "Open a Tachi-managed git worktree outside Desktop/repo (#484).\n\nUsage:\n  tachi-clean wt-open --repo <repo-root> [--branch <name>] [--base <ref>] [--task <id>] [--role <name>] [--name <leaf>] [--path <path>] [--dispatch-id <id>] [--dry-run] [--json]\n\nDefault path: $TACHI_WORKTREES_ROOT/<repo-slug>/<task>-<role>-<id>\n  or ~/.cache/tachi/worktrees/<repo-slug>/...\nRefuses Desktop, iCloud, and paths inside the primary repo.\n"
+    );
+}
+
+fn print_wt_list_help() {
+    println!(
+        "List registered Tachi-managed worktrees.\n\nUsage:\n  tachi-clean wt-list [--json]\n"
     );
 }
 
