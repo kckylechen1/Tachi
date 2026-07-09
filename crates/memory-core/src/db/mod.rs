@@ -5,14 +5,18 @@ mod daily_pipeline;
 mod doctor_probe;
 mod domain;
 mod event_ledger;
+#[cfg(feature = "admin")]
 pub mod foundry_config;
+#[cfg(feature = "admin")]
 pub mod foundry_jobs;
 mod gc_candidates;
 mod graph;
+#[cfg(feature = "admin")]
 mod hub_db;
 mod memory_crud;
 pub mod migrations;
 mod open;
+#[cfg(feature = "admin")]
 mod pack_db;
 mod recall_cache;
 mod sandbox;
@@ -20,7 +24,9 @@ mod schema;
 mod sqlite_vec;
 mod state;
 mod stats_gc;
+#[cfg(feature = "admin")]
 mod vault_db;
+#[cfg(feature = "admin")]
 mod virtual_capability;
 
 pub use agent_state::{get_agent_known_revisions, update_agent_known_state};
@@ -48,6 +54,7 @@ pub use graph::{
     add_edge, avg_importance, count_same_topic, get_contradiction_count, get_edges,
     get_superseded_ids, graph_expand, remove_edge,
 };
+#[cfg(feature = "admin")]
 pub use hub_db::{
     hub_get, hub_get_active_version_route, hub_list, hub_record_call_outcome, hub_record_feedback,
     hub_search, hub_set_active_version_route, hub_set_enabled, hub_set_review, hub_upsert,
@@ -70,6 +77,7 @@ pub(crate) use open::{
     acquire_startup_lock, configure_connection, open_read_only, open_read_write,
     retry_memory_locked, sqlite_error_is_locked,
 };
+#[cfg(feature = "admin")]
 pub use pack_db::{
     pack_delete, pack_get, pack_list, pack_upsert, projection_list, projection_upsert,
 };
@@ -89,12 +97,14 @@ pub use state::{
     save_derived_with_id, set_state, set_state_if_version, StateRow,
 };
 pub use stats_gc::{archive_stale_memories, gc_tables, stats};
+#[cfg(feature = "admin")]
 pub use vault_db::{
     vault_count_entries, vault_delete_entry, vault_entry_exists, vault_get_config, vault_get_entry,
     vault_get_key_health, vault_get_rotation, vault_insert_audit, vault_list_entries,
     vault_list_entries_by_type, vault_list_key_health, vault_list_rotations, vault_set_config,
     vault_set_rotation, vault_touch_entry, vault_upsert_entry, vault_upsert_key_health,
 };
+#[cfg(feature = "admin")]
 pub use virtual_capability::{vc_list_bindings, vc_upsert_binding};
 
 #[cfg(test)]

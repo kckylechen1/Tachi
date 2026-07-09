@@ -11,6 +11,9 @@ members = [
     "crates/memory-server-prompt-envelope",
     "crates/memory-server-rescue",
     "crates/memory-server-runtime",
+    # Portable kernel facade: memory-core without admin (vault/hub/foundry/pack).
+    # Downstream forks (HyperTachi) should sync this graph, not full memory-server.
+    "crates/portable-kernel",
     "crates/tachi-bootstrap",
     "crates/tachi-dispatch",
     "crates/tachi-foundry",
@@ -21,6 +24,7 @@ members = [
 ]
 default-members = [
     "crates/memory-core",
+    "crates/portable-kernel",
     "crates/memory-server",
     "crates/tachi-bootstrap",
     "crates/tachi-hub",

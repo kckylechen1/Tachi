@@ -1,0 +1,21 @@
+[package]
+name = "portable-kernel"
+version = "1.7.0"
+edition = "2021"
+description = "Portable Tachi memory kernel for downstream forks (HyperTachi / HyperMemory / adapters)"
+license = "AGPL-3.0-only"
+publish = false
+
+# This facade depends on memory-core *without* the admin feature.
+# Operator surfaces (vault secrets, Hub catalog, Foundry job queue, Pack)
+# are intentionally absent so HyperTachi and similar forks can sync one
+# crate graph without pulling Tachi product APIs.
+#
+# Schema DDL still creates admin tables so a portable consumer can open
+# DBs written by full Tachi; those tables simply stay unused.
+[dependencies]
+memory-core = { path = "../memory-core", default-features = false }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = "3"

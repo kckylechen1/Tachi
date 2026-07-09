@@ -10,10 +10,14 @@
 //! contains exactly one `impl MemoryStore { … }` block; Rust merges
 //! them at compile time, so the public API is unchanged.
 //!
+//! **Admin domains** (`hub`, `pack`, `vault`) compile only with the
+//! `admin` feature (default on). Portable builds omit those methods.
+//!
 //! Adding a new domain:
 //!   1. Create `store/<domain>.rs` with `use super::super::*;` then a
 //!      single `impl MemoryStore` block.
-//!   2. `pub mod <domain>;` here.
+//!   2. `pub mod <domain>;` here (gate with `cfg(feature = "admin")`
+//!      if the domain is operator-only).
 //!   3. Implementations may freely access `self.conn`, `self.db_label`,
 //!      etc. — those fields are `pub(crate)`.
 
@@ -28,16 +32,19 @@ pub mod enrichment;
 pub mod events;
 pub mod gc_candidates;
 pub mod graph;
+#[cfg(feature = "admin")]
 pub mod hub;
 pub mod lessons;
 pub mod linking;
 pub mod llm_usage;
 pub mod maintenance;
 pub mod open;
+#[cfg(feature = "admin")]
 pub mod pack;
 pub mod recall_cache;
 pub mod rem;
 pub mod sandbox;
 pub mod state;
 pub mod tasks;
+#[cfg(feature = "admin")]
 pub mod vault;

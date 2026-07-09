@@ -1623,6 +1623,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "portable-kernel"
+version = "1.7.0"
+dependencies = [
+ "memory-core",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -5,6 +5,21 @@ edition = "2021"
 description = "Core memory storage and search engine for OpenClaw/Antigravity"
 license = "AGPL-3.0-only"
 
+# Feature layout (portable kernel vs Tachi admin):
+#
+# - default = ["admin"] keeps today's full Tachi product surface.
+# - --no-default-features (or default-features = false) builds the
+#   *portable kernel only*: store/search/scorer/schema/events/sandbox.
+#   Vault / Hub / Foundry job queue / Pack product APIs are omitted.
+# - Schema DDL still creates admin tables so a portable build can open
+#   DBs written by full Tachi (empty tables are fine).
+#
+# Downstream forks (HyperTachi, HyperMemory) should depend via the
+# `portable-kernel` facade crate, which disables `admin` by default.
+[features]
+default = ["admin"]
+admin = []
+
 [dependencies]
 rusqlite = { workspace = true }
 serde = { workspace = true }
