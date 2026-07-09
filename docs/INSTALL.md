@@ -25,6 +25,10 @@ Current architecture:
 
 ### macOS (Homebrew — Recommended)
 
+Public install is a **prebuilt binary** from the public tap
+(`kckylechen1/homebrew-tachi`). No Rust toolchain is required. Currently
+**Apple Silicon (arm64)** only.
+
 ```bash
 brew tap kckylechen1/tachi && brew install tachi
 ```
