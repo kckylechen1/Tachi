@@ -23,6 +23,24 @@ pub(crate) const WARN_SINGLE_DB_WITH_WORKSPACE_DB: &str =
 pub(crate) const WARN_UNSCOPED_NO_WORKSPACE: &str =
     "unscoped memory session: no project DB bound and no resolvable workspace named project";
 
+/// Stable, greppable prefix for the #925 scope-downgrade warning: a
+/// save/checkpoint asked for one `scope` (e.g. `project`) but landed in a
+/// different effective `db_scope` (e.g. `global`, because the daemon is
+/// single-DB) with no signal in the response. The requested/effective
+/// values are call-specific, so only the prefix is a fixed string — see
+/// `scope_downgrade_warning` for the full message, mirroring how
+/// `WARN_SINGLE_DB_WITH_WORKSPACE_DB` above is a fixed warning id.
+pub(crate) const WARN_SCOPE_DOWNGRADED_PREFIX: &str =
+    "requested scope was not honored on save/checkpoint";
+
+/// Build the loud, stable warning for a save/checkpoint whose requested
+/// `scope` differs from the `db_scope` it actually landed in.
+pub(crate) fn scope_downgrade_warning(requested_scope: &str, effective_db_scope: &str) -> String {
+    format!(
+        "{WARN_SCOPE_DOWNGRADED_PREFIX}: requested scope={requested_scope:?} but saved to db_scope={effective_db_scope:?} — pass project=<name> or restart the daemon with a project DB bound to get the requested scope"
+    )
+}
+
 /// Build the binding receipt for the current server + optional explicit `project=` arg.
 pub(crate) fn library_binding_receipt(
     server: &MemoryServer,

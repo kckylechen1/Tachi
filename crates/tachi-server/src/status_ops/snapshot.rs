@@ -298,7 +298,13 @@ fn collect_entries_for_status(
     let Ok(store) = MemoryStore::open_read_only(path_str) else {
         return;
     };
-    let entries: Vec<MemoryEntry> = match store.list_by_path(path_prefix, limit, false) {
+    // Recency-first: `list_by_path` orders `path ASC, timestamp DESC`, so a
+    // `LIMIT` here can truncate before ever reaching a genuinely newer entry
+    // that happens to sort under a lexicographically later path prefix
+    // (e.g. `/agent/checkpoints/2026-07-09` sorts after
+    // `/agent/checkpoints/2026-05-30`). `list_by_path_recent` orders purely
+    // by `timestamp DESC` so the newest rows always survive the cutoff.
+    let entries: Vec<MemoryEntry> = match store.list_by_path_recent(path_prefix, limit, false) {
         Ok(entries) => entries,
         Err(_) => return,
     };

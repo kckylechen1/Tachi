@@ -35,7 +35,13 @@ pub(crate) fn parse_json_or_empty(raw: String) -> Value {
     })
 }
 
-const SAVE_BASE_RECEIPT_KEYS: &[&str] = &["id", "path", "status", "enrichment"];
+// `scope`/`scope_warning` (#925) are only ever present on the raw response
+// when the effective save/checkpoint scope differed from what was
+// requested — keep them through the compact receipt so a silent downgrade
+// (e.g. `scope=project` falling back to global on a single-DB daemon) stays
+// visible instead of being dropped by this allowlist.
+const SAVE_BASE_RECEIPT_KEYS: &[&str] =
+    &["id", "path", "status", "enrichment", "scope", "scope_warning"];
 /// Per-route identity fields — kept whole when present, never echoed input text.
 const SAVE_VARIANT_ROUTE_KEYS: &[&str] =
     &["wiki_path", "note_file", "note_path", "continuity_event"];
@@ -232,7 +238,15 @@ pub(crate) fn format_save_result(raw: &str, requested_path: Option<&str>) -> Str
         .and_then(Value::as_str)
         .map(|w| format!("\nWarning: {w}"))
         .unwrap_or_default();
-    format!("Saved -> `{path}` (id: `{id}`, status: {status}{enrichment}){warning}")
+    // #925: loud, dedicated signal for a silent scope downgrade — kept
+    // separate from the generic `warning` above so it survives the compact
+    // receipt allowlist and is unambiguous about what changed.
+    let scope_warning = value
+        .get("scope_warning")
+        .and_then(Value::as_str)
+        .map(|w| format!("\nScope warning: {w}"))
+        .unwrap_or_default();
+    format!("Saved -> `{path}` (id: `{id}`, status: {status}{enrichment}){warning}{scope_warning}")
 }
 
 pub(crate) fn format_extract_result(raw: &str) -> String {
