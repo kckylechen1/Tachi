@@ -10,6 +10,7 @@ mod contract;
 mod downstream_sync_surface;
 mod hypermem_gate;
 mod kernel_surface;
+mod library_identity_runtime;
 mod organize;
 mod portable_kernel_split;
 mod release_distribution;
