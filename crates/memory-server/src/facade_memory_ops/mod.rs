@@ -68,12 +68,17 @@ pub(crate) async fn handle_tachi_memory(
                     .into_iter()
                     .map(|(name, rows)| json!({ "name": name, "rows": rows }))
                     .collect::<Vec<_>>();
+                let binding = crate::memory_search_ops::library_binding_receipt(
+                    server,
+                    search_params.project.as_deref(),
+                );
                 return json_string(&json!({
                     "status": "completed",
                     "query": search_params.query,
                     "scope": scope,
                     "scope_remapped": scope_remapped,
                     "sections": sections,
+                    "binding": binding,
                 }));
             }
             crate::facade_search_ops::handle_tachi_search(server, search_params).await

@@ -24,6 +24,14 @@ async fn runtime_info_reports_identity_and_db_routing() {
     assert!(value["databases"]["global"]["path"].as_str().is_some());
     assert_eq!(value["databases"]["project"], serde_json::Value::Null);
     assert_eq!(value["databases"]["single_db_mode"], json!(true));
+    // #898: runtime_info always carries a library binding receipt.
+    assert!(
+        value.get("binding").is_some(),
+        "runtime_info must include binding receipt"
+    );
+    assert_eq!(value["binding"]["single_db_mode"], json!(true));
+    assert!(value["binding"]["global_path"].as_str().is_some());
+    assert!(value["binding"]["warnings"].as_array().is_some());
     assert!(value["process"]["pid"].as_u64().is_some());
     let process_role = value["process"]["process_role"]
         .as_str()
