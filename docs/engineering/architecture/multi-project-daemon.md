@@ -104,3 +104,15 @@ This design assumes the daemon can hold many SQLite write connections (global + 
 
 ## 9. Related
 - #730 (the regression this resolves), #716 (write-proxy law, extended not relaxed), #520 (lock-storm root; protection now covers project DBs), #728 (deploy pipeline — should catch scope-config interactions), #546 (async writer queue — the internal serialization substrate). Aligns with the Tachi-as-agent-OS product thesis (one resident process owning all machine memory).
+
+## 10. Current-state note (2026-07-09)
+
+Phase 1 substrate and most **#746** child bugs have landed. The **executable
+runtime contract** (session binding headers/meta, read/write asymmetry, Plan C
+alias identity, worktree scope, vector predicate agreement, HTTP initialize) is
+documented in
+[`library-identity-runtime.md`](./library-identity-runtime.md).
+
+Remaining under the library-identity track is primarily **#732** client
+migration / reconnect cookbook and parity dogfood — not another redesign of
+this multi-project daemon doc.

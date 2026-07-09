@@ -209,7 +209,10 @@ to an explicit authorization policy.
 
 If the daemon is restarted, HTTP clients may need to reconnect so they receive a
 fresh MCP session id. Stdio clients keep working through the compatibility
-adapter below.
+adapter below. Full read/write identity rules (cross-library reads, unbound C1
+write rejection, Plan C names) are in
+[`docs/engineering/architecture/library-identity-runtime.md`](engineering/architecture/library-identity-runtime.md)
+(#746).
 
 ### With Full Lane Configuration
 
