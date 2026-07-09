@@ -37,12 +37,10 @@ use std::path::Path;
 // every GitHub-related event begins with `github_`.
 
 /// Allow-list of GitHub event kinds that may be appended via
-/// `append_github_event`. Centralised so the `tachi_gh safe_merge` flow,
-/// future webhook bridges, and tests cannot drift.
-//
-// `dead_code` allow: production callers land in the follow-up commit that
-// wires `tachi_gh safe_merge` through this helper. Tests already exercise
-// every branch, and the helper is intentionally stable API surface.
+/// Allowed `kind` values for [`append_github_event`].
+///
+/// Shared by `tachi_gh safe_merge`, ship/handoff/task lifecycle, and tests so
+/// event vocabulary cannot drift.
 pub(crate) const GITHUB_EVENT_KINDS: &[&str] = &[
     "github_issue_created",
     "github_issue_linked",

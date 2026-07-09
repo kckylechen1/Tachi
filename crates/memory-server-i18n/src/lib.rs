@@ -1,7 +1,7 @@
 //! Minimal i18n string lookup (`t()`) with en/zh locales, resolved from the
 //! `TACHI_LOCALE` env var. Extracted from memory-server (#833 slice 2).
 
-#![allow(dead_code, clippy::manual_pattern_char_comparison)]
+#![allow(clippy::manual_pattern_char_comparison)]
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -92,5 +92,32 @@ mod tests {
     fn returns_key_for_unknown_translation() {
         let val = t("nonexistent.key.12345");
         assert_eq!(val, "nonexistent.key.12345");
+    }
+
+    #[test]
+    fn available_locales_includes_en_and_zh() {
+        let locales = available_locales();
+        assert!(locales.contains(&"en"));
+        assert!(locales.contains(&"zh"));
+    }
+
+    #[test]
+    fn known_keys_resolve_for_en() {
+        // Touch every catalog key so locale tables are not "dead" under -D dead_code.
+        for key in [
+            "vault.locked",
+            "vault.not_initialized",
+            "vault.access_denied",
+            "vault.secret_not_found",
+            "db.busy",
+            "db.error",
+            "search.no_results",
+            "dispatch.failed",
+            "config.invalid",
+            "health.degraded",
+        ] {
+            let val = t(key);
+            assert_ne!(val, key, "missing en translation for {key}");
+        }
     }
 }

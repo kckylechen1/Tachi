@@ -74,7 +74,9 @@ pub(super) fn run_intake_action(
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+// Only unit tests in this module call the thin wrapper; production uses
+// `discover_report` / CLI entrypoints directly.
+#[cfg(test)]
 pub(crate) fn discover_candidates(env_home: &Path, cwd: &Path) -> Vec<Candidate> {
     let global_db_path = env_home.join(".tachi").join("global").join("memory.db");
     discover_report(env_home, cwd, &global_db_path, None).candidates

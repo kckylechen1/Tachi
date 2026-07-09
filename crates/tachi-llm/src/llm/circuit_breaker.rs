@@ -113,7 +113,7 @@ impl CircuitBreaker {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn state_name(&self) -> &'static str {
         match *self.inner.state.read().unwrap_or_else(|e| e.into_inner()) {
             BreakerState::Closed => "closed",
@@ -122,6 +122,7 @@ impl CircuitBreaker {
         }
     }
 }
+
 
 #[derive(Clone, Default)]
 pub(crate) struct CircuitBreakerRegistry {
@@ -158,7 +159,8 @@ impl CircuitBreakerRegistry {
         self.get_or_create(key).record_failure();
     }
 
-    #[allow(dead_code)]
+    /// Introspection helper for unit tests / future status surfaces.
+    #[cfg(test)]
     pub(crate) fn snapshot(&self) -> Vec<(String, &'static str)> {
         self.breakers
             .read()
@@ -205,6 +207,15 @@ mod tests {
         }
         assert!(!registry.allow("lane_a"));
         assert!(registry.allow("lane_b"), "lane_b should be unaffected");
+
+        let snap = registry.snapshot();
+        let by_key: std::collections::HashMap<_, _> = snap.into_iter().collect();
+        assert_eq!(by_key.get("lane_a").copied(), Some("open"));
+        // lane_b may be absent until first allow; force create
+        assert!(registry.allow("lane_b"));
+        let snap = registry.snapshot();
+        let by_key: std::collections::HashMap<_, _> = snap.into_iter().collect();
+        assert_eq!(by_key.get("lane_b").copied(), Some("closed"));
     }
 
     #[test]
