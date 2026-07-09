@@ -54,6 +54,23 @@ fn empty_snapshot(dbs: Vec<DbStatus>) -> StatusSnapshot {
         plan_c_split_brain: Vec::new(),
         health_deductions: Vec::new(),
         health_score: 95,
+        disk: empty_disk_status(),
+    }
+}
+
+fn empty_disk_status() -> disk::DiskStatus {
+    let volume = disk::DiskVolumeStatus {
+        label: "test",
+        path: String::new(),
+        free_bytes: None,
+        total_bytes: None,
+        free_percent: None,
+        warning: None,
+        error: Some("not probed in this fixture".to_string()),
+    };
+    disk::DiskStatus {
+        worktrees_root: volume.clone(),
+        shared_target_dir: volume,
     }
 }
 

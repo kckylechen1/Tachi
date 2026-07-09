@@ -520,6 +520,11 @@ async fn render_one(
     }
     println!();
 
+    println!("Disk (#484)");
+    render_disk_volume(&snapshot.disk.worktrees_root);
+    render_disk_volume(&snapshot.disk.shared_target_dir);
+    println!();
+
     if !snapshot.project_warnings.is_empty() {
         println!("Project Warnings");
         for warning in &snapshot.project_warnings {
@@ -559,6 +564,32 @@ async fn render_one(
     );
 
     Ok(())
+}
+
+fn render_disk_volume(volume: &crate::status_ops::disk::DiskVolumeStatus) {
+    if let Some(err) = &volume.error {
+        println!("  [!] {}: {} ({err})", volume.label, volume.path);
+        return;
+    }
+    let marker = if volume.warning.is_some() { "[!]" } else { "[OK]" };
+    let free_gb = volume
+        .free_bytes
+        .map(|b| b as f64 / (1024.0 * 1024.0 * 1024.0));
+    println!(
+        "  {marker} {}: {} — {} free ({})",
+        volume.label,
+        volume.path,
+        free_gb
+            .map(|gb| format!("{gb:.1} GB"))
+            .unwrap_or_else(|| "? GB".to_string()),
+        volume
+            .free_percent
+            .map(|p| format!("{p:.1}%"))
+            .unwrap_or_else(|| "?%".to_string()),
+    );
+    if let Some(warning) = &volume.warning {
+        println!("      {warning}");
+    }
 }
 
 fn render_rotation_group_probes(groups: &[status_health::ProviderRotationGroupProbe]) {

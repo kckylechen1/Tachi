@@ -43,6 +43,11 @@ pub struct OpenReport {
     pub base_sha: String,
     pub managed_root: String,
     pub marker_path: Option<String>,
+    /// Shared `CARGO_TARGET_DIR` written to `<worktree>/.cargo/config.toml`
+    /// (#484 slice 2), when this is a Rust repo and provisioning happened.
+    /// `None` when the worktree is not a Rust repo (no root `Cargo.toml`) or
+    /// provisioning was skipped/failed (see `warnings`).
+    pub cargo_target_dir: Option<String>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -87,6 +92,86 @@ pub fn default_worktrees_root() -> Result<PathBuf, String> {
                 .to_string(),
         ),
     }
+}
+
+/// Env var overriding the shared `cargo` `target-dir` written into every
+/// managed worktree's `.cargo/config.toml` (#484 slice 2).
+pub const SHARED_CARGO_TARGET_DIR_ENV: &str = "TACHI_SHARED_CARGO_TARGET_DIR";
+
+/// Default shared cargo target-dir (`~/.cache/sigil-shared-target`), used
+/// when `TACHI_SHARED_CARGO_TARGET_DIR` is unset. Same fail-closed shape as
+/// [`default_worktrees_root`]: refuses to fall back to the current working
+/// directory when neither the env override nor `HOME`/`USERPROFILE` is set.
+pub fn default_shared_cargo_target_dir() -> Result<PathBuf, String> {
+    if let Some(raw) = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV) {
+        if !raw.is_empty() {
+            return Ok(PathBuf::from(raw));
+        }
+    }
+    match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        Some(home) if !home.is_empty() => {
+            Ok(PathBuf::from(home).join(".cache").join("sigil-shared-target"))
+        }
+        _ => Err(
+            "cannot determine shared cargo target dir: HOME (and USERPROFILE) is unset and \
+             TACHI_SHARED_CARGO_TARGET_DIR is not set"
+                .to_string(),
+        ),
+    }
+}
+
+/// Outcome of attempting to provision a shared `cargo` `target-dir` for a
+/// freshly opened managed worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CargoTargetProvision {
+    /// `.cargo/config.toml` was written pointing at this shared target dir.
+    Written(PathBuf),
+    /// Not a Rust repo (no root `Cargo.toml`) — skipped silently.
+    SkippedNotRustRepo,
+    /// `.cargo/config.toml` already existed — never overwritten.
+    SkippedExisting,
+}
+
+/// Write `<worktree_path>/.cargo/config.toml` with `[build] target-dir =
+/// "<shared>"` so every managed worktree shares one `cargo` target dir
+/// instead of growing its own multi-GB local `target/` (#484 slice 2).
+///
+/// File-based (not env-based) so it survives any child process/lane that
+/// forgets to export `CARGO_TARGET_DIR`. Only applies to Rust repos (a root
+/// `Cargo.toml` must exist in the worktree already, since `git worktree add`
+/// checks out tracked files before this runs) and never overwrites an
+/// existing `.cargo/config.toml`.
+pub fn provision_shared_cargo_target_config(
+    worktree_path: &Path,
+) -> Result<CargoTargetProvision, String> {
+    if !worktree_path.join("Cargo.toml").exists() {
+        return Ok(CargoTargetProvision::SkippedNotRustRepo);
+    }
+    let cargo_dir = worktree_path.join(".cargo");
+    let config_path = cargo_dir.join("config.toml");
+    if config_path.exists() {
+        return Ok(CargoTargetProvision::SkippedExisting);
+    }
+    let target_dir = default_shared_cargo_target_dir()?;
+    std::fs::create_dir_all(&cargo_dir)
+        .map_err(|err| format!("create {}: {err}", cargo_dir.display()))?;
+    let contents = format!(
+        "# Written by tachi wt-open (#484): shared cargo target-dir so managed\n\
+         # worktrees don't each grow their own multi-GB local target/.\n\
+         # Override via {SHARED_CARGO_TARGET_DIR_ENV} at worktree-open time.\n\
+         [build]\n\
+         target-dir = \"{}\"\n",
+        escape_toml_string(&target_dir.display().to_string())
+    );
+    std::fs::write(&config_path, contents)
+        .map_err(|err| format!("write {}: {err}", config_path.display()))?;
+    Ok(CargoTargetProvision::Written(target_dir))
+}
+
+/// Minimal TOML basic-string escaping (backslash + double-quote) — paths on
+/// this platform never legitimately need more than that.
+fn escape_toml_string(raw: &str) -> String {
+    raw.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Stable short slug for a repository path.
@@ -172,6 +257,7 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
         base_sha: base_sha.clone(),
         managed_root: managed_root.display().to_string(),
         marker_path: None,
+        cargo_target_dir: None,
         warnings: Vec::new(),
         errors: Vec::new(),
     };
@@ -274,6 +360,27 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
         return Ok(report);
     }
     report.opened = true;
+
+    // Shared cargo target-dir (#484 slice 2): file-based so it survives any
+    // child process/lane that forgets to export CARGO_TARGET_DIR. Never
+    // fatal — a failure here does not undo the worktree open.
+    match provision_shared_cargo_target_config(&path) {
+        Ok(CargoTargetProvision::Written(dir)) => {
+            report.cargo_target_dir = Some(dir.display().to_string());
+        }
+        Ok(CargoTargetProvision::SkippedNotRustRepo) => {}
+        Ok(CargoTargetProvision::SkippedExisting) => {
+            report.warnings.push(format!(
+                "skipped shared cargo target-dir provisioning: {} already exists",
+                path.join(".cargo").join("config.toml").display()
+            ));
+        }
+        Err(err) => {
+            report.warnings.push(format!(
+                "shared cargo target-dir provisioning failed: {err}"
+            ));
+        }
+    }
 
     // Register marker + global registry so wt-remove / sweep can reclaim later.
     let dispatch_id = options.dispatch_id.or_else(|| options.task.clone());
@@ -569,6 +676,9 @@ pub fn emit_open_report(report: &OpenReport, output: OutputFormat) -> Result<(),
             println!("  managed_root: {}", report.managed_root);
             println!("  opened: {}", report.opened);
             println!("  registered: {}", report.registered);
+            if let Some(dir) = &report.cargo_target_dir {
+                println!("  cargo_target_dir: {dir}");
+            }
             for warning in &report.warnings {
                 println!("  warning: {warning}");
             }
@@ -949,6 +1059,174 @@ mod tests {
             "unexpected error: {err}"
         );
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // --- #484 slice 2: shared cargo target-dir provisioning ---
+
+    #[test]
+    fn provision_writes_config_for_rust_repo() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp("tachi-cargo-provision-rust");
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let target = root.join("shared-target");
+
+        let old = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV);
+        std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, &target);
+
+        let outcome = provision_shared_cargo_target_config(&root).expect("provision ok");
+        match &outcome {
+            CargoTargetProvision::Written(dir) => assert_eq!(dir, &target),
+            other => panic!("expected Written, got {other:?}"),
+        }
+
+        let config_path = root.join(".cargo").join("config.toml");
+        let contents = std::fs::read_to_string(&config_path).expect("config written");
+        assert!(contents.contains("[build]"), "contents: {contents}");
+        assert!(
+            contents.contains(&format!("target-dir = \"{}\"", target.display())),
+            "contents should point at the shared target dir, got: {contents}"
+        );
+
+        match old {
+            Some(v) => std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, v),
+            None => std::env::remove_var(SHARED_CARGO_TARGET_DIR_ENV),
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provision_skips_non_rust_repo_silently() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp("tachi-cargo-provision-non-rust");
+        // No Cargo.toml.
+
+        let outcome = provision_shared_cargo_target_config(&root).expect("provision ok");
+        assert_eq!(outcome, CargoTargetProvision::SkippedNotRustRepo);
+        assert!(
+            !root.join(".cargo").exists(),
+            "non-Rust repo must not get a .cargo dir"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provision_never_overwrites_existing_config() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp("tachi-cargo-provision-existing");
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        let custom = "# hand-written, do not touch\n[build]\ntarget-dir = \"/custom/target\"\n";
+        std::fs::write(root.join(".cargo").join("config.toml"), custom).unwrap();
+
+        let target = root.join("shared-target");
+        let old = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV);
+        std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, &target);
+
+        let outcome = provision_shared_cargo_target_config(&root).expect("provision ok");
+        assert_eq!(outcome, CargoTargetProvision::SkippedExisting);
+        let contents =
+            std::fs::read_to_string(root.join(".cargo").join("config.toml")).unwrap();
+        assert_eq!(contents, custom, "existing config.toml must be untouched");
+
+        match old {
+            Some(v) => std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, v),
+            None => std::env::remove_var(SHARED_CARGO_TARGET_DIR_ENV),
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn open_worktree_provisions_shared_cargo_target_for_rust_repo() {
+        // End-to-end: git worktree add checks out a tracked root Cargo.toml,
+        // so open_worktree must then write .cargo/config.toml pointing at
+        // the shared target dir into the freshly created worktree.
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp("tachi-wt-open-cargo");
+        let home = root.join("home");
+        let cache = root.join("cache-worktrees");
+        let shared_target = root.join("shared-target");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "Cargo.toml"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "add Cargo.toml"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+
+        let old_home = std::env::var_os("HOME");
+        let old_root = std::env::var_os("TACHI_WORKTREES_ROOT");
+        let old_target = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV);
+        std::env::set_var("HOME", &home);
+        std::env::set_var("TACHI_WORKTREES_ROOT", &cache);
+        std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, &shared_target);
+
+        let report = open_worktree(OpenOptions {
+            repo_root: repo.clone(),
+            path: None,
+            branch: Some("tachi/484/executor-cargo".into()),
+            base: Some("HEAD".into()),
+            task: Some("484".into()),
+            role: Some("executor".into()),
+            dispatch_id: Some("dispatch-484-cargo".into()),
+            name: Some("484-executor-cargo".into()),
+            dry_run: false,
+            output: OutputFormat::Json,
+        })
+        .unwrap();
+
+        assert!(report.errors.is_empty(), "open errors: {:?}", report.errors);
+        assert!(report.opened);
+        assert_eq!(
+            report.cargo_target_dir.as_deref(),
+            Some(shared_target.display().to_string().as_str())
+        );
+
+        let path = PathBuf::from(&report.path);
+        let config = path.join(".cargo").join("config.toml");
+        assert!(config.exists(), "expected {} to exist", config.display());
+        let contents = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            contents.contains(&shared_target.display().to_string()),
+            "contents: {contents}"
+        );
+
+        // Cleanup worktree from the temp repo so the test dir can be removed.
+        let _ = Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "worktree",
+                "remove",
+                "--force",
+                path.to_str().unwrap(),
+            ])
+            .status();
+
+        match old_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match old_root {
+            Some(v) => std::env::set_var("TACHI_WORKTREES_ROOT", v),
+            None => std::env::remove_var("TACHI_WORKTREES_ROOT"),
+        }
+        match old_target {
+            Some(v) => std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, v),
+            None => std::env::remove_var(SHARED_CARGO_TARGET_DIR_ENV),
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

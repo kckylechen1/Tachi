@@ -202,6 +202,7 @@ fn collect_snapshot_inner(
         fresh_provider_probe_cache.map(|cache| cache.rotation_groups.as_slice()),
     );
     let health_score = status_health::health_score_from_deductions(&health_deductions);
+    let disk = disk::collect_disk_status();
 
     StatusSnapshot {
         daemon,
@@ -218,6 +219,7 @@ fn collect_snapshot_inner(
         plan_c_split_brain,
         health_deductions,
         health_score,
+        disk,
     }
 }
 
