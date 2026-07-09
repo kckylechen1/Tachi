@@ -27,11 +27,6 @@ mod types;
 
 pub use config::scrub_agent_noise;
 pub use runner::run_daily_batch_distill;
-#[allow(unused_imports)]
-pub use types::DistillBatchReport;
-
-#[allow(unused_imports)]
-pub(crate) use parser::parse_distill_response;
 
 #[cfg(test)]
 use candidates::collect_candidate_groups;
@@ -43,6 +38,9 @@ use config::{
 };
 #[cfg(test)]
 use memory_core::MemoryEntry;
+// Unit tests in `daily_distill/tests` call this via `super::*`.
+#[cfg(test)]
+pub(crate) use parser::parse_distill_response;
 #[cfg(test)]
 use persist::persist_distill_memory;
 #[cfg(test)]

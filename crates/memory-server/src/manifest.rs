@@ -36,16 +36,17 @@ mod render;
 mod schema;
 mod sweep;
 
-#[allow(unused_imports)]
-pub use gc::{gc_manifest, GcReport};
-#[allow(unused_imports)]
-pub use model::{DbEntry, DbRole, Manifest, ManifestGuardError};
+pub use gc::gc_manifest;
+pub use model::{DbEntry, DbRole, Manifest};
 pub use render::render_manifest;
 pub use schema::{
     canonicalize_db_path, classify_db_schema, is_archival_db_path, should_skip_path, SchemaKind,
 };
-#[allow(unused_imports)]
-pub use sweep::{apply_sweep, plan_sweep, SweepAction, SweepReport};
+pub use sweep::{apply_sweep, plan_sweep};
+
+// Unit tests under `manifest/tests` pattern-match guard errors via `super::*`.
+#[cfg(test)]
+pub use model::ManifestGuardError;
 
 #[cfg(test)]
 mod tests;

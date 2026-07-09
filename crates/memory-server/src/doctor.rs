@@ -27,8 +27,10 @@ mod types;
 pub use autofix::auto_fix_safe;
 pub use classify::classify_one;
 pub use render::render_report;
-#[allow(unused_imports)]
-pub use scan::{collect_candidates, default_scan_roots, is_backup_filename, scan, ScanOptions};
+pub use scan::{default_scan_roots, scan, ScanOptions};
+// Unit tests assert on backup filename classification via `super::*`.
+#[cfg(test)]
+pub use scan::is_backup_filename;
 pub use secrets::project_secret_file_warnings;
 pub use types::{
     AutoFixAction, DbClassification, DoctorFinding, DoctorReport, DoctorWarning, JobBreakdown,

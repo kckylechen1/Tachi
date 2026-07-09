@@ -5,12 +5,15 @@ mod migration;
 mod render;
 mod report;
 
-#[allow(unused_imports)]
-pub(crate) use apply::execute_tidy_apply;
 pub(super) use command::run_tidy_command;
-#[allow(unused_imports)]
+
+// Test-only surface: `bootstrap/mod.rs` re-exports these under `#[cfg(test)]`
+// for `crate::bootstrap::*` callers in unit tests.
+#[cfg(test)]
+pub(crate) use apply::execute_tidy_apply;
+#[cfg(test)]
 pub(crate) use migration::{
     build_migration_plan, execute_tidy_migrations, update_manifest_after_migration, MigrationConfig,
 };
-#[allow(unused_imports)]
+#[cfg(test)]
 pub(crate) use report::build_tidy_report;
