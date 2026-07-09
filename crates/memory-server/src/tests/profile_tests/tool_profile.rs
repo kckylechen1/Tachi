@@ -80,3 +80,88 @@ async fn coordinate_profile_exposes_advanced_coordination_facades() {
     assert!(tools.contains("`tachi_shell`"));
     assert!(tools.contains("`tachi_orchestrator`"));
 }
+
+/// #919 CRITICAL — integration RED test: a Delegate worker is on the
+/// `tachi_task` tool-visibility allow-list (F3 lists the tool so it can call
+/// plan/complete/status/...), but the action-level gate must still deny
+/// `action='dispatch'` (recursive-dispatch prevention). This drives the
+/// actual `ServerHandler::call_tool` MCP entry point end-to-end (not just
+/// `facade_action_allowed` directly), so it catches the bug the pre-#919
+/// unit tests could not (they proved tool *visibility*, not that `call_tool`
+/// actually invokes the action gate). Two independent layers now enforce
+/// this (the `call_tool` choke-point gate, and a handler-level re-check in
+/// `task_router::reject_delegate_task_action`, mirroring `tachi_skill`'s
+/// defense in depth) — manually verified during #919: disabling EITHER layer
+/// alone still denies (the other layer catches it); disabling BOTH makes
+/// this test genuinely RED (`is_error` flips to `Some(false)` and the
+/// dispatch actually proceeds).
+#[tokio::test]
+async fn delegate_tachi_task_dispatch_is_denied_end_to_end() {
+    let server = make_server();
+    server.set_tool_profile(Some(
+        tachi_hub::parse_tool_profile("delegate").expect("delegate profile should parse"),
+    ));
+
+    let mut args = serde_json::Map::new();
+    args.insert("action".to_string(), serde_json::json!("dispatch"));
+    args.insert("agent".to_string(), serde_json::json!("claude"));
+    args.insert(
+        "task".to_string(),
+        serde_json::json!("recursive dispatch attempt"),
+    );
+
+    let result = call_tool_via_server(server, "tachi_task", Some(args))
+        .await
+        .expect("denied action should return a tool result, not a transport error");
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "delegate must not be able to dispatch via tachi_task"
+    );
+    let message = result
+        .content
+        .first()
+        .and_then(|content| content.as_text())
+        .map(|text| text.text.as_str())
+        .unwrap_or("");
+    // Either defense layer's wording is acceptable — the point is that some
+    // permission-denial fired, not which specific layer caught it.
+    assert!(
+        message.contains("not allowed") || message.contains("not available"),
+        "expected a permission-denied message, got: {message}"
+    );
+    assert!(
+        message.contains("dispatch"),
+        "denial message should name the denied action, got: {message}"
+    );
+    // Not a "tool not found" — the tool IS visible to delegate; only the
+    // dispatch *action* is denied. Distinguishing these two failure modes is
+    // exactly what the F3 action-level gate (as opposed to tool-level
+    // filtering alone) exists for.
+    assert!(!message.contains("tool not found"));
+}
+
+/// Positive control for the RED test above: the same delegate profile CAN
+/// call a permitted `tachi_task` action end-to-end (the gate isn't just
+/// denying everything).
+#[tokio::test]
+async fn delegate_tachi_task_board_is_allowed_end_to_end() {
+    let server = make_server();
+    server.set_tool_profile(Some(
+        tachi_hub::parse_tool_profile("delegate").expect("delegate profile should parse"),
+    ));
+
+    let mut args = serde_json::Map::new();
+    args.insert("action".to_string(), serde_json::json!("board"));
+
+    let result = call_tool_via_server(server, "tachi_task", Some(args))
+        .await
+        .expect("permitted action should return a tool result");
+
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "delegate should be able to call tachi_task(action='board')"
+    );
+}

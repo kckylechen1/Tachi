@@ -7,14 +7,54 @@
 
 use super::types::{default_tool_profile, ToolBundle, ToolProfile};
 
+/// Facades with a per-action bundle policy (`facade_action_required_bundle`
+/// classifies at least one of their actions). A tool NOT in this list has no
+/// action concept as far as the gate is concerned — it is governed by
+/// tool-level visibility only, and an empty/unclassified action on it is
+/// harmless. A tool IN this list is a genuine authorization surface: an
+/// action the gate can't classify (missing, or a bundle-map miss) must be
+/// denied by default rather than silently passed through — that is the
+/// fail-open bug this function exists to close (#919).
+fn is_gated_facade(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "tachi_task"
+            | "tachi_memory"
+            | "tachi_skill"
+            | "tachi_wiki"
+            | "tachi_verify"
+            | "tachi_gh"
+            | "tachi_event"
+    )
+}
+
+/// A profile that already allows every bundle (standard/admin) gains nothing
+/// from an unclassified-action fallback: it would have allowed the action
+/// anyway once classified, so letting the call through to the handler (for a
+/// precise invalid-action error instead of an opaque permission error) is
+/// pure UX and not a privilege escalation. Any profile that does NOT have
+/// full bundle access must not be auto-granted an action it can't classify.
+fn profile_has_full_bundle_access(profile: ToolProfile) -> bool {
+    profile.allows(ToolBundle::Observe)
+        && profile.allows(ToolBundle::Remember)
+        && profile.allows(ToolBundle::Coordinate)
+        && profile.allows(ToolBundle::Operate)
+}
+
 /// Whether `tool_name` + `action` is allowed under `profile`.
 ///
 /// - Admin: always allowed.
-/// - Missing/empty `action`: allowed (non-facade tools, or tool-level gate only).
-/// - Delegate: curated per-facade action allow-list (prevents recursive dispatch).
+/// - Delegate: curated per-facade action allow-list (prevents recursive
+///   dispatch); missing/unknown actions on a delegate-gated facade are
+///   denied — a delegate tool must explicitly enumerate its allowed actions.
 /// - Other profiles: action must be covered by a bundle the profile allows.
-/// - Unknown actions on known facades: fail open so the facade handler can
-///   return a precise invalid-action error (profile is not a schema oracle).
+///   Missing/unknown actions on a known (gated) facade are denied UNLESS the
+///   profile already has full bundle access (standard/admin), in which case
+///   the call passes through so the facade handler can return a precise
+///   invalid-action error — the gate is not a schema oracle, but it must
+///   default-DENY for any profile it actually restricts (#919).
+/// - Tools with no action policy at all (no action concept) stay tool-level
+///   only, unaffected by any of the above.
 pub fn facade_action_allowed(
     tool_name: &str,
     action: Option<&str>,
@@ -25,25 +65,36 @@ pub fn facade_action_allowed(
         return true;
     }
 
-    let Some(action) = action.map(str::trim).filter(|a| !a.is_empty()) else {
-        return true;
-    };
-    let action = action.to_ascii_lowercase();
+    let action = action.map(str::trim).filter(|a| !a.is_empty());
 
     if profile.uses_delegate_allow_list() {
-        return delegate_facade_action_allowed(tool_name, &action);
+        // Delegate is the narrowest profile: an empty/missing action on a
+        // gated facade must be explicitly enumerated, same as a real action.
+        // `delegate_facade_action_allowed` already denies by default for any
+        // action string it doesn't recognize (including "").
+        return delegate_facade_action_allowed(
+            tool_name,
+            action.unwrap_or("").to_ascii_lowercase().as_str(),
+        );
     }
+
+    let Some(action) = action else {
+        return !is_gated_facade(tool_name) || profile_has_full_bundle_access(profile);
+    };
+    let action = action.to_ascii_lowercase();
 
     if let Some(bundle) = facade_action_required_bundle(tool_name, &action) {
         return profile.allows(bundle);
     }
 
-    true
+    !is_gated_facade(tool_name) || profile_has_full_bundle_access(profile)
 }
 
 /// Curated worker surface: facades that are on `DELEGATE_MINIMAL_TOOL_PATTERNS`
-/// only expose safe actions. Unknown tools on the delegate list (no action map)
-/// stay tool-level only.
+/// only expose safe actions. Tools on the delegate list with no action concept
+/// (no action-gated bundle) are explicitly enumerated as always-allowed so a
+/// newly-added gated facade can never silently fall through the default; any
+/// tool/action pair not recognized here is denied.
 fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
     match tool_name {
         "tachi_task" => matches!(
@@ -65,9 +116,13 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
         ),
         "tachi_skill" => matches!(action, "discover" | "run" | "bundle"),
         "tachi_event" => matches!(action, "emit" | "query" | "metrics" | "context" | "a2a"),
-        // Non-facade tools on the delegate list (tachi_complete, run_skill, …)
-        // have no action map — tool visibility is enough.
-        _ => true,
+        // Non-facade tools on the delegate list (no action concept): tool
+        // visibility is enough, regardless of what's in the `action` arg.
+        "tachi_tools" | "runtime_info" | "tachi_web_search" | "tachi_browse" | "tachi_unstick"
+        | "tachi_complete" | "run_skill" => true,
+        // Anything else — a tool not on the delegate allow-list at all, or a
+        // gated facade we forgot to enumerate above — is denied by default.
+        _ => false,
     }
 }
 
@@ -250,22 +305,129 @@ mod tests {
     }
 
     #[test]
-    fn f3_missing_action_is_not_profile_gated() {
+    fn f3_missing_action_on_non_gated_tool_is_not_profile_gated() {
+        // tachi_complete has no action concept; tool-level visibility is enough.
         assert!(facade_action_allowed(
             "tachi_complete",
             None,
             Some(ToolProfile::delegate())
         ));
         assert!(facade_action_allowed(
-            "tachi_task",
-            Some(""),
+            "tachi_complete",
+            None,
+            Some(ToolProfile::observe())
+        ));
+    }
+
+    /// #919 CRITICAL: an empty/missing action on a *gated* facade must be
+    /// denied by default for any profile the gate actually restricts — never
+    /// silently allowed. This is the fail-open bug this module exists to close.
+    #[test]
+    fn f919_missing_action_on_gated_facade_is_denied_for_restricted_profiles() {
+        for profile in [
+            ToolProfile::delegate(),
+            ToolProfile::observe(),
+            ToolProfile::remember(),
+            ToolProfile::coordinate(),
+            ToolProfile::operate(),
+        ] {
+            assert!(
+                !facade_action_allowed("tachi_task", Some(""), Some(profile)),
+                "empty action on tachi_task must be denied for {}",
+                profile.as_str()
+            );
+            assert!(
+                !facade_action_allowed("tachi_task", Some("  "), Some(profile)),
+                "whitespace-only action on tachi_task must be denied for {}",
+                profile.as_str()
+            );
+            assert!(
+                !facade_action_allowed("tachi_task", None, Some(profile)),
+                "None action on tachi_task must be denied for {}",
+                profile.as_str()
+            );
+        }
+    }
+
+    /// A profile with full bundle access (standard/admin) is not made *more*
+    /// permissive by this gate; letting an unclassified action reach the
+    /// handler there is a UX choice (precise invalid-action error), not a
+    /// privilege escalation, since the profile already allows every bundle.
+    #[test]
+    fn f919_missing_or_unknown_action_passes_through_for_full_bundle_profiles() {
+        for profile in [ToolProfile::standard(), ToolProfile::admin()] {
+            assert!(facade_action_allowed("tachi_task", None, Some(profile)));
+            assert!(facade_action_allowed("tachi_task", Some(""), Some(profile)));
+            assert!(facade_action_allowed(
+                "tachi_task",
+                Some("not_a_real_action"),
+                Some(profile)
+            ));
+        }
+    }
+
+    /// #919 CRITICAL: known facade + unknown/typo action must be denied for
+    /// restricted profiles (was fail-open: any unmapped action returned `true`
+    /// unconditionally regardless of profile).
+    #[test]
+    fn f919_unknown_action_on_known_facade_is_denied_for_restricted_profiles() {
+        for profile in [
+            ToolProfile::observe(),
+            ToolProfile::remember(),
+            ToolProfile::coordinate(),
+            ToolProfile::operate(),
+        ] {
+            assert!(!facade_action_allowed(
+                "tachi_task",
+                Some("not_a_real_action"),
+                Some(profile)
+            ));
+            assert!(!facade_action_allowed(
+                "tachi_memory",
+                Some("not_a_real_action"),
+                Some(profile)
+            ));
+        }
+    }
+
+    /// #919 CRITICAL: a delegate-list tool that has no explicit action arm
+    /// (not one of the enumerated facades, and not one of the enumerated
+    /// no-action-concept tools) must be denied, not silently granted every
+    /// action — closes the `_ => true` catch-all that used to grant ALL
+    /// actions on any tool the delegate match didn't recognize.
+    #[test]
+    fn f919_delegate_unrecognized_tool_action_pair_is_denied() {
+        assert!(!facade_action_allowed(
+            "tachi_wiki",
+            Some("write"),
             Some(ToolProfile::delegate())
         ));
-        assert!(facade_action_allowed(
-            "tachi_task",
-            Some("  "),
+        assert!(!facade_action_allowed(
+            "some_future_gated_tool",
+            Some("anything"),
             Some(ToolProfile::delegate())
         ));
+    }
+
+    /// Unrestricted tools on the delegate allow-list keep working regardless
+    /// of what's in the (irrelevant) action arg — this is the "no action
+    /// concept" carve-out, distinct from a real gated facade with an
+    /// unrecognized action.
+    #[test]
+    fn f919_delegate_no_action_concept_tools_stay_allowed() {
+        let profile = Some(ToolProfile::delegate());
+        for tool in [
+            "tachi_tools",
+            "runtime_info",
+            "tachi_web_search",
+            "tachi_browse",
+            "tachi_unstick",
+            "tachi_complete",
+            "run_skill",
+        ] {
+            assert!(facade_action_allowed(tool, None, profile));
+            assert!(facade_action_allowed(tool, Some("whatever"), profile));
+        }
     }
 
     #[test]

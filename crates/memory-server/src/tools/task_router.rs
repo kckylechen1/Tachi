@@ -5,10 +5,17 @@ pub(super) async fn handle_tachi_task_facade(
     server: &MemoryServer,
     params: TachiTaskParams,
 ) -> Result<String, String> {
-    // F4: typed action enum; match on wire string for stable arm labels.
+    // F4 (#913): typed action enum. `action` (wire string) is kept for arm
+    // labels/response formatting; the dispatch below matches on
+    // `params.action` (the enum) directly and exhaustively — no `_ =>`
+    // catch-all — so a new `TachiTaskAction` variant fails to COMPILE here
+    // until it is explicitly routed, instead of silently round-tripping
+    // through an "Invalid action" string match a new variant could slip past
+    // (#919 concern).
     let action = params.action.as_str().to_string();
-    let raw = match action.as_str() {
-        "plan" => {
+    reject_delegate_task_action(server, &action)?;
+    let raw = match params.action {
+        TachiTaskAction::Plan => {
             let task = params
                 .task
                 .clone()
@@ -19,14 +26,14 @@ pub(super) async fn handle_tachi_task_facade(
                 project: params.project.clone(),
                 path_prefix: params.path_prefix.clone(),
                 domain: params.domain.clone(),
-                top_k: crate::clamp_facade_top_k(
-                    params.top_k.unwrap_or(6),
-                ),
+                top_k: crate::clamp_facade_top_k(params.top_k.unwrap_or(6)),
             };
             return handle_tachi_task_brief(server, brief_params).await;
         }
-        "briefing" | "doc_index" => return handle_tachi_feature_briefing(server, &params).await,
-        "dispatch" => {
+        TachiTaskAction::Briefing | TachiTaskAction::DocIndex => {
+            return handle_tachi_feature_briefing(server, &params).await
+        }
+        TachiTaskAction::Dispatch => {
             crate::task_lifecycle::guard_issue_flow_dispatch(&params)?;
             if params.agent.is_none() && params.profile.is_none() {
                 return Err("agent or profile is required when action='dispatch'".to_string());
@@ -67,7 +74,7 @@ pub(super) async fn handle_tachi_task_facade(
             };
             crate::dispatch_ops::handle_tachi_dispatch(server, dispatch_params).await
         }
-        "complete" => {
+        TachiTaskAction::Complete => {
             let dispatch_defaults = params
                 .dispatch_id
                 .as_deref()
@@ -141,7 +148,7 @@ pub(super) async fn handle_tachi_task_facade(
             };
             crate::complete_ops::handle_tachi_complete(server, complete_params).await
         }
-        "board" => {
+        TachiTaskAction::Board => {
             let board_params = TachiBoardParams {
                 state_filter: params.state_filter.clone(),
                 limit: params.limit,
@@ -150,21 +157,27 @@ pub(super) async fn handle_tachi_task_facade(
             };
             crate::dispatch_ops::handle_tachi_board(server, board_params).await
         }
-        "status" => handle_tachi_task_status(server, &params).await,
-        "cancel" => handle_tachi_task_cancel(server, &params).await,
-        "wait" => handle_tachi_task_wait(server, &params).await,
-        "profiles" | "profile" | "card" => serde_json::to_string(
-            &crate::dispatch_profile::dispatch_profiles_json_for_server(server)?,
-        )
-        .map_err(|e| format!("serialize dispatch profiles: {e}")),
-        "intake" => crate::task_lifecycle::handle_task_intake(server, &params).await,
-        "link_pr" => Ok(with_gh_lifecycle_deprecation(
+        TachiTaskAction::Status => handle_tachi_task_status(server, &params).await,
+        TachiTaskAction::Cancel => handle_tachi_task_cancel(server, &params).await,
+        TachiTaskAction::Wait => handle_tachi_task_wait(server, &params).await,
+        TachiTaskAction::Profiles | TachiTaskAction::Profile | TachiTaskAction::Card => {
+            serde_json::to_string(&crate::dispatch_profile::dispatch_profiles_json_for_server(
+                server,
+            )?)
+            .map_err(|e| format!("serialize dispatch profiles: {e}"))
+        }
+        TachiTaskAction::Intake => crate::task_lifecycle::handle_task_intake(server, &params).await,
+        TachiTaskAction::LinkPr => Ok(with_gh_lifecycle_deprecation(
             "link_pr",
             crate::task_lifecycle::handle_task_link_pr(server, &params).await?,
         )),
-        "cycle_status" => crate::task_lifecycle::handle_task_cycle_status(server, &params).await,
-        "cycle_plan" => crate::task_lifecycle::handle_task_cycle_plan(server, &params).await,
-        "recommend" => {
+        TachiTaskAction::CycleStatus => {
+            crate::task_lifecycle::handle_task_cycle_status(server, &params).await
+        }
+        TachiTaskAction::CyclePlan => {
+            crate::task_lifecycle::handle_task_cycle_plan(server, &params).await
+        }
+        TachiTaskAction::Recommend => {
             let task = params
                 .task
                 .clone()
@@ -179,7 +192,7 @@ pub(super) async fn handle_tachi_task_facade(
                 &file_paths,
             )
         }
-        "route_simulate" => {
+        TachiTaskAction::RouteSimulate => {
             let mut file_paths = params.doc_paths.clone();
             file_paths.extend(params.spec_paths.clone());
             crate::dispatch_profile::handle_route_simulation(
@@ -190,12 +203,12 @@ pub(super) async fn handle_tachi_task_facade(
                 &file_paths,
             )
         }
-        "proposals" => crate::dispatch_profile::handle_route_policy_proposals(
+        TachiTaskAction::Proposals => crate::dispatch_profile::handle_route_policy_proposals(
             server,
             params.limit.unwrap_or(500),
             params.state_filter.as_deref(),
         ),
-        "review_proposal" => {
+        TachiTaskAction::ReviewProposal => {
             let proposal_id = params.proposal_id.as_deref().ok_or_else(|| {
                 "proposal_id is required when action='review_proposal'".to_string()
             })?;
@@ -209,17 +222,13 @@ pub(super) async fn handle_tachi_task_facade(
                 params.notes.as_deref(),
             )
         }
-        "apply_proposals" => {
+        TachiTaskAction::ApplyProposals => {
             let proposal_id = params.proposal_id.as_deref().ok_or_else(|| {
                 "proposal_id is required when action='apply_proposals'".to_string()
             })?;
-            crate::dispatch_profile::handle_route_policy_apply(
-                server,
-                proposal_id,
-                params.confirm,
-            )
+            crate::dispatch_profile::handle_route_policy_apply(server, proposal_id, params.confirm)
         }
-        "merge" => {
+        TachiTaskAction::Merge => {
             if params.pr_ref.is_some() || params.issue_ref.is_some() {
                 return Err(
                     "tachi_task(action='merge') only merges local dispatched worktrees. Use tachi_gh(action='safe_merge', repo=..., number=...) for GitHub PR gates or PR merges."
@@ -239,23 +248,23 @@ pub(super) async fn handle_tachi_task_facade(
             };
             tachi_merge_ops::handle_approve_merge(merge_params).await
         }
-        "pr_status" => {
+        TachiTaskAction::PrStatus => {
             let gh_params = build_task_pr_status_gh_params(&params)?;
             Ok(with_gh_lifecycle_deprecation(
                 "pr_status",
                 crate::gh_ops::handle_tachi_gh(server, gh_params).await?,
             ))
         }
-        "pr_handoff" => Ok(with_gh_lifecycle_deprecation(
+        TachiTaskAction::PrHandoff => Ok(with_gh_lifecycle_deprecation(
             "pr_handoff",
             crate::task_lifecycle::handle_task_pr_handoff(&params)?,
         )),
-        "release_note" => Ok(with_gh_lifecycle_deprecation(
+        TachiTaskAction::ReleaseNote => Ok(with_gh_lifecycle_deprecation(
             "release_note",
             crate::task_lifecycle::handle_task_release_note(server, &params).await?,
         )),
-        "ux_matrix" => crate::task_lifecycle::handle_task_ux_matrix(&params),
-        "build_references" | "close_loop" => {
+        TachiTaskAction::UxMatrix => crate::task_lifecycle::handle_task_ux_matrix(&params),
+        TachiTaskAction::BuildReferences | TachiTaskAction::CloseLoop => {
             let workflow_params = TachiWorkflowParams {
                 action: action.clone(),
                 issue_ref: params.issue_ref.clone(),
@@ -291,11 +300,10 @@ pub(super) async fn handle_tachi_task_facade(
                 }
             }
             Ok(result)
-        }
-        _ => Err(format!(
-            "Invalid action '{}'. Primary task actions: briefing/doc_index/plan/dispatch/complete/status/cancel/board/wait/profiles/profile/card/recommend/route_simulate/proposals/review_proposal/apply_proposals/intake/cycle_status/cycle_plan/ux_matrix/build_references/close_loop/merge. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is accepted for compatibility — prefer tachi_gh.",
-            params.action
-        )),
+        } // No `_ =>` catch-all: `TachiTaskAction` is exhaustively matched
+          // above (#919 concern) — a new variant fails to compile here until
+          // it is explicitly routed, instead of silently returning "Invalid
+          // action" for a value that already deserialized successfully.
     }?;
     if action == "complete" && crate::facade_memory_ops::wants_full_format(params.format.as_deref())
     {
@@ -309,6 +317,21 @@ pub(super) async fn handle_tachi_task_facade(
     )
 }
 
+/// Defense-in-depth for the task facade; primary gate is F3
+/// `facade_action_allowed` in `call_tool` (covers the MCP path). Direct
+/// internal calls to `handle_tachi_task_facade` still hit this — same
+/// pattern as `skill_facade::reject_delegate_skill_action` (#919 concern:
+/// `tachi_task` previously forwarded straight to the router with no
+/// handler-level re-check).
+fn reject_delegate_task_action(server: &MemoryServer, action: &str) -> Result<(), String> {
+    if !tachi_hub::facade_action_allowed("tachi_task", Some(action), server.active_tool_profile()) {
+        return Err(format!(
+            "tachi_task(action='{action}') is not available to the active tool profile; delegate workers may use 'plan', 'complete', 'status', 'board', 'wait', 'briefing', or 'doc_index'."
+        ));
+    }
+    Ok(())
+}
+
 /// F2 (#495/#913): keep compat execution on `tachi_task` but mark GH lifecycle
 /// as non-primary. Canonical surface is `tachi_gh(action=...)`.
 fn with_gh_lifecycle_deprecation(action: &str, body: String) -> String {
@@ -318,14 +341,8 @@ fn with_gh_lifecycle_deprecation(action: &str, body: String) -> String {
     if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&body) {
         if let Some(obj) = value.as_object_mut() {
             obj.insert("deprecated_surface".to_string(), serde_json::json!(true));
-            obj.insert(
-                "canonical_tool".to_string(),
-                serde_json::json!("tachi_gh"),
-            );
-            obj.insert(
-                "deprecation_notice".to_string(),
-                serde_json::json!(notice),
-            );
+            obj.insert("canonical_tool".to_string(), serde_json::json!("tachi_gh"));
+            obj.insert("deprecation_notice".to_string(), serde_json::json!(notice));
             if let Ok(serialized) = serde_json::to_string(&value) {
                 return serialized;
             }

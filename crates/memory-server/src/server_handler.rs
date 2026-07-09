@@ -124,6 +124,64 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
     tool.annotations = Some(annotations);
 }
 
+/// #919 CONCERN: the `tachi_task` MCP schema advertises every primary action
+/// (including `dispatch`/`recommend`/`merge`) regardless of profile, even
+/// though the F3 action-policy gate (`facade_action_allowed`) denies those to
+/// a delegate worker at call time. Advertising a capability the gate then
+/// denies is an unnecessary info-leak/confusion surface, so for a delegate
+/// session intersect the advertised `action` enum with what the SAME gate
+/// (single source of truth — no separate hardcoded list to drift) actually
+/// allows. Read-only: only narrows the schema, never widens it beyond what
+/// `TACHI_TASK_PRIMARY_ACTIONS` already declares.
+fn narrow_gated_action_schemas(
+    tools: &mut [rmcp::model::Tool],
+    profile: Option<tachi_hub::ToolProfile>,
+) {
+    let profile = profile.unwrap_or_else(tachi_hub::default_tool_profile);
+    if profile.as_str() != "delegate" {
+        return;
+    }
+    for tool in tools.iter_mut() {
+        if tool.name.as_ref() != "tachi_task" {
+            continue;
+        }
+        let allowed: Vec<&str> = memory_server_params::TACHI_TASK_PRIMARY_ACTIONS
+            .iter()
+            .copied()
+            .filter(|action| {
+                tachi_hub::facade_action_allowed("tachi_task", Some(action), Some(profile))
+            })
+            .collect();
+        narrow_action_enum_property(tool, &allowed);
+    }
+}
+
+/// Rewrite the `properties.action.enum` array of a tool's input schema to
+/// `allowed`, if that property/shape is present. No-op for tools whose
+/// schema doesn't have the expected `{properties: {action: {enum: [...]}}}`
+/// shape (defensive — a schema change elsewhere should never panic list_tools).
+fn narrow_action_enum_property(tool: &mut rmcp::model::Tool, allowed: &[&str]) {
+    let mut schema = (*tool.input_schema).clone();
+    let Some(action_prop) = schema
+        .get_mut("properties")
+        .and_then(|p| p.as_object_mut())
+        .and_then(|props| props.get_mut("action"))
+        .and_then(|a| a.as_object_mut())
+    else {
+        return;
+    };
+    action_prop.insert(
+        "enum".to_string(),
+        serde_json::Value::Array(
+            allowed
+                .iter()
+                .map(|a| serde_json::Value::String((*a).to_string()))
+                .collect(),
+        ),
+    );
+    tool.input_schema = std::sync::Arc::new(schema);
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct HttpSessionIdentity {
     profile: Option<String>,
@@ -302,6 +360,7 @@ impl ServerHandler for MemoryServer {
                 self.active_tool_profile(),
                 env_patterns.as_deref(),
             );
+            narrow_gated_action_schemas(&mut tools, self.active_tool_profile());
             for tool in &mut tools {
                 annotate_tool(tool);
             }
@@ -348,7 +407,11 @@ impl ServerHandler for MemoryServer {
                     .map(|p| p.as_str())
                     .unwrap_or_else(|| "standard".to_string());
                 let action_label = action_arg.unwrap_or("");
-                return Ok(tool_action_denied_result(name, action_label, &profile_label));
+                return Ok(tool_action_denied_result(
+                    name,
+                    action_label,
+                    &profile_label,
+                ));
             }
 
             let bound_project = self.session_project();
