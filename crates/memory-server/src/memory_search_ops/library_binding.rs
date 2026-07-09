@@ -5,6 +5,16 @@
 //! `<repo>/.tachi/memory.db`. This module reports **which libraries a call
 //! actually addresses** and emits loud, stable warnings when that posture is
 //! unsafe for coding sessions.
+//!
+//! ## Scope (in / out)
+//!
+//! **In scope:** JSON `tachi_memory` search responses, briefing (JSON +
+//! markdown), and `runtime_info` — the surfaces agents use to decide "which
+//! library am I talking to?".
+//!
+//! **Out of scope for binding receipts:** `tachi_search` markdown rendering and
+//! the standalone search CLI. Those remain presentation-only; do not expand
+//! receipts there without a separate campaign leaf.
 
 use crate::MemoryServer;
 use serde_json::{json, Value};
@@ -57,14 +67,6 @@ pub(crate) fn library_binding_receipt(
         if !workspace_local_db_exists {
             warnings.push(WARN_UNSCOPED_NO_WORKSPACE.to_string());
         }
-    }
-    if let (Some(alias), Some(explicit_name)) = (
-        workspace_plan_c_alias.as_deref(),
-        explicit.as_deref().or(session_project.as_deref()),
-    ) {
-        // Soft hint only: explicit name that is neither the plan-c alias nor a
-        // known symlink target can still be a deliberate named library.
-        let _ = (alias, explicit_name);
     }
 
     let resolved_named_path = effective_named_project.as_ref().and_then(|name| {
@@ -141,18 +143,40 @@ mod tests {
     use memory_core::MemoryStore;
     use serde_json::json;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
 
     fn workspace_local_db_for_root(root: &Path) -> PathBuf {
         root.join(".tachi").join("memory.db")
     }
 
-    /// Serialise env-mutating tests — `TACHI_PROJECT_ROOT` is process-global.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+    /// Restore process env on drop even if a later assert panics.
+    /// Callers must hold [`crate::utils::global_test_lock`] for the guard's lifetime.
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: tests that use this helper hold global_test_lock.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: tests that use this helper hold global_test_lock.
+            unsafe {
+                if let Some(value) = self.original.as_ref() {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
     }
 
     #[test]
@@ -191,7 +215,10 @@ mod tests {
     /// MUST warn. Project-bound process MUST NOT emit that warning.
     #[test]
     fn single_db_mode_warns_when_workspace_local_db_exists_project_bound_does_not() {
-        let _guard = env_lock();
+        // Must use the crate-wide lock — a private Mutex races other env-mutating tests.
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let workspace = tmp.path().join("workspace-repo");
         std::fs::create_dir_all(workspace.join(".git")).expect("git dir");
@@ -203,7 +230,8 @@ mod tests {
                 .expect("open workspace local db");
         }
 
-        std::env::set_var("TACHI_PROJECT_ROOT", &workspace);
+        // Drop-safe restore of TACHI_PROJECT_ROOT even if asserts panic.
+        let _project_root = EnvGuard::set_path("TACHI_PROJECT_ROOT", &workspace);
 
         let global_db = tmp.path().join("global-memory.db");
         {
@@ -239,7 +267,5 @@ mod tests {
             !receipt_has_single_db_workspace_warning(&dual_receipt),
             "project-bound must not emit single_db workspace warning; receipt={dual_receipt}"
         );
-
-        std::env::remove_var("TACHI_PROJECT_ROOT");
     }
 }
