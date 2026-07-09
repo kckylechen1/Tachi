@@ -88,25 +88,28 @@ Coverage **display** and embed **selection** share one durable-row predicate
 (recall-cache exclusion by default). Status “missing vectors” and
 `backfill-vectors` / sweep selection must not disagree on basis.
 
-## 7. HTTP direct-connect (#732) — landed vs open
+## 7. HTTP direct-connect (#732)
 
-### Landed (usable today)
+Full cookbook: [`http-direct-connect.md`](./http-direct-connect.md).
+
+### Landed
 
 - Streamable HTTP MCP on loopback (`/mcp`, typically port 6919).
-- Per-session identity at `initialize` (headers + meta) → `session_project` /
-  profile on `MemoryServer` clone.
-- Same enforce + C1 guards as stdio path (`HTTP direct-connect` transport label).
+- Per-session identity at `initialize` (**headers and/or meta**) →
+  `session_project` / profile on `MemoryServer` clone.
+- Same enforce + C1 guards as stdio (`HTTP direct-connect` transport label).
 - Profile `admin` refused over HTTP until #495 authorization policy exists.
-- CLI client can talk HTTP with project header forwarding.
+- `/health` advertises `bind`, `auth_posture=loopback-trust-v1`, reconnect hints.
+- CLI client forwards `X-Tachi-Project` when needed.
+- CI goldens: header bind, meta bind, admin reject, unbound C1 write, bound
+  cross-project write reject, global+project save landing.
 
-### Still open (keep #732 open)
+### Remaining (optional / other issues)
 
-| Gap | Notes |
+| Gap | Owner |
 |---|---|
-| Client migration cookbook | Claude Code `--transport http` + header recipe as first-class INSTALL section with ps proof (zero extra tachi procs) |
-| Reconnect / restart window | Document daemon restart → client `-32000` reconnect; keep restart window small |
-| Full parity dogfood | Automated parity suite: same tool list + save/search landing DB for HTTP vs stdio session |
-| Auth of header claims | #495 multi-tenant; not required for single-user loopback |
+| Multi-tenant ACL of header claims | **#495** |
+| Live workstation dogfood (`pgrep` inventory with Claude Code HTTP) | ops note in cookbook — not a code gate |
 
 ## 8. Discrimination tests (where they live)
 

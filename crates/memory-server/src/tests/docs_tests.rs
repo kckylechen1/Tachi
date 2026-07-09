@@ -8,6 +8,7 @@ mod component_governance;
 mod conflicts;
 mod contract;
 mod downstream_sync_surface;
+mod http_direct_connect;
 mod hypermem_gate;
 mod kernel_surface;
 mod library_identity_runtime;

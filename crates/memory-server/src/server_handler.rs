@@ -113,7 +113,7 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
     tool.annotations = Some(annotations);
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct HttpSessionIdentity {
     profile: Option<String>,
     client: Option<String>,
@@ -149,15 +149,7 @@ fn http_session_identity(
     request: &InitializeRequestParams,
     context: &RequestContext<RoleServer>,
 ) -> HttpSessionIdentity {
-    let mut identity = HttpSessionIdentity::default();
-    if let Some(meta) = request.meta.as_ref() {
-        identity.profile = meta_string(meta, crate::session_identity::META_PROFILE)
-            .or_else(|| meta_string(meta, "tachi.profile"));
-        identity.client = meta_string(meta, crate::session_identity::META_CLIENT)
-            .or_else(|| meta_string(meta, "tachi.client"));
-        identity.project = meta_string(meta, crate::session_identity::META_PROJECT)
-            .or_else(|| meta_string(meta, "tachi.project"));
-    }
+    let mut identity = identity_from_initialize_meta(request.meta.as_ref());
     if let Some(parts) = context.extensions.get::<axum::http::request::Parts>() {
         identity.profile =
             header_string(parts, crate::session_identity::HEADER_PROFILE).or(identity.profile);
@@ -166,6 +158,22 @@ fn http_session_identity(
         identity.project =
             header_string(parts, crate::session_identity::HEADER_PROJECT).or(identity.project);
     }
+    identity
+}
+
+/// Extract session identity fields from MCP initialize `_meta` (#732).
+/// Headers still win when both are present (applied after this helper).
+fn identity_from_initialize_meta(meta: Option<&rmcp::model::Meta>) -> HttpSessionIdentity {
+    let mut identity = HttpSessionIdentity::default();
+    let Some(meta) = meta else {
+        return identity;
+    };
+    identity.profile = meta_string(meta, crate::session_identity::META_PROFILE)
+        .or_else(|| meta_string(meta, "tachi.profile"));
+    identity.client = meta_string(meta, crate::session_identity::META_CLIENT)
+        .or_else(|| meta_string(meta, "tachi.client"));
+    identity.project = meta_string(meta, crate::session_identity::META_PROJECT)
+        .or_else(|| meta_string(meta, "tachi.project"));
     identity
 }
 
@@ -545,5 +553,46 @@ mod tests {
         }))
         .expect("tool result");
         assert!(tool_result_can_be_cached(&ok));
+    }
+
+    #[test]
+    fn initialize_meta_binds_profile_client_and_project() {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            crate::session_identity::META_PROFILE.to_string(),
+            json!("delegate"),
+        );
+        map.insert(
+            crate::session_identity::META_CLIENT.to_string(),
+            json!("meta-client"),
+        );
+        map.insert(
+            crate::session_identity::META_PROJECT.to_string(),
+            json!("Sigil-meta"),
+        );
+        let meta = rmcp::model::Meta(map);
+        let identity = identity_from_initialize_meta(Some(&meta));
+        assert_eq!(identity.profile.as_deref(), Some("delegate"));
+        assert_eq!(identity.client.as_deref(), Some("meta-client"));
+        assert_eq!(identity.project.as_deref(), Some("Sigil-meta"));
+    }
+
+    #[test]
+    fn initialize_meta_accepts_dotted_aliases() {
+        let mut map = serde_json::Map::new();
+        map.insert("tachi.profile".to_string(), json!("observe"));
+        map.insert("tachi.project".to_string(), json!("wiki"));
+        let meta = rmcp::model::Meta(map);
+        let identity = identity_from_initialize_meta(Some(&meta));
+        assert_eq!(identity.profile.as_deref(), Some("observe"));
+        assert_eq!(identity.project.as_deref(), Some("wiki"));
+    }
+
+    #[test]
+    fn initialize_meta_none_is_empty_identity() {
+        let identity = identity_from_initialize_meta(None);
+        assert!(identity.profile.is_none());
+        assert!(identity.client.is_none());
+        assert!(identity.project.is_none());
     }
 }

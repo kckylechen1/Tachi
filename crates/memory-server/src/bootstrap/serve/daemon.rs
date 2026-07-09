@@ -235,16 +235,7 @@ pub(super) async fn serve_http_daemon(
                     };
                     (
                         code,
-                        axum::Json(serde_json::json!({
-                            "status": status,
-                            "version": crate::build_info::PKG_VERSION,
-                            "git_sha": crate::build_info::GIT_SHA,
-                            "build_time": crate::build_info::BUILD_TIME,
-                            "transport": "http",
-                            "mcp": "streamable-http",
-                            "db_ready": db_ok,
-                            "vec_available": vec_available,
-                        })),
+                        axum::Json(daemon_health_payload(db_ok, vec_available, status)),
                     )
                 }
             }),
@@ -324,6 +315,37 @@ fn daemon_uses_manifest_background(
         && paths_match(global_db_path, &app_home.join("global").join("memory.db"))
 }
 
+/// Shared `/health` JSON for the streamable-HTTP daemon (#732).
+///
+/// Auth posture v1 is **loopback trust**: the listener is bound to 127.0.0.1
+/// only; no bearer token is required on single-user workstations. Multi-user
+/// ACL for header claims is #495. Reconnect fields document HTTP client
+/// behavior after daemon restart (stdio adapters are unaffected).
+pub(crate) fn daemon_health_payload(
+    db_ok: bool,
+    vec_available: bool,
+    status: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "status": status,
+        "version": crate::build_info::PKG_VERSION,
+        "git_sha": crate::build_info::GIT_SHA,
+        "build_time": crate::build_info::BUILD_TIME,
+        "transport": "http",
+        "mcp": "streamable-http",
+        "bind": "127.0.0.1",
+        "auth_posture": "loopback-trust-v1",
+        "db_ready": db_ok,
+        "vec_available": vec_available,
+        "reconnect": {
+            "on_disconnect": "re-initialize MCP session (new mcp-session-id)",
+            "client_hint": "expect brief JSON-RPC -32000 / connection errors until /health returns ok; then POST initialize again",
+            "stdio_unaffected": true,
+            "docs": "docs/engineering/architecture/http-direct-connect.md"
+        },
+    })
+}
+
 fn paths_match(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
@@ -338,6 +360,31 @@ fn paths_match(left: &Path, right: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_payload_advertises_loopback_trust_and_reconnect() {
+        let payload = daemon_health_payload(true, true, "ok");
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["transport"], "http");
+        assert_eq!(payload["mcp"], "streamable-http");
+        assert_eq!(payload["bind"], "127.0.0.1");
+        assert_eq!(payload["auth_posture"], "loopback-trust-v1");
+        assert_eq!(payload["reconnect"]["stdio_unaffected"], true);
+        assert!(
+            payload["reconnect"]["on_disconnect"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("re-initialize"),
+            "reconnect must tell clients to re-init: {payload}"
+        );
+        assert!(
+            payload["reconnect"]["docs"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("http-direct-connect.md"),
+            "health must point at the cookbook: {payload}"
+        );
+    }
 
     #[test]
     fn manifest_background_only_runs_for_default_global_db() {

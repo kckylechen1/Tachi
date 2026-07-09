@@ -94,6 +94,10 @@ fn mcp_server_instructions_requires_end_of_task_save() {
     assert!(text.contains("action='save'"));
     assert!(text.contains("action='cycle_plan'"));
     assert!(text.contains("agent_end"));
+    assert!(
+        text.contains("HTTP direct-connect"),
+        "instructions must mention HTTP direct-connect (#732)"
+    );
 }
 
 #[test]

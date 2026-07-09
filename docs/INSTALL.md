@@ -207,12 +207,23 @@ stay bound to the session project unless a narrower invariant allows otherwise.
 `admin` is not accepted over HTTP direct-connect until profile claims are wired
 to an explicit authorization policy.
 
-If the daemon is restarted, HTTP clients may need to reconnect so they receive a
-fresh MCP session id. Stdio clients keep working through the compatibility
-adapter below. Full read/write identity rules (cross-library reads, unbound C1
-write rejection, Plan C names) are in
-[`docs/engineering/architecture/library-identity-runtime.md`](engineering/architecture/library-identity-runtime.md)
-(#746).
+If the daemon is restarted, HTTP clients must **re-run MCP `initialize`** (new
+`mcp-session-id`). Expect brief transport / `-32000` errors until
+`curl -sS http://127.0.0.1:6919/health` reports `"status":"ok"`. Stdio clients
+keep working through the compatibility adapter below and are unaffected by HTTP
+session ids. Auth posture v1 is **loopback trust** (`127.0.0.1` only; no bearer
+token) — see `/health` fields `bind` and `auth_posture`.
+
+Verify a pure HTTP session is not spawning extra adapters:
+
+```bash
+curl -sS http://127.0.0.1:6919/health | jq '{status,bind,auth_posture,reconnect}'
+pgrep -fl 'tachi|memory-server' || true
+```
+
+Full cookbook: [`docs/engineering/architecture/http-direct-connect.md`](engineering/architecture/http-direct-connect.md) (#732).
+Identity rules (cross-library reads, C1 writes, Plan C names):
+[`library-identity-runtime.md`](engineering/architecture/library-identity-runtime.md) (#746).
 
 ### With Full Lane Configuration
 
