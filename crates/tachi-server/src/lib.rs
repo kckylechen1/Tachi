@@ -3,6 +3,47 @@
 // Rust MCP server using rmcp SDK to expose memcore functionality.
 // Stateless design: each tool opens its own DB connection per-request.
 
+//! # Build profiles: `full` (default) vs `portable` (Refs #924 / #770 #790 #798)
+//!
+//! `tachi-server` ships two Cargo profiles (see `[features]` in `Cargo.toml`):
+//!
+//! * **`full`** (default) — today's product runtime, unchanged. Memory kernel
+//!   plus every operator/product surface. Every existing build resolves this
+//!   profile, so behavior is byte-identical for full-profile users.
+//!
+//! * **`portable`** — the stripped HyperMem-cutover profile for the downstream
+//!   trading runtime (Hyperion/Quant). It exists so the Hyperion-HyperTachi
+//!   kernel fork can retire to a thin adapter over an upstream binary instead
+//!   of patching operator code out.
+//!
+//! ## `portable` — what is IN
+//!
+//! * Memory facades: `save` / `search` / `get` / `briefing` / `checkpoint`.
+//! * Serving: stdio MCP + HTTP, daemon mode with per-scope pid/lock isolation.
+//! * `status` / health readiness.
+//! * The #791 `DecayPolicy` / `hybrid_score_with_policy` scorer hook (in
+//!   `memcore`), so A-share scoring re-lands downstream as policy config, not
+//!   fork patches.
+//! * Opens DBs written by full Tachi (admin tables present but unused — this is
+//!   guaranteed by `portable-kernel`'s `default-features = false` memcore).
+//!
+//! ## `portable` — what is OUT (operator/product surfaces)
+//!
+//! * Vault secrets, hub / skill catalog, foundry job queue, dispatch /
+//!   ship / merge, `tachi_gh`, PR lifecycle. The crates backing these
+//!   (`tachi-hub`, `tachi-foundry`, `tachi-dispatch`, `tachi-merge-ops`, and
+//!   the operator CLIs) are `optional` deps enabled only by `full`, so a
+//!   `portable` build never compiles them into the trading runtime.
+//!
+//! ## Status (skeleton — #924)
+//!
+//! The Cargo dependency partition is landed. The source-level module/router
+//! gates that make `cargo check --no-default-features --features portable`
+//! actually COMPILE are the staged follow-up (the operator surfaces are
+//! interleaved through `MemoryServer`'s constructor, the `Commands` CLI enum,
+//! the ~17 tool routers, and `status_ops`; see the issue's staged plan). Until
+//! those gates land, `full` is the only compiling profile.
+
 #![allow(
     clippy::cast_abs_to_unsigned,
     clippy::cloned_ref_to_slice_refs,
