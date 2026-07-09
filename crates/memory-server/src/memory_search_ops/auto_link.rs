@@ -67,6 +67,41 @@ pub(crate) fn should_reinforce(
         && (REINFORCEMENT_MIN_SIMILARITY..REINFORCEMENT_DUPLICATE_SIMILARITY).contains(&similarity)
 }
 
+/// Minimum shared entities for a plain `related_to` auto-link edge (tachi#773).
+///
+/// Host DB evidence: most `related_to` edges were single-entity co-occurrence
+/// (`Sigil` / `memory-server` alone) and formed a dense fog without ranking
+/// value. Require either multi-entity agreement or a modest vector similarity.
+pub(crate) const RELATED_TO_MIN_SHARED_ENTITIES: usize = 2;
+/// When only one entity is shared, still allow related_to if vectors are close.
+pub(crate) const RELATED_TO_MIN_VECTOR_SIMILARITY: f64 = 0.55;
+
+/// Unique entities present in both lists (order-independent). Used so duplicate
+/// labels in either entry cannot inflate `shared_count` past the fog floor.
+pub(crate) fn unique_shared_entities(a: &[String], b: &[String]) -> Vec<String> {
+    let set_a: HashSet<&str> = a.iter().map(String::as_str).collect();
+    let mut out: HashSet<String> = HashSet::new();
+    for e in b {
+        if set_a.contains(e.as_str()) {
+            out.insert(e.clone());
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Whether to emit a weak `related_to` edge after supersede/reinforce checks fail.
+pub(crate) fn should_related_to(shared_count: usize, vector_similarity: Option<f64>) -> bool {
+    if shared_count >= RELATED_TO_MIN_SHARED_ENTITIES {
+        return true;
+    }
+    if shared_count == 0 {
+        return false;
+    }
+    vector_similarity.is_some_and(|sim| {
+        sim.is_finite() && sim >= RELATED_TO_MIN_VECTOR_SIMILARITY
+    })
+}
+
 pub(crate) fn numbers_in_text(text: &str) -> HashSet<String> {
     static NUMBER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = NUMBER_RE.get_or_init(|| {
@@ -96,10 +131,13 @@ pub(crate) fn spawn_auto_linking(
     let auto_link_server = server.clone();
     let auto_link_id = entry.id.clone();
     let auto_link_entry = entry.clone();
-    let auto_link_entities = entry.entities.clone();
+    // Dedup source entities so duplicate labels cannot inflate shared_count
+    // past the #773 related_to fog floor (Gemini #905 review).
+    let auto_link_entities: HashSet<String> = entry.entities.iter().cloned().collect();
+    let auto_link_entity_list: Vec<String> = auto_link_entities.iter().cloned().collect();
 
     tokio::spawn(async move {
-        for entity in &auto_link_entities {
+        for entity in &auto_link_entity_list {
             let query = entity.clone();
             let search_action = |store: &mut MemoryStore| {
                 store
@@ -130,13 +168,10 @@ pub(crate) fn spawn_auto_linking(
                     if is_training_seed(&result.entry) {
                         continue;
                     }
-                    let shared: Vec<String> = result
-                        .entry
-                        .entities
-                        .iter()
-                        .filter(|e| auto_link_entities.contains(e))
-                        .cloned()
-                        .collect();
+                    // Unique shared entities only — duplicate entity labels must not
+                    // count as multi-entity agreement for related_to/supersede.
+                    let shared =
+                        unique_shared_entities(&auto_link_entity_list, &result.entry.entities);
                     if shared.is_empty() {
                         continue;
                     }
@@ -159,6 +194,13 @@ pub(crate) fn spawn_auto_linking(
                             supersedes,
                         )
                     });
+                    let related = !supersedes
+                        && !reinforces
+                        && should_related_to(shared.len(), vector_similarity);
+                    if !supersedes && !reinforces && !related {
+                        // Skip single-entity fog edges (ops-audit / #773).
+                        continue;
+                    }
                     let relation = if supersedes {
                         "supersedes"
                     } else if reinforces {
@@ -340,5 +382,32 @@ mod tests {
         assert!(!should_reinforce(&new_entry, &old_entry, 1, 0.60, false));
         assert!(!should_reinforce(&new_entry, &old_entry, 1, 0.97, false));
         assert!(!should_reinforce(&new_entry, &old_entry, 1, 0.82, true));
+    }
+
+    #[test]
+    fn should_related_to_rejects_single_entity_without_vector_support() {
+        // Pre-fix fog: one shared entity always became related_to.
+        assert!(!should_related_to(1, None));
+        assert!(!should_related_to(1, Some(0.40)));
+        assert!(should_related_to(1, Some(0.55)));
+        assert!(should_related_to(2, None));
+        assert!(!should_related_to(0, Some(0.99)));
+    }
+
+    #[test]
+    fn unique_shared_entities_dedups_duplicate_labels() {
+        // Discrimination: ["sigil","sigil"] ∩ ["sigil"] must count as 1,
+        // not 2 — otherwise the fog floor is bypassed by noisy entity lists.
+        let a = vec!["sigil".into(), "sigil".into()];
+        let b = vec!["sigil".into(), "sigil".into(), "sigil".into()];
+        let shared = unique_shared_entities(&a, &b);
+        assert_eq!(shared.len(), 1);
+        assert!(!should_related_to(shared.len(), None));
+
+        let a2 = vec!["sigil".into(), "memory-server".into(), "sigil".into()];
+        let b2 = vec!["memory-server".into(), "sigil".into()];
+        let shared2 = unique_shared_entities(&a2, &b2);
+        assert_eq!(shared2.len(), 2);
+        assert!(should_related_to(shared2.len(), None));
     }
 }
