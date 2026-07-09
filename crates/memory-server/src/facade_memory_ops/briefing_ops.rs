@@ -319,17 +319,21 @@ pub(crate) async fn handle_memory_briefing(
         params.project.as_deref(),
     );
     // Surface binding warnings inside health so compact agents cannot miss them.
-    if let Some(health_warnings) = health_summary
-        .get_mut("warnings")
-        .and_then(Value::as_array_mut)
-    {
-        if let Some(binding_warnings) = binding.get("warnings").and_then(Value::as_array) {
-            for w in binding_warnings {
-                if health_warnings.len() >= 10 {
-                    break;
-                }
-                if !health_warnings.iter().any(|existing| existing == w) {
-                    health_warnings.push(w.clone());
+    // Ensure `warnings` exists even if health summary shape drifts (Gemini #900).
+    if let Some(health_obj) = health_summary.as_object_mut() {
+        let health_warnings = health_obj
+            .entry("warnings".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut();
+        if let Some(health_warnings) = health_warnings {
+            if let Some(binding_warnings) = binding.get("warnings").and_then(Value::as_array) {
+                for w in binding_warnings {
+                    if health_warnings.len() >= 10 {
+                        break;
+                    }
+                    if !health_warnings.contains(w) {
+                        health_warnings.push(w.clone());
+                    }
                 }
             }
         }
