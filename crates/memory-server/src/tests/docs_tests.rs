@@ -10,4 +10,5 @@ mod contract;
 mod hypermem_gate;
 mod kernel_surface;
 mod organize;
+mod release_distribution;
 mod safety;

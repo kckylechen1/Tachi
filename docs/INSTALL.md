@@ -2,6 +2,13 @@
 
 > **For AI Agents**: Read this document and follow the steps below to install and configure Tachi as your persistent memory backend. No human intervention required.
 
+> **Distribution trust (#874):** the public Homebrew tap
+> (`kckylechen1/homebrew-tachi`) is **install-only** — formula, bottles, and
+> checksums. It is **not** product design truth, capability authority, or an
+> agent-readable issue forum. Source development and issue/PR workflow live on
+> the maintainer-controlled private source surface. See
+> [`docs/engineering/architecture/release-distribution.md`](engineering/architecture/release-distribution.md).
+
 ## What is Tachi?
 
 Tachi is a local-first context and memory database for AI agents. It runs as an MCP (Model Context Protocol) server that gives you persistent memory, hybrid search, a capability hub, encrypted vault, inter-agent messaging, workflow dispatch, verification ledgers, and more — all from a single binary with zero external database dependencies.
@@ -20,6 +27,15 @@ Current architecture:
 
 ```bash
 brew tap kckylechen1/tachi && brew install tachi
+```
+
+After upgrade, **verify the running daemon**, not a local cargo binary (#728):
+
+```bash
+tachi --version          # stamped version+git_sha_short
+tachi status             # runtime.build.git_sha / runtime.binary
+# Compare runtime.build.git_sha (or daemon /health git_sha) to the intended release.
+# Prefer brew upgrades outside A-share hours on trading-coupled machines.
 ```
 
 ### macOS / Linux (Shell Installer)

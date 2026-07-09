@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
-import yaml from 'js-yaml';
+import { dump as yamlDump, load as yamlLoad } from 'js-yaml';
 import { getDataDir } from './config.js';
 
 const MCP_CONFIG_FILE = 'mcp-servers.yaml';
@@ -26,7 +26,7 @@ export function loadMcpConfig(): McpConfig {
     
     if (existsSync(configPath)) {
       const content = readFileSync(configPath, 'utf-8');
-      const parsed = yaml.load(content) as Partial<McpConfig>;
+      const parsed = yamlLoad(content) as Partial<McpConfig>;
       return { servers: [], ...parsed };
     }
   } catch (error) {
@@ -40,7 +40,7 @@ export function saveMcpConfig(config: McpConfig): void {
   try {
     const dataDir = getDataDir();
     const configPath = join(dataDir, MCP_CONFIG_FILE);
-    const yamlContent = yaml.dump(config);
+    const yamlContent = yamlDump(config);
     writeFileSync(configPath, yamlContent, 'utf-8');
   } catch (error) {
     console.error('Failed to save MCP config:', error);

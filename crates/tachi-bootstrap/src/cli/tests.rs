@@ -209,6 +209,11 @@ fn vault_sync_help_names_offline_guessing_risk() {
         "{export_help}"
     );
     assert!(export_help.contains("--allow-cloud"), "{export_help}");
+    // #576 residual surface reduction path must remain discoverable.
+    assert!(
+        export_help.contains("--entries-only") || export_help.contains("entries-only"),
+        "export help must document --entries-only: {export_help}"
+    );
 
     let mut import_cmd = Cli::command();
     let import_help = import_cmd

@@ -1,7 +1,7 @@
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
 import { join, delimiter } from 'path';
 import { homedir } from 'os';
-import yaml from 'js-yaml';
+import { dump as yamlDump, load as yamlLoad } from 'js-yaml';
 
 export interface Config {
   daemon: {
@@ -48,7 +48,7 @@ export async function initConfig(): Promise<void> {
 export function loadConfig(): Config {
   try {
     const content = readFileSync(configPath, 'utf-8');
-    const parsed = yaml.load(content) as Partial<Config>;
+    const parsed = yamlLoad(content) as Partial<Config>;
     return { ...defaultConfig, ...parsed };
   } catch {
     return defaultConfig;
@@ -56,7 +56,7 @@ export function loadConfig(): Config {
 }
 
 export function saveConfig(config: Config): void {
-  const yamlContent = yaml.dump(config);
+  const yamlContent = yamlDump(config);
   writeFileSync(configPath, yamlContent, 'utf-8');
 }
 

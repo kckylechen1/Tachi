@@ -18,6 +18,19 @@ async fn tachi_status_agent_surface_is_compact() {
             .is_some(),
         "slim runtime still keeps the secret count"
     );
+    // Deploy gate (#728): status must expose THIS process's stamped build identity
+    // so agents compare the serving binary, never a hand-built local artifact.
+    let git_sha = parsed["runtime"]["build"]["git_sha"].as_str().unwrap_or("");
+    assert!(
+        !git_sha.is_empty(),
+        "runtime.build.git_sha must be present for deploy verification: {body}"
+    );
+    assert!(
+        parsed["runtime"]["build"]["build_time"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "runtime.build.build_time must be present: {body}"
+    );
     // api_keys.provider_pools collapses to a {total, rate_limited} summary.
     assert!(
         parsed["api_keys"]["provider_pools"]["total"]

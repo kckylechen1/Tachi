@@ -2,6 +2,11 @@
 
 Status: design ratified by owner 2026-07-05. Phased delivery; each phase independently mergeable.
 
+**Release / brew distribution** is a separate layer: after a tag lands, CI + the
+public Homebrew tap publish installable binaries. That path is documented in
+[`release-distribution.md`](./release-distribution.md) (#728 / #758 / #874).
+`ship` opens PRs; it does **not** update formulas or restart daemons.
+
 ## The problem
 
 Shipping a finished contract (issue / frozen spec → branch → PR) is fixed-cost ceremony:

@@ -34,6 +34,16 @@ obtains the file to test Vault password guesses offline. Keep the default sync
 path local, require explicit `--allow-cloud` for cloud-synced destinations, and
 do not describe the signed bundle as safe merely because rows are encrypted.
 
+**#576 residual risk (owner-accepted until recipient-key encryption):**
+
+- Help text and this note name the offline-guessing threat.
+- Prefer `--entries-only` to omit salt/verifier from the export when the import
+  side already has a matching vault (reduces surface; entry ciphertext remains
+  an oracle — still not offline-guessing-proof).
+- A password-derived AEAD wrapper alone is **not** accepted as a fix (its tag is
+  itself an offline oracle). Full remediation is recipient-key encryption
+  (X25519/HPKE/age), tracked separately — not self-ratified as closed security.
+
 ## Observed Consumers
 
 ### OpenCode
