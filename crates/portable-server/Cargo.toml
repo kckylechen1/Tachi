@@ -1,0 +1,36 @@
+[package]
+name = "portable-server"
+version = "1.8.0"
+edition = "2021"
+description = "Portable memory-kernel MCP server (stdio): save/search/get/status over portable-kernel, no Tachi operator surfaces"
+license = "AGPL-3.0-only"
+publish = false
+
+# Stripped server profile for the HyperMem runtime cutover (tachi #924).
+#
+# This is the *binary* companion to the `portable-kernel` *library*: a thin
+# bin crate that serves the memory-kernel surface over MCP stdio and nothing
+# else. It depends only on `portable-kernel` (memcore with `admin` off) plus
+# rmcp for the transport — zero dependency on `tachi-server`, so none of the
+# operator/product surfaces (vault, hub, foundry, dispatch, merge, PR
+# lifecycle) can be compiled in by construction.
+#
+# The #791 `DecayPolicy` scorer hook is reachable here via `--decay-policy`
+# (env `PORTABLE_DECAY_POLICY`); default keeps the kernel's current behavior.
+
+[[bin]]
+name = "portable-server"
+path = "src/main.rs"
+
+[dependencies]
+portable-kernel = { path = "../portable-kernel" }
+rmcp = { version = "1.2", features = ["server", "transport-io", "macros", "schemars"] }
+tokio = { version = "1", features = ["io-std", "macros", "rt", "rt-multi-thread", "signal"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

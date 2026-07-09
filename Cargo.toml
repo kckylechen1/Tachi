@@ -14,6 +14,10 @@ members = [
     # Portable kernel facade: memcore without admin (vault/hub/foundry/pack).
     # Downstream forks (HyperTachi) should sync this graph, not full tachi-server.
     "crates/portable-kernel",
+    # Stripped server profile (bin): serves the portable kernel over MCP stdio
+    # (save/search/get/status), no operator/product surfaces. Companion to the
+    # portable-kernel library for the HyperMem runtime cutover.
+    "crates/portable-server",
     "crates/tachi-bootstrap",
     "crates/tachi-dispatch",
     "crates/tachi-foundry",

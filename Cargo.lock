@@ -1513,6 +1513,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "portable-server"
+version = "1.8.0"
+dependencies = [
+ "chrono",
+ "portable-kernel",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
