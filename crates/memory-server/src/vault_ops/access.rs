@@ -12,15 +12,11 @@ use super::rotation::collect_rotation_entries;
 use super::session::{ensure_vault_unlocked, with_vault_key};
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(super) enum VaultOpsError {
     VaultLocked,
     AgentRequired,
     AgentDenied,
     AgentIdentityMismatch(String),
-    SecretNotFound,
-    NoRotationKeys,
-    InvalidInput(String),
     Internal(String),
 }
 
@@ -37,9 +33,6 @@ impl std::fmt::Display for VaultOpsError {
                 "Access denied: agent is not in the allowed list for this secret"
             ),
             Self::AgentIdentityMismatch(msg) => write!(f, "{msg}"),
-            Self::SecretNotFound => write!(f, "Secret not found"),
-            Self::NoRotationKeys => write!(f, "No keys found for rotation prefix"),
-            Self::InvalidInput(msg) => write!(f, "Invalid input: {msg}"),
             Self::Internal(msg) => write!(f, "Vault error: {msg}"),
         }
     }
