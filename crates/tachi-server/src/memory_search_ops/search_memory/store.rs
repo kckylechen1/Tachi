@@ -12,9 +12,16 @@ fn search_store(
     let mut opts =
         params.to_search_options_with_recall_config(store.vec_available, recall_config.cloned());
     opts.record_access = record_access;
-    store
+    let results = store
         .search(&params.query, Some(opts))
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // Strong access signal: results were recalled and access was recorded
+    // ("recalled and used"). Opt-in personal /eval corpus capture lives here so
+    // it cannot break the search path (log + skip on any capture error).
+    if record_access {
+        crate::memory_search_ops::eval_capture::maybe_capture_after_access(store, params, &results);
+    }
+    Ok(results)
 }
 
 pub(super) fn with_named_project_search(
