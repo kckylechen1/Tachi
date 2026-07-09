@@ -81,7 +81,7 @@ fn context_symbols_prefix_plain_queries_for_recall_bias() {
         &["Tachi".to_string(), "tachi-server".to_string()],
     );
 
-    assert_eq!(query, "Tachi memory-server dispatch smoke failure");
+    assert_eq!(query, "Tachi tachi-server dispatch smoke failure");
 }
 
 #[test]
@@ -101,12 +101,12 @@ fn context_symbols_are_deduped_and_not_repeated_when_query_already_mentions_them
         &[
             "tachi".to_string(),
             "tachi-server".to_string(),
-            "MEMORY-SERVER".to_string(),
+            "TACHI-SERVER".to_string(),
             " ".to_string(),
         ],
     );
 
-    assert_eq!(query, "memory-server Tachi continuity recall");
+    assert_eq!(query, "tachi-server Tachi continuity recall");
 }
 
 #[test]
