@@ -148,7 +148,7 @@ impl super::super::LlmClient {
             };
             let attempt_started = Instant::now();
             let resp = self
-                .http
+                .http_client()
                 .post(&lane_cfg.base_url)
                 .header(CONTENT_TYPE, "application/json")
                 .header(AUTHORIZATION, format!("Bearer {}", selected.value))

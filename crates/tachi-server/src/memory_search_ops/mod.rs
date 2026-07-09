@@ -2,6 +2,7 @@ mod auto_link;
 mod confidence_reinforce;
 mod contradiction;
 mod library_binding;
+mod recall_degradation;
 mod rerank;
 mod routing_config;
 mod save_memory;
@@ -16,6 +17,9 @@ pub(crate) use library_binding::{format_binding_markdown, library_binding_receip
 pub(crate) use rerank::{
     apply_search_rerank_policy, expand_search_params_for_rerank, rerank_rows_with_outcome,
     RerankOutcome, SearchRerankPolicy,
+};
+pub(crate) use recall_degradation::{
+    attach_lexical_only_marker, merge_lexical_only_marker, short_reason as recall_short_reason,
 };
 pub(crate) use save_memory::handle_remember;
 pub(crate) use save_memory::handle_save_memory;

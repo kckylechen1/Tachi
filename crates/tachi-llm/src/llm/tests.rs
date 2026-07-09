@@ -54,3 +54,4 @@ mod config_json;
 mod embedding_rerank;
 mod provider_key_persistence;
 mod provider_pool;
+mod recall_pool_hygiene;
