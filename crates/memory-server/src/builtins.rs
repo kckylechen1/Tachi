@@ -13,4 +13,7 @@ mod trading;
 mod trajectory;
 mod waza;
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) use seed::seed_builtin_capabilities;

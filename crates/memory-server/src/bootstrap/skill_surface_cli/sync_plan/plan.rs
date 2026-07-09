@@ -16,7 +16,8 @@ pub(in crate::bootstrap::skill_surface_cli) fn build_skill_source_sync_plan(
     let mut affected_cards = BTreeSet::new();
 
     for spec in SKILL_SOURCE_MANIFESTS {
-        let parsed = parse_skill_source_manifest(spec.content)
+        let content = read_skill_source_manifest_content(spec)?;
+        let parsed = parse_skill_source_manifest(&content)
             .map_err(|e| format!("parse {}: {e}", spec.path))?;
         let corpus = inspect_corpus_sync(spec, parsed);
         accumulate_sync_summary(&mut summary, &corpus, &mut affected_cards);
