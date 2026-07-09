@@ -1,19 +1,16 @@
 [workspace]
 members = [
-    "crates/memory-core",
-    "crates/memory-node",
-    "crates/memory-server",
-    "crates/memory-server-capture-gate",
-    "crates/memory-server-hub-cli",
-    "crates/memory-server-i18n",
-    "crates/memory-server-manifest-audit",
-    "crates/memory-server-params",
-    "crates/memory-server-prompt-envelope",
-    "crates/memory-server-rescue",
-    "crates/memory-server-runtime",
-    # Portable kernel facade: memory-core without admin (vault/hub/foundry/pack).
-    # Downstream forks (HyperTachi) should sync this graph, not full memory-server.
-    "crates/portable-kernel",
+    "crates/memcore",
+    "crates/memcore-node",
+    "crates/tachi-server",
+    "crates/tachi-capture-gate",
+    "crates/tachi-hub-cli",
+    "crates/tachi-i18n",
+    "crates/tachi-manifest-audit",
+    "crates/tachi-params",
+    "crates/tachi-prompt-envelope",
+    "crates/tachi-rescue",
+    "crates/tachi-runtime",
     "crates/tachi-bootstrap",
     "crates/tachi-dispatch",
     "crates/tachi-foundry",
@@ -23,9 +20,8 @@ members = [
     "tools/cleaner",
 ]
 default-members = [
-    "crates/memory-core",
-    "crates/portable-kernel",
-    "crates/memory-server",
+    "crates/memcore",
+    "crates/tachi-server",
     "crates/tachi-bootstrap",
     "crates/tachi-hub",
 ]
@@ -54,7 +50,7 @@ debug = "line-tables-only"
 #   - CVE-2025-6965: aggregate term count overflow (fixed 3.50.2)
 #   - CVE-2025-29087 / -3277: concat_ws() integer overflow (fixed 3.49.1)
 #   - CVE-2025-29088: lookaside allocator DoS via sqlite3_db_config (fixed 3.49.1)
-# memory-core asserts sqlite_version() >= 3.50.3 at test time.
+# memcore asserts sqlite_version() >= 3.50.3 at test time.
 rusqlite = { version = "0.38", features = ["backup", "bundled", "vtab"] }
 sqlite-vec = "0.1.7-alpha.10"
 serde = { version = "1", features = ["derive"] }

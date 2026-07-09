@@ -15,8 +15,8 @@ Tachi is a local-first context and memory database for AI agents. It runs as an 
 
 Current architecture:
 
-- `memory-core` owns SQLite storage, migrations, hybrid search, graph/domain state, packs, vault metadata, and sqlite-vec integration.
-- `memory-server` owns the MCP/CLI surface, profile filtering, Hub routing, dispatch/workflow tools, wiki operations, vault encryption, daemon locking, Foundry background work, and verification/arena/eval ledgers.
+- `memcore` owns SQLite storage, migrations, hybrid search, graph/domain state, packs, vault metadata, and sqlite-vec integration.
+- `tachi-server` (compat binary `memory-server` / `tachi`) owns the MCP/CLI surface, profile filtering, Hub routing, dispatch/workflow tools, wiki operations, vault encryption, daemon locking, Foundry background work, and verification/arena/eval ledgers.
 - Hosts should connect through the profile-based MCP surface instead of exposing every low-level tool by default.
 
 ---

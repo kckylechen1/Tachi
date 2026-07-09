@@ -6,7 +6,7 @@ license = "AGPL-3.0-only"
 publish = false
 
 [dependencies]
-memory-core = { path = "../memory-core" }
+memcore = { path = "../memcore" }
 chrono = { workspace = true }
 rmcp = { version = "1.2", features = ["schemars"] }
 serde_json = { workspace = true }

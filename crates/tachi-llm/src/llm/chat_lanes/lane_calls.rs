@@ -1,4 +1,4 @@
-use memory_core::store::llm_usage::LlmUsageEvent;
+use memcore::store::llm_usage::LlmUsageEvent;
 use reqwest::{
     header::{AUTHORIZATION, CONTENT_TYPE},
     Url,
@@ -409,7 +409,7 @@ fn persist_llm_usage_blocking(
     let db_path = db_path
         .to_str()
         .ok_or_else(|| "persist llm usage: invalid db path".to_string())?;
-    let store = memory_core::MemoryStore::open(db_path)
+    let store = memcore::MemoryStore::open(db_path)
         .map_err(|err| format!("persist llm usage open db: {err}"))?;
     store
         .record_llm_usage(&record)

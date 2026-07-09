@@ -1,0 +1,12 @@
+[package]
+name = "tachi-manifest-audit"
+version = "1.7.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Tachi project-DB relocation audit (dry-run planning)"
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

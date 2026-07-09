@@ -18,7 +18,7 @@ Matrix (architecture doc §4.4):
                             response exposes per-variant rerank policy counts
                             (memory-server/src/facade_memory_ops/
                             recall_simulate_ops/runner.rs:184-187, populated
-                            from crates/memory-server/src/memory_search_ops/
+                            from crates/tachi-server/src/memory_search_ops/
                             rerank.rs's SearchRerankPolicy), so this pass
                             reports how many cases actually got `applied` vs
                             `not_needed` / `score_gap_too_wide` / `fallback` /

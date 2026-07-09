@@ -1,0 +1,6 @@
+[package]
+name = "tachi-prompt-envelope"
+version = "1.7.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Tachi prompt envelope registry — instruction overlays per agent/mode"

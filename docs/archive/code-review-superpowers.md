@@ -12,7 +12,7 @@
 
 | Check | Result |
 |-------|--------|
-| `cargo test -p memory-server` | **21/21 passed** |
+| `cargo test -p tachi-server` | **21/21 passed** |
 | `npm run build` (tachi-desktop) | **Success** |
 | Uncommitted files match claimed changeset | **Yes** (14 modified, 5 untracked) |
 | No secrets in diff | **Clean** |
@@ -31,7 +31,7 @@ The Virtual Capability (VC) layer is well-structured, deterministic, and follows
 
 ### C-1: `tachi_init_project_db` does not attach the created DB to the running server
 
-**File:** `crates/memory-server/src/project_db_ops.rs:3-55`
+**File:** `crates/tachi-server/src/project_db_ops.rs:3-55`
 
 The handler creates a new SQLite database on disk via `MemoryStore::open()`, returns a success JSON including `activation.daemon_hint`, but **does not set `server.project_db_path`** or swap the project store on the running `MemoryServer` instance. The `_server` parameter is intentionally unused (prefixed with `_`).
 
@@ -52,7 +52,7 @@ This means:
 
 ### I-1: `unwrap_or_default()` silently swallows corrupted VC binding metadata
 
-**File:** `crates/memory-core/src/db/virtual_capability.rs:50`
+**File:** `crates/memcore/src/db/virtual_capability.rs:50`
 
 ```rust
 let metadata = serde_json::from_str(&metadata_raw).unwrap_or_default();
@@ -72,7 +72,7 @@ let metadata: Value = serde_json::from_str(&metadata_raw)
 
 ### I-2: VC bindings and VC registration can land in different databases
 
-**File:** `crates/memory-server/src/hub_ops.rs:1185-1195` (bind) vs `1102-1108` (register)
+**File:** `crates/tachi-server/src/hub_ops.rs:1185-1195` (bind) vs `1102-1108` (register)
 
 `handle_vc_register` stores the VC capability based on the `scope` param (defaulting to project if available, else global). `handle_vc_bind` determines the target DB by checking whether the VC exists in the project DB. But if the VC was registered in global, and there's an active project DB, the bind logic at line 1185-1195 will check the project DB first, find nothing, and correctly fall back to global. **However**, if someone later creates a project DB and registers a *different* VC with the same ID in project scope, the bindings from global are now orphaned — `vc_list` (line 1225-1248) only returns VCs via `hub_discover` which merges both DBs, but the binding lookup at `server_methods.rs:151-172` returns project bindings first if non-empty, never merging with global bindings.
 
@@ -88,7 +88,7 @@ let metadata: Value = serde_json::from_str(&metadata_raw)
 
 ### M-1: `version_pin` cast from `i64` to `u32` can panic on negative values
 
-**File:** `crates/memory-core/src/db/virtual_capability.rs:55`
+**File:** `crates/memcore/src/db/virtual_capability.rs:55`
 
 ```rust
 version_pin: row.get::<_, Option<i64>>(3)?.map(|v| v as u32),
@@ -100,7 +100,7 @@ If a negative `i64` is stored in SQLite (e.g., via manual DB edit or a bug), `v 
 
 ### M-2: `handle_vc_register` hardcodes `version: 1` and `review_status: "approved"`
 
-**File:** `crates/memory-server/src/hub_ops.rs:1125,1129`
+**File:** `crates/tachi-server/src/hub_ops.rs:1125,1129`
 
 Virtual capabilities are auto-approved on registration, bypassing the governance gates that protect concrete MCP capabilities. This is likely intentional (VCs are logical abstractions, not executable code), but it is undocumented and could surprise an agent that expects the full governance lifecycle.
 
@@ -108,7 +108,7 @@ Virtual capabilities are auto-approved on registration, bypassing the governance
 
 ### M-3: `handle_vc_list` re-parses JSON that was just serialized
 
-**File:** `crates/memory-server/src/hub_ops.rs:1230-1231`
+**File:** `crates/tachi-server/src/hub_ops.rs:1230-1231`
 
 ```rust
 let raw = handle_hub_discover(server, params).await?;
@@ -121,7 +121,7 @@ let mut items: Vec<Value> = serde_json::from_str(&raw)...
 
 ### M-4: `tachi_init_project_db` test doesn't clean up on failure
 
-**File:** `crates/memory-server/src/tests.rs:1024`
+**File:** `crates/tachi-server/src/tests.rs:1024`
 
 ```rust
 let _ = std::fs::remove_dir_all(root);

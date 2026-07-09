@@ -34,7 +34,7 @@ impl super::super::super::LlmClient {
         let Some(db_path) = path.to_str() else {
             return Err("Invalid vault db path".to_string());
         };
-        let store = memory_core::MemoryStore::open_read_only(db_path)
+        let store = memcore::MemoryStore::open_read_only(db_path)
             .map_err(|e| format!("Open vault db failed: {e}"))?;
         let rows = store
             .vault_list_key_health(None)

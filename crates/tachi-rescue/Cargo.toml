@@ -1,0 +1,16 @@
+[package]
+name = "tachi-rescue"
+version = "1.7.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Tachi DB rescue — split multi-project memory.db into per-project DBs"
+
+[dependencies]
+chrono = { workspace = true }
+memcore = { path = "../memcore" }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

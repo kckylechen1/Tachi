@@ -47,7 +47,7 @@ tachi_memory(
   text='根因：migrate_enum_constraints 在重建表时未携带新列 recall_count / tier，导致迁移后列丢失。修复：在 CREATE TABLE memories_new 里补上这三列并用 COALESCE fallback。',
   path='/code-review/sigil/schema-migration-bug',
   keywords=['schema', 'migration', 'sqlite', 'tier'],
-  entities=['memory-core', 'schema.rs', 'migrate_enum_constraints'],
+  entities=['memcore', 'schema.rs', 'migrate_enum_constraints'],
   project='sigil'
 )
 ```

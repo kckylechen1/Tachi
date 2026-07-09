@@ -40,7 +40,7 @@ Binding rules:
 3. Existence of the project DB is the current authorization model for binding
    (single-user / loopback). Multi-tenant ACL of header claims is **#495**, out of scope.
 
-Constants live in `crates/memory-server/src/session_identity.rs`:
+Constants live in `crates/tachi-server/src/session_identity.rs`:
 
 - Headers: `x-tachi-project`, `x-tachi-profile`, `x-tachi-client`
 - Meta keys: `tachiProject`, `tachiProfile`, `tachiClient` (+ dotted aliases)

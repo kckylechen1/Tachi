@@ -1,7 +1,7 @@
 //! Compile-time build provenance for the `--version` CLI surface.
 //!
 //! Values are injected by [`build.rs`](../build.rs) at compile time. This is
-//! the twin of `memory_server::build_info`; the two crates share the same
+//! the twin of `tachi_server::build_info`; the two crates share the same
 //! `GIT_SHA` so the binary's `--version` and the daemon's `/health` report
 //! the same provenance.
 

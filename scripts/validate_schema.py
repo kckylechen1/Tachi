@@ -27,7 +27,7 @@ def extract_schema():
     PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
     # 检查 main.rs 中的定义
-    main_rs_path = os.path.join(PROJECT_ROOT, "crates", "memory-server", "src", "main.rs")
+    main_rs_path = os.path.join(PROJECT_ROOT, "crates", "tachi-server", "src", "main.rs")
     with open(main_rs_path, "r") as f:
         content = f.read()
 

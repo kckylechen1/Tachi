@@ -11,8 +11,8 @@ TACHI_LINK="${TACHI_LINK:-${HOME}/bin/tachi}"
 CLEAN_LINK="${CLEAN_LINK:-${HOME}/bin/tachi-clean}"
 SKIP_LINK="${SKIP_LINK:-0}"
 
-echo ">> cargo build --release -p memory-server -p tachi-clean --locked"
-cargo build --release -p memory-server -p tachi-clean --locked
+echo ">> cargo build --release -p tachi-server -p tachi-clean --locked"
+cargo build --release -p tachi-server -p tachi-clean --locked
 
 SRC="$SCRIPT_DIR/target/release/memory-server"
 if [[ ! -f "$SRC" ]]; then

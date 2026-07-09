@@ -53,7 +53,7 @@
       "component_id": "tachi-memory-kernel",
       "component_type": "kernel",
       "owner_repo": "kckylechen1/tachi",
-      "owner_path": "crates/memory-core; crates/memory-server; docs/engineering/architecture/kernel-surface-v1.fixture.json",
+      "owner_path": "crates/memcore; crates/tachi-server; docs/engineering/architecture/kernel-surface-v1.fixture.json",
       "contract_summary": "Portable memory kernel owning durable schema, provenance, recall primitives, vector/FTS fallback behavior, event-ledger projection, and readiness diagnostics without product workflow dependencies.",
       "source_refs": [
         "#790",
@@ -204,7 +204,7 @@
       "component_id": "tachi-event-projection-bridge",
       "component_type": "workflow_bridge",
       "owner_repo": "kckylechen1/tachi",
-      "owner_path": "crates/memory-server event projection and continuity paths",
+      "owner_path": "crates/tachi-server event projection and continuity paths",
       "contract_summary": "Bridge from memory lifecycle events into projection/readiness evidence so downstream adapters can inspect recall, reflection, and continuity state without owning the kernel schema.",
       "source_refs": [
         "#770",

@@ -1,0 +1,17 @@
+[package]
+name = "tachi-hub-cli"
+version = "1.7.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Tachi Hub registry CLI commands"
+
+[dependencies]
+rusqlite = { workspace = true }
+tachi-bootstrap = { path = "../tachi-bootstrap" }
+dirs = "5.0"
+serde_json = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }
+tempfile = "3"
+memcore = { path = "../memcore" }

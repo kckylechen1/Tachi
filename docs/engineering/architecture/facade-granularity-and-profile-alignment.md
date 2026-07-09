@@ -91,11 +91,11 @@ profile or explicit `tachi_tools` discovery.
 ## 3. ToolProfile status — mostly hollowed out
 
 There are two unrelated "profile" concepts. This section is about **`ToolProfile`** (tool-surface
-trimming), defined in [`profiles/types.rs`](../../../crates/memory-server/src/profiles/types.rs).
+trimming), defined in [`profiles/types.rs`](../../../crates/tachi-server/src/profiles/types.rs).
 
 The early design had five additive bundles: `observe / remember / coordinate / operate / admin`.
 But v1.0 introduced the facade surface and, with it, `standard_minimal` — a hard-coded 14-tool
-allow-list ([`profiles/patterns.rs`](../../../crates/memory-server/src/profiles/patterns.rs) → `STANDARD_MINIMAL_TOOL_PATTERNS`).
+allow-list ([`profiles/patterns.rs`](../../../crates/tachi-server/src/profiles/patterns.rs) → `STANDARD_MINIMAL_TOOL_PATTERNS`).
 The net effect:
 
 - **default = `standard` = the hard allow-list**, bypassing bundles
@@ -108,7 +108,7 @@ someone hand-types `--profile observe+coordinate`. That is dead design.
 ### The deeper problem: facades broke tool-level filtering
 
 `ToolProfile` trims by **tool name** via glob matching
-([`profiles/matching.rs#L77-L112`](../../../crates/memory-server/src/profiles/matching.rs)).
+([`profiles/matching.rs#L77-L112`](../../../crates/tachi-server/src/profiles/matching.rs)).
 But a facade packs many capabilities behind one name (`tachi_task` = 28 actions), so a profile can
 only allow or deny the *entire* `tachi_task` — it cannot deny just `dispatch`.
 
@@ -132,7 +132,7 @@ DELEGATE_MINIMAL_TOOL_PATTERNS (7-tool allow-list) filters worker's visible tool
 Two important nuances:
 
 **Not every worker is `delegate`.** The tool surface depends on the worker's role, per the
-`DispatchProfileDef` table in [`dispatch_profile/mod.rs`](../../../crates/memory-server/src/dispatch_profile/mod.rs):
+`DispatchProfileDef` table in [`dispatch_profile/mod.rs`](../../../crates/tachi-server/src/dispatch_profile/mod.rs):
 
 | dispatch profile | worker's tool_profile |
 | :--- | :--- |

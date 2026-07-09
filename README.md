@@ -20,7 +20,7 @@
 
 ## TL;DR
 
-Tachi is a single-binary, local-first memory and coordination backend for AI agents. It runs as an [MCP](https://modelcontextprotocol.io/) server (`memory-server`) and gives agents:
+Tachi is a single-binary, local-first memory and coordination backend for AI agents. It runs as an [MCP](https://modelcontextprotocol.io/) server (`tachi-server` / `tachi`) and gives agents:
 
 - **Persistent memory** with hybrid semantic + lexical + graph retrieval
 - **Hierarchical namespaces** (`/user/preferences`, `/project/architecture`)
@@ -163,7 +163,7 @@ The server also loads `.env` from the project root automatically. Copy `.env.exa
 
 ### 3. Use
 
-These examples show the JSON arguments you would pass to the MCP tools. Facade tools expose the same fields as their underlying native tools; the full schemas live in `crates/memory-server-params/src/facade.rs` and its `facade/` submodules.
+These examples show the JSON arguments you would pass to the MCP tools. Facade tools expose the same fields as their underlying native tools; the full schemas live in `crates/tachi-params/src/facade.rs` and its `facade/` submodules.
 
 ```json
 // tachi_save — structured memory
@@ -241,7 +241,7 @@ graph TD
         GC["Garbage Collection"]
     end
 
-    subgraph Core["Core (Rust memory-core)"]
+    subgraph Core["Core (Rust MemCore (memcore))"]
         API["Store API"]
         SEARCH["5-Channel Hybrid Search"]
         GRAPH["Memory Graph"]
@@ -270,11 +270,11 @@ graph TD
 
 | Path | What it is |
 |------|------------|
-| `crates/memory-core` | Rust core: SQLite storage, migrations, hybrid search, graph, domains, vault metadata, sqlite-vec. |
+| `crates/memcore` | Rust core: SQLite storage, migrations, hybrid search, graph, domains, vault metadata, sqlite-vec. |
 | `crates/tachi-bootstrap` | Shared CLI command contract and startup parsing for the Tachi server binary. |
 | `crates/tachi-hub` | Shared Hub capability policy, skill execution envelope, and security scan rules used by the server/runtime. |
-| `crates/memory-server` | MCP server/runtime implementation, profile filtering, Hub handlers/routing, dispatch/workflow tools, wiki, vault encryption, daemon locking, Foundry background workers. |
-| `crates/memory-node` | Node.js bindings (`@chaoxlabs/tachi-node`) for native integration. |
+| `crates/tachi-server` | MCP server/runtime implementation, profile filtering, Hub handlers/routing, dispatch/workflow tools, wiki, vault encryption, daemon locking, Foundry background workers. |
+| `crates/memcore-node` | Node.js bindings (`@chaoxlabs/tachi-node`) for native integration. |
 | `packages/tachi-cli` | TypeScript CLI and npm wrapper. |
 | `tools/cleaner` | `tachi-clean` utility for safe target/worktree/temp cleanup. |
 | `skill/` | Built-in skill packs: `amp`, `codex`, `superpowers`, `waza`. |
@@ -464,7 +464,7 @@ cargo build --release
 cargo nextest run --workspace   # cargo install cargo-nextest; plain `cargo test --all` also works
 
 # Run the MCP server from source with the standard profile
-cargo run -p memory-server -- --profile standard
+cargo run -p tachi-server --bin tachi -- --profile standard
 ```
 
 Requires Rust ≥ 1.75. `@napi-rs/cli` and `cargo-watch` are useful for Node binding work and iterative development.

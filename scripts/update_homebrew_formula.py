@@ -99,9 +99,9 @@ def replace_block(text: str, name: str, replacement: str) -> str:
 def ensure_modern_formula_style(text: str) -> str:
     text = text.replace('  license "AGPL-3.0"', '  license "AGPL-3.0-only"')
     install_block = """  def install
-    system "cargo", "install", *std_cargo_args(path: "crates/memory-server"),
-           "--bin", "memory-server"
-    mv bin/"memory-server", bin/"tachi"
+    system "cargo", "install", *std_cargo_args(path: "crates/tachi-server"),
+           "--bin", "tachi-server"
+    mv bin/"tachi-server", bin/"tachi"
   end"""
     text = replace_block(text, "install", install_block)
     return text

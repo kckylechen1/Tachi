@@ -396,7 +396,7 @@ export class MemoryMcpClient {
       }
     }
 
-    // Prefer "tachi" (brew install name) over "memory-server" (dev name)
+    // Prefer "tachi" (brew install name) over "tachi-server" (dev name)
     return "tachi";
   }
 
@@ -428,10 +428,10 @@ export class MemoryMcpClient {
         cwd: process.cwd(),
       },
     ];
-    // If primary command is "tachi", also try "memory-server" as last resort
+    // If primary command is "tachi", also try "tachi-server" as last resort
     if (command === "tachi") {
       candidates.push({
-        command: "memory-server",
+        command: "tachi-server",
         args: ["--global-db", this.globalDbPath, "--project-db", this.projectDbPath],
         env,
         cwd: os.tmpdir(),

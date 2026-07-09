@@ -26,7 +26,7 @@
 
 已验证：
 
-- `cargo test -p memory-server`：17/17 通过
+- `cargo test -p tachi-server`：17/17 通过
 - `apps/tachi-desktop`：`npm run build` 通过
 
 ## What Is Done

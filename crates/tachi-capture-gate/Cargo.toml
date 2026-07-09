@@ -1,0 +1,9 @@
+[package]
+name = "tachi-capture-gate"
+version = "1.7.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Tachi capture gate — pre-write validation for save_memory"
+
+[dependencies]
+serde = { workspace = true }

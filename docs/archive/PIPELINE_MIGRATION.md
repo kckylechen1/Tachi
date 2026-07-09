@@ -5,7 +5,7 @@ Port the 3 Python pipeline workers (`mcp/workers/causal.py`, `mcp/workers/distil
 
 ## Pre-work Already Done (Verify These First)
 
-### 1. `crates/memory-server/src/prompts.rs`
+### 1. `crates/tachi-server/src/prompts.rs`
 Should contain these 4 NEW constants (in addition to existing EXTRACTION_PROMPT and SUMMARY_PROMPT):
 - `CAUSAL_PROMPT` — causal extraction prompt (from `mcp/workers/causal.py`)
 - `MERGE_PROMPT` — memory merge prompt (from `mcp/workers/consolidator.py`)
@@ -14,14 +14,14 @@ Should contain these 4 NEW constants (in addition to existing EXTRACTION_PROMPT 
 
 If missing, add them. Reference the Python files for the exact prompt text.
 
-### 2. `crates/memory-server/src/llm.rs`
+### 2. `crates/tachi-server/src/llm.rs`
 LlmClient should have these 2 NEW methods (in addition to existing ones):
 - `call_llm_with_model(&self, system, user, model, temperature, max_tokens)` — explicit model override, delegates to call_llm
 - `embed_batch(&self, texts: &[String], input_type: &str) -> Result<Vec<Vec<f32>>, String>` — batch embedding via Voyage-4 API (same endpoint, but `input` is an array of strings, response `data` is array of embeddings)
 
 If missing, add them.
 
-### 3. `crates/memory-core/src/db.rs`
+### 3. `crates/memcore/src/db.rs`
 Should have:
 - `derived_items` table in `init_schema` (CREATE TABLE IF NOT EXISTS with columns: id, text, path, summary, importance, source, scope, metadata, created_at)
 - `save_derived(conn, text, path, summary, importance, source, scope, metadata) -> Result<String>` — insert into derived_items
@@ -31,7 +31,7 @@ Should have:
 
 If missing, add them.
 
-### 4. `crates/memory-core/src/lib.rs`
+### 4. `crates/memcore/src/lib.rs`
 MemoryStore should expose wrapper methods for the 4 new db functions:
 - `save_derived(...)`, `count_derived_by_source(...)`, `list_derived_by_source(...)`, `archive_memory(...)`
 
@@ -41,7 +41,7 @@ If missing, add them.
 
 ## New Work Required
 
-### 5. Create `crates/memory-server/src/pipeline.rs` (NEW FILE)
+### 5. Create `crates/tachi-server/src/pipeline.rs` (NEW FILE)
 
 This is the core module implementing 3 async pipeline workers. Each worker is a public async function (not a struct/trait). All workers receive `Arc<Mutex<MemoryStore>>` + `Arc<LlmClient>`.
 
@@ -139,7 +139,7 @@ fn parse_json_array(content: &str) -> Vec<serde_json::Value> {
 }
 ```
 
-### 6. Modify `crates/memory-server/src/main.rs`
+### 6. Modify `crates/tachi-server/src/main.rs`
 
 1. Add `mod pipeline;` near the top (next to `mod llm;` and `mod prompts;`)
 
@@ -193,7 +193,7 @@ if self.pipeline_enabled {
 
 After all changes:
 ```bash
-cargo check -p memory-server    # must compile with no errors
+cargo check -p tachi-server    # must compile with no errors
 cargo test --workspace           # all existing tests must pass
 ```
 

@@ -43,8 +43,8 @@ Tachi codebase. Two findings shape the implementation order:
 The same memory primitives have independently converged across three repos by one
 author — evidence of cross-**domain** generality (not cross-**user**; see Constraint 7):
 
-- **Sigil / tachi** (`crates/memory-core` + `memory-server`) — the agent-memory engine.
-- **hypermemory** (`Quant_Analyzer_2026/hypermemory/crates/memory-core`) — the same
+- **Sigil / tachi** (`crates/memcore` + `tachi-server`) — the agent-memory engine.
+- **hypermemory** (`Quant_Analyzer_2026/hypermemory/crates/memcore`) — the same
   engine, quant domain.
 - **Quant `autoresearch_lab`** (Python) — a full pattern system: score-free feature
   vectors, three counters (IC / hit-rate / decay), positive/negative samples
@@ -280,10 +280,10 @@ in parallel. Four wiring leaves (all substrate exists; issues open at dispatch t
 
 Implemented substrate:
 
-- `memory-core` now has a typed `tachi_events` ledger for continuity events, including
+- `memcore` now has a typed `tachi_events` ledger for continuity events, including
   authority level, effect scope, projection hints, outcome labels, evidence basis,
   and continuity metrics.
-- `memory-server` exposes the `tachi_event` facade for manual/agent event emission,
+- `tachi-server` exposes the `tachi_event` facade for manual/agent event emission,
   query, and continuity metric reads.
 - `tachi_status` surfaces read-only continuity metrics, including `challenge_rate`.
 - `capture_session` emits a raw `session.captured` event and can optionally run a
@@ -410,7 +410,7 @@ required before high-recall collection.
   Cross-persona sharing of bonding material is a non-goal (persona bleed is an
   anti-feature). Within the engineering instance, all engineering agents form one
   "thinking buddy" dyad with the owner (归一教义: no named-character SOUL).
-- **Engine lives upstream in `memory-core`;** forks and product instances inherit the
+- **Engine lives upstream in `memcore`;** forks and product instances inherit the
   schema, half-life config, and guardrails instead of reinventing them (hypermemory
   already forked once — per-product relationship schemas would drift within months).
   Emotional state needs no new machinery: mood = short-half-life tier decaying to

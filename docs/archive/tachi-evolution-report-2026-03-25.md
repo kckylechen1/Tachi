@@ -28,12 +28,12 @@
 
 对应代码位置：
 
-- `crates/memory-core/src/hub.rs`
-- `crates/memory-core/src/db.rs`
-- `crates/memory-core/src/lib.rs`
-- `crates/memory-server/src/hub_ops.rs`
-- `crates/memory-server/src/main.rs`
-- `crates/memory-server/src/server_handler.rs`
+- `crates/memcore/src/hub.rs`
+- `crates/memcore/src/db.rs`
+- `crates/memcore/src/lib.rs`
+- `crates/tachi-server/src/hub_ops.rs`
+- `crates/tachi-server/src/main.rs`
+- `crates/tachi-server/src/server_handler.rs`
 
 核心缺口：
 
@@ -50,10 +50,10 @@
 
 对应代码位置：
 
-- `crates/memory-core/src/db.rs`
-- `crates/memory-core/src/lib.rs`
-- `crates/memory-server/src/sandbox_ops.rs`
-- `crates/memory-server/src/main.rs`
+- `crates/memcore/src/db.rs`
+- `crates/memcore/src/lib.rs`
+- `crates/tachi-server/src/sandbox_ops.rs`
+- `crates/tachi-server/src/main.rs`
 
 核心缺口：
 
@@ -70,8 +70,8 @@
 
 对应代码位置：
 
-- `crates/memory-server/src/main.rs`
-- `crates/memory-server/src/ghost_ops.rs`
+- `crates/tachi-server/src/main.rs`
+- `crates/tachi-server/src/ghost_ops.rs`
 
 核心缺口：
 

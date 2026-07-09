@@ -298,7 +298,7 @@ Gastown 不作为新工具暴露，而是作为 `tachi_shell` 的协作协议：
 6. standard profile 暴露 `tachi_shell`，逐步弱化 `tachi_task` 作为用户入口。
 
 验收：
-- `cargo test -p memory-server` 通过。
+- `cargo test -p tachi-server` 通过。
 - `tachi_shell(action="kanban")` 能返回现有任务状态。
 
 ### Phase 2：Skill gate 接入
@@ -386,14 +386,14 @@ Gastown 不作为新工具暴露，而是作为 `tachi_shell` 的协作协议：
 
 预计涉及：
 
-- `crates/memory-server/src/tools.rs`：tool registration / call routing。
-- `crates/memory-server-params/src/facade.rs`：facade 参数。
-- `crates/memory-server/src/profiles.rs`：standard/delegate profile 暴露。
-- `crates/memory-server/src/dispatch_ops.rs`：后台 clanker 执行。
-- `crates/memory-server/src/task_ops.rs` 或现有 `tachi_task` facade：kanban/status 复用。
-- `crates/memory-server/src/skill_ops.rs` / Hub skill runner：skill gate。
-- `crates/memory-server/src/gh_ops.rs`：GitHub issue / PR lifecycle。
-- `crates/memory-server/src/memory_ops.rs` / save handlers：artifact/memo metadata。
+- `crates/tachi-server/src/tools.rs`：tool registration / call routing。
+- `crates/tachi-params/src/facade.rs`：facade 参数。
+- `crates/tachi-server/src/profiles.rs`：standard/delegate profile 暴露。
+- `crates/tachi-server/src/dispatch_ops.rs`：后台 clanker 执行。
+- `crates/tachi-server/src/task_ops.rs` 或现有 `tachi_task` facade：kanban/status 复用。
+- `crates/tachi-server/src/skill_ops.rs` / Hub skill runner：skill gate。
+- `crates/tachi-server/src/gh_ops.rs`：GitHub issue / PR lifecycle。
+- `crates/tachi-server/src/memory_ops.rs` / save handlers：artifact/memo metadata。
 
 ## 风险与约束
 

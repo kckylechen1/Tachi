@@ -269,8 +269,8 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 
 ### Implemented
 
-- `memory-core` typed `tachi_events` ledger: `TachiEventRecord`, `ProjectionKind`, `AuthorityLevel`, `EffectScope`.
-- `memory-server` `tachi_event` facade with eight actions: `emit`, `query`, `metrics`, `project`, `promote`, `context`, `a2a`, `label_eval`.
+- `memcore` typed `tachi_events` ledger: `TachiEventRecord`, `ProjectionKind`, `AuthorityLevel`, `EffectScope`.
+- `tachi-server` `tachi_event` facade with eight actions: `emit`, `query`, `metrics`, `project`, `promote`, `context`, `a2a`, `label_eval`.
 - `tachi_status` surfaces `challenge_rate` as a read-only continuity metric.
 - `capture_session` emits `session.captured`; optional continuity pipeline emits candidates and `session.outcome`.
 - `tachi_complete` bridges subagent eval into `task.outcome` / `subagent.evaluated` events.
@@ -364,62 +364,62 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 
 ### 8.1 `patterns` section in `tachi_event action=context`
 
-- **File:** `crates/memory-server/src/continuity_ops/context.rs`
+- **File:** `crates/tachi-server/src/continuity_ops/context.rs`
 - **Function:** `build_continuity_context`
 - **Current behavior:** after building `memories`, active `/user/patterns` and bonding projections are returned under `"patterns"` with `pattern_ref`; bonding projections are also exposed through `"bonding"` with `SharedLexicon` schema markers and `lexicon`; timeline projections are exposed through `"timeline"` with `TimelineEntry` schema markers and typed timeline metadata; the local `"a2a"` section exposes evidence/open-thread refs without raw payloads; `"host_lifecycle"` exposes the adapter contract. Context records `seen` feedback for returned pattern refs, while `action=a2a` remains read-only.
 
 ### 8.2 `scope="patterns"` in `tachi_search`
 
-- **File:** `crates/memory-server/src/facade_search_ops.rs`
+- **File:** `crates/tachi-server/src/facade_search_ops.rs`
 - **Function:** `collect_tachi_search_sections`
 - **Current behavior:** scope match includes `"patterns"`; pattern recall runs with `path_prefix = "/user/patterns"`, ordinary `memory` recall filters projection rows, and pattern rows include `pattern_ref` for later feedback.
-- **File:** `crates/memory-server/src/agent_markdown/search.rs`
+- **File:** `crates/tachi-server/src/agent_markdown/search.rs`
 - **Function:** `format_search_sections`
 - **Current behavior:** the generic section renderer handles the `Patterns` section.
 
 ### 8.2.1 Pattern feedback loop
 
-- **File:** `crates/memory-server/src/continuity_ops/feedback.rs`
+- **File:** `crates/tachi-server/src/continuity_ops/feedback.rs`
 - **Current behavior:** normalizes `pattern:<id>` / `pattern-hit:<id>` / `pattern-miss:<id>` / `pattern-stale:<id>` evidence refs into continuity feedback events.
-- **File:** `crates/memory-server/src/complete_ops/handler.rs`
+- **File:** `crates/tachi-server/src/complete_ops/handler.rs`
 - **Current behavior:** `tachi_complete` records pattern feedback from `evidence_refs`; success defaults to `hit`, failure to `miss`, and partial/aborted to `seen`.
-- **File:** `crates/memory-server/src/workflow_closure.rs`
+- **File:** `crates/tachi-server/src/workflow_closure.rs`
 - **Current behavior:** `close_loop` writes wiki entries with `include_patterns=true` and records attached reviewed patterns as `hit`.
 
 ### 8.3 Memory save emits continuity event when requested
 
-- **File:** `crates/memory-server/src/memory_search_ops/save_memory/handler.rs`
+- **File:** `crates/tachi-server/src/memory_search_ops/save_memory/handler.rs`
 - **Function:** `handle_save_memory`
 - **Current behavior:** after `upsert_save_entry`, `emit_continuity=true` calls `emit_memory_saved_event`.
-- **File:** `crates/memory-server/src/continuity_ops/emit.rs`
+- **File:** `crates/tachi-server/src/continuity_ops/emit.rs`
 - **Current behavior:** `emit_memory_saved_event` writes a `memory.saved` event with projection hints inferred from category/path metadata.
-- **File:** `crates/memory-server-params/src/memory.rs`
+- **File:** `crates/tachi-params/src/memory.rs`
 - **Current behavior:** `SaveMemoryParams` has `#[serde(default)] emit_continuity: bool`.
 
 ### 8.4 Wiki write recalls patterns
 
-- **File:** `crates/memory-server/src/copilot_ops/wiki_facade.rs`
+- **File:** `crates/tachi-server/src/copilot_ops/wiki_facade.rs`
 - **Function:** `handle_tachi_wiki_write`
 - **Current behavior:** when `include_patterns=true`, active patterns are queried and merged into `metadata.pattern_refs`.
-- **File:** `crates/memory-server/src/continuity_ops/context.rs`
+- **File:** `crates/tachi-server/src/continuity_ops/context.rs`
 - **Current behavior:** `pub(crate) fn list_active_patterns` is available for wiki/skill integration.
-- **File:** `crates/memory-server-params/src/memory/wiki.rs`
+- **File:** `crates/tachi-params/src/memory/wiki.rs`
 - **Current behavior:** `WikiWriteParams` has `include_patterns`, `pattern_query`, and `pattern_top_k`.
 
 ### 8.5 Pattern → skill generator
 
-- **New file:** `crates/memory-server/src/hub_ops/pattern_to_skill.rs`
+- **New file:** `crates/tachi-server/src/hub_ops/pattern_to_skill.rs`
 - **Function:** `handle_skill_from_pattern`
 - **Current behavior:**
   1. Fetch active patterns.
   2. Build skill definition JSON (system, prompt, content, inputSchema, policy, tags, `pattern_ref`).
   3. Persist via `store.hub_register`.
   4. Keep generated skills disabled and pending review; do not auto-expose as listed tools.
-- **File:** `crates/memory-server/src/hub_ops/mod.rs`
+- **File:** `crates/tachi-server/src/hub_ops/mod.rs`
 - **Current behavior:** re-exports the new handler.
-- **File:** `crates/memory-server/src/tools/skill_facade.rs`
+- **File:** `crates/tachi-server/src/tools/skill_facade.rs`
 - **Current behavior:** routes `tachi_skill(action="from_pattern")` to the new handler.
-- **File:** `crates/memory-server-params/src/facade.rs`
+- **File:** `crates/tachi-params/src/facade.rs`
 - **Current behavior:** `from_pattern` is in the `TachiSkillParams` action schema.
 
 ---

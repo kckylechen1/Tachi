@@ -89,7 +89,7 @@
 | 模型 | 任务 | 输入 tokens | 输出 tokens | 产出比 |
 |---|---|---|---|---|
 | **Qwen** | Review HyperTachi upstream bugs | **493K** | 6.9K | **1.4%** |
-| **Qwen** | Analyze memory-core capabilities | **232K** | 1.9K | **0.8%** |
+| **Qwen** | Analyze memcore capabilities | **232K** | 1.9K | **0.8%** |
 | GPT 5.5 | Audit HyperTachi fixes | 132K | 6.7K | **5.0%** |
 | GPT 5.5 | Map HyperTachi core | 176K | 7.3K | **4.2%** |
 

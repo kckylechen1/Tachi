@@ -1,4 +1,4 @@
-# Portable Kernel Split — memory-core vs admin
+# Portable Kernel Split — memcore vs admin
 
 > **Status:** landed 2026-07-09 (first cut).  
 > **Anchors:** #770, #790–#794, #833 Phase 1.1.  
@@ -7,7 +7,7 @@
 
 ## Why
 
-`memory-core` mixed two audiences:
+`memcore` mixed two audiences:
 
 1. **Portable kernel** — store, schema, hybrid search/scorer, graph, events,
    sandbox. HyperTachi / HyperMemory / adapters need this.
@@ -21,7 +21,7 @@ Without a compile boundary, every downstream fork either:
 
 ## What landed
 
-### Cargo feature on `memory-core`
+### Cargo feature on `memcore`
 
 | Feature | Default | Contents |
 |---|---|---|
@@ -32,36 +32,39 @@ Schema DDL still creates admin tables so a portable build can open DBs written
 by full Tachi. Empty tables are fine; portable code simply has no typed API for
 them.
 
-### Facade crate `portable-kernel`
+### Portable consume path (no separate facade crate)
 
-```
-crates/portable-kernel
-  └── depends on memory-core with default-features = false
+There is **no** separate `portable-kernel` package after the MemCore brand rename
+(#890). Downstream depends on **`memcore` with `default-features = false`**.
+
+```toml
+memcore = { path = "…/crates/memcore", default-features = false }
+# or: cargo test -p memcore --no-default-features
 ```
 
-- Re-exports the portable `memory-core` API.
-- `ADMIN_SURFACE_ENABLED == false` by construction.
-- Smoke tests: open/upsert/stats without admin types.
+- Portable API: store / schema / search / scorer / graph / events / sandbox.
+- `ADMIN_SURFACE_ENABLED == false` when built without the `admin` feature.
+- Smoke: `cargo test -p memcore --lib --no-default-features`.
 
 ### Tachi product unchanged
 
-`memory-server`, `tachi-hub`, `tachi-foundry`, `tachi-llm`, etc. still depend on
-`memory-core` with **default features** (admin on). No call-site rewrites.
+`tachi-server`, `tachi-hub`, `tachi-foundry`, `tachi-llm`, etc. still depend on
+`memcore` with **default features** (admin on).
 
 ## How downstream should fork / sync
 
 | Consumer | Sync unit | Feature flag |
 |---|---|---|
-| Hyperion-HyperTachi | `memory-core` **or** `portable-kernel` | `default-features = false` on core |
+| Hyperion-HyperTachi | `memcore` **or** `memcore` (default-features = false) | `default-features = false` on core |
 | HyperMemory runtime binary | same + thin MCP/CLI profile | no dispatch/gh/merge crates |
 | RomanBath `zeroclaw-memory-sigil` | algorithm/tests only (not crate path dep) | n/a |
 | Projects zeroclaw | MCP adapter contract, not crates | n/a |
 
-**Do not** rsync `memory-server` + operator leaves into HyperTachi as a
+**Do not** rsync `tachi-server` + operator leaves into HyperTachi as a
 prerequisite for memory quality. Prefer:
 
 ```text
-1. Merge / vendor crates/memory-core (portable build)
+1. Merge / vendor crates/memcore (portable build)
 2. Rebuild Hypermem binary
 3. Run hypermem compatibility gate + trading smoke
 ```
@@ -85,7 +88,7 @@ let opts = SearchOptions {
 store.search(query, Some(opts))?;
 ```
 
-Do not re-hardcode A-share / character-card decay constants into `memory-core`.
+Do not re-hardcode A-share / character-card decay constants into `memcore`.
 
 ## Targeted issue lanes (after this split)
 
@@ -105,11 +108,10 @@ Issues should name their lane. A portable PR must not require
 export CARGO_TARGET_DIR=$HOME/.cache/sigil-shared-target
 
 # Full Tachi product surface (admin on)
-cargo test -p memory-core
+cargo test -p memcore
 
-# Portable kernel only
-cargo test -p memory-core --no-default-features
-cargo test -p portable-kernel
+# Portable MemCore only
+cargo test -p memcore --lib --no-default-features
 ```
 
 ## Not in this cut
@@ -122,10 +124,10 @@ cargo test -p portable-kernel
 
 ## Acceptance
 
-- [x] `memory-core` has documented `admin` feature; default keeps Tachi green.
-- [x] `portable-kernel` builds and tests with admin off.
+- [x] `memcore` has documented `admin` feature; default keeps Tachi green.
+- [x] `memcore` (default-features = false) builds and tests with admin off.
 - [x] Portable build still opens a schema that includes admin tables.
-- [x] HyperTachi catch-up experiment: portable `memory-core` only (2026-07-09).
+- [x] HyperTachi catch-up experiment: portable `memcore` only (2026-07-09).
       See § Catch-up experiment results below.
 - [ ] Optional later: extract admin into `memory-admin` crate if feature gate
       proves insufficient for packaging.
@@ -133,17 +135,17 @@ cargo test -p portable-kernel
 ## Catch-up experiment results (2026-07-09)
 
 Isolated worktree on Hyperion-HyperTachi pin `21a43095` → branch
-`experiment/portable-memory-core-catchup` → draft PR
+`experiment/portable-memcore-catchup` → draft PR
 [Hyperion-HyperTachi#20](https://github.com/kckylechen1/Hyperion-HyperTachi/pull/20).
 
 | Metric | Result |
 |---|---|
-| HT-only files under old `memory-core` | **0** (pure older subset) |
-| Compile errors in HT `memory-server` after core replace | **14 → 0** (mechanical API) |
-| `memory-core` portable tests in HT tree | **254** passed |
-| `memory-core` full (admin) tests in HT tree | **278** passed |
-| `portable-kernel` in HT tree | **2** passed |
-| `cargo check -p memory-server` (HT) | **green** |
+| HT-only files under old `memcore` | **0** (pure older subset) |
+| Compile errors in HT `tachi-server` after core replace | **14 → 0** (mechanical API) |
+| `memcore` portable tests in HT tree | **254** passed |
+| `memcore` full (admin) tests in HT tree | **278** passed |
+| `memcore` (default-features = false) in HT tree | **2** passed |
+| `cargo check -p tachi-server` (HT) | **green** |
 
 Product policy that correctly stayed out of the kernel:
 
@@ -152,4 +154,4 @@ Product policy that correctly stayed out of the kernel:
 
 **Conclusion:** portable-only catch-up is viable. Do not rsync operator crates.
 Full procedure: HyperTachi
-`docs/engineering/portable-memory-core-catchup.md` on that experiment branch.
+`docs/engineering/portable-memcore-catchup.md` on that experiment branch.

@@ -20,7 +20,7 @@ the escape-gate comparison column.
   calls `search_memory_rows_with_recall_config` directly, never the
   cache-guarded handler.
 - **shares the same server-side pipeline as `tachi search`** — the same
-  `rows.rs` exclusions and the same `memory-core` quality multipliers (wiki
+  `rows.rs` exclusions and the same `memcore` quality multipliers (wiki
   ×1.15 etc.) apply inside the eval loop, so results are faithful.
 - **does not mutate `access_count`** — `record_access` is hardcoded `false` in
   the simulate runner, so running the full matrix leaves the live corpus
@@ -78,9 +78,9 @@ Variant matrix (architecture doc §4.4):
 - `fts_heavier` — reweights the default + events/notes groups toward FTS.
 - `enable_rerank` — a **separate pass** (rerank is request-global, not
   per-variant), baseline config. `recall_simulate` exposes a per-variant
-  `rerank.policy_counts` map (`crates/memory-server/src/facade_memory_ops/
+  `rerank.policy_counts` map (`crates/tachi-server/src/facade_memory_ops/
   recall_simulate_ops/runner.rs:184-187`, backed by `SearchRerankPolicy` in
-  `crates/memory-server/src/memory_search_ops/rerank.rs:9-30`), so this row
+  `crates/tachi-server/src/memory_search_ops/rerank.rs:9-30`), so this row
   reports how many cases actually got `applied` vs `not_needed` /
   `score_gap_too_wide` / `fallback` / `skipped_exact_token` — proof rerank
   participated in ranking, not just that the request carried

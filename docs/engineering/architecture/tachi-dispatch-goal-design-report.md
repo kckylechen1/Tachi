@@ -586,11 +586,11 @@ if goal.audit_required && outcome == "success" {
 
 ### Tachi 源码
 
-- `crates/memory-server/src/dispatch_ops/dispatch.rs` — Dispatch 主流程
-- `crates/memory-server/src/dispatch_ops/prompt.rs` — Prompt 组装
-- `crates/memory-server/src/dispatch_ops/kanban_helpers.rs` — Kanban 状态管理
-- `crates/memory-server/src/dispatch_ops/subprocess.rs` — 子进程管理
-- `crates/memory-server-params/src/facade/dispatch.rs` — TachiDispatchParams 定义
+- `crates/tachi-server/src/dispatch_ops/dispatch.rs` — Dispatch 主流程
+- `crates/tachi-server/src/dispatch_ops/prompt.rs` — Prompt 组装
+- `crates/tachi-server/src/dispatch_ops/kanban_helpers.rs` — Kanban 状态管理
+- `crates/tachi-server/src/dispatch_ops/subprocess.rs` — 子进程管理
+- `crates/tachi-params/src/facade/dispatch.rs` — TachiDispatchParams 定义
 
 ### 本报告相关文件
 

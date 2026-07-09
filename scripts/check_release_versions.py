@@ -59,22 +59,22 @@ def require_contains(label: str, text: str, needle: str, errors: list[str]) -> N
 
 
 def main() -> int:
-    expected = cargo_version("crates/memory-server/Cargo.toml")
+    expected = cargo_version("crates/tachi-server/Cargo.toml")
     tag = f"v{expected}"
     errors: list[str] = []
 
     cargo_files = [
-        "crates/memory-core/Cargo.toml",
-        "crates/memory-server-capture-gate/Cargo.toml",
-        "crates/memory-server-hub-cli/Cargo.toml",
-        "crates/memory-server-i18n/Cargo.toml",
-        "crates/memory-server-manifest-audit/Cargo.toml",
-        "crates/memory-server/Cargo.toml",
-        "crates/memory-server-params/Cargo.toml",
-        "crates/memory-server-prompt-envelope/Cargo.toml",
-        "crates/memory-server-rescue/Cargo.toml",
-        "crates/memory-server-runtime/Cargo.toml",
-        "crates/memory-node/Cargo.toml",
+        "crates/memcore/Cargo.toml",
+        "crates/tachi-capture-gate/Cargo.toml",
+        "crates/tachi-hub-cli/Cargo.toml",
+        "crates/tachi-i18n/Cargo.toml",
+        "crates/tachi-manifest-audit/Cargo.toml",
+        "crates/tachi-server/Cargo.toml",
+        "crates/tachi-params/Cargo.toml",
+        "crates/tachi-prompt-envelope/Cargo.toml",
+        "crates/tachi-rescue/Cargo.toml",
+        "crates/tachi-runtime/Cargo.toml",
+        "crates/memcore-node/Cargo.toml",
         "crates/tachi-bootstrap/Cargo.toml",
         "crates/tachi-dispatch/Cargo.toml",
         "crates/tachi-foundry/Cargo.toml",
@@ -87,17 +87,17 @@ def main() -> int:
 
     lock_versions = cargo_lock_versions(
         {
-            "memory-core",
-            "memory-server-capture-gate",
-            "memory-server-hub-cli",
-            "memory-server-i18n",
-            "memory-server-manifest-audit",
-            "memory-server",
-            "memory-server-params",
-            "memory-server-prompt-envelope",
-            "memory-server-rescue",
-            "memory-server-runtime",
-            "memory-node",
+            "memcore",
+            "tachi-capture-gate",
+            "tachi-hub-cli",
+            "tachi-i18n",
+            "tachi-manifest-audit",
+            "tachi-server",
+            "tachi-params",
+            "tachi-prompt-envelope",
+            "tachi-rescue",
+            "tachi-runtime",
+            "memcore-node",
             "tachi-bootstrap",
             "tachi-dispatch",
             "tachi-foundry",
@@ -107,17 +107,17 @@ def main() -> int:
         }
     )
     for name in [
-        "memory-core",
-        "memory-server-capture-gate",
-        "memory-server-hub-cli",
-        "memory-server-i18n",
-        "memory-server-manifest-audit",
-        "memory-server",
-        "memory-server-params",
-        "memory-server-prompt-envelope",
-        "memory-server-rescue",
-        "memory-server-runtime",
-        "memory-node",
+        "memcore",
+        "tachi-capture-gate",
+        "tachi-hub-cli",
+        "tachi-i18n",
+        "tachi-manifest-audit",
+        "tachi-server",
+        "tachi-params",
+        "tachi-prompt-envelope",
+        "tachi-rescue",
+        "tachi-runtime",
+        "memcore-node",
         "tachi-bootstrap",
         "tachi-dispatch",
         "tachi-foundry",
@@ -128,7 +128,7 @@ def main() -> int:
         require_match(f"Cargo.lock {name}", lock_versions.get(name, ""), expected, errors)
 
     json_files = [
-        "crates/memory-node/package.json",
+        "crates/memcore-node/package.json",
         "integrations/openclaw/package.json",
         "packages/tachi-cli/package.json",
     ]
@@ -136,7 +136,7 @@ def main() -> int:
         require_match(path, package_json_version(path), expected, errors)
 
     lock_files = [
-        "crates/memory-node/package-lock.json",
+        "crates/memcore-node/package-lock.json",
         "integrations/openclaw/package-lock.json",
         "packages/tachi-cli/package-lock.json",
     ]

@@ -9,7 +9,7 @@
 
 ## 1. Why this page exists
 
-GLM-era cratesplit (#833) cut operator leaves out of `memory-server`. That is
+GLM-era cratesplit (#833) cut operator leaves out of `tachi-server`. That is
 healthy for **Tachi compile isolation**, but it must not be continued as
 “keep carving the monorepo” without a **downstream sync surface**.
 
@@ -21,19 +21,19 @@ or wrong work (trying to path-dep zeroclaw onto Tachi crates).
 
 | Product | Path | How it relates to Tachi | Memory stack today |
 |---|---|---|---|
-| **Tachi (upstream)** | `~/Desktop/Sigil` → `kckylechen1/tachi` | Source of portable kernel + full operator product | `memory-core` + fat `memory-server` + extracted leaves |
-| **Quant / HyperMemory** | `~/Desktop/Quant_Analyzer_2026` | Submodule `hypermemory` → `kckylechen1/Hyperion-HyperTachi` (**fork of Tachi**, `upstream = tachi`) | Vendored workspace: `memory-core` + `memory-server` only; product binary `memory-server` / shipped as `hyperion-tachi` / `hypermemory` |
+| **Tachi (upstream)** | `~/Desktop/Sigil` → `kckylechen1/tachi` | Source of portable kernel + full operator product | `memcore` + fat `tachi-server` + extracted leaves |
+| **Quant / HyperMemory** | `~/Desktop/Quant_Analyzer_2026` | Submodule `hypermemory` → `kckylechen1/Hyperion-HyperTachi` (**fork of Tachi**, `upstream = tachi`) | Vendored workspace: `memcore` + `tachi-server` only; product binary `tachi-server` / shipped as `hyperion-tachi` / `hypermemory` |
 | **zeroclaw (engineering)** | `~/Projects/zeroclaw` → `kckylechen1/zeroclaw` | **No Cargo dep on Tachi.** Memory is first-party `zeroclaw-memory` backends. Product rule: route trading memory via hapi-edge / HyperMemory MCP, never host generic tachi MCP for trading | `zeroclaw-memory` (sqlite/lucid/postgres/qdrant/markdown). HyperMemory custom backend **retired** (#634 option C) |
 | **RomanBath + modified zeroclaw** | `/Volumes/Storage/RomanBath` (repo `kckylechen1/romanbath`) | Product shell over zeroclaw; **chat memory is `zeroclaw-memory-sigil`** (Sigil-shaped ACT-R/FTS/hybrid), not Tachi crates | `zeroclaw-memory-sigil` (scorer, schema, dreaming, chat partition by character). Branch tip carries memory-sigil FTS/RRF fixes (`feat/vector-recall-channel`) |
 | **Quant’s embedded zeroclaw** | `Quant_Analyzer_2026/zeroclaw` submodule → `kckylechen1/zeroclaw` | Same as Projects zeroclaw pin, **not** the RomanBath fork | No `zeroclaw-memory-sigil` in that pin |
 
 ### 2.1 Scale / drift signals (approximate)
 
-| Tree | `memory-core` LOC | `memory-server` LOC | Notes |
+| Tree | `memcore` LOC | `tachi-server` LOC | Notes |
 |---|---:|---:|---|
 | Tachi | ~23k | ~169k (incl. tests) | Many product modules; cratesplit leaves extracted |
 | Hyperion-HyperTachi (Quant pin `21a43095`) | ~15k | ~50k | **Behind Tachi main by hundreds of commits**; still monolithic `capture_gate.rs`, still has `dispatch_ops/` |
-| RomanBath `zeroclaw-memory-sigil` | n/a (own crate) | n/a | Ports **ideas** (ACT-R, hybrid, FTS Chinese) from Sigil/Tachi scorer lineage without depending on `memory-core` as a crate |
+| RomanBath `zeroclaw-memory-sigil` | n/a (own crate) | n/a | Ports **ideas** (ACT-R, hybrid, FTS Chinese) from Sigil/Tachi scorer lineage without depending on `memcore` as a crate |
 
 HyperTachi still declares `upstream = https://github.com/kckylechen1/tachi.git`.
 That is the only tree that can “feel” cratesplit as a merge conflict surface.
@@ -43,7 +43,7 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 ```
                     ┌─────────────────────────────┐
                     │  Tachi portable kernel      │
-                    │  memory-core + schema +     │
+                    │  memcore + schema +     │
                     │  recall/vector/events/ready │
                     └─────────────┬───────────────┘
                                   │
@@ -60,7 +60,7 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 
 | Consumer | Needs from Tachi | Does **not** need |
 |---|---|---|
-| Hyperion-HyperTachi | Stable **`memory-core` API + schema**, portable save/search/status, vector readiness, scorer hooks for A-share policy | `tachi_gh`, dispatch/ship/merge, hub CLI, rescue, card evolution, agent-md layering |
+| Hyperion-HyperTachi | Stable **`memcore` API + schema**, portable save/search/status, vector readiness, scorer hooks for A-share policy | `tachi_gh`, dispatch/ship/merge, hub CLI, rescue, card evolution, agent-md layering |
 | Quant runtime | A **thin HyperMemory binary** (or MCP URL) bound to trading/project DBs | Full Tachi operator surface in-process |
 | Projects zeroclaw | Contract vocabulary only (retain/recall/readiness via adapter or MCP); **not** crate path deps | Tachi monorepo layout |
 | RomanBath zeroclaw | Either keep `zeroclaw-memory-sigil` as product policy **or** eventually call portable Tachi via MCP; today **owns its own SQLite stack** inspired by Sigil scorer | Auto-merge of Tachi cratesplit into monorepo |
@@ -71,8 +71,8 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 
 | Crate / surface | Role | Downstream rule |
 |---|---|---|
-| **`memory-core`** (portable: `default-features = false`) | Canonical rows, edges, store, scorer types, search primitives | **Primary sync unit.** Prefer package or subtree merge of this crate alone. |
-| **`portable-kernel`** | Facade re-export of portable `memory-core` (admin off) | Prefer this dep for HyperTachi / adapter workspaces; see [`portable-kernel-split.md`](./portable-kernel-split.md). |
+| **`memcore`** (portable: `default-features = false`) | Canonical rows, edges, store, scorer types, search primitives | **Primary sync unit.** Prefer package or subtree merge of this crate alone. |
+| **`memcore` (default-features = false)** | Facade re-export of portable `memcore` (admin off) | Prefer this dep for HyperTachi / adapter workspaces; see [`memcore-split.md`](./memcore-split.md). |
 | Schema / migrations owned by core | `memories`, FTS, edges, access history, event ledger columns | Breaking changes need dual-gate: Tachi tests + Hypermem gate fixture |
 | Vector / backfill readiness | Coverage, degraded mode | Via core + readiness APIs, not Foundry product UI |
 | Event projection hooks | Continuity projection for adapters | Neutral events only; no GitHub/dispatch events required |
@@ -84,8 +84,8 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 | Crate / area | Why |
 |---|---|
 | `tachi-dispatch`, `tachi-merge-ops` | Operator dispatch / worktree merge |
-| `memory-server-hub-cli`, `memory-server-rescue`, `memory-server-manifest-audit` | Operator DB/skill governance |
-| `memory-server-prompt-envelope` | Dispatch prompt overlays |
+| `tachi-hub-cli`, `tachi-rescue`, `tachi-manifest-audit` | Operator DB/skill governance |
+| `tachi-prompt-envelope` | Dispatch prompt overlays |
 | `gh_ops`, ship, safe_merge, PR lifecycle | GitHub product |
 | `component_governance_ops` as a **runtime dep** of Hypermem | Governance is Tachi control-plane; cutover uses fixtures, not a second binary |
 | Full `dispatch_ops` / `shell_ops` campaign machinery | Must not be a Hypermem cutover prerequisite (#793/#794) |
@@ -94,9 +94,9 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 
 | Crate | Rule |
 |---|---|
-| `memory-server-capture-gate` | Gate policy is good; Hypermem still has in-tree `capture_gate.rs`. Prefer **shared logic in core or a tiny no-product crate**, not a server-only leaf that Hypermem must vend. |
+| `tachi-capture-gate` | Gate policy is good; Hypermem still has in-tree `capture_gate.rs`. Prefer **shared logic in core or a tiny no-product crate**, not a server-only leaf that Hypermem must vend. |
 | `tachi-llm` / `tachi-foundry` | Needed for embed/rerank/backfill. Hypermem may keep a thinner LLM client; do not force full Foundry product surfaces. |
-| `memory-server-params` | OK if limited to memory/readiness param types; not if it becomes a dump of every facade enum. |
+| `tachi-params` | OK if limited to memory/readiness param types; not if it becomes a dump of every facade enum. |
 | `memory-server-i18n` | Optional strings only. |
 
 ## 5. What GLM cratesplit already did (downstream lens)
@@ -107,7 +107,7 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 | Extract capture-gate / prompt-envelope / i18n | **Low compile win**, **medium fork friction** if HyperTachi is rsynced naively. |
 | Rerank seam (search ↛ foundry hard edge) | **Relevant** to recall quality; Hypermem/RomanBath-sigil must re-validate hybrid+rerank behavior if they cherry-pick. |
 | Drop aws-lc | **Build hygiene**; independent of API. |
-| Main `memory-server` still ~169k | **Cold-compile goal unmet**; next cuts must be large **and** portable-aware. |
+| Main `tachi-server` still ~169k | **Cold-compile goal unmet**; next cuts must be large **and** portable-aware. |
 
 **Do not** continue the “tiny leaf” campaign. Next cuts must either:
 
@@ -130,7 +130,7 @@ Goal: Hyperion-HyperTachi stops being “old monorepo clone” and becomes:
 
 ```
 portable-workspace/
-  memory-core/          # path or published crate
+  memcore/          # path or published crate
   memory-server-lite/   # optional: MCP/CLI profile = remember/coordinate-lite
 ```
 
@@ -138,9 +138,9 @@ Concrete Tachi-side work:
 
 | Step | Action | Downstream effect |
 |---|---|---|
-| 1.1 | Define Cargo feature or package set `portable-kernel` that builds **only** whitelist crates + a server binary **without** linking dispatch/gh/merge | HyperTachi can depend on that package set instead of whole tree |
-| 1.2 | Move or keep all **schema/scorer/store** changes in `memory-core` first | Single merge surface for HyperTachi |
-| 1.3 | Document HyperTachi catch-up procedure: merge `memory-core` → rebuild Hypermem binary → run hypermem gate fixture + Quant trading smoke | Stops “sync whole memory-server” |
+| 1.1 | Define Cargo feature or package set `memcore` (default-features = false) that builds **only** whitelist crates + a server binary **without** linking dispatch/gh/merge | HyperTachi can depend on that package set instead of whole tree |
+| 1.2 | Move or keep all **schema/scorer/store** changes in `memcore` first | Single merge surface for HyperTachi |
+| 1.3 | Document HyperTachi catch-up procedure: merge `memcore` → rebuild Hypermem binary → run hypermem gate fixture + Quant trading smoke | Stops “sync whole memory-server” |
 | 1.4 | Explicitly delete/ignore operator modules on HyperTachi when catching up (`dispatch_ops` product lanes, ship, etc.) unless product still needs them | Aligns with #793 “no operator surface dependency” |
 
 **Do not** start Phase 1 by extracting more 100-LOC leaves.
@@ -151,8 +151,8 @@ Only extract clusters that HyperTachi would also want as units:
 
 | Priority | Cluster (today inside Tachi) | Target crate | Portable? |
 |---|---|---|---|
-| P0 | Store/open/schema/migrations already in core | keep / further modularize **inside** `memory-core` | yes |
-| P0 | Hybrid search + scorer + rerank glue | `memory-core` or `memory-recall` **without** Foundry product deps | yes |
+| P0 | Store/open/schema/migrations already in core | keep / further modularize **inside** `memcore` | yes |
+| P0 | Hybrid search + scorer + rerank glue | `memcore` or `memory-recall` **without** Foundry product deps | yes |
 | P1 | Vector backfill / coverage | `memory-vector` or core submodule | yes |
 | P1 | Continuity event ledger + projection read models | `memory-events` (neutral events only) | yes |
 | P2 | Status/readiness snapshot used by adapters | thin `memory-readiness` or core API | yes |
@@ -165,7 +165,7 @@ Only extract clusters that HyperTachi would also want as units:
 | Downstream | Strategy |
 |---|---|
 | **Projects zeroclaw** | Keep first-party `zeroclaw-memory`. Integrate Tachi via **MCP adapter** (chat retain/recall/readiness) per #792; never reintroduce retired HyperMemory backend. |
-| **RomanBath `zeroclaw-memory-sigil`** | Treat as **product policy memory** (character partition, dreaming, ACT-R). Port **algorithms and tests** from Tachi/Sigil scorer lineage when useful; do **not** replace with a path dep on `memory-core` until a deliberate cutover. When Tachi changes hybrid/RRF/FTS Chinese behavior, open a RomanBath PR to `zeroclaw-memory-sigil` with discrimination tests (RB already has this culture: memory-sigil FTS/RRF commits). |
+| **RomanBath `zeroclaw-memory-sigil`** | Treat as **product policy memory** (character partition, dreaming, ACT-R). Port **algorithms and tests** from Tachi/Sigil scorer lineage when useful; do **not** replace with a path dep on `memcore` until a deliberate cutover. When Tachi changes hybrid/RRF/FTS Chinese behavior, open a RomanBath PR to `zeroclaw-memory-sigil` with discrimination tests (RB already has this culture: memory-sigil FTS/RRF commits). |
 | **Quant trading** | Runtime path = HyperMemory binary + `data/tachi/projects/*`. Engineering memory may use Tachi project DBs; still no requirement to compile Tachi operator crates into hapi-edge. |
 
 ### Phase 4 — Cutover gates (before declaring “one kernel”)
@@ -181,8 +181,8 @@ Only extract clusters that HyperTachi would also want as units:
 ## 7. Recommended near-term sequence (ordered)
 
 1. **Stop leaf-only cratesplit** unless the leaf is clearly Tachi-operator quarantine.  
-2. **✅ Landed: portable packaging (Phase 1.1)** — `memory-core` feature `admin` (default on) + facade crate `portable-kernel` (`default-features = false`). See [`portable-kernel-split.md`](./portable-kernel-split.md).  
-3. **✅ HyperTachi catch-up experiment (2026-07-09):** portable `memory-core` only on pin `21a43095` → branch `experiment/portable-memory-core-catchup` / [HyperTachi#20](https://github.com/kckylechen1/Hyperion-HyperTachi/pull/20). Result: **0** HT-only core files; **14** mechanical server API fixes; core tests 254/278 green; `memory-server` check green; trading policy lifted to `hypermem_policy`. See [`portable-kernel-split.md`](./portable-kernel-split.md) § results.
+2. **✅ Landed: portable packaging (Phase 1.1)** — `memcore` feature `admin` (default on) + facade crate `memcore` (default-features = false) (`default-features = false`). See [`memcore-split.md`](./memcore-split.md).  
+3. **✅ HyperTachi catch-up experiment (2026-07-09):** portable `memcore` only on pin `21a43095` → branch `experiment/portable-memcore-catchup` / [HyperTachi#20](https://github.com/kckylechen1/Hyperion-HyperTachi/pull/20). Result: **0** HT-only core files; **14** mechanical server API fixes; core tests 254/278 green; `tachi-server` check green; trading policy lifted to `hypermem_policy`. See [`memcore-split.md`](./memcore-split.md) § results.
 4. **Next large extract:** recall/search stack **without** foundry product deps (extends #876).  
 5. **RomanBath:** keep `zeroclaw-memory-sigil` as the chat owner; open an issue there for “sync scorer behavior from Tachi kernel surface” rather than monorepo merge.  
 6. **zeroclaw Projects:** no cratesplit work required; only MCP/adapter contract when #792 consumers need updates.  
@@ -192,7 +192,7 @@ Only extract clusters that HyperTachi would also want as units:
 
 | Anti-pattern | Why it hurts |
 |---|---|
-| Rsync entire Tachi `memory-server` into HyperTachi after each cratesplit | Reintroduces operator surfaces; multiplies conflicts |
+| Rsync entire Tachi `tachi-server` into HyperTachi after each cratesplit | Reintroduces operator surfaces; multiplies conflicts |
 | Path-depending Quant or RomanBath on `~/Desktop/Sigil/crates/*` | Breaks CI, packaging, and multi-machine builds |
 | Putting portable APIs only in `memory-server-*` product crates | Forces Hypermem to depend on operator graph |
 | Assuming RomanBath zeroclaw == Projects zeroclaw | RB has `zeroclaw-memory-sigil` + memory-sigil commits; Projects pin does not |
@@ -201,7 +201,7 @@ Only extract clusters that HyperTachi would also want as units:
 ## 9. Acceptance for “cratesplit is healthy for downstream”
 
 - [ ] Whitelist/blacklist in this doc match what HyperTachi actually merges.  
-- [ ] A HyperTachi PR can update `memory-core` without importing dispatch/gh/merge crates.  
+- [ ] A HyperTachi PR can update `memcore` without importing dispatch/gh/merge crates.  
 - [ ] Tachi `downstream_dogfood` + hypermem gate fixtures stay green on portable PRs.  
 - [ ] RomanBath chat memory has an explicit owner (`zeroclaw-memory-sigil`) and a manual port path for scorer/FTS improvements.  
 - [ ] Projects zeroclaw remains free of Tachi crate deps; trading memory still goes through HyperMemory/hapi.  

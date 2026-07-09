@@ -808,9 +808,9 @@ docs/ADD_A_MODEL.md            # Backend integration guide
 ### 8.6 Tachi Internal
 
 ```
-crates/memory-server/src/shell_ops/mod.rs    # 5-stage lifecycle
-crates/memory-server/src/dispatch_ops/       # Agent dispatch
-crates/memory-server/src/claude_pool.rs      # Bounded concurrency
-crates/memory-server-params/src/             # MCP tool schemas
-crates/memory-server/src/llm.rs              # Multi-model backend lanes (Qwen/Claude)
+crates/tachi-server/src/shell_ops/mod.rs    # 5-stage lifecycle
+crates/tachi-server/src/dispatch_ops/       # Agent dispatch
+crates/tachi-server/src/claude_pool.rs      # Bounded concurrency
+crates/tachi-params/src/             # MCP tool schemas
+crates/tachi-server/src/llm.rs              # Multi-model backend lanes (Qwen/Claude)
 ```

@@ -1522,7 +1522,7 @@ tachi dispatch auto "Build a REST API" --strategy orchestrator-worker \
 
 ### 15.1 Current Backend Map
 
-Tachi's `LlmClient` (`crates/memory-server/src/llm.rs`) already uses a **lane-based architecture** with multiple model tiers:
+Tachi's `LlmClient` (`crates/tachi-server/src/llm.rs`) already uses a **lane-based architecture** with multiple model tiers:
 
 | Lane | Default Model | Backend | Usage |
 |------|--------------|---------|-------|

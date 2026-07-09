@@ -2,10 +2,10 @@
 //! what evidence a delegated agent must return. They are intentionally separate
 //! from `tachi_hub::ToolProfile`, which only gates MCP tool visibility.
 
-use memory_server_params::{DispatchMcpAccessParams, TachiDispatchParams};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use tachi_params::{DispatchMcpAccessParams, TachiDispatchParams};
 
 pub const DISPATCH_POLICY_PROPOSAL_NS: &str = "dispatch_route_policy_proposals";
 pub const ROUTE_POLICY_RULE_NS: &str = "dispatch_route_policy_rules";

@@ -7,7 +7,7 @@
   ],
   "portable_bundle": {
     "required_surfaces": [
-      "memory-core",
+      "memcore",
       "memory_db_schema_contracts",
       "recall_scorer_rrf",
       "vector_backfill",
@@ -30,7 +30,7 @@
     {
       "class": "kernel",
       "owns": [
-        "memory-core",
+        "memcore",
         "memory_db_schema_contracts",
         "recall_scorer_rrf",
         "vector_backfill",

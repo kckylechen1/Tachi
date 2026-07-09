@@ -60,7 +60,7 @@ Agent / IDE / CLI
 - **LLM 自动注入**：仅当 `secret_type == api_key` 且名称以 **`_API_KEY` 结尾**、且未配置 `allowed_agents` 时，会进入 `LlmClient` 的内存表（如 `VOYAGE_API_KEY`、`SILICONFLOW_API_KEY`）。
 - **`GH_TOKEN` 等**：可进 Vault，但**不会**走上述 `*_API_KEY` 自动灌 LLM 的分支；典型用法是 **`tachi env`** 解密后输出 `export NAME='value'`，供本机 shell 或运维流程使用。
 
-实现参考：`crates/memory-server/src/vault_ops.rs`、`vault_crypto.rs`、`crates/memory-core/src/db/vault_db.rs`。
+实现参考：`crates/tachi-server/src/vault_ops.rs`、`vault_crypto.rs`、`crates/memcore/src/db/vault_db.rs`。
 
 ---
 

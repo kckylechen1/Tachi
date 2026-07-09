@@ -1,0 +1,18 @@
+[package]
+name = "memcore-node"
+version = "1.7.0"
+edition = "2021"
+description = "MemCore Node — NAPI-RS bindings for MemCore"
+license = "AGPL-3.0-only"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+memcore = { path = "../memcore" }
+napi = { version = "2", default-features = false, features = ["napi8", "serde-json"] }
+napi-derive = "2"
+serde_json = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"

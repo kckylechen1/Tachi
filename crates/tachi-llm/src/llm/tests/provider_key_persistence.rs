@@ -54,7 +54,7 @@ async fn provider_key_health_persists_off_async_runtime_thread() {
     let mut persisted = None;
     for _ in 0..50 {
         if db_path.exists() {
-            if let Ok(store) = memory_core::MemoryStore::open(db_path.to_str().unwrap()) {
+            if let Ok(store) = memcore::MemoryStore::open(db_path.to_str().unwrap()) {
                 persisted = store
                     .vault_get_key_health(
                         "TACHI_TEST_ONLY_API_KEY_ASYNC_PERSIST",
@@ -137,7 +137,7 @@ async fn provider_key_health_reloads_external_db_cooldowns_before_selection() {
     const KEY: &str = "TACHI_TEST_ONLY_API_KEY_RELOAD_COOLDOWN";
     let temp = tempfile::tempdir().expect("temp vault db");
     let db_path = temp.path().join("vault.db");
-    let store = memory_core::MemoryStore::open(db_path.to_str().unwrap()).expect("open db");
+    let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("open db");
     drop(store);
 
     let client = LlmClient::new_with_vault_db(Some(&db_path)).expect("client should initialize");
@@ -156,7 +156,7 @@ async fn provider_key_health_reloads_external_db_cooldowns_before_selection() {
     );
 
     let now = Utc::now();
-    let store = memory_core::MemoryStore::open(db_path.to_str().unwrap()).expect("open db");
+    let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("open db");
     store
         .vault_upsert_key_health(&VaultKeyHealth {
             logical_name: KEY.to_string(),
@@ -207,7 +207,7 @@ async fn provider_key_health_reload_clears_local_cooldown_on_external_success() 
     client.mark_provider_key_rate_limited_for_tests(&format!("{KEY}_1"), Some(300));
 
     let now = Utc::now() + chrono::Duration::seconds(1);
-    let store = memory_core::MemoryStore::open(db_path.to_str().unwrap()).expect("open db");
+    let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("open db");
     store
         .vault_upsert_key_health(&VaultKeyHealth {
             logical_name: KEY.to_string(),

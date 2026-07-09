@@ -195,8 +195,8 @@ latency, cost, verification, human override, plan delta, and failure mode.
 
 The June 5 implementation was verified with:
 
-- `cargo test -p memory-server`
-- `cargo build -p memory-server --release`
+- `cargo test -p tachi-server`
+- `cargo build -p tachi-server --release`
 - `target/release/memory-server --help`
 - Release-binary `remember/search` smoke with temporary DB overrides
 - Tachi MCP save using explicit `project="Sigil"`

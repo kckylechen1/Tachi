@@ -111,7 +111,7 @@ Deferred until needed:
 This model reuses what already exists instead of creating a parallel system.
 
 1. **Dispatch profiles are Cards.**
-- `DispatchProfileDef` in `crates/memory-server/src/dispatch_profile.rs`
+- `DispatchProfileDef` in `crates/tachi-server/src/dispatch_profile.rs`
   already carries `role`, `stage`, `common_skills`, `signature_skills`,
   `forbidden_skills`, `evidence_required`, `strong_against`, and
   `weak_against`.
@@ -122,16 +122,16 @@ This model reuses what already exists instead of creating a parallel system.
      JSON.
 
 2. **Superpowers and Waza are builtin skills.**
-   - Stable IDs live in `crates/memory-server/src/skill_policy.rs`.
+   - Stable IDs live in `crates/tachi-server/src/skill_policy.rs`.
    - Source content lives under `skill/superpowers/skills/` and
      `skill/waza/skills/`.
-   - `crates/memory-server/src/builtins.rs` seeds them into the Hub on startup
+   - `crates/tachi-server/src/builtins.rs` seeds them into the Hub on startup
      and registers skill tools.
    - `tachi_skill(action="discover" | "bundle" | "loadout" | "run")` exposes the
      skill surface.
 
 3. **Dispatch already produces evidence artifacts.**
-   - `crates/memory-server/src/dispatch_ops/` writes `prompt.md`, `context.md`,
+   - `crates/tachi-server/src/dispatch_ops/` writes `prompt.md`, `context.md`,
      `capability_bundle.json`, `trajectory.jsonl`, `progress.jsonl`,
      `status.json`, and `result.md` under `~/.tachi/runs/<dispatch_id>/`.
 
@@ -721,8 +721,8 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
 Status as of 2026-06-27:
 
 - Card projection and CLI JSON are implemented through
-  `crates/memory-server/src/dispatch_profile/cards/render.rs` and
-  `crates/memory-server/src/bootstrap/cli_tool/cards.rs`.
+  `crates/tachi-server/src/dispatch_profile/cards/render.rs` and
+  `crates/tachi-server/src/bootstrap/cli_tool/cards.rs`.
 - Poke probes are covered by
   `poke_smoke_suite_writes_report_and_probe_artifacts`.
 - Card evolution is review-required through

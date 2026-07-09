@@ -1,0 +1,6 @@
+[package]
+name = "tachi-i18n"
+version = "1.7.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Tachi i18n string lookup"

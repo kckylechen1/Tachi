@@ -35,9 +35,9 @@ jobs:
             version="${GITHUB_REF_NAME#v}"
           fi
 
-          server_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/memory-server/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
-          node_crate_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/memory-node/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
-          node_pkg_version=$(node -p "require('./crates/memory-node/package.json').version")
+          server_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/tachi-server/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
+          node_crate_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/memcore-node/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
+          node_pkg_version=$(node -p "require('./crates/memcore-node/package.json').version")
 
           if [ -z "$server_version" ] || [ -z "$node_crate_version" ] || [ -z "$node_pkg_version" ]; then
             echo "Failed to resolve one or more release versions."
@@ -49,17 +49,17 @@ jobs:
           fi
 
           if [ "$version" != "$server_version" ]; then
-            echo "Tag/workflow version ($version) does not match crates/memory-server/Cargo.toml ($server_version)."
+            echo "Tag/workflow version ($version) does not match crates/tachi-server/Cargo.toml ($server_version)."
             exit 1
           fi
 
           if [ "$server_version" != "$node_crate_version" ]; then
-            echo "memory-server version ($server_version) does not match crates/memory-node/Cargo.toml ($node_crate_version)."
+            echo "tachi-server version ($server_version) does not match crates/memcore-node/Cargo.toml ($node_crate_version)."
             exit 1
           fi
 
           if [ "$server_version" != "$node_pkg_version" ]; then
-            echo "memory-server version ($server_version) does not match crates/memory-node/package.json ($node_pkg_version)."
+            echo "tachi-server version ($server_version) does not match crates/memcore-node/package.json ($node_pkg_version)."
             exit 1
           fi
 
@@ -104,11 +104,11 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Install node deps
-        working-directory: crates/memory-node
+        working-directory: crates/memcore-node
         run: npm ci
 
       - name: Build native module
-        working-directory: crates/memory-node
+        working-directory: crates/memcore-node
         run: |
           cargo build --release --locked --target ${{ matrix.target }} --manifest-path Cargo.toml
           npx napi build --platform --release --cargo-cwd . --target ${{ matrix.target }}
@@ -119,7 +119,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.target }}
-          path: crates/memory-node/*.node
+          path: crates/memcore-node/*.node
           if-no-files-found: error
 
   publish:
@@ -139,24 +139,24 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: Install node deps
-        working-directory: crates/memory-node
+        working-directory: crates/memcore-node
         run: npm ci
 
       - name: Prepare npm package layout
-        working-directory: crates/memory-node
+        working-directory: crates/memcore-node
         run: npx napi create-npm-dir --target .
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: crates/memory-node/artifacts
+          path: crates/memcore-node/artifacts
 
       - name: Move artifacts
-        working-directory: crates/memory-node
+        working-directory: crates/memcore-node
         run: npx napi artifacts -d artifacts
 
       - name: Verify package output
-        working-directory: crates/memory-node
+        working-directory: crates/memcore-node
         run: |
           echo "=== Checking platform sub-packages ==="
           for dir in npm/*/; do
@@ -172,7 +172,7 @@ jobs:
           done
 
       - name: Publish platform packages
-        working-directory: crates/memory-node
+        working-directory: crates/memcore-node
         run: |
           for dir in npm/*/; do
             if [ -f "$dir/package.json" ]; then
@@ -185,7 +185,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Add platform optional dependencies
-        working-directory: crates/memory-node
+        working-directory: crates/memcore-node
         run: |
           VERSION="${{ needs.resolve-version.outputs.version }}"
           npm pkg set \
@@ -196,7 +196,7 @@ jobs:
             optionalDependencies.@chaoxlabs/tachi-node-linux-arm64-gnu="$VERSION"
 
       - name: Publish main package
-        working-directory: crates/memory-node
+        working-directory: crates/memcore-node
         run: npm publish --access public --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

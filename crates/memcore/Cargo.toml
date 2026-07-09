@@ -1,0 +1,36 @@
+[package]
+name = "memcore"
+version = "1.7.0"
+edition = "2021"
+description = "MemCore — portable memory kernel (store, schema, hybrid search/scorer, graph, events)"
+license = "AGPL-3.0-only"
+
+# Feature layout (portable kernel vs Tachi admin):
+#
+# - default = ["admin"] keeps today's full Tachi product surface.
+# - --no-default-features (or default-features = false) builds the
+#   *portable kernel only*: store/search/scorer/schema/events/sandbox.
+#   Vault / Hub / Foundry job queue / Pack product APIs are omitted.
+# - Schema DDL still creates admin tables so a portable build can open
+#   DBs written by full Tachi (empty tables are fine).
+#
+# Downstream forks (HyperTachi, HyperMemory) should depend on this crate with
+# `default-features = false` (portable MemCore only; no admin).
+[features]
+default = ["admin"]
+admin = []
+
+[dependencies]
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
+libsimple = "~0.7"
+sqlite-vec = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

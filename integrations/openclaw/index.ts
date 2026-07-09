@@ -18,7 +18,7 @@ import { registerNativeTachiMemoryCapability } from "./native-memory.js";
 // Branch #7 — Tachi manifest-aware DB routing
 // ---------------------------------------------------------------------------
 // Sigil's memory-server now publishes ~/.tachi/manifest.json (see
-// crates/memory-server/src/manifest.rs). Each entry tags an owned DB with
+// crates/tachi-server/src/manifest.rs). Each entry tags an owned DB with
 // {role, owner, allow_write, scope_hint}. OpenClaw agents have entries like:
 //   { role: "agent", owner: "openclaw-agent:<id>", allow_write: true, ... }
 // We consult the manifest before falling back to the legacy
