@@ -11,7 +11,7 @@ fn test_server() -> MemoryServer {
 
 fn verify_params(action: &str) -> TachiVerifyParams {
     TachiVerifyParams {
-        action: action.to_string(),
+        action: action.parse().expect("valid tachi_verify action"),
         format: Some("json".to_string()),
         flow_id: Some("flow_g528-verify".to_string()),
         pr_ref: None,

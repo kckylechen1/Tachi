@@ -45,7 +45,9 @@ fn dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams {
 
 fn task_params(action: &str) -> TachiTaskParams {
     TachiTaskParams {
-        action: action.to_string(),
+        action: action
+            .parse()
+            .unwrap_or_else(|e| panic!("valid tachi_task action '{action}': {e}")),
         format: Some("json".to_string()),
         task: None,
         agent_id: None,

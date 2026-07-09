@@ -291,7 +291,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
         &run_artifacts,
     );
     let top_level_wiki_hits = filter_wiki_hits_not_in_doc_index(&wiki_hits, &doc_index);
-    let kind = if params.action.eq_ignore_ascii_case("doc_index") {
+    let kind = if params.action.as_str() == "doc_index" {
         "doc_index"
     } else {
         "feature_briefing"

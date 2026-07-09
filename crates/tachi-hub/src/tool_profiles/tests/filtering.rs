@@ -179,6 +179,8 @@ fn delegate_profile_restricts_to_allow_list() {
             test_tool("tachi_web_search"),
             test_tool("tachi_browse"),
             test_tool("tachi_unstick"),
+            // F3: task facade is on the list; dispatch gated by action policy
+            test_tool("tachi_task"),
             test_tool("tachi_complete"),
             test_tool("tachi_skill"),
             test_tool("run_skill"),
@@ -213,6 +215,7 @@ fn delegate_profile_restricts_to_allow_list() {
             "tachi_web_search".to_string(),
             "tachi_browse".to_string(),
             "tachi_unstick".to_string(),
+            "tachi_task".to_string(),
             "tachi_complete".to_string(),
             "tachi_skill".to_string(),
             "run_skill".to_string(),

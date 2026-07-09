@@ -607,13 +607,21 @@ fn build_server_state(
         .clone()
         .or_else(|| std::env::var("TACHI_PROFILE").ok());
     if let Some(raw_profile) = requested_tool_profile.as_deref() {
-        match tachi_hub::parse_tool_profile(raw_profile) {
-            Some(profile) => server.set_tool_profile(Some(profile)),
-            None => eprintln!(
-                "Ignoring unknown tool profile '{}'; expected observe | remember | coordinate | operate | admin or a compatible host alias",
-                raw_profile
-            ),
-        }
+        // #919 CRITICAL: an unrecognized CLI/env profile used to be logged and
+        // ignored, silently falling back to the (unrestricted) `standard`
+        // default — a fail-open widening of whatever narrower surface the
+        // caller intended. Reject at startup instead, matching the HTTP
+        // direct-connect path (`parse_http_tool_profile`), which already
+        // hard-errors on an unknown profile rather than defaulting.
+        let profile = tachi_hub::parse_tool_profile(raw_profile).ok_or_else(
+            || -> Box<dyn std::error::Error> {
+                format!(
+                    "unknown tool profile '{raw_profile}'; expected observe | remember | coordinate | operate | delegate | admin or a compatible host alias"
+                )
+                .into()
+            },
+        )?;
+        server.set_tool_profile(Some(profile));
     } else {
         eprintln!("{DEFAULT_STANDARD_PROFILE_NOTICE}");
     }

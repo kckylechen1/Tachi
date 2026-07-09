@@ -13,24 +13,27 @@ pub(crate) async fn handle_tachi_verify(
     _server: &MemoryServer,
     params: TachiVerifyParams,
 ) -> Result<String, String> {
-    let action = params.action.trim().to_ascii_lowercase();
-    let raw = match action.as_str() {
-        "start" => {
+    use crate::tool_params::TachiVerifyAction;
+
+    let action = params.action;
+    let action_str = action.as_str();
+    let raw = match action {
+        TachiVerifyAction::Start => {
             validate_record_params(&params)?;
             record_items(&params, "pending")?
         }
-        "record" => {
+        TachiVerifyAction::Record => {
             validate_record_params(&params)?;
             let status = normalize_status(params.status.as_deref(), "passed")?;
             record_items(&params, &status)?
         }
-        "status" | "board" => {
+        TachiVerifyAction::Status | TachiVerifyAction::Board => {
             if let Some(flow_id) = params.flow_id.as_deref() {
                 let ledger = read_verification_ledger(flow_id)?;
                 let gate = gate_for_status(&params, ledger.as_ref())?;
                 json!({
                     "status": "completed",
-                    "action": action,
+                    "action": action_str,
                     "flow_id": flow_id,
                     "verification": ledger.unwrap_or_else(|| empty_ledger(flow_id)),
                     "gate": gate,
@@ -38,20 +41,17 @@ pub(crate) async fn handle_tachi_verify(
             } else {
                 json!({
                     "status": "completed",
-                    "action": action,
+                    "action": action_str,
                     "runs": recent_verification_summaries(params.limit.unwrap_or(DEFAULT_STATUS_LIMIT as u32) as usize),
                 })
             }
         }
-        _ => {
-            return Err(format!(
-                "Invalid action '{}'. Use 'start', 'record', 'status', or 'board'.",
-                params.action
-            ))
-        }
     };
 
-    if matches!(action.as_str(), "start" | "record") {
+    if matches!(
+        action,
+        TachiVerifyAction::Start | TachiVerifyAction::Record
+    ) {
         let recorded_ids = recorded_check_ids(&params);
         let shaped = shape_record_response(&raw, &params, &recorded_ids);
         if params

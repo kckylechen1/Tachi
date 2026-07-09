@@ -5,6 +5,7 @@ use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::json;
 
+mod action_policy_consistency;
 mod agent_identity;
 mod rate_limit;
 mod runtime;

@@ -136,7 +136,7 @@ pub(in crate::task_lifecycle) fn intake_briefing_params(
     issue: &IssueSnapshot,
 ) -> TachiTaskParams {
     let mut briefing = params.clone();
-    briefing.action = "briefing".to_string();
+    briefing.action = crate::tool_params::TachiTaskAction::Briefing;
     briefing.format = Some("json".to_string());
     briefing.flow_id = Some(flow_id.to_string());
     briefing.issue_ref = Some(format!("{}#{}", issue.repo, issue.number));

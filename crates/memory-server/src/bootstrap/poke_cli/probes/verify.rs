@@ -17,9 +17,10 @@ pub(in crate::bootstrap::poke_cli) async fn probe_verify_ledger(
         Utc::now().format("%Y%m%dT%H%M%SZ"),
         &uuid::Uuid::new_v4().as_simple().to_string()[..8]
     );
+    use crate::tool_params::TachiVerifyAction;
     let record = server
         .tachi_verify(Parameters(TachiVerifyParams {
-            action: "record".to_string(),
+            action: TachiVerifyAction::Record,
             format: Some("json".to_string()),
             flow_id: Some(flow_id.clone()),
             pr_ref: None,
@@ -40,7 +41,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_verify_ledger(
         .await?;
     let status = server
         .tachi_verify(Parameters(TachiVerifyParams {
-            action: "status".to_string(),
+            action: TachiVerifyAction::Status,
             format: Some("json".to_string()),
             flow_id: Some(flow_id.clone()),
             pr_ref: None,
@@ -61,7 +62,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_verify_ledger(
         .await?;
     let unrelated = server
         .tachi_verify(Parameters(TachiVerifyParams {
-            action: "status".to_string(),
+            action: TachiVerifyAction::Status,
             format: Some("json".to_string()),
             flow_id: Some(unrelated_flow_id.clone()),
             pr_ref: None,

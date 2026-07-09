@@ -18,8 +18,8 @@ fn tachi_verify_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
-        &["start", "record", "status", "board"],
-        "Required Tachi verification ledger action.",
+        super::action_inventory::TACHI_VERIFY_ACTIONS,
+        "Required Tachi verification ledger action (start/record/status/board).",
         generator,
     )
 }
@@ -222,9 +222,9 @@ pub struct TachiVerifyCheckItem {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiVerifyParams {
-    /// Action: "start", "record", "status", or "board".
+    /// Action: start / record / status / board (F4 typed enum).
     #[schemars(schema_with = "tachi_verify_action_schema")]
-    pub action: String,
+    pub action: super::TachiVerifyAction,
 
     /// Response shape: "markdown" (default receipt), "json" (automation receipt), or "full" (pre-change verbose payload).
     #[serde(default)]

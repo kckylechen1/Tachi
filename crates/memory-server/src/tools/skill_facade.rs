@@ -164,14 +164,16 @@ pub(super) async fn handle_tachi_skill_facade(
     normalize_skill_response(&action, &raw)
 }
 
+/// Defense-in-depth for skill facade; primary gate is F3 `facade_action_allowed`
+/// in `call_tool` (covers MCP path). Direct internal calls still hit this.
 fn reject_delegate_skill_action(server: &MemoryServer, action: &str) -> Result<(), String> {
-    if server
-        .active_tool_profile()
-        .is_some_and(|profile| profile.as_str() == "delegate")
-        && !matches!(action, "discover" | "run" | "bundle")
-    {
+    if !tachi_hub::facade_action_allowed(
+        "tachi_skill",
+        Some(action),
+        server.active_tool_profile(),
+    ) {
         return Err(format!(
-            "tachi_skill(action='{action}') is not available to delegate tool profiles; use 'discover', 'run', or 'bundle'."
+            "tachi_skill(action='{action}') is not available to the active tool profile; delegate workers may use 'discover', 'run', or 'bundle'."
         ));
     }
     Ok(())

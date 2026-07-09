@@ -1,9 +1,11 @@
+mod action_policy;
 mod matching;
 mod patterns;
 #[cfg(test)]
 mod tests;
 mod types;
 
+pub use action_policy::{facade_action_allowed, facade_action_required_bundle};
 pub use matching::{
     filter_tool_defs, parse_tool_patterns_csv, parse_tool_profile, tool_matches_bundle,
     tool_name_matches_pattern, tool_visible,
