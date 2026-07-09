@@ -39,17 +39,23 @@
 ```
 private main (reviewed)
   → tag vX.Y.Z  (Cargo.toml version must match; scripts/check_release_versions.py)
-  → attach private release assets:
-      tachi-vX.Y.Z-aarch64-apple-darwin.tar.gz   (layout: <dir>/tachi)
-  → GitHub Actions / operator:
-      · update-homebrew-tap.yml
-        or scripts/promote_homebrew_binaries.sh X.Y.Z
-          — copy binary asset → public homebrew-tachi release tag tachi-X.Y.Z
-          — rewrite Formula/tachi.rb as **binary install** (no Rust for end users)
-      · build-native.yml     — node native module / multi-target (separate surface)
+  → GitHub Actions: release-cli-binaries.yml
+      · cargo build --release -p memory-server (stamped GIT_SHA)
+      · scripts/package_release_binary.sh
+          → tachi-vX.Y.Z-aarch64-apple-darwin.tar.gz  (layout: <dir>/tachi)
+      · attach assets to private GitHub Release vX.Y.Z
+      · scripts/promote_homebrew_binaries.sh
+          → public homebrew-tachi release tag tachi-X.Y.Z
+          → rewrite Formula/tachi.rb as **binary install** (no Rust for end users)
   → brew upgrade tachi
   → launchd / brew services relaunches the Cellar binary
   → VERIFY THE RUNNING DAEMON (below), never a local cargo target/
+
+Operator fallbacks:
+  · scripts/package_release_binary.sh X.Y.Z          — local package
+  · scripts/promote_homebrew_binaries.sh X.Y.Z       — promote only
+  · update-homebrew-tap.yml (workflow_dispatch)      — re-promote without rebuild
+  · build-native.yml                                 — node native module (separate)
 ```
 
 **Public formula rule:** never point `url` at

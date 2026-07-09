@@ -1,0 +1,179 @@
+name: Release CLI binaries + public brew
+
+# #728 pipeline:
+#   tag vX.Y.Z
+#     → build stamped memory-server → package tachi-vX.Y.Z-<triple>.tar.gz
+#     → attach to private GitHub Release
+#     → promote binary + rewrite public homebrew-tachi formula
+#
+# Manual: workflow_dispatch with version= (must match Cargo.toml).
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without leading v (must match Cargo.toml)"
+        required: false
+      skip_promote:
+        description: "If true, only build/upload private assets (no public tap)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  resolve-version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve version
+        id: version
+        run: |
+          python3 scripts/check_release_versions.py
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+
+          cargo_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/memory-server/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
+          if [ -z "$cargo_version" ]; then
+            echo "Could not find memory-server version in Cargo.toml."
+            exit 1
+          fi
+          if [ -z "$version" ]; then
+            version="$cargo_version"
+          fi
+          if [ "$version" != "$cargo_version" ]; then
+            echo "Tag/workflow version ($version) does not match crates/memory-server/Cargo.toml ($cargo_version)."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Public Homebrew path is arm64-first (#874). Intel is a residual leaf.
+          - runner: macos-14
+            triple: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    name: Build CLI ${{ matrix.triple }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
+
+      - name: Package release binary
+        id: pkg
+        env:
+          CARGO_TERM_COLOR: always
+        run: |
+          chmod +x scripts/package_release_binary.sh
+          scripts/package_release_binary.sh "${{ needs.resolve-version.outputs.version }}" \
+            --triple "${{ matrix.triple }}"
+
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.triple }}
+          path: |
+            tachi-v${{ needs.resolve-version.outputs.version }}-${{ matrix.triple }}.tar.gz
+            tachi-v${{ needs.resolve-version.outputs.version }}-SHASUMS256.txt
+          if-no-files-found: error
+
+  publish-private-release:
+    needs: [resolve-version, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download all CLI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: cli-*
+          merge-multiple: true
+
+      - name: Merge SHASUMS and list assets
+        working-directory: dist
+        run: |
+          ls -la
+          VERSION="${{ needs.resolve-version.outputs.version }}"
+          # Merge any per-job SHASUMS fragments.
+          cat tachi-v${VERSION}-SHASUMS256.txt 2>/dev/null | sort -u > "tachi-v${VERSION}-SHASUMS256.merged.txt" || true
+          if [ -s "tachi-v${VERSION}-SHASUMS256.merged.txt" ]; then
+            mv "tachi-v${VERSION}-SHASUMS256.merged.txt" "tachi-v${VERSION}-SHASUMS256.txt"
+          else
+            # Rebuild from tarballs if fragments missing.
+            : > "tachi-v${VERSION}-SHASUMS256.txt"
+            for f in tachi-v${VERSION}-*.tar.gz; do
+              [ -f "$f" ] || continue
+              echo "$(sha256sum "$f" | awk '{print $1}')  $f" >> "tachi-v${VERSION}-SHASUMS256.txt"
+            done
+          fi
+          echo "=== assets ==="
+          ls -la tachi-v${VERSION}-*
+          cat "tachi-v${VERSION}-SHASUMS256.txt"
+
+      - name: Ensure private GitHub Release and upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          TAG: ${{ needs.resolve-version.outputs.tag }}
+        working-directory: dist
+        run: |
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Tachi v${VERSION}" \
+              --notes "CI-built CLI binaries for v${VERSION} (#728). Promote to public Homebrew via promote job / scripts/promote_homebrew_binaries.sh." \
+              --target "${{ github.sha }}"
+          fi
+          # Upload every platform tarball + sums (clobber for re-runs).
+          gh release upload "$TAG" \
+            tachi-v${VERSION}-*.tar.gz \
+            tachi-v${VERSION}-SHASUMS256.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+  promote-public-brew:
+    needs: [resolve-version, publish-private-release]
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.skip_promote != true }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check tap secret
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_GITHUB_TOKEN is not configured — cannot promote public formula."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+
+      - name: Promote arm64 binary to public tap
+        env:
+          SOURCE_REPO: ${{ github.repository }}
+          TAP_REPO: kckylechen1/homebrew-tachi
+          SOURCE_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAP_GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          # Formula default platform is arm64; promote that asset first.
+          TRIPLE: aarch64-apple-darwin
+        run: |
+          chmod +x scripts/promote_homebrew_binaries.sh
+          scripts/promote_homebrew_binaries.sh "${{ needs.resolve-version.outputs.version }}"
