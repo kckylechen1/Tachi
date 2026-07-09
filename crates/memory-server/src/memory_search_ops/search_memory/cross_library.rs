@@ -12,7 +12,13 @@
 //!   the #897 multi-DB fixture), then re-sort with Project-before-Global
 //!   tie-break.
 //!
-//! Escape hatch: `TACHI_RECALL_CROSS_LIBRARY_PROJECT_BOOST=0` disables.
+//! Escape hatch: `TACHI_RECALL_CROSS_LIBRARY_PROJECT_BOOST=0` disables *all*
+//! project preference — both the score multiplier and the Project-before-Global
+//! tie-break (tachi#911 follow-up to #902: `0` previously disabled only the
+//! multiplier, leaving equal-score rows still ranked project-first). At
+//! `boost <= 0.0` this function is a no-op and returns `false`, so the caller
+//! (`rows.rs`) falls back to its plain `final_score` sort, same as the
+//! single-scope / wiki-scoped / empty-results cases.
 
 use crate::tool_params::SearchMemoryParams;
 use crate::DbScope;
@@ -60,6 +66,24 @@ pub(crate) fn apply_cross_library_project_preference(
     results: &mut [(SearchResult, DbScope)],
     params: &SearchMemoryParams,
 ) -> bool {
+    apply_cross_library_project_preference_with_boost(
+        results,
+        params,
+        cross_library_project_boost(),
+    )
+}
+
+/// Boost-parameterized core of [`apply_cross_library_project_preference`],
+/// split out so the `boost <= 0.0` disable path (tachi#911 follow-up to
+/// #902) is directly unit-testable: `cross_library_project_boost()` caches
+/// its env read in a process-wide `OnceLock`, so a test cannot exercise both
+/// the default-boost and boost-disabled behaviors in the same test binary by
+/// mutating the env var — passing `boost` explicitly sidesteps that.
+fn apply_cross_library_project_preference_with_boost(
+    results: &mut [(SearchResult, DbScope)],
+    params: &SearchMemoryParams,
+    boost: f64,
+) -> bool {
     if results.is_empty() || wiki_scoped(params) {
         return false;
     }
@@ -78,15 +102,20 @@ pub(crate) fn apply_cross_library_project_preference(
         return false;
     }
 
-    let boost = cross_library_project_boost();
-    if boost > 0.0 {
-        let factor = 1.0 + boost;
-        for (result, scope) in results.iter_mut() {
-            if matches!(scope, DbScope::Project) {
-                let score = result.score.final_score;
-                if score.is_finite() && score > 0.0 {
-                    result.score.final_score = score * factor;
-                }
+    if boost <= 0.0 {
+        // tachi#911 follow-up to #902: `boost == 0` means "disable ALL
+        // project preference," not just the score multiplier — skip the
+        // Project-before-Global tie-break too and let the caller's plain
+        // final_score sort run instead (see module doc + rows.rs fallback).
+        return false;
+    }
+
+    let factor = 1.0 + boost;
+    for (result, scope) in results.iter_mut() {
+        if matches!(scope, DbScope::Project) {
+            let score = result.score.final_score;
+            if score.is_finite() && score > 0.0 {
+                result.score.final_score = score * factor;
             }
         }
     }
@@ -254,5 +283,50 @@ mod tests {
             &bare_params()
         ));
         assert_eq!(results[0].0.entry.id, "project-decision");
+    }
+
+    // tachi#911 follow-up to #902: `TACHI_RECALL_CROSS_LIBRARY_PROJECT_BOOST=0`
+    // must disable the Project-before-Global tie-break, not just the score
+    // multiplier. `cross_library_project_boost()` caches its env read in a
+    // process-wide `OnceLock` shared with every other test in this binary, so
+    // these tests exercise the boost-parameterized core directly instead of
+    // mutating the env var (which would race/leak across the other tests
+    // above that rely on the default 0.85 boost).
+
+    #[test]
+    fn zero_boost_disables_multiplier_and_tie_break() {
+        let mut results = vec![
+            row("global-equal", 0.5, DbScope::Global),
+            row("project-equal", 0.5, DbScope::Project),
+        ];
+        let applied =
+            apply_cross_library_project_preference_with_boost(&mut results, &bare_params(), 0.0);
+        assert!(!applied, "boost=0 must report no preference applied");
+        // No mutation: caller (rows.rs) is expected to run its own plain
+        // final_score sort when this returns false, so this function must
+        // leave both scores and order untouched.
+        assert_eq!(results[0].0.entry.id, "global-equal");
+        assert_eq!(results[0].0.score.final_score, 0.5);
+        assert_eq!(results[1].0.entry.id, "project-equal");
+        assert_eq!(results[1].0.score.final_score, 0.5);
+    }
+
+    #[test]
+    fn negative_boost_also_disables_preference() {
+        // `cross_library_project_boost()` already floors env-provided negative
+        // values to the calibrated default via `.filter(|v| *v >= 0.0)`, but
+        // the boost-parameterized core is defensive against any `boost <= 0.0`
+        // reaching it directly.
+        let mut results = vec![
+            row("global-heavy", 1.0, DbScope::Global),
+            row("project-decision", 0.6, DbScope::Project),
+        ];
+        let applied =
+            apply_cross_library_project_preference_with_boost(&mut results, &bare_params(), -1.0);
+        assert!(!applied);
+        assert_eq!(results[0].0.entry.id, "global-heavy");
+        assert_eq!(results[0].0.score.final_score, 1.0);
+        assert_eq!(results[1].0.entry.id, "project-decision");
+        assert_eq!(results[1].0.score.final_score, 0.6);
     }
 }
