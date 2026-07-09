@@ -6,6 +6,7 @@
 
 mod briefing_ops;
 mod checkpoint_ops;
+mod consolidate_ops;
 mod evidence_format;
 mod pattern_feedback_ops;
 mod progress_ops;
@@ -206,7 +207,7 @@ pub(crate) async fn handle_tachi_memory(
         "checkpoint" => checkpoint_ops::handle_memory_checkpoint(server, params).await,
         "alerts" => readiness_ops::handle_memory_alerts(server, &params).await,
         "ask" => readiness_ops::handle_memory_ask(server, &params).await,
-        "consolidate" => readiness_ops::handle_memory_consolidate(server, &params).await,
+        "consolidate" => consolidate_ops::handle_memory_consolidate(server, &params).await,
         "recall_simulate" => {
             recall_simulate_ops::handle_memory_recall_simulate(server, &params).await
         }
@@ -243,7 +244,6 @@ fn should_forward_facade_read(action: &str) -> bool {
             | "briefing"
             | "alerts"
             | "ask"
-            | "consolidate"
             | "recall_simulate"
             | "readiness"
     )
@@ -266,7 +266,6 @@ mod tests {
             "briefing",
             "alerts",
             "ask",
-            "consolidate",
             "recall_simulate",
             "readiness",
         ] {
@@ -275,6 +274,9 @@ mod tests {
                 "{action} should use daemon read forwarding"
             );
         }
+        // consolidate propose is dry_run but review/apply mutate; do not
+        // treat the whole action as a pure read-forward.
+        assert!(!should_forward_facade_read("consolidate"));
     }
 
     #[test]
@@ -285,6 +287,7 @@ mod tests {
             "checkpoint",
             "pattern_feedback",
             "progress",
+            "consolidate",
         ] {
             assert!(
                 !should_forward_facade_read(action),
