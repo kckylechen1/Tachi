@@ -16,8 +16,10 @@ async fn save_memory_auto_link_does_not_bump_target_access_count() {
     // Seed an entry tagged with the entity we will later search via auto-link.
     let seeded_id = format!("auto-link-target-{}", uuid::Uuid::new_v4());
     let mut seeded = make_entry(&seeded_id);
-    seeded.entities = vec!["sigil".to_string()];
-    seeded.text = "Original notes about sigil internals".to_string();
+    // Two shared entities so post-#773 related_to still fires (single-entity
+    // fog edges are intentionally suppressed).
+    seeded.entities = vec!["sigil".to_string(), "memory-server".to_string()];
+    seeded.text = "Original notes about sigil memory-server internals".to_string();
     server
         .with_global_store(|store| store.upsert(&seeded).map_err(|e| format!("seed: {e}")))
         .expect("seed entry");
@@ -54,7 +56,7 @@ async fn save_memory_auto_link_does_not_bump_target_access_count() {
             topic: String::new(),
             keywords: vec![],
             persons: vec![],
-            entities: vec!["sigil".to_string()],
+            entities: vec!["sigil".to_string(), "memory-server".to_string()],
             location: String::new(),
             scope: "general".to_string(),
             vector: None,

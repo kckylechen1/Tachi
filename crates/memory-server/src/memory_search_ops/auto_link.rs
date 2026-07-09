@@ -67,6 +67,28 @@ pub(crate) fn should_reinforce(
         && (REINFORCEMENT_MIN_SIMILARITY..REINFORCEMENT_DUPLICATE_SIMILARITY).contains(&similarity)
 }
 
+/// Minimum shared entities for a plain `related_to` auto-link edge (tachi#773).
+///
+/// Host DB evidence: most `related_to` edges were single-entity co-occurrence
+/// (`Sigil` / `memory-server` alone) and formed a dense fog without ranking
+/// value. Require either multi-entity agreement or a modest vector similarity.
+pub(crate) const RELATED_TO_MIN_SHARED_ENTITIES: usize = 2;
+/// When only one entity is shared, still allow related_to if vectors are close.
+pub(crate) const RELATED_TO_MIN_VECTOR_SIMILARITY: f64 = 0.55;
+
+/// Whether to emit a weak `related_to` edge after supersede/reinforce checks fail.
+pub(crate) fn should_related_to(shared_count: usize, vector_similarity: Option<f64>) -> bool {
+    if shared_count >= RELATED_TO_MIN_SHARED_ENTITIES {
+        return true;
+    }
+    if shared_count == 0 {
+        return false;
+    }
+    vector_similarity.is_some_and(|sim| {
+        sim.is_finite() && sim >= RELATED_TO_MIN_VECTOR_SIMILARITY
+    })
+}
+
 pub(crate) fn numbers_in_text(text: &str) -> HashSet<String> {
     static NUMBER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = NUMBER_RE.get_or_init(|| {
@@ -159,6 +181,13 @@ pub(crate) fn spawn_auto_linking(
                             supersedes,
                         )
                     });
+                    let related = !supersedes
+                        && !reinforces
+                        && should_related_to(shared.len(), vector_similarity);
+                    if !supersedes && !reinforces && !related {
+                        // Skip single-entity fog edges (ops-audit / #773).
+                        continue;
+                    }
                     let relation = if supersedes {
                         "supersedes"
                     } else if reinforces {
@@ -340,5 +369,15 @@ mod tests {
         assert!(!should_reinforce(&new_entry, &old_entry, 1, 0.60, false));
         assert!(!should_reinforce(&new_entry, &old_entry, 1, 0.97, false));
         assert!(!should_reinforce(&new_entry, &old_entry, 1, 0.82, true));
+    }
+
+    #[test]
+    fn should_related_to_rejects_single_entity_without_vector_support() {
+        // Pre-fix fog: one shared entity always became related_to.
+        assert!(!should_related_to(1, None));
+        assert!(!should_related_to(1, Some(0.40)));
+        assert!(should_related_to(1, Some(0.55)));
+        assert!(should_related_to(2, None));
+        assert!(!should_related_to(0, Some(0.99)));
     }
 }
