@@ -192,49 +192,21 @@ async fn ops_audit_cross_library_dilution_hit_at_10_ratchet() {
     assert_eq!(access, 0, "recall_simulate must not record access");
 }
 
-/// SHAPE LOCK — green while the defect is live: merged path does **not** put
-/// the project decision at rank 1 (global noise dilutes). When Phase 2 cures
-/// this, flip to assert rank==1 and retire the ignored target.
+/// PRODUCT GREEN after #899 — project decision is rank 1 under multi-DB merge.
+/// Pre-fix baseline (main without preference): rank ~5 (see #897 PR notes).
 #[tokio::test]
-async fn ops_audit_cross_library_dilution_documents_red_rank_shape() {
-    let (_tmp, server) = make_ops_audit_two_store();
-    let parsed = run_recall_simulate(&server).await;
-    let case0 = &parsed["cases"][0];
-    let rank = case0["rank"].as_u64();
-    let returned = case0["returned_ids"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-
-    // Product-green would be rank == 1. While the defect is live we require
-    // either miss or rank > 1 so the suite keeps discriminating.
-    let product_green = rank == Some(1);
-    assert!(
-        !product_green,
-        "cross-library dilution no longer observable (rank=1). \
-         Raise the product target out of #[ignore] and drop this shape lock. \
-         returned={returned:?}"
-    );
-
-    // Prefer the measured audit shape: present but buried (rank in 2..=10).
-    if let Some(r) = rank {
-        assert!(
-            r > 1,
-            "expected buried rank (>1), got rank={r}; returned={returned:?}"
-        );
-    }
-}
-
-/// TARGET — RED on current main. Product goal for Phase 2 cross-library policy.
-#[tokio::test]
-#[ignore = "ops-audit target — red on main; cross-library rank-1 goal for tachi#897 / #896 Phase 2"]
 async fn ops_audit_cross_library_dilution_meets_rank1_target() {
     let (_tmp, server) = make_ops_audit_two_store();
     let parsed = run_recall_simulate(&server).await;
     let case0 = &parsed["cases"][0];
     assert_eq!(
+        case0["hit"],
+        json!(true),
+        "expected hit@10 after #899 preference: {case0}"
+    );
+    assert_eq!(
         case0["rank"],
         json!(1),
-        "project decision must be rank 1 on bound multi-DB search: {case0}"
+        "project decision must be rank 1 on bound multi-DB search (#899): {case0}"
     );
 }
