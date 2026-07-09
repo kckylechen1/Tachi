@@ -1,23 +1,25 @@
-name: Update Homebrew Tap
+name: Re-promote Homebrew Tap (manual)
 
+# Manual re-promote of an **already published** private release asset onto the
+# public homebrew-tachi tap. The automatic tag path is
+# `release-cli-binaries.yml` (build → private release → promote) under #728.
+#
+# Use this when you only need to re-run formula rewrite / re-upload without a rebuild.
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish to Homebrew tap (without leading v)"
-        required: false
+        description: "Version to promote (without leading v); must already have private release assets"
+        required: true
 
 jobs:
-  update-homebrew-tap:
+  promote-public-binary:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     env:
+      SOURCE_REPO: kckylechen1/tachi
       TAP_REPO: kckylechen1/homebrew-tachi
-      FORMULA_PATH: tap/Formula/tachi.rb
     steps:
       - name: Check required secret
         env:
@@ -40,54 +42,25 @@ jobs:
         id: version
         run: |
           python3 scripts/check_release_versions.py
-
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            version="${{ inputs.version }}"
-          else
-            version="${GITHUB_REF_NAME#v}"
-          fi
-
+          version="${{ inputs.version }}"
+          version="${version#v}"
           cargo_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/memory-server/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
-
-          if [ -z "$cargo_version" ]; then
-            echo "Could not find memory-server version in Cargo.toml."
-            exit 1
-          fi
-
           if [ -z "$version" ]; then
-            version="$cargo_version"
-          fi
-
-          if [ "$version" != "$cargo_version" ]; then
-            echo "Tag/workflow version ($version) does not match crates/memory-server/Cargo.toml ($cargo_version)."
+            echo "version input required"
             exit 1
           fi
-
+          if [ "$version" != "$cargo_version" ]; then
+            echo "WARNING: input version ($version) != Cargo.toml ($cargo_version) — promoting input as requested (re-promote older tag)."
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Check out Homebrew tap
-        uses: actions/checkout@v5
-        with:
-          repository: ${{ env.TAP_REPO }}
-          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
-          path: tap
-
-      - name: Update formula URL and sha256
-        run: |
-          python3 scripts/update_homebrew_formula.py "$FORMULA_PATH" --version "${{ steps.version.outputs.version }}"
-
-      - name: Commit and push formula update
-        working-directory: tap
+      - name: Promote binary + rewrite formula
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          SOURCE_REPO: ${{ env.SOURCE_REPO }}
+          TAP_REPO: ${{ env.TAP_REPO }}
+          SOURCE_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAP_GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          TRIPLE: aarch64-apple-darwin
         run: |
-          if git diff --quiet -- Formula/tachi.rb; then
-            echo "Formula already up to date"
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/tachi.rb
-          git commit -m "bump tachi to v${VERSION}"
-          git push
+          chmod +x scripts/promote_homebrew_binaries.sh
+          scripts/promote_homebrew_binaries.sh "${{ steps.version.outputs.version }}"

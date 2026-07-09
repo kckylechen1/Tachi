@@ -39,14 +39,30 @@
 ```
 private main (reviewed)
   → tag vX.Y.Z  (Cargo.toml version must match; scripts/check_release_versions.py)
-  → GitHub Actions:
-      · build-native.yml     — native module / multi-target release assets
-      · update-homebrew-tap  — rewrite Formula URL + sha256 on homebrew-tachi
-      · build-bottles.yml    — bottle tarballs + formula bottle block
+  → GitHub Actions: release-cli-binaries.yml
+      · cargo build --release -p memory-server (stamped GIT_SHA)
+      · scripts/package_release_binary.sh
+          → tachi-vX.Y.Z-aarch64-apple-darwin.tar.gz  (layout: <dir>/tachi)
+      · attach assets to private GitHub Release vX.Y.Z
+      · scripts/promote_homebrew_binaries.sh
+          → public homebrew-tachi release tag tachi-X.Y.Z
+          → rewrite Formula/tachi.rb as **binary install** (no Rust for end users)
   → brew upgrade tachi
   → launchd / brew services relaunches the Cellar binary
   → VERIFY THE RUNNING DAEMON (below), never a local cargo target/
+
+Operator fallbacks:
+  · scripts/package_release_binary.sh X.Y.Z          — local package
+  · scripts/promote_homebrew_binaries.sh X.Y.Z       — promote only
+  · update-homebrew-tap.yml (workflow_dispatch)      — re-promote without rebuild
+  · build-native.yml                                 — node native module (separate)
 ```
+
+**Public formula rule:** never point `url` at
+`github.com/kckylechen1/tachi/archive/refs/tags/...` (private → anonymous 404).
+Default `scripts/update_homebrew_formula.py --mode binary` uses:
+
+`https://github.com/kckylechen1/homebrew-tachi/releases/download/tachi-X.Y.Z/tachi-vX.Y.Z-<triple>.tar.gz`
 
 ### Deploy failure class this kills
 
@@ -104,8 +120,14 @@ the running-binary gate, not a second hand-roll of `cp`.
 
 | Issue | Delivered in-repo |
 |---|---|
-| #728 | Workflows + GIT_SHA stamp + status `runtime.build` gate + this doc |
+| #728 | Workflows + GIT_SHA stamp + status `runtime.build` gate + **public binary formula path** + this doc |
 | #758 | Explicit ship vs release vs brew layering (this doc + ship-verb.md) |
-| #874 | Trust split + promotion path documented; owner flips visibility |
+| #874 | Trust split + **public binary promotion** (`promote_homebrew_binaries.sh` / update-homebrew-tap) |
 | #576 | Residual risk documented and help-tested; entries-only mode shipped |
 | #586 | CRITICAL/HIGH closed; residual #547 noted as postponed |
+
+### Residual (honest)
+
+- Public binaries are **macOS arm64** first; Intel macOS needs a matching asset.
+- `build-bottles.yml` still assumes a source-building formula for bottle rebuilds;
+  binary formula is the default public path. Bottle workflow is secondary.

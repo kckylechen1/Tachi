@@ -1,0 +1,75 @@
+class Tachi < Formula
+  desc "Local-first memory + Hub for AI agents (MCP server)"
+  homepage "https://github.com/kckylechen1/tachi"
+  url "https://github.com/kckylechen1/tachi/archive/refs/tags/v0.0.0.tar.gz"
+  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  license "AGPL-3.0-only"
+  disable! date: "2026-07-08", because: "private-source transition pending reviewed public artifact promotion"
+  head "https://github.com/kckylechen1/tachi.git", branch: "main"
+
+  livecheck do
+    url :stable
+    regex(/^v?(\d+(?:\.\d+)+)$/i)
+  end
+
+  depends_on "rust" => :build
+
+  def install
+    system "cargo", "install", *std_cargo_args(path: "crates/memory-server"),
+           "--bin", "memory-server"
+    mv bin/"memory-server", bin/"tachi"
+  end
+
+  service do
+    run [opt_bin/"tachi", "--daemon", "--port", "6919", "--no-project-db"]
+    environment_variables PATH:                           std_service_path_env,
+                          TACHI_DAEMON_IDLE_TIMEOUT_SECS: "0",
+                          TACHI_PROFILE:                  "standard"
+    log_path var/"log/tachi.log"
+    error_log_path var/"log/tachi.err.log"
+  end
+
+  def caveats
+    <<~EOS
+      Tachi is installed at:
+        #{opt_bin}/tachi
+      To use Tachi with your MCP client, add this command to your config:
+
+        {
+          "mcpServers": {
+            "tachi": {
+              "command": "#{opt_bin}/tachi"
+            }
+          }
+        }
+
+      Optional environment variables:
+        export VOYAGE_API_KEY="your_key"
+        export SILICONFLOW_API_KEY="your_key"
+        export MEMORY_DB_PATH="$HOME/.Tachi/global/memory.db"
+
+      Quick smoke test:
+        tachi --help
+        tachi --no-project-db stats
+        tachi hub stats
+    EOS
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/tachi --version")
+    assert_match "memory + Hub MCP server", shell_output("#{bin}/tachi --help")
+    assert_match "Hub registry", shell_output("#{bin}/tachi hub --help")
+    db_path = testpath/"tachi-homebrew-test.db"
+    text = "Homebrew smoke test memory from formula verification with enough " \
+           "characters to avoid the capture floor warning. It validates that " \
+           "the installed Tachi binary can save to an isolated MEMORY_DB_PATH."
+
+    saved = shell_output("MEMORY_DB_PATH=#{db_path} #{bin}/tachi --no-project-db save " \
+                         "--path /scratch/homebrew '#{text}'")
+    assert_match "\"status\": \"saved", saved
+
+    stats = shell_output("MEMORY_DB_PATH=#{db_path} #{bin}/tachi --no-project-db stats")
+    assert_match "\"total\": 1", stats
+    assert_match db_path.to_s, stats
+  end
+end
