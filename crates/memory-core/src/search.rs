@@ -20,6 +20,11 @@ mod expansion;
 mod filtering;
 mod graph_expansion;
 mod ranking;
+mod rerank_blend;
+
+pub use rerank_blend::{
+    apply_blend_relevance, merge_rerank_order_with_hybrid_floor, HYBRID_HEAD_FRACTION,
+};
 
 #[cfg(test)]
 use self::expansion::search_fts_with_expansion_config;

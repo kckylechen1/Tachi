@@ -74,7 +74,10 @@ pub use scorer::{
     generic_precision_multiplier, surprise_score, DecayPolicy, DecayPolicyContext,
     DefaultDecayPolicy, HybridWeights, PrecisionMatcher, DEFAULT_DECAY_POLICY,
 };
-pub use search::{hybrid_search, SearchOptions};
+pub use search::{
+    apply_blend_relevance, hybrid_search, merge_rerank_order_with_hybrid_floor, SearchOptions,
+    HYBRID_HEAD_FRACTION,
+};
 pub use types::{
     AuthorityLevel, ContinuityCandidate, ContinuityCandidateBatch, ContinuityMetrics,
     ContinuityOutcomeLabel, DomainConfig, EffectScope, GcConfig, GraphExpandResult, HybridScore,
