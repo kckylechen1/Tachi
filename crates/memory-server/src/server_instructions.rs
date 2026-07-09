@@ -9,6 +9,8 @@ WORKFLOW: (1) briefing at session start: tachi_memory(action='briefing'). \
 Cursor/Windsurf have no auto-capture — you must call save explicitly. OpenClaw auto-captures on agent_end. \
 Wiki for stable reusable knowledge: tachi_wiki(action='write'). \
 Skills: tachi_skill(action='discover') before solving complex problems. \
-Diagnostics: tachi_status."
+Diagnostics: tachi_status. \
+HTTP direct-connect: bind project/profile with X-Tachi-Project / X-Tachi-Profile (or initialize meta tachiProject/tachiProfile). \
+On daemon restart re-run initialize (new session id); stdio adapters are a permanent compatibility layer. See docs/engineering/architecture/http-direct-connect.md."
         .to_string()
 }

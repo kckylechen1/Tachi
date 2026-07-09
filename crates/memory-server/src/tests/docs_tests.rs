@@ -7,6 +7,7 @@ use tempfile::tempdir;
 mod component_governance;
 mod conflicts;
 mod contract;
+mod http_direct_connect;
 mod hypermem_gate;
 mod kernel_surface;
 mod library_identity_runtime;

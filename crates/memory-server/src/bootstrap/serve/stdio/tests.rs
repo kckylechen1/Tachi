@@ -1728,3 +1728,138 @@ fn http_direct_connect_unbound_session_rejects_explicit_cross_project_write() {
     restore_env("SIGIL_HOME", saved_sigil);
     restore_env("TACHI_APP_HOME", saved_app);
 }
+
+/// #732: initialize result advertises HTTP direct-connect guidance (reconnect path).
+/// Meta key extraction is unit-tested in `server_handler::tests` (wire path prefers headers).
+#[test]
+fn http_direct_connect_initialize_advertises_http_guidance() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let saved_home = std::env::var_os("TACHI_HOME");
+    let saved_sigil = std::env::var_os("SIGIL_HOME");
+    let saved_app = std::env::var_os("TACHI_APP_HOME");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    std::env::set_var("TACHI_HOME", &tachi_home);
+    std::env::remove_var("SIGIL_HOME");
+    std::env::remove_var("TACHI_APP_HOME");
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let headers = http_headers(&[]);
+        let (_client, _session_headers, init) =
+            http_mcp_initialize(&daemon.url, headers, None).await;
+        assert!(init.get("error").is_none(), "initialize failed: {init:#}");
+        let blob = format!("{init}");
+        assert!(
+            blob.contains("HTTP direct-connect") || blob.contains("http-direct-connect.md"),
+            "initialize should advertise HTTP direct-connect guidance: {init:#}"
+        );
+        (ct, daemon_task)
+    });
+
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
+    restore_env("TACHI_HOME", saved_home);
+    restore_env("SIGIL_HOME", saved_sigil);
+    restore_env("TACHI_APP_HOME", saved_app);
+}
+
+/// #732 / #737: bound HTTP session rejects cross-project *writes* (reads remain allowed).
+#[test]
+fn http_direct_connect_bound_session_rejects_cross_project_write() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let saved_home = std::env::var_os("TACHI_HOME");
+    let saved_sigil = std::env::var_os("SIGIL_HOME");
+    let saved_app = std::env::var_os("TACHI_APP_HOME");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    let bound_name = "Sigil-http-bound";
+    let other_name = "Sigil-http-other";
+    let bound_project = tachi_home
+        .join("projects")
+        .join(bound_name)
+        .join("memory.db");
+    let other_project = tachi_home
+        .join("projects")
+        .join(other_name)
+        .join("memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    std::env::set_var("TACHI_HOME", &tachi_home);
+    std::env::remove_var("SIGIL_HOME");
+    std::env::remove_var("TACHI_APP_HOME");
+    seed_project_db(&tachi_home, &bound_project);
+    seed_project_db(&tachi_home, &other_project);
+
+    let other_text = "bound session must not write foreign project";
+    let other_id = "http-bound-foreign-write";
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let headers = http_headers(&[(crate::session_identity::HEADER_PROJECT, bound_name)]);
+        let (client, session_headers, init) = http_mcp_initialize(&daemon.url, headers, None).await;
+        assert!(init.get("error").is_none(), "initialize failed: {init:#}");
+        http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
+
+        let save = http_mcp_call_tool(
+            &client,
+            &daemon.url,
+            session_headers,
+            2,
+            "tachi_memory",
+            serde_json::Map::from_iter([
+                ("action".to_string(), serde_json::json!("save")),
+                ("id".to_string(), serde_json::json!(other_id)),
+                ("text".to_string(), serde_json::json!(other_text)),
+                ("summary".to_string(), serde_json::json!("foreign write")),
+                ("path".to_string(), serde_json::json!("/tests/http-bound")),
+                ("category".to_string(), serde_json::json!("fact")),
+                ("project".to_string(), serde_json::json!(other_name)),
+                ("force".to_string(), serde_json::json!(true)),
+            ]),
+        )
+        .await;
+
+        let rejected = save
+            .get("error")
+            .map(|err| {
+                err["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("project binding mismatch")
+            })
+            .unwrap_or_else(|| {
+                if save["result"]["isError"] == serde_json::json!(true) {
+                    http_tool_text(&save).contains("project binding mismatch")
+                } else {
+                    false
+                }
+            });
+        assert!(
+            rejected,
+            "bound HTTP session must reject cross-project write: {save:#}"
+        );
+        (ct, daemon_task)
+    });
+
+    assert_eq!(memory_text_count(&other_project, other_text), 0);
+    assert_eq!(memory_id_count(&other_project, other_id), 0);
+
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
+    restore_env("TACHI_HOME", saved_home);
+    restore_env("SIGIL_HOME", saved_sigil);
+    restore_env("TACHI_APP_HOME", saved_app);
+}
