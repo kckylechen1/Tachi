@@ -31,11 +31,11 @@ mod tests {
 
     #[test]
     fn portable_build_disables_admin_marker() {
-        assert!(
-            !ADMIN_SURFACE_ENABLED,
-            "portable-kernel must build memory-core without admin"
-        );
-        assert!(IS_PORTABLE_BUILD);
+        // Compile-time feature markers — const assert avoids clippy::assertions_on_constants.
+        const {
+            assert!(!ADMIN_SURFACE_ENABLED);
+            assert!(IS_PORTABLE_BUILD);
+        }
     }
 
     #[test]
