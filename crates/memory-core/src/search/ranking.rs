@@ -528,3 +528,232 @@ fn apply_mmr_diversity(
     selected.extend(deferred);
     selected
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    // tachi#911 follow-up to #903: the golden/ops-audit corpora only guard
+    // recall@10 / MRR floors and rank-1 promotion for specific known-broken
+    // cases; nothing asserted that the DECISION_BOOST (1.55x) / RESEARCH_PATH_BOOST
+    // (2.85x) multipliers leave an *already-correct* rank order unchanged.
+    // These tests exercise `apply_decision_and_research_boosts` directly
+    // (unit-level, no DB) against seeded scores whose pre-boost order already
+    // matches the intended/golden order, and assert the boost does not
+    // reshuffle it.
+
+    fn entry(id: &str, path: &str, category: &str, importance: f64) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: path.to_string(),
+            summary: id.to_string(),
+            text: id.to_string(),
+            importance,
+            timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: category.to_string(),
+            topic: String::new(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "test".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            metadata: serde_json::json!({}),
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    fn score(final_score: f64) -> HybridScore {
+        HybridScore {
+            vector: 0.0,
+            fts: 0.0,
+            symbolic: 0.0,
+            decay: 0.0,
+            final_score,
+        }
+    }
+
+    /// Ranks (descending by `final_score`) among `ids`, using the same
+    /// tie-break precedence (`final_score` desc) the rest of this module
+    /// uses; ties are not exercised by these fixtures.
+    fn ranked_ids(scores: &HashMap<String, HybridScore>, ids: &[&str]) -> Vec<String> {
+        let mut ranked: Vec<(&str, f64)> = ids
+            .iter()
+            .map(|id| (*id, scores.get(*id).unwrap().final_score))
+            .collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        ranked.into_iter().map(|(id, _)| id.to_string()).collect()
+    }
+
+    #[test]
+    fn boosts_are_noop_when_no_entry_qualifies() {
+        // None of these entries are decision-category-above-floor, and the
+        // query is not research-shaped, so neither boost should apply at
+        // all: scores and the already-correct rank order must be untouched.
+        let entries: HashMap<String, MemoryEntry> = [
+            entry("a", "/notes/a", "fact", 0.9),
+            entry("b", "/notes/b", "fact", 0.6),
+            entry("c", "/guide/c", "howto", 0.95),
+        ]
+        .into_iter()
+        .map(|e| (e.id.clone(), e))
+        .collect();
+        let entries_ref: HashMap<String, &MemoryEntry> =
+            entries.iter().map(|(k, v)| (k.clone(), v)).collect();
+
+        let mut scores: HashMap<String, HybridScore> = HashMap::new();
+        scores.insert("a".to_string(), score(3.0));
+        scores.insert("b".to_string(), score(2.0));
+        scores.insert("c".to_string(), score(1.0));
+        let before = scores.clone();
+
+        apply_decision_and_research_boosts(
+            "ordinary lookup query with no special terms",
+            &entries_ref,
+            &mut scores,
+        );
+
+        assert_eq!(scores.get("a").unwrap().final_score, before["a"].final_score);
+        assert_eq!(scores.get("b").unwrap().final_score, before["b"].final_score);
+        assert_eq!(scores.get("c").unwrap().final_score, before["c"].final_score);
+        assert_eq!(
+            ranked_ids(&scores, &["a", "b", "c"]),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn decision_boost_preserves_relative_order_among_equally_qualifying_entries() {
+        // All three entries qualify for DECISION_BOOST (category=decision,
+        // importance >= floor). A uniform multiplier applied to every
+        // candidate in a set must never invert their existing relative
+        // order — guards the specific "already-correct ranks get reshuffled"
+        // regression risk in #903/#911.
+        let entries: HashMap<String, MemoryEntry> = [
+            entry("d1", "/notes/decisions/1", "decision", 0.95),
+            entry("d2", "/notes/decisions/2", "decision", 0.9),
+            entry("d3", "/notes/decisions/3", "decision", 0.85),
+        ]
+        .into_iter()
+        .map(|e| (e.id.clone(), e))
+        .collect();
+        let entries_ref: HashMap<String, &MemoryEntry> =
+            entries.iter().map(|(k, v)| (k.clone(), v)).collect();
+
+        let mut scores: HashMap<String, HybridScore> = HashMap::new();
+        scores.insert("d1".to_string(), score(3.0));
+        scores.insert("d2".to_string(), score(2.0));
+        scores.insert("d3".to_string(), score(1.0));
+
+        apply_decision_and_research_boosts(
+            "ordinary lookup query with no special terms",
+            &entries_ref,
+            &mut scores,
+        );
+
+        // Every score moved (boost applied) ...
+        assert_eq!(scores.get("d1").unwrap().final_score, 3.0 * 1.55);
+        assert_eq!(scores.get("d2").unwrap().final_score, 2.0 * 1.55);
+        assert_eq!(scores.get("d3").unwrap().final_score, 1.0 * 1.55);
+        // ... but the already-correct rank order is unchanged.
+        assert_eq!(
+            ranked_ids(&scores, &["d1", "d2", "d3"]),
+            vec!["d1".to_string(), "d2".to_string(), "d3".to_string()]
+        );
+    }
+
+    #[test]
+    fn already_correct_ops_audit_style_decision_rank_is_not_inverted() {
+        // Mirrors the ops-audit "recent project decision vs. older roadmap
+        // noise" shape (ops_audit_corpus.rs case 1), but seeded so the
+        // decision is *already* ranked first pre-boost — the boost must not
+        // invert an already-correct order due to overshoot.
+        let entries: HashMap<String, MemoryEntry> = [
+            entry(
+                "ops-project-decision-priority",
+                "/notes/project/decisions",
+                "decision",
+                0.9,
+            ),
+            entry("ops-roadmap-noise", "/notes/roadmap", "fact", 0.7),
+            entry("ops-review-noise", "/notes/review", "fact", 0.7),
+        ]
+        .into_iter()
+        .map(|e| (e.id.clone(), e))
+        .collect();
+        let entries_ref: HashMap<String, &MemoryEntry> =
+            entries.iter().map(|(k, v)| (k.clone(), v)).collect();
+
+        let mut scores: HashMap<String, HybridScore> = HashMap::new();
+        scores.insert("ops-project-decision-priority".to_string(), score(1.2));
+        scores.insert("ops-roadmap-noise".to_string(), score(1.0));
+        scores.insert("ops-review-noise".to_string(), score(0.9));
+
+        apply_decision_and_research_boosts(
+            "what is the current open issue priority project decision for this sprint",
+            &entries_ref,
+            &mut scores,
+        );
+
+        assert_eq!(
+            ranked_ids(
+                &scores,
+                &[
+                    "ops-project-decision-priority",
+                    "ops-roadmap-noise",
+                    "ops-review-noise"
+                ]
+            ),
+            vec![
+                "ops-project-decision-priority".to_string(),
+                "ops-roadmap-noise".to_string(),
+                "ops-review-noise".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn research_path_boost_preserves_relative_order_among_equally_qualifying_entries() {
+        // Two wiki/research-path entries under a research-shaped query both
+        // qualify for RESEARCH_PATH_BOOST; the uniform multiplier must not
+        // invert their existing relative order.
+        let entries: HashMap<String, MemoryEntry> = [
+            entry("r1", "/wiki/research/hindsight-eval", "fact", 0.7),
+            entry("r2", "/wiki/research/protocol-notes", "fact", 0.7),
+        ]
+        .into_iter()
+        .map(|e| (e.id.clone(), e))
+        .collect();
+        let entries_ref: HashMap<String, &MemoryEntry> =
+            entries.iter().map(|(k, v)| (k.clone(), v)).collect();
+
+        let mut scores: HashMap<String, HybridScore> = HashMap::new();
+        scores.insert("r1".to_string(), score(2.0));
+        scores.insert("r2".to_string(), score(1.0));
+
+        apply_decision_and_research_boosts(
+            "hindsight research evaluation protocol for memory recall quality",
+            &entries_ref,
+            &mut scores,
+        );
+
+        assert_eq!(scores.get("r1").unwrap().final_score, 2.0 * 2.85);
+        assert_eq!(scores.get("r2").unwrap().final_score, 1.0 * 2.85);
+        assert_eq!(
+            ranked_ids(&scores, &["r1", "r2"]),
+            vec!["r1".to_string(), "r2".to_string()]
+        );
+    }
+}

@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
 
+### Changed
+
+- **`memory-core` `SearchOptions` gains a `decay_policy` field and `DecayPolicy` now requires `Send + Sync`** (#891), so downstream policy injection can reach the live hybrid search path without forking `scorer.rs`. This is a source-breaking change for downstream code that builds `SearchOptions` via a full struct literal (add `decay_policy: None` or use `..Default::default()`) or implements `DecayPolicy` on a non-`Send`/non-`Sync` type — intentional, by design, to keep the trait usable behind `Arc<dyn DecayPolicy>` on the ranking hot path.
+
 ## [1.7.0] - 2026-07-08 — portable memory kernel, vector auditability, and dispatch canon
 
 Minor release. Tachi becomes the shared memory kernel for downstream products

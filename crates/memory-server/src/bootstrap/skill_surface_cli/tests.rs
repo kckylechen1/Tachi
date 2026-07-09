@@ -92,45 +92,118 @@ fn skill_surface_reads_cc_switch_projection_matrix() {
 
 #[test]
 fn skill_source_report_reads_builtin_manifest_status() {
-    let report = build_skill_source_report().unwrap();
+    // #909 hermeticity follow-up (tachi#911): `build_skill_source_report()`
+    // resolves each `SKILL_SOURCE_MANIFESTS` entry through
+    // `shell_ops::resolve_meta_skill("skill/<corpus>/manifest.yaml")`. That
+    // resolver checks the repo-root-relative path *before* `$TACHI_SKILLS_ROOT`
+    // (see `resolve_meta_skill`'s doc comment / resolution order), and in this
+    // repo `skill/` is itself a git-tracked *absolute symlink* into a
+    // host-local vendored-skills library (kckylechen1/tachi#895) — so on any
+    // host where that symlink target exists, repo-root resolution wins and a
+    // `$TACHI_SKILLS_ROOT` fixture can never be observed by this function; on
+    // a host where the target is absent, every resolution step fails and the
+    // call returns `Err`. Neither path lets this test mount a small fixture
+    // without changing `resolve_meta_skill`'s production resolution order
+    // (out of scope here), so instead of asserting exact skill counts/SHAs
+    // tied to today's snapshot of the host library, this test:
+    //   1. skips (does not fail the suite) when the library isn't mounted, and
+    //   2. otherwise asserts only structural invariants that must hold for
+    //      any valid manifest content — so it no longer breaks when the
+    //      vendored corpora are updated upstream or the library is absent.
+    let report = match build_skill_source_report() {
+        Ok(report) => report,
+        Err(e) => {
+            eprintln!(
+                "skipping skill_source_report_reads_builtin_manifest_status: \
+                 vendored-skills library not mounted on this host ({e})"
+            );
+            return;
+        }
+    };
 
     assert_eq!(report.schema_version, "tachi.skill_surface.sources.v1");
-    assert_eq!(report.summary.corpora, 2);
-    assert_eq!(report.summary.skills, 16);
-    assert_eq!(report.summary.upstream_managed, 13);
-    assert_eq!(report.summary.native_contracts, 3);
-    assert_eq!(report.summary.missing_metadata, 0);
-
-    let superpowers = report
-        .corpora
-        .iter()
-        .find(|corpus| corpus.corpus == "superpowers")
-        .unwrap();
     assert_eq!(
-        superpowers.upstream.repo.as_deref(),
-        Some("obra/superpowers")
+        report.summary.corpora,
+        super::SKILL_SOURCE_MANIFESTS.len(),
+        "summary.corpora must track the number of configured manifest specs"
     );
     assert_eq!(
-        superpowers.upstream.pinned_sha.as_deref(),
-        Some("6fd4507659784c351abbd2bc264c7162cfd386dc")
+        report.corpora.len(),
+        super::SKILL_SOURCE_MANIFESTS.len(),
+        "one corpus status entry per configured manifest spec"
     );
-    assert!(superpowers
-        .skills
-        .iter()
-        .any(|skill| skill.name == "verification-before-completion"
-            && skill.metadata_status == "native_contract"));
 
-    let waza = report
-        .corpora
-        .iter()
-        .find(|corpus| corpus.corpus == "waza")
-        .unwrap();
-    assert!(waza.skills.iter().any(|skill| skill.name == "check"
-        && skill.metadata_status == "pinned_upstream"
-        && skill.source.local_overlay.as_deref() == Some("tachi-routing-only")));
-    assert!(waza.skills.iter().any(|skill| skill.name == "tachi"
-        && skill.metadata_status == "native_contract"
-        && skill.source.update_policy.as_deref() == Some("local_review")));
+    let corpus_names: Vec<&str> = report.corpora.iter().map(|c| c.corpus.as_str()).collect();
+    assert!(
+        corpus_names.contains(&"superpowers"),
+        "expected a superpowers corpus entry, got {corpus_names:?}"
+    );
+    assert!(
+        corpus_names.contains(&"waza"),
+        "expected a waza corpus entry, got {corpus_names:?}"
+    );
+
+    const KNOWN_METADATA_STATUSES: &[&str] = &[
+        "pinned_upstream",
+        "native_contract",
+        "local_or_external",
+        "missing_metadata",
+    ];
+    let mut total_skills = 0usize;
+    let mut total_upstream_managed = 0usize;
+    let mut total_native_contracts = 0usize;
+    let mut total_missing_metadata = 0usize;
+    for corpus in &report.corpora {
+        assert!(
+            !corpus.skills.is_empty(),
+            "{} corpus should list at least one skill",
+            corpus.corpus
+        );
+        assert_eq!(
+            corpus.summary.skills,
+            corpus.skills.len(),
+            "{} corpus summary.skills must match the skill list length",
+            corpus.corpus
+        );
+        total_skills += corpus.skills.len();
+        total_upstream_managed += corpus.summary.upstream_managed;
+        total_native_contracts += corpus.summary.native_contracts;
+        total_missing_metadata += corpus.summary.missing_metadata;
+        for skill in &corpus.skills {
+            assert!(
+                KNOWN_METADATA_STATUSES.contains(&skill.metadata_status.as_str()),
+                "unexpected metadata_status {:?} for skill {} in corpus {}",
+                skill.metadata_status,
+                skill.name,
+                corpus.corpus
+            );
+            if skill.metadata_status == "missing_metadata" {
+                assert!(
+                    skill.source.update_policy.is_none()
+                        || skill.source.kind.is_none()
+                        || (skill.source.kind.as_deref() == Some("upstream_skill_repo")
+                            && (skill.source.repo.is_none()
+                                || skill.source.path.is_none()
+                                || skill.source.pinned_ref.is_none()
+                                || skill.source.pinned_sha.is_none())),
+                    "missing_metadata skill {} in corpus {} should be missing a required field",
+                    skill.name,
+                    corpus.corpus
+                );
+            }
+        }
+    }
+    assert_eq!(
+        report.summary.skills, total_skills,
+        "top-level summary.skills must equal the sum across all corpora"
+    );
+    assert_eq!(report.summary.upstream_managed, total_upstream_managed);
+    assert_eq!(report.summary.native_contracts, total_native_contracts);
+    assert_eq!(report.summary.missing_metadata, total_missing_metadata);
+    assert!(
+        report.summary.upstream_managed + report.summary.native_contracts <= report.summary.skills,
+        "upstream_managed + native_contracts must not exceed total skills"
+    );
 }
 
 #[test]
