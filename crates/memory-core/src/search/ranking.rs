@@ -280,11 +280,15 @@ fn query_looks_research_shaped(query: &str) -> bool {
 }
 
 fn is_research_wiki_path(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.starts_with("/wiki/")
-        && (lower.contains("/research/")
-            || lower.contains("/research-")
-            || lower.ends_with("/research"))
+    // Allocation-free case-insensitive scan (Gemini #903): avoid
+    // `to_ascii_lowercase()` per candidate under load. Match any path segment
+    // whose name starts with `research` (covers /research, /research-*, /research_*).
+    if path.len() < 6 || !path.as_bytes()[..6].eq_ignore_ascii_case(b"/wiki/") {
+        return false;
+    }
+    path.as_bytes()
+        .windows(9)
+        .any(|w| w.eq_ignore_ascii_case(b"/research"))
 }
 
 fn apply_access_feedback(
