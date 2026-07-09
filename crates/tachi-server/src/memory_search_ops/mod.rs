@@ -1,6 +1,7 @@
 mod auto_link;
 mod confidence_reinforce;
 mod contradiction;
+mod eval_capture;
 mod library_binding;
 mod rerank;
 mod routing_config;
