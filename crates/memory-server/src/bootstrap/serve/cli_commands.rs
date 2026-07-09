@@ -206,6 +206,16 @@ pub(super) async fn run_pre_serve_command(
             super::super::poke_cli::run_poke_command(app_home, action.clone()).await?;
             Ok(true)
         }
+        Commands::Eval { action } => {
+            super::super::eval_cli::run_eval_command(
+                action.clone(),
+                global_db_path,
+                project_db_path,
+                app_home,
+            )
+            .await?;
+            Ok(true)
+        }
         Commands::Serve => Ok(false),
         _ => {
             super::super::cli_tool::run_cli_command(

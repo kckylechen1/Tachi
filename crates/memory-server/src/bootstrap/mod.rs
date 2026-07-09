@@ -9,6 +9,7 @@ mod backfill;
 mod clean_cli;
 mod cli_tool;
 mod env_cmd;
+mod eval_cli;
 mod harness_cli;
 mod manifest_cli;
 mod poke_cli;

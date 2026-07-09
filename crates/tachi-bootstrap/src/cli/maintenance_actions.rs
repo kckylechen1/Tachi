@@ -130,6 +130,31 @@ pub enum CleanAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+pub enum EvalAction {
+    /// Run the local /eval recall corpus and publish aggregate-only health.
+    Recall {
+        /// Optional JSON cases file. Defaults to labeled rows under /eval in the target DB.
+        #[arg(long, value_name = "PATH")]
+        cases: Option<PathBuf>,
+        /// Maximum search results per case.
+        #[arg(long, default_value_t = 10)]
+        top_k: usize,
+        /// Minimum current recall@k required for a passing run.
+        #[arg(long, default_value_t = 1.0)]
+        min_recall: f64,
+        /// Minimum current MRR required for a passing run.
+        #[arg(long, default_value_t = 0.0)]
+        min_mrr: f64,
+        /// Include adaptive rerank in the replay.
+        #[arg(long)]
+        enable_rerank: bool,
+        /// Emit machine-readable JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub enum RepairAction {
     /// Quarantine resolution helpers (PR-3 v4 migration aftermath).
     Quarantine {
