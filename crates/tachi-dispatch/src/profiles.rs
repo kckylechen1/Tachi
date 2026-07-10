@@ -2,10 +2,16 @@
 //! what evidence a delegated agent must return. They are intentionally separate
 //! from `tachi_hub::ToolProfile`, which only gates MCP tool visibility.
 
-use tachi_params::{DispatchMcpAccessParams, TachiDispatchParams};
+use crate::native_skill_ids::{
+    CODING_ARCHITECTURE_DECISION, CODING_REFACTOR_CHECKLIST, CODING_TEST_STRATEGY,
+    SUPERPOWER_EXECUTING_PLANS, SUPERPOWER_REQUESTING_CODE_REVIEW,
+    SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT, SUPERPOWER_VERIFICATION_BEFORE_COMPLETION,
+    SUPERPOWER_WRITING_PLANS, WAZA_CHECK, WAZA_LEARN, WAZA_READ, WAZA_TACHI, WAZA_THINK,
+};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use tachi_params::{DispatchMcpAccessParams, TachiDispatchParams};
 
 pub const DISPATCH_POLICY_PROPOSAL_NS: &str = "dispatch_route_policy_proposals";
 pub const ROUTE_POLICY_RULE_NS: &str = "dispatch_route_policy_rules";
@@ -14,24 +20,6 @@ pub const MIN_ROUTE_POLICY_RULE_SAMPLES: u32 = 2;
 pub const MIN_LOADOUT_EVOLUTION_SAMPLES: u32 = 10;
 pub const MIN_CARD_RISK_EVOLUTION_SAMPLES: u32 = 3;
 pub const ROUTE_POLICY_RULE_SCORE_BONUS: f64 = 35.0;
-
-pub const SUPERPOWER_WRITING_PLANS: &str = "skill:superpowers-writing-plans";
-pub const SUPERPOWER_EXECUTING_PLANS: &str = "skill:superpowers-executing-plans";
-pub const SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT: &str =
-    "skill:superpowers-subagent-driven-development";
-pub const SUPERPOWER_REQUESTING_CODE_REVIEW: &str = "skill:superpowers-requesting-code-review";
-pub const SUPERPOWER_VERIFICATION_BEFORE_COMPLETION: &str =
-    "skill:superpowers-verification-before-completion";
-
-pub const WAZA_CHECK: &str = "skill:waza-check";
-pub const WAZA_LEARN: &str = "skill:waza-learn";
-pub const WAZA_READ: &str = "skill:waza-read";
-pub const WAZA_TACHI: &str = "skill:waza-tachi";
-pub const WAZA_THINK: &str = "skill:waza-think";
-
-pub const CODING_REFACTOR_CHECKLIST: &str = "skill:coding-refactor-checklist";
-pub const CODING_TEST_STRATEGY: &str = "skill:coding-test-strategy";
-pub const CODING_ARCHITECTURE_DECISION: &str = "skill:coding-architecture-decision";
 
 #[derive(Debug, Clone, Copy)]
 pub struct DispatchProfileDef {

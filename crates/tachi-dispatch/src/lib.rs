@@ -6,6 +6,7 @@
 
 mod launcher;
 mod model_registry;
+mod native_skill_ids;
 pub mod policy;
 mod profiles;
 mod registry;
@@ -22,6 +23,14 @@ pub use model_registry::{
     dispatch_model_card, resolve_dispatch_model, resolve_dispatch_model_card,
     resolve_dispatch_model_with_config, DispatchModelCard, DISPATCH_MODEL_CARDS,
     GLM_CODING_DEFAULT_MODEL, GLM_CODING_ENV_OVERRIDE, GLM_CODING_MODEL_ALIAS,
+};
+pub use native_skill_ids::{
+    is_native_skill_id, NativeSkillId, CODING_ARCHITECTURE_DECISION, CODING_REFACTOR_CHECKLIST,
+    CODING_SKILL_IDS, CODING_TEST_STRATEGY, SUPERPOWER_BRAINSTORMING, SUPERPOWER_EXECUTING_PLANS,
+    SUPERPOWER_FINISHING_BRANCH, SUPERPOWER_REQUESTING_CODE_REVIEW, SUPERPOWER_SKILL_IDS,
+    SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT, SUPERPOWER_VERIFICATION_BEFORE_COMPLETION,
+    SUPERPOWER_WRITING_PLANS, WAZA_CHECK, WAZA_DESIGN, WAZA_HEALTH, WAZA_HUNT, WAZA_LEARN,
+    WAZA_READ, WAZA_SKILL_IDS, WAZA_TACHI, WAZA_THINK, WAZA_WRITE,
 };
 pub use profiles::{
     dispatch_profile_alias, profile_demotion_targets_from_overlay, profile_deprecated_aliases,
