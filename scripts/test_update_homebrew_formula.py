@@ -92,6 +92,33 @@ class UpdateHomebrewFormulaBinaryTests(unittest.TestCase):
         self.assertIn('tachi hub --help', after)
         self.assertIn("--no-project-db", after)
 
+    def test_service_block_sets_keep_alive(self) -> None:
+        """#936: the service block must set `keep_alive true` so launchd respawns
+        the daemon after a fail-loud / watchdog exit. Without it, 'exit → launchd
+        respawns' is false and the liveness recovery premise breaks."""
+        self.run_script()
+        after = self.formula.read_text(encoding="utf-8")
+        service = self.module_service_block(after)
+        self.assertIn("keep_alive true", service)
+
+    @staticmethod
+    def module_service_block(text: str) -> str:
+        import re
+
+        match = re.search(r"  service do\n.*?  end\n?", text, re.DOTALL)
+        assert match is not None, f"no service block in formula:\n{text}"
+        return match.group(0)
+
+    def test_service_block_keep_alive_is_idempotent(self) -> None:
+        """Re-running the updater on its own output must not duplicate keep_alive."""
+        self.run_script()
+        once = self.formula.read_text(encoding="utf-8")
+        # Second pass over the already-updated formula (re-promote path).
+        self.run_script()
+        twice = self.formula.read_text(encoding="utf-8")
+        self.assertEqual(once.count("keep_alive true"), 1)
+        self.assertEqual(twice.count("keep_alive true"), 1)
+
 
 class ApplyBinaryUrlsRepromoteTests(unittest.TestCase):
     """#907 (reviewed in #907): on_macos removal regex must remove the WHOLE

@@ -300,6 +300,11 @@ def ensure_service_block(text: str) -> str:
     """Formula service runs a global/background daemon, not a cwd-bound project daemon."""
     service_block = """  service do
     run [opt_bin/"tachi", "--daemon", "--port", "6919", "--no-project-db"]
+    # KeepAlive so launchd respawns the daemon after any exit — including the
+    # fail-loud serve contract and liveness watchdog exits (#936), which rely on
+    # the supervisor restarting a serving process. launchd's default
+    # ThrottleInterval (~10s) rate-limits respawns.
+    keep_alive true
     environment_variables PATH:                           std_service_path_env,
                           TACHI_DAEMON_IDLE_TIMEOUT_SECS: "0",
                           TACHI_PROFILE:                  "standard"

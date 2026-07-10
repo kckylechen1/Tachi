@@ -64,6 +64,42 @@ pub(super) fn daemon_idle_timeout() -> Option<std::time::Duration> {
     (secs > 0).then(|| std::time::Duration::from_secs(secs))
 }
 
+/// Liveness watchdog cadence + consecutive-failure threshold for the HTTP
+/// daemon (#936). The watchdog self-probes `/health` through the real socket;
+/// after `fails` consecutive failures it logs at ERROR and `exit(2)` so
+/// launchd's `KeepAlive` respawns a daemon that can actually serve.
+///
+/// Returns `None` (watchdog disabled) when `TACHI_DAEMON_WATCHDOG_FAILS=0`.
+/// Interval defaults to 30s, clamped to `[5, 3600]`; failures default to 4.
+pub(super) fn daemon_watchdog_config() -> Option<(std::time::Duration, u32)> {
+    let fails = std::env::var("TACHI_DAEMON_WATCHDOG_FAILS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(4);
+    if fails == 0 {
+        return None;
+    }
+    let secs = std::env::var("TACHI_DAEMON_WATCHDOG_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(30)
+        .clamp(5, 3600);
+    Some((std::time::Duration::from_secs(secs), fails))
+}
+
+/// Grace window after bind before the watchdog starts counting failures (#936).
+/// A slow first startup (cold caches, vector index warm-up) must not trip the
+/// watchdog before the surface has had a chance to answer. Failures inside this
+/// window are ignored; the first successful probe also arms the counter early.
+/// Defaults to 60s; env `TACHI_DAEMON_WATCHDOG_GRACE_SECS`.
+pub(super) fn daemon_watchdog_grace() -> std::time::Duration {
+    let secs = std::env::var("TACHI_DAEMON_WATCHDOG_GRACE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(60);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Idle window after which a **direct** stdio MCP server (one that opened the
 /// DB for writing) self-terminates. Targets the "host alive but session
 /// abandoned" leak mode identified in #520: the dominant pattern is NOT
