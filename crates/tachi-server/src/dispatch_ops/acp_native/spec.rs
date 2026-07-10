@@ -20,6 +20,14 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
     agent: &str,
     prompt: &str,
 ) -> Result<NativeAcpRunSpec, String> {
+    // Defense-in-depth (#894 S0 round 2): runs BEFORE command resolution/
+    // trust/availability preflight below. The primary fix is hoisting this
+    // same check to the dispatch entry point (`dispatch.rs::handle_tachi_dispatch`,
+    // before Stage 1/ClaudePool and before any builder runs at all); this
+    // builder-local copy stays as a second, independent gate in case a caller
+    // reaches this function through a path that bypassed the entry check.
+    tachi_dispatch::reject_unsupported_sandbox("acp-native", params.sandbox.as_deref())?;
+
     let (command, args, command_source) = resolve_native_acp_command(params, agent)?;
     if !crate::utils::is_trusted_command(&command) {
         return Err(format!(
@@ -33,11 +41,6 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
             command
         ));
     }
-
-    // Native ACP has no `--sandbox`-equivalent knob today; a caller-supplied
-    // `sandbox` request must fail closed with a receipt rather than be
-    // silently dropped (#894 S0).
-    tachi_dispatch::reject_unsupported_sandbox("acp-native", params.sandbox.as_deref())?;
 
     let cwd = params
         .cwd

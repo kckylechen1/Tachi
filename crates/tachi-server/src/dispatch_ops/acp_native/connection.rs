@@ -273,13 +273,16 @@ impl NativeAcpConnection {
     /// Emit a fail-closed receipt for every ACP permission decision, naming the
     /// typed request kind and the verdict (#894 S0). A DENY additionally logs
     /// loudly so an unexpected auto-deny is visible in the daemon log.
+    ///
+    /// #894 S0 round 2: there is exactly one authorizer now (the typed
+    /// taxonomy in `permission.rs`) — the earlier `legacy_heuristic` /
+    /// `typed_taxonomy` distinction is gone along with the deprecated
+    /// substring authorizer it described. `authorizer` stays in the receipt
+    /// schema as a fixed constant so existing consumers don't need a schema
+    /// migration for this field.
     fn append_permission_receipt(&self, decision: &AcpPermissionDecision) {
         let verdict = if decision.allowed { "allow" } else { "deny" };
-        let authorizer = if decision.heuristic {
-            "legacy_heuristic"
-        } else {
-            "typed_taxonomy"
-        };
+        const AUTHORIZER: &str = "typed_taxonomy";
         // `raw_kind` is attacker-influenced (it comes straight off the child
         // ACP agent's request, not our own code) — sanitize before it lands
         // in the trajectory log or the tracing log line, so a hostile agent
@@ -296,7 +299,7 @@ impl NativeAcpConnection {
                 "request_kind": decision.kind.as_str(),
                 "raw_tool_kind": raw_kind,
                 "verdict": verdict,
-                "authorizer": authorizer,
+                "authorizer": AUTHORIZER,
                 "timestamp": Utc::now().to_rfc3339(),
             }),
         );
@@ -307,7 +310,7 @@ impl NativeAcpConnection {
                 agent = %self.agent,
                 request_kind = decision.kind.as_str(),
                 raw_tool_kind = %raw_kind,
-                authorizer,
+                authorizer = AUTHORIZER,
                 "ACP permission request DENIED under profile '{}' (request kind '{}')",
                 self.permission_label,
                 decision.kind.as_str(),

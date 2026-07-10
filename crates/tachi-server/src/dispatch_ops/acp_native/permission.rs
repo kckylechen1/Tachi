@@ -13,6 +13,13 @@ use serde_json::{json, Value};
 /// This taxonomy reads only the structured kind, matched by exact equality, and
 /// treats anything it does not positively recognize as [`AcpRequestKind::Unknown`]
 /// → DENY (fail-closed).
+///
+/// #894 S0 round 2 (leader adjudication, cross-vendor review): the earlier
+/// `TACHI_ACP_PERMISSION_HEURISTIC=legacy` deprecation-cycle compat flag has
+/// been REMOVED — an env-flippable switch back to an unsound substring
+/// authorizer is itself a standing bypass, and native-ACP has zero production
+/// consumers to migrate, so the deprecation window served nobody. This module
+/// now has exactly one authorizer: the typed taxonomy below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AcpRequestKind {
     ReadOp,
@@ -40,8 +47,6 @@ pub(super) struct AcpPermissionDecision {
     /// The raw `toolCall.kind` string seen (or `<missing>` when absent).
     pub raw_kind: String,
     pub allowed: bool,
-    /// True when the deprecated substring heuristic produced this decision.
-    pub heuristic: bool,
 }
 
 /// Extract the **canonical** ACP `ToolKind` string: `params.toolCall.kind`
@@ -83,9 +88,9 @@ fn fallback_tool_kind_strs(params: &Value) -> Vec<String> {
 fn bucket_kind(kind: &str) -> AcpRequestKind {
     match kind {
         // ACP spec `ToolKind` read-only values only (#894 hardening: grep/list/
-        // view/find were legacy-parity carryover from the substring heuristic,
-        // not ACP spec values — they now classify Unknown→DENY, an intentional
-        // safety-over-parity behavior change; see commit message).
+        // view/find were legacy-parity carryover from the (now-deleted)
+        // substring heuristic, not ACP spec values — they now classify
+        // Unknown→DENY, an intentional safety-over-parity behavior change.
         "read" | "search" => AcpRequestKind::ReadOp,
         "write" | "edit" | "delete" | "remove" | "create" | "move" => AcpRequestKind::WriteOp,
         "execute" | "exec" | "terminal" | "shell" | "run" => AcpRequestKind::ExecuteOp,
@@ -130,24 +135,12 @@ pub(super) fn classify_acp_request_kind(params: &Value) -> (AcpRequestKind, Stri
     }
 }
 
-/// Deprecation gate: `TACHI_ACP_PERMISSION_HEURISTIC=legacy` restores the old
-/// unsound substring authorizer for one deprecation cycle.
-fn legacy_heuristic_enabled() -> bool {
-    std::env::var("TACHI_ACP_PERMISSION_HEURISTIC")
-        .map(|value| value.trim().eq_ignore_ascii_case("legacy"))
-        .unwrap_or(false)
-}
-
 /// Authorize one ACP permission request under the given profile label, returning
 /// both the JSON-RPC outcome and the receipt context.
 pub(super) fn native_permission_decision(
     permission_label: &str,
     params: &Value,
 ) -> AcpPermissionDecision {
-    if legacy_heuristic_enabled() {
-        return legacy_permission_decision(permission_label, params);
-    }
-
     let (kind, raw_kind) = classify_acp_request_kind(params);
     // profile -> verdict table. `approve-reads` is the only label the spec layer
     // emits today (see `native_acp_permission_label`); anything else reaches the
@@ -161,27 +154,6 @@ pub(super) fn native_permission_decision(
         kind,
         raw_kind,
         allowed,
-        heuristic: false,
-    }
-}
-
-fn legacy_permission_decision(permission_label: &str, params: &Value) -> AcpPermissionDecision {
-    tracing::warn!(
-        target: "tachi::acp::permission",
-        "TACHI_ACP_PERMISSION_HEURISTIC=legacy: using the DEPRECATED substring ACP permission authorizer (unsound, #894 S0). It keyword-greps the entire request and can fail open; unset the env var to use the typed taxonomy."
-    );
-    // Classify with the taxonomy purely so the receipt still names a request
-    // kind, but let the legacy substring rule drive the verdict.
-    let (kind, raw_kind) = classify_acp_request_kind(params);
-    let allowed = permission_label == "approve-reads" && permission_request_is_read_like(params);
-    let response = outcome_for(params, allowed);
-
-    AcpPermissionDecision {
-        response,
-        kind,
-        raw_kind,
-        allowed,
-        heuristic: true,
     }
 }
 
@@ -189,12 +161,6 @@ fn outcome_for(params: &Value, allowed: bool) -> Value {
     let selected = if allowed {
         select_allow_option(params)
     } else {
-        // DENY must never be decided by substring-matching option names/ids —
-        // a crafted option like {"optionId": "allow-once", "name": "Do not
-        // reject", "kind": "allow_once"} would substring-match "reject" in the
-        // name and get selected as if it were a deny, when its typed kind says
-        // it is in fact an allow option. Select strictly by the ACP typed
-        // PermissionOption `kind` field (`reject_once` / `reject_always`).
         select_deny_option(params)
     };
     selected.map(selected_outcome).unwrap_or_else(cancelled_outcome)
@@ -217,55 +183,33 @@ fn cancelled_outcome() -> Value {
     })
 }
 
-/// DEPRECATED unsound heuristic, retained one deprecation cycle behind
-/// `TACHI_ACP_PERMISSION_HEURISTIC=legacy`. Keyword-greps the entire request;
-/// exposed to the sibling test module only for the taxonomy parity tests.
-pub(super) fn permission_request_is_read_like(params: &Value) -> bool {
-    let haystack = serde_json::to_string(params)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    ["read", "search", "grep", "list", "view", "find"]
-        .iter()
-        .any(|needle| haystack.contains(needle))
-        && ![
-            "write", "edit", "delete", "remove", "terminal", "shell", "exec", "create",
-        ]
-        .iter()
-        .any(|needle| haystack.contains(needle))
-}
-
-/// ALLOW-path option selection. Unchanged from the pre-#894-hardening
-/// behavior: substring match over the option's serialized name/id, falling
-/// back to the first listed option if nothing matches. This path only ever
-/// runs when the request was already classified `ReadOp` via the canonical
-/// `toolCall.kind`, so a mis-picked *allow* option among several allow-shaped
-/// choices is not a fail-open risk the way DENY selection was.
+/// ALLOW-path option selection. #894 S0 round 2: selects strictly by the ACP
+/// typed `PermissionOption.kind` field — `allow_once` preferred, else
+/// `allow_always` — **never** by substring-matching `optionId`/`name`. No
+/// substring matching exists anywhere in option selection any more (neither
+/// ALLOW nor DENY). If no option advertises an allow kind, there is no
+/// ACP-legal way to positively approve, so the caller falls back to the
+/// `cancelled` outcome — the same legal-refusal shape DENY uses when it has
+/// nothing to select either.
 fn select_allow_option(params: &Value) -> Option<String> {
     let options = params.get("options").and_then(Value::as_array)?;
-    let mut fallback = None;
-    for option in options {
-        let id = option
-            .get("optionId")
-            .or_else(|| option.get("id"))
-            .or_else(|| option.get("name"))
-            .and_then(Value::as_str)?;
-        let label = serde_json::to_string(option)
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if fallback.is_none() {
-            fallback = Some(id.to_string());
-        }
-        let selected = ["approve", "allow", "accept", "yes", "read"]
-            .iter()
-            .any(|needle| label.contains(needle))
-            && !["deny", "reject", "cancel", "no"]
-                .iter()
-                .any(|needle| label.contains(needle));
-        if selected {
-            return Some(id.to_string());
+    for wanted_kind in ["allow_once", "allow_always"] {
+        for option in options {
+            let Some(kind) = option.get("kind").and_then(Value::as_str) else {
+                continue;
+            };
+            if kind == wanted_kind {
+                if let Some(id) = option
+                    .get("optionId")
+                    .or_else(|| option.get("id"))
+                    .and_then(Value::as_str)
+                {
+                    return Some(id.to_string());
+                }
+            }
         }
     }
-    fallback
+    None
 }
 
 /// DENY-path option selection. Selects strictly by the ACP typed

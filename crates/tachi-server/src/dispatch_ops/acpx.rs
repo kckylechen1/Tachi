@@ -173,6 +173,66 @@ mod tests {
         assert!(err.contains("fail-closed"), "{err}");
     }
 
+    /// #894 S0 round 2: the sandbox rejection must run BEFORE the node
+    /// readiness preflight (a real subprocess spawn), not after. The prior
+    /// version of this test used `TACHI_ACPX_COMMAND=python3`, which the node
+    /// check skips entirely (`should_check_node_for_acpx` only fires for
+    /// `acpx`/`npx`/`node`) — so it never actually exercised the ordering.
+    /// This version points at a real `node`-named binary that, if invoked,
+    /// writes a marker file; asserting the marker is absent after the call
+    /// proves the preflight subprocess never ran.
+    #[cfg(unix)]
+    #[test]
+    fn acpx_sandbox_rejection_runs_before_node_preflight_spawn() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_path = tempfile::tempdir().expect("fake node PATH dir");
+        let marker_path = temp_path.path().join("node-was-invoked.marker");
+        let node_path = temp_path.path().join("node");
+        // If this script ever runs, it proves the node preflight fired before
+        // the sandbox check — which would be the regression this test guards
+        // against.
+        std::fs::write(
+            &node_path,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nprintf 'v22.13.0\\n'\n",
+                marker_path.display()
+            ),
+        )
+        .expect("fake node");
+        let mut perms = std::fs::metadata(&node_path)
+            .expect("fake node metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&node_path, perms).expect("fake node executable");
+
+        let path_value = temp_path.path().to_string_lossy().to_string();
+        let _path = EnvRestore::set("PATH", &path_value);
+        let _cmd = EnvRestore::set("TACHI_ACPX_COMMAND", "node");
+        let _args = EnvRestore::remove("TACHI_ACPX_ARGS");
+        let _agent = EnvRestore::remove("TACHI_ACPX_AGENT");
+        let _mode = EnvRestore::remove("TACHI_ACPX_RUN_MODE");
+        let _legacy_mode = EnvRestore::remove("TACHI_ACPX_SESSION_MODE");
+        let _session = EnvRestore::remove("TACHI_ACPX_SESSION");
+        let mut params = params();
+        params.sandbox = Some("workspace-write".to_string());
+
+        let err = build_acpx_command_spec(&params, "codex", Path::new("/tmp/run/prompt.md"))
+            .expect_err("acpx has no sandbox concept and must fail closed");
+
+        assert!(
+            err.contains("acpx") && err.contains("workspace-write"),
+            "receipt must name backend + requested level: {err}"
+        );
+        assert!(
+            !marker_path.exists(),
+            "node preflight must never run when the sandbox check rejects first"
+        );
+    }
+
     #[test]
     fn acpx_missing_command_error_is_actionable() {
         let _guard = crate::shell_ops::tachi_run_root_env_lock()
