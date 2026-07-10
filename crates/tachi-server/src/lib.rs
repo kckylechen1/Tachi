@@ -108,7 +108,6 @@ mod foundry_runtime_ops;
 mod foundry_scheduler;
 mod gh_ops;
 mod gh_safe_merge;
-mod graph_state_ops;
 mod handoff_ops;
 mod hub_ops;
 mod kanban;

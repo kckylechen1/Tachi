@@ -1,8 +1,8 @@
 //! F4 (#913): typed facade action enums (stringly `action: String` → enum).
 //!
 //! Wire format remains snake_case strings for MCP compatibility. JsonSchema for
-//! `tachi_task` still advertises **primary** actions only (F2); compat GH
-//! lifecycle variants deserialize but are not schema-advertised.
+//! `tachi_task` advertises **primary** actions only. GitHub PR lifecycle actions
+//! live exclusively on `tachi_gh` (#757: removed from tachi_task).
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -60,10 +60,10 @@ impl FromStr for TachiVerifyAction {
 
 // ─── tachi_task ──────────────────────────────────────────────────────────────
 
-/// Actions accepted by `tachi_task` (primary + F2 compat GH lifecycle).
+/// Actions accepted by `tachi_task`.
 ///
-/// MCP schema advertises primary only; GH lifecycle variants still deserialize
-/// for compatibility and return a deprecation notice at the router.
+/// GitHub PR lifecycle (`link_pr` / `pr_status` / `pr_handoff` / `release_note`)
+/// is **not** accepted here — use `tachi_gh` (#757).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TachiTaskAction {
@@ -91,15 +91,10 @@ pub enum TachiTaskAction {
     UxMatrix,
     BuildReferences,
     CloseLoop,
-    // F2 compat — prefer tachi_gh
-    LinkPr,
-    PrStatus,
-    PrHandoff,
-    ReleaseNote,
 }
 
 impl TachiTaskAction {
-    /// Primary schema-advertised actions (excludes GH lifecycle).
+    /// Schema-advertised primary actions.
     pub const PRIMARY: &'static [Self] = &[
         Self::Plan,
         Self::Briefing,
@@ -125,14 +120,6 @@ impl TachiTaskAction {
         Self::UxMatrix,
         Self::BuildReferences,
         Self::CloseLoop,
-    ];
-
-    /// Compatibility-only GH lifecycle (router still accepts; prefer tachi_gh).
-    pub const COMPAT_GH_LIFECYCLE: &'static [Self] = &[
-        Self::LinkPr,
-        Self::PrStatus,
-        Self::PrHandoff,
-        Self::ReleaseNote,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -161,18 +148,7 @@ impl TachiTaskAction {
             Self::UxMatrix => "ux_matrix",
             Self::BuildReferences => "build_references",
             Self::CloseLoop => "close_loop",
-            Self::LinkPr => "link_pr",
-            Self::PrStatus => "pr_status",
-            Self::PrHandoff => "pr_handoff",
-            Self::ReleaseNote => "release_note",
         }
-    }
-
-    pub fn is_compat_gh_lifecycle(self) -> bool {
-        matches!(
-            self,
-            Self::LinkPr | Self::PrStatus | Self::PrHandoff | Self::ReleaseNote
-        )
     }
 }
 
@@ -211,10 +187,10 @@ impl FromStr for TachiTaskAction {
             "ux_matrix" => Ok(Self::UxMatrix),
             "build_references" => Ok(Self::BuildReferences),
             "close_loop" => Ok(Self::CloseLoop),
-            "link_pr" => Ok(Self::LinkPr),
-            "pr_status" => Ok(Self::PrStatus),
-            "pr_handoff" => Ok(Self::PrHandoff),
-            "release_note" => Ok(Self::ReleaseNote),
+            // #757: these were removed from tachi_task; point callers at tachi_gh.
+            "link_pr" | "pr_status" | "pr_handoff" | "release_note" => Err(format!(
+                "Invalid tachi_task action '{s}'. GitHub PR lifecycle actions live on tachi_gh(action='{s}')."
+            )),
             other => Err(format!(
                 "Invalid tachi_task action '{other}'. See primary task actions or use tachi_gh for GitHub PR lifecycle."
             )),
@@ -225,7 +201,7 @@ impl FromStr for TachiTaskAction {
 #[cfg(test)]
 mod tests {
     use super::super::action_inventory::{
-        TACHI_TASK_COMPAT_GH_LIFECYCLE_ACTIONS, TACHI_TASK_PRIMARY_ACTIONS, TACHI_VERIFY_ACTIONS,
+        TACHI_TASK_PRIMARY_ACTIONS, TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS, TACHI_VERIFY_ACTIONS,
     };
     use super::*;
 
@@ -244,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn f4_task_action_primary_and_compat_roundtrip() {
+    fn f4_task_action_primary_roundtrip() {
         assert_eq!(
             TachiTaskAction::PRIMARY.len(),
             TACHI_TASK_PRIMARY_ACTIONS.len()
@@ -252,15 +228,22 @@ mod tests {
         for &s in TACHI_TASK_PRIMARY_ACTIONS {
             let parsed: TachiTaskAction = s.parse().expect("task primary");
             assert_eq!(parsed.as_str(), s);
-            assert!(!parsed.is_compat_gh_lifecycle());
             let wire = serde_json::to_string(&parsed).unwrap();
             assert_eq!(wire, format!("\"{s}\""));
         }
-        for &s in TACHI_TASK_COMPAT_GH_LIFECYCLE_ACTIONS {
-            let parsed: TachiTaskAction = s.parse().expect("task compat");
-            assert_eq!(parsed.as_str(), s);
-            assert!(parsed.is_compat_gh_lifecycle());
-        }
         assert!("nope".parse::<TachiTaskAction>().is_err());
+    }
+
+    #[test]
+    fn f757_task_rejects_removed_gh_lifecycle_actions() {
+        for &s in TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS {
+            let err = s
+                .parse::<TachiTaskAction>()
+                .expect_err("removed lifecycle must not parse as tachi_task action");
+            assert!(
+                err.contains("tachi_gh"),
+                "error for {s} should point at tachi_gh, got: {err}"
+            );
+        }
     }
 }

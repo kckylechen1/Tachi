@@ -42,14 +42,6 @@ fn default_limit() -> usize {
     100
 }
 
-fn default_edge_weight() -> f64 {
-    1.0
-}
-
-fn default_edge_direction() -> String {
-    "both".to_string()
-}
-
 fn default_true() -> bool {
     true
 }
@@ -285,48 +277,6 @@ pub struct ArchiveMemoryParams {
     pub project: Option<String>,
 }
 
-// ─── Graph Edges ────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct AddEdgeParams {
-    /// Source memory ID
-    pub source_id: String,
-    /// Target memory ID
-    pub target_id: String,
-    /// Relation type (e.g. "causes", "follows", "related_to")
-    pub relation: String,
-    /// Edge weight (default: 1.0)
-    #[serde(default = "default_edge_weight")]
-    pub weight: f64,
-    /// Optional JSON metadata for the edge
-    #[serde(default)]
-    pub metadata: Option<serde_json::Value>,
-
-    /// Scope: "global" or "project" (default)
-    #[serde(default = "default_scope")]
-    pub scope: String,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct GetEdgesParams {
-    /// Memory entry ID
-    pub memory_id: String,
-    /// Direction: "outgoing", "incoming", or "both" (default: "both")
-    #[serde(default = "default_edge_direction")]
-    pub direction: String,
-    /// Optional relation type filter
-    #[serde(default)]
-    pub relation_filter: Option<String>,
-
-    /// Optional named project DB for read-only edge lookup
-    #[serde(default)]
-    pub project: Option<String>,
-
-    /// Scope: "global" or "project" (default)
-    #[serde(default = "default_scope")]
-    pub scope: String,
-}
-
 // ─── Sync ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -339,23 +289,6 @@ pub struct SyncMemoriesParams {
     /// Maximum entries to return (default: 100)
     #[serde(default = "default_sync_limit")]
     pub limit: usize,
-}
-
-// ─── State / Extraction / Ingest ────────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct SetStateParams {
-    /// State key
-    pub key: String,
-
-    /// State value (JSON value)
-    pub value: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct GetStateParams {
-    /// State key
-    pub key: String,
 }
 
 pub const MIN_FACT_CHAR_COUNT: usize = 30;

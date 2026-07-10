@@ -40,15 +40,19 @@ fn f919_tachi_task_primary_actions_are_all_classified() {
 }
 
 #[test]
-fn f919_tachi_task_compat_gh_lifecycle_actions_are_all_classified() {
-    // These route through tachi_task as compat aliases (with a deprecation
-    // notice) as well as through tachi_gh — the tachi_task bundle map must
-    // classify them too, or a compat call from a restricted profile
-    // fail-closed-denies a still-supported action.
-    assert_all_classified(
-        "tachi_task",
-        tachi_params::TACHI_TASK_COMPAT_GH_LIFECYCLE_ACTIONS,
-    );
+fn f757_tachi_task_removed_gh_lifecycle_actions_are_unclassified() {
+    // #757: GH lifecycle left tachi_task entirely. They must NOT classify under
+    // tachi_task (would re-open a dual entry) and must still classify under tachi_gh.
+    for &action in tachi_params::TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS {
+        assert!(
+            tachi_hub::facade_action_required_bundle("tachi_task", action).is_none(),
+            "removed tachi_task lifecycle action {action} must not classify under tachi_task"
+        );
+        assert!(
+            tachi_hub::facade_action_required_bundle("tachi_gh", action).is_some(),
+            "lifecycle action {action} must still classify under tachi_gh"
+        );
+    }
 }
 
 #[test]

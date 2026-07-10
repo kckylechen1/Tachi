@@ -41,7 +41,6 @@ mod continuity_facade;
 mod dispatch_complete_defaults;
 mod dispatch_facade;
 mod formatting;
-mod graph_state_facade;
 mod handoff_facade;
 mod hub_facade;
 mod memory_facade;
@@ -65,10 +64,6 @@ use self::skill_discovery::*;
 use self::skill_facade::*;
 use self::task_facade::*;
 use self::task_router::*;
-
-pub(crate) use self::task_facade::build_task_pr_status_gh_params;
-#[cfg(test)]
-pub(crate) use self::task_facade::resolve_task_pr_status_target;
 
 #[tool_router(router = copilot_tool_router, vis = "pub(crate)")]
 impl MemoryServer {

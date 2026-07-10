@@ -2,7 +2,7 @@ use super::*;
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn tachi_task_pr_handoff_writes_pr_body_with_verification_and_gaps() {
+async fn tachi_gh_pr_handoff_writes_pr_body_with_verification_and_gaps() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -10,7 +10,7 @@ async fn tachi_task_pr_handoff_writes_pr_body_with_verification_and_gaps() {
     let temp_runs = tempfile::tempdir().expect("temp run root");
     let _home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
     let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", temp_runs.path());
-    let server = make_server();
+    let _server = make_server();
     let flow_id = "flow_20260614T000002Z_pr_handoff";
     let issue = crate::task_lifecycle::IssueSnapshot {
         repo: "kckylechen1/tachi".to_string(),
@@ -37,18 +37,16 @@ async fn tachi_task_pr_handoff_writes_pr_body_with_verification_and_gaps() {
         serde_json::to_string_pretty(&json!({
             "overall": "passed",
             "items": [
-                { "command": "cargo test -p tachi-server tachi_task_pr_handoff", "status": "passed" }
+                { "command": "cargo test -p tachi-server tachi_gh_pr_handoff", "status": "passed" }
             ]
         }))
         .expect("verification json"),
     )
     .expect("write verification");
 
-    let mut params = task_params("pr_handoff");
+    let mut params = task_params("status");
     params.flow_id = Some(flow_id.to_string());
-    let raw = server
-        .tachi_task(Parameters(params))
-        .await
+    let raw = crate::task_lifecycle::handle_task_pr_handoff(&params)
         .expect("pr_handoff should succeed");
     let parsed: Value = serde_json::from_str(&raw).expect("pr_handoff JSON");
     assert_eq!(parsed["ok"], json!(true));

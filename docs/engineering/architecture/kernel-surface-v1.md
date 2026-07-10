@@ -257,14 +257,15 @@ Tachi now expresses exposure through additive bundles instead of mutually exclus
 
 - `search_memory`
 - `tachi_memory(action="get")`; native `get_memory` is admin/backcompat only
-- `memory_graph`
 - `list_memories`
 - `memory_stats`
-- `get_edges`
 - `recommend_capability`
 - `recommend_skill`
 - `recommend_toolchain`
 - `tachi_skill(action="bundle")`; native `prepare_capability_bundle` is backcompat only
+
+(`memory_graph` / `get_edges` were dropped from `observe` in #757 — internalized
+off the MCP surface entirely, not just this bundle.)
 
 ### `remember`
 

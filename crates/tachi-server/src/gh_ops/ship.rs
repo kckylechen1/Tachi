@@ -859,8 +859,10 @@ async fn link_created_pr(
     flow_id: &str,
     pr_ref: &str,
 ) -> Result<Value, String> {
+    // action is ignored by handle_task_link_pr; use a valid tachi_task primary
+    // after #757 removed link_pr from TachiTaskAction.
     let task_params: crate::tool_params::TachiTaskParams = serde_json::from_value(json!({
-        "action": "link_pr",
+        "action": "status",
         "flow_id": flow_id,
         "pr_ref": pr_ref,
     }))

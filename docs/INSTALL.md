@@ -503,13 +503,27 @@ Once connected, Tachi exposes a profile-filtered MCP surface. The full `admin` c
 `get_memory` remains available in the full admin/backcompat catalog. Daily
 agent profiles should use `tachi_memory(action="get")` instead.
 
-### Knowledge Graph
+### Knowledge Graph & Domains
 
-`add_edge`, `get_edges`, `memory_graph`
+Graph primitives (`add_edge`, `get_edges`, `memory_graph`) were internalized
+off the MCP surface in #757 — no live tool call reaches them anymore; the
+tachi-server facade helper layer that used to wrap them was deleted outright
+once #913 found zero remaining in-crate callers, so only the
+`memcore::MemoryStore` boundary remains. Agents get graph behavior through
+`tachi_save`/`tachi_memory` auto-linking and recall's graph-spreading-activation
+channel — there is no standalone graph-traversal action.
+
+The domain registry (`register_domain`, `get_domain`, `list_domains`,
+`delete_domain`) was retired in #972 — domains are no longer a first-class
+MCP concept; there is no replacement action.
 
 ### State & Config
 
-`set_state`, `get_state`, `runtime_info`
+State primitives (`set_state`, `get_state`) were internalized off the MCP
+surface in #757 for the same reason — there is no facade equivalent for raw
+KV state.
+
+`runtime_info`
 
 ### Extraction & Ingestion
 
