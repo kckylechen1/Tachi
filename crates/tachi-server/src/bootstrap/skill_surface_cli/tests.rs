@@ -110,15 +110,25 @@ fn skill_source_report_reads_builtin_manifest_status() {
     //   2. otherwise asserts only structural invariants that must hold for
     //      any valid manifest content — so it no longer breaks when the
     //      vendored corpora are updated upstream or the library is absent.
+    // #909 residual (tachi#911 tail sweep): only the specific "optional
+    // fixture not mounted" error is skipped gracefully. Any other error
+    // (unreadable manifest, malformed YAML) is unexpected and must fail
+    // the test loudly rather than being swallowed alongside the expected
+    // case — see `is_missing_vendored_manifest_error_...` tests below for
+    // the classifier that draws this line.
     let report = match build_skill_source_report() {
         Ok(report) => report,
-        Err(e) => {
+        Err(e) if super::is_missing_vendored_manifest_error(&e) => {
             eprintln!(
                 "skipping skill_source_report_reads_builtin_manifest_status: \
                  vendored-skills library not mounted on this host ({e})"
             );
             return;
         }
+        Err(e) => panic!(
+            "build_skill_source_report() failed with an unexpected (non-missing-library) \
+             error, refusing to silently skip: {e}"
+        ),
     };
 
     assert_eq!(report.schema_version, "tachi.skill_surface.sources.v1");
@@ -204,6 +214,27 @@ fn skill_source_report_reads_builtin_manifest_status() {
         report.summary.upstream_managed + report.summary.native_contracts <= report.summary.skills,
         "upstream_managed + native_contracts must not exceed total skills"
     );
+}
+
+// #909 residual (tachi#911 tail sweep): the classifier must distinguish the
+// one *expected* error class (optional vendored-skills library not mounted)
+// from everything else, so a real parser/read regression doesn't get
+// silently swallowed as "library not mounted."
+
+#[test]
+fn missing_vendored_manifest_error_is_recognized_as_expected() {
+    let err = "manifest skill/superpowers/manifest.yaml: not found in repo root, cwd, cargo \
+               manifest dir, or the central vendored-skills library (set $TACHI_SKILLS_ROOT, \
+               or mount ~/.agents/vendored-skills)";
+    assert!(super::is_missing_vendored_manifest_error(err));
+}
+
+#[test]
+fn unrelated_read_and_parse_errors_are_not_treated_as_missing_manifest() {
+    let read_err = "read /home/.agents/vendored-skills/skill/waza/manifest.yaml: permission denied";
+    let parse_err = "parse skill/waza/manifest.yaml: unexpected token at line 4";
+    assert!(!super::is_missing_vendored_manifest_error(read_err));
+    assert!(!super::is_missing_vendored_manifest_error(parse_err));
 }
 
 #[test]

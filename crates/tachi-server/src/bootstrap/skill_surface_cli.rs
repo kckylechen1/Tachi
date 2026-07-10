@@ -50,12 +50,34 @@ const SKILL_SOURCE_MANIFESTS: &[SkillSourceManifestSpec] = &[
 fn read_skill_source_manifest_content(spec: &SkillSourceManifestSpec) -> Result<String, String> {
     let resolved = crate::shell_ops::resolve_meta_skill(spec.path).ok_or_else(|| {
         format!(
-            "manifest {} not found in repo root, cwd, cargo manifest dir, or the central \
-             vendored-skills library (set $TACHI_SKILLS_ROOT, or mount ~/.agents/vendored-skills)",
+            "{MISSING_VENDORED_MANIFEST_PREFIX}{}: not found in repo root, cwd, cargo manifest \
+             dir, or the central vendored-skills library (set $TACHI_SKILLS_ROOT, or mount \
+             ~/.agents/vendored-skills)",
             spec.path
         )
     })?;
     std::fs::read_to_string(&resolved).map_err(|e| format!("read {}: {e}", resolved.display()))
+}
+
+/// Marker prefix for the one *expected* `build_skill_source_report()` error
+/// class: the optional vendored-skills library (tachi#895) simply isn't
+/// mounted on this host. Every other error (manifest resolved but unreadable,
+/// manifest present but malformed YAML, etc.) is *unexpected* and must not be
+/// swallowed the same way (tachi#911 tail sweep, #909 residual: a prior guard
+/// skipped on any `Err` wholesale, which would also hide a real parser
+/// regression behind a "library not mounted" message).
+const MISSING_VENDORED_MANIFEST_PREFIX: &str = "manifest ";
+
+/// Classify a `build_skill_source_report`/`read_skill_source_manifest_content`
+/// error string: `true` only for the expected "optional fixture not mounted"
+/// case, `false` for anything else (which callers should propagate or log at
+/// WARN instead of silently skipping). Only the test-hermeticity guard in
+/// `tests.rs` needs this today — the real CLI command (`command.rs`) already
+/// propagates every `build_skill_source_report()` error via `?`, which is
+/// the correct "don't skip" behavior for a live command.
+#[cfg(test)]
+fn is_missing_vendored_manifest_error(err: &str) -> bool {
+    err.starts_with(MISSING_VENDORED_MANIFEST_PREFIX) && err.contains("not found in repo root")
 }
 
 #[derive(Debug, Clone)]

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use memcore::MemoryStore;
+use memcore::{EvalEvidenceRow, MemoryStore};
 use serde_json::{Value, json};
 use tachi_bootstrap::cli::EvalAction;
 
@@ -25,14 +25,15 @@ pub(in crate::bootstrap) async fn run_eval_command(
             enable_rerank,
             json,
         } => {
-            let loaded = if let Some(path) = cases {
-                load_cases_file(&path)?
+            let (loaded, skipped_rows) = if let Some(path) = cases {
+                (load_cases_file(&path)?, 0usize)
             } else {
                 let corpus_db = project_db_path.map(PathBuf::as_path).unwrap_or(db_path);
                 load_eval_namespace_cases(corpus_db)?
             };
             let status = run_recall_eval(
                 loaded,
+                skipped_rows,
                 db_path,
                 project_db_path,
                 app_home,
@@ -57,6 +58,7 @@ pub(in crate::bootstrap) async fn run_eval_command(
 
 async fn run_recall_eval(
     loaded: Vec<LoadedCase>,
+    skipped_rows: usize,
     db_path: &Path,
     project_db_path: Option<&PathBuf>,
     app_home: &Path,
@@ -87,7 +89,7 @@ async fn run_recall_eval(
     let server = crate::MemoryServer::new(db_path.to_path_buf(), project_db_path.cloned())?;
     let report = crate::facade_memory_ops::build_recall_simulation_report(&server, &params).await?;
 
-    let status = build_aggregate_status(&report, &loaded, top_k, min_recall, min_mrr);
+    let status = build_aggregate_status(&report, &loaded, skipped_rows, top_k, min_recall, min_mrr);
     write_status_artifact(app_home, &status)?;
     Ok(status)
 }
@@ -109,17 +111,29 @@ fn load_cases_file(path: &Path) -> Result<Vec<LoadedCase>, Box<dyn std::error::E
 
 fn load_eval_namespace_cases(
     db_path: &Path,
-) -> Result<Vec<LoadedCase>, Box<dyn std::error::Error>> {
+) -> Result<(Vec<LoadedCase>, usize), Box<dyn std::error::Error>> {
     let store =
         MemoryStore::open_read_only(db_path.to_str().ok_or("eval DB path must be valid UTF-8")?)?;
     let rows = store.list_eval_evidence(3650, 10_000, false)?;
+    Ok(collect_eval_namespace_cases(rows))
+}
+
+/// Pure (no I/O) core of [`load_eval_namespace_cases`]: turns raw
+/// `/eval`-namespace rows into recall cases, counting rows that
+/// `case_from_eval_metadata` declines to convert (missing query, no expected
+/// ids, explicitly disabled, etc.) instead of silently dropping them
+/// (tachi#911 tail sweep, #922: a shrinking corpus should be visible in the
+/// eval status artifact / gate summary, not swallowed).
+fn collect_eval_namespace_cases(rows: Vec<EvalEvidenceRow>) -> (Vec<LoadedCase>, usize) {
     let mut cases = Vec::new();
+    let mut skipped_rows = 0usize;
     for row in rows {
-        if let Some(case) = case_from_eval_metadata(&row.metadata, &row.id, &row.summary) {
-            cases.push(case);
+        match case_from_eval_metadata(&row.metadata, &row.id, &row.summary) {
+            Some(case) => cases.push(case),
+            None => skipped_rows += 1,
         }
     }
-    Ok(cases)
+    (cases, skipped_rows)
 }
 
 fn case_from_eval_metadata(metadata: &Value, row_id: &str, summary: &str) -> Option<LoadedCase> {
@@ -193,6 +207,7 @@ fn expected_ids(value: &Value) -> Vec<String> {
 fn build_aggregate_status(
     report: &Value,
     loaded: &[LoadedCase],
+    skipped_rows: usize,
     top_k: usize,
     min_recall: f64,
     min_mrr: f64,
@@ -228,6 +243,7 @@ fn build_aggregate_status(
         "status": if passed { "ok" } else { "failed" },
         "generated_at": chrono::Utc::now().to_rfc3339(),
         "case_count": loaded.len(),
+        "skipped_rows": skipped_rows,
         "top_k": top_k,
         "thresholds": {
             "min_recall": min_recall,
@@ -320,8 +336,9 @@ fn print_recall_eval_summary(status: &Value) {
         status["status"].as_str().unwrap_or("unknown")
     );
     println!(
-        "  cases={} top_k={} hit={}/{} recall={} mrr={}",
+        "  cases={} skipped_rows={} top_k={} hit={}/{} recall={} mrr={}",
         status["case_count"],
+        status["skipped_rows"],
         status["top_k"],
         current["hit_count"],
         status["case_count"],
@@ -388,6 +405,7 @@ mod tests {
                 }]
             }),
             &loaded,
+            0,
             10,
             1.0,
             0.0,
@@ -396,7 +414,168 @@ mod tests {
 
         assert_eq!(status["status"], json!("ok"));
         assert_eq!(status["per_slice"]["summary"], json!({"n": 1, "hits": 1}));
+        assert_eq!(status["skipped_rows"], json!(0));
         assert!(!rendered.contains("private query"));
         assert!(!rendered.contains("target-1"));
+    }
+
+    // #922 (tachi#911 tail sweep): `load_eval_namespace_cases` silently
+    // dropped rows that `case_from_eval_metadata` declined to convert
+    // (malformed/incomplete `/eval` metadata), so a shrinking eval corpus
+    // was invisible. `collect_eval_namespace_cases` is the pure core that
+    // counts those drops without needing a real sqlite fixture.
+
+    #[test]
+    fn collect_eval_namespace_cases_counts_one_malformed_row_as_skipped() {
+        let rows = vec![
+            EvalEvidenceRow {
+                id: "eval-good".to_string(),
+                path: "/eval/run-1".to_string(),
+                summary: "good case".to_string(),
+                text: String::new(),
+                metadata: json!({
+                    "recall_eval": {
+                        "query": "well-formed query",
+                        "expected_id": "target-1",
+                    }
+                }),
+                created_at: "2026-07-01T00:00:00Z".to_string(),
+            },
+            EvalEvidenceRow {
+                id: "eval-malformed".to_string(),
+                path: "/eval/run-2".to_string(),
+                summary: "malformed case".to_string(),
+                text: String::new(),
+                // No `query` and no `expected_id`/`expected_ids` — the row
+                // reads as an eval-namespace entry but is not a usable case.
+                metadata: json!({ "recall_eval": {} }),
+                created_at: "2026-07-01T00:00:01Z".to_string(),
+            },
+        ];
+
+        let (cases, skipped_rows) = collect_eval_namespace_cases(rows);
+
+        assert_eq!(cases.len(), 1, "well-formed row must still produce a case");
+        assert_eq!(cases[0].case["query"], json!("well-formed query"));
+        assert_eq!(skipped_rows, 1, "malformed row must be counted, not dropped silently");
+    }
+
+    #[test]
+    fn collect_eval_namespace_cases_reports_zero_skipped_when_all_rows_are_valid() {
+        let rows = vec![EvalEvidenceRow {
+            id: "eval-good".to_string(),
+            path: "/eval/run-1".to_string(),
+            summary: "good case".to_string(),
+            text: String::new(),
+            metadata: json!({
+                "recall_eval": { "query": "q", "expected_id": "target-1" }
+            }),
+            created_at: "2026-07-01T00:00:00Z".to_string(),
+        }];
+
+        let (cases, skipped_rows) = collect_eval_namespace_cases(rows);
+        assert_eq!(cases.len(), 1);
+        assert_eq!(skipped_rows, 0);
+    }
+
+    // #922 RED-path aggregation coverage (tachi#911 tail sweep): before this,
+    // `build_aggregate_status` had no test exercising a failing corpus, so a
+    // regression that always reported "ok" (or panicked) on a real failure
+    // could have shipped unnoticed.
+
+    #[test]
+    fn aggregate_status_reports_failed_on_recall_below_threshold() {
+        let loaded = vec![
+            LoadedCase {
+                case: json!({"query": "q1", "expected_ids": ["target-1"]}),
+                slice: "summary".to_string(),
+            },
+            LoadedCase {
+                case: json!({"query": "q2", "expected_ids": ["target-2"]}),
+                slice: "summary".to_string(),
+            },
+        ];
+        let status = build_aggregate_status(
+            &json!({
+                "variants": [{
+                    "name": "current",
+                    "case_count": 2,
+                    "metrics": {"hit_count": 1, "miss_count": 1, "recall_at_k": 0.5, "mrr": 0.5},
+                    "cases": [
+                        {
+                            "query": "q1",
+                            "expected_ids": ["target-1"],
+                            "returned_ids": ["target-1"],
+                            "hit": true,
+                            "error": null
+                        },
+                        {
+                            "query": "q2",
+                            "expected_ids": ["target-2"],
+                            "returned_ids": [],
+                            "hit": false,
+                            "error": null
+                        }
+                    ],
+                    "rerank": {"policy_counts": {}}
+                }]
+            }),
+            &loaded,
+            0,
+            10,
+            /* min_recall */ 1.0,
+            /* min_mrr */ 1.0,
+        );
+
+        assert_eq!(
+            status["status"],
+            json!("failed"),
+            "recall/mrr below configured gate thresholds must fail, not pass"
+        );
+        assert_eq!(status["current"]["recall_at_k"], json!(0.5));
+        assert_eq!(status["current"]["case_errors"], json!(0));
+
+        // The caller (`run_eval_command`) treats any non-"ok" status as a
+        // hard gate failure (`status != "ok"` => `Err(...)`), so asserting
+        // the exact non-"ok" string here covers the RED exit path without
+        // needing to run the CLI end-to-end.
+        assert_ne!(status["status"].as_str(), Some("ok"));
+    }
+
+    #[test]
+    fn aggregate_status_reports_failed_when_any_case_errors() {
+        let loaded = vec![LoadedCase {
+            case: json!({"query": "q1", "expected_ids": ["target-1"]}),
+            slice: "summary".to_string(),
+        }];
+        let status = build_aggregate_status(
+            &json!({
+                "variants": [{
+                    "name": "current",
+                    "case_count": 1,
+                    "metrics": {"hit_count": 1, "miss_count": 0, "recall_at_k": 1.0, "mrr": 1.0},
+                    "cases": [{
+                        "query": "q1",
+                        "expected_ids": ["target-1"],
+                        "returned_ids": ["target-1"],
+                        "hit": true,
+                        "error": "vector backend unavailable"
+                    }],
+                    "rerank": {"policy_counts": {}}
+                }]
+            }),
+            &loaded,
+            0,
+            10,
+            0.0,
+            0.0,
+        );
+
+        assert_eq!(
+            status["status"],
+            json!("failed"),
+            "a case-level error must fail the gate even when recall/mrr floors are met"
+        );
+        assert_eq!(status["current"]["case_errors"], json!(1));
     }
 }
