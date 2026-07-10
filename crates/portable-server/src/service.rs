@@ -202,6 +202,18 @@ impl PortableServer {
         serde_json::to_string(&entry).map_err(|e| e.to_string())
     }
 
+    /// Cheap DB-reachability probe used by `--daemon` mode's `/health` route
+    /// (`http.rs`): `true` when the store answers a stats query without
+    /// error. Kept transport-agnostic here (returns a plain `bool`, not an
+    /// HTTP response) so this file stays free of any HTTP-framework
+    /// dependency — `http.rs` owns turning this into a status code + JSON.
+    pub fn health_ok(&self) -> bool {
+        self.store
+            .lock()
+            .map(|store| store.stats(false).is_ok())
+            .unwrap_or(false)
+    }
+
     #[tool(
         description = "Report portable-server runtime status: db path, entry count, vector availability, active decay policy, and the exposed tool set."
     )]

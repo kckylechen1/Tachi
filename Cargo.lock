@@ -1512,9 +1512,12 @@ dependencies = [
 name = "portable-server"
 version = "1.8.0"
 dependencies = [
+ "axum",
  "chrono",
  "portable-kernel",
+ "reqwest",
  "rmcp",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",
