@@ -43,12 +43,13 @@ pub(in crate::memory_search_ops::save_memory) fn enqueue_save_enrichment(
         enrichment_revision,
     );
     let needs_keyword = item.needs_keyword_enrichment;
-    let enqueued = server.enqueue_enrichment(item);
-    if enqueued && needs_keyword {
-        // Operator-visible pending until the async job lands enriched/failed/skipped.
+    // Write pending BEFORE enqueue so a fast worker's terminal status cannot be
+    // overwritten by a late pending stamp (#943). The pending write is also
+    // conditional (only None/pending → pending) as belt-and-suspenders.
+    if needs_keyword {
         mark_keyword_enrichment_pending(server, &entry.id, target_db, named_project.as_deref());
     }
-    enqueued
+    server.enqueue_enrichment(item)
 }
 
 fn mark_keyword_enrichment_pending(
@@ -59,7 +60,7 @@ fn mark_keyword_enrichment_pending(
 ) {
     let action = |store: &mut memcore::MemoryStore| {
         store
-            .set_keyword_enrichment_status(id, "pending")
+            .set_keyword_enrichment_pending_if_unset(id)
             .map_err(|e| format!("set keywords_status=pending: {e}"))
     };
     let res = match named_project {

@@ -23,8 +23,8 @@ pub use read::{
 pub(crate) use search::search_fts_raw_match;
 pub use search::{search_fts, search_symbolic_candidates, search_vec};
 pub use update::{
-    record_enrichment_failure, release_event_claim, set_keyword_enrichment_status, try_claim_event,
-    update_enrichment_fields, update_with_revision,
+    record_enrichment_failure, release_event_claim, set_keyword_enrichment_pending_if_unset,
+    set_keyword_enrichment_status, try_claim_event, update_enrichment_fields, update_with_revision,
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

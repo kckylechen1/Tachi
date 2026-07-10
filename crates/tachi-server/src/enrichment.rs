@@ -11,6 +11,9 @@ use tokio::sync::mpsc;
 /// Cap on merged write-side keyword sets to bound FTS index bloat (#921).
 pub(crate) const MAX_ENRICHED_KEYWORDS: usize = 24;
 
+/// Per-keyword max length at the enrichment boundary (#943 / FTS safety).
+pub(crate) const MAX_KEYWORD_LEN: usize = 64;
+
 /// Env flag for write-side synonym/bilingual keyword enrichment (default OFF).
 pub(crate) const WRITE_ENRICH_KEYWORDS_ENV: &str = "TACHI_WRITE_ENRICH_KEYWORDS";
 
@@ -72,20 +75,54 @@ pub(crate) fn needs_keyword_enrichment(entry: &MemoryEntry) -> bool {
     }
 }
 
-/// Merge existing + expanded keywords with case-insensitive dedupe and a hard cap.
+/// Sanitize one keyword at the enrichment write boundary (#943).
+///
+/// - strips C0/C1 control characters (U+0000–U+001F, U+007F–U+009F)
+/// - trims whitespace
+/// - rejects empty / pure-punctuation tokens
+/// - truncates to [`MAX_KEYWORD_LEN`]
+///
+/// FTS insert path (`update_enrichment_fields`) writes keywords via parameterized
+/// SQL and copies column content into `memories_fts` with `WHERE id = ?1` — the
+/// keyword text is document content, not a MATCH expression — so FTS-operator
+/// tokens (AND/OR/NEAR) are not injection vectors. Still drop control noise and
+/// bound length so a hostile LLM cannot bloat or corrupt the index surface.
+pub(crate) fn sanitize_enriched_keyword(raw: &str) -> Option<String> {
+    let stripped: String = raw
+        .chars()
+        .filter(|c| {
+            let u = *c as u32;
+            !(u <= 0x1F || (0x7F..=0x9F).contains(&u))
+        })
+        .collect();
+    let trimmed = stripped.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Reject pure punctuation/whitespace (no letter or digit content).
+    if !trimmed.chars().any(|c| c.is_alphanumeric()) {
+        return None;
+    }
+    let truncated: String = trimmed.chars().take(MAX_KEYWORD_LEN).collect();
+    if truncated.is_empty() {
+        return None;
+    }
+    Some(truncated)
+}
+
+/// Merge existing + expanded keywords with sanitization, case-insensitive dedupe, and a hard cap.
 pub(crate) fn merge_enriched_keywords(existing: &[String], expanded: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for raw in existing.iter().chain(expanded.iter()) {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
+        let Some(clean) = sanitize_enriched_keyword(raw) else {
             continue;
-        }
-        let key = trimmed.to_ascii_lowercase();
+        };
+        let key = clean.to_ascii_lowercase();
         if !seen.insert(key) {
             continue;
         }
-        out.push(trimmed.to_string());
+        out.push(clean);
         if out.len() >= MAX_ENRICHED_KEYWORDS {
             break;
         }
@@ -399,7 +436,18 @@ impl MemoryServer {
                         }
                     }
                 }
-                Some(async move { (i, llm.expand_search_keywords(&text, &seed).await, seed) })
+                // Scrub seed keywords with the same external_llm_input path as
+                // memory text so credentials in existing_keywords cannot egress
+                // into the extract-lane prompt (#943 / #568).
+                let seed_for_llm: Vec<String> =
+                    seed.iter().map(|kw| external_llm_input(kw)).collect();
+                Some(async move {
+                    (
+                        i,
+                        llm.expand_search_keywords(&text, &seed_for_llm).await,
+                        seed,
+                    )
+                })
             })
             .collect();
 
@@ -661,6 +709,12 @@ fn record_enrichment_failure(
             "[enrichment-batcher] deferring transient enrichment failure for {} at stage={stage}: {error}",
             item.id
         );
+        // Transient defer skips durable aggregate failure, but write-side keyword
+        // enrichment must still leave an operator-visible keywords_status so the
+        // attempt is not silent (#943).
+        if stage == "keywords" {
+            write_keyword_enrichment_status(server, item, "failed");
+        }
         return;
     }
 
@@ -804,6 +858,46 @@ mod tests {
             .collect();
         let capped = merge_enriched_keywords(&[], &many);
         assert_eq!(capped.len(), MAX_ENRICHED_KEYWORDS);
+    }
+
+    #[test]
+    fn sanitize_enriched_keyword_strips_controls_bounds_length_rejects_punct() {
+        assert_eq!(
+            sanitize_enriched_keyword("  hello\u{0001}world  ").as_deref(),
+            Some("helloworld")
+        );
+        let oversized: String = "a".repeat(MAX_KEYWORD_LEN + 20);
+        let truncated = sanitize_enriched_keyword(&oversized).expect("keep truncated");
+        assert_eq!(truncated.chars().count(), MAX_KEYWORD_LEN);
+        assert!(sanitize_enriched_keyword("   ").is_none());
+        assert!(sanitize_enriched_keyword("!!!???").is_none());
+        assert!(sanitize_enriched_keyword("\u{0007}\u{009F}").is_none());
+        assert_eq!(sanitize_enriched_keyword("双语").as_deref(), Some("双语"));
+    }
+
+    #[test]
+    fn merge_enriched_keywords_sanitizes_hostile_llm_output() {
+        let existing = vec!["keep-me".into()];
+        let expanded = vec![
+            "a".repeat(MAX_KEYWORD_LEN + 10),
+            "bad\u{0000}ctrl".into(),
+            "!!!".into(),
+            "  ".into(),
+            "keep-me".into(), // dupe of existing
+            "new-ok".into(),
+        ];
+        let merged = merge_enriched_keywords(&existing, &expanded);
+        assert_eq!(
+            merged,
+            vec![
+                "keep-me".to_string(),
+                "a".repeat(MAX_KEYWORD_LEN),
+                "badctrl".to_string(),
+                "new-ok".to_string(),
+            ]
+        );
+        assert!(!merged.iter().any(|k| k.contains('\0')));
+        assert!(!merged.iter().any(|k| k == "!!!"));
     }
 
     #[test]
@@ -1162,6 +1256,211 @@ mod tests {
             !hits.contains_key(&id),
             "flag-off must not index mock synonym"
         );
+
+        mock.abort();
+    }
+
+    /// Hostile LLM keyword payload is sanitized at the write boundary before FTS.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn write_side_keyword_enrichment_sanitizes_hostile_llm_keywords() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _flag = EnvRestore::set(WRITE_ENRICH_KEYWORDS_ENV, "true");
+        let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+
+        let oversized = "x".repeat(MAX_KEYWORD_LEN + 32);
+        let (port, mock) = spawn_mock_extract_llm(json!({
+            "keywords": [
+                oversized,
+                "good\u{0001}keyword",
+                "!!!",
+                "  ",
+                "dup",
+                "DUP",
+                "safe-term"
+            ]
+        }))
+        .await;
+        let _base = EnvRestore::set(
+            "EXTRACT_BASE_URL",
+            &format!("http://127.0.0.1:{port}/chat/completions"),
+        );
+        let _model = EnvRestore::set("EXTRACT_MODEL", "mock-keyword-model");
+        let _key = EnvRestore::set("EXTRACT_API_KEY", "test-key");
+
+        let server = make_server();
+        let id = format!("kw-sanitize-{}", uuid::Uuid::new_v4());
+        let entry = seed_entry(
+            &id,
+            "Sanitization must drop controls, pure punct, and bound length.",
+            vec!["dup".into()],
+        );
+        server
+            .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("upsert: {e}")))
+            .expect("seed");
+
+        let mut batch = vec![build_enrichment_item(
+            &entry,
+            false,
+            false,
+            DbScope::Global,
+            None,
+            None,
+            None,
+            None,
+            entry.revision,
+        )];
+        server.flush_enrichment_batch(&mut batch).await;
+
+        let loaded = server
+            .with_global_store(|store| {
+                store
+                    .get(&id)
+                    .map_err(|e| format!("get: {e}"))
+                    .map(|e| e.expect("entry exists"))
+            })
+            .expect("load");
+
+        assert!(
+            loaded.keywords.iter().all(|k| k.chars().count() <= MAX_KEYWORD_LEN),
+            "no keyword may exceed max len: {:?}",
+            loaded.keywords
+        );
+        assert!(
+            loaded.keywords.iter().all(|k| !k.chars().any(|c| {
+                let u = c as u32;
+                u <= 0x1F || (0x7F..=0x9F).contains(&u)
+            })),
+            "control chars must be stripped: {:?}",
+            loaded.keywords
+        );
+        assert!(
+            !loaded.keywords.iter().any(|k| k == "!!!"),
+            "pure punctuation must be dropped: {:?}",
+            loaded.keywords
+        );
+        assert!(
+            loaded.keywords.iter().any(|k| k == "goodkeyword"),
+            "control-stripped token kept: {:?}",
+            loaded.keywords
+        );
+        assert!(
+            loaded.keywords.iter().any(|k| k == "safe-term"),
+            "safe term kept: {:?}",
+            loaded.keywords
+        );
+        // case-insensitive dedupe of dup/DUP
+        assert_eq!(
+            loaded
+                .keywords
+                .iter()
+                .filter(|k| k.eq_ignore_ascii_case("dup"))
+                .count(),
+            1,
+            "duplicates collapsed: {:?}",
+            loaded.keywords
+        );
+        assert_eq!(
+            loaded.metadata["enrichment"]["keywords_status"],
+            json!("enriched")
+        );
+
+        mock.abort();
+    }
+
+    /// existing_keywords with secret-shaped tokens are scrubbed before LLM egress.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn write_side_keyword_enrichment_scrubs_existing_keywords_in_prompt() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _flag = EnvRestore::set(WRITE_ENRICH_KEYWORDS_ENV, "true");
+        let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+
+        use axum::{body::Bytes, routing::post, Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_handler = captured.clone();
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |body: Bytes| {
+                let captured = captured_for_handler.clone();
+                async move {
+                    let text = String::from_utf8_lossy(&body).into_owned();
+                    captured.lock().expect("lock").push(text);
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": "{\"keywords\":[\"synonym-ok\"]}"
+                            },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock");
+        let port = listener.local_addr().expect("addr").port();
+        let mock = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        tokio::task::yield_now().await;
+
+        let _base = EnvRestore::set(
+            "EXTRACT_BASE_URL",
+            &format!("http://127.0.0.1:{port}/chat/completions"),
+        );
+        let _model = EnvRestore::set("EXTRACT_MODEL", "mock-keyword-model");
+        let _key = EnvRestore::set("EXTRACT_API_KEY", "test-key");
+
+        let server = make_server();
+        let id = format!("kw-scrub-{}", uuid::Uuid::new_v4());
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz123456";
+        let entry = seed_entry(
+            &id,
+            "Memory text without the secret token in body.",
+            vec![format!("api_key={secret}"), "safe-seed".into()],
+        );
+        server
+            .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("upsert: {e}")))
+            .expect("seed");
+
+        let mut batch = vec![build_enrichment_item(
+            &entry,
+            false,
+            false,
+            DbScope::Global,
+            None,
+            None,
+            None,
+            None,
+            entry.revision,
+        )];
+        server.flush_enrichment_batch(&mut batch).await;
+
+        let bodies = captured.lock().expect("lock").clone();
+        assert!(
+            !bodies.is_empty(),
+            "mock must have received at least one extract request"
+        );
+        for body in &bodies {
+            assert!(
+                !body.contains(secret),
+                "secret must not egress in prompt body: {body}"
+            );
+            assert!(
+                body.contains("[REDACTED]") || body.contains("safe-seed"),
+                "scrubbed seed or safe keyword expected in body: {body}"
+            );
+        }
 
         mock.abort();
     }

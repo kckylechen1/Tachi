@@ -512,3 +512,20 @@ async fn chat_lane_retries_with_next_pool_key_after_429() {
 
     server_task.abort();
 }
+
+#[test]
+fn sanitize_llm_keyword_bounds_and_rejects_noise() {
+    assert_eq!(
+        LlmClient::sanitize_llm_keyword("  ok-term  ").as_deref(),
+        Some("ok-term")
+    );
+    assert_eq!(
+        LlmClient::sanitize_llm_keyword("a\u{0001}b").as_deref(),
+        Some("ab")
+    );
+    assert!(LlmClient::sanitize_llm_keyword("!!!").is_none());
+    assert!(LlmClient::sanitize_llm_keyword("   ").is_none());
+    let long = "z".repeat(80);
+    let got = LlmClient::sanitize_llm_keyword(&long).expect("truncate");
+    assert_eq!(got.chars().count(), 64);
+}

@@ -91,14 +91,24 @@ impl super::super::LlmClient {
 
     /// Expand synonym + bilingual (zh↔en) search keywords for write-side enrichment (#921).
     ///
-    /// Uses the extract chat lane (same provider path as metadata extraction) so
-    /// callers that already scrub via the enrichment batcher's `external_llm_input`
-    /// keep the #568 redaction posture without inventing a new egress.
+    /// Uses the extract chat lane (same provider path as metadata extraction).
+    ///
+    /// # Egress contract (#568 / #943)
+    /// Both `text` **and** every `existing_keywords` entry must already be routed
+    /// through the caller's `external_llm_input` / `scrub_secrets` path before
+    /// reaching this method. This function interpolates them into the extract-lane
+    /// user message as-is; it does not invent a second scrub implementation.
+    /// Callers that skip scrubbing on the seed list leak credentials.
+    ///
+    /// Parsed keywords are lightly sanitized here (length / controls / pure-punct);
+    /// the enrichment batcher re-applies the full write-boundary sanitizer before
+    /// persist.
     pub async fn expand_search_keywords(
         &self,
         text: &str,
         existing_keywords: &[String],
     ) -> Result<Vec<String>, String> {
+        // Seed is assumed secret-scrubbed by the caller (see egress contract).
         let seed = if existing_keywords.is_empty() {
             "(none)".to_string()
         } else {
@@ -129,13 +139,29 @@ impl super::super::LlmClient {
                 items
                     .iter()
                     .filter_map(Value::as_str)
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
+                    .filter_map(Self::sanitize_llm_keyword)
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         Ok(keywords)
+    }
+
+    /// Lightweight LLM-output keyword filter (full write-boundary sanitizer lives
+    /// in tachi-server enrichment). Bounds length and drops control / pure-punct.
+    pub(crate) fn sanitize_llm_keyword(raw: &str) -> Option<String> {
+        const MAX_LEN: usize = 64;
+        let stripped: String = raw
+            .chars()
+            .filter(|c| {
+                let u = *c as u32;
+                !(u <= 0x1F || (0x7F..=0x9F).contains(&u))
+            })
+            .collect();
+        let trimmed = stripped.trim();
+        if trimmed.is_empty() || !trimmed.chars().any(|c| c.is_alphanumeric()) {
+            return None;
+        }
+        Some(trimmed.chars().take(MAX_LEN).collect())
     }
 
     /// Extract structured facts from text using EXTRACTION_PROMPT

@@ -95,6 +95,97 @@ fn update_enrichment_fields_clears_stale_failure_metadata() {
     assert!(metadata["enrichment"].get("retry").is_none());
 }
 
+/// Mixed-stage: keyword failure must survive a later embedding success (#943).
+#[test]
+fn update_enrichment_fields_preserves_unresolved_keyword_failure() {
+    let mut conn = make_conn();
+    let mut entry = make_entry(
+        "enrich-mixed",
+        "keyword stage failed; embedding later succeeds",
+    );
+    entry.metadata = json!({
+        "enrichment": {
+            "status": "failed",
+            "failed_stage": "keywords",
+            "last_error": "extract lane timeout",
+            "last_failure_at": "2026-06-01T00:00:00Z",
+            "keywords_status": "failed"
+        }
+    });
+    upsert(&mut conn, &entry, false).unwrap();
+
+    let vec_blob = serialize_f32(&vec![0.2_f32; 1024]);
+    update_enrichment_fields(
+        &mut conn,
+        "enrich-mixed",
+        None,
+        Some(&vec_blob),
+        None, // keywords not written — failure unresolved
+        None,
+        1,
+    )
+    .unwrap();
+
+    let metadata: String = conn
+        .query_row(
+            "SELECT metadata FROM memories WHERE id='enrich-mixed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(
+        metadata["enrichment"]["status"], "failed",
+        "aggregate status must remain failed: {metadata:?}"
+    );
+    assert_eq!(metadata["enrichment"]["failed_stage"], "keywords");
+    assert_eq!(
+        metadata["enrichment"]["last_error"],
+        "extract lane timeout"
+    );
+    assert_eq!(metadata["enrichment"]["keywords_status"], "failed");
+    assert_eq!(
+        metadata["enrichment"]["partial_success_status"],
+        "embedded",
+        "successful stage still recorded: {metadata:?}"
+    );
+    assert!(
+        metadata["enrichment"].get("last_success_at").is_some(),
+        "last_success_at stamped on partial success"
+    );
+}
+
+#[test]
+fn set_keyword_enrichment_pending_if_unset_does_not_overwrite_terminal() {
+    let mut conn = make_conn();
+    let entry = make_entry("kw-pending-race", "pending must not clobber terminal");
+    upsert(&mut conn, &entry, false).unwrap();
+
+    assert!(set_keyword_enrichment_pending_if_unset(&conn, "kw-pending-race").unwrap());
+    let pending: String = conn
+        .query_row(
+            "SELECT json_extract(metadata, '$.enrichment.keywords_status') FROM memories WHERE id='kw-pending-race'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending, "pending");
+
+    set_keyword_enrichment_status(&conn, "kw-pending-race", "enriched").unwrap();
+    assert!(
+        !set_keyword_enrichment_pending_if_unset(&conn, "kw-pending-race").unwrap(),
+        "pending must not overwrite terminal enriched"
+    );
+    let still: String = conn
+        .query_row(
+            "SELECT json_extract(metadata, '$.enrichment.keywords_status') FROM memories WHERE id='kw-pending-race'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(still, "enriched");
+}
+
 #[test]
 fn record_auth_failed_enrichment_failure_carries_bounded_retry_metadata() {
     let mut conn = make_conn();
