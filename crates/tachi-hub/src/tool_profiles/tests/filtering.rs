@@ -183,6 +183,7 @@ fn delegate_profile_restricts_to_allow_list() {
             test_tool("tachi_task"),
             test_tool("tachi_complete"),
             test_tool("tachi_skill"),
+            // #517: standalone run_skill no longer on default delegate tray
             test_tool("run_skill"),
             // Old tools that should be excluded from delegate
             test_tool("tachi_search"),
@@ -218,7 +219,10 @@ fn delegate_profile_restricts_to_allow_list() {
             "tachi_task".to_string(),
             "tachi_complete".to_string(),
             "tachi_skill".to_string(),
-            "run_skill".to_string(),
         ]
+    );
+    assert!(
+        !names.iter().any(|n| n == "run_skill"),
+        "run_skill must not appear on default delegate tray (#517 soft-deprecate)"
     );
 }
