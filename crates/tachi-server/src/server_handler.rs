@@ -404,16 +404,17 @@ impl ServerHandler for MemoryServer {
             // F3 (#495/#913): action-level ToolProfile gate for facade tools.
             // Runs after tool_visible so delegate can list tachi_task while still
             // denying recursive dispatch.
-            let action_arg = params
+            let action_arg: Option<String> = params
                 .arguments
                 .as_ref()
                 .and_then(|args| args.get("action"))
-                .and_then(|value| value.as_str());
-            if !tachi_hub::facade_action_allowed(name, action_arg, active_profile) {
+                .and_then(|value| value.as_str())
+                .map(|s| s.to_string());
+            if !tachi_hub::facade_action_allowed(name, action_arg.as_deref(), active_profile) {
                 let profile_label = active_profile
                     .map(|p| p.as_str())
                     .unwrap_or_else(|| "standard".to_string());
-                let action_label = action_arg.unwrap_or("");
+                let action_label = action_arg.as_deref().unwrap_or("");
                 return Ok(tool_action_denied_result(
                     name,
                     action_label,
@@ -468,6 +469,7 @@ impl ServerHandler for MemoryServer {
             // mutating actions' invalidation.
             let is_memory_doctor_scan_read = name == "tachi_memory"
                 && action_arg
+                    .as_deref()
                     .map(|action| action.eq_ignore_ascii_case("doctor_scan"))
                     .unwrap_or(false);
 
