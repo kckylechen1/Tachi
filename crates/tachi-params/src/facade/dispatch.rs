@@ -499,6 +499,45 @@ pub struct TachiCompleteParams {
     /// byte-compatible with pre-existing callers.
     #[serde(default)]
     pub signatures: Vec<SignatureRecordParams>,
+
+    /// Leader adjudication rulings to capture as precedent memory rows (#950
+    /// slice 1: capture only). Additive and optional: an empty/omitted array
+    /// leaves `complete` byte-compatible with pre-existing callers, writing no
+    /// `/precedents` rows. Rulings are stored faithfully as supplied; the
+    /// verdict→principle decomposition lane is a later slice.
+    #[serde(default)]
+    pub rulings: Vec<RulingRecordParams>,
+}
+
+/// One caller-supplied leader adjudication captured at `complete` (#950). Stored
+/// faithfully under `/precedents/<project>/<date>-<shortid>` with structured
+/// fields in metadata and a human-readable rendering in the body. `case` and
+/// `ruling` are the two required fields; a ruling missing either is skipped with
+/// a warning and never fails the enclosing `complete` call.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct RulingRecordParams {
+    /// The finding + context the ruling adjudicates (required).
+    pub case: String,
+
+    /// The options the leader weighed before ruling.
+    #[serde(default)]
+    pub options_considered: Option<String>,
+
+    /// The adjudication itself — the decision the leader made (required).
+    pub ruling: String,
+
+    /// Constitution clauses / prior precedents cited in support.
+    #[serde(default)]
+    pub principles_cited: Vec<String>,
+
+    /// Truth-maintenance status: "validated" | "overturned" | "pending".
+    /// Defaults to "pending" when omitted.
+    #[serde(default)]
+    pub outcome: Option<String>,
+
+    /// When `outcome` is "overturned", the ruling/precedent that overturned it.
+    #[serde(default)]
+    pub overturned_by: Option<String>,
 }
 
 /// One leader-adjudicated error signature (or resolution) recorded at

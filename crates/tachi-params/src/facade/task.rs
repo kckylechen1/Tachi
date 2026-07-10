@@ -1,6 +1,6 @@
 use super::{
-    string_enum_schema, CompletionPredicate, DispatchMcpAccessParams, SignatureRecordParams,
-    TachiSubagentEvalParams, TachiTaskAction,
+    string_enum_schema, CompletionPredicate, DispatchMcpAccessParams, RulingRecordParams,
+    SignatureRecordParams, TachiSubagentEvalParams, TachiTaskAction,
 };
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
@@ -151,6 +151,12 @@ pub struct TachiTaskParams {
     /// byte-compatible with existing callers.
     #[serde(default)]
     pub signatures: Vec<SignatureRecordParams>,
+    /// [action=complete] Leader adjudication rulings to capture as precedent
+    /// memory rows (#950 slice 1: capture only). Additive/optional — an
+    /// empty/omitted array writes no `/precedents` rows and is byte-compatible
+    /// with existing callers.
+    #[serde(default)]
+    pub rulings: Vec<RulingRecordParams>,
     /// [action=complete] Evidence references for verification.
     #[serde(default)]
     pub evidence_refs: Vec<String>,

@@ -374,6 +374,12 @@ pub(crate) async fn handle_tachi_complete(
     pipeline_status["signature_recording"] =
         crate::signature_evidence::record_complete_signatures(server, &params);
 
+    // Precedent capture (#950 slice 1): persist caller-supplied structured
+    // leader rulings as /precedents rows. Best-effort — a malformed ruling is
+    // skipped + warned and never fails completion (the primary contract).
+    pipeline_status["precedent_recording"] =
+        crate::precedent_ops::record_complete_rulings(server, &params, &date).await;
+
     pipeline_status["post_complete_hooks"] = run_lesson_post_complete_hook(
         server,
         &params,
