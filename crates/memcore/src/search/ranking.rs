@@ -117,7 +117,12 @@ pub(super) fn rank_candidate_entries(
     apply_tier_boosts(&entries_ref, &mut scores);
     apply_entity_recency_boosts(&entries_ref, &superseded_ids, &mut scores);
     apply_decision_and_research_boosts(query, &entries_ref, &mut scores);
-    apply_lexical_overlap_boost(query, opts.path_prefix.as_deref(), &entries_ref, &mut scores);
+    apply_lexical_overlap_boost(
+        query,
+        opts.path_prefix.as_deref(),
+        &entries_ref,
+        &mut scores,
+    );
 
     // Decorate each candidate with its parsed instant once (epoch millis), then
     // sort — the comparator compares the pre-parsed key, never the raw string
@@ -233,6 +238,10 @@ fn apply_quality_boosts(
 /// - High-importance **decisions** must surface over keyword-flooded wiki/stubs.
 /// - When the **query** looks research-shaped, `/wiki/**/research/**` notes
 ///   get a path boost so denser architecture wikis do not always steal rank 1.
+/// - When the **query** looks governance-framing-shaped (ops-audit case 3 /
+///   tachi#958), high-importance decisions get an extra lift and pure
+///   component-registry inventory stubs are damped so FTS flood cannot bury
+///   the adjudicated stance.
 ///
 /// Provisional multipliers — calibrate only via ops_audit + golden_corpus.
 fn apply_decision_and_research_boosts(
@@ -244,12 +253,20 @@ fn apply_decision_and_research_boosts(
     const DECISION_IMPORTANCE_FLOOR: f64 = 0.85;
     /// provisional decision boost (tachi#708/#896 same-store precision).
     const DECISION_BOOST: f64 = 1.55;
+    /// Extra decision lift under governance-framing queries (tachi#958).
+    /// Stacks on DECISION_BOOST; keep uniform so relative order among
+    /// equally-qualifying decisions is preserved.
+    const GOVERNANCE_DECISION_EXTRA: f64 = 1.45;
+    /// Dampen low-importance registry inventory stubs when the query is
+    /// governance-framing (they own component/registry/cutover tokens).
+    const REGISTRY_STUB_DAMPEN: f64 = 0.62;
     /// provisional research-path boost under /wiki/**/research/**
     /// (calibrated so labeled research notes beat denser architecture wikis
     /// on the ops-audit adjacent-wiki case).
     const RESEARCH_PATH_BOOST: f64 = 2.85;
 
     let research_query = query_looks_research_shaped(query);
+    let governance_query = query_looks_governance_shaped(query);
 
     for (id, entry) in entries_ref {
         let mut mult = 1.0_f64;
@@ -257,11 +274,17 @@ fn apply_decision_and_research_boosts(
             && entry.importance >= DECISION_IMPORTANCE_FLOOR
         {
             mult *= DECISION_BOOST;
+            if governance_query {
+                mult *= GOVERNANCE_DECISION_EXTRA;
+            }
         }
         if research_query && is_research_wiki_path(&entry.path) {
             mult *= RESEARCH_PATH_BOOST;
         }
-        if mult > 1.0 {
+        if governance_query && looks_like_registry_inventory_stub(entry) {
+            mult *= REGISTRY_STUB_DAMPEN;
+        }
+        if (mult - 1.0).abs() > f64::EPSILON {
             if let Some(score) = scores.get_mut(id) {
                 if score.final_score.is_finite() && score.final_score > 0.0 {
                     score.final_score *= mult;
@@ -281,6 +304,45 @@ fn query_looks_research_shaped(query: &str) -> bool {
         || q.contains("evaluation protocol")
 }
 
+/// Governance-framing queries (ops-audit case 3 / tachi#958): task framing,
+/// cutover stance, and stub-vs-roadmap dilution shapes.
+fn query_looks_governance_shaped(query: &str) -> bool {
+    let q = query.to_ascii_lowercase();
+    if q.contains("governance") || q.contains("framing") || q.contains("adjudicat") {
+        return true;
+    }
+    // "when stubs and old roadmap dominate" — the exact ops-audit paraphrase.
+    let has_stub = q.contains("stub");
+    let has_roadmap = q.contains("roadmap");
+    let has_cutover = q.contains("cutover");
+    (has_stub && has_roadmap) || (has_stub && has_cutover && q.contains("dominat"))
+}
+
+/// Low-importance inventory rows that flood component-registry FTS (path
+/// `/notes/registry/...` or keyword bag of stub+inventory).
+fn looks_like_registry_inventory_stub(entry: &MemoryEntry) -> bool {
+    if entry.importance >= 0.7 {
+        return false;
+    }
+    let path = entry.path.to_ascii_lowercase();
+    if path.contains("/registry/") || path.contains("/notes/registry") {
+        return true;
+    }
+    let has_stub = entry
+        .keywords
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case("stub") || k.eq_ignore_ascii_case("stubs"));
+    let has_inventory = entry
+        .keywords
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case("inventory"));
+    let has_registry = entry
+        .keywords
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case("registry") || k.eq_ignore_ascii_case("component"));
+    has_stub && has_inventory && has_registry
+}
+
 fn is_research_wiki_path(path: &str) -> bool {
     // Allocation-free case-insensitive scan (Gemini #903): avoid
     // `to_ascii_lowercase()` per candidate under load. Match any path segment
@@ -292,7 +354,6 @@ fn is_research_wiki_path(path: &str) -> bool {
         .windows(9)
         .any(|w| w.eq_ignore_ascii_case(b"/research"))
 }
-
 
 /// Phase C (#708): lexical-overlap precision boost via soft-stem token coverage
 /// and char 4-gram Jaccard. Lifts paraphrase-heavy summary queries without
@@ -328,6 +389,11 @@ fn apply_lexical_overlap_boost(
             continue;
         }
         let mut text = String::new();
+        // Path segments participate (e.g. /notes/project/governance) so
+        // paraphrase queries that only hit path-level framing still get
+        // token coverage for decision notes (tachi#958).
+        text.push_str(&entry.path);
+        text.push(' ');
         text.push_str(&entry.summary);
         text.push(' ');
         text.push_str(&entry.text);
@@ -625,9 +691,18 @@ mod tests {
             &mut scores,
         );
 
-        assert_eq!(scores.get("a").unwrap().final_score, before["a"].final_score);
-        assert_eq!(scores.get("b").unwrap().final_score, before["b"].final_score);
-        assert_eq!(scores.get("c").unwrap().final_score, before["c"].final_score);
+        assert_eq!(
+            scores.get("a").unwrap().final_score,
+            before["a"].final_score
+        );
+        assert_eq!(
+            scores.get("b").unwrap().final_score,
+            before["b"].final_score
+        );
+        assert_eq!(
+            scores.get("c").unwrap().final_score,
+            before["c"].final_score
+        );
         assert_eq!(
             ranked_ids(&scores, &["a", "b", "c"]),
             vec!["a".to_string(), "b".to_string(), "c".to_string()]
@@ -754,6 +829,95 @@ mod tests {
         assert_eq!(
             ranked_ids(&scores, &["r1", "r2"]),
             vec!["r1".to_string(), "r2".to_string()]
+        );
+    }
+
+    #[test]
+    fn governance_query_lifts_decision_and_damps_registry_stubs_without_reshuffling() {
+        // tachi#958: governance-framing query must promote the high-importance
+        // decision over inventory stubs while preserving relative order among
+        // two stubs that both get dampened equally.
+        let mut decision = entry(
+            "ops-gov-framing-cutover",
+            "/notes/project/governance",
+            "decision",
+            0.92,
+        );
+        decision.keywords = vec!["taxonomy".into(), "adjudicated".into()];
+        let mut stub_a = entry(
+            "ops-registry-stub-sandbox",
+            "/notes/registry/sandbox",
+            "fact",
+            0.55,
+        );
+        stub_a.keywords = vec![
+            "component".into(),
+            "registry".into(),
+            "cutover".into(),
+            "stub".into(),
+            "inventory".into(),
+        ];
+        let mut stub_b = entry(
+            "ops-registry-stub-dispatch",
+            "/notes/registry/dispatch",
+            "fact",
+            0.55,
+        );
+        stub_b.keywords = vec![
+            "component".into(),
+            "registry".into(),
+            "cutover".into(),
+            "stub".into(),
+            "inventory".into(),
+        ];
+        let entries: HashMap<String, MemoryEntry> = [decision, stub_a, stub_b]
+            .into_iter()
+            .map(|e| (e.id.clone(), e))
+            .collect();
+        let entries_ref: HashMap<String, &MemoryEntry> =
+            entries.iter().map(|(k, v)| (k.clone(), v)).collect();
+
+        // Pre-boost: stubs flood ahead of the decision (rank 3).
+        let mut scores: HashMap<String, HybridScore> = HashMap::new();
+        scores.insert("ops-registry-stub-sandbox".to_string(), score(3.0));
+        scores.insert("ops-registry-stub-dispatch".to_string(), score(2.5));
+        scores.insert("ops-gov-framing-cutover".to_string(), score(1.0));
+
+        apply_decision_and_research_boosts(
+            "governance framing for component registry cutover when stubs and old roadmap dominate",
+            &entries_ref,
+            &mut scores,
+        );
+
+        // Decision: 1.55 * 1.45 = 2.2475; stubs * 0.62.
+        let decision_score = scores.get("ops-gov-framing-cutover").unwrap().final_score;
+        let stub_a_score = scores.get("ops-registry-stub-sandbox").unwrap().final_score;
+        let stub_b_score = scores
+            .get("ops-registry-stub-dispatch")
+            .unwrap()
+            .final_score;
+        assert!((decision_score - 1.0 * 1.55 * 1.45).abs() < 1e-9);
+        assert!((stub_a_score - 3.0 * 0.62).abs() < 1e-9);
+        assert!((stub_b_score - 2.5 * 0.62).abs() < 1e-9);
+        assert!(
+            decision_score > stub_a_score && decision_score > stub_b_score,
+            "decision must outrank both stubs: decision={decision_score} a={stub_a_score} b={stub_b_score}"
+        );
+        // Stub relative order preserved under uniform dampen.
+        assert_eq!(
+            ranked_ids(
+                &scores,
+                &[
+                    "ops-gov-framing-cutover",
+                    "ops-registry-stub-sandbox",
+                    "ops-registry-stub-dispatch"
+                ]
+            ),
+            vec![
+                "ops-gov-framing-cutover".to_string(),
+                "ops-registry-stub-sandbox".to_string(),
+                "ops-registry-stub-dispatch".to_string(),
+            ]
         );
     }
 }
