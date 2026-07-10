@@ -20,6 +20,13 @@ publish = false
 #
 # The #791 `DecayPolicy` scorer hook is reachable here via `--decay-policy`
 # (env `PORTABLE_DECAY_POLICY`); default keeps the kernel's current behavior.
+#
+# tachi #938: a second `--daemon` transport (MCP streamable-HTTP on
+# 127.0.0.1) alongside stdio, over the same `PortableServer` tool surface.
+# Pulls in `axum` + the rmcp `transport-streamable-http-server` feature —
+# still zero dependency on `tachi-server`, mirroring its daemon's streamable-
+# HTTP pattern (`crates/tachi-server/src/bootstrap/serve/daemon.rs`) rather
+# than depending on it.
 
 [[bin]]
 name = "portable-server"
@@ -27,9 +34,33 @@ path = "src/main.rs"
 
 [dependencies]
 portable-kernel = { path = "../portable-kernel" }
-rmcp = { version = "1.2", features = ["server", "transport-io", "macros", "schemars"] }
-tokio = { version = "1", features = ["io-std", "macros", "rt", "rt-multi-thread", "signal"] }
+rmcp = { version = "1.2", features = ["server", "transport-io", "macros", "schemars", "transport-streamable-http-server"] }
+tokio = { version = "1", features = ["io-std", "macros", "net", "rt", "rt-multi-thread", "signal", "sync"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+axum = "0.7"
+
+# Test-only bump of the already-locked `rmcp` dependency: the client-side
+# streamable-HTTP transport is needed to prove the `--daemon` MCP surface
+# round-trips (`http.rs`'s `daemon_serves_health_and_mcp_initialize_over_loopback_http`),
+# but has no reason to ship in the binary — Cargo only applies these extra
+# features when building this crate's own tests, not its release artifact.
+[dev-dependencies]
+rmcp = { version = "1.2", features = ["client", "transport-streamable-http-client-reqwest"] }
+reqwest = { package = "reqwest", version = "0.13", default-features = false, features = ["charset", "json", "rustls-no-provider", "system-proxy"] }
+# `reqwest`'s `rustls-no-provider` feature (above) ships rustls with no
+# default crypto backend installed; the plain `reqwest::get` in
+# `http.rs`'s daemon test needs one installed process-wide before the
+# first request or it panics ("No rustls crypto provider is configured"),
+# even for a loopback http:// request. Same `ring`-backend pattern and
+# rationale as `tachi-llm::install_tls_provider` (cheaper cold build than
+# the `aws-lc-rs` backend `reqwest`'s own `rustls` feature would pull in).
+rustls = { workspace = true }
+# `test-util` for `#[tokio::test(start_paused = true)]` + virtual-time
+# `sleep`: lets `http.rs`'s watchdog test exercise the real
+# 30s-interval/3-failure liveness loop deterministically and in milliseconds
+# instead of ~90s of real wall-clock sleep. Same pattern as tachi-server's
+# own `[dev-dependencies]` tokio bump (see its Cargo.toml).
+tokio = { version = "1", features = ["test-util", "macros", "rt", "time"] }

@@ -7,6 +7,8 @@
 //! | :- | :- | :- | :- |
 //! | `--global-db <path>` | `PORTABLE_MEMORY_DB` | in-memory | kernel DB file |
 //! | `--decay-policy <name>` | `PORTABLE_DECAY_POLICY` | `default` | #791 scorer hook |
+//! | `--daemon` | `PORTABLE_DAEMON=true` | off (stdio) | serve streamable HTTP on loopback instead of stdio (tachi #938) |
+//! | `--port <n>` | `PORTABLE_PORT` | `7919` | loopback port for `--daemon` mode; ignored in stdio mode |
 
 use std::sync::Arc;
 
@@ -15,6 +17,11 @@ use portable_kernel::DecayPolicy;
 /// Sentinel db path meaning "open an ephemeral in-memory store".
 pub const IN_MEMORY: &str = ":memory:";
 
+/// Default `--daemon` loopback port. Deliberately not the full tachi-server
+/// daemon's port (6919, see `tachi-server`'s bootstrap) — the two daemons are
+/// meant to run side by side on one workstation without a port collision.
+pub const DEFAULT_PORT: u16 = 7919;
+
 pub struct Config {
     /// DB path, or [`IN_MEMORY`] for an ephemeral store.
     pub db_path: String,
@@ -22,6 +29,11 @@ pub struct Config {
     pub decay_policy_name: String,
     /// Resolved policy; `None` = kernel default (current behavior).
     pub decay_policy: Option<Arc<dyn DecayPolicy>>,
+    /// `true` selects `--daemon` (streamable HTTP on loopback) instead of the
+    /// default stdio transport.
+    pub daemon: bool,
+    /// Loopback port for `--daemon` mode. Ignored in stdio mode.
+    pub port: u16,
 }
 
 impl Config {
@@ -39,6 +51,8 @@ impl Config {
     {
         let mut db_path: Option<String> = None;
         let mut decay_policy_name: Option<String> = None;
+        let mut daemon = false;
+        let mut port: Option<u16> = None;
 
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
@@ -55,15 +69,27 @@ impl Config {
                             .ok_or_else(|| "--decay-policy requires a name".to_string())?,
                     );
                 }
+                "--daemon" => {
+                    daemon = true;
+                }
+                "--port" => {
+                    let raw = it
+                        .next()
+                        .ok_or_else(|| "--port requires a number".to_string())?;
+                    port = Some(parse_port(&raw)?);
+                }
                 other if other.starts_with("--global-db=") => {
                     db_path = Some(other["--global-db=".len()..].to_string());
                 }
                 other if other.starts_with("--decay-policy=") => {
                     decay_policy_name = Some(other["--decay-policy=".len()..].to_string());
                 }
+                other if other.starts_with("--port=") => {
+                    port = Some(parse_port(&other["--port=".len()..])?);
+                }
                 other => {
                     return Err(format!(
-                        "unknown argument '{other}' (supported: --global-db, --decay-policy)"
+                        "unknown argument '{other}' (supported: --global-db, --decay-policy, --daemon, --port)"
                     ));
                 }
             }
@@ -81,12 +107,43 @@ impl Config {
 
         let decay_policy = crate::decay::resolve(&decay_policy_name)?;
 
+        let daemon = daemon
+            || env("PORTABLE_DAEMON")
+                .map(|v| is_truthy(&v))
+                .unwrap_or(false);
+
+        let port = match port {
+            Some(p) => p,
+            None => match env("PORTABLE_PORT") {
+                Some(v) if !v.trim().is_empty() => parse_port(&v)?,
+                _ => DEFAULT_PORT,
+            },
+        };
+
         Ok(Self {
             db_path,
             decay_policy_name,
             decay_policy,
+            daemon,
+            port,
         })
     }
+}
+
+/// Parse a `--port` / `PORTABLE_PORT` value into a `u16`, erroring on
+/// anything that isn't a plain non-negative integer in `0..=65535`.
+fn parse_port(raw: &str) -> Result<u16, String> {
+    raw.trim()
+        .parse::<u16>()
+        .map_err(|_| format!("invalid port '{raw}' (expected a number in 0-65535)"))
+}
+
+/// Truthy env-var parsing for `PORTABLE_DAEMON`, matching the boolean-flag
+/// convention already used by `TACHI_TRADING_HOURS_GUARD` elsewhere in this
+/// workspace: `1`/`true`/`yes`/`on` (case-insensitive) enable, anything else
+/// (including unset) does not.
+fn is_truthy(v: &str) -> bool {
+    matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
 
 #[cfg(test)]
@@ -103,6 +160,9 @@ mod tests {
         assert_eq!(c.db_path, IN_MEMORY);
         assert_eq!(c.decay_policy_name, "default");
         assert!(c.decay_policy.is_none());
+        assert!(!c.daemon, "daemon mode must default off (stdio)");
+        assert_eq!(c.port, DEFAULT_PORT);
+        assert_eq!(DEFAULT_PORT, 7919, "must not default to the full daemon's 6919");
     }
 
     #[test]
@@ -113,7 +173,11 @@ mod tests {
             "--decay-policy".to_string(),
             "flat".to_string(),
         ];
-        let c = Config::parse(args, |_| Some("ignored".to_string())).expect("parse");
+        let env = |k: &str| match k {
+            "PORTABLE_MEMORY_DB" | "PORTABLE_DECAY_POLICY" => Some("ignored".to_string()),
+            _ => None,
+        };
+        let c = Config::parse(args, env).expect("parse");
         assert_eq!(c.db_path, "/tmp/mem.db");
         assert_eq!(c.decay_policy_name, "flat");
         assert!(c.decay_policy.is_some());
@@ -139,7 +203,92 @@ mod tests {
 
     #[test]
     fn unknown_flag_errors() {
-        let args = vec!["--daemon".to_string()];
+        let args = vec!["--bogus-flag".to_string()];
+        assert!(Config::parse(args, no_env).is_err());
+    }
+
+    #[test]
+    fn daemon_flag_switches_mode_and_accepts_port_flag() {
+        let args = vec![
+            "--daemon".to_string(),
+            "--port".to_string(),
+            "9001".to_string(),
+        ];
+        let c = Config::parse(args, no_env).expect("parse");
+        assert!(c.daemon);
+        assert_eq!(c.port, 9001);
+    }
+
+    #[test]
+    fn port_equals_form_parses() {
+        let args = vec!["--port=4242".to_string()];
+        let c = Config::parse(args, no_env).expect("parse");
+        assert_eq!(c.port, 4242);
+        assert!(!c.daemon, "--port alone must not imply --daemon");
+    }
+
+    #[test]
+    fn daemon_env_fallback_is_truthy_parsed() {
+        let env = |k: &str| match k {
+            "PORTABLE_DAEMON" => Some("true".to_string()),
+            _ => None,
+        };
+        let c = Config::parse(Vec::<String>::new(), env).expect("parse");
+        assert!(c.daemon);
+
+        let env_off = |k: &str| match k {
+            "PORTABLE_DAEMON" => Some("nah".to_string()),
+            _ => None,
+        };
+        let c_off = Config::parse(Vec::<String>::new(), env_off).expect("parse");
+        assert!(!c_off.daemon, "non-truthy PORTABLE_DAEMON must not enable daemon mode");
+    }
+
+    #[test]
+    fn port_env_fallback_applies_when_no_flag() {
+        let env = |k: &str| match k {
+            "PORTABLE_PORT" => Some("5555".to_string()),
+            _ => None,
+        };
+        let c = Config::parse(Vec::<String>::new(), env).expect("parse");
+        assert_eq!(c.port, 5555);
+    }
+
+    #[test]
+    fn port_flag_wins_over_env() {
+        let args = vec!["--port".to_string(), "1234".to_string()];
+        let env = |k: &str| match k {
+            "PORTABLE_PORT" => Some("9999".to_string()),
+            _ => None,
+        };
+        let c = Config::parse(args, env).expect("parse");
+        assert_eq!(c.port, 1234);
+    }
+
+    #[test]
+    fn bad_port_flag_errors() {
+        let args = vec!["--port".to_string(), "not-a-number".to_string()];
+        assert!(Config::parse(args, no_env).is_err());
+
+        let args_overflow = vec!["--port".to_string(), "70000".to_string()];
+        assert!(
+            Config::parse(args_overflow, no_env).is_err(),
+            "port above u16::MAX must error"
+        );
+    }
+
+    #[test]
+    fn bad_port_env_errors() {
+        let env = |k: &str| match k {
+            "PORTABLE_PORT" => Some("nope".to_string()),
+            _ => None,
+        };
+        assert!(Config::parse(Vec::<String>::new(), env).is_err());
+    }
+
+    #[test]
+    fn port_missing_value_errors() {
+        let args = vec!["--port".to_string()];
         assert!(Config::parse(args, no_env).is_err());
     }
 }
