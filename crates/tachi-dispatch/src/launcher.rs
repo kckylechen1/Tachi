@@ -136,12 +136,15 @@ fn validate_codex_sandbox(value: &str) -> Result<&str, String> {
     }
 }
 
-/// Backends with no sandbox primitive (grok, kimi, custom/opencode) must not
-/// silently drop a caller-supplied `sandbox` request. Only codex consumes
-/// `--sandbox`; every other backend fail-closes with a receipt naming the
-/// backend and the requested sandbox level (#894 S0).
-fn reject_unsupported_sandbox(backend: &str, params: &DispatchLaunchParams) -> Result<(), String> {
-    match params.sandbox.as_deref() {
+/// Backends with no sandbox primitive (claude, grok, kimi, custom/opencode,
+/// acpx, native-ACP) must not silently drop a caller-supplied `sandbox`
+/// request. Only codex consumes `--sandbox`; every other backend/transport
+/// fail-closes with a receipt naming the backend and the requested sandbox
+/// level (#894 S0). Public so every launch-path (subprocess adapters in this
+/// crate, and the acpx/native-ACP spec builders in `tachi-server`) shares one
+/// rejection function instead of re-deriving the receipt wording.
+pub fn reject_unsupported_sandbox(backend: &str, sandbox: Option<&str>) -> Result<(), String> {
+    match sandbox {
         Some(sandbox) if !sandbox.trim().is_empty() => Err(format!(
             "permission receipt: backend '{backend}' has no sandbox concept and cannot honor requested sandbox '{sandbox}'; refusing to silently downgrade (fail-closed, #894 S0)"
         )),
@@ -154,6 +157,7 @@ pub fn build_claude_launch(
     prompt: &str,
     mcp_config_path: Option<&Path>,
 ) -> Result<LaunchCommand, String> {
+    reject_unsupported_sandbox("claude", params.sandbox.as_deref())?;
     let mut cmd = LaunchCommand::new("claude");
     cmd.args(["-p", "--output-format", "json"]);
 
@@ -245,7 +249,7 @@ pub fn build_grok_launch(
 
     let profile = resolve_permission_profile(params)?;
     reject_non_claude_allowlist("grok", profile)?;
-    reject_unsupported_sandbox("grok", params)?;
+    reject_unsupported_sandbox("grok", params.sandbox.as_deref())?;
     if profile == PermissionProfile::Full {
         cmd.arg("--permission-mode");
         cmd.arg("bypassPermissions");
@@ -278,7 +282,7 @@ pub fn build_kimi_launch(
 ) -> Result<LaunchCommand, String> {
     let profile = resolve_permission_profile(params)?;
     reject_non_claude_allowlist("kimi", profile)?;
-    reject_unsupported_sandbox("kimi", params)?;
+    reject_unsupported_sandbox("kimi", params.sandbox.as_deref())?;
     let mut cmd = LaunchCommand::new("kimi");
     cmd.args(kimi_command_args(params, prompt, profile));
 
@@ -311,6 +315,16 @@ fn kimi_command_args(
     args
 }
 
+/// Trust boundary (#894 S0, explicitly out of scope for this slice to widen):
+/// `is_trusted_dispatch_command` only authorizes the *binary* (`params.command[0]`)
+/// against the fixed allowlist below. Everything after that — the rest of
+/// `params.command` (argv) and `prompt` — is forwarded to the child verbatim,
+/// unsanitized, exactly as it arrived from the dispatch caller. This function
+/// does not, and is not meant to, defend against a malicious *caller*; that
+/// authority boundary is the dispatch entrypoint (who is allowed to call
+/// `agent='custom'` at all), not this launcher. Sanitizing argv content is a
+/// separate, larger piece of work than the authorizer soundness this slice
+/// fixes and is intentionally not attempted here.
 pub fn build_custom_launch(
     params: &DispatchLaunchParams,
     prompt: &str,
@@ -336,7 +350,7 @@ pub fn build_custom_launch(
             profile.as_str()
         ));
     }
-    reject_unsupported_sandbox(binary, params)?;
+    reject_unsupported_sandbox(binary, params.sandbox.as_deref())?;
     let mut cmd = LaunchCommand::new(binary);
     cmd.args(params.command[1..].iter().cloned());
     cmd.arg(prompt);
@@ -413,6 +427,22 @@ mod tests {
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn claude_fails_closed_on_sandbox_request() {
+        // Claude has no `--sandbox`-equivalent knob; a caller-supplied
+        // sandbox request must fail closed with a receipt naming the backend
+        // and requested level, never be silently discarded (#894 S0).
+        let mut params = params();
+        params.sandbox = Some("workspace-write".to_string());
+        let err = build_claude_launch(&params, "hello", None)
+            .expect_err("claude has no sandbox concept and must fail closed");
+        assert!(
+            err.contains("claude") && err.contains("workspace-write"),
+            "receipt must name backend + requested level: {err}"
+        );
+        assert!(err.contains("fail-closed"), "{err}");
     }
 
     #[test]

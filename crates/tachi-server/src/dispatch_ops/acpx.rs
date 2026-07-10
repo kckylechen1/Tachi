@@ -148,6 +148,32 @@ mod tests {
     }
 
     #[test]
+    fn acpx_fails_closed_on_sandbox_request() {
+        // acpx has no `--sandbox`-equivalent knob; a caller-supplied sandbox
+        // request must fail closed with a receipt naming the backend and the
+        // requested level, never be silently dropped (#894 S0).
+        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _cmd = EnvRestore::set("TACHI_ACPX_COMMAND", "python3");
+        let _args = EnvRestore::set("TACHI_ACPX_ARGS", "-m acpx");
+        let _agent = EnvRestore::remove("TACHI_ACPX_AGENT");
+        let _mode = EnvRestore::remove("TACHI_ACPX_RUN_MODE");
+        let _legacy_mode = EnvRestore::remove("TACHI_ACPX_SESSION_MODE");
+        let _session = EnvRestore::remove("TACHI_ACPX_SESSION");
+        let mut params = params();
+        params.sandbox = Some("workspace-write".to_string());
+
+        let err = build_acpx_command_spec(&params, "codex", Path::new("/tmp/run/prompt.md"))
+            .expect_err("acpx has no sandbox concept and must fail closed");
+        assert!(
+            err.contains("acpx") && err.contains("workspace-write"),
+            "receipt must name backend + requested level: {err}"
+        );
+        assert!(err.contains("fail-closed"), "{err}");
+    }
+
+    #[test]
     fn acpx_missing_command_error_is_actionable() {
         let _guard = crate::shell_ops::tachi_run_root_env_lock()
             .lock()

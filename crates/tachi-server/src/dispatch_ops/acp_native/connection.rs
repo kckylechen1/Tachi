@@ -280,6 +280,12 @@ impl NativeAcpConnection {
         } else {
             "typed_taxonomy"
         };
+        // `raw_kind` is attacker-influenced (it comes straight off the child
+        // ACP agent's request, not our own code) — sanitize before it lands
+        // in the trajectory log or the tracing log line, so a hostile agent
+        // can't inject control characters / newlines or blow up the log with
+        // an oversized field.
+        let raw_kind = sanitize_receipt_field(&decision.raw_kind);
         append_trajectory_event(
             &self.trajectory_path,
             json!({
@@ -288,7 +294,7 @@ impl NativeAcpConnection {
                 "agent": self.agent,
                 "permission_profile": self.permission_label,
                 "request_kind": decision.kind.as_str(),
-                "raw_tool_kind": decision.raw_kind,
+                "raw_tool_kind": raw_kind,
                 "verdict": verdict,
                 "authorizer": authorizer,
                 "timestamp": Utc::now().to_rfc3339(),
@@ -300,7 +306,7 @@ impl NativeAcpConnection {
                 dispatch_id = %self.dispatch_id,
                 agent = %self.agent,
                 request_kind = decision.kind.as_str(),
-                raw_tool_kind = %decision.raw_kind,
+                raw_tool_kind = %raw_kind,
                 authorizer,
                 "ACP permission request DENIED under profile '{}' (request kind '{}')",
                 self.permission_label,
@@ -407,5 +413,21 @@ impl NativeAcpConnection {
             }),
         );
         Ok(stream_path)
+    }
+}
+
+/// Sanitize an attacker-influenced string (the raw ACP `toolCall.kind` value,
+/// sent by the child agent process, not by our own code) before it lands in a
+/// trajectory event or a tracing log line: strip control characters (no
+/// injected newlines / escape sequences into the log stream) and cap the
+/// length at 64 chars (no unbounded-size field from a hostile agent).
+pub(super) fn sanitize_receipt_field(value: &str) -> String {
+    const MAX_LEN: usize = 64;
+    let cleaned: String = value.chars().filter(|ch| !ch.is_control()).collect();
+    let truncated: String = cleaned.chars().take(MAX_LEN).collect();
+    if truncated.is_empty() {
+        "<empty>".to_string()
+    } else {
+        truncated
     }
 }

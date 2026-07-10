@@ -49,6 +49,11 @@ pub(in crate::dispatch_ops) fn build_acpx_command_spec(
     }
     let node_readiness = acpx_node_readiness(&command)?;
 
+    // acpx has no `--sandbox`-equivalent knob today; a caller-supplied
+    // `sandbox` request must fail closed with a receipt rather than be
+    // silently dropped (#894 S0).
+    tachi_dispatch::reject_unsupported_sandbox("acpx", params.sandbox.as_deref())?;
+
     let profile = resolve_permission_profile(params)?;
     let (permission_args, permission_label) = acpx_permission_args(profile)?;
     let cwd = params

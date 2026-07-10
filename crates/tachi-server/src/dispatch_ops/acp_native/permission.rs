@@ -44,36 +44,85 @@ pub(super) struct AcpPermissionDecision {
     pub heuristic: bool,
 }
 
-/// Extract the ACP `ToolKind` string from a permission request, if present.
-fn tool_kind_str(params: &Value) -> Option<String> {
+/// Extract the **canonical** ACP `ToolKind` string: `params.toolCall.kind`
+/// only. This is the sole field allowed to produce an ALLOW verdict.
+fn canonical_tool_kind_str(params: &Value) -> Option<String> {
     params
         .get("toolCall")
-        .and_then(|tool_call| tool_call.get("kind").or_else(|| tool_call.get("tool_kind")))
-        .or_else(|| params.get("kind"))
+        .and_then(|tool_call| tool_call.get("kind"))
         .and_then(Value::as_str)
         .map(|kind| kind.trim().to_ascii_lowercase())
         .filter(|kind| !kind.is_empty())
 }
 
+/// Extract every non-canonical "kind-shaped" field we can find (the ACP
+/// `toolCall.tool_kind` alias and a stray top-level `kind`). These exist only
+/// to (a) enrich the DENY receipt with what a malformed/legacy request
+/// claimed, and (b) let a conflicting fallback kind force a DENY even when it
+/// would otherwise look read-like — they can NEVER promote a request to
+/// ReadOp/allow. See `classify_acp_request_kind` for how they're used.
+fn fallback_tool_kind_strs(params: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(tool_call) = params.get("toolCall") {
+        if let Some(kind) = tool_call.get("tool_kind").and_then(Value::as_str) {
+            let kind = kind.trim().to_ascii_lowercase();
+            if !kind.is_empty() {
+                out.push(kind);
+            }
+        }
+    }
+    if let Some(kind) = params.get("kind").and_then(Value::as_str) {
+        let kind = kind.trim().to_ascii_lowercase();
+        if !kind.is_empty() {
+            out.push(kind);
+        }
+    }
+    out
+}
+
+fn bucket_kind(kind: &str) -> AcpRequestKind {
+    match kind {
+        // ACP spec `ToolKind` read-only values only (#894 hardening: grep/list/
+        // view/find were legacy-parity carryover from the substring heuristic,
+        // not ACP spec values — they now classify Unknown→DENY, an intentional
+        // safety-over-parity behavior change; see commit message).
+        "read" | "search" => AcpRequestKind::ReadOp,
+        "write" | "edit" | "delete" | "remove" | "create" | "move" => AcpRequestKind::WriteOp,
+        "execute" | "exec" | "terminal" | "shell" | "run" => AcpRequestKind::ExecuteOp,
+        _ => AcpRequestKind::Unknown,
+    }
+}
+
 /// Classify an ACP permission request into the typed taxonomy.
 ///
-/// Recognized kinds are matched by exact equality on the structured
-/// `toolCall.kind` field — never substring search over the whole request.
-/// Read-only ACP `ToolKind`s and their read synonyms map to
-/// [`AcpRequestKind::ReadOp`]; mutating kinds map to [`AcpRequestKind::WriteOp`];
-/// command execution maps to [`AcpRequestKind::ExecuteOp`]; everything else
-/// (a missing kind, the ACP `fetch`/`think`/`switch_mode`/`other` kinds, or any
-/// value the client does not recognize) is [`AcpRequestKind::Unknown`].
+/// **Only the canonical `toolCall.kind` field may produce
+/// [`AcpRequestKind::ReadOp`] (i.e. an ALLOW-capable classification).** A
+/// request with no canonical `toolCall.kind` is `Unknown` — full stop — even
+/// if a fallback field (`toolCall.tool_kind`, or a stray top-level `kind`)
+/// looks read-like; those fields are receipt/deny-enrichment only. If a
+/// fallback field disagrees with the canonical kind (or exists when the
+/// canonical kind is absent) in a way that would itself classify as
+/// write/execute, that also forces `Unknown` so a crafted conflicting request
+/// cannot be argued into an allow by a reviewer relying on the raw kind
+/// string alone — the returned `raw_kind` always reflects the canonical
+/// field (or `<missing>`), so receipts still show what was actually decided.
 pub(super) fn classify_acp_request_kind(params: &Value) -> (AcpRequestKind, String) {
-    match tool_kind_str(params) {
+    let canonical = canonical_tool_kind_str(params);
+    let fallbacks = fallback_tool_kind_strs(params);
+
+    match canonical {
         Some(kind) => {
-            let variant = match kind.as_str() {
-                "read" | "search" | "grep" | "list" | "view" | "find" => AcpRequestKind::ReadOp,
-                "write" | "edit" | "delete" | "remove" | "create" | "move" => {
-                    AcpRequestKind::WriteOp
-                }
-                "execute" | "exec" | "terminal" | "shell" | "run" => AcpRequestKind::ExecuteOp,
-                _ => AcpRequestKind::Unknown,
+            let variant = bucket_kind(&kind);
+            // A canonical ReadOp classification can still be forced to Unknown
+            // if any fallback field disagrees with it — a crafted request that
+            // sets a benign toolCall.kind while carrying a conflicting
+            // tool_kind/kind must not sail through as an allow.
+            let variant = if variant == AcpRequestKind::ReadOp
+                && fallbacks.iter().any(|fb| fb != &kind)
+            {
+                AcpRequestKind::Unknown
+            } else {
+                variant
             };
             (variant, kind)
         }
@@ -137,9 +186,18 @@ fn legacy_permission_decision(permission_label: &str, params: &Value) -> AcpPerm
 }
 
 fn outcome_for(params: &Value, allowed: bool) -> Value {
-    select_permission_option(params, allowed)
-        .map(selected_outcome)
-        .unwrap_or_else(cancelled_outcome)
+    let selected = if allowed {
+        select_allow_option(params)
+    } else {
+        // DENY must never be decided by substring-matching option names/ids —
+        // a crafted option like {"optionId": "allow-once", "name": "Do not
+        // reject", "kind": "allow_once"} would substring-match "reject" in the
+        // name and get selected as if it were a deny, when its typed kind says
+        // it is in fact an allow option. Select strictly by the ACP typed
+        // PermissionOption `kind` field (`reject_once` / `reject_always`).
+        select_deny_option(params)
+    };
+    selected.map(selected_outcome).unwrap_or_else(cancelled_outcome)
 }
 
 fn selected_outcome(option_id: String) -> Value {
@@ -176,7 +234,13 @@ pub(super) fn permission_request_is_read_like(params: &Value) -> bool {
         .any(|needle| haystack.contains(needle))
 }
 
-fn select_permission_option(params: &Value, approve: bool) -> Option<String> {
+/// ALLOW-path option selection. Unchanged from the pre-#894-hardening
+/// behavior: substring match over the option's serialized name/id, falling
+/// back to the first listed option if nothing matches. This path only ever
+/// runs when the request was already classified `ReadOp` via the canonical
+/// `toolCall.kind`, so a mis-picked *allow* option among several allow-shaped
+/// choices is not a fail-open risk the way DENY selection was.
+fn select_allow_option(params: &Value) -> Option<String> {
     let options = params.get("options").and_then(Value::as_array)?;
     let mut fallback = None;
     for option in options {
@@ -191,25 +255,41 @@ fn select_permission_option(params: &Value, approve: bool) -> Option<String> {
         if fallback.is_none() {
             fallback = Some(id.to_string());
         }
-        let selected = if approve {
-            ["approve", "allow", "accept", "yes", "read"]
+        let selected = ["approve", "allow", "accept", "yes", "read"]
+            .iter()
+            .any(|needle| label.contains(needle))
+            && !["deny", "reject", "cancel", "no"]
                 .iter()
-                .any(|needle| label.contains(needle))
-                && !["deny", "reject", "cancel", "no"]
-                    .iter()
-                    .any(|needle| label.contains(needle))
-        } else {
-            ["deny", "reject", "cancel", "no"]
-                .iter()
-                .any(|needle| label.contains(needle))
-        };
+                .any(|needle| label.contains(needle));
         if selected {
             return Some(id.to_string());
         }
     }
-    if approve {
-        fallback
-    } else {
-        None
+    fallback
+}
+
+/// DENY-path option selection. Selects strictly by the ACP typed
+/// `PermissionOption.kind` field (`reject_once` / `reject_always`) — **never**
+/// by substring-matching the option's `optionId`/`name`. If no option
+/// advertises a reject kind, there is no ACP-legal way to positively refuse,
+/// so the caller falls back to the `cancelled` outcome, which the ACP spec
+/// defines as the client's own refusal to select any option — a legal DENY
+/// response that does not require a reject-kind option to exist.
+fn select_deny_option(params: &Value) -> Option<String> {
+    let options = params.get("options").and_then(Value::as_array)?;
+    for option in options {
+        let Some(kind) = option.get("kind").and_then(Value::as_str) else {
+            continue;
+        };
+        if matches!(kind, "reject_once" | "reject_always") {
+            if let Some(id) = option
+                .get("optionId")
+                .or_else(|| option.get("id"))
+                .and_then(Value::as_str)
+            {
+                return Some(id.to_string());
+            }
+        }
     }
+    None
 }

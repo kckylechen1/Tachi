@@ -34,6 +34,11 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
         ));
     }
 
+    // Native ACP has no `--sandbox`-equivalent knob today; a caller-supplied
+    // `sandbox` request must fail closed with a receipt rather than be
+    // silently dropped (#894 S0).
+    tachi_dispatch::reject_unsupported_sandbox("acp-native", params.sandbox.as_deref())?;
+
     let cwd = params
         .cwd
         .as_deref()
@@ -198,4 +203,67 @@ fn absolutize_cwd(cwd: &Path) -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join(cwd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> TachiDispatchParams {
+        TachiDispatchParams {
+            agent: Some("custom".to_string()),
+            profile: None,
+            task: "noop".to_string(),
+            cwd: Some("/tmp/project".to_string()),
+            skills: Vec::new(),
+            context_query: None,
+            model: None,
+            timeout_secs: 5,
+            permission_profile: None,
+            allowed_tools: Vec::new(),
+            completion_predicate: None,
+            max_turns: None,
+            sandbox: None,
+            inject_tachi_mcp: None,
+            inject_hub_mcps: None,
+            command: vec!["python3".to_string()],
+            harness_transport: Some("acp-native".to_string()),
+            harness_server_url: None,
+            project: None,
+            stage: None,
+            credential_profiles: Vec::new(),
+            issue_ref: None,
+            pr_ref: None,
+            flow_id: None,
+            tool_profile: None,
+            auto_capability_bundle: None,
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn native_acp_fails_closed_on_sandbox_request() {
+        // Native ACP has no `--sandbox`-equivalent knob; a caller-supplied
+        // sandbox request must fail closed with a receipt naming the backend
+        // and requested level, never be silently dropped (#894 S0).
+        let mut params = params();
+        params.sandbox = Some("workspace-write".to_string());
+
+        let err = build_native_acp_run_spec(&params, "custom", "hello")
+            .expect_err("native ACP has no sandbox concept and must fail closed");
+        assert!(
+            err.contains("acp-native") && err.contains("workspace-write"),
+            "receipt must name backend + requested level: {err}"
+        );
+        assert!(err.contains("fail-closed"), "{err}");
+    }
+
+    #[test]
+    fn native_acp_builds_spec_without_sandbox() {
+        let params = params();
+        let spec = build_native_acp_run_spec(&params, "custom", "hello")
+            .expect("no sandbox requested should build cleanly");
+        assert_eq!(spec.command, "python3");
+    }
 }
