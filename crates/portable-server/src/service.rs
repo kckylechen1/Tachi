@@ -256,7 +256,8 @@ impl PortableServer {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let now = chrono::Utc::now().to_rfc3339();
-        let target = self.stores.write_target(params.scope.as_deref());
+        let scope = params.scope.unwrap_or_else(|| "project".to_string());
+        let target = self.stores.write_target(Some(&scope));
 
         let mut entry = MemoryEntry {
             id: id.clone(),
@@ -274,7 +275,7 @@ impl PortableServer {
             entities: Vec::new(),
             location: String::new(),
             source: "portable-server".to_string(),
-            scope: params.scope.unwrap_or_else(|| "project".to_string()),
+            scope,
             archived: false,
             access_count: 0,
             last_access: None,
@@ -673,12 +674,10 @@ mod tests {
             .await
             .expect("global save");
 
-        let mut project_params = save_params("project store fact", "/project");
-        project_params.scope = Some("project".to_string());
         server
-            .save(Parameters(project_params))
+            .save(Parameters(save_params("project store fact", "/project")))
             .await
-            .expect("project save");
+            .expect("default project save");
 
         let hits = server
             .search(Parameters(SearchParams {
@@ -708,6 +707,8 @@ mod tests {
             status["databases"]["project"]["path"],
             serde_json::json!("/tmp/trading.db")
         );
+        assert_eq!(status["databases"]["global"]["entry_count"], 1);
+        assert_eq!(status["databases"]["project"]["entry_count"], 1);
     }
 
     /// The #791 hook is reachable from this profile: a `flat` policy injected
