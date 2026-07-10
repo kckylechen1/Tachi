@@ -1,30 +1,29 @@
 use serde_json::{json, Value};
 
-pub(crate) const SUPERPOWER_BRAINSTORMING: &str = "skill:superpowers-brainstorming";
-pub(crate) const SUPERPOWER_WRITING_PLANS: &str = "skill:superpowers-writing-plans";
-pub(crate) const SUPERPOWER_EXECUTING_PLANS: &str = "skill:superpowers-executing-plans";
+pub(crate) const SUPERPOWER_BRAINSTORMING: &str = tachi_dispatch::SUPERPOWER_BRAINSTORMING;
+pub(crate) const SUPERPOWER_WRITING_PLANS: &str = tachi_dispatch::SUPERPOWER_WRITING_PLANS;
+pub(crate) const SUPERPOWER_EXECUTING_PLANS: &str = tachi_dispatch::SUPERPOWER_EXECUTING_PLANS;
 pub(crate) const SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT: &str =
-    "skill:superpowers-subagent-driven-development";
+    tachi_dispatch::SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT;
 pub(crate) const SUPERPOWER_REQUESTING_CODE_REVIEW: &str =
-    "skill:superpowers-requesting-code-review";
+    tachi_dispatch::SUPERPOWER_REQUESTING_CODE_REVIEW;
 pub(crate) const SUPERPOWER_VERIFICATION_BEFORE_COMPLETION: &str =
-    "skill:superpowers-verification-before-completion";
-pub(crate) const SUPERPOWER_FINISHING_BRANCH: &str =
-    "skill:superpowers-finishing-a-development-branch";
+    tachi_dispatch::SUPERPOWER_VERIFICATION_BEFORE_COMPLETION;
+pub(crate) const SUPERPOWER_FINISHING_BRANCH: &str = tachi_dispatch::SUPERPOWER_FINISHING_BRANCH;
 
-pub(crate) const WAZA_CHECK: &str = "skill:waza-check";
-pub(crate) const WAZA_DESIGN: &str = "skill:waza-design";
-pub(crate) const WAZA_HEALTH: &str = "skill:waza-health";
-pub(crate) const WAZA_HUNT: &str = "skill:waza-hunt";
-pub(crate) const WAZA_LEARN: &str = "skill:waza-learn";
-pub(crate) const WAZA_READ: &str = "skill:waza-read";
-pub(crate) const WAZA_TACHI: &str = "skill:waza-tachi";
-pub(crate) const WAZA_THINK: &str = "skill:waza-think";
-pub(crate) const WAZA_WRITE: &str = "skill:waza-write";
+pub(crate) const WAZA_CHECK: &str = tachi_dispatch::WAZA_CHECK;
+pub(crate) const WAZA_DESIGN: &str = tachi_dispatch::WAZA_DESIGN;
+pub(crate) const WAZA_HEALTH: &str = tachi_dispatch::WAZA_HEALTH;
+pub(crate) const WAZA_HUNT: &str = tachi_dispatch::WAZA_HUNT;
+pub(crate) const WAZA_LEARN: &str = tachi_dispatch::WAZA_LEARN;
+pub(crate) const WAZA_READ: &str = tachi_dispatch::WAZA_READ;
+pub(crate) const WAZA_TACHI: &str = tachi_dispatch::WAZA_TACHI;
+pub(crate) const WAZA_THINK: &str = tachi_dispatch::WAZA_THINK;
+pub(crate) const WAZA_WRITE: &str = tachi_dispatch::WAZA_WRITE;
 
-pub(crate) const CODING_REFACTOR_CHECKLIST: &str = "skill:coding-refactor-checklist";
-pub(crate) const CODING_TEST_STRATEGY: &str = "skill:coding-test-strategy";
-pub(crate) const CODING_ARCHITECTURE_DECISION: &str = "skill:coding-architecture-decision";
+pub(crate) const CODING_REFACTOR_CHECKLIST: &str = tachi_dispatch::CODING_REFACTOR_CHECKLIST;
+pub(crate) const CODING_TEST_STRATEGY: &str = tachi_dispatch::CODING_TEST_STRATEGY;
+pub(crate) const CODING_ARCHITECTURE_DECISION: &str = tachi_dispatch::CODING_ARCHITECTURE_DECISION;
 
 pub(crate) fn dispatch_stage_key(stage: Option<&str>) -> String {
     stage
