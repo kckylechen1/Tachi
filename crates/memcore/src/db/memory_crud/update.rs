@@ -188,6 +188,12 @@ pub fn update_enrichment_fields(
     }
 
     // Refresh FTS when any searchable text field changed.
+    //
+    // FTS safety (#943): keywords/entities land in `memories` via parameterized
+    // UPDATE binds above; this INSERT copies column content with `WHERE id = ?1`.
+    // Keyword text becomes document content (not a MATCH expression), so FTS
+    // operators inside keywords are not injection vectors. User queries still
+    // go through `simple_query` / `simple_query_input` on the search path.
     if new_summary.is_some() || new_keywords.is_some() || new_entities.is_some() {
         tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![id])?;
         tx.execute(
@@ -226,22 +232,67 @@ pub fn update_enrichment_fields(
         (false, false, true) => "metadata",
         (false, false, false) => "touched",
     };
-    tx.execute(
-        r#"UPDATE memories
-           SET metadata = json_remove(
-                 json_set(
-                   CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                   '$.enrichment.status', ?1,
-                   '$.enrichment.last_success_at', ?2,
-                   '$.enrichment.last_error', NULL
-                 ),
-                 '$.enrichment.failed_stage',
-                 '$.enrichment.last_failure_at',
-                 '$.enrichment.retry'
+
+    // Mixed-stage merge (#943): if another enrichment stage already recorded a
+    // durable failure that this write does NOT resolve, preserve aggregate
+    // failure metadata (failed_stage / last_error / last_failure_at / retry)
+    // and only stamp last_success_at for the stages that succeeded. Clearing
+    // then re-applying keywords_status alone used to drop operator-visible
+    // failure context on partial success.
+    let existing_failed_stage: Option<String> = tx
+        .query_row(
+            r#"SELECT json_extract(
+                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                 '$.enrichment.failed_stage'
                )
-           WHERE id = ?3"#,
-        params![status, &now, id],
-    )?;
+               FROM memories WHERE id = ?1"#,
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .unwrap_or(None);
+    let failed_stage_resolved = match existing_failed_stage.as_deref() {
+        None => true,
+        Some("embedding") => new_vec.is_some(),
+        Some("summary") => new_summary.is_some(),
+        // Both metadata extraction and write-side keyword enrichment land in
+        // the keywords/entities columns.
+        Some("metadata") | Some("keywords") => {
+            new_keywords.is_some() || new_entities.is_some()
+        }
+        // Unknown / db_update: do not claim resolution from a field write.
+        Some(_) => false,
+    };
+
+    if failed_stage_resolved {
+        tx.execute(
+            r#"UPDATE memories
+               SET metadata = json_remove(
+                     json_set(
+                       CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                       '$.enrichment.status', ?1,
+                       '$.enrichment.last_success_at', ?2,
+                       '$.enrichment.last_error', NULL
+                     ),
+                     '$.enrichment.failed_stage',
+                     '$.enrichment.last_failure_at',
+                     '$.enrichment.retry'
+                   )
+               WHERE id = ?3"#,
+            params![status, &now, id],
+        )?;
+    } else {
+        // Preserve failure aggregate; still record that some stages succeeded.
+        tx.execute(
+            r#"UPDATE memories
+               SET metadata = json_set(
+                     CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                     '$.enrichment.last_success_at', ?1,
+                     '$.enrichment.partial_success_status', ?2
+                   )
+               WHERE id = ?3"#,
+            params![&now, status, id],
+        )?;
+    }
 
     tx.commit()?;
     Ok(true)
@@ -254,24 +305,79 @@ pub fn record_enrichment_failure(
     error: &str,
 ) -> Result<(), MemoryError> {
     let now = now_utc_iso();
+    // Write-side keyword enrichment (#921) keeps a dedicated keywords_status so
+    // operators can distinguish enriched/pending/skipped/failed without
+    // collapsing it into the multi-stage overall enrichment.status string.
+    let keywords_status = if stage == "keywords" {
+        Some("failed")
+    } else {
+        None
+    };
     if auth_class_enrichment_error(error) {
+        if let Some(kw_status) = keywords_status {
+            conn.execute(
+                r#"UPDATE memories
+                   SET metadata = json_set(
+                         CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                         '$.enrichment.status', 'failed',
+                         '$.enrichment.failed_stage', ?1,
+                         '$.enrichment.last_error', ?2,
+                         '$.enrichment.last_failure_at', ?3,
+                         '$.enrichment.keywords_status', ?4,
+                         '$.enrichment.retry.kind', 'auth',
+                         '$.enrichment.retry.attempts',
+                            COALESCE(CAST(json_extract(metadata, '$.enrichment.retry.attempts') AS INTEGER), 0),
+                         '$.enrichment.retry.max_attempts', ?5,
+                         '$.enrichment.retry.next_retry_at', ?3
+                       ),
+                       updated_at = ?3
+                   WHERE id = ?6"#,
+                params![
+                    stage,
+                    error,
+                    &now,
+                    kw_status,
+                    ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS,
+                    id
+                ],
+            )?;
+        } else {
+            conn.execute(
+                r#"UPDATE memories
+                   SET metadata = json_set(
+                         CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                         '$.enrichment.status', 'failed',
+                         '$.enrichment.failed_stage', ?1,
+                         '$.enrichment.last_error', ?2,
+                         '$.enrichment.last_failure_at', ?3,
+                         '$.enrichment.retry.kind', 'auth',
+                         '$.enrichment.retry.attempts',
+                            COALESCE(CAST(json_extract(metadata, '$.enrichment.retry.attempts') AS INTEGER), 0),
+                         '$.enrichment.retry.max_attempts', ?4,
+                         '$.enrichment.retry.next_retry_at', ?3
+                       ),
+                       updated_at = ?3
+                   WHERE id = ?5"#,
+                params![stage, error, &now, ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS, id],
+            )?;
+        }
+    } else if let Some(kw_status) = keywords_status {
         conn.execute(
             r#"UPDATE memories
-               SET metadata = json_set(
-                     CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                     '$.enrichment.status', 'failed',
-                     '$.enrichment.failed_stage', ?1,
-                     '$.enrichment.last_error', ?2,
-                     '$.enrichment.last_failure_at', ?3,
-                     '$.enrichment.retry.kind', 'auth',
-                     '$.enrichment.retry.attempts',
-                        COALESCE(CAST(json_extract(metadata, '$.enrichment.retry.attempts') AS INTEGER), 0),
-                     '$.enrichment.retry.max_attempts', ?4,
-                     '$.enrichment.retry.next_retry_at', ?3
+               SET metadata = json_remove(
+                     json_set(
+                       CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                       '$.enrichment.status', 'failed',
+                       '$.enrichment.failed_stage', ?1,
+                       '$.enrichment.last_error', ?2,
+                       '$.enrichment.last_failure_at', ?3,
+                       '$.enrichment.keywords_status', ?4
+                     ),
+                     '$.enrichment.retry'
                    ),
                    updated_at = ?3
                WHERE id = ?5"#,
-            params![stage, error, &now, ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS, id],
+            params![stage, error, &now, kw_status, id],
         )?;
     } else {
         conn.execute(
@@ -292,4 +398,60 @@ pub fn record_enrichment_failure(
         )?;
     }
     Ok(())
+}
+
+/// Set operator-visible write-side keyword enrichment status (#921).
+///
+/// Values: `enriched` | `pending` | `skipped` | `failed`.
+pub fn set_keyword_enrichment_status(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+) -> Result<(), MemoryError> {
+    let now = now_utc_iso();
+    conn.execute(
+        r#"UPDATE memories
+           SET metadata = json_set(
+                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                 '$.enrichment.keywords_status', ?1
+               ),
+               updated_at = ?2
+           WHERE id = ?3"#,
+        params![status, &now, id],
+    )?;
+    Ok(())
+}
+
+/// Stamp `keywords_status=pending` only when absent or already pending.
+///
+/// Returns `true` when a row was updated. Terminal statuses
+/// (`enriched` / `skipped` / `failed`) are never overwritten — this closes the
+/// race where a late pending write lands after a fast worker already finished
+/// (#943).
+pub fn set_keyword_enrichment_pending_if_unset(
+    conn: &Connection,
+    id: &str,
+) -> Result<bool, MemoryError> {
+    let now = now_utc_iso();
+    let rows = conn.execute(
+        r#"UPDATE memories
+           SET metadata = json_set(
+                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                 '$.enrichment.keywords_status', 'pending'
+               ),
+               updated_at = ?1
+           WHERE id = ?2
+             AND (
+               json_extract(
+                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                 '$.enrichment.keywords_status'
+               ) IS NULL
+               OR json_extract(
+                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                 '$.enrichment.keywords_status'
+               ) = 'pending'
+             )"#,
+        params![&now, id],
+    )?;
+    Ok(rows > 0)
 }

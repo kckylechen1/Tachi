@@ -26,14 +26,38 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_response(
         "saved"
     };
     response.insert("status".into(), json!(status));
-    response.insert(
-        "enrichment".into(),
-        json!({
-            "queued": enrichment_enqueued,
-            "embedding_pending": needs_embedding && entry.vector.is_none(),
-            "summary_pending": needs_summary && entry.summary.is_empty(),
-        }),
+    let mut enrichment = serde_json::Map::new();
+    enrichment.insert("queued".into(), json!(enrichment_enqueued));
+    enrichment.insert(
+        "embedding_pending".into(),
+        json!(needs_embedding && entry.vector.is_none()),
     );
+    enrichment.insert(
+        "summary_pending".into(),
+        json!(needs_summary && entry.summary.is_empty()),
+    );
+    // Write-side keyword enrichment status (#921). Only surface when the
+    // feature flag is on so flag-off remains zero behavior change.
+    if crate::enrichment::write_keyword_enrichment_enabled() {
+        let keywords_status = entry
+            .metadata
+            .get("enrichment")
+            .and_then(|value| value.get("keywords_status"))
+            .and_then(|value| value.as_str())
+            .unwrap_or(
+                if enrichment_enqueued && crate::enrichment::needs_keyword_enrichment(entry) {
+                    "pending"
+                } else {
+                    "skipped"
+                },
+            );
+        enrichment.insert("keywords_status".into(), json!(keywords_status));
+        enrichment.insert(
+            "keywords_pending".into(),
+            json!(keywords_status == "pending"),
+        );
+    }
+    response.insert("enrichment".into(), json!(enrichment));
     if let Some(warning) = warning {
         response.insert("warning".into(), json!(warning));
     }

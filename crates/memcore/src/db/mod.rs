@@ -11,11 +11,11 @@ pub mod foundry_config;
 pub mod foundry_jobs;
 mod gc_candidates;
 mod graph;
+#[cfg(feature = "admin")]
+mod hub_db;
 mod memory_crud;
 pub mod migrations;
 mod open;
-#[cfg(feature = "admin")]
-mod hub_db;
 mod recall_cache;
 mod sandbox;
 mod schema;
@@ -68,8 +68,9 @@ pub use memory_crud::{
     archive_memory, delete, fetch_by_ids, find_active_wiki_entry_by_path_or_topic,
     get_access_times, get_all, list_by_path, list_by_path_recent, list_wiki_duplicate_candidates,
     normalize_for_write, record_enrichment_failure, release_event_claim, search_fts,
-    search_symbolic_candidates, search_vec, supersede_memory, try_claim_event,
-    update_enrichment_fields, update_with_revision, upsert,
+    search_symbolic_candidates, search_vec, set_keyword_enrichment_pending_if_unset,
+    set_keyword_enrichment_status, supersede_memory, try_claim_event, update_enrichment_fields,
+    update_with_revision, upsert,
 };
 pub(crate) use open::{
     acquire_startup_lock, configure_connection, open_read_only, open_read_write,

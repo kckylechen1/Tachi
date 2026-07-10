@@ -9,9 +9,10 @@ use super::{
     open_for_wal_checkpoint, open_immutable_readonly, open_raw, promote_memory_to_durable,
     record_access, record_access_with_updates, record_enrichment_failure, register_sqlite_vec,
     release_event_claim, schema_version, search_fts, search_symbolic_candidates, search_vec,
-    serialize_f32, set_sandbox_policy, stats, supersede_memory, table_exists, try_claim_event,
-    try_load_sqlite_vec, update_agent_known_state, update_enrichment_fields, update_with_revision,
-    upsert, AccessUpdate, FoundryJobStatusCounts,
+    serialize_f32, set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status,
+    set_sandbox_policy, stats, supersede_memory, table_exists, try_claim_event, try_load_sqlite_vec,
+    update_agent_known_state, update_enrichment_fields, update_with_revision, upsert, AccessUpdate,
+    FoundryJobStatusCounts,
 };
 #[cfg(feature = "admin")]
 use super::{vault_touch_entry, vault_upsert_entry};
