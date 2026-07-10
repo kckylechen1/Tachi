@@ -17,6 +17,7 @@ async fn workflow_close_loop_writes_wiki_with_references() {
             // Keep the smoke test offline: do not attempt a real gh comment.
             post_comment: Some(false),
             flow_id: None,
+            notes: None,
             wiki_title: Some("Closure smoke".to_string()),
             wiki_text: Some("Closed loop lesson for issue 150.".to_string()),
             wiki_path: None,

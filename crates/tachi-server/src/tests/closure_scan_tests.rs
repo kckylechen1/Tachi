@@ -120,6 +120,7 @@ async fn close_loop_drafts_wiki_from_result_when_missing() {
             // Offline: do not attempt a real gh comment.
             post_comment: Some(false),
             flow_id: Some(flow_id.to_string()),
+            notes: None,
         }))
         .await
         .expect("close_loop should draft and succeed");
@@ -134,4 +135,93 @@ async fn close_loop_drafts_wiki_from_result_when_missing() {
     assert!(json["closure_actions"]["comment_body"]
         .as_str()
         .is_some_and(|body| body.contains("Drafted lesson")));
+}
+
+/// #925: when result.md is missing, close_loop drafts from `notes`.
+#[tokio::test]
+async fn close_loop_drafts_wiki_from_notes_when_result_missing() {
+    let (server, _home) = make_server_with_temp_home();
+    let flow_id = "flow_20260101T000000Z_notes_draft_eeee5555";
+    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("run dir");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    // No result.md — notes must be enough.
+
+    let resp = server
+        .tachi_workflow(Parameters(TachiWorkflowParams {
+            action: "close_loop".to_string(),
+            issue_ref: Some("owner/repo#42".to_string()),
+            pr_ref: None,
+            doc_paths: vec![],
+            spec_paths: vec![],
+            related_issues: vec![],
+            wiki_title: None,
+            wiki_text: None,
+            wiki_path: None,
+            wiki_topic: None,
+            wiki_summary: None,
+            wiki_category: None,
+            wiki_keywords: vec![],
+            wiki_entities: vec![],
+            wiki_importance: None,
+            wiki_scope: None,
+            wiki_domain: None,
+            project: None,
+            force: true,
+            post_comment: Some(false),
+            flow_id: Some(flow_id.to_string()),
+            notes: Some(
+                "# Notes-sourced lesson\nShipped the renderer fix; no credential paths touched."
+                    .to_string(),
+            ),
+        }))
+        .await
+        .expect("close_loop should draft from notes");
+
+    let json: Value = serde_json::from_str(&resp).expect("json");
+    assert_eq!(json["ok"], json!(true));
+    assert_eq!(json["closure_actions"]["auto_drafted"], json!(true));
+    assert_eq!(json["closure_actions"]["draft_source"], json!("notes"));
+    assert!(json["closure_actions"]["comment_body"]
+        .as_str()
+        .is_some_and(|body| body.contains("Notes-sourced lesson")));
+}
+
+/// #925: missing draft sources return a repair template (not a one-liner).
+#[tokio::test]
+async fn close_loop_missing_draft_returns_repair_template() {
+    let (server, _home) = make_server_with_temp_home();
+    let err = server
+        .tachi_workflow(Parameters(TachiWorkflowParams {
+            action: "close_loop".to_string(),
+            issue_ref: Some("owner/repo#99".to_string()),
+            pr_ref: None,
+            doc_paths: vec![],
+            spec_paths: vec![],
+            related_issues: vec![],
+            wiki_title: None,
+            wiki_text: None,
+            wiki_path: None,
+            wiki_topic: None,
+            wiki_summary: None,
+            wiki_category: None,
+            wiki_keywords: vec![],
+            wiki_entities: vec![],
+            wiki_importance: None,
+            wiki_scope: None,
+            wiki_domain: None,
+            project: None,
+            force: true,
+            post_comment: Some(false),
+            flow_id: None,
+            notes: None,
+        }))
+        .await
+        .expect_err("close_loop without draft sources must fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("wiki_title + wiki_text")
+            && msg.contains("notes")
+            && msg.contains("result.md"),
+        "error must list repair options, got: {msg}"
+    );
 }

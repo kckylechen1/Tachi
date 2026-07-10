@@ -39,9 +39,17 @@ pub(crate) fn enforce_session_project(
         {
             return Ok(());
         }
+        let requested = explicit_project
+            .as_str()
+            .map(|s| format!("\"{s}\""))
+            .unwrap_or_else(|| explicit_project.to_string());
+        // #925: agent-hostile bare rejection → explicit repair hint. Semantic
+        // names (e.g. "hyperion") are not session bindings; omit project so
+        // the bound identity is used, or pass the exact bound name.
         return Err(rmcp::ErrorData::invalid_params(
             format!(
-                "{transport_label} project binding mismatch: session is bound to '{project}', but tool call requested project={explicit_project}"
+                "{transport_label} project binding mismatch: session is bound to '{project}', but tool call requested project={requested}. \
+repair: omit the project parameter (session binding wins) or set project=\"{project}\"; semantic aliases are not accepted as project="
             ),
             None,
         ));
@@ -253,6 +261,14 @@ mod tests {
         assert!(
             err.message.contains("project binding mismatch"),
             "got: {}",
+            err.message
+        );
+        // #925: bare mismatch is agent-hostile — must name the repair.
+        assert!(
+            err.message.contains("repair:")
+                && err.message.contains("omit the project parameter")
+                && err.message.contains("project=\"sigil\""),
+            "mismatch must include repair hint, got: {}",
             err.message
         );
     }

@@ -423,6 +423,7 @@ async fn close_loop_attaches_pattern_refs_and_records_hit_feedback() {
             related_issues: vec![],
             post_comment: Some(false),
             flow_id: None,
+            notes: None,
             wiki_title: Some("UniquePatternCloseLoopNeedle closure".to_string()),
             wiki_text: Some(
                 "Reviewed closure should cite UniquePatternCloseLoopNeedle.".to_string(),
