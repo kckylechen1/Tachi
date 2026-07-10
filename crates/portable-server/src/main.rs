@@ -5,7 +5,7 @@
 //! keep-set and nothing else. No dependency on `tachi-server`, so no operator
 //! or product surface can be compiled in.
 //!
-//! Boot: `portable-server [--global-db <path>] [--decay-policy <name>]
+//! Boot: `portable-server [--global-db <path>] [--project-db <path>] [--decay-policy <name>]
 //! [--daemon] [--port <n>]` (env fallbacks `PORTABLE_MEMORY_DB` /
 //! `PORTABLE_DECAY_POLICY` / `PORTABLE_DAEMON` / `PORTABLE_PORT`).
 //!
@@ -26,14 +26,31 @@ use portable_kernel::MemoryStore;
 use service::PortableServer;
 
 fn build_server(config: Config) -> Result<PortableServer, String> {
-    let store = if config.db_path == IN_MEMORY {
-        MemoryStore::open_in_memory().map_err(|e| format!("open in-memory store: {e}"))?
-    } else {
-        MemoryStore::open(&config.db_path)
-            .map_err(|e| format!("open store at {}: {e}", config.db_path))?
-    };
+    fn open_store(path: &str) -> Result<MemoryStore, String> {
+        if path == IN_MEMORY {
+            MemoryStore::open_in_memory().map_err(|e| format!("open in-memory store: {e}"))
+        } else {
+            MemoryStore::open(path).map_err(|e| format!("open store at {path}: {e}"))
+        }
+    }
+
+    let store = open_store(&config.db_path)?;
+    let project_stores = config
+        .project_db_paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let name = if index == 0 {
+                "project".to_string()
+            } else {
+                format!("project-{index}")
+            };
+            open_store(path).map(|store| (name, path.clone(), store))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(PortableServer::new(
         store,
+        project_stores,
         config.decay_policy,
         config.decay_policy_name,
         config.db_path,
@@ -85,4 +102,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::StatusParams;
+    use rmcp::handler::server::wrapper::Parameters;
+
+    #[tokio::test]
+    async fn build_server_attaches_configured_project_store() {
+        let config = Config {
+            db_path: IN_MEMORY.to_string(),
+            project_db_paths: vec![IN_MEMORY.to_string()],
+            decay_policy_name: "default".to_string(),
+            decay_policy: None,
+            daemon: false,
+            port: 7919,
+        };
+        let server = build_server(config).expect("build server");
+        let status = server
+            .status(Parameters(StatusParams {}))
+            .await
+            .expect("status");
+        let status: serde_json::Value = serde_json::from_str(&status).expect("status json");
+
+        assert_eq!(status["databases"]["global"]["path"], IN_MEMORY);
+        assert_eq!(status["databases"]["project"]["path"], IN_MEMORY);
+    }
 }
