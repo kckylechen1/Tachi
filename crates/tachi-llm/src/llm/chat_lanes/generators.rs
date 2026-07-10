@@ -89,6 +89,55 @@ impl super::super::LlmClient {
         Ok((keywords, entities))
     }
 
+    /// Expand synonym + bilingual (zh↔en) search keywords for write-side enrichment (#921).
+    ///
+    /// Uses the extract chat lane (same provider path as metadata extraction) so
+    /// callers that already scrub via the enrichment batcher's `external_llm_input`
+    /// keep the #568 redaction posture without inventing a new egress.
+    pub async fn expand_search_keywords(
+        &self,
+        text: &str,
+        existing_keywords: &[String],
+    ) -> Result<Vec<String>, String> {
+        let seed = if existing_keywords.is_empty() {
+            "(none)".to_string()
+        } else {
+            existing_keywords.join(", ")
+        };
+        let user =
+            format!("Memory text:\n{text}\n\nExisting keywords: {seed}\n\nReturn JSON only.");
+        let response = self
+            .call_extract_llm(
+                crate::default_prompts::KEYWORD_ENRICHMENT_PROMPT,
+                &user,
+                None,
+                0.2,
+                400,
+            )
+            .await?;
+        let json_str = Self::extract_json_payload(&response)?;
+        let parsed: Value = serde_json::from_str(json_str).map_err(|e| {
+            format!(
+                "Failed to parse keyword enrichment JSON: {} - response was: {}",
+                e, json_str
+            )
+        })?;
+        let keywords = parsed
+            .get("keywords")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok(keywords)
+    }
+
     /// Extract structured facts from text using EXTRACTION_PROMPT
     pub async fn extract_facts(&self, text: &str) -> Result<Vec<Value>, String> {
         let response = self

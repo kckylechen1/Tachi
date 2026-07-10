@@ -180,6 +180,9 @@ pub(super) fn slim_entry(e: &MemoryEntry, db: DbScope) -> serde_json::Value {
 /// Like `slim_entry` but additionally surfaces enrichment status fields:
 ///   - `embedding_pending`: true when no vector has been written yet
 ///   - `summary_pending`:   true when no summary has been written yet
+///   - `keywords_status` / `keywords_pending`: write-side synonym/bilingual
+///     keyword enrichment (#921) — only present when metadata carries
+///     `enrichment.keywords_status` (flag-off ⇒ field absent = zero change)
 ///   - `foundry_jobs`:      array of `{id, kind, status, created_at}` for any
 ///     foundry jobs currently touching this memory id (queued/running first,
 ///     omitted when empty)
@@ -200,6 +203,19 @@ pub(super) fn slim_entry_with_enrichment(
 
     obj.insert("embedding_pending".into(), json!(e.vector.is_none()));
     obj.insert("summary_pending".into(), json!(e.summary.is_empty()));
+
+    if let Some(keywords_status) = e
+        .metadata
+        .get("enrichment")
+        .and_then(|value| value.get("keywords_status"))
+        .and_then(|value| value.as_str())
+    {
+        obj.insert("keywords_status".into(), json!(keywords_status));
+        obj.insert(
+            "keywords_pending".into(),
+            json!(keywords_status == "pending"),
+        );
+    }
 
     // Foundry job lookup runs against the same store the entry came from. Any
     // failure (table missing, transient lock, …) is non-fatal — we simply omit

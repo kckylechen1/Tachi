@@ -1,36 +1,99 @@
 use crate::foundry_runtime_ops::enqueue_foundry_capture_maintenance;
 use crate::server_state::{DbScope, MemoryServer};
 use memcore::{MemoryEntry, MemoryStore};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 // ─── Enrichment Batcher ──────────────────────────────────────────────────────
 
+/// Cap on merged write-side keyword sets to bound FTS index bloat (#921).
+pub(crate) const MAX_ENRICHED_KEYWORDS: usize = 24;
+
+/// Env flag for write-side synonym/bilingual keyword enrichment (default OFF).
+pub(crate) const WRITE_ENRICH_KEYWORDS_ENV: &str = "TACHI_WRITE_ENRICH_KEYWORDS";
+
 /// An item queued for background embedding + summary enrichment.
 #[derive(Debug, Clone)]
-pub(super) struct EnrichmentItem {
-    pub(super) id: String,
-    pub(super) text: String,
-    pub(super) summary: String,
-    pub(super) keywords: Vec<String>,
-    pub(super) entities: Vec<String>,
-    pub(super) needs_embedding: bool,
-    pub(super) needs_summary: bool,
-    pub(super) needs_metadata: bool,
-    pub(super) target_db: DbScope,
-    pub(super) named_project: Option<String>,
-    pub(super) db_path: Option<PathBuf>,
-    pub(super) foundry_agent_id: Option<String>,
-    pub(super) foundry_path_prefix: Option<String>,
-    pub(super) revision: i64,
+pub(crate) struct EnrichmentItem {
+    pub(crate) id: String,
+    pub(crate) text: String,
+    pub(crate) summary: String,
+    pub(crate) keywords: Vec<String>,
+    pub(crate) entities: Vec<String>,
+    pub(crate) needs_embedding: bool,
+    pub(crate) needs_summary: bool,
+    pub(crate) needs_metadata: bool,
+    /// Synonym + bilingual keyword expansion (#921). Gated by
+    /// [`WRITE_ENRICH_KEYWORDS_ENV`]; default off ⇒ always false.
+    pub(crate) needs_keyword_enrichment: bool,
+    pub(crate) target_db: DbScope,
+    pub(crate) named_project: Option<String>,
+    pub(crate) db_path: Option<PathBuf>,
+    pub(crate) foundry_agent_id: Option<String>,
+    pub(crate) foundry_path_prefix: Option<String>,
+    pub(crate) revision: i64,
 }
 
-pub(super) fn needs_metadata_enrichment(keywords: &[String], _entities: &[String]) -> bool {
+pub(crate) fn needs_metadata_enrichment(keywords: &[String], _entities: &[String]) -> bool {
     keywords.is_empty()
 }
 
-pub(super) fn build_enrichment_item(
+/// Feature flag for write-side keyword enrichment. Default OFF.
+pub(crate) fn write_keyword_enrichment_enabled() -> bool {
+    std::env::var(WRITE_ENRICH_KEYWORDS_ENV)
+        .map(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
+fn keywords_status_from_entry(entry: &MemoryEntry) -> Option<&str> {
+    entry
+        .metadata
+        .get("enrichment")
+        .and_then(|value| value.get("keywords_status"))
+        .and_then(|value| value.as_str())
+}
+
+/// Whether this entry still needs write-side synonym/bilingual keyword expansion.
+///
+/// Fail-closed: when the flag is off, always false (zero behavior change).
+pub(crate) fn needs_keyword_enrichment(entry: &MemoryEntry) -> bool {
+    if !write_keyword_enrichment_enabled() {
+        return false;
+    }
+    match keywords_status_from_entry(entry) {
+        Some("enriched") | Some("skipped") => false,
+        // pending/failed/absent: eligible when there is text to enrich
+        _ => !entry.text.trim().is_empty(),
+    }
+}
+
+/// Merge existing + expanded keywords with case-insensitive dedupe and a hard cap.
+pub(crate) fn merge_enriched_keywords(existing: &[String], expanded: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for raw in existing.iter().chain(expanded.iter()) {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let key = trimmed.to_ascii_lowercase();
+        if !seen.insert(key) {
+            continue;
+        }
+        out.push(trimmed.to_string());
+        if out.len() >= MAX_ENRICHED_KEYWORDS {
+            break;
+        }
+    }
+    out
+}
+
+pub(crate) fn build_enrichment_item(
     entry: &MemoryEntry,
     needs_embedding: bool,
     needs_summary: bool,
@@ -50,6 +113,7 @@ pub(super) fn build_enrichment_item(
         needs_embedding,
         needs_summary,
         needs_metadata: needs_metadata_enrichment(&entry.keywords, &entry.entities),
+        needs_keyword_enrichment: needs_keyword_enrichment(entry),
         target_db,
         named_project,
         db_path,
@@ -91,7 +155,7 @@ pub(super) const ENRICH_FLUSH_INTERVAL_MS: u64 = 500;
 type MetadataExtractionResult = (usize, Result<(Vec<String>, Vec<String>), String>);
 
 impl MemoryServer {
-    pub(super) fn enqueue_enrichment(&self, item: EnrichmentItem) -> bool {
+    pub(crate) fn enqueue_enrichment(&self, item: EnrichmentItem) -> bool {
         if let Err(err) = self.enrichment_lock().enrich_tx.try_send(item) {
             tracing::warn!("[enrichment-batcher] failed to queue enrichment item: {err}");
             return false;
@@ -145,8 +209,17 @@ impl MemoryServer {
         db_path: Option<PathBuf>,
     ) -> usize {
         let mut queued = 0usize;
+        let keyword_flag = write_keyword_enrichment_enabled();
         for candidate in candidates {
-            if !candidate.needs_embedding && !candidate.needs_summary && !candidate.needs_metadata {
+            let needs_keyword_enrichment = keyword_flag
+                && (candidate.failed_stage == "keywords"
+                    || candidate.needs_metadata
+                    || candidate.keywords.is_empty());
+            if !candidate.needs_embedding
+                && !candidate.needs_summary
+                && !candidate.needs_metadata
+                && !needs_keyword_enrichment
+            {
                 continue;
             }
             let item = EnrichmentItem {
@@ -158,6 +231,7 @@ impl MemoryServer {
                 needs_embedding: candidate.needs_embedding,
                 needs_summary: candidate.needs_summary,
                 needs_metadata: candidate.needs_metadata,
+                needs_keyword_enrichment,
                 target_db,
                 named_project: named_project.clone(),
                 db_path: db_path.clone(),
@@ -221,7 +295,7 @@ impl MemoryServer {
     }
 
     /// Flush a batch: batch-embed all texts needing embedding, then update DB.
-    pub(super) async fn flush_enrichment_batch(&self, batch: &mut Vec<EnrichmentItem>) {
+    pub(crate) async fn flush_enrichment_batch(&self, batch: &mut Vec<EnrichmentItem>) {
         let items: Vec<EnrichmentItem> = std::mem::take(batch);
         let batch_size = items.len();
         tracing::info!("[enrichment-batcher] flushing batch of {batch_size} items");
@@ -273,6 +347,8 @@ impl MemoryServer {
 
         let mut keywords_out: Vec<Option<Vec<String>>> = vec![None; items.len()];
         let mut entities_out: Vec<Option<Vec<String>>> = vec![None; items.len()];
+        // Operator-visible keyword enrichment status per item (enriched/skipped/failed).
+        let mut keyword_status_out: Vec<Option<&'static str>> = vec![None; items.len()];
         for (idx, result) in metadata_results {
             match result {
                 Ok((keywords, entities)) => {
@@ -297,6 +373,67 @@ impl MemoryServer {
         // is no longer derived in the generic engine — that domain logic lives
         // in the host project. LLM enrichment above already populated
         // keywords_out / entities_out.
+
+        // 2b. Write-side synonym + bilingual keyword expansion (#921).
+        // Gated by TACHI_WRITE_ENRICH_KEYWORDS (default off). Reuses the
+        // extract-lane provider path and external_llm_input scrub (#568).
+        let keyword_futures: Vec<_> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.needs_keyword_enrichment)
+            .filter_map(|(i, item)| {
+                if item.text.trim().is_empty() {
+                    keyword_status_out[i] = Some("skipped");
+                    return None;
+                }
+                let llm = self.llm.clone();
+                let text = external_llm_input(&item.text);
+                let mut seed = item.keywords.clone();
+                if let Some(kws) = keywords_out[i].as_ref() {
+                    for kw in kws {
+                        if !seed
+                            .iter()
+                            .any(|existing| existing.eq_ignore_ascii_case(kw))
+                        {
+                            seed.push(kw.clone());
+                        }
+                    }
+                }
+                Some(async move { (i, llm.expand_search_keywords(&text, &seed).await, seed) })
+            })
+            .collect();
+
+        let keyword_results: Vec<(usize, Result<Vec<String>, String>, Vec<String>)> =
+            futures::future::join_all(keyword_futures).await;
+
+        for (idx, result, seed) in keyword_results {
+            match result {
+                Ok(expanded) => {
+                    let merged = merge_enriched_keywords(&seed, &expanded);
+                    if merged.is_empty() {
+                        keyword_status_out[idx] = Some("skipped");
+                    } else {
+                        keywords_out[idx] = Some(merged);
+                        keyword_status_out[idx] = Some("enriched");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[enrichment-batcher] keyword enrichment failed for {}: {e}",
+                        items[idx].id
+                    );
+                    keyword_status_out[idx] = Some("failed");
+                    record_enrichment_failure(self, &items[idx], "keywords", &e);
+                }
+            }
+        }
+
+        // Persist skipped status for items that never entered the LLM path.
+        for (i, status) in keyword_status_out.iter().enumerate() {
+            if *status == Some("skipped") {
+                write_keyword_enrichment_status(self, &items[i], "skipped");
+            }
+        }
 
         // 3. Batch embedding for items that need it
         let embed_indices: Vec<usize> = items
@@ -355,6 +492,7 @@ impl MemoryServer {
             let new_summary = summaries[i].as_deref();
             let new_keywords = keywords_out[i].as_deref();
             let new_entities = entities_out[i].as_deref();
+            let keyword_status = keyword_status_out[i];
 
             if new_vec.is_some()
                 || new_summary.is_some()
@@ -402,6 +540,15 @@ impl MemoryServer {
 
                 match res {
                     Ok(true) => {
+                        // Re-apply keyword status after field update: success path
+                        // clears failure metadata, so keyword stage outcome must
+                        // land after that write (including failed keyword stage
+                        // when other stages still succeeded).
+                        if let Some(status) = keyword_status {
+                            if status != "skipped" {
+                                write_keyword_enrichment_status(self, item, status);
+                            }
+                        }
                         if new_vec.is_some() {
                             let contradiction_server = self.clone();
                             let contradiction_id = item.id.clone();
@@ -468,10 +615,38 @@ impl MemoryServer {
                         record_enrichment_failure(self, item, "db_update", &e);
                     }
                 }
+            } else if let Some(status) = keyword_status {
+                // Keyword-only outcome with no field writes (failed already
+                // recorded; enriched/skipped still need status visibility when
+                // expand returned nothing new or pure skip).
+                if status == "enriched" || status == "failed" {
+                    write_keyword_enrichment_status(self, item, status);
+                }
             }
         }
 
         tracing::info!("[enrichment-batcher] batch of {batch_size} complete");
+    }
+}
+
+fn write_keyword_enrichment_status(server: &MemoryServer, item: &EnrichmentItem, status: &str) {
+    let action = |store: &mut MemoryStore| {
+        store
+            .set_keyword_enrichment_status(&item.id, status)
+            .map_err(|e| format!("set keyword enrichment status: {e}"))
+    };
+    let res = if let Some(ref project_name) = item.named_project {
+        server.with_named_project_store(project_name, action)
+    } else if let Some(ref db_path) = item.db_path {
+        server.with_path_store(db_path, action)
+    } else {
+        server.with_store_for_scope(item.target_db, action)
+    };
+    if let Err(err) = res {
+        tracing::warn!(
+            "[enrichment-batcher] failed to set keywords_status={status} for {}: {err}",
+            item.id
+        );
     }
 }
 
@@ -565,7 +740,12 @@ fn derive_path_prefix(server: &MemoryServer, item: &EnrichmentItem) -> Option<St
 
 #[cfg(test)]
 mod tests {
-    use super::{external_llm_input, should_defer_enrichment_failure};
+    use super::*;
+    use crate::test_support::EnvRestore;
+    use crate::tests::make_server;
+    use chrono::Utc;
+    use memcore::MemoryEntry;
+    use serde_json::json;
 
     #[test]
     fn external_llm_input_scrubs_secret_patterns() {
@@ -606,5 +786,383 @@ mod tests {
             "db_update",
             "retry after lock contention"
         ));
+    }
+
+    #[test]
+    fn merge_enriched_keywords_dedupes_and_caps() {
+        let existing = vec!["Recall".into(), "pipeline".into()];
+        let expanded = vec![
+            "recall".into(), // case-insensitive dupe
+            "检索".into(),
+            "synapse".into(),
+        ];
+        let merged = merge_enriched_keywords(&existing, &expanded);
+        assert_eq!(merged, vec!["Recall", "pipeline", "检索", "synapse"]);
+
+        let many: Vec<String> = (0..(MAX_ENRICHED_KEYWORDS + 5))
+            .map(|i| format!("kw{i}"))
+            .collect();
+        let capped = merge_enriched_keywords(&[], &many);
+        assert_eq!(capped.len(), MAX_ENRICHED_KEYWORDS);
+    }
+
+    #[test]
+    fn write_keyword_enrichment_flag_defaults_off() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _unset = EnvRestore::remove(WRITE_ENRICH_KEYWORDS_ENV);
+        assert!(!write_keyword_enrichment_enabled());
+        let _set = EnvRestore::set(WRITE_ENRICH_KEYWORDS_ENV, "true");
+        assert!(write_keyword_enrichment_enabled());
+    }
+
+    fn seed_entry(id: &str, text: &str, keywords: Vec<String>) -> MemoryEntry {
+        MemoryEntry {
+            id: id.into(),
+            path: "/test/keyword-enrich".into(),
+            summary: "pre-seeded summary".into(),
+            text: text.into(),
+            importance: 0.8,
+            timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".into(),
+            topic: "keyword-enrich".into(),
+            keywords,
+            persons: vec![],
+            entities: vec!["tachi".into()],
+            location: String::new(),
+            source: "test".into(),
+            scope: "general".into(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            // Present so flush does not attempt Voyage embed.
+            vector: Some(vec![0.0_f32; 1024]),
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".into(),
+        }
+    }
+
+    async fn spawn_mock_extract_llm(body: serde_json::Value) -> (u16, tokio::task::JoinHandle<()>) {
+        use axum::{routing::post, Json, Router};
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let body = body.clone();
+                async move {
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": body.to_string()
+                            },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock extract llm");
+        let port = listener.local_addr().expect("addr").port();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve mock llm");
+        });
+        // Give the server a tick to accept.
+        tokio::task::yield_now().await;
+        (port, handle)
+    }
+
+    /// (a) Generated keywords are retrievable through the normal FTS search path.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn write_side_keyword_enrichment_hits_search_via_synonym() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _flag = EnvRestore::set(WRITE_ENRICH_KEYWORDS_ENV, "true");
+        let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+
+        let (port, mock) = spawn_mock_extract_llm(json!({
+            "keywords": ["synapse-recall", "双语检索", "write-side-enrichment"]
+        }))
+        .await;
+        let _base = EnvRestore::set(
+            "EXTRACT_BASE_URL",
+            &format!("http://127.0.0.1:{port}/chat/completions"),
+        );
+        let _model = EnvRestore::set("EXTRACT_MODEL", "mock-keyword-model");
+        let _key = EnvRestore::set("EXTRACT_API_KEY", "test-key");
+
+        // Construct server AFTER extract env is pointed at the mock so the
+        // LlmClient binds the mock extract lane.
+        let server = make_server();
+        let id = format!("kw-search-{}", uuid::Uuid::new_v4());
+        // Text deliberately omits the synonym; only enrichment adds it.
+        let entry = seed_entry(
+            &id,
+            "Write-side enrichment widens FTS surface at save time without query-time LLM cost.",
+            vec!["fts".into(), "enrichment".into()],
+        );
+        server
+            .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("upsert: {e}")))
+            .expect("seed");
+
+        // Precondition: synonym not in text/keywords → FTS miss.
+        let before = server
+            .with_global_store(|store| {
+                Ok(memcore::db::search_fts(
+                    store.connection(),
+                    "synapse-recall",
+                    10,
+                    false,
+                    false,
+                    None,
+                    None,
+                )
+                .map_err(|e| format!("fts before: {e}"))?)
+            })
+            .expect("fts before");
+        assert!(
+            !before.contains_key(&id),
+            "pre-enrichment search must miss synonym; got {before:?}"
+        );
+
+        let mut batch = vec![build_enrichment_item(
+            &entry,
+            false,
+            false,
+            DbScope::Global,
+            None,
+            None,
+            None,
+            None,
+            entry.revision,
+        )];
+        assert!(
+            batch[0].needs_keyword_enrichment,
+            "flag-on seed must request keyword enrichment"
+        );
+        server.flush_enrichment_batch(&mut batch).await;
+
+        let loaded = server
+            .with_global_store(|store| {
+                store
+                    .get(&id)
+                    .map_err(|e| format!("get: {e}"))
+                    .map(|e| e.expect("entry exists"))
+            })
+            .expect("load");
+        assert!(
+            loaded
+                .keywords
+                .iter()
+                .any(|k| k.eq_ignore_ascii_case("synapse-recall")),
+            "keywords must include expanded synonym: {:?}",
+            loaded.keywords
+        );
+        assert_eq!(
+            loaded.metadata["enrichment"]["keywords_status"],
+            json!("enriched")
+        );
+
+        let after = server
+            .with_global_store(|store| {
+                Ok(memcore::db::search_fts(
+                    store.connection(),
+                    "synapse-recall",
+                    10,
+                    false,
+                    false,
+                    None,
+                    None,
+                )
+                .map_err(|e| format!("fts after: {e}"))?)
+            })
+            .expect("fts after");
+        assert!(
+            after.contains_key(&id),
+            "post-enrichment FTS must hit via generated synonym; got {after:?}"
+        );
+
+        mock.abort();
+    }
+
+    /// (b) Enrichment failure leaves the save intact with failed status.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn write_side_keyword_enrichment_failure_leaves_save_intact() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _flag = EnvRestore::set(WRITE_ENRICH_KEYWORDS_ENV, "true");
+        let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+
+        // Bind a port with no accept loop → connection errors → durable failure.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind closed provider");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+
+        let _base = EnvRestore::set(
+            "EXTRACT_BASE_URL",
+            &format!("http://127.0.0.1:{port}/chat/completions"),
+        );
+        let _model = EnvRestore::set("EXTRACT_MODEL", "mock-keyword-model");
+        let _key = EnvRestore::set("EXTRACT_API_KEY", "test-key");
+
+        let server = make_server();
+        let id = format!("kw-fail-{}", uuid::Uuid::new_v4());
+        let original_text =
+            "Save must survive keyword enrichment provider failures without data loss.";
+        let entry = seed_entry(&id, original_text, vec!["intact".into()]);
+        server
+            .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("upsert: {e}")))
+            .expect("seed");
+
+        let mut batch = vec![build_enrichment_item(
+            &entry,
+            false,
+            false,
+            DbScope::Global,
+            None,
+            None,
+            None,
+            None,
+            entry.revision,
+        )];
+        server.flush_enrichment_batch(&mut batch).await;
+
+        let loaded = server
+            .with_global_store(|store| {
+                store
+                    .get(&id)
+                    .map_err(|e| format!("get: {e}"))
+                    .map(|e| e.expect("entry must still exist"))
+            })
+            .expect("load after failure");
+        assert_eq!(
+            loaded.text, original_text,
+            "save payload must remain intact"
+        );
+        assert_eq!(loaded.keywords, vec!["intact".to_string()]);
+        assert_eq!(
+            loaded.metadata["enrichment"]["status"],
+            json!("failed"),
+            "overall enrichment status must be failed: {:?}",
+            loaded.metadata
+        );
+        assert_eq!(
+            loaded.metadata["enrichment"]["failed_stage"],
+            json!("keywords")
+        );
+        assert_eq!(
+            loaded.metadata["enrichment"]["keywords_status"],
+            json!("failed"),
+            "keywords_status must distinguish failed: {:?}",
+            loaded.metadata
+        );
+    }
+
+    /// (c) Flag off = zero behavior change (no keyword expansion, no status field).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn write_side_keyword_enrichment_flag_off_is_noop() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _flag = EnvRestore::remove(WRITE_ENRICH_KEYWORDS_ENV);
+        let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+
+        // Mock that would inject a synonym if the job ran.
+        let (port, mock) = spawn_mock_extract_llm(json!({
+            "keywords": ["should-not-appear-when-flag-off"]
+        }))
+        .await;
+        let _base = EnvRestore::set(
+            "EXTRACT_BASE_URL",
+            &format!("http://127.0.0.1:{port}/chat/completions"),
+        );
+        let _model = EnvRestore::set("EXTRACT_MODEL", "mock-keyword-model");
+        let _key = EnvRestore::set("EXTRACT_API_KEY", "test-key");
+
+        let server = make_server();
+        let id = format!("kw-off-{}", uuid::Uuid::new_v4());
+        let entry = seed_entry(
+            &id,
+            "Flag-off path must not expand keywords or write keywords_status.",
+            vec!["baseline".into()],
+        );
+        server
+            .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("upsert: {e}")))
+            .expect("seed");
+
+        let mut batch = vec![build_enrichment_item(
+            &entry,
+            false,
+            false,
+            DbScope::Global,
+            None,
+            None,
+            None,
+            None,
+            entry.revision,
+        )];
+        assert!(
+            !batch[0].needs_keyword_enrichment,
+            "flag-off must not request keyword enrichment"
+        );
+        server.flush_enrichment_batch(&mut batch).await;
+
+        let loaded = server
+            .with_global_store(|store| {
+                store
+                    .get(&id)
+                    .map_err(|e| format!("get: {e}"))
+                    .map(|e| e.expect("entry exists"))
+            })
+            .expect("load");
+        assert_eq!(loaded.keywords, vec!["baseline".to_string()]);
+        assert!(
+            loaded
+                .metadata
+                .get("enrichment")
+                .and_then(|e| e.get("keywords_status"))
+                .is_none(),
+            "flag-off must not write keywords_status: {:?}",
+            loaded.metadata
+        );
+
+        let hits = server
+            .with_global_store(|store| {
+                Ok(memcore::db::search_fts(
+                    store.connection(),
+                    "should-not-appear-when-flag-off",
+                    10,
+                    false,
+                    false,
+                    None,
+                    None,
+                )
+                .map_err(|e| format!("fts: {e}"))?)
+            })
+            .expect("fts");
+        assert!(
+            !hits.contains_key(&id),
+            "flag-off must not index mock synonym"
+        );
+
+        mock.abort();
     }
 }

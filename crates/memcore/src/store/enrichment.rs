@@ -109,6 +109,11 @@ impl MemoryStore {
         db::record_enrichment_failure(&self.conn, id, stage, error)
     }
 
+    /// Set write-side keyword enrichment status (`enriched`/`pending`/`skipped`/`failed`).
+    pub fn set_keyword_enrichment_status(&self, id: &str, status: &str) -> Result<(), MemoryError> {
+        db::set_keyword_enrichment_status(&self.conn, id, status)
+    }
+
     /// Claim failed auth-class enrichment rows for retry after a vault unlock.
     ///
     /// Retry state lives in metadata, so no schema migration is needed: each

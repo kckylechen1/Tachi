@@ -13,6 +13,7 @@ fn enrichment_work_pending(
     needs_embedding
         || needs_summary
         || crate::enrichment::needs_metadata_enrichment(&entry.keywords, &entry.entities)
+        || crate::enrichment::needs_keyword_enrichment(entry)
 }
 
 pub(in crate::memory_search_ops::save_memory) fn enqueue_save_enrichment(
@@ -30,18 +31,44 @@ pub(in crate::memory_search_ops::save_memory) fn enqueue_save_enrichment(
         return false;
     }
 
-    server.enqueue_enrichment(crate::enrichment::build_enrichment_item(
+    let item = crate::enrichment::build_enrichment_item(
         entry,
         needs_embedding,
         needs_summary,
         target_db,
-        named_project,
+        named_project.clone(),
         None,
         None,
         None,
         enrichment_revision,
-    ));
-    true
+    );
+    let needs_keyword = item.needs_keyword_enrichment;
+    let enqueued = server.enqueue_enrichment(item);
+    if enqueued && needs_keyword {
+        // Operator-visible pending until the async job lands enriched/failed/skipped.
+        mark_keyword_enrichment_pending(server, &entry.id, target_db, named_project.as_deref());
+    }
+    enqueued
+}
+
+fn mark_keyword_enrichment_pending(
+    server: &MemoryServer,
+    id: &str,
+    target_db: DbScope,
+    named_project: Option<&str>,
+) {
+    let action = |store: &mut memcore::MemoryStore| {
+        store
+            .set_keyword_enrichment_status(id, "pending")
+            .map_err(|e| format!("set keywords_status=pending: {e}"))
+    };
+    let res = match named_project {
+        Some(name) => server.with_named_project_store(name, action),
+        None => server.with_store_for_scope(target_db, action),
+    };
+    if let Err(err) = res {
+        tracing::warn!("[enrichment] failed to mark keywords_status=pending for {id}: {err}");
+    }
 }
 
 #[cfg(test)]
@@ -89,6 +116,14 @@ mod tests {
 
     #[test]
     fn enrichment_work_pending_when_metadata_missing() {
+        // Hold the global env lock and force flag-off so a parallel flag-on
+        // test cannot make keyword enrichment look pending.
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _flag =
+            crate::test_support::EnvRestore::remove(crate::enrichment::WRITE_ENRICH_KEYWORDS_ENV);
+
         let mut e = test_entry("enr-2", "test");
         e.summary = "ready".into();
         e.vector = Some(vec![0.1; 64]);
@@ -98,7 +133,34 @@ mod tests {
 
         e.keywords = vec!["tag".into()];
         e.entities = vec!["entity".into()];
+        // Flag off → no keyword enrichment work once metadata is present.
         assert!(!enrichment_work_pending(&e, false, false));
+    }
+
+    #[test]
+    fn enrichment_work_pending_when_keyword_flag_on() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _flag = crate::test_support::EnvRestore::set(
+            crate::enrichment::WRITE_ENRICH_KEYWORDS_ENV,
+            "true",
+        );
+        let mut e = test_entry("enr-kw", "bilingual keyword probe");
+        e.summary = "ready".into();
+        e.vector = Some(vec![0.1; 64]);
+        e.keywords = vec!["tag".into()];
+        e.entities = vec!["entity".into()];
+        assert!(
+            enrichment_work_pending(&e, false, false),
+            "flag-on must enqueue write-side keyword enrichment even when metadata present"
+        );
+
+        e.metadata = json!({"enrichment": {"keywords_status": "enriched"}});
+        assert!(
+            !enrichment_work_pending(&e, false, false),
+            "already-enriched keyword status must not re-enqueue"
+        );
     }
 
     #[test]

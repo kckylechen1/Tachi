@@ -27,3 +27,16 @@ Rules:
 - Use the same language as the input text
 - Do not invent facts absent from the text
 - Empty arrays are allowed when nothing applies"#;
+
+/// Write-side synonym + bilingual keyword expansion for FTS recall (#921).
+/// Used only when `TACHI_WRITE_ENRICH_KEYWORDS` is enabled.
+pub const KEYWORD_ENRICHMENT_PROMPT: &str = r#"Generate synonym and bilingual (Chinese↔English) search keywords for one memory entry to widen FTS recall. Output JSON only:
+{"keywords": ["8-16 short search terms"]}
+
+Rules:
+- Include synonyms, related terms, acronyms, and zh↔en translations of key concepts present in the text
+- Prefer high-precision recall tags; avoid stopwords and generic noise
+- Keep terms short (1-4 words, or short CJK phrases)
+- Do not invent facts absent from the text
+- Prefer new terms that extend (not merely repeat) any existing keywords provided
+- Empty array is allowed when nothing useful applies"#;
