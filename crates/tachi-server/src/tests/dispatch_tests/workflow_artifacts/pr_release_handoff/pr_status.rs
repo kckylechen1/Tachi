@@ -1,4 +1,5 @@
 use super::*;
+use crate::tool_params::TachiTaskParams;
 
 /// Field bag for shared PR-target helpers (action is ignored by helpers).
 fn pr_field_bag() -> TachiTaskParams {
