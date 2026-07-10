@@ -169,8 +169,33 @@ pub(super) async fn serve_http_daemon(
 
     let ct = CancellationToken::new();
     let ct_shutdown = ct.clone();
+
+    // Discovery pid path + its RAII cleanup guard, computed/armed BEFORE the
+    // bind attempt (#936 review follow-up). Bind failure below is a NORMAL
+    // function return (`?`-shaped / explicit `return Err`) — destructors run,
+    // unlike `std::process::exit` — so `DiscoveryPidGuard::drop` fires and
+    // removes any STALE discovery pid file a prior run left behind. Before
+    // this fix the pid path was computed only AFTER a successful bind, so a
+    // bind failure (port conflict, etc.) returned before any cleanup site
+    // existed: under `KeepAlive` the daemon retries every ~10s while a stale
+    // pid from the last successful run keeps pointing CLI/MCP clients at a
+    // dead process.
+    let pid_path = crate::daemon_lock::scoped_daemon_pid_path(&app_home, &global_db_path);
+    let mut pid_guard = DiscoveryPidGuard::new(pid_path.clone());
+
     let requested_bind_addr = format!("127.0.0.1:{}", port);
-    let listener = tokio::net::TcpListener::bind(&requested_bind_addr).await?;
+    let listener = match tokio::net::TcpListener::bind(&requested_bind_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            // Tagged `bind_failed`, distinct from the post-bind `[fatal]` serve
+            // -death exits below, so a launchd retry loop is diagnosable from
+            // the log alone: repeated `bind_failed` means the port never opens
+            // (an external conflict), whereas a bare `[fatal]` after "Tachi
+            // daemon listening on" means the surface bound fine and then died.
+            eprintln!("[fatal] [bind_failed] daemon failed to bind {requested_bind_addr}: {e}");
+            return Err(e.into());
+        }
+    };
     let local_addr = listener.local_addr()?;
     let bind_addr = local_addr.to_string();
     let port = local_addr.port();
@@ -203,11 +228,11 @@ pub(super) async fn serve_http_daemon(
         });
     }
 
-    // Daemon discovery pid file path — computed here (before the watchdog spawn)
-    // so the watchdog's `exit(2)` path can drop it too, matching the fail-loud
-    // serve path and shrinking the window where a stale pid points at a dead
-    // process. The file itself is written further below, after the router binds.
-    let pid_path = crate::daemon_lock::scoped_daemon_pid_path(&app_home, &global_db_path);
+    // `pid_path` / `pid_guard` were computed above, before the bind attempt,
+    // so the guard covers a bind failure too. The discovery file itself is
+    // written further below, after the router binds; the watchdog's
+    // `exit(2)` path also removes it explicitly (see below), matching the
+    // fail-loud serve path.
 
     // Liveness watchdog (#936): launchd checks the *process*, not the
     // *service*. This self-probe hits `/health/live` through the real TCP
@@ -437,6 +462,10 @@ pub(super) async fn serve_http_daemon(
 
     // Best-effort cleanup of daemon discovery file
     let _ = tokio::fs::remove_file(&pid_path_cleanup).await;
+    // This call site already did its own (async, logged-on-failure) removal
+    // above, so disarm the guard rather than let its synchronous Drop attempt
+    // a redundant no-op removal.
+    pid_guard.disarm();
     Ok(())
 }
 
@@ -603,6 +632,56 @@ fn paths_match(left: &Path, right: &Path) -> bool {
         .zip(std::fs::canonicalize(right).ok())
         .map(|(left, right)| left == right)
         .unwrap_or(false)
+}
+
+/// RAII guard for the daemon discovery pid file (#936 review follow-up).
+///
+/// Construct it right after the pid path is computed and BEFORE the bind
+/// attempt, so any early `?`-shaped return between there and the discovery
+/// file actually being written (chiefly: a failed bind) runs this guard's
+/// `Drop`, removing a STALE discovery pid file a prior run left behind.
+/// Mirrors the existing [`crate::daemon_lock::DaemonLock`] Drop pattern: a
+/// same-shaped guard rather than a bespoke defer closure, so the cleanup
+/// contract reads the same way at both call sites.
+///
+/// Note: `std::process::exit` (used on the fail-loud serve and watchdog exit
+/// paths) does NOT run destructors, so this guard cannot replace the explicit
+/// `tokio::fs::remove_file` calls on those paths — it only protects the
+/// early-`?`-return paths that precede bind, plus the normal graceful-
+/// shutdown fallthrough (which calls [`DiscoveryPidGuard::disarm`] after
+/// doing its own explicit removal, so the guard's `Drop` there is a no-op
+/// rather than a redundant duplicate attempt).
+struct DiscoveryPidGuard {
+    path: PathBuf,
+    disarmed: bool,
+}
+
+impl DiscoveryPidGuard {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            disarmed: false,
+        }
+    }
+
+    /// Mark cleanup as already handled by the call site; `Drop` becomes a
+    /// no-op.
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for DiscoveryPidGuard {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        // Drop cannot be async; a small pid-file removal is an acceptable
+        // synchronous fs op here (the same tradeoff `DaemonLock::drop`
+        // makes). Best-effort: a bind failure with no prior discovery file
+        // (e.g. the very first run) is a harmless no-op.
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 #[cfg(test)]
@@ -864,5 +943,49 @@ mod tests {
             last = counter.record(probe, true);
         }
         assert_eq!(last, WatchdogVerdict::Exit(2));
+    }
+
+    // ---- #936 review follow-up: bind-failure discovery-pid cleanup -------
+
+    #[tokio::test]
+    async fn bind_failure_removes_stale_discovery_pid_and_returns_err() {
+        // The reported bug: a bind failure (port conflict, etc.) used to
+        // return before the discovery pid path even existed as a local
+        // binding, so a STALE pid file from a PRIOR successful run survived —
+        // and under `KeepAlive` the daemon retries every ~10s carrying that
+        // stale discovery state forever. Simulate exactly that: seed a stale
+        // discovery pid file, then occupy the port so this run's own bind
+        // fails.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let app_home = tmp.path().join(".tachi");
+        std::fs::create_dir_all(&app_home).expect("app_home");
+        let global_db = tmp.path().join("global.db");
+        let server = crate::MemoryServer::new(global_db.clone(), None).expect("server");
+
+        let pid_path = crate::daemon_lock::scoped_daemon_pid_path(&app_home, &global_db);
+        if let Some(parent) = pid_path.parent() {
+            std::fs::create_dir_all(parent).expect("pid parent");
+        }
+        std::fs::write(&pid_path, br#"{"pid": 999999}"#).expect("seed stale discovery pid");
+        assert!(pid_path.exists(), "precondition: stale pid file seeded");
+
+        // Occupy the port first so this run's own bind attempt fails.
+        let blocker = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind blocker");
+        let port = blocker.local_addr().expect("blocker addr").port();
+
+        let result = serve_http_daemon(server, app_home, global_db, None, port).await;
+
+        assert!(
+            result.is_err(),
+            "binding onto an already-occupied port must return Err"
+        );
+        assert!(
+            !pid_path.exists(),
+            "a bind failure must not leave a stale discovery pid file behind"
+        );
+
+        drop(blocker);
     }
 }
