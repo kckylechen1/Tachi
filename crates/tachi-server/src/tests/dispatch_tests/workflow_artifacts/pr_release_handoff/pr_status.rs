@@ -1,8 +1,13 @@
 use super::*;
 
+/// Field bag for shared PR-target helpers (action is ignored by helpers).
+fn pr_field_bag() -> TachiTaskParams {
+    task_params("status")
+}
+
 #[test]
-fn tachi_task_pr_status_parses_repo_number_and_pr_ref() {
-    let mut params = task_params("pr_status");
+fn lifecycle_pr_status_parses_repo_number_and_pr_ref() {
+    let mut params = pr_field_bag();
     params.repo = Some("kckylechen1/tachi".to_string());
     params.number = Some(228);
     assert_eq!(
@@ -32,7 +37,7 @@ fn tachi_task_pr_status_parses_repo_number_and_pr_ref() {
 }
 
 #[test]
-fn tachi_task_pr_status_rejects_ambiguous_pr_refs() {
+fn lifecycle_pr_status_rejects_ambiguous_pr_refs() {
     for pr_ref in [
         "",
         "kckylechen1/tachi#",
@@ -40,7 +45,7 @@ fn tachi_task_pr_status_rejects_ambiguous_pr_refs() {
         "https://github.com/kckylechen1/tachi/issues/228",
         "https://github.com/kckylechen1/tachi/pull/228/files",
     ] {
-        let mut params = task_params("pr_status");
+        let mut params = pr_field_bag();
         params.pr_ref = Some(pr_ref.to_string());
         assert!(
             crate::tools::resolve_task_pr_status_target(&params).is_err(),
@@ -50,8 +55,8 @@ fn tachi_task_pr_status_rejects_ambiguous_pr_refs() {
 }
 
 #[test]
-fn tachi_task_pr_status_builds_safe_merge_preview_params() {
-    let mut params = task_params("pr_status");
+fn lifecycle_pr_status_builds_safe_merge_preview_params() {
+    let mut params = pr_field_bag();
     params.pr_ref = Some("kckylechen1/tachi#228".to_string());
     params.flow_id = Some("flow_pr_status".to_string());
     params.merge_policy = Some("strict".to_string());
@@ -72,13 +77,10 @@ fn tachi_task_pr_status_builds_safe_merge_preview_params() {
     assert_eq!(gh_params.merge_strategy, None);
 }
 
-#[tokio::test]
-async fn tachi_task_pr_status_requires_repo_number_or_parseable_ref() {
-    let server = make_server();
-    let params = task_params("pr_status");
-    let err = server
-        .tachi_task(Parameters(params))
-        .await
+#[test]
+fn lifecycle_pr_status_requires_repo_number_or_parseable_ref() {
+    let params = pr_field_bag();
+    let err = crate::tools::build_task_pr_status_gh_params(&params)
         .expect_err("missing target should fail before GitHub access");
     assert_eq!(
         err,

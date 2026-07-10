@@ -139,7 +139,7 @@ to the correct facade, then deleting duplicate action aliases.
 
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
-| `tachi_task` PR actions | `pr_status`, `pr_handoff`, `release_note`, and related lifecycle branches live inside `crates/tachi-server/src/tools/task_router.rs:237-242`; `docs/engineering/architecture/facade-granularity-and-profile-alignment.md:49-60` identifies duplicated PR lifecycle and self-tuning overload. | `tachi_gh` for PR/GitHub work; `tachi_flow` if lifecycle gets split. | Delete duplicate task actions after migration. | Leaf: remove PR lifecycle duplication from `tachi_task`. |
+| `tachi_task` PR actions | **DONE #757**: removed from `tachi_task` enum/router; canonical only on `tachi_gh`. Shared lifecycle handlers remain under `task_lifecycle` for `tachi_gh` / ship. | `tachi_gh` for PR/GitHub work. | Deleted dual entry. | — |
 | `tachi_task` tuning actions | `route_simulate`, `proposals`, `review_proposal`, `apply_proposals` live at `task_router.rs:177-215`. | Future `tachi_tune`, admin-only. | Extract/quarantine. | Leaf: extract route policy tuning from daily task facade. |
 | `tachi_memory` tuning actions | Existing architecture notes identify recall tuning overload; implementation lives under facade memory ops. | Future `tachi_tune`, admin-only. | Extract/quarantine. | Leaf: extract recall tuning from daily memory facade. |
 | `tachi_save` shorthand | Standard allow-list includes it at `patterns.rs:130`. | `tachi_memory(action="save")`. | Fold candidate, keep only if dogfood proves value. | Dogfood decision after Batch A. |
@@ -158,7 +158,7 @@ runtime escape hatches.
 | Hub governance and VC tools | `hub_*` and `vc_*` admin names at `tool_profile_router_coverage.rs:64-72` and `:106-109`; recommendation/read surfaces remain non-admin. | Keep admin-only, consider a single `tachi_hub` facade later. | Hub is the capability registry behind #745. |
 | Pack/projection tools | `pack_*` and `projection_list` admin names at `tool_profile_router_coverage.rs:77-82`. | Keep admin-only. | Pack lifecycle is operator/admin, not daily MCP. |
 | Raw domain CRUD | Direct tools in `tools.rs:126-160`; admin names at `tool_profile_router_coverage.rs:56`, `:61`, `:75`, `:83`. | Quarantine; likely delete or move under admin facade later. | Domain config is internal routing policy, not a daily tool. |
-| Graph/state primitives | `add_edge`, `set_state`, `get_state` admin names at `tool_profile_router_coverage.rs:54`, `:63`, `:90`; graph read tools remain non-admin. | Keep read graph, quarantine writes. | Direct mutation can corrupt memory graph semantics. |
+| Graph/state primitives | **DONE #757 (stricter)**: MCP registration removed for `add_edge` / `set_state` / `get_state` / `get_edges` / `memory_graph`. Internal `MemoryServer` helpers + store logic kept for in-crate callers. | Internal only; agents use facades. | Internalized off MCP surface. |
 | Runtime/adapter primitives | `recall_context`, `capture_session`, compaction, and section tools live in operate patterns at `patterns.rs:84-108`. | Keep out of standard; do not delete yet. | Host adapters may own these calls. |
 
 ### Batch F: Worker Escape Hatches, Do Not Delete Before Action-Level Filtering

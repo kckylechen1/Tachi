@@ -10,13 +10,11 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     // General Hub discovery remains visible for broad observe profiles; skill
     // workflow discovery should prefer tachi_skill(action='discover').
     "hub_discover",
-    "memory_graph",
     "list_memories",
     "memory_stats",
     "runtime_info",
     "tachi_status",
     "tachi_doctor_scan",
-    "get_edges",
     "wiki_search",
     // Facade read tools
     "tachi_search",

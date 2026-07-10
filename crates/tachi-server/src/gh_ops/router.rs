@@ -253,8 +253,17 @@ fn resolve_tachi_gh_pr_target(
 fn lifecycle_task_params(
     params: &TachiGhParams,
 ) -> Result<crate::tool_params::TachiTaskParams, String> {
-    let value = serde_json::to_value(params)
+    // Handlers ignore `action`; force a valid tachi_task primary so GH lifecycle
+    // action strings (link_pr/pr_status/…) do not fail TachiTaskAction decode
+    // after #757 removed those variants from tachi_task.
+    let mut value = serde_json::to_value(params)
         .map_err(|err| format!("serialize tachi_gh lifecycle params: {err}"))?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "action".to_string(),
+            serde_json::Value::String("status".to_string()),
+        );
+    }
     serde_json::from_value(value)
         .map_err(|err| format!("convert tachi_gh lifecycle params to tachi_task params: {err}"))
 }

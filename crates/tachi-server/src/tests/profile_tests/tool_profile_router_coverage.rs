@@ -78,7 +78,6 @@ fn bundle_count(tool_name: &str) -> usize {
 }
 
 const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
-    "add_edge",
     "chain_skills",
     "check_inbox",
     "delete_domain",
@@ -88,7 +87,6 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "dlq_retry",
     "get_domain",
     "get_memory",
-    "get_state",
     "hub_export_skills",
     "hub_feedback",
     "hub_get",
@@ -113,7 +111,6 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "sandbox_set_rule",
     "save_memory",
     "search_memory",
-    "set_state",
     "skill_evolve",
     "tachi_audit_log",
     "tachi_init_project_db",
@@ -134,6 +131,15 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "vc_register",
     "vc_resolve",
     "update_card",
+];
+
+/// #757: graph/state primitives internalized — no longer MCP-registered.
+const INTERNALIZED_GRAPH_STATE_MCP_NAMES: &[&str] = &[
+    "add_edge",
+    "set_state",
+    "get_state",
+    "get_edges",
+    "memory_graph",
 ];
 
 const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
@@ -294,6 +300,37 @@ fn retired_native_aliases_stay_retired() {
         assert!(
             !cacheable.contains(alias) && !invalidating.contains(alias),
             "retired native alias '{alias}' must not remain in cache policy lists"
+        );
+    }
+}
+
+/// Discrimination (#757): graph/state primitives must not reappear on the MCP
+/// router. Internal `MemoryServer` helpers and store logic may still exist.
+#[test]
+fn f757_graph_state_primitives_are_not_mcp_registered() {
+    let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
+    let cacheable: BTreeSet<&str> = crate::server_state::CACHEABLE_TOOLS
+        .iter()
+        .copied()
+        .collect();
+    let invalidating: BTreeSet<&str> = crate::server_state::CACHE_INVALIDATING_TOOLS
+        .iter()
+        .copied()
+        .collect();
+
+    for name in INTERNALIZED_GRAPH_STATE_MCP_NAMES {
+        assert!(
+            !route_names.contains(*name),
+            "internalized graph/state tool '{name}' must not be registered on the MCP router"
+        );
+        assert_eq!(
+            bundle_count(name),
+            0,
+            "internalized graph/state tool '{name}' must not appear in profile bundles"
+        );
+        assert!(
+            !cacheable.contains(name) && !invalidating.contains(name),
+            "internalized graph/state tool '{name}' must not remain in cache policy lists"
         );
     }
 }

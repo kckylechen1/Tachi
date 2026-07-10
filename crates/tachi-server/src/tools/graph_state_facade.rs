@@ -1,5 +1,10 @@
+//! Internal graph/state helpers (not MCP-registered after #757).
+//!
+//! Low-level primitives remain callable by in-crate code and unit tests via
+//! these `MemoryServer` methods. Store logic lives in `graph_state_ops` /
+//! memcore — only the MCP surface registration was removed.
+
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_router};
 
 use crate::graph_state_ops::{
     handle_add_edge, handle_get_edges, handle_get_state, handle_memory_graph, handle_set_state,
@@ -9,11 +14,8 @@ use crate::tool_params::{
 };
 use crate::MemoryServer;
 
-#[tool_router(router = graph_state_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
-    #[tool(
-        description = "Add or update an edge in the memory graph. Edges represent causal, temporal, or entity relationships between memories."
-    )]
+    /// Add or update an edge in the memory graph (internal; not MCP-registered).
     pub(crate) async fn add_edge(
         &self,
         Parameters(params): Parameters<AddEdgeParams>,
@@ -21,9 +23,7 @@ impl MemoryServer {
         handle_add_edge(self, params).await
     }
 
-    #[tool(
-        description = "Get edges connected to a memory entry. Returns causal, temporal, and entity relationship edges."
-    )]
+    /// Get edges connected to a memory entry (internal; not MCP-registered).
     pub(crate) async fn get_edges(
         &self,
         Parameters(params): Parameters<GetEdgesParams>,
@@ -31,9 +31,7 @@ impl MemoryServer {
         handle_get_edges(self, params).await
     }
 
-    #[tool(
-        description = "Inspect a read-only neighborhood from the memory graph, seeded by memory id or a search query. Returns seed nodes, neighboring nodes, and connecting edges."
-    )]
+    /// Inspect a read-only graph neighborhood (internal; not MCP-registered).
     pub(crate) async fn memory_graph(
         &self,
         Parameters(params): Parameters<MemoryGraphParams>,
@@ -46,7 +44,7 @@ impl MemoryServer {
         handle_memory_graph(self, params).await
     }
 
-    #[tool(description = "Set a key-value pair in server state (stored in hard_state table).")]
+    /// Set hard_state key/value (internal; not MCP-registered).
     pub(crate) async fn set_state(
         &self,
         Parameters(params): Parameters<SetStateParams>,
@@ -54,7 +52,7 @@ impl MemoryServer {
         handle_set_state(self, params).await
     }
 
-    #[tool(description = "Get a value from server state by key.")]
+    /// Get hard_state value by key (internal; not MCP-registered).
     pub(crate) async fn get_state(
         &self,
         Parameters(params): Parameters<GetStateParams>,

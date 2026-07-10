@@ -1,15 +1,19 @@
 use super::*;
 
 #[tokio::test]
-async fn standard_profile_direct_add_edge_call_is_rejected() {
+async fn f757_direct_add_edge_call_is_not_registered() {
+    // #757: add_edge is internalized — missing from the router for every
+    // profile (not merely profile-hidden). Discrimination: call still returns
+    // tool-not-found rather than executing graph mutation.
     let server = make_server();
+    // Admin profile would have exposed admin-only tools if they were registered.
     server.set_tool_profile(Some(
-        tachi_hub::parse_tool_profile("standard").expect("standard profile should parse"),
+        tachi_hub::parse_tool_profile("admin").expect("admin profile should parse"),
     ));
 
     let result = call_tool_via_server(server, "add_edge", None)
         .await
-        .expect("hidden tool should return a tool-level error, not a transport error");
+        .expect("unregistered tool should return a tool-level error, not a transport error");
 
     assert_eq!(result.is_error, Some(true));
     let message = result
@@ -18,8 +22,10 @@ async fn standard_profile_direct_add_edge_call_is_rejected() {
         .and_then(|content| content.as_text())
         .map(|text| text.text.as_str())
         .unwrap_or("");
-    assert!(message.contains("tool not found"));
-    assert!(message.contains("tachi_tools"));
+    assert!(
+        message.contains("tool not found"),
+        "expected tool not found for internalized add_edge, got: {message}"
+    );
 }
 
 #[tokio::test]

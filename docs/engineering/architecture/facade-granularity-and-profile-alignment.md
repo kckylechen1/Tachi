@@ -46,10 +46,9 @@ It answers three questions raised during a facade review:
 
 ### Concrete confusion points
 
-1. **PR lifecycle is defined twice.** `link_pr` / `pr_status` / `pr_handoff` / `release_note` exist in
-   both `tachi_task` and `tachi_gh`. The schema itself says *"remain accepted here for compatibility,
-   but their canonical surface is `tachi_gh`"* — the designers already know it is redundant. Agents
-   must guess which entry point to call every time.
+1. **PR lifecycle dual entry (resolved #757).** `link_pr` / `pr_status` / `pr_handoff` / `release_note`
+   now live only on `tachi_gh`. The previous `tachi_task` compatibility aliases were deleted so agents
+   no longer guess which entry point to call.
 2. **`merge` is semantically split.** `tachi_task(merge)` = local worktree merge;
    `tachi_gh(safe_merge)` = GitHub PR merge. Same word, different machine.
 3. **`briefing` appears in three places** — `tachi_briefing` (standalone), `tachi_memory(briefing)`,
