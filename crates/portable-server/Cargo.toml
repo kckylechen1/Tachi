@@ -58,3 +58,9 @@ reqwest = { package = "reqwest", version = "0.13", default-features = false, fea
 # rationale as `tachi-llm::install_tls_provider` (cheaper cold build than
 # the `aws-lc-rs` backend `reqwest`'s own `rustls` feature would pull in).
 rustls = { workspace = true }
+# `test-util` for `#[tokio::test(start_paused = true)]` + virtual-time
+# `sleep`: lets `http.rs`'s watchdog test exercise the real
+# 30s-interval/3-failure liveness loop deterministically and in milliseconds
+# instead of ~90s of real wall-clock sleep. Same pattern as tachi-server's
+# own `[dev-dependencies]` tokio bump (see its Cargo.toml).
+tokio = { version = "1", features = ["test-util", "macros", "rt", "time"] }
