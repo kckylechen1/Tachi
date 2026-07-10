@@ -80,10 +80,9 @@ pub use search::{
 };
 pub use types::{
     AuthorityLevel, ContinuityCandidate, ContinuityCandidateBatch, ContinuityMetrics,
-    ContinuityOutcomeLabel, DomainConfig, EffectScope, GcConfig, GraphExpandResult, HybridScore,
-    MemoryEdge, MemoryEntry, MetricCount, OutcomeEvidenceBasis, ProjectionKind, RetentionPolicy,
-    SearchResult, SessionOutcomeKind, SessionOutcomeMetrics, StatsResult, TachiEventQuery,
-    TachiEventRecord,
+    ContinuityOutcomeLabel, EffectScope, GcConfig, GraphExpandResult, HybridScore, MemoryEdge,
+    MemoryEntry, MetricCount, OutcomeEvidenceBasis, ProjectionKind, RetentionPolicy, SearchResult,
+    SessionOutcomeKind, SessionOutcomeMetrics, StatsResult, TachiEventQuery, TachiEventRecord,
 };
 #[cfg(feature = "admin")]
 pub use vault::{

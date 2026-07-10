@@ -9,10 +9,13 @@ owns that DB -- it takes a momentary shared read lock exactly like any other
 SQLite reader, which is safe to run against a live WAL-mode writer.
 
 Schema note (verified by reading crates/memcore source, not guessed):
-  - `memories` table: crates/memcore/src/db/schema/ddl.rs -- there is no
-    `domain` column on `memories` itself (a separate `domains` config table
-    exists for per-domain GC settings, unrelated to per-row tagging). The
-    per-row taxonomy fields actually present are `category` and `topic`.
+  - `memories` table: crates/memcore/src/db/schema/ddl.rs -- `memories` DOES
+    carry a free-text `domain` TEXT column (per-row tagging, filterable via
+    `save_memory`/`search_memory`), but this script does not export it --
+    the per-row taxonomy fields it exports are `category` and `topic`.
+    (The separate `domains` registry table for per-domain GC/retention
+    config was feature-dead and removed in #757; it never had rows and is
+    unrelated to the per-row `domain` column, which is untouched.)
     This script exports the REAL columns, not the ones a spec might guess.
   - Vector storage: `memories_vec` is a sqlite-vec `vec0` virtual table
     (crates/memcore/src/db/sqlite_vec.rs), schema

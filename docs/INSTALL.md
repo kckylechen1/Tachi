@@ -503,10 +503,9 @@ Once connected, Tachi exposes a profile-filtered MCP surface. The full `admin` c
 `get_memory` remains available in the full admin/backcompat catalog. Daily
 agent profiles should use `tachi_memory(action="get")` instead.
 
-### Knowledge Graph & Domains
+### Knowledge Graph
 
 `add_edge`, `get_edges`, `memory_graph`
-`register_domain`, `get_domain`, `list_domains`, `delete_domain`
 
 ### State & Config
 

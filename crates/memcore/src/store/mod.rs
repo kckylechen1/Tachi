@@ -27,7 +27,6 @@ pub mod crud;
 pub mod daily_pipeline;
 pub mod derived;
 pub mod distill;
-pub mod domain;
 pub mod enrichment;
 pub mod events;
 pub mod gc_candidates;
