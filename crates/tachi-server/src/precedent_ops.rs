@@ -14,11 +14,21 @@
 //!    fails the enclosing `complete` call — completion recording is the primary
 //!    contract; precedent capture is best-effort alongside it.
 //!
-//! Rows go through the standard `save_eval_memory` pipeline so they inherit the
-//! same secret-scrubbing, validation, and enrichment as every other memory
-//! write. Structured fields live in `metadata`; a human-readable rendering is
-//! the body; provenance (`dispatch_id` / `flow_id` / `issue_ref` / `pr_ref`)
-//! carried on the completion is linked into both.
+//! Rows go through the standard `save_eval_memory` pipeline, and the pipeline
+//! itself only scrubs `text`/`summary` for secrets — `metadata` is opaque to
+//! it. So every caller-supplied ruling string (`case`, `ruling`,
+//! `options_considered`, `principles_cited`, `overturned_by`) is scrubbed
+//! *before* it goes into the body, the summary, and the metadata payload
+//! (mirroring the `complete_ops::scrub` convention `tachi_complete` itself
+//! uses for the eval record). Provenance (`dispatch_id` / `flow_id` /
+//! `issue_ref` / `pr_ref`) carried on the completion is linked into both.
+//!
+//! The capture gate (`memory-server-capture-gate`) can hard-reject a save
+//! under `TACHI_CAPTURE_GATE=enforce` (path bucket, domain, min-chars,
+//! markdown-dump heuristics); a rejected save still returns `Ok(..)` from
+//! `save_eval_memory` with `saved:false` and no `id`. That response is
+//! detected and routed to `skipped`, never counted as `recorded` — a rejected
+//! precedent must never be silently reported as captured.
 //!
 //! Category decision (documented per issue #950): rows are stored as the
 //! existing `decision` category with `metadata.kind = "precedent"` as the
@@ -130,6 +140,39 @@ struct NormalizedRuling {
     overturned_by: Option<String>,
 }
 
+/// Scrub every free-text field of a normalized ruling for secrets, in place.
+/// `save_eval_memory`'s pipeline only scrubs `text`/`summary` on the way in;
+/// `metadata` is opaque to it, and the ruling's own body/summary are built
+/// from these fields *before* that pipeline runs. Scrubbing here up front
+/// (rather than relying on the pipeline) guarantees the metadata copy is
+/// redacted identically to the body/summary. Returns the total redaction
+/// count across all fields.
+fn scrub_ruling(n: &mut NormalizedRuling) -> usize {
+    let mut redactions = 0usize;
+    let (case, c) = crate::memory_search_ops::scrub_secrets(&n.case);
+    n.case = case;
+    redactions += c;
+    let (ruling, c) = crate::memory_search_ops::scrub_secrets(&n.ruling);
+    n.ruling = ruling;
+    redactions += c;
+    if let Some(options) = &n.options_considered {
+        let (safe, c) = crate::memory_search_ops::scrub_secrets(options);
+        n.options_considered = Some(safe);
+        redactions += c;
+    }
+    for principle in &mut n.principles_cited {
+        let (safe, c) = crate::memory_search_ops::scrub_secrets(principle);
+        *principle = safe;
+        redactions += c;
+    }
+    if let Some(overturned_by) = &n.overturned_by {
+        let (safe, c) = crate::memory_search_ops::scrub_secrets(overturned_by);
+        n.overturned_by = Some(safe);
+        redactions += c;
+    }
+    redactions
+}
+
 /// Truncate a single line to at most `max` chars for the ≤100-char summary
 /// field, appending an ellipsis when cut.
 fn summary_line(case: &str, max: usize) -> String {
@@ -176,7 +219,10 @@ fn render_body(n: &NormalizedRuling, params: &TachiCompleteParams) -> String {
 }
 
 /// Build the structured metadata payload carried on the precedent row.
-fn build_metadata(n: &NormalizedRuling, params: &TachiCompleteParams) -> Value {
+/// `n` must already be scrubbed (see `scrub_ruling`); `redactions` is
+/// surfaced so a scrubbed row is visibly marked, matching the eval-record
+/// convention (`complete_ops::eval_record`).
+fn build_metadata(n: &NormalizedRuling, params: &TachiCompleteParams, redactions: usize) -> Value {
     let mut map = Map::new();
     map.insert("kind".into(), json!("precedent"));
     map.insert("case".into(), json!(n.case));
@@ -204,7 +250,41 @@ fn build_metadata(n: &NormalizedRuling, params: &TachiCompleteParams) -> Value {
     if let Some(pref) = params.pr_ref.as_deref().filter(|s| !s.is_empty()) {
         map.insert("pr_ref".into(), json!(pref));
     }
+    if redactions > 0 {
+        map.insert("secret_redactions".into(), json!(redactions));
+        map.insert(
+            "secret_redaction_warning".into(),
+            json!("Potential secrets were redacted from this ruling before persistence."),
+        );
+    }
     Value::Object(map)
+}
+
+/// Detect whether a `save_eval_memory` response actually persisted a row.
+/// The capture gate (and the noise filter) can hard-reject a save under
+/// `TACHI_CAPTURE_GATE=enforce`; the rejection response is still `Ok(..)` at
+/// the `save_eval_memory` layer (it's a structured "not saved" JSON body, not
+/// an `Err`), so the only reliable signal is a present, non-empty `id`. A
+/// legitimate exact-duplicate response also carries a real `id` (the existing
+/// row's), so this correctly counts that as recorded rather than skipped.
+fn extract_persisted_id(saved: &Value) -> Result<String, String> {
+    match saved.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        Some(id) => Ok(id.to_string()),
+        None => {
+            if let Some(reason) = saved.get("reason").and_then(Value::as_str) {
+                Err(reason.to_string())
+            } else if let Some(rejected_by) = saved.get("rejected_by").and_then(Value::as_str) {
+                let violations = saved
+                    .get("violations")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                Err(format!("rejected_by={rejected_by} violations={violations}"))
+            } else {
+                Err("save response carried no id (rejected by capture gate or noise filter)"
+                    .to_string())
+            }
+        }
+    }
 }
 
 /// Persist every caller-supplied ruling on a `complete` call as a `/precedents`
@@ -227,7 +307,7 @@ pub(crate) async fn record_complete_rulings(
     let mut skipped: Vec<Value> = Vec::new();
 
     for ruling in &params.rulings {
-        let normalized = match normalize_ruling(ruling) {
+        let mut normalized = match normalize_ruling(ruling) {
             Ok(n) => n,
             Err(reason) => {
                 tracing::warn!(reason = %reason, "skipping malformed precedent ruling");
@@ -235,6 +315,8 @@ pub(crate) async fn record_complete_rulings(
                 continue;
             }
         };
+        let redactions = scrub_ruling(&mut normalized);
+        let normalized = normalized;
 
         let short_id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
         let path = format!("/precedents/{project}/{date}-{short_id}");
@@ -273,24 +355,31 @@ pub(crate) async fn record_complete_rulings(
             timestamp: None,
             valid_from: None,
             valid_until: None,
-            metadata: Some(build_metadata(&normalized, params)),
+            metadata: Some(build_metadata(&normalized, params, redactions)),
             emit_continuity: false,
         };
 
         match save_eval_memory(server, mem_params).await {
             Ok(raw) => {
-                let saved: Value = serde_json::from_str(&raw)
-                    .unwrap_or_else(|_| json!({ "raw": raw }));
-                let id = saved
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                recorded.push(json!({
-                    "case": normalized.case,
-                    "outcome": normalized.outcome,
-                    "path": path,
-                    "id": id,
-                }));
+                let saved: Value =
+                    serde_json::from_str(&raw).unwrap_or_else(|_| json!({ "raw": raw }));
+                match extract_persisted_id(&saved) {
+                    Ok(id) => {
+                        recorded.push(json!({
+                            "case": normalized.case,
+                            "outcome": normalized.outcome,
+                            "path": path,
+                            "id": id,
+                        }));
+                    }
+                    Err(reason) => {
+                        tracing::warn!(
+                            reason = %reason,
+                            "precedent ruling rejected by capture gate/noise filter"
+                        );
+                        skipped.push(json!({ "case": normalized.case, "reason": reason }));
+                    }
+                }
             }
             Err(err) => {
                 tracing::warn!(error = %err, "failed to persist precedent ruling");

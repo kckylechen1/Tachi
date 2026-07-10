@@ -109,7 +109,18 @@ fn receipt_eval_entry(value: Option<&Value>) -> Value {
 }
 
 /// Pipeline stages whose value is structured route output, not a single status scalar.
-const PIPELINE_VARIANT_OBJECT_STAGES: &[&str] = &["pattern_feedback", "kanban_update"];
+///
+/// `precedent_recording` carries `{recorded, skipped}` (#950/#962): without
+/// this entry, `pipeline_stage_status`'s generic object handling below drops
+/// straight to the `recorded` field and silently discards `skipped`, so a
+/// capture-gate rejection under the *default* (non-`full`) receipt format
+/// looked identical to a clean run — exactly the silent-data-loss shape this
+/// module exists to prevent. `signature_recording` (`signature_evidence.rs`)
+/// returns the same `{recorded, skipped}` shape and has the identical latent
+/// gap; it is not added here because fixing it is outside this fix's scope,
+/// but the same one-line addition is the fix if/when it's picked up.
+const PIPELINE_VARIANT_OBJECT_STAGES: &[&str] =
+    &["pattern_feedback", "kanban_update", "precedent_recording"];
 
 fn pipeline_stage_status(value: &Value) -> Option<Value> {
     match value {
