@@ -152,9 +152,9 @@ impl MemoryServer {
                 mcp_tool_exposure_mode,
             }),
             pool: Arc::new(McpClientPool::new()),
-            // graph_state_facade methods (add_edge/get_edges/memory_graph/
-            // set_state/get_state) stay as in-crate helpers only — not composed
-            // into the MCP tool router (#757 surface prune).
+            // graph/state primitives (add_edge/get_edges/memory_graph/
+            // set_state/get_state) were deleted outright (#757 surface prune;
+            // #913 dead-code round found zero remaining in-crate callers).
             tool_router: Self::continuity_tool_router()
                 + Self::component_tool_router()
                 + Self::agent_profile_tool_router()

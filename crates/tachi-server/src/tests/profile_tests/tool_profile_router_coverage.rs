@@ -133,7 +133,10 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "update_card",
 ];
 
-/// #757: graph/state primitives internalized — no longer MCP-registered.
+/// #757: graph/state primitives are no longer MCP-registered. #913 deleted
+/// the in-crate handler/facade layer outright (zero remaining callers), so
+/// these names must never resurface as routed tools, bundle members, or
+/// cache-policy entries.
 const INTERNALIZED_GRAPH_STATE_MCP_NAMES: &[&str] = &[
     "add_edge",
     "set_state",
@@ -305,7 +308,9 @@ fn retired_native_aliases_stay_retired() {
 }
 
 /// Discrimination (#757): graph/state primitives must not reappear on the MCP
-/// router. Internal `MemoryServer` helpers and store logic may still exist.
+/// router. The in-crate handler/facade layer was deleted in #913 (dead code,
+/// zero callers); only the memcore store layer (with its own live callers —
+/// auto_link, contradiction, etc.) remains.
 #[test]
 fn f757_graph_state_primitives_are_not_mcp_registered() {
     let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
