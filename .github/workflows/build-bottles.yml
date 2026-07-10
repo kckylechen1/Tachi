@@ -85,10 +85,39 @@ jobs:
       - name: Build bottle
         run: brew install --build-bottle kckylechen1/tachi/tachi
 
+      - name: Codesign built binary (#937)
+        run: |
+          set -euo pipefail
+          BOTTLE_BIN="$(brew --prefix tachi)/bin/tachi"
+          echo ">> codesign --force -s - $BOTTLE_BIN"
+          codesign --force -s - "$BOTTLE_BIN"
+
       - name: Create bottle
         run: |
           brew bottle --json --no-rebuild tachi
           ls -la tachi--*.tar.gz tachi--*.json
+
+      - name: Verify codesign (#937)
+        run: |
+          set -euo pipefail
+          for bottle in tachi--*.tar.gz; do
+            [ -f "$bottle" ] || continue
+            TMP_DIR="$(mktemp -d)"
+            tar -xzf "$bottle" -C "$TMP_DIR"
+            BIN="$(find "$TMP_DIR" -type f -name tachi -perm -u+x | head -n1)"
+            if [ -z "$BIN" ]; then
+              echo "error: could not locate tachi binary inside $bottle" >&2
+              exit 1
+            fi
+            echo "== codesign -dv ($bottle) =="
+            codesign -dv "$BIN" 2>&1 | tee /tmp/codesign-out.txt
+            if grep -q "linker-signed" /tmp/codesign-out.txt; then
+              echo "error: $BIN (from $bottle) is still linker-signed" >&2
+              exit 1
+            fi
+            echo "== codesign --verify ($bottle) =="
+            codesign --verify --strict "$BIN"
+          done
 
       - name: Upload bottle artifact
         uses: actions/upload-artifact@v7

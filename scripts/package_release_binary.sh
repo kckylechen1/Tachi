@@ -107,6 +107,16 @@ mkdir -p "$STAGE"
 cp "$BIN_PATH" "$STAGE/tachi"
 chmod +x "$STAGE/tachi"
 
+# Ad-hoc re-sign (#937): Apple's linker ad-hoc-signs at build time
+# ("Signature=linker-signed"), which launchd/AMFI rejects when the binary is
+# spawned as a daemon. Force a real ad-hoc signature on the staged, final-name
+# binary so what we sign is what ships. macOS-only — this script may run its
+# build step on non-mac hosts for other triples, so guard on the tool.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  echo ">> codesign --force -s - $STAGE/tachi"
+  codesign --force -s - "$STAGE/tachi"
+fi
+
 # Prefer BSD/GNU portable tar from stage parent.
 (
   cd "$OUT_DIR"

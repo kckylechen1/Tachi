@@ -89,6 +89,25 @@ jobs:
           scripts/package_release_binary.sh "${{ needs.resolve-version.outputs.version }}" \
             --triple "${{ matrix.triple }}"
 
+      - name: Verify codesign (#937)
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          TRIPLE: ${{ matrix.triple }}
+        run: |
+          set -euo pipefail
+          ASSET_STEM="tachi-v${VERSION}-${TRIPLE}"
+          TMP_DIR="$(mktemp -d)"
+          tar -xzf "${ASSET_STEM}.tar.gz" -C "$TMP_DIR"
+          BIN="$TMP_DIR/${ASSET_STEM}/tachi"
+          echo "== codesign -dv (${ASSET_STEM}) =="
+          codesign -dv "$BIN" 2>&1 | tee /tmp/codesign-out.txt
+          if grep -q "linker-signed" /tmp/codesign-out.txt; then
+            echo "error: $BIN is still linker-signed — the packaging step's ad-hoc re-sign did not take effect" >&2
+            exit 1
+          fi
+          echo "== codesign --verify (${ASSET_STEM}) =="
+          codesign --verify --strict "$BIN"
+
       - name: Upload tarball artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
