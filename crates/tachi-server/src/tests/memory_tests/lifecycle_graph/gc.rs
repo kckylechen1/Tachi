@@ -51,7 +51,9 @@ async fn memory_gc_prunes_expired_resolved_kanban_cards() {
         })
         .expect("failed to age kanban card");
 
-    let gc = server.memory_gc().await.expect("memory_gc should succeed");
+    let gc = crate::memory_ops::handle_memory_gc(&server)
+        .await
+        .expect("memory_gc should succeed");
     let gc_json: serde_json::Value =
         serde_json::from_str(&gc).expect("memory_gc response should be JSON");
     assert_eq!(gc_json["global"]["kanban_cards_pruned"], json!(1));

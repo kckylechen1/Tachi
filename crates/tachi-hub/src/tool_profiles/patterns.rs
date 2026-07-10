@@ -15,7 +15,6 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "memory_stats",
     "runtime_info",
     "tachi_status",
-    "tachi_doctor_scan",
     "get_edges",
     "wiki_search",
     // Facade read tools

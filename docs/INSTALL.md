@@ -498,10 +498,12 @@ Once connected, Tachi exposes a profile-filtered MCP surface. The full `admin` c
 
 ### Core Memory
 
-`save_memory`, `search_memory`, `get_memory`, `list_memories`, `delete_memory`, `archive_memory`, `memory_stats`, `memory_gc`, `remember`, `find_similar_memory`
+`save_memory`, `search_memory`, `get_memory`, `list_memories`, `archive_memory`, `memory_stats`, `remember`, `find_similar_memory`
 
 `get_memory` remains available in the full admin/backcompat catalog. Daily
-agent profiles should use `tachi_memory(action="get")` instead.
+agent profiles should use `tachi_memory(action="get")` instead. Permanent
+deletion and garbage collection are folded into `tachi_memory(action="delete")`
+and `tachi_memory(action="gc")` (#757).
 
 ### Knowledge Graph & Domains
 
@@ -514,7 +516,10 @@ agent profiles should use `tachi_memory(action="get")` instead.
 
 ### Extraction & Ingestion
 
-`extract_facts`, `ingest_event`, `ingest`, `ingest_source`
+`extract_facts`, `ingest_event`
+
+Source/event ingestion is folded into `tachi_memory(action="ingest")` and
+`tachi_memory(action="ingest_source")` (#757).
 
 ### Neural Foundry (Context Lifecycle & Evolution)
 
@@ -621,7 +626,9 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 ### Utilities
 
-`skill_evolve`, `run_skill`, `chain_skills`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`, `tachi_doctor_scan`
+`skill_evolve`, `run_skill`, `chain_skills`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`
+
+`tachi_doctor_scan` is folded into `tachi_memory(action="doctor_scan")` (#757).
 
 ---
 

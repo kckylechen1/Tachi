@@ -51,6 +51,18 @@ fn memory_save_params(text: String, path: &str, format: Option<&str>) -> TachiMe
         notes: None,
         confirm: false,
         state_filter: None,
+        content: None,
+        ingest_type: "source".to_string(),
+        source_url: None,
+        auto_chunk: true,
+        auto_summarize: true,
+        auto_link: true,
+        chunk_size_chars: 1200,
+        chunk_overlap_chars: 120,
+        conversation_id: None,
+        turn_id: None,
+        event_type: None,
+        messages: Vec::new(),
     }
 }
 
@@ -227,6 +239,18 @@ async fn g5_checkpoint_receipt_default_under_500_bytes() {
             notes: None,
             confirm: false,
             state_filter: None,
+            content: None,
+            ingest_type: "source".to_string(),
+            source_url: None,
+            auto_chunk: true,
+            auto_summarize: true,
+            auto_link: true,
+            chunk_size_chars: 1200,
+            chunk_overlap_chars: 120,
+            conversation_id: None,
+            turn_id: None,
+            event_type: None,
+            messages: Vec::new(),
         },
     )
     .await

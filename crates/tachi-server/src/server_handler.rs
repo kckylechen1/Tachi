@@ -94,9 +94,7 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
     );
     let destructive = matches!(
         name,
-        "delete_memory"
-            | "archive_memory"
-            | "memory_gc"
+        "archive_memory"
             | "tachi_task"
             | "tachi_shell"
             | "tachi_orchestrator"
