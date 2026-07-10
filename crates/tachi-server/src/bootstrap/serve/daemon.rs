@@ -203,6 +203,74 @@ pub(super) async fn serve_http_daemon(
         });
     }
 
+    // Liveness watchdog (#936): launchd checks the *process*, not the
+    // *service*. This self-probe hits `/health` through the real TCP listener
+    // (never the handler fn directly) every interval; after N consecutive
+    // failures it presumes the HTTP/MCP surface wedged (§ the incident's
+    // "background-alive, HTTP-dead" class) and `exit(2)` so KeepAlive respawns.
+    // It shares `ct` so a normal shutdown stops it cleanly without false-firing,
+    // and it only counts failures after a grace window or the first success.
+    if let Some((watchdog_interval, watchdog_fails)) = daemon_watchdog_config() {
+        let ct_watchdog = ct.clone();
+        let health_url = format!("http://{bind_addr}/health");
+        let grace = daemon_watchdog_grace();
+        tokio::spawn(async move {
+            // reqwest is built with `rustls-no-provider`; install the crypto
+            // provider before building any client or `.build()` panics (even
+            // for loopback http, the builder resolves the provider eagerly).
+            crate::ensure_tls_provider();
+            let client = match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[watchdog] failed to build probe client: {e}; liveness watchdog disabled");
+                    return;
+                }
+            };
+            eprintln!(
+                "[watchdog] liveness watchdog armed: probing {health_url} every {}s, exit after {watchdog_fails} consecutive failures (grace {}s)",
+                watchdog_interval.as_secs(),
+                grace.as_secs()
+            );
+            let mut counter = WatchdogCounter::new(watchdog_fails);
+            let started = std::time::Instant::now();
+            loop {
+                tokio::select! {
+                    _ = ct_watchdog.cancelled() => break,
+                    _ = tokio::time::sleep(watchdog_interval) => {}
+                }
+                let probe = match client.get(&health_url).send().await {
+                    Ok(resp) if resp.status().is_success() => Probe::Healthy,
+                    Ok(resp) => {
+                        eprintln!("[watchdog] /health returned {}", resp.status());
+                        Probe::Unreachable
+                    }
+                    Err(e) => {
+                        eprintln!("[watchdog] /health probe failed: {e}");
+                        Probe::Unreachable
+                    }
+                };
+                let grace_elapsed = started.elapsed() >= grace;
+                match counter.record(probe, grace_elapsed) {
+                    WatchdogVerdict::Continue => {}
+                    WatchdogVerdict::Exit(code) => {
+                        // Re-check cancellation: a shutdown racing an in-flight
+                        // failing probe must not be mistaken for a wedge.
+                        if ct_watchdog.is_cancelled() {
+                            break;
+                        }
+                        eprintln!(
+                            "[fatal] [watchdog] /health unreachable {watchdog_fails} consecutive time(s); HTTP surface presumed dead — exiting {code} so launchd respawns a serving daemon"
+                        );
+                        std::process::exit(code);
+                    }
+                }
+            }
+        });
+    }
+
     let health_server = server.clone();
 
     let mut http_config = StreamableHttpServerConfig::default();
@@ -287,8 +355,24 @@ pub(super) async fn serve_http_daemon(
     tokio::select! {
         result = axum::serve(listener, router)
             .with_graceful_shutdown(async move { ct_shutdown.cancelled_owned().await }) => {
-            if let Err(e) = result {
-                eprintln!("HTTP server error: {e}");
+            // FAIL-LOUD serve contract (#936): the HTTP serve future must only
+            // resolve because we asked it to (SIGINT/SIGTERM/idle-reaper cancels
+            // `ct`, which `ct_shutdown` clones). Any *self-initiated* completion
+            // — accept loop ending on its own (`Ok`) or an `axum::serve` error
+            // (`Err`) — means the MCP/HTTP surface is dead while the process is
+            // otherwise alive. Before this fix both were swallowed and the fn
+            // returned `Ok(())` unconditionally, so the process kept running
+            // deaf and launchd saw `state=running`. Now we exit non-zero so
+            // `KeepAlive` respawns a daemon that can actually serve.
+            match serve_exit_decision(&result, ct.is_cancelled()) {
+                ExitDecision::Clean => {
+                    eprintln!("[daemon] HTTP serve future completed after a shutdown signal");
+                }
+                ExitDecision::Fatal { code, reason } => {
+                    eprintln!("[fatal] {reason}; exiting {code} so launchd respawns a serving daemon");
+                    let _ = tokio::fs::remove_file(&pid_path_cleanup).await;
+                    std::process::exit(code);
+                }
             }
         }
         _ = tokio::signal::ctrl_c() => {
@@ -344,6 +428,106 @@ pub(crate) fn daemon_health_payload(
             "docs": "docs/engineering/architecture/http-direct-connect.md"
         },
     })
+}
+
+/// What to do once the HTTP serve future has resolved (#936). Factored out of
+/// the `tokio::select!` arm so the fail-loud decision is a pure function that
+/// tests can assert on — `std::process::exit` lives at the single call site.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ExitDecision {
+    /// The serve future resolved because we asked it to (`ct` was cancelled by
+    /// a signal/idle-reaper). Fall through to normal graceful teardown.
+    Clean,
+    /// The serve future resolved on its own — a dead surface. Log and exit
+    /// non-zero so launchd respawns.
+    Fatal { code: i32, reason: String },
+}
+
+/// Fail-loud serve contract. `result` is the output of `axum::serve(..).await`;
+/// `ct_cancelled` is whether the daemon's shutdown token was cancelled (i.e. we
+/// asked the surface to stop). An `Ok` with no shutdown signal means the accept
+/// loop ended unexpectedly; an `Err` is always a fatal serve error.
+pub(super) fn serve_exit_decision(
+    result: &std::io::Result<()>,
+    ct_cancelled: bool,
+) -> ExitDecision {
+    match result {
+        Ok(()) if ct_cancelled => ExitDecision::Clean,
+        Ok(()) => ExitDecision::Fatal {
+            code: 1,
+            reason: "HTTP serve future returned Ok without a shutdown signal (accept loop ended unexpectedly — MCP/HTTP surface is dead)".to_string(),
+        },
+        Err(e) => ExitDecision::Fatal {
+            code: 1,
+            reason: format!("HTTP serve future returned error: {e}"),
+        },
+    }
+}
+
+/// Outcome of a single watchdog self-probe (#936).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Probe {
+    /// `/health` answered with a success status through the real socket.
+    Healthy,
+    /// The probe failed: connection refused, timeout, or non-success status.
+    Unreachable,
+}
+
+/// What the watchdog loop should do after recording a probe (#936).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum WatchdogVerdict {
+    Continue,
+    Exit(i32),
+}
+
+/// Consecutive-failure state machine for the liveness watchdog (#936). Kept
+/// pure and side-effect-free so the exit logic is unit-testable without a live
+/// socket or `std::process::exit`. Failures before the surface is "armed" (the
+/// grace window has elapsed, or a first success was observed) are ignored to
+/// avoid a false-positive exit storm during a slow startup; any success resets
+/// the counter.
+pub(super) struct WatchdogCounter {
+    max_failures: u32,
+    consecutive_failures: u32,
+    armed: bool,
+}
+
+impl WatchdogCounter {
+    pub(super) fn new(max_failures: u32) -> Self {
+        Self {
+            max_failures,
+            consecutive_failures: 0,
+            armed: false,
+        }
+    }
+
+    /// Record one probe outcome. `grace_elapsed` = the post-bind grace window
+    /// has passed. Returns whether the daemon should exit.
+    pub(super) fn record(&mut self, probe: Probe, grace_elapsed: bool) -> WatchdogVerdict {
+        match probe {
+            Probe::Healthy => {
+                self.armed = true;
+                self.consecutive_failures = 0;
+                WatchdogVerdict::Continue
+            }
+            Probe::Unreachable => {
+                if !self.armed && !grace_elapsed {
+                    // Still inside the startup grace window and never healthy
+                    // yet — do not count this as a wedge.
+                    return WatchdogVerdict::Continue;
+                }
+                // Grace elapsed arms the counter even without a prior success:
+                // a surface that never once answered is itself a failure.
+                self.armed = true;
+                self.consecutive_failures += 1;
+                if self.max_failures > 0 && self.consecutive_failures >= self.max_failures {
+                    WatchdogVerdict::Exit(2)
+                } else {
+                    WatchdogVerdict::Continue
+                }
+            }
+        }
+    }
 }
 
 fn paths_match(left: &Path, right: &Path) -> bool {
@@ -414,5 +598,170 @@ mod tests {
             &agent_global,
             Some(&project_db)
         ));
+    }
+
+    // ---- #936 fail-loud serve contract ---------------------------------
+
+    #[test]
+    fn serve_exit_ok_after_shutdown_is_clean() {
+        // Graceful path: axum returned Ok because `ct` was cancelled by a
+        // signal / idle-reaper. This is the only non-fatal outcome.
+        assert_eq!(serve_exit_decision(&Ok(()), true), ExitDecision::Clean);
+    }
+
+    #[test]
+    fn serve_exit_ok_without_shutdown_is_fatal() {
+        // The #936 core bug: accept loop ended on its own, no shutdown signal.
+        // Pre-fix this was swallowed and the fn returned Ok(()) → process lived
+        // on deaf. Now it must be fatal, exit code 1.
+        match serve_exit_decision(&Ok(()), false) {
+            ExitDecision::Fatal { code, reason } => {
+                assert_eq!(code, 1);
+                assert!(
+                    reason.contains("without a shutdown signal"),
+                    "reason should name the missing shutdown signal: {reason}"
+                );
+            }
+            other => panic!("expected Fatal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serve_exit_err_is_fatal() {
+        let err = std::io::Error::new(std::io::ErrorKind::Other, "listener exploded");
+        // An error is fatal regardless of whether a shutdown was in progress.
+        for cancelled in [false, true] {
+            match serve_exit_decision(&Err(err_like(&err)), cancelled) {
+                ExitDecision::Fatal { code, reason } => {
+                    assert_eq!(code, 1);
+                    assert!(reason.contains("listener exploded"), "reason: {reason}");
+                }
+                other => panic!("expected Fatal (cancelled={cancelled}), got {other:?}"),
+            }
+        }
+    }
+
+    fn err_like(e: &std::io::Error) -> std::io::Error {
+        std::io::Error::new(e.kind(), e.to_string())
+    }
+
+    // ---- #936 liveness watchdog consecutive-failure logic ---------------
+
+    #[test]
+    fn watchdog_exits_after_max_consecutive_failures() {
+        let mut c = WatchdogCounter::new(4);
+        // Grace elapsed → failures count. First 3 keep going, 4th exits(2).
+        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Exit(2));
+    }
+
+    #[test]
+    fn watchdog_success_resets_the_counter() {
+        let mut c = WatchdogCounter::new(4);
+        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        // A single healthy probe wipes the streak…
+        assert_eq!(c.record(Probe::Healthy, true), WatchdogVerdict::Continue);
+        // …so it now takes another full run of 4 to exit.
+        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Exit(2));
+    }
+
+    #[test]
+    fn watchdog_ignores_failures_inside_grace_window() {
+        let mut c = WatchdogCounter::new(2);
+        // grace not yet elapsed and no success yet → failures ignored entirely.
+        assert_eq!(c.record(Probe::Unreachable, false), WatchdogVerdict::Continue);
+        assert_eq!(c.record(Probe::Unreachable, false), WatchdogVerdict::Continue);
+        assert_eq!(c.record(Probe::Unreachable, false), WatchdogVerdict::Continue);
+        // Once grace elapses, counting starts from zero.
+        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Exit(2));
+    }
+
+    #[test]
+    fn watchdog_arms_on_first_success_even_before_grace() {
+        let mut c = WatchdogCounter::new(2);
+        // First success arms the counter, so a later failure counts even though
+        // the grace window has not elapsed.
+        assert_eq!(c.record(Probe::Healthy, false), WatchdogVerdict::Continue);
+        assert_eq!(c.record(Probe::Unreachable, false), WatchdogVerdict::Continue);
+        assert_eq!(c.record(Probe::Unreachable, false), WatchdogVerdict::Exit(2));
+    }
+
+    #[test]
+    fn watchdog_disabled_never_exits() {
+        // max_failures == 0 is the disabled sentinel; record must never exit.
+        let mut c = WatchdogCounter::new(0);
+        for _ in 0..100 {
+            assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        }
+    }
+
+    // ---- #936 integration: real socket self-probe drives the decision ----
+
+    #[tokio::test]
+    async fn watchdog_probe_through_real_socket_then_fatal_when_dead() {
+        use tokio_util::sync::CancellationToken;
+
+        // Bind a real server on an ephemeral port with a /health route, the
+        // same shape the daemon exposes, and drive it with a live reqwest
+        // client — proving the self-probe goes through the socket, not the fn.
+        let ct = CancellationToken::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral");
+        let addr = listener.local_addr().expect("addr");
+        let router = axum::Router::new().route(
+            "/health",
+            axum::routing::get(|| async { axum::http::StatusCode::OK }),
+        );
+        let ct_serve = ct.clone();
+        let serve = tokio::spawn(async move {
+            let result = axum::serve(listener, router)
+                .with_graceful_shutdown(async move { ct_serve.cancelled_owned().await })
+                .await;
+            // Assert the fail-loud contract on the real serve result: it was
+            // shut down via the token, so this must read as Clean.
+            serve_exit_decision(&result, true)
+        });
+
+        crate::ensure_tls_provider();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("client");
+        let health_url = format!("http://{addr}/health");
+        let mut counter = WatchdogCounter::new(4);
+
+        // Live socket answers → Healthy → counter stays Continue.
+        let resp = client.get(&health_url).send().await.expect("probe live");
+        assert!(resp.status().is_success());
+        assert_eq!(
+            counter.record(Probe::Healthy, true),
+            WatchdogVerdict::Continue
+        );
+
+        // Shut the surface down (simulates the wedge/death) and drain it.
+        ct.cancel();
+        let decision = serve.await.expect("join serve");
+        assert_eq!(decision, ExitDecision::Clean);
+
+        // Now real probes fail through the (closed) socket → after 4 the
+        // watchdog would exit(2). We assert the decision, never call exit.
+        let mut last = WatchdogVerdict::Continue;
+        for _ in 0..4 {
+            let probe = match client.get(&health_url).send().await {
+                Ok(r) if r.status().is_success() => Probe::Healthy,
+                _ => Probe::Unreachable,
+            };
+            assert_eq!(probe, Probe::Unreachable, "surface must be dead post-cancel");
+            last = counter.record(probe, true);
+        }
+        assert_eq!(last, WatchdogVerdict::Exit(2));
     }
 }
