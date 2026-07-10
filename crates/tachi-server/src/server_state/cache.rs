@@ -34,8 +34,6 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "vc_list",
     "vc_resolve",
     "get_pipeline_status",
-    "list_domains",
-    "get_domain",
     "wiki_search",
     // Facade tools (read-only)
     "tachi_search",
@@ -78,8 +76,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "handoff_check",
     "post_card",
     "update_card",
-    "register_domain",
-    "delete_domain",
     "distill_trajectory",
     "tachi_unstick",
     "wiki_lint",
