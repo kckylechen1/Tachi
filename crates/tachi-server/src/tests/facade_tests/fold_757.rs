@@ -82,9 +82,26 @@ async fn doctor_scan_action_matches_tachi_doctor_scan_handler() {
     let via_direct = crate::doctor_ops::handle_tachi_doctor_scan()
         .await
         .expect("direct doctor_scan should succeed");
+
+    // `generated_at` (doctor/scan.rs: `scan()` stamps `Utc::now()`) is set
+    // fresh on each independent call, so it legitimately differs between the
+    // two invocations here even though the handler is a literal 1:1
+    // delegation (facade_memory_ops/mod.rs "doctor_scan" arm). Strip it from
+    // both sides before comparing so the assertion checks content
+    // equivalence, not wall-clock equality.
+    let mut facade_json: Value =
+        serde_json::from_str(&via_facade).expect("facade doctor_scan output is valid JSON");
+    let mut direct_json: Value =
+        serde_json::from_str(&via_direct).expect("direct doctor_scan output is valid JSON");
+    for value in [&mut facade_json, &mut direct_json] {
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("generated_at");
+        }
+    }
+
     assert_eq!(
-        via_facade, via_direct,
-        "facade action='doctor_scan' must match tachi_doctor_scan handler byte-for-byte"
+        facade_json, direct_json,
+        "facade action='doctor_scan' must match tachi_doctor_scan handler (ignoring generated_at)"
     );
 }
 
