@@ -147,16 +147,30 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             _ => None,
         },
         "tachi_memory" => match action.as_str() {
-            "search" | "get" | "briefing" | "alerts" | "ask" | "progress" | "readiness" => {
-                Some(ToolBundle::Observe)
-            }
+            // doctor_scan: read-only (own docstring: "Read-only only — all
+            // mutations are CLI-only") and was OBSERVE-tier pre-#757-fold
+            // (`tachi_doctor_scan` in OBSERVE_TOOL_PATTERNS) — keep parity,
+            // do not narrow a read-only action past its prior visibility.
+            "search" | "get" | "briefing" | "alerts" | "ask" | "progress" | "readiness"
+            | "doctor_scan" => Some(ToolBundle::Observe),
             "save" | "extract_facts" | "checkpoint" => Some(ToolBundle::Remember),
+            // #757 fold: delete/gc/ingest/ingest_source were standalone tools
+            // absent from every bundle pattern list pre-fold (i.e. invisible
+            // to any non-full-bundle profile) — Operate is the narrowest
+            // bundle this policy can express (fail-safe: never wider than
+            // what existed), matching the tier already used for comparable
+            // destructive/heavy-write ops (archive_memory, sync_memories,
+            // capture_session, compact_rollup).
             "consolidate"
             | "recall_simulate"
             | "recall_proposals"
             | "review_recall_proposal"
             | "apply_recall_proposals"
-            | "pattern_feedback" => Some(ToolBundle::Operate),
+            | "pattern_feedback"
+            | "delete"
+            | "gc"
+            | "ingest"
+            | "ingest_source" => Some(ToolBundle::Operate),
             _ => None,
         },
         "tachi_skill" => match action.as_str() {
