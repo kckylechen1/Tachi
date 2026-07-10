@@ -157,7 +157,7 @@ runtime escape hatches.
 | Sandbox policy tools | `sandbox_*` admin names at `tool_profile_router_coverage.rs:84-89`. | Keep admin-only. | Security policy management and audit. |
 | Hub governance and VC tools | `hub_*` and `vc_*` admin names at `tool_profile_router_coverage.rs:64-72` and `:106-109`; recommendation/read surfaces remain non-admin. | Keep admin-only, consider a single `tachi_hub` facade later. | Hub is the capability registry behind #745. |
 | Pack/projection tools | `pack_*` and `projection_list` admin names at `tool_profile_router_coverage.rs:77-82`. | Keep admin-only. | Pack lifecycle is operator/admin, not daily MCP. |
-| Raw domain CRUD | Direct tools in `tools.rs:126-160`; admin names at `tool_profile_router_coverage.rs:56`, `:61`, `:75`, `:83`. | Quarantine; likely delete or move under admin facade later. | Domain config is internal routing policy, not a daily tool. |
+| ~~Raw domain CRUD~~ | Deleted in #757: `register_domain`/`get_domain`/`list_domains`/`delete_domain` and the `domains` registry table/store layer are gone. The free-text `memories.domain` filter field remains. | Deleted. | Registry was feature-dead (0 production rows, zero external callers). |
 | Graph/state primitives | `add_edge`, `set_state`, `get_state` admin names at `tool_profile_router_coverage.rs:54`, `:63`, `:90`; graph read tools remain non-admin. | Keep read graph, quarantine writes. | Direct mutation can corrupt memory graph semantics. |
 | Runtime/adapter primitives | `recall_context`, `capture_session`, compaction, and section tools live in operate patterns at `patterns.rs:84-108`. | Keep out of standard; do not delete yet. | Host adapters may own these calls. |
 

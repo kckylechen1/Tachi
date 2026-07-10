@@ -14,6 +14,8 @@
 //! - v7: reconcile half-migrated DBs (re-bridge + drop `indexed_tags`/`domain_key`, ensure `location`)
 //! - v8: drop the legacy physical `persons` column after folding it into `entities`
 //! - v9: relocate non-empty `location` into `path` / metadata, then drop `location`
+//! - v10: drop retired skill-pack tables (`packs`, `agent_projections`)
+//! - v11: drop retired `domains` registry table (#757)
 
 use std::path::Path;
 
@@ -25,12 +27,14 @@ use super::common::now_utc_iso;
 
 mod basic;
 mod cross_db;
+mod domain_retire;
 mod legacy_columns;
 mod pack_retire;
 mod sentinel;
 
 use basic::*;
 use cross_db::*;
+use domain_retire::*;
 use legacy_columns::*;
 use pack_retire::*;
 pub use legacy_columns::{
@@ -55,6 +59,7 @@ pub struct MigrationReport {
     pub locations_relocated: usize,
     pub location_columns_dropped: usize,
     pub pack_tables_dropped: usize,
+    pub domains_table_dropped: usize,
 }
 
 /// Run all data-fix migrations in order. Idempotent.
@@ -124,6 +129,11 @@ pub fn run_data_migrations(
     if !was_run(conn, "v10_drop_pack_tables")? {
         report.pack_tables_dropped = migrate_v10_drop_pack_tables(conn)?;
         mark_run(conn, "v10_drop_pack_tables")?;
+    }
+
+    if !was_run(conn, "v11_drop_domains_table")? {
+        report.domains_table_dropped = migrate_v11_drop_domains_table(conn)?;
+        mark_run(conn, "v11_drop_domains_table")?;
     }
 
     Ok(report)
@@ -580,5 +590,42 @@ mod tests {
         let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
         assert_eq!(report.pack_tables_dropped, 0);
         assert!(!table_present(&conn, "packs"));
+    }
+
+    #[test]
+    fn v11_drops_legacy_domains_table() {
+        let (mut conn, tmp) = open_test_db();
+        // init_schema no longer creates the `domains` registry table; emulate
+        // a legacy DB that still carries it (and a row) by creating it
+        // manually.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS domains (
+                name TEXT PRIMARY KEY,
+                description TEXT NOT NULL DEFAULT ''
+            );
+            INSERT INTO domains (name, description) VALUES ('legacy', 'old registry row');",
+        )
+        .unwrap();
+        assert!(table_present(&conn, "domains"));
+
+        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+        assert_eq!(report.domains_table_dropped, 1);
+        assert!(!table_present(&conn, "domains"));
+
+        // The live free-text `memories.domain` column is untouched.
+        assert!(table_has_column(&conn, "memories", "domain").unwrap());
+
+        // Idempotent: re-running is a no-op (sentinel guards it).
+        let report2 = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+        assert_eq!(report2.domains_table_dropped, 0);
+    }
+
+    #[test]
+    fn v11_is_a_noop_on_db_without_domains_table() {
+        let (mut conn, tmp) = open_test_db();
+        assert!(!table_present(&conn, "domains"));
+        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+        assert_eq!(report.domains_table_dropped, 0);
+        assert!(!table_present(&conn, "domains"));
     }
 }
