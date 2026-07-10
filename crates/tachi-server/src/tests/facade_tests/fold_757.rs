@@ -152,8 +152,13 @@ async fn ingest_action_matches_ingest_handler() {
 #[tokio::test]
 async fn ingest_source_action_matches_ingest_source_handler() {
     let server = make_server();
+    // An explicit empty *string* is still type-valid (satisfies the required
+    // `content: String` contract) and exercises the same deterministic
+    // whitespace/empty-content skip path the direct handler uses (see
+    // `ingest_source_empty_content_records_skip_audit`), so both sides stay
+    // byte-comparable without touching the network/LLM.
     let mut facade_params = fold_params("ingest_source");
-    facade_params.content = None;
+    facade_params.content = Some(json!(""));
     let via_facade = crate::facade_memory_ops::handle_tachi_memory(&server, facade_params)
         .await
         .expect("facade ingest_source should succeed");
@@ -183,6 +188,45 @@ async fn ingest_source_action_matches_ingest_source_handler() {
     assert_eq!(
         via_facade, via_direct,
         "facade action='ingest_source' must match ingest_source handler byte-for-byte"
+    );
+}
+
+/// #757-fold fix (gpt-5.6-terra review): the standalone `ingest_source` tool
+/// required `content: String` — omission was a hard deserialization failure
+/// before the handler ever ran. The fold's facade previously masked this by
+/// silently defaulting a missing `content` to `String::new()` (this test used
+/// to assert THAT byte-matched a hand-built empty string; it now asserts the
+/// omission is rejected instead, restoring the original required-field
+/// boundary).
+#[tokio::test]
+async fn ingest_source_action_rejects_omitted_content() {
+    let server = make_server();
+    let mut facade_params = fold_params("ingest_source");
+    facade_params.content = None;
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, facade_params)
+        .await
+        .expect_err("ingest_source must reject omitted content");
+    assert!(
+        err.to_ascii_lowercase().contains("content"),
+        "expected a content-related rejection, got: {err}"
+    );
+}
+
+/// Companion to the omission case: the standalone tool's `content: String`
+/// field also rejected non-string JSON (deserialization type mismatch). The
+/// fold previously coerced any JSON value to text via
+/// `value_to_template_text` instead of rejecting it — restore the rejection.
+#[tokio::test]
+async fn ingest_source_action_rejects_non_string_content() {
+    let server = make_server();
+    let mut facade_params = fold_params("ingest_source");
+    facade_params.content = Some(json!(42));
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, facade_params)
+        .await
+        .expect_err("ingest_source must reject non-string content");
+    assert!(
+        err.to_ascii_lowercase().contains("content"),
+        "expected a content-related rejection, got: {err}"
     );
 }
 

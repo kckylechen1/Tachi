@@ -291,10 +291,35 @@ pub(crate) async fn handle_tachi_memory(
             .await
         }
         "ingest_source" => {
+            // #757-fold fix (gpt-5.6-terra review): the standalone
+            // `ingest_source` tool required `content: String` — a missing or
+            // non-string `content` failed deserialization before the handler
+            // ever ran (tachi-params/src/memory/ingest.rs `IngestSourceParams`).
+            // The fold silently widened that to "any JSON value, coerced to
+            // text, defaulting to empty on omission" — restore the original
+            // boundary: reject omission and non-string content with a clear
+            // error instead of coercing. (Handler-level whitespace/empty
+            // *string* content is still a legitimate, deterministic no-op
+            // "skipped" response — that behavior belongs to
+            // `handle_ingest_source` itself, see
+            // `ingest_source_empty_content_records_skip_audit`, and is
+            // unaffected by this type-level check.)
             let content = match params.content.clone() {
                 Some(serde_json::Value::String(text)) => text,
-                Some(other) => crate::utils::value_to_template_text(&other),
-                None => String::new(),
+                Some(_) => {
+                    return Err(
+                        "content must be a string when action='ingest_source' (matches the \
+                         standalone ingest_source tool's required content: String contract)"
+                            .to_string(),
+                    )
+                }
+                None => {
+                    return Err(
+                        "content is required when action='ingest_source' (matches the \
+                         standalone ingest_source tool's required content: String contract)"
+                            .to_string(),
+                    )
+                }
             };
             crate::pipeline_ops::handle_ingest_source(
                 server,
