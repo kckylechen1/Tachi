@@ -291,57 +291,6 @@ pub struct SyncMemoriesParams {
     pub limit: usize,
 }
 
-// ─── Domain Management ──────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct RegisterDomainParams {
-    /// Unique domain name (e.g. "domain-pack", "code-review")
-    pub name: String,
-
-    /// Human-readable description of this domain
-    #[serde(default)]
-    pub description: Option<String>,
-
-    /// GC stale-days threshold for memories in this domain (default: 90)
-    #[serde(
-        default,
-        deserialize_with = "super::coerce::opt_u32_from_string_or_number"
-    )]
-    #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
-    pub gc_threshold_days: Option<u32>,
-
-    /// Default retention policy for memories saved to this domain
-    #[serde(default)]
-    pub default_retention: Option<String>,
-
-    /// Default path prefix for memories saved to this domain
-    #[serde(default)]
-    pub default_path_prefix: Option<String>,
-
-    /// Arbitrary JSON metadata
-    #[serde(default)]
-    pub metadata: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct GetDomainParams {
-    /// Domain name to retrieve
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct ListDomainsParams {
-    /// Placeholder (no filters currently needed)
-    #[serde(default)]
-    pub _placeholder: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct DeleteDomainParams {
-    /// Domain name to delete
-    pub name: String,
-}
-
 pub const MIN_FACT_CHAR_COUNT: usize = 30;
 
 /// Build a MemoryEntry from a JSON fact value (shared by extract_facts and ingest_event).

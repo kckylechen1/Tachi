@@ -25,7 +25,7 @@ Tachi 是一个单二进制、本地优先的 Agent 记忆与协调后端。它�
 - **持久记忆**，支持混合语义 + 词法 + 图谱检索
 - **层级命名空间**（`/user/preferences`、`/project/architecture`）
 - **因果图谱边**，连接记忆、实体与决策
-- **按域隔离的存储**，支持独立 GC 与保留策略
+- **域标签存储**——每条记忆自带自由文本 `domain` 字段，`save_memory`/`search_memory` 可按域过滤
 - **本地加密保险库**，用于 API 密钥与机密
 - **Agent 协调**：交接令牌、看板、发布订阅（幽灵低语）
 - **技能包与能力中心**：一次注册，各 Agent 共用
@@ -43,7 +43,7 @@ Tachi 是一个单二进制、本地优先的 Agent 记忆与协调后端。它�
 
 Tachi 基于四个信念构建：
 
-1. **记忆应该结构化，而不是乱堆。** 层级 `path` 命名空间、因果图谱边和域隔离让长期上下文保持有序、可追踪。
+1. **记忆应该结构化，而不是乱堆。** 层级 `path` 命名空间、因果图谱边和域标签让长期上下文保持有序、可追踪。
 2. **检索应该是混合且快速的。** 语义（sqlite-vec + Voyage）、词法（FTS5 + CJK）、时间衰减（ACT-R）和图谱激活蔓延通过 RRF 融合。我们针对本地低延迟查找优化；可复现的基准测试已在路线图中。
 3. **Agent 应该共享基础设施，而不是各自 spawn 混乱。** Tachi Hub 一次注册 MCP 服务器和技能，已连接 Agent 共享连接池、空闲清理、熔断器和清洗后的环境。告别僵尸进程。
 4. **长期状态应留在本地。** 所有数据库都是 SQLite 文件，无需云数据库。云同步应传输加密 bundle 和事件日志，而不是活的 WAL 文件。
@@ -246,8 +246,8 @@ graph TD
 ### 3. 因果图谱
 图谱引擎创建并遍历因果、时序和实体关系。`save_memory` 可自动为共享实体的记忆建立链接（`auto_link`）。`add_edge` / `get_edges` / `memory_graph` 是内部 `MemoryStore` 原语，已不在 MCP 曲面上（#757）；Agent 通过 `tachi_save`/`tachi_memory` 自动链接和召回的图谱激活蔓延通道（见上文第 2 节）触达图谱能力——没有独立的图谱遍历动作。
 
-### 4. 域感知路由
-`register_domain` 创建独立作用域，每域可配置独立 GC 阈值（`gc_threshold_days`）、默认保留策略和路径前缀。`save_memory` 和 `search_memory` 可按域过滤。
+### 4. 域标签存储
+每条记忆自带自由文本 `domain` 字段（如 `"code-review"`、`"personal"`）。`save_memory` 和 `search_memory` 可按域过滤。不存在独立的域注册表——域只是记忆行上的临时标签，不是需要配置的资源。
 
 ### 5. 加密保险库（Vault）
 本地优先的密钥存储：Argon2id KDF + AES-256-GCM、每秘独立 nonce、空闲自动上锁、暴力破解保护、按 Secret 的 Agent ACL、多钥轮换。项目内 Agent 可通过 `.tachi/vault.env` 别名解析 Vault 密钥。详见 [`docs/INSTALL.md`](docs/INSTALL.md)。

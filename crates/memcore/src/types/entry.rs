@@ -180,36 +180,6 @@ impl Default for GcConfig {
     }
 }
 
-// ─── Domain Configuration ───────────────────────────────────────────────────
-
-/// Per-domain configuration for memory routing and GC.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DomainConfig {
-    /// Unique domain name, e.g. "domain-pack", "code-review", "personal"
-    pub name: String,
-    /// Human-readable description
-    #[serde(default)]
-    pub description: String,
-    /// Domain-specific GC stale threshold in days (overrides global default)
-    #[serde(default)]
-    pub gc_threshold_days: Option<u32>,
-    /// Default retention policy for memories in this domain
-    #[serde(default)]
-    pub default_retention: Option<String>,
-    /// Optional default path prefix for memories in this domain
-    #[serde(default)]
-    pub default_path_prefix: Option<String>,
-    /// Optional JSON metadata
-    #[serde(default = "default_metadata")]
-    pub metadata: serde_json::Value,
-    /// When the domain was created
-    #[serde(default)]
-    pub created_at: String,
-    /// When the domain was last updated
-    #[serde(default)]
-    pub updated_at: String,
-}
-
 // ─── Core Entry ──────────────────────────────────────────────────────────────
 
 /// A single memory entry, unified across all three systems.

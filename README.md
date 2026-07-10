@@ -25,7 +25,7 @@ Tachi is a single-binary, local-first memory and coordination backend for AI age
 - **Persistent memory** with hybrid semantic + lexical + graph retrieval
 - **Hierarchical namespaces** (`/user/preferences`, `/project/architecture`)
 - **Causal graph edges** between memories, entities, and decisions
-- **Domain-scoped storage** with per-domain GC and retention policies
+- **Domain-tagged storage** — free-text `domain` field on every memory, filterable via `save_memory`/`search_memory`
 - **Encrypted local vault** for API keys and secrets
 - **Agent coordination** via handoff, kanban, and pub/sub (Ghost Whispers)
 - **Skill packs and capability hub** — register once, use from any agent
@@ -299,8 +299,8 @@ Memories are stored under `path` namespaces (e.g. `/user/preferences`, `/project
 ### 3. Causal Graph
 The graph engine creates and traverses causal, temporal, and entity relationships. `save_memory` can automatically link entries sharing entities (`auto_link`). `add_edge` / `get_edges` / `memory_graph` are internal `MemoryStore` primitives — not on the MCP surface (#757); agents reach graph behavior through `tachi_save`/`tachi_memory` auto-linking and recall's graph-spreading-activation channel (§2 above) — there is no standalone graph-traversal action.
 
-### 4. Domain-Aware Routing
-`register_domain` creates isolated scopes with per-domain GC thresholds (`gc_threshold_days`), default retention policies, and path prefixes. `save_memory` and `search_memory` can filter by domain. (Domain CRUD is an `admin`/operate surface.)
+### 4. Domain-Tagged Storage
+Every memory carries a free-text `domain` field (e.g. `"code-review"`, `"personal"`). `save_memory` and `search_memory` can filter by domain. There is no separate domain registry — domains are ad-hoc tags on memory rows, not a configured resource.
 
 ### 5. Encrypted Vault
 Local-first secret storage: Argon2id KDF + AES-256-GCM, per-secret nonces, auto-lock after inactivity, brute-force protection, per-secret agent ACLs, and multi-key rotation. Project-local agents can resolve Vault secrets via `.tachi/vault.env` aliases. See [`docs/INSTALL.md`](docs/INSTALL.md).

@@ -513,7 +513,9 @@ once #913 found zero remaining in-crate callers, so only the
 `tachi_save`/`tachi_memory` auto-linking and recall's graph-spreading-activation
 channel — there is no standalone graph-traversal action.
 
-`register_domain`, `get_domain`, `list_domains`, `delete_domain`
+The domain registry (`register_domain`, `get_domain`, `list_domains`,
+`delete_domain`) was retired in #972 — domains are no longer a first-class
+MCP concept; there is no replacement action.
 
 ### State & Config
 
