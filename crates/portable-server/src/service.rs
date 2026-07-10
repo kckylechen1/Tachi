@@ -215,6 +215,32 @@ impl StoreSet {
     }
 }
 
+/// Validate a caller-supplied `scope` before it ever reaches
+/// `StoreSet::write_target`. Accepts (case-insensitively) `"project"`,
+/// `"global"`, or absent/empty (defaults to `"project"` per contract).
+///
+/// Full-Tachi's `tachi_memory` also accepts `"user"` and `"general"` scopes
+/// that this portable profile does not implement any storage for. Before
+/// this check, `write_target` silently fell through to the global store for
+/// *any* unrecognized scope string, so a caller migrating a `scope="user"`
+/// call from full-Tachi got a silent global write instead of an error
+/// (#938 review). Reject-unknown instead: any value other than the two
+/// supported scopes fails clearly, matching the existing
+/// "not available in this profile" error style used for unsupported
+/// `hapi_memory` actions.
+fn validated_scope(scope: Option<String>) -> Result<String, String> {
+    let scope = scope
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "project".to_string());
+    if scope.eq_ignore_ascii_case("project") || scope.eq_ignore_ascii_case("global") {
+        Ok(scope)
+    } else {
+        Err(format!(
+            "scope '{scope}' is not available in this profile (use global or project)"
+        ))
+    }
+}
+
 /// The rmcp service. Owns the kernel store behind a mutex (rusqlite `Connection`
 /// is `Send` but not `Sync`; all handler work is synchronous and never awaits
 /// while the lock is held) plus the injected #791 decay policy.
@@ -256,7 +282,7 @@ impl PortableServer {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let now = chrono::Utc::now().to_rfc3339();
-        let scope = params.scope.unwrap_or_else(|| "project".to_string());
+        let scope = validated_scope(params.scope)?;
         let target = self.stores.write_target(Some(&scope));
 
         let mut entry = MemoryEntry {
@@ -709,6 +735,68 @@ mod tests {
         );
         assert_eq!(status["databases"]["global"]["entry_count"], 1);
         assert_eq!(status["databases"]["project"]["entry_count"], 1);
+    }
+
+    /// #938 review fix: `scope="user"` (a valid scope on full-Tachi's
+    /// `tachi_memory`, not implemented by this portable profile) must be
+    /// rejected with a clear error instead of silently routing the write to
+    /// the global store. Same for an arbitrary unknown scope string.
+    /// `scope="GLOBAL"` (mixed case) must still route to the global store —
+    /// pins the case-insensitivity `write_target` already relied on.
+    #[tokio::test]
+    async fn unknown_scope_is_rejected_and_global_scope_stays_case_insensitive() {
+        let global = MemoryStore::open_in_memory().expect("global");
+        let project = MemoryStore::open_in_memory().expect("project");
+        let server = PortableServer::new(
+            global,
+            vec![(
+                "project".to_string(),
+                "/tmp/trading.db".to_string(),
+                project,
+            )],
+            None,
+            "default".to_string(),
+            "/tmp/global.db".to_string(),
+        );
+
+        let mut user_scoped = save_params("user scope fact", "/user");
+        user_scoped.scope = Some("user".to_string());
+        let err = server
+            .save(Parameters(user_scoped))
+            .await
+            .expect_err("scope=user must be rejected, not silently routed to global");
+        assert!(
+            err.contains("scope 'user' is not available in this profile"),
+            "unexpected error message: {err}"
+        );
+
+        let mut general_scoped = save_params("general scope fact", "/general");
+        general_scoped.scope = Some("general".to_string());
+        server
+            .save(Parameters(general_scoped))
+            .await
+            .expect_err("scope=general must also be rejected");
+
+        let mut global_scoped = save_params("mixed case global fact", "/global");
+        global_scoped.scope = Some("GLOBAL".to_string());
+        server
+            .save(Parameters(global_scoped))
+            .await
+            .expect("mixed-case scope=GLOBAL must still be accepted");
+
+        let status = server
+            .status(Parameters(StatusParams {}))
+            .await
+            .expect("status");
+        let status: serde_json::Value = serde_json::from_str(&status).expect("status json");
+        assert_eq!(
+            status["databases"]["global"]["entry_count"], 1,
+            "the GLOBAL-scoped write must land in the global store, not project"
+        );
+        assert_eq!(
+            status["databases"]["project"]["entry_count"], 0,
+            "the rejected user/general scopes must not have written anywhere"
+        );
     }
 
     /// The #791 hook is reachable from this profile: a `flat` policy injected
