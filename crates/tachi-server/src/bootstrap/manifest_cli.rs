@@ -243,7 +243,7 @@ async fn run_daily_pipeline_remediation(
 ) -> String {
     // Step 1: refresh provider probe cache.
     let probe_result =
-        crate::status_ops::status_health::refresh_provider_probe_cache(app_home, global_db_path)
+        crate::status_ops::status_health::refresh_doctor_probe_cache(app_home, global_db_path)
             .await;
     let probe_summary = match &probe_result {
         Ok(cache) => {
@@ -318,31 +318,13 @@ async fn run_daily_pipeline_remediation(
 }
 
 async fn collect_provider_key_report(global_db_path: &Path, probe_keys: bool) -> ProviderKeyReport {
-    let keys = if probe_keys {
-        collect_provider_key_status_with_value_compare(global_db_path)
-    } else {
-        collect_provider_key_status(global_db_path)
-    };
-    let probes = if probe_keys {
-        crate::status_ops::status_health::run_provider_probes(global_db_path).await
-    } else {
-        Vec::new()
-    };
-    ProviderKeyReport { keys, probes }
-}
-
-fn collect_provider_key_status(global_db_path: &Path) -> Vec<ProviderKeyStatus> {
-    crate::status_ops::status_health::collect_api_key_status(global_db_path)
-        .into_iter()
-        .map(ProviderKeyStatus::from)
-        .collect()
-}
-
-fn collect_provider_key_status_with_value_compare(global_db_path: &Path) -> Vec<ProviderKeyStatus> {
-    crate::status_ops::status_health::collect_api_key_status_with_value_compare(global_db_path)
-        .into_iter()
-        .map(ProviderKeyStatus::from)
-        .collect()
+    let (keys, probes) =
+        crate::status_ops::status_health::collect_doctor_provider_key_report(global_db_path, probe_keys)
+            .await;
+    ProviderKeyReport {
+        keys: keys.into_iter().map(ProviderKeyStatus::from).collect(),
+        probes,
+    }
 }
 
 #[derive(Debug, serde::Serialize)]

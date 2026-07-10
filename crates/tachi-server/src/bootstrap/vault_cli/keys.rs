@@ -262,3 +262,35 @@ pub(super) fn decrypt_profile_secret_values(
     }
     Ok(values)
 }
+
+/// Stable internal API for the MCP hub CLI: unlock the vault with a verified
+/// master password and upsert an API-key secret in one step. Reuses the same
+/// crypto and entry shape as `tachi vault set`. Returns `true` when a new entry
+/// was created (vs. updating an existing one).
+pub(in crate::bootstrap) fn unlock_and_upsert_api_key_secret(
+    global_db_path: &PathBuf,
+    secret_name: &str,
+    description: &str,
+    raw_value: String,
+    stdin_password: bool,
+    keychain: bool,
+    password_file: Option<&Path>,
+    insecure_password_file: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let config = read_vault_config_for_key(global_db_path)?;
+    let key = read_verified_vault_key(
+        &config,
+        stdin_password,
+        keychain,
+        password_file,
+        insecure_password_file,
+    )?;
+    vault_upsert_secret_with_key(
+        global_db_path,
+        &key,
+        secret_name,
+        "api_key",
+        description,
+        raw_value,
+    )
+}

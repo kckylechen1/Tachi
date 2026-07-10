@@ -6,7 +6,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::status_ops::status_health::API_KEY_DEFS;
 use crate::vault_ops::load_unlocked_api_key_secret_pools;
 use crate::MemoryServer;
 pub use tachi_llm::{
@@ -16,14 +15,7 @@ pub use tachi_llm::{
 use tachi_llm::{LlmClient, ProviderSecret};
 
 pub(crate) fn provider_env_keys() -> HashSet<String> {
-    let mut keys = HashSet::new();
-    for def in API_KEY_DEFS {
-        keys.insert(def.key.to_string());
-        for alias in def.aliases {
-            keys.insert((*alias).to_string());
-        }
-    }
-    keys
+    crate::status_ops::status_health::provider_api_key_env_names()
 }
 
 /// Load API keys from an unlocked in-process Vault session.

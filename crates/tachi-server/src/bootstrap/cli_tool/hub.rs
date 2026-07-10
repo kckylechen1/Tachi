@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use tachi_bootstrap::cli::{HubAction, McpAction};
 
 use super::super::{
-    evaluate_cli_capability_enabled, open_cli_store, open_cli_store_read_only, print_pretty_json,
+    evaluate_cli_capability_enabled, open_cli_store, print_pretty_json,
 };
 
 pub(super) async fn run_hub_command(
@@ -380,27 +380,15 @@ fn store_mcp_key_in_vault(
     password_file: Option<&Path>,
     insecure_password_file: bool,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let store_ro = open_cli_store_read_only(hub_db)?;
-    let config = store_ro
-        .vault_get_config()
-        .map_err(|e| format!("vault_get_config: {e}"))?
-        .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
-    drop(store_ro);
-
-    let key = crate::bootstrap::vault_cli::read_verified_vault_key(
-        &config,
+    crate::bootstrap::vault_cli::unlock_and_upsert_api_key_secret(
+        hub_db,
+        vault_key_name,
+        &format!("API key for MCP server {normalized_name}"),
+        raw_key,
         stdin_password,
         keychain,
         password_file,
         insecure_password_file,
-    )?;
-    crate::bootstrap::vault_cli::vault_upsert_secret_with_key(
-        hub_db,
-        &key,
-        vault_key_name,
-        "api_key",
-        &format!("API key for MCP server {normalized_name}"),
-        raw_key,
     )
 }
 
