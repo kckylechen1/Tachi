@@ -244,7 +244,7 @@ graph TD
 - **RRF 融合** —— 互惠排名融合汇总各通道，向量余弦再加权，减少高语义查询的排名倒置。
 
 ### 3. 因果图谱
-图谱引擎创建并遍历因果、时序和实体关系。`save_memory` 可自动为共享实体的记忆建立链接（`auto_link`）。`add_edge` / `get_edges` / `memory_graph` 是内部 `MemoryServer` 原语，已不在 MCP 曲面上（#757）；Agent 通过 `tachi_save`/`tachi_memory` 自动链接和 `tachi_task` 图谱遍历触达图谱能力。
+图谱引擎创建并遍历因果、时序和实体关系。`save_memory` 可自动为共享实体的记忆建立链接（`auto_link`）。`add_edge` / `get_edges` / `memory_graph` 是内部 `MemoryStore` 原语，已不在 MCP 曲面上（#757）；Agent 通过 `tachi_save`/`tachi_memory` 自动链接和召回的图谱激活蔓延通道（见上文第 2 节）触达图谱能力——没有独立的图谱遍历动作。
 
 ### 4. 域感知路由
 `register_domain` 创建独立作用域，每域可配置独立 GC 阈值（`gc_threshold_days`）、默认保留策略和路径前缀。`save_memory` 和 `search_memory` 可按域过滤。
