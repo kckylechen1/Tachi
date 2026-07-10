@@ -16,8 +16,9 @@ pub mod signatures;
 pub mod eval;
 pub use launcher::{
     build_claude_launch, build_codex_launch, build_custom_launch, build_grok_launch,
-    build_kimi_launch, is_trusted_dispatch_command, resolve_permission_profile, tail_chars,
-    DispatchLaunchParams, LaunchCommand, PermissionProfile,
+    build_kimi_launch, is_trusted_dispatch_command, reject_unsupported_sandbox,
+    resolve_permission_profile, tail_chars, validate_codex_sandbox, DispatchLaunchParams,
+    LaunchCommand, PermissionProfile, CODEX_SANDBOX_VALUES,
 };
 pub use model_registry::{
     dispatch_model_card, resolve_dispatch_model, resolve_dispatch_model_card,

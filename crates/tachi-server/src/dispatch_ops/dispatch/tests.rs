@@ -310,6 +310,58 @@ async fn opencode_serve_preflight_uses_dispatch_credential_env() {
     assert!(result.contains("credential-ok"), "result={result}");
 }
 
+/// #894 S0 round 2 (cross-vendor review): the entry-point sandbox check must
+/// fire before ANY stage/preflight/spawn work — in particular before the V2
+/// plan stage's `ClaudePool` call. Proven two ways without needing to mock
+/// `ClaudePool`: (1) the error text is exactly the entry-point sandbox
+/// rejection, never the `"dispatch v2 stage1"` wrapper `run_plan_stage`
+/// would have produced had it actually been reached; (2) no run directory is
+/// created at all (workspace creation is step 1, which never runs either).
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn v2_auto_stage_rejects_unsupported_sandbox_before_plan_stage_spawn() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let run_root = dispatch_runs_root();
+    let server = crate::tests::make_server();
+
+    let mut params = test_dispatch_params(
+        Some("claude"),
+        "should fail before any V2 plan-stage ClaudePool spawn",
+    );
+    params.stage = Some("auto".to_string());
+    params.sandbox = Some("workspace-write".to_string());
+
+    let started = std::time::Instant::now();
+    let err = handle_tachi_dispatch(&server, params).await.expect_err(
+        "an unsupported sandbox on a V2/auto dispatch must be rejected before Stage 1 spawns ClaudePool",
+    );
+    let elapsed = started.elapsed();
+
+    assert!(
+        err.contains("claude") && err.contains("has no sandbox concept"),
+        "must be the entry-point sandbox rejection: {err}"
+    );
+    assert!(
+        !err.contains("dispatch v2 stage1"),
+        "must fail before ever calling run_plan_stage / ClaudePool: {err}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "entry-point rejection must be near-instant (no pool spawn, no network call); took {elapsed:?}"
+    );
+    let run_dir_count = std::fs::read_dir(&run_root)
+        .map(|entries| entries.filter_map(Result::ok).count())
+        .unwrap_or(0);
+    assert_eq!(
+        run_dir_count, 0,
+        "no run directory should exist — workspace creation (step 1) never ran"
+    );
+}
+
 #[test]
 fn mcp_cleanup_removes_temp_config_on_drop() {
     let temp_home = tempfile::tempdir().expect("temp home");

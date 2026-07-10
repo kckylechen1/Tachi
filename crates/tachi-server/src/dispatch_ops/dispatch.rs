@@ -155,6 +155,70 @@ pub(crate) use self::recovery::recover_orphaned_dispatch_runs;
 
 // ─── Main dispatch handler ───────────────────────────────────────────────────
 
+/// Compute the effective harness transport from `params` alone — pure,
+/// side-effect-free string/vec inspection. Hoisted to run immediately after
+/// `resolve_dispatch_start` (before any stage/preflight/spawn work) so the
+/// entry-point sandbox validation below knows which transport a request will
+/// actually reach.
+fn effective_harness_transport(params: &TachiDispatchParams, agent_norm: &str) -> String {
+    params.harness_transport.clone().unwrap_or_else(|| {
+        if agent_norm == "custom"
+            && params.command.first().is_some_and(|cmd| cmd == "opencode")
+            && params.command.iter().any(|arg| arg == "--attach")
+        {
+            "opencode_serve".to_string()
+        } else {
+            "cli".to_string()
+        }
+    })
+}
+
+/// #894 S0 round 2 (cross-vendor review): the single choke-point for
+/// `params.sandbox` validation. Every dispatch caller (`tachi_task`, arena
+/// spawn, shell dispatch, convoy, poke probes) funnels through
+/// `handle_tachi_dispatch`, so running this check here — before step 1
+/// (workspace creation), before prompt assembly, before the V2 plan stage's
+/// `ClaudePool` spawn, and before any builder's own preflight (acpx's `node
+/// --version` probe, etc.) — closes the whole class of "expensive work
+/// happens before a doomed-to-fail sandbox request is rejected" findings in
+/// one place. The per-builder calls (`build_codex_launch`,
+/// `build_claude_launch`, `acpx::build_acpx_command_spec`,
+/// `acp_native::build_native_acp_run_spec`, ...) all still run their own copy
+/// of this check — kept intentionally as defense-in-depth, not removed, in
+/// case a future caller reaches a builder through a path that bypasses this
+/// entry point.
+fn validate_dispatch_sandbox_at_entry(
+    agent_norm: &str,
+    harness_transport: &str,
+    sandbox: Option<&str>,
+) -> Result<(), String> {
+    // Transport takes priority over agent name for the error label, matching
+    // the per-builder wording exactly: even a codex agent has no sandbox
+    // primitive once it's routed through acpx or native-ACP.
+    if is_acpx_transport(harness_transport) {
+        return tachi_dispatch::reject_unsupported_sandbox("acpx", sandbox);
+    }
+    if is_native_acp_transport(harness_transport) {
+        return tachi_dispatch::reject_unsupported_sandbox("acp-native", sandbox);
+    }
+    if agent_norm == "codex" {
+        // Codex is the one backend with a real sandbox primitive. Validate
+        // its enum here too (not just inside `build_codex_launch`) so a typo
+        // is rejected before Stage 1 spends a ClaudePool call.
+        return match sandbox.map(str::trim) {
+            None => Ok(()),
+            Some("") => Err(
+                "invalid codex --sandbox value: blank/whitespace-only sandbox request is malformed input, not equivalent to omitting it (fail-closed, #894 S0)"
+                    .to_string(),
+            ),
+            Some(value) => tachi_dispatch::validate_codex_sandbox(value).map(|_| ()),
+        };
+    }
+    // Every other backend (claude, grok, kimi, custom/opencode) has no
+    // sandbox concept.
+    tachi_dispatch::reject_unsupported_sandbox(agent_norm, sandbox)
+}
+
 pub(crate) async fn handle_tachi_dispatch(
     server: &MemoryServer,
     mut params: TachiDispatchParams,
@@ -172,6 +236,10 @@ pub(crate) async fn handle_tachi_dispatch(
         workspace_dir,
         host_adapter,
     } = resolve_dispatch_start(server, &mut params, now)?;
+
+    // 0. Validate `params.sandbox` before ANY stage/preflight/spawn work.
+    let harness_transport = effective_harness_transport(&params, &agent_norm);
+    validate_dispatch_sandbox_at_entry(&agent_norm, &harness_transport, params.sandbox.as_deref())?;
 
     // 1. Create isolated workspace directory + MCP config
     let mcp_config_path = prepare_workspace_and_mcp(
@@ -215,16 +283,6 @@ pub(crate) async fn handle_tachi_dispatch(
     })
     .await?;
 
-    let harness_transport = params.harness_transport.clone().unwrap_or_else(|| {
-        if agent_norm == "custom"
-            && params.command.first().is_some_and(|cmd| cmd == "opencode")
-            && params.command.iter().any(|arg| arg == "--attach")
-        {
-            "opencode_serve".to_string()
-        } else {
-            "cli".to_string()
-        }
-    });
     let harness_server_url = infer_harness_server_url(&params, &harness_transport);
 
     // Seed status.json so external pollers see something immediately.
