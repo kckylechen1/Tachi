@@ -144,6 +144,52 @@ pub use memory::{
     TachiWebSearchParams, MAX_FACADE_TOP_K,
 };
 
+// ─── Facade: research verb (tachi#530) ───────────────────────────────────────
+
+fn default_research_action() -> String {
+    "feed".to_string()
+}
+
+/// Parameters for the `tachi_research` verb (tachi#530).
+///
+/// P1 implements **feed mode** only: `action="feed"` with a `url` → fetch the
+/// page (treated as UNTRUSTED input), digest it, and emit an impact-routing
+/// PROPOSAL. The verb's only writes are report artifacts in its run dir; every
+/// routed finding is a proposal the leader/owner ratifies (2-gate). Flat schema
+/// per #495's shape law.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TachiResearchParams {
+    /// Research action. P1 supports only "feed" (drop a URL → fetch + digest +
+    /// impact-routing proposal, no fan-out). Question mode / lifecycle edges are
+    /// later phases.
+    #[serde(default = "default_research_action")]
+    #[schemars(
+        description = "Research action. P1: 'feed' (URL in → fetch + digest + impact-routing proposal, no fan-out)."
+    )]
+    pub action: String,
+
+    /// Feed-mode source URL (http/https). The fetched page is UNTRUSTED data:
+    /// it is quoted into the report, never interpreted as instructions.
+    #[serde(default)]
+    #[schemars(description = "[action=feed|required] http/https source URL. Fetched page is untrusted data.")]
+    pub url: Option<String>,
+
+    /// Optional issue/spec reference to bias impact routing (e.g. "owner/repo#123").
+    #[serde(default)]
+    #[schemars(description = "Optional issue/spec ref to bias impact routing, e.g. 'owner/repo#123'.")]
+    pub issue_ref: Option<String>,
+
+    /// Optional short note on why this source is being researched.
+    #[serde(default)]
+    #[schemars(description = "Optional note on why this source is being researched.")]
+    pub note: Option<String>,
+
+    /// Response shape. Defaults to JSON; pass "markdown" for the human report.
+    #[serde(default)]
+    #[schemars(description = "Response shape. Defaults to JSON; 'markdown' returns the human report.")]
+    pub format: Option<String>,
+}
+
 // ─── Facade: append-only continuity events ───────────────────────────────────
 
 fn default_tachi_event_limit() -> usize {

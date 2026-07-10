@@ -111,7 +111,7 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
     );
     let open_world = matches!(
         name,
-        "tachi_web_search" | "tachi_gh" | "hub_call" | "hub_discover"
+        "tachi_web_search" | "tachi_research" | "tachi_gh" | "hub_call" | "hub_discover"
     );
 
     let existing = tool.annotations.take().unwrap_or_default();
