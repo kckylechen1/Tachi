@@ -6,7 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 
 use super::super::dispatch_v2::append_trajectory_event;
-use super::permission::native_permission_response;
+use super::permission::{native_permission_decision, AcpPermissionDecision};
 use super::protocol::{
     compact_json, ensure_session_id, extract_agent_session_id, extract_session_id,
     extract_text_recursive, extract_update_text, format_json_rpc_error, is_json_rpc_notification,
@@ -250,10 +250,12 @@ impl NativeAcpConnection {
         let method = message.get("method").and_then(Value::as_str).unwrap_or("");
         let params = message.get("params").cloned().unwrap_or(Value::Null);
         let response = if method.contains("permission") {
+            let decision = native_permission_decision(&self.permission_label, &params);
+            self.append_permission_receipt(&decision);
             json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "result": native_permission_response(&self.permission_label, &params),
+                "result": decision.response,
             })
         } else {
             json!({
@@ -266,6 +268,45 @@ impl NativeAcpConnection {
             })
         };
         self.send_message(response).await
+    }
+
+    /// Emit a fail-closed receipt for every ACP permission decision, naming the
+    /// typed request kind and the verdict (#894 S0). A DENY additionally logs
+    /// loudly so an unexpected auto-deny is visible in the daemon log.
+    fn append_permission_receipt(&self, decision: &AcpPermissionDecision) {
+        let verdict = if decision.allowed { "allow" } else { "deny" };
+        let authorizer = if decision.heuristic {
+            "legacy_heuristic"
+        } else {
+            "typed_taxonomy"
+        };
+        append_trajectory_event(
+            &self.trajectory_path,
+            json!({
+                "event": "acp_native_permission_receipt",
+                "dispatch_id": self.dispatch_id,
+                "agent": self.agent,
+                "permission_profile": self.permission_label,
+                "request_kind": decision.kind.as_str(),
+                "raw_tool_kind": decision.raw_kind,
+                "verdict": verdict,
+                "authorizer": authorizer,
+                "timestamp": Utc::now().to_rfc3339(),
+            }),
+        );
+        if !decision.allowed {
+            tracing::warn!(
+                target: "tachi::acp::permission",
+                dispatch_id = %self.dispatch_id,
+                agent = %self.agent,
+                request_kind = decision.kind.as_str(),
+                raw_tool_kind = %decision.raw_kind,
+                authorizer,
+                "ACP permission request DENIED under profile '{}' (request kind '{}')",
+                self.permission_label,
+                decision.kind.as_str(),
+            );
+        }
     }
 
     fn map_session_update(&mut self, message: &Value) {

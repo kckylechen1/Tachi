@@ -120,6 +120,35 @@ fn reject_non_claude_allowlist(agent: &str, profile: PermissionProfile) -> Resul
     Ok(())
 }
 
+/// Codex CLI `--sandbox` accepts exactly these policy values. Any other value
+/// must be rejected before spawn (#894 S0) rather than forwarded to the child,
+/// where an unrecognized value is silently ineffective (fail-closed).
+const CODEX_SANDBOX_VALUES: &[&str] = &["read-only", "workspace-write", "danger-full-access"];
+
+fn validate_codex_sandbox(value: &str) -> Result<&str, String> {
+    if CODEX_SANDBOX_VALUES.contains(&value) {
+        Ok(value)
+    } else {
+        Err(format!(
+            "invalid codex --sandbox value '{value}'; allowed: {}",
+            CODEX_SANDBOX_VALUES.join(", ")
+        ))
+    }
+}
+
+/// Backends with no sandbox primitive (grok, kimi, custom/opencode) must not
+/// silently drop a caller-supplied `sandbox` request. Only codex consumes
+/// `--sandbox`; every other backend fail-closes with a receipt naming the
+/// backend and the requested sandbox level (#894 S0).
+fn reject_unsupported_sandbox(backend: &str, params: &DispatchLaunchParams) -> Result<(), String> {
+    match params.sandbox.as_deref() {
+        Some(sandbox) if !sandbox.trim().is_empty() => Err(format!(
+            "permission receipt: backend '{backend}' has no sandbox concept and cannot honor requested sandbox '{sandbox}'; refusing to silently downgrade (fail-closed, #894 S0)"
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub fn build_claude_launch(
     params: &DispatchLaunchParams,
     prompt: &str,
@@ -177,6 +206,7 @@ pub fn build_codex_launch(
         cmd.arg("--dangerously-bypass-approvals-and-sandbox");
     } else {
         let sandbox = params.sandbox.as_deref().unwrap_or("workspace-write");
+        let sandbox = validate_codex_sandbox(sandbox)?;
         cmd.arg("--sandbox");
         cmd.arg(sandbox);
     }
@@ -215,6 +245,7 @@ pub fn build_grok_launch(
 
     let profile = resolve_permission_profile(params)?;
     reject_non_claude_allowlist("grok", profile)?;
+    reject_unsupported_sandbox("grok", params)?;
     if profile == PermissionProfile::Full {
         cmd.arg("--permission-mode");
         cmd.arg("bypassPermissions");
@@ -247,6 +278,7 @@ pub fn build_kimi_launch(
 ) -> Result<LaunchCommand, String> {
     let profile = resolve_permission_profile(params)?;
     reject_non_claude_allowlist("kimi", profile)?;
+    reject_unsupported_sandbox("kimi", params)?;
     let mut cmd = LaunchCommand::new("kimi");
     cmd.args(kimi_command_args(params, prompt, profile));
 
@@ -293,6 +325,18 @@ pub fn build_custom_launch(
             binary
         ));
     }
+    // The custom/opencode backend has no permission or sandbox primitive of its
+    // own. A non-default permission_profile or any sandbox request cannot be
+    // honored and must fail closed with a receipt rather than be silently
+    // dropped (#894 S0).
+    let profile = resolve_permission_profile(params)?;
+    if profile != PermissionProfile::Default {
+        return Err(format!(
+            "permission receipt: backend '{binary}' (custom/opencode) has no permission mechanism and cannot honor permission_profile '{}'; refusing to silently downgrade (fail-closed, #894 S0)",
+            profile.as_str()
+        ));
+    }
+    reject_unsupported_sandbox(binary, params)?;
     let mut cmd = LaunchCommand::new(binary);
     cmd.args(params.command[1..].iter().cloned());
     cmd.arg(prompt);
@@ -536,6 +580,92 @@ mod tests {
                 build_custom_launch(&params, "run task").is_err(),
                 "trusted prefixes must not allow traversal components: {cmd}"
             );
+        }
+    }
+
+    #[test]
+    fn codex_rejects_unknown_sandbox_value_before_spawn() {
+        let mut params = params();
+        params.sandbox = Some("workspace-writ".to_string());
+        let err = build_codex_launch(&params, "hello", None)
+            .expect_err("typo sandbox value must be rejected pre-spawn");
+        assert!(
+            err.contains("invalid codex --sandbox value 'workspace-writ'"),
+            "unexpected error: {err}"
+        );
+        // The unknown value must never reach the launch args.
+        assert!(build_codex_launch(&params, "hello", None).is_err());
+    }
+
+    #[test]
+    fn codex_accepts_every_valid_sandbox_value() {
+        for value in ["read-only", "workspace-write", "danger-full-access"] {
+            let mut params = params();
+            params.sandbox = Some(value.to_string());
+            let cmd = build_codex_launch(&params, "hello", None)
+                .unwrap_or_else(|err| panic!("valid sandbox '{value}' rejected: {err}"));
+            assert!(
+                cmd.args.windows(2).any(|pair| pair == ["--sandbox", value]),
+                "sandbox '{value}' missing from args: {:?}",
+                cmd.args
+            );
+        }
+    }
+
+    #[test]
+    fn grok_fails_closed_on_sandbox_request() {
+        let mut params = params();
+        params.sandbox = Some("workspace-write".to_string());
+        let err = build_grok_launch(&params, "hello", None)
+            .expect_err("grok has no sandbox concept and must fail closed");
+        assert!(err.contains("grok"), "receipt must name backend: {err}");
+        assert!(
+            err.contains("workspace-write"),
+            "receipt must name requested level: {err}"
+        );
+        assert!(err.contains("fail-closed"), "must be a fail-closed receipt: {err}");
+    }
+
+    #[test]
+    fn kimi_fails_closed_on_sandbox_request() {
+        let mut params = params();
+        params.sandbox = Some("read-only".to_string());
+        let err = build_kimi_launch(&params, "hello")
+            .expect_err("kimi has no sandbox concept and must fail closed");
+        assert!(err.contains("kimi") && err.contains("read-only"), "{err}");
+    }
+
+    #[test]
+    fn custom_fails_closed_on_unhonorable_permission_profile_and_sandbox() {
+        // Non-default permission_profile the custom backend cannot honor.
+        {
+            let mut p = params();
+            p.command = vec!["python3".to_string()];
+            p.permission_profile = Some("allowlist".to_string());
+            p.allowed_tools = vec!["Read".to_string()];
+            let err = build_custom_launch(&p, "hello")
+                .expect_err("custom cannot honor allowlist and must fail closed");
+            assert!(
+                err.contains("custom/opencode") && err.contains("allowlist"),
+                "receipt must name backend + level: {err}"
+            );
+        }
+
+        // Sandbox request the custom backend cannot honor.
+        {
+            let mut p = params();
+            p.command = vec!["python3".to_string()];
+            p.sandbox = Some("workspace-write".to_string());
+            let err = build_custom_launch(&p, "hello")
+                .expect_err("custom has no sandbox concept and must fail closed");
+            assert!(err.contains("workspace-write"), "{err}");
+        }
+
+        // Default profile with no sandbox still builds cleanly.
+        {
+            let mut p = params();
+            p.command = vec!["python3".to_string(), "-m".to_string(), "worker".to_string()];
+            assert!(build_custom_launch(&p, "hello").is_ok());
         }
     }
 
