@@ -12,7 +12,7 @@ mod session_actions;
 mod sync_actions;
 
 pub(super) use keys::{
-    read_verified_vault_key, vault_init_with_password, vault_upsert_secret_with_key,
+    unlock_and_upsert_api_key_secret, vault_init_with_password, vault_upsert_secret_with_key,
 };
 pub(super) use output::lease_api_key_from_store;
 pub(super) use password::read_vault_password;

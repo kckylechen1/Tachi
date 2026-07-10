@@ -27,6 +27,7 @@ pub(crate) use recall_degradation::{
 };
 pub(crate) use save_memory::handle_remember;
 pub(crate) use save_memory::handle_save_memory;
+pub(crate) use save_memory::save_eval_memory;
 pub(crate) use search_helpers::client_project_precedence;
 pub(crate) use search_helpers::explicit_workspace_project;
 pub(crate) use search_helpers::list_available_named_projects;

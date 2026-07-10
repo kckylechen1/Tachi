@@ -115,11 +115,11 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
     },
 ];
 
-pub(crate) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus> {
+pub(super) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus> {
     collect_api_key_status_inner(global_db_path, false, None)
 }
 
-pub(crate) fn collect_api_key_status_with_value_compare(
+pub(super) fn collect_api_key_status_with_value_compare(
     global_db_path: &Path,
 ) -> Vec<ApiKeyStatus> {
     collect_api_key_status_inner(global_db_path, true, None)

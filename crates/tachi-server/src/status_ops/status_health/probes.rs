@@ -155,7 +155,7 @@ pub(crate) fn probe_llm_client_for_tests(
     probe_llm_client(global_db_path)
 }
 
-pub(crate) async fn run_provider_probes(global_db_path: &Path) -> Vec<ProviderProbeResult> {
+pub(super) async fn run_provider_probes(global_db_path: &Path) -> Vec<ProviderProbeResult> {
     run_provider_probe_report(global_db_path).await.probes
 }
 

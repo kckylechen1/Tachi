@@ -3,7 +3,7 @@ use serde_json::json;
 
 use crate::facade_memory_ops::shape_complete_response;
 use crate::hub_ops::handle_distill_trajectory;
-use crate::memory_search_ops::handle_save_memory;
+use crate::memory_search_ops::save_eval_memory;
 use crate::tool_params::{DistillTrajectoryParams, TachiCompleteParams};
 use crate::MemoryServer;
 
@@ -42,7 +42,7 @@ pub(crate) async fn handle_tachi_complete(
     // detection / "single project on disk"): that silently reroutes eval rows
     // away from the server's own stores. Callers must pass `project` (or the
     // server must have a bound project DB) for project-scoped persistence.
-    let save_result = handle_save_memory(server, mem_params).await?;
+    let save_result = save_eval_memory(server, mem_params).await?;
     let save_json: serde_json::Value = serde_json::from_str(&save_result)
         .unwrap_or_else(|_| serde_json::json!({"raw": save_result}));
 
