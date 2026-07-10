@@ -175,13 +175,21 @@ pub struct TachiResearchParams {
     pub url: Option<String>,
 
     /// Optional issue/spec reference to bias impact routing (e.g. "owner/repo#123").
+    /// Format-validated at the ops boundary (`#N`, `repo#N`, `owner/repo#N`, or an
+    /// http(s) URL) before the fetch runs — malformed refs are rejected, not silently
+    /// coerced, since this string is rendered into the report/proposals.
     #[serde(default)]
-    #[schemars(description = "Optional issue/spec ref to bias impact routing, e.g. 'owner/repo#123'.")]
+    #[schemars(
+        description = "Optional issue/spec ref to bias impact routing: '#N', 'repo#N', 'owner/repo#N', or an http(s) URL. Rejected at the ops boundary if it matches none of those shapes."
+    )]
     pub issue_ref: Option<String>,
 
-    /// Optional short note on why this source is being researched.
+    /// Optional short note on why this source is being researched. Length-capped
+    /// and control-character-stripped at the ops boundary before rendering.
     #[serde(default)]
-    #[schemars(description = "Optional note on why this source is being researched.")]
+    #[schemars(
+        description = "Optional note on why this source is being researched. Capped to 500 chars and control-characters stripped before rendering."
+    )]
     pub note: Option<String>,
 
     /// Response shape. Defaults to JSON; pass "markdown" for the human report.

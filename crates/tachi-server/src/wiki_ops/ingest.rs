@@ -89,6 +89,13 @@ pub(super) fn wiki_ingest_http_client_for_url(
         .redirect(reqwest::redirect::Policy::none())
         .timeout(StdDuration::from_secs(30))
         .resolve_to_addrs(host, resolved_addrs)
+        // SECURITY: same bypass as research_ops's fetch client (tachi#530
+        // T3 review) — tachi-server's reqwest carries the `system-proxy`
+        // feature, so without `.no_proxy()` a configured/system proxy would
+        // do the real DNS resolution and connect, letting it rebind the
+        // validated host to a private/local address and bypass the
+        // `validate_wiki_ingest_http_url` SSRF guard entirely.
+        .no_proxy()
         .build()
         .map_err(|e| format!("build source URL client: {e}"))
 }
@@ -100,6 +107,9 @@ pub(super) fn wiki_ingest_http_client() -> Result<&'static reqwest::Client, Stri
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(StdDuration::from_secs(30))
+                // SECURITY: see the sibling `.no_proxy()` call above — same
+                // proxy-bypass hole, same fix, for the no-DNS-override path.
+                .no_proxy()
                 .build()
                 .map_err(|e| format!("build source URL client: {e}"))
         })
