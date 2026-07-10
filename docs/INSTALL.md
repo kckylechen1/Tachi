@@ -60,10 +60,13 @@ That service runs `tachi --daemon --port 6919 --global-db ~/.tachi/global/memory
 global/background worker on the canonical HTTP MCP port and does not accidentally
 bind itself to the directory where the installer was run. It keeps projection,
 vector sweep, Foundry, and daily maintenance alive after the installing shell
-exits. The LaunchAgent uses `RunAtLoad` without `KeepAlive`; Tachi's singleton
-lock and auto-spawn path handle recovery without a launchd restart loop. Skip service
-installation with `--skip-daemon-service` when you only want stdio MCP clients
-to auto-spawn short-lived daemons.
+exits. The LaunchAgent uses `RunAtLoad` **and `KeepAlive`**: if the daemon exits
+— including the fail-loud serve contract and liveness watchdog exits (#936) that
+fire when the HTTP/MCP surface is dead while background workers still run —
+launchd respawns it (rate-limited by launchd's ~10s default `ThrottleInterval`).
+Tachi's singleton lock keeps only one daemon per global DB, so the respawn never
+races a live instance. Skip service installation with `--skip-daemon-service`
+when you only want stdio MCP clients to auto-spawn short-lived daemons.
 
 ### Verify Installation
 

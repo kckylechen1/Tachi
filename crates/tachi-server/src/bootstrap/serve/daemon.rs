@@ -203,17 +203,39 @@ pub(super) async fn serve_http_daemon(
         });
     }
 
+    // Daemon discovery pid file path — computed here (before the watchdog spawn)
+    // so the watchdog's `exit(2)` path can drop it too, matching the fail-loud
+    // serve path and shrinking the window where a stale pid points at a dead
+    // process. The file itself is written further below, after the router binds.
+    let pid_path = crate::daemon_lock::scoped_daemon_pid_path(&app_home, &global_db_path);
+
     // Liveness watchdog (#936): launchd checks the *process*, not the
-    // *service*. This self-probe hits `/health` through the real TCP listener
-    // (never the handler fn directly) every interval; after N consecutive
-    // failures it presumes the HTTP/MCP surface wedged (§ the incident's
-    // "background-alive, HTTP-dead" class) and `exit(2)` so KeepAlive respawns.
-    // It shares `ct` so a normal shutdown stops it cleanly without false-firing,
-    // and it only counts failures after a grace window or the first success.
+    // *service*. This self-probe hits `/health/live` through the real TCP
+    // listener (never the handler fn directly) every interval; after N
+    // consecutive TRANSPORT failures — no HTTP response at all: connection
+    // refused, timeout, or a transport error — it presumes the HTTP/MCP surface
+    // wedged (§ the incident's "background-alive, HTTP-dead" class) and
+    // `exit(2)`. An ANSWERED probe (any status) proves the surface is alive and
+    // resets the counter, so a degraded-but-serving daemon is never killed; the
+    // probe targets `/health/live` (which touches no store) precisely so a slow
+    // or locked DB read cannot masquerade as a dead surface.
+    //
+    // Recovery premise: exiting only helps if the launchd job restarts the
+    // process. Both supervisor surfaces are now configured for that —
+    // `scripts/install.sh`'s LaunchAgent plist sets `<key>KeepAlive</key>` and
+    // the Homebrew formula's `service do` block sets `keep_alive true`
+    // (launchd's default ~10s ThrottleInterval), so any exit respawns a fresh
+    // serving daemon. Pre-existing installs predating this must reload the job
+    // (`brew services restart tachi` / re-run the installer) to pick it up.
+    //
+    // The watchdog shares `ct` so a normal shutdown stops it cleanly without
+    // false-firing, and it only counts failures after a grace window or the
+    // first success.
     if let Some((watchdog_interval, watchdog_fails)) = daemon_watchdog_config() {
         let ct_watchdog = ct.clone();
-        let health_url = format!("http://{bind_addr}/health");
+        let health_url = format!("http://{bind_addr}/health/live");
         let grace = daemon_watchdog_grace();
+        let pid_path_watchdog = pid_path.clone();
         tokio::spawn(async move {
             // reqwest is built with `rustls-no-provider`; install the crypto
             // provider before building any client or `.build()` panics (even
@@ -244,11 +266,21 @@ pub(super) async fn serve_http_daemon(
                 let probe = match client.get(&health_url).send().await {
                     Ok(resp) if resp.status().is_success() => Probe::Healthy,
                     Ok(resp) => {
-                        eprintln!("[watchdog] /health returned {}", resp.status());
-                        Probe::Unreachable
+                        // Answered, but non-2xx (e.g. a 503 while the DB is
+                        // degraded). The surface is ALIVE — it accepted the TCP
+                        // connection and produced an HTTP response — so this does
+                        // NOT count toward the liveness exit. Killing an
+                        // alive-but-degraded daemon only makes recovery harder.
+                        eprintln!(
+                            "[watchdog] /health/live answered {} — surface alive but degraded; not counting toward liveness exit",
+                            resp.status()
+                        );
+                        Probe::Degraded
                     }
                     Err(e) => {
-                        eprintln!("[watchdog] /health probe failed: {e}");
+                        // No HTTP response at all: connection refused, timeout, or
+                        // a transport error — the surface is presumed dead.
+                        eprintln!("[watchdog] /health/live probe transport failure (no response): {e}");
                         Probe::Unreachable
                     }
                 };
@@ -262,8 +294,12 @@ pub(super) async fn serve_http_daemon(
                             break;
                         }
                         eprintln!(
-                            "[fatal] [watchdog] /health unreachable {watchdog_fails} consecutive time(s); HTTP surface presumed dead — exiting {code} so launchd respawns a serving daemon"
+                            "[fatal] [watchdog] /health/live unreachable (no HTTP response) {watchdog_fails} consecutive time(s); HTTP surface presumed dead — exiting {code} so launchd (KeepAlive) respawns a serving daemon"
                         );
+                        // Drop the discovery pid file before exiting, same as the
+                        // fail-loud serve path, so a respawning daemon or CLI
+                        // client never forwards a write to this dead pid.
+                        let _ = tokio::fs::remove_file(&pid_path_watchdog).await;
                         std::process::exit(code);
                     }
                 }
@@ -284,6 +320,20 @@ pub(super) async fn serve_http_daemon(
     );
 
     let router = axum::Router::new()
+        .route(
+            "/health/live",
+            axum::routing::get(|| async {
+                // Liveness ONLY: proves the HTTP surface can accept a connection
+                // and route a response. Deliberately touches no store, so a
+                // degraded or lock-contended DB read can never turn into a false
+                // "surface dead" signal for the liveness watchdog (#936). The
+                // DB-touching readiness check is the separate `/health` route.
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({ "status": "live" })),
+                )
+            }),
+        )
         .route(
             "/health",
             axum::routing::get(move || {
@@ -313,7 +363,7 @@ pub(super) async fn serve_http_daemon(
 
     // Write daemon discovery file so CLI invocations can forward writes
     // to the running daemon instead of contending for the DB write lock.
-    let pid_path = crate::daemon_lock::scoped_daemon_pid_path(&app_home, &global_db_path);
+    // (`pid_path` was computed earlier so the watchdog can clean it up too.)
     let pid_payload = serde_json::json!({
         "pid": std::process::id(),
         "port": port,
@@ -369,7 +419,7 @@ pub(super) async fn serve_http_daemon(
                     eprintln!("[daemon] HTTP serve future completed after a shutdown signal");
                 }
                 ExitDecision::Fatal { code, reason } => {
-                    eprintln!("[fatal] {reason}; exiting {code} so launchd respawns a serving daemon");
+                    eprintln!("[fatal] {reason}; exiting {code} so launchd (KeepAlive) respawns a serving daemon");
                     let _ = tokio::fs::remove_file(&pid_path_cleanup).await;
                     std::process::exit(code);
                 }
@@ -465,11 +515,22 @@ pub(super) fn serve_exit_decision(
 }
 
 /// Outcome of a single watchdog self-probe (#936).
+///
+/// The distinction that matters for liveness: an *answered* probe (`Healthy` or
+/// `Degraded`) proves the HTTP surface accepted a connection and produced a
+/// response — the daemon is alive — so it resets the counter. Only a *transport*
+/// failure (`Unreachable`: no response at all) is evidence the surface wedged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Probe {
-    /// `/health` answered with a success status through the real socket.
+    /// The probe answered with a 2xx status through the real socket.
     Healthy,
-    /// The probe failed: connection refused, timeout, or non-success status.
+    /// The probe answered with a non-2xx status (e.g. 503 while the DB is
+    /// degraded). The surface is STILL ALIVE — it accepted the connection and
+    /// produced an HTTP response — so this resets the watchdog, exactly like a
+    /// 2xx. A degraded-but-serving daemon must never be killed by the watchdog.
+    Degraded,
+    /// No HTTP response at all: connection refused, timeout, or transport error.
+    /// The surface is presumed dead → counts toward the kill threshold.
     Unreachable,
 }
 
@@ -505,7 +566,10 @@ impl WatchdogCounter {
     /// has passed. Returns whether the daemon should exit.
     pub(super) fn record(&mut self, probe: Probe, grace_elapsed: bool) -> WatchdogVerdict {
         match probe {
-            Probe::Healthy => {
+            // Any answered response — 2xx OR a degraded non-2xx — proves the
+            // HTTP surface is alive, so it arms and resets the counter. Only a
+            // transport failure (no response) is treated as a wedge.
+            Probe::Healthy | Probe::Degraded => {
                 self.armed = true;
                 self.consecutive_failures = 0;
                 WatchdogVerdict::Continue
@@ -700,6 +764,43 @@ mod tests {
         for _ in 0..100 {
             assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
         }
+    }
+
+    #[test]
+    fn watchdog_answered_degraded_never_exits() {
+        // Review MUST-FIX (#936): a SERVED non-2xx (e.g. 503 while the DB is
+        // degraded) proves the HTTP surface is alive. It must reset the counter
+        // exactly like a 2xx, so a daemon that answers 503 forever is never
+        // killed by the watchdog.
+        let mut c = WatchdogCounter::new(2);
+        for _ in 0..100 {
+            assert_eq!(c.record(Probe::Degraded, true), WatchdogVerdict::Continue);
+        }
+        // A degraded answer also resets an in-progress transport-failure streak.
+        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(c.record(Probe::Degraded, true), WatchdogVerdict::Continue);
+        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Exit(2));
+    }
+
+    #[test]
+    fn watchdog_armed_by_default_wiring_guard() {
+        // Wiring guard (#936): the liveness watchdog spawn in `serve_http_daemon`
+        // is gated on `daemon_watchdog_config()` returning Some. If the default
+        // flips to disabled, the watchdog silently un-wires — this pins the
+        // default armed (threshold 4, interval clamped >= 5s). The fail-loud
+        // select arm's contract is separately guarded by
+        // `serve_exit_ok_without_shutdown_is_fatal`.
+        let prev = std::env::var("TACHI_DAEMON_WATCHDOG_FAILS").ok();
+        std::env::remove_var("TACHI_DAEMON_WATCHDOG_FAILS");
+        let cfg = daemon_watchdog_config();
+        match prev {
+            Some(v) => std::env::set_var("TACHI_DAEMON_WATCHDOG_FAILS", v),
+            None => std::env::remove_var("TACHI_DAEMON_WATCHDOG_FAILS"),
+        }
+        let (interval, fails) = cfg.expect("watchdog must be armed by default");
+        assert_eq!(fails, 4, "default consecutive-failure threshold");
+        assert!(interval.as_secs() >= 5, "interval clamped to >= 5s");
     }
 
     // ---- #936 integration: real socket self-probe drives the decision ----

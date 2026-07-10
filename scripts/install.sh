@@ -292,6 +292,8 @@ install_daemon_service() {
   </dict>
   <key>RunAtLoad</key>
   <true/>
+  <key>KeepAlive</key>
+  <true/>
   <key>StandardOutPath</key>
   <string>$(xml_escape "$logs_dir/launchd-daemon.out.log")</string>
   <key>StandardErrorPath</key>
