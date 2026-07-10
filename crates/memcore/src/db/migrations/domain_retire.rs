@@ -16,6 +16,11 @@ use crate::error::MemoryError;
 ///
 /// Returns the number of tables actually dropped (0 or 1).
 pub(super) fn migrate_v11_drop_domains_table(conn: &Connection) -> Result<usize, MemoryError> {
+    // `unwrap_or(0)` treats a failed existence-check (lock/I/O/authorizer
+    // error) as "table absent", so the sentinel below still gets written and
+    // the migration is not retried. This mirrors the same trade-off in v10's
+    // `exists()` (pack_retire.rs) — an established framework pattern here,
+    // not something specific to this migration.
     fn exists(conn: &Connection, name: &str) -> bool {
         let n: i64 = conn
             .query_row(
