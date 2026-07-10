@@ -20,8 +20,8 @@
 //! - **Target layer** (plain `#[test]` once #708 Phase C is green): records the
 //!   spec's quality goal (recall@10 / MRR >= 0.9). Landed green via `rrf_k=20`
 //!   + lexical-overlap precision boost (soft-stem token coverage + char 4-gram
-//!   Jaccard). The historical RED baseline is preserved in git history and in
-//!   the ratchet floors below.
+//!     Jaccard). The historical RED baseline is preserved in git history and in
+//!     the ratchet floors below.
 //!
 //! # Metric split (important)
 //! On this corpus recall@10 has long saturated at 1.000 for every slice — defect
