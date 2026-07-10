@@ -21,9 +21,9 @@ use super::*;
 async fn recall_pool_streak_counts_header_then_stall_as_timeout_not_success() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let _guard = crate::test_support::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    // Reentrant GlobalTestLock (R2): .lock() already swallows poison and
+    // returns TestLockGuard — do not chain .unwrap_or_else(into_inner).
+    let _guard = crate::test_support::global_test_lock().lock();
     let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
 
     // Header-then-stall mock provider: accepts each connection, writes

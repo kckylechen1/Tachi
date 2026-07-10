@@ -41,7 +41,7 @@ pub(crate) async fn run_provider_probe_report(global_db_path: &Path) -> Provider
         ),
         tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            llm_rerank.rerank_voyage("tachi provider probe", &rerank_docs, 1),
+            llm_rerank.rerank("tachi provider probe", &rerank_docs, 1),
         ),
         tokio::time::timeout(
             std::time::Duration::from_secs(20),
@@ -83,19 +83,23 @@ pub(crate) async fn run_provider_probe_report(global_db_path: &Path) -> Provider
             message: Some("timed out after 15s".to_string()),
         },
     });
+    let rerank_probe_name = match tachi_llm::RerankConfig::from_env() {
+        Ok(cfg) => format!("{}_rerank", cfg.provider_name()),
+        Err(_) => "rerank".to_string(),
+    };
     out.push(match rerank {
         Ok(Ok(rows)) => ProviderProbeResult {
-            name: "voyage_rerank".to_string(),
+            name: rerank_probe_name.clone(),
             status: "ok".to_string(),
             message: Some(format!("{} result(s)", rows.len())),
         },
         Ok(Err(err)) => ProviderProbeResult {
-            name: "voyage_rerank".to_string(),
+            name: rerank_probe_name.clone(),
             status: "failed".to_string(),
             message: Some(err),
         },
         Err(_) => ProviderProbeResult {
-            name: "voyage_rerank".to_string(),
+            name: rerank_probe_name,
             status: "timeout".to_string(),
             message: Some("timed out after 15s".to_string()),
         },

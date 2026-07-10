@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use tachi_llm::{RerankConfig, RerankProviderKind};
+
 use crate::status_ops::{ApiKeyStatus, DbStatus};
 
 pub(crate) fn format_elapsed(dur: chrono::Duration) -> String {
@@ -26,6 +28,20 @@ pub(super) fn is_auth_error(reason: &str) -> bool {
         || lower.contains("permission denied")
 }
 
+/// Map the configured rerank provider to a status key-label (or None when the
+/// arm has no API key to flag, e.g. local HTTP).
+fn configured_rerank_provider_label() -> Option<String> {
+    match RerankConfig::from_env() {
+        Ok(cfg) => match cfg.provider {
+            RerankProviderKind::Voyage => Some("VOYAGE".to_string()),
+            // Local has no cloud API key in `provider_to_key`.
+            RerankProviderKind::Local => None,
+        },
+        // Invalid config cannot be blamed on a key; leave unset.
+        Err(_) => None,
+    }
+}
+
 pub(crate) fn infer_provider_from_failed_job(
     kind: &str,
     lane: Option<&str>,
@@ -41,11 +57,17 @@ pub(crate) fn infer_provider_from_failed_job(
     if !is_auth_error(reason) {
         return None;
     }
+    // Rerank lane consults configured provider (never hardcode VOYAGE).
+    // Checked before the kind special-case so a `recall_rerank_cache` job that
+    // failed on the rerank step is not mis-attributed to SiliconFlow.
+    if lane == Some("rerank") {
+        return configured_rerank_provider_label();
+    }
     if kind == "recall_rerank_cache" || kind == "memory_distill" {
         return Some("SILICONFLOW".to_string());
     }
     match lane.unwrap_or_default() {
-        "rerank" | "embedding" => Some("VOYAGE".to_string()),
+        "embedding" => Some("VOYAGE".to_string()),
         "extract" | "extraction" | "summary" | "distill" | "reasoning" => {
             Some("SILICONFLOW".to_string())
         }
