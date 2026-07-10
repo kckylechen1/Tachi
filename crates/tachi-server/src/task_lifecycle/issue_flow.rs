@@ -95,7 +95,10 @@ pub(crate) async fn handle_task_intake(
     let briefing =
         crate::copilot_ops::handle_tachi_feature_briefing(server, &briefing_params).await?;
     let pr_handoff_path = run_dir_for_flow_id(&flow_id)?.join("pr_handoff.md");
-    serde_json::to_string(&json!({
+    // #527: default intake is a receipt (plan + paths). Full briefing is a
+    // large read model — include only on format=full (was 50KB+ in dogfood).
+    let full = crate::facade_memory_ops::wants_full_format(params.format.as_deref());
+    let mut receipt = json!({
         "ok": true,
         "action": "intake",
         "flow_id": flow_id,
@@ -106,9 +109,19 @@ pub(crate) async fn handle_task_intake(
         "spec_paths": issue.spec_paths,
         "pr_handoff_path": pr_handoff_path.to_string_lossy(),
         "run_dir": run_dir_for_flow_id(&flow_id)?.to_string_lossy(),
-        "briefing": serde_json::from_str::<Value>(&briefing).unwrap_or(json!(briefing)),
-    }))
-    .map_err(|e| format!("serialize intake: {e}"))
+    });
+    if full {
+        receipt.as_object_mut().expect("receipt object").insert(
+            "briefing".to_string(),
+            serde_json::from_str::<Value>(&briefing).unwrap_or(json!(briefing)),
+        );
+    } else {
+        receipt.as_object_mut().expect("receipt object").insert(
+            "note".to_string(),
+            json!("receipt: briefing omitted; format=full for feature briefing board, or tachi_task(action='briefing')"),
+        );
+    }
+    serde_json::to_string(&receipt).map_err(|e| format!("serialize intake: {e}"))
 }
 
 pub(crate) async fn handle_task_link_pr(
