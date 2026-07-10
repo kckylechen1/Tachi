@@ -256,6 +256,23 @@ fn lifecycle_task_params(
     // Handlers ignore `action`; force a valid tachi_task primary so GH lifecycle
     // action strings (link_pr/pr_status/…) do not fail TachiTaskAction decode
     // after #757 removed those variants from tachi_task.
+    //
+    // INVARIANT: lifecycle handlers must not read params.action; if one starts
+    // to, this bridge must be replaced. Every callee downstream of this
+    // function — `task_lifecycle::handle_task_link_pr`, `resolve_task_pr_target`
+    // (pr_status), `handle_task_pr_handoff`, `handle_task_release_note` — must
+    // keep ignoring `params.action` on the `TachiTaskParams` it receives here,
+    // because that field is always overwritten to the literal `"status"` a few
+    // lines below regardless of which of the four tachi_gh lifecycle actions
+    // actually triggered this call. If one of those handlers starts branching
+    // on `params.action`, it will silently misroute (every lifecycle action
+    // behaves as `status`) instead of erroring.
+    // `lifecycle_task_params_bridge_routes_all_four_gh_lifecycle_actions` in
+    // `mod tests` below only proves the conversion itself is lossless for the
+    // fields the handlers *do* key off (pr_ref/flow_id/repo/number) — it does
+    // not, and cannot, catch a handler that starts reading `action`. Follow-up:
+    // #757 tracks replacing this bridge with a dedicated lifecycle params type
+    // instead of reusing `TachiTaskParams`.
     let mut value = serde_json::to_value(params)
         .map_err(|err| format!("serialize tachi_gh lifecycle params: {err}"))?;
     if let Some(obj) = value.as_object_mut() {
@@ -310,5 +327,54 @@ mod tests {
         let target = resolve_tachi_gh_pr_target(&params, "safe_merge").expect("target");
         assert_eq!(target.repo, "owner/repo");
         assert_eq!(target.number, 42);
+    }
+
+    /// Guard for the `lifecycle_task_params` bridge (see the invariant comment
+    /// at its definition): drives all four tachi_gh lifecycle actions
+    /// (link_pr/pr_status/pr_handoff/release_note) THROUGH the bridge — not
+    /// through the handlers — and asserts each converts without error, with
+    /// `action` forced to `status` (the bridge's whole reason to exist), and
+    /// with the fields the handlers actually key off (pr_ref/flow_id)
+    /// preserved untouched per action. A per-action-distinct pr_ref/flow_id
+    /// pair means a field mix-up between actions fails loudly instead of
+    /// silently misrouting.
+    #[test]
+    fn lifecycle_task_params_bridge_routes_all_four_gh_lifecycle_actions() {
+        for action in ["link_pr", "pr_status", "pr_handoff", "release_note"] {
+            let pr_ref = format!("owner/repo#{}", action.len());
+            let flow_id = format!("flow-{action}");
+            let gh_params = params(json!({
+                "action": action,
+                "pr_ref": pr_ref,
+                "flow_id": flow_id,
+            }));
+
+            let task_params = lifecycle_task_params(&gh_params)
+                .unwrap_or_else(|err| panic!("{action}: bridge conversion failed: {err}"));
+
+            assert_eq!(
+                task_params.action,
+                crate::tool_params::TachiTaskAction::Status,
+                "{action}: bridge must force action=status regardless of the source tachi_gh action"
+            );
+            assert_eq!(
+                task_params.pr_ref.as_deref(),
+                Some(pr_ref.as_str()),
+                "{action}: pr_ref must round-trip through the bridge unchanged"
+            );
+            assert_eq!(
+                task_params.flow_id.as_deref(),
+                Some(flow_id.as_str()),
+                "{action}: flow_id must round-trip through the bridge unchanged"
+            );
+
+            // resolve_task_pr_target is action-agnostic (reads repo/number/pr_ref
+            // only) — confirm routing to the right PR target still works through
+            // the bridge for the actions that rely on it (link_pr, pr_status).
+            let target = crate::task_lifecycle::resolve_task_pr_target(&task_params)
+                .unwrap_or_else(|err| panic!("{action}: resolve_task_pr_target failed: {err}"));
+            assert_eq!(target.repo, "owner/repo");
+            assert_eq!(target.number, action.len() as u64);
+        }
     }
 }

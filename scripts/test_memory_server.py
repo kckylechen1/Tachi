@@ -177,25 +177,20 @@ def test_tachi_server():
             check("databases.global exists", "global" in dbs)
             check("databases.project exists", "project" in dbs)
 
-        # ── Test 8: set_state / get_state (global only) ──
-        print("\n[Test 8] set_state / get_state")
-        resp = call_tool(proc, "set_state", {"key": "test_key", "value": {"hello": "world"}})
-        data = extract_text(resp)
-        check("set_state ok", data.get("key") == "test_key")
+        # Test 8 (set_state / get_state) removed: graph/state primitives
+        # (memory_graph/add_edge/get_edges/set_state/get_state) were taken off
+        # the MCP surface and are internal-only now — no facade equivalent for
+        # raw KV state to smoke-test here. See #757.
 
-        resp = call_tool(proc, "get_state", {"key": "test_key"})
-        data = extract_text(resp)
-        check("get_state value", data.get("value") == {"hello": "world"}, f"got: {data}")
-
-        # ── Test 9: get_pipeline_status ──
-        print("\n[Test 9] get_pipeline_status")
+        # ── Test 8: get_pipeline_status ──
+        print("\n[Test 8] get_pipeline_status")
         resp = call_tool(proc, "get_pipeline_status")
         data = extract_text(resp)
         check("pipeline status", data.get("status") == "running")
         check("pipeline has global_vec", "global_vec_available" in data or "vec_available" in str(data))
 
-        # ── Test 10: hub_register (global) ──
-        print("\n[Test 10] hub_register (global)")
+        # ── Test 9: hub_register (global) ──
+        print("\n[Test 9] hub_register (global)")
         resp = call_tool(proc, "hub_register", {
             "id": "skill:code-review",
             "cap_type": "skill",
@@ -208,8 +203,8 @@ def test_tachi_server():
         check("hub_register global", data.get("db") == "global", f"got: {data}")
         check("hub_register id", data.get("id") == "skill:code-review")
 
-        # ── Test 11: hub_register (project) ──
-        print("\n[Test 11] hub_register (project)")
+        # ── Test 10: hub_register (project) ──
+        print("\n[Test 10] hub_register (project)")
         resp = call_tool(proc, "hub_register", {
             "id": "mcp:github",
             "cap_type": "mcp",
@@ -221,8 +216,8 @@ def test_tachi_server():
         data = extract_text(resp)
         check("hub_register project", data.get("db") == "project", f"got: {data}")
 
-        # ── Test 12: hub_discover ──
-        print("\n[Test 12] hub_discover (list all)")
+        # ── Test 11: hub_discover ──
+        print("\n[Test 11] hub_discover (list all)")
         resp = call_tool(proc, "hub_discover", {"enabled_only": True})
         data = extract_text(resp)
         check("hub_discover returns list", isinstance(data, list), f"type: {type(data)}")
@@ -233,23 +228,23 @@ def test_tachi_server():
             dbs = set(c.get("db") for c in data)
             check("discover has both dbs", len(dbs) >= 2, f"dbs: {dbs}")
 
-        # ── Test 13: hub_discover (search) ──
-        print("\n[Test 13] hub_discover (search)")
+        # ── Test 12: hub_discover (search) ──
+        print("\n[Test 12] hub_discover (search)")
         resp = call_tool(proc, "hub_discover", {"query": "code review"})
         data = extract_text(resp)
         check("hub_search returns list", isinstance(data, list))
         if isinstance(data, list) and len(data) > 0:
             check("hub_search finds skill", data[0].get("id") == "skill:code-review")
 
-        # ── Test 14: hub_get ──
-        print("\n[Test 14] hub_get")
+        # ── Test 13: hub_get ──
+        print("\n[Test 13] hub_get")
         resp = call_tool(proc, "hub_get", {"id": "skill:code-review"})
         data = extract_text(resp)
         check("hub_get found", data.get("id") == "skill:code-review", f"got: {data}")
         check("hub_get has definition", "prompt" in data.get("definition", ""))
 
-        # ── Test 15: hub_feedback ──
-        print("\n[Test 15] hub_feedback")
+        # ── Test 14: hub_feedback ──
+        print("\n[Test 14] hub_feedback")
         resp = call_tool(proc, "hub_feedback", {
             "id": "skill:code-review",
             "success": True,
@@ -263,16 +258,16 @@ def test_tachi_server():
         data = extract_text(resp)
         check("hub_feedback uses incremented", data.get("uses", 0) >= 1, f"uses: {data.get('uses')}")
 
-        # ── Test 16: hub_stats ──
-        print("\n[Test 16] hub_stats")
+        # ── Test 15: hub_stats ──
+        print("\n[Test 15] hub_stats")
         resp = call_tool(proc, "hub_stats")
         data = extract_text(resp)
         check("hub_stats total", data.get("total_capabilities", 0) >= 2, f"got: {data}")
         check("hub_stats by_type", "skill" in data.get("by_type", {}), f"got: {data.get('by_type')}")
 
         # ── Summary ──
-        # ── Test 17: hub_call (MCP proxy spike) ──
-        print("\n[Test 17] hub_call (MCP proxy)")
+        # ── Test 16: hub_call (MCP proxy spike) ──
+        print("\n[Test 16] hub_call (MCP proxy)")
         # First register the test echo MCP server
         import os as _os
         echo_server_path = _os.path.join(_os.path.dirname(__file__), "tests/test_echo_mcp_server.py")
@@ -310,8 +305,8 @@ def test_tachi_server():
         data = extract_text(resp)
         check("hub_call add", "42" in str(data.get("content", [])), f"got: {data}")
 
-        # ── Test 18: tools/list includes proxy tools ──
-        print("\n[Test 18] tools/list includes proxy tools")
+        # ── Test 17: tools/list includes proxy tools ──
+        print("\n[Test 17] tools/list includes proxy tools")
         resp = send_request(proc, {
             "jsonrpc": "2.0", "id": next_id(), "method": "tools/list",
             "params": {},
@@ -325,13 +320,13 @@ def test_tachi_server():
         check("tools/list has proxy echo", "test-echo__echo" in tool_names, f"tools: {[t for t in tool_names if 'echo' in t]}")
         check("tools/list has proxy add", "test-echo__add" in tool_names, f"tools: {[t for t in tool_names if 'add' in t]}")
 
-        # ── Test 19: call proxy tool directly (via transparent name) ──
-        print("\n[Test 19] call proxy tool directly")
+        # ── Test 18: call proxy tool directly (via transparent name) ──
+        print("\n[Test 18] call proxy tool directly")
         resp = call_tool(proc, "test-echo__echo", {"text": "transparent proxy works"})
         data = extract_text(resp)
         check("proxy echo works", "transparent proxy works" in str(data), f"got: {data}")
 
-        print("\n[Test 20] skill dynamic tool mapping")
+        print("\n[Test 19] skill dynamic tool mapping")
         resp = call_tool(proc, "hub_register", {
             "id": "skill:smart-review",
             "cap_type": "skill",

@@ -505,12 +505,20 @@ agent profiles should use `tachi_memory(action="get")` instead.
 
 ### Knowledge Graph & Domains
 
-`add_edge`, `get_edges`, `memory_graph`
+Graph primitives (`add_edge`, `get_edges`, `memory_graph`) were internalized
+off the MCP surface in #757 — no live tool call reaches them anymore; the
+store logic remains for in-crate callers. Agents get graph traversal through
+`tachi_save`/`tachi_memory` auto-linking and `tachi_task` facades instead.
+
 `register_domain`, `get_domain`, `list_domains`, `delete_domain`
 
 ### State & Config
 
-`set_state`, `get_state`, `runtime_info`
+State primitives (`set_state`, `get_state`) were internalized off the MCP
+surface in #757 for the same reason — there is no facade equivalent for raw
+KV state.
+
+`runtime_info`
 
 ### Extraction & Ingestion
 
