@@ -4,17 +4,18 @@ use super::*;
 async fn save_memory_includes_provenance_for_registered_agent() {
     let server = make_server();
 
-    server
-        .agent_register(Parameters(AgentRegisterParams {
+    {
+        let mut guard = server.agent_runtime_write();
+        guard.agent_profile = Some(AgentProfile {
             agent_id: "claude-code".to_string(),
-            display_name: Some("Claude Code".to_string()),
+            display_name: "Claude Code".to_string(),
             capabilities: vec!["code-gen".to_string()],
             tool_filter: None,
             rate_limit_rpm: None,
             rate_limit_burst: None,
-        }))
-        .await
-        .expect("agent_register should succeed");
+            registered_at: Utc::now().to_rfc3339(),
+        });
+    }
 
     let saved = server
         .save_memory(Parameters(SaveMemoryParams {

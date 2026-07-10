@@ -31,7 +31,6 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_memory",
     // Continuity event facade (query action is read-only)
     "tachi_event",
-    "tachi_profile",
     // Zero-param session-start alias for tachi_memory(action='briefing')
     "tachi_briefing",
     // Component governance read model (Issue #796)
@@ -90,13 +89,6 @@ pub const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "find_similar_memory",
     "get_pipeline_status",
     "sync_memories",
-    "agent_register",
-    "agent_whoami",
-    "synthesize_agent_evolution",
-    "project_agent_profile",
-    "queue_agent_evolution",
-    "review_agent_evolution_proposal",
-    "list_agent_evolution_proposals",
     "hub_call",
     "hub_disconnect",
     "wiki_lint",

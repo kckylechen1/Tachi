@@ -4,9 +4,8 @@ use super::{
 use crate::tool_params::{
     AgentEvolutionDocumentPathParams, AgentEvolutionEvidencePathParams,
     AgentEvolutionMemoryQueryParams, CompactSessionMemoryParams, DistillTrajectoryParams,
-    HubRegisterParams, IngestSourceParams, ListAgentEvolutionProposalsParams,
-    PrepareCapabilityBundleParams, RecommendCapabilityParams, RecommendSkillParams,
-    RecommendToolchainParams, ReviewAgentEvolutionProposalParams, RunSkillParams,
+    HubRegisterParams, IngestSourceParams, PrepareCapabilityBundleParams,
+    RecommendCapabilityParams, RecommendSkillParams, RecommendToolchainParams, RunSkillParams,
     SynthesizeAgentEvolutionParams, TachiCompleteParams, TachiSkillParams,
 };
 use chrono::Utc;

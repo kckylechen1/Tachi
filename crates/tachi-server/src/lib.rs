@@ -74,7 +74,6 @@
 
 mod agent_eval;
 mod agent_markdown;
-mod agent_profile_ops;
 mod agent_registry;
 mod arena_ops;
 mod bootstrap;
@@ -158,7 +157,7 @@ mod workflow_closure;
 use crate::tool_params::*;
 
 pub(crate) mod server_state;
-pub(crate) use server_state::{AgentProfile, CachedVaultKey, DbScope, MemoryServer, VaultState};
+pub(crate) use server_state::{CachedVaultKey, DbScope, MemoryServer, VaultState};
 
 // Enrichment batcher methods are in enrichment.rs
 

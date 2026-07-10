@@ -421,7 +421,8 @@ fn maturity_review_artifacts(entry: &MemoryEntry, reason: &str) -> Value {
             "gate": gate,
         },
         "agent_profile_proposal": {
-            "tool": "project_agent_profile",
+            "tool": "tachi_event",
+            "action": "promote",
             "write": false,
             "review_status": "pending",
             "input": {

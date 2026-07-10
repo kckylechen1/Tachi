@@ -60,17 +60,18 @@ async fn test_handoff_leave_supersedes_pending_duplicate() {
     let db_path =
         std::env::temp_dir().join(format!("handoff-dup-test-{}.sqlite", uuid::Uuid::new_v4()));
     let server = test_server(db_path.clone());
-    server
-        .agent_register(Parameters(AgentRegisterParams {
+    {
+        let mut guard = server.agent_runtime_write();
+        guard.agent_profile = Some(AgentProfile {
             agent_id: "agent-a".to_string(),
-            display_name: None,
+            display_name: "agent-a".to_string(),
             capabilities: vec![],
             tool_filter: None,
             rate_limit_rpm: None,
             rate_limit_burst: None,
-        }))
-        .await
-        .expect("register agent");
+            registered_at: Utc::now().to_rfc3339(),
+        });
+    }
 
     let first_resp = server
         .handoff_leave(Parameters(HandoffLeaveParams {

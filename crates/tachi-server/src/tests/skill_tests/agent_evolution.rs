@@ -24,8 +24,9 @@ async fn synthesize_agent_evolution_dry_run_loads_paths_and_memory_queries() {
         .with_global_store(|store| store.upsert(&memory).map_err(|e| e.to_string()))
         .expect("seed query memory");
 
-    let result = server
-        .synthesize_agent_evolution(Parameters(SynthesizeAgentEvolutionParams {
+    let result = crate::foundry_ops::handle_synthesize_agent_evolution(
+        &server,
+        SynthesizeAgentEvolutionParams {
             agent_id: "yaya".to_string(),
             display_name: Some("Yaya".to_string()),
             documents: Vec::new(),
@@ -51,9 +52,10 @@ async fn synthesize_agent_evolution_dry_run_loads_paths_and_memory_queries() {
             }],
             goals: vec!["reduce routing drift".to_string()],
             dry_run: true,
-        }))
-        .await
-        .expect("synthesize_agent_evolution dry_run should succeed");
+        },
+    )
+    .await
+    .expect("synthesize_agent_evolution dry_run should succeed");
     let json: Value = serde_json::from_str(&result).expect("json");
     assert_eq!(json["status"], json!("dry_run"));
     assert_eq!(
@@ -112,44 +114,4 @@ async fn compact_session_memory_persists_rollup_and_signal_entries() {
         .as_str()
         .unwrap_or("")
         .contains("Durable Session Memory"));
-}
-
-#[tokio::test]
-async fn list_agent_evolution_proposals_empty_result_accepts_zero_limit() {
-    let server = make_server();
-
-    let result = crate::foundry_ops::handle_list_agent_evolution_proposals(
-        &server,
-        ListAgentEvolutionProposalsParams {
-            agent_id: "codex".to_string(),
-            status: None,
-            limit: 0,
-        },
-    )
-    .await
-    .expect("empty proposal list should succeed");
-    let json: Value = serde_json::from_str(&result).expect("json");
-    assert_eq!(json["agent_id"], json!("codex"));
-    assert_eq!(json["count"], json!(0));
-    assert_eq!(json["proposals"].as_array().expect("array").len(), 0);
-}
-
-#[tokio::test]
-async fn review_agent_evolution_proposal_rejects_invalid_status() {
-    let server = make_server();
-
-    let err = crate::foundry_ops::handle_review_agent_evolution_proposal(
-        &server,
-        ReviewAgentEvolutionProposalParams {
-            proposal_id: "proposal-1".to_string(),
-            status: "maybe".to_string(),
-            note: None,
-        },
-    )
-    .await
-    .expect_err("invalid review status should fail");
-    assert!(
-        err.contains("Invalid review status"),
-        "unexpected error: {err}"
-    );
 }

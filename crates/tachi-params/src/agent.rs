@@ -13,56 +13,8 @@ fn default_evolution_memory_query_limit() -> usize {
     5
 }
 
-fn default_foundry_list_limit() -> usize {
-    10
-}
-
 fn default_copilot_top_k() -> usize {
     6
-}
-
-// ─── Agent Registration ─────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct AgentRegisterParams {
-    /// Unique agent identifier (e.g. "claude-code", "openclaw", "cursor", "codex")
-    pub agent_id: String,
-
-    /// Human-readable display name
-    #[serde(default)]
-    pub display_name: Option<String>,
-
-    /// Agent capabilities / feature flags (e.g. ["code-gen", "file-edit", "web-search"])
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-
-    /// Optional tool allowlist — if set, only these tools will be returned in list_tools.
-    /// Supports glob patterns like "hub_*", "save_memory", "tachi_skill_*".
-    #[serde(default)]
-    pub tool_filter: Option<Vec<String>>,
-
-    /// Optional per-agent rate limit override (requests per minute, 0 = use server default)
-    #[serde(
-        default,
-        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
-    )]
-    #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
-    pub rate_limit_rpm: Option<u64>,
-
-    /// Optional per-agent burst limit override (0 = use server default)
-    #[serde(
-        default,
-        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
-    )]
-    #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
-    pub rate_limit_burst: Option<u64>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct AgentWhoamiParams {
-    /// No parameters needed — returns the current agent profile for this session.
-    #[serde(default)]
-    pub _placeholder: Option<String>,
 }
 
 // ─── Handoff ────────────────────────────────────────────────────────────────
@@ -310,53 +262,4 @@ pub struct SynthesizeAgentEvolutionParams {
     /// If true, do not call the LLM. Return the normalized job and request payload only.
     #[serde(default)]
     pub dry_run: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct ListAgentEvolutionProposalsParams {
-    /// Canonical target agent id
-    pub agent_id: String,
-
-    /// Optional status filter: proposed | approved | rejected | applied
-    #[serde(default)]
-    pub status: Option<String>,
-
-    /// Number of proposals to return
-    #[serde(default = "default_foundry_list_limit")]
-    pub limit: usize,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct ReviewAgentEvolutionProposalParams {
-    /// Derived proposal id returned by synthesize/queue/list operations
-    pub proposal_id: String,
-
-    /// Review status: approved | rejected | applied
-    pub status: String,
-
-    /// Optional reviewer note
-    #[serde(default)]
-    pub note: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct ProjectAgentProfileParams {
-    /// Canonical target agent id
-    pub agent_id: String,
-
-    /// Current host documents that should receive approved proposals
-    #[serde(default)]
-    pub documents: Vec<AgentEvolutionDocumentParams>,
-
-    /// Optional subset of persisted proposal ids to project
-    #[serde(default)]
-    pub proposal_ids: Vec<String>,
-
-    /// If true, only project approved proposals (default: true)
-    #[serde(default = "default_true")]
-    pub approved_only: bool,
-
-    /// If true, write projected content back to document paths on disk
-    #[serde(default)]
-    pub write: bool,
 }

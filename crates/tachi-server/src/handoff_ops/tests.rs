@@ -1,5 +1,5 @@
 use super::*;
-use crate::tool_params::AgentRegisterParams;
+use memory_server_runtime::AgentProfile;
 use rmcp::handler::server::wrapper::Parameters;
 
 fn ensure_test_env() {
