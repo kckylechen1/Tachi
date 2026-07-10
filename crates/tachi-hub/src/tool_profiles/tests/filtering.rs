@@ -111,7 +111,7 @@ fn standard_profile_restricts_to_allow_list() {
             test_tool("tachi_memory"),
             test_tool("tachi_event"),
             test_tool("tachi_domain_adapter"),
-            test_tool("tachi_profile"),
+            test_tool("tachi_orchestrator"),
             test_tool("tachi_briefing"),
             test_tool("tachi_save"),
             test_tool("tachi_web_search"),

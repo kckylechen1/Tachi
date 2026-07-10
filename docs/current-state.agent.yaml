@@ -66,7 +66,7 @@ implemented_now:
       - RPM limit (default 0 = unlimited)
       - burst/loop detection (same tool+args, default threshold 8)
       - configurable via RATE_LIMIT_RPM / RATE_LIMIT_BURST env vars
-      - agent profile overrides
+      - "per-agent override slot exists (AgentProfile.rate_limit_rpm/burst) but is unreachable since issue 757 (no facade sets it); all sessions use the global env default"
 
   skill_evolve:
     tools:
@@ -78,13 +78,11 @@ implemented_now:
       - feedback recording in handle_run_skill
 
   agent_profile:
-    tools:
-      - agent_register
-      - agent_whoami
+    tools: []
     features:
-      - per-session AgentProfile (name, role, capabilities)
-      - rate limit overrides per agent
-      - stored in Arc<RwLock<Option<AgentProfile>>>
+      - "agent_register/agent_whoami retired under issue 757; no facade currently writes AgentProfile state at runtime"
+      - "AgentProfile struct + Arc<RwLock<Option<AgentProfile>>> slot still exists for consumers (provenance, handoff from_agent, rate-limit overrides, Foundry attribution) but always reads None in production"
+      - "each consumer degrades gracefully to a non-agent_profile fallback (TACHI_PROFILE env, unknown-agent/system/tachi_scheduler sentinels, or global RATE_LIMIT_RPM/BURST env default); no crash, but per-agent identity/rate-limit-override granularity is gone"
 
   cross_agent_handoff:
     tools:
