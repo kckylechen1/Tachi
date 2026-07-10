@@ -54,6 +54,7 @@ async fn dispatch_credential_profile_requires_unlocked_vault_before_spawn() {
 
     let mut params = dispatch_params(Some("custom"), "should fail before spawn");
     params.cwd = Some(project.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
     params.credential_profiles = vec!["locked_env_profile".to_string()];
     params.command = vec![
         "python3".to_string(),
@@ -134,6 +135,7 @@ async fn dispatch_credential_profile_denies_consumer_before_decrypting_secret() 
 
     let mut params = dispatch_params(Some("custom"), "should fail before decrypt");
     params.cwd = Some(project.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
     params.credential_profiles = vec!["denied_env_profile".to_string()];
     params.command = vec![
         "python3".to_string(),

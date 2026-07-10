@@ -177,6 +177,12 @@ pub(super) async fn handle_convoy_dispatch_action(
                 profile: slice_profile.clone(),
                 task: prompt,
                 cwd: slice_cwd.clone(),
+                // Convoy slices supply a bare (per-slice) cwd; declare it
+                // unmanaged for the fail-safe env gate (#894 S1 §1.3). Per-slice
+                // env_id cascade is the follow-up; the escape hatch keeps
+                // convoy working and ledger-stamped `env: unmanaged` today.
+                env_id: None,
+                unmanaged_cwd: Some(true),
                 skills: Vec::new(),
                 context_query: None,
                 model: None,

@@ -85,6 +85,20 @@ pub struct TachiDispatchParams {
     #[serde(default)]
     pub cwd: Option<String>,
 
+    /// Execution-environment lease id (#894 S1). When set, the dispatch cwd is
+    /// resolved from the daemon-owned `exec_envs` lease (a managed env); a bare
+    /// `cwd` is ignored/rejected in favor of the lease path, and the dispatch is
+    /// stamped `env: managed` in the ledger.
+    #[serde(default)]
+    pub env_id: Option<String>,
+
+    /// Explicit opt-in to dispatch into a bare `cwd` that is NOT backed by a
+    /// managed lease (#894 S1). Fail-safe default is managed: a bare `cwd`
+    /// without `env_id` is only accepted when this is true, and such dispatches
+    /// are stamped `env: unmanaged` in the ledger.
+    #[serde(default)]
+    pub unmanaged_cwd: Option<bool>,
+
     /// Skills to inject into the agent's prompt (capability IDs)
     #[serde(default)]
     pub skills: Vec<String>,

@@ -418,6 +418,32 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             last_hit_at   TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_recall_cache_updated ON recall_cache(updated_at);
+
+        -- Execution-environment leases (#894 S1). Daemon-owned rows are the
+        -- single source of truth for a provisioned worktree/env: worktree
+        -- markers (`.tachi-worktree.json`) and the global `worktrees.json`
+        -- become read-only projections/backstops for offline tools (the
+        -- sweep), never a second owner. `state` is the S1 lifecycle
+        -- (`active` -> `reclaimed`); the reclaim transition is a transactional
+        -- state flip written by exactly one reclaim function. `dispatch_id`
+        -- links a lease to the dispatch that owns it.
+        CREATE TABLE IF NOT EXISTS exec_envs (
+            env_id         TEXT PRIMARY KEY,
+            kind           TEXT NOT NULL DEFAULT 'worktree',
+            path           TEXT NOT NULL,
+            repo_root      TEXT NOT NULL DEFAULT '',
+            branch         TEXT NOT NULL DEFAULT '',
+            base_sha       TEXT NOT NULL DEFAULT '',
+            dispatch_id    TEXT,
+            state          TEXT NOT NULL DEFAULT 'active',
+            reclaim_reason TEXT,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            created_at     TEXT NOT NULL DEFAULT '',
+            reclaimed_at   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_exec_envs_state ON exec_envs(state);
+        CREATE INDEX IF NOT EXISTS idx_exec_envs_path ON exec_envs(path);
+        CREATE INDEX IF NOT EXISTS idx_exec_envs_dispatch ON exec_envs(dispatch_id);
 "#;
 
 pub(super) const MIGRATED_INDEXES_SQL: &str = r#"

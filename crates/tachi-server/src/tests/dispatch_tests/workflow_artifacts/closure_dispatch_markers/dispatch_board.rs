@@ -25,6 +25,7 @@ async fn tachi_dispatch_with_flow_id_records_dispatch_card() {
         "print('ok')".to_string(),
     ];
     params.cwd = Some(tmp.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
     params.profile = Some("glm_impl".to_string());
     params.flow_id = Some(flow_id.to_string());
     params.issue_ref = Some("kckylechen1/tachi#194".to_string());

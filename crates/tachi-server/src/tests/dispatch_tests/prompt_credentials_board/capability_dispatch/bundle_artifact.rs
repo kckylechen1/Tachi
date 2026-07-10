@@ -30,6 +30,7 @@ async fn dispatch_response_and_flow_card_link_capability_bundle_artifact() {
     let mut params = dispatch_params(Some("custom"), "smoke capability bundle artifact");
     params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
     params.cwd = Some(tmp.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
     params.profile = Some("glm_impl".to_string());
     params.flow_id = Some(flow_id.clone());
     params.auto_capability_bundle = Some(true);
@@ -86,6 +87,7 @@ async fn dispatch_explicit_false_writes_disabled_capability_bundle_artifact() {
     let mut params = dispatch_params(Some("custom"), "smoke disabled capability bundle artifact");
     params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
     params.cwd = Some(tmp.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
     params.profile = Some("glm_impl".to_string());
     params.auto_capability_bundle = Some(false);
 

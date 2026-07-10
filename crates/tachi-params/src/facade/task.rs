@@ -167,6 +167,16 @@ pub struct TachiTaskParams {
     #[schemars(description = "[action=dispatch] Working directory for the spawned agent.")]
     pub cwd: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "[action=dispatch] Execution-environment lease id (#894 S1); resolves the agent cwd from the daemon-owned lease (managed env)."
+    )]
+    pub env_id: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=dispatch] Explicit opt-in to dispatch into a bare cwd not backed by a lease; stamped env: unmanaged. Fail-safe default is managed."
+    )]
+    pub unmanaged_cwd: Option<bool>,
+    #[serde(default)]
     #[schemars(description = "[action=dispatch] Skill ids to inject into the agent prompt.")]
     pub skills: Vec<String>,
     #[serde(default)]
