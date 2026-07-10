@@ -451,7 +451,8 @@ impl MemoryServer {
             })
             .collect();
 
-        let keyword_results: Vec<(usize, Result<Vec<String>, String>, Vec<String>)> =
+        type KeywordEnrichmentResult = (usize, Result<Vec<String>, String>, Vec<String>);
+        let keyword_results: Vec<KeywordEnrichmentResult> =
             futures::future::join_all(keyword_futures).await;
 
         for (idx, result, seed) in keyword_results {
@@ -1015,7 +1016,7 @@ mod tests {
         // Precondition: synonym not in text/keywords → FTS miss.
         let before = server
             .with_global_store(|store| {
-                Ok(memcore::db::search_fts(
+                memcore::db::search_fts(
                     store.connection(),
                     "synapse-recall",
                     10,
@@ -1024,7 +1025,7 @@ mod tests {
                     None,
                     None,
                 )
-                .map_err(|e| format!("fts before: {e}"))?)
+                .map_err(|e| format!("fts before: {e}"))
             })
             .expect("fts before");
         assert!(
@@ -1072,7 +1073,7 @@ mod tests {
 
         let after = server
             .with_global_store(|store| {
-                Ok(memcore::db::search_fts(
+                memcore::db::search_fts(
                     store.connection(),
                     "synapse-recall",
                     10,
@@ -1081,7 +1082,7 @@ mod tests {
                     None,
                     None,
                 )
-                .map_err(|e| format!("fts after: {e}"))?)
+                .map_err(|e| format!("fts after: {e}"))
             })
             .expect("fts after");
         assert!(
@@ -1240,7 +1241,7 @@ mod tests {
 
         let hits = server
             .with_global_store(|store| {
-                Ok(memcore::db::search_fts(
+                memcore::db::search_fts(
                     store.connection(),
                     "should-not-appear-when-flag-off",
                     10,
@@ -1249,7 +1250,7 @@ mod tests {
                     None,
                     None,
                 )
-                .map_err(|e| format!("fts: {e}"))?)
+                .map_err(|e| format!("fts: {e}"))
             })
             .expect("fts");
         assert!(

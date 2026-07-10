@@ -56,11 +56,23 @@ fn spawn_blackhole_listener() -> u16 {
 
 #[tokio::test]
 async fn search_falls_back_to_lexical_with_degraded_marker_when_embed_provider_blackholes() {
-    // VOYAGE_BASE_URL + the embedding-enable toggle + recall timeouts are all
-    // process-wide env; serialize against other env-mutating tests.
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    const CHILD_ENV: &str = "TACHI_RECALL_FAILSAFE_CHILD";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        // The provider endpoint and recall knobs are process-global. Run the
+        // environment-mutating body in an isolated test process rather than
+        // holding the suite's blocking mutex across the provider timeout.
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("search_falls_back_to_lexical_with_degraded_marker_when_embed_provider_blackholes")
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("spawn isolated recall failsafe test");
+        assert!(
+            status.success(),
+            "isolated recall failsafe test failed: {status}"
+        );
+        return;
+    }
 
     let server = make_server();
     if !server.global_vec_available() {

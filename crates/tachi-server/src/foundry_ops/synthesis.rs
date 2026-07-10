@@ -212,19 +212,13 @@ pub(super) fn parse_synthesis_response(
     })
 }
 
+type AgentEvolutionSynthesisResult = (memcore::AgentEvolutionSynthesis, String, String, DbScope);
+
 pub(super) async fn run_agent_evolution_synthesis(
     server: &MemoryServer,
     params: &SynthesizeAgentEvolutionParams,
     job: &memcore::FoundryJobSpec,
-) -> Result<
-    (
-        memcore::AgentEvolutionSynthesis,
-        String,
-        String,
-        DbScope,
-    ),
-    String,
-> {
+) -> Result<AgentEvolutionSynthesisResult, String> {
     let documents = build_documents(params)?;
     let evidence = build_evidence(server, params).await?;
     let payload = build_synthesis_payload(params, &documents, &evidence);
