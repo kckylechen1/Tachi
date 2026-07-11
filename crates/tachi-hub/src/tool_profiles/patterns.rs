@@ -132,6 +132,10 @@ pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_wiki",
     // Skill facade (discover + run)
     "tachi_skill",
+    // Vault session unlock/lock must work against the default daemon profile —
+    // CLI `tachi vault unlock` depends on it (#979).
+    "vault_unlock",
+    "vault_lock",
     // Vault status (read-only, safe in standard)
     "vault_status",
     // GitHub facade (token checked at call time, not at list time)
