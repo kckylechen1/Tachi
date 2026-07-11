@@ -575,7 +575,7 @@ pub(crate) async fn handle_tachi_dispatch(
     .await;
 
     let ReadyDispatch {
-        mut execution,
+        execution,
         execution_backend_name,
         execution_backend_metadata,
         acpx_enabled,
