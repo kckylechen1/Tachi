@@ -56,6 +56,12 @@ pub use db::foundry_jobs::{
     JobStatusHistogram, PersistedFoundryJob, RequeueOutcome,
 };
 pub use db::row_to_entry;
+#[cfg(feature = "admin")]
+pub use db::session_claims::{
+    get_claim, heartbeat_claim, insert_claim, is_claim_stale, list_active_claims, list_claims,
+    release_claim, upsert_or_heartbeat_claim, ClaimSelector, ClaimState, NewSessionClaim,
+    ReleaseOutcome, SessionClaim,
+};
 pub use db::{CategoryPathPrefixMemoryRow, FoundryJobStatusCounts, PathPrefixMemoryRow};
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use error::MemoryError;

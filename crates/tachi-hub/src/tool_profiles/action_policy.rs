@@ -146,6 +146,8 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "ask"
                 | "progress"
                 | "readiness"
+                | "claim"
+                | "release"
         ),
         "tachi_skill" => matches!(action, "discover" | "run" | "bundle"),
         "tachi_event" => matches!(action, "emit" | "query" | "metrics" | "context" | "a2a"),
@@ -187,7 +189,12 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             // do not narrow a read-only action past its prior visibility.
             "search" | "get" | "briefing" | "alerts" | "ask" | "progress" | "readiness"
             | "doctor_scan" => Some(ToolBundle::Observe),
-            "save" | "extract_facts" | "checkpoint" => Some(ToolBundle::Remember),
+            // #1001: claim/release are advisory presence bookkeeping, same
+            // worker-writable tier as save/checkpoint — a dispatched lane
+            // must be able to register/release its own presence claim.
+            "save" | "extract_facts" | "checkpoint" | "claim" | "release" => {
+                Some(ToolBundle::Remember)
+            }
             "consolidate"
             | "recall_simulate"
             | "recall_proposals"

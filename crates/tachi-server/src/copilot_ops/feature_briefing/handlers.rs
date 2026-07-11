@@ -278,6 +278,16 @@ pub(crate) async fn handle_tachi_feature_briefing(
         &memory_rows,
     );
     let open_loops = crate::shell_ops::scan_open_loops(8);
+    // #1001: presence 工位表 + advisory collision warnings. Read-only,
+    // failure-safe (empty board on any storage error) — never fails briefing.
+    let presence_claims = crate::claims_ops::list_live_claims_for_briefing(server);
+    let presence_board = crate::claims_ops::briefing_claims_board(server);
+    let presence_warnings = crate::claims_ops::collision_warnings(
+        &presence_claims,
+        None,
+        params.issue_ref.as_deref(),
+        &[],
+    );
     let wiki_hits = compact_layer_rows(wiki_rows, top_k, Some("wiki"), Some("advisory"));
     let memory_fragments = compact_layer_rows(memory_rows, top_k, Some("memory"), Some("context"));
     let eval_evidence = compact_layer_rows(eval_rows, top_k.min(5), Some("eval"), Some("evidence"));
@@ -329,6 +339,10 @@ pub(crate) async fn handle_tachi_feature_briefing(
         "doc_index": doc_index,
         "next_action": next_action,
         "open_loops": open_loops,
+        "presence": {
+            "board": presence_board,
+            "warnings": presence_warnings,
+        },
         "layering": {
             "project_work_record": "GitHub issues/PRs and linked flow state; source of truth for active work",
             "docs": "canonical repo specs/design docs; source of truth for feature/API truth",

@@ -12,6 +12,7 @@ pub(crate) fn format_briefing(
     checkpoints: &Value,
     open_loops: &[Value],
     component_governance: &Value,
+    presence: &Value,
     compact: bool,
 ) -> String {
     let memory_cap = if compact { 6 } else { 12 };
@@ -47,6 +48,43 @@ pub(crate) fn format_briefing(
             match item.get("action").and_then(Value::as_str) {
                 Some(action) => out.push(format!("- {detail} → `{action}`")),
                 None => out.push(format!("- {detail}")),
+            }
+        }
+    }
+
+    let presence_items = presence
+        .get("board")
+        .and_then(|b| b.get("items"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let presence_warnings = presence
+        .get("warnings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !presence_items.is_empty() || !presence_warnings.is_empty() {
+        out.push("\n### Presence 工位表 (who's working what) [AUTHORITY: WORKFLOW STATE]".to_string());
+        out.push(
+            "_Advisory only — never a lock. TTL-expired claims disappear on their own._"
+                .to_string(),
+        );
+        for row in &presence_items {
+            let session = row
+                .get("session_client")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let issue_ref = row.get("issue_ref").and_then(Value::as_str);
+            let flow_id = row.get("flow_id").and_then(Value::as_str);
+            let heartbeat = row.get("heartbeat_at").and_then(Value::as_str).unwrap_or("");
+            let target = issue_ref
+                .or(flow_id)
+                .unwrap_or("(no issue/flow declared)");
+            out.push(format!("- **{session}** → {target} (heartbeat {heartbeat})"));
+        }
+        for warning in &presence_warnings {
+            if let Some(text) = warning.as_str() {
+                out.push(format!("- ⚠️ {text}"));
             }
         }
     }

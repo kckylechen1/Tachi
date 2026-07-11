@@ -278,6 +278,20 @@ pub(crate) async fn handle_tachi_dispatch(
     let env_stamp = env_resolution.stamp();
     let env_id_stamp = env_resolution.env_id().map(str::to_string);
 
+    // #1001: zero-ceremony presence claim — auto-register/heartbeat so a
+    // briefing read from another session sees this dispatch is in flight.
+    // Degrades to no-op on any storage error; never fails dispatch.
+    crate::claims_ops::auto_register_or_heartbeat_claim(
+        server,
+        &crate::claims_ops::ClaimHookInput {
+            issue_ref: params.issue_ref.clone(),
+            flow_id: params.flow_id.clone(),
+            dispatch_id: Some(dispatch_id.clone()),
+            branch: params.branch.clone(),
+            declared_file_scope: None,
+        },
+    );
+
     // 0b. Validate `params.sandbox` before ANY stage/preflight/spawn work.
     let harness_transport = effective_harness_transport(&params, &agent_norm);
     validate_dispatch_sandbox_at_entry(&agent_norm, &harness_transport, params.sandbox.as_deref())?;

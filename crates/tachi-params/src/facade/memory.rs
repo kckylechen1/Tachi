@@ -68,6 +68,11 @@ fn tachi_memory_action_schema(
             "doctor_scan",
             "ingest",
             "ingest_source",
+            // #1001: manual presence-claim backstop (auto hooks cover
+            // briefing/intake/dispatch; these two are for harness-native work
+            // that never routes through those call sites).
+            "claim",
+            "release",
         ],
         "Required Tachi memory facade action.",
         generator,
@@ -300,7 +305,7 @@ fn default_memory_top_k() -> usize {
 pub struct TachiMemoryParams {
     #[schemars(
         schema_with = "tachi_memory_action_schema",
-        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), recall_simulate (replay labeled query→expected-id cases and report recall@k/MRR without mutating access counters), recall_proposals (generate/list evidence-backed RecallConfig proposals), review_recall_proposal (approve/reject one recall proposal), apply_recall_proposals (persist approved TACHI_RECALL_* config.env values), pattern_feedback (record explicit hit/miss/stale/seen feedback for projected pattern memory), progress (long-running flow status), readiness (health + tool visibility), delete (permanently remove a memory entry by id; folded from delete_memory), gc (run garbage collection on growing tables; folded from memory_gc), doctor_scan (read-only scan of memory.db roots; folded from tachi_doctor_scan), ingest (unified event/source ingest; folded from ingest), ingest_source (batch source ingest with chunking/enrichment; folded from ingest_source)."
+        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), recall_simulate (replay labeled query→expected-id cases and report recall@k/MRR without mutating access counters), recall_proposals (generate/list evidence-backed RecallConfig proposals), review_recall_proposal (approve/reject one recall proposal), apply_recall_proposals (persist approved TACHI_RECALL_* config.env values), pattern_feedback (record explicit hit/miss/stale/seen feedback for projected pattern memory), progress (long-running flow status), readiness (health + tool visibility), claim (register/heartbeat a manual presence claim on an issue_ref/flow_id; advisory only, never a lock), release (release a claim by claim_id or dispatch_id), delete (permanently remove a memory entry by id; folded from delete_memory), gc (run garbage collection on growing tables; folded from memory_gc), doctor_scan (read-only scan of memory.db roots; folded from tachi_doctor_scan), ingest (unified event/source ingest; folded from ingest), ingest_source (batch source ingest with chunking/enrichment; folded from ingest_source)."
     )]
     pub action: String,
     #[serde(default, alias = "output_format")]
@@ -569,4 +574,32 @@ pub struct TachiMemoryParams {
     #[serde(default)]
     #[schemars(description = "[action=ingest] Messages in the conversation turn.")]
     pub messages: Vec<Message>,
+
+    // --- presence claim fields (#1001) ---
+    #[serde(default)]
+    #[schemars(
+        description = "[action=claim] GitHub issue this session is working (e.g. org/repo#123). At least one of issue_ref/flow_id is required."
+    )]
+    pub issue_ref: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=claim] Branch/worktree name this claim is associated with (advisory)."
+    )]
+    pub branch: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=claim] File paths this session declares it is touching; used for advisory file-scope-overlap collision warnings against other live claims."
+    )]
+    pub declared_file_scope: Vec<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=release] Claim id to release.")]
+    pub claim_id: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=release] Release the active claim for this dispatch id instead of a claim_id."
+    )]
+    pub dispatch_id: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=release] Optional human-readable release reason.")]
+    pub release_reason: Option<String>,
 }

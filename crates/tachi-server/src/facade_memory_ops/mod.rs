@@ -235,6 +235,34 @@ pub(crate) async fn handle_tachi_memory(
         }
         "progress" => progress_ops::handle_memory_progress(server, &params).await,
         "readiness" => readiness_ops::handle_memory_readiness(server, &params).await,
+        // #1001: manual claim/release backstop for harness-native work that
+        // never routes through the briefing/intake/dispatch auto-hooks. The
+        // zero-ceremony auto-register/heartbeat path lives in
+        // `claims_ops::auto_register_or_heartbeat_claim`, called directly from
+        // those call sites; these two actions are the fallback entrypoint.
+        "claim" => {
+            let result = crate::claims_ops::handle_manual_claim(
+                server,
+                params.issue_ref.clone(),
+                params.flow_id.clone(),
+                params.branch.clone(),
+                if params.declared_file_scope.is_empty() {
+                    None
+                } else {
+                    Some(params.declared_file_scope.clone())
+                },
+            )?;
+            json_string(&result)
+        }
+        "release" => {
+            let result = crate::claims_ops::handle_manual_release(
+                server,
+                params.claim_id.clone(),
+                params.dispatch_id.clone(),
+                params.release_reason.clone(),
+            )?;
+            json_string(&result)
+        }
         // #757 fold: standalone memory-admin + pipeline tools re-fronted as
         // tachi_memory actions. Each arm delegates to the SAME handler the old
         // #[tool] entry point used — re-fronting, not re-implementation.
@@ -346,7 +374,7 @@ pub(crate) async fn handle_tachi_memory(
             .await
         }
         _ => Err(format!(
-            "Invalid action '{}'. Use 'search', 'get', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'recall_simulate', 'recall_proposals', 'review_recall_proposal', 'apply_recall_proposals', 'pattern_feedback', 'progress', 'readiness', 'delete', 'gc', 'doctor_scan', 'ingest', or 'ingest_source'.",
+            "Invalid action '{}'. Use 'search', 'get', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'recall_simulate', 'recall_proposals', 'review_recall_proposal', 'apply_recall_proposals', 'pattern_feedback', 'progress', 'readiness', 'claim', 'release', 'delete', 'gc', 'doctor_scan', 'ingest', or 'ingest_source'.",
             params.action
         )),
     }

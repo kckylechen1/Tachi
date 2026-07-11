@@ -51,6 +51,7 @@ mod tests {
             &checkpoints,
             &[],
             &serde_json::json!({"matches": []}),
+            &serde_json::json!({}),
             false,
         );
 
@@ -111,6 +112,7 @@ mod tests {
             &serde_json::json!(checkpoints),
             &[],
             &empty_gov,
+            &serde_json::json!({}),
             true,
         );
         let full = format_briefing(
@@ -125,6 +127,7 @@ mod tests {
             &serde_json::json!(checkpoints),
             &[],
             &empty_gov,
+            &serde_json::json!({}),
             false,
         );
 
@@ -207,6 +210,7 @@ mod tests {
             &empty,
             &[],
             &serde_json::json!({"matches": []}),
+            &serde_json::json!({}),
             true,
         );
         let gate_rows = compact
