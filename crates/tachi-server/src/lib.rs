@@ -123,6 +123,7 @@ mod notes_ops;
 mod orchestrator_ops;
 mod path_utils;
 mod pipeline_ops;
+mod precedent_ops;
 mod project_db_ops;
 mod prompts;
 mod provenance;

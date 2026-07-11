@@ -35,6 +35,7 @@ async fn aggregate_live_filters_auto_synthesized_watchdog_rows() {
             project: None,
             format: None,
             signatures: Vec::new(),
+            rulings: Vec::new(),
         }))
         .await
         .expect("real eval should save");
@@ -186,6 +187,7 @@ async fn aggregate_live_uses_harness_native_mirror_eval_without_owning_lifecycle
             project: None,
             format: None,
             signatures: Vec::new(),
+            rulings: Vec::new(),
         }))
         .await
         .expect("mirror eval should save without dispatch_id");
