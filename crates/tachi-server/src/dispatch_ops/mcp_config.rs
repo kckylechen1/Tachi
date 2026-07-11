@@ -19,6 +19,7 @@ pub(super) async fn generate_mcp_config(
     inject_tachi: bool,
     inject_hub: bool,
     tachi_profile: Option<&str>,
+    agent_seat: Option<&str>,
     allowed_mcp_servers: &[String],
 ) -> Result<Option<PathBuf>, String> {
     let mut mcp_servers = serde_json::Map::new();
@@ -28,6 +29,19 @@ pub(super) async fn generate_mcp_config(
         let mut env = serde_json::Map::new();
         if let Some(profile) = tachi_profile.filter(|s| !s.trim().is_empty()) {
             env.insert("TACHI_PROFILE".to_string(), json!(profile.trim()));
+        }
+        // Round-2 fix (codex final review of #964/PR #1003, BUG CP2):
+        // `TACHI_PROFILE` is a tool-profile selector (worker/delegate/
+        // standard/codex), not a seat identity — a leader dispatched with
+        // TACHI_PROFILE=standard would otherwise resolve as a named seat
+        // (not None/leader) and lose its own broadcasts. `TACHI_AGENT_SEAT`
+        // is a dedicated, separate env var carrying the actual per-worker
+        // seat name (the dispatch's `profile`/`agent` identity), read by
+        // `sticky_ops::identity::resolve_caller_agent_id`'s env fallback.
+        // Every tachi-dispatched worker gets a real seat identity this way,
+        // independent of whatever tool profile it was also given.
+        if let Some(seat) = agent_seat.filter(|s| !s.trim().is_empty()) {
+            env.insert("TACHI_AGENT_SEAT".to_string(), json!(seat.trim()));
         }
         let mut entry = json!({
             "command": "tachi",

@@ -131,7 +131,7 @@ async fn generate_mcp_config_sets_owner_only_permissions() {
     std::env::remove_var("TACHI_HOME");
 
     let server = crate::tests::make_server();
-    let path = generate_mcp_config(&server, "test-perms", true, false, None, &[])
+    let path = generate_mcp_config(&server, "test-perms", true, false, None, None, &[])
         .await
         .expect("generate mcp config")
         .expect("config path");
@@ -157,6 +157,114 @@ async fn generate_mcp_config_sets_owner_only_permissions() {
             mode
         );
     }
+
+    if let Some(value) = original_home {
+        std::env::set_var("HOME", value);
+    } else {
+        std::env::remove_var("HOME");
+    }
+    if let Some(value) = original_tachi_home {
+        std::env::set_var("TACHI_HOME", value);
+    } else {
+        std::env::remove_var("TACHI_HOME");
+    }
+}
+
+// ─── CP2 (round-3): dispatch-id seat, not profile-derived seat ────────────
+//
+// CP2 (codex final review of #964/PR #1003): `agent_seat` used to be derived
+// from `params.profile` (falling back to `agent_norm`) — but `params.profile`
+// is a `DispatchProfile` (e.g. "codex_55_review"), a capability-surface
+// selector shared by every worker dispatched on that profile, NOT a seat.
+// Two workers dispatched with the SAME `profile` therefore got the SAME
+// `TACHI_AGENT_SEAT`, and could cross-consume each other's `to:`-addressed
+// stickies. The seat is now the dispatch's own `dispatch_id` (unique per
+// lane by construction — see `new_dispatch_id`), so this collision is
+// structurally impossible regardless of what `profile`/`agent` two
+// concurrent dispatches share.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cp2_two_dispatches_on_same_profile_get_distinct_agent_seats() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let original_home = std::env::var_os("HOME");
+    let original_tachi_home = std::env::var_os("TACHI_HOME");
+    std::env::set_var("HOME", temp_home.path());
+    std::env::remove_var("TACHI_HOME");
+
+    let server = crate::tests::make_server();
+
+    // Simulate two workers dispatched on the identical `profile` name
+    // ("codex_55_review") — the exact scenario codex's CP2 finding named.
+    // In the real handler, `agent_seat` is `Some(dispatch_id.as_str())`
+    // (dispatch.rs); each dispatch call gets its own freshly generated
+    // `dispatch_id` (new_dispatch_id embeds a uuid suffix), never the shared
+    // `profile` string. Two distinct dispatch_ids stand in for that here.
+    let dispatch_id_a = new_dispatch_id(Utc::now(), "codex");
+    let dispatch_id_b = new_dispatch_id(Utc::now(), "codex");
+    assert_ne!(
+        dispatch_id_a, dispatch_id_b,
+        "two dispatch calls must get distinct dispatch_ids"
+    );
+
+    let path_a = generate_mcp_config(
+        &server,
+        &dispatch_id_a,
+        true,
+        false,
+        Some("codex_55_review"),
+        Some(&dispatch_id_a),
+        &[],
+    )
+    .await
+    .expect("generate mcp config a")
+    .expect("config path a");
+    let path_b = generate_mcp_config(
+        &server,
+        &dispatch_id_b,
+        true,
+        false,
+        Some("codex_55_review"),
+        Some(&dispatch_id_b),
+        &[],
+    )
+    .await
+    .expect("generate mcp config b")
+    .expect("config path b");
+
+    let seat_of = |path: &std::path::Path| -> String {
+        let raw = std::fs::read_to_string(path).expect("read mcp config");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse mcp config json");
+        json["mcpServers"]["tachi"]["env"]["TACHI_AGENT_SEAT"]
+            .as_str()
+            .expect("TACHI_AGENT_SEAT present in generated config")
+            .to_string()
+    };
+    let seat_a = seat_of(&path_a);
+    let seat_b = seat_of(&path_b);
+
+    assert_eq!(
+        seat_a, dispatch_id_a,
+        "seat must be the dispatch id, not the shared profile"
+    );
+    assert_eq!(
+        seat_b, dispatch_id_b,
+        "seat must be the dispatch id, not the shared profile"
+    );
+    assert_ne!(
+        seat_a, seat_b,
+        "two workers on the SAME profile must get DISTINCT seats — this is the CP2 regression"
+    );
+    assert_ne!(
+        seat_a, "codex_55_review",
+        "seat must never equal the shared profile name"
+    );
+    assert_ne!(
+        seat_b, "codex_55_review",
+        "seat must never equal the shared profile name"
+    );
 
     if let Some(value) = original_home {
         std::env::set_var("HOME", value);
