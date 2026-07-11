@@ -57,4 +57,11 @@ impl MemoryStore {
     pub fn avg_importance(&self) -> Result<f64, MemoryError> {
         db::avg_importance(&self.conn)
     }
+
+    /// Close `valid_to` on every still-open `related_to` edge (tachi#773
+    /// item 3: legacy fog retirement). Idempotent — safe to call repeatedly
+    /// from a maintenance sweep. Returns the number of rows closed.
+    pub fn close_related_to_fog(&self) -> Result<usize, MemoryError> {
+        db::close_related_to_fog(&self.conn)
+    }
 }

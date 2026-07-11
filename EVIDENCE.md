@@ -75,3 +75,50 @@ test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1594 filtered out
 cargo test -p tachi-server --lib vector_namespace
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1600 filtered out
 ```
+
+## Item 3: Legacy fog retirement (close_related_to_fog)
+
+`memcore::db::close_related_to_fog` / `MemoryStore::close_related_to_fog`:
+idempotent UPDATE closing `valid_to` on every still-open `related_to` edge.
+Rows are not deleted (audit trail preserved), only closed so they leave
+`get_edges`/`graph_expand` traversal.
+
+### Dependency surfaced: ported PR #1013 (uncommitted) into this branch
+
+While writing the discrimination test (insert a legacy `related_to` edge with
+`valid_to = NULL`, close it, assert `get_edges` excludes it immediately), hit
+exactly the bug PR #1013 (`fix/773-edge-valid-to-normalization`, not yet
+merged to main — confirmed via `git merge-base --is-ancestor c3b35074
+origin/main` -> false) fixes: `get_edges`'s `valid_to > datetime('now)`
+compares lexically, and RFC3339 (`...T...Z`) sorts greater than SQLite's
+`datetime('now')` text output, so a same-day-closed edge stayed "active"
+forever. Per the branch's own instructions ("use the SAME normalized
+format/comparison [#1013] establishes... if it merges first, rebase onto
+it") — since #1013 hasn't merged, ported its exact diff (not a second
+convention): `add_edge` normalizes `valid_to` via `normalize_utc_iso_or_now`
+on write; all 5 read sites (`get_edges` x3 direction branches,
+`get_edges_batch`, `get_contradiction_count`) now compare
+`datetime(valid_to) > datetime('now')` (format-agnostic). If #1013 merges
+before this branch, this is the same patch twice — trivial rebase conflict,
+not a semantic conflict.
+
+### Red (pre-port, illustrative)
+```
+thread '...close_related_to_fog_closes_open_rows_and_excludes_from_get_edges' panicked:
+closed related_to edge must leave get_edges traversal, got [MemoryEdge { ...
+  valid_to: Some("2026-07-11T20:45:57.994Z") }]
+```
+
+### Green (post-port + new fn)
+```
+cargo test -p memcore --lib db::tests::graph
+running 11 tests
+test db::tests::graph::close_related_to_fog_closes_open_rows_and_excludes_from_get_edges ... ok
+test db::tests::graph::close_related_to_fog_is_idempotent ... ok
+test db::tests::graph::close_related_to_fog_leaves_other_relations_untouched ... ok
+test db::tests::graph::close_related_to_fog_closed_edge_valid_to_exactly_now_is_closed_not_active ... ok
+test result: ok. 11 passed; 0 failed
+
+cargo test -p memcore --lib
+test result: ok. 341 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out
+```

@@ -1,5 +1,6 @@
 use super::{
-    add_edge, archive_memory, checkpoint_wal_truncate, collect_daily_health_snapshot,
+    add_edge, archive_memory, checkpoint_wal_truncate, close_related_to_fog,
+    collect_daily_health_snapshot,
     count_chunks_rows, count_distinct_access_days, count_memories_missing_domain,
     count_memories_rows, count_memories_vec_rows, delete, fetch_by_ids, foundry_job_status_counts,
     gc_tables, get_all, get_edges, get_sandbox_policy, graph_expand, init_schema,

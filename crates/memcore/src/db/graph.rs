@@ -19,6 +19,20 @@ pub fn add_edge(conn: &Connection, edge: &MemoryEdge) -> Result<(), MemoryError>
     } else {
         normalize_utc_iso_or_now(&edge.valid_from)
     };
+    // Freeze normalized UTC half-open interval [valid_from, valid_to) semantics
+    // (tachi#773 Sol correction 4 / PR #1013 convention, ported here since it
+    // hadn't merged yet when this branch needed it): valid_to must be
+    // normalized to the same RFC3339-with-millis format as
+    // valid_from/created_at so it stays comparable with the read-side's
+    // format-agnostic datetime() comparison (see get_edges / get_edges_batch /
+    // get_contradiction_count). Storing it raw let same-day RFC3339 values
+    // remain lexically "active" forever against SQLite's differently
+    // formatted datetime('now') text.
+    let valid_to = edge
+        .valid_to
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(normalize_utc_iso_or_now);
     let meta_str = serde_json::to_string(&edge.metadata).unwrap_or_else(|_| "{}".to_string());
 
     conn.execute(
@@ -26,9 +40,36 @@ pub fn add_edge(conn: &Connection, edge: &MemoryEdge) -> Result<(), MemoryError>
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
            ON CONFLICT(source_id, target_id, relation)
            DO UPDATE SET weight = ?4, metadata = ?5, created_at = ?6, valid_from = ?7, valid_to = ?8"#,
-        params![edge.source_id, edge.target_id, edge.relation, edge.weight, meta_str, created, valid_from, edge.valid_to],
+        params![edge.source_id, edge.target_id, edge.relation, edge.weight, meta_str, created, valid_from, valid_to],
     )?;
     Ok(())
+}
+
+/// Close `valid_to` on every still-open `related_to` edge (tachi#773 item 3:
+/// legacy fog retirement). Idempotent: only rows with `valid_to IS NULL` are
+/// touched, so re-running after a first pass (or a crash mid-pass) closes
+/// exactly the rows that are still open and no others — safe to call from a
+/// maintenance sweep on every tick.
+///
+/// `related_to` rows are not deleted (they stay for audit / historical
+/// reads), only closed so `get_edges` / `graph_expand`'s
+/// `valid_to IS NULL OR datetime(valid_to) > datetime('now')` filter excludes
+/// them from traversal from this point forward.
+///
+/// Uses the same normalized-UTC-millis format `add_edge` writes for
+/// `created_at`/`valid_from` (`now_utc_iso`, RFC3339 with millis, matching
+/// PR #1013's fix/773-edge-valid-to-normalization convention so a single
+/// comparison format is used everywhere valid_to is read).
+///
+/// Returns the number of rows closed by this call (0 on a fully-idempotent
+/// re-run once the fog is already closed).
+pub fn close_related_to_fog(conn: &Connection) -> Result<usize, MemoryError> {
+    let now = now_utc_iso();
+    let closed = conn.execute(
+        "UPDATE memory_edges SET valid_to = ?1 WHERE relation = 'related_to' AND valid_to IS NULL",
+        params![now],
+    )?;
+    Ok(closed)
 }
 
 /// Remove an edge from the memory graph.
@@ -56,13 +97,13 @@ pub fn get_edges(
     let base_sql = match direction {
         "incoming" =>
             "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to FROM memory_edges WHERE target_id = ?1
-             AND (valid_to IS NULL OR valid_to > datetime('now'))",
+             AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))",
         "outgoing" =>
             "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to FROM memory_edges WHERE source_id = ?1
-             AND (valid_to IS NULL OR valid_to > datetime('now'))",
+             AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))",
         _ =>
             "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to FROM memory_edges WHERE (source_id = ?1 OR target_id = ?1)
-             AND (valid_to IS NULL OR valid_to > datetime('now'))",
+             AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))",
     };
 
     // Use parameterized query for relation_filter to prevent SQL injection
@@ -118,7 +159,7 @@ fn get_edges_batch(
         "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to \
          FROM memory_edges \
          WHERE (source_id IN ({ph}) OR target_id IN ({ph})) \
-         AND (valid_to IS NULL OR valid_to > datetime('now'))",
+         AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))",
         ph = placeholders
     );
 
@@ -178,7 +219,7 @@ fn get_edges_batch(
 /// Used by surprise scoring to detect controversial/surprising memories.
 pub fn get_contradiction_count(conn: &Connection, memory_id: &str) -> Result<u32, MemoryError> {
     let count: u32 = conn.query_row(
-        "SELECT COUNT(*) FROM memory_edges WHERE (source_id = ?1 OR target_id = ?1) AND relation = 'contradicts' AND (valid_to IS NULL OR valid_to > datetime('now'))",
+        "SELECT COUNT(*) FROM memory_edges WHERE (source_id = ?1 OR target_id = ?1) AND relation = 'contradicts' AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))",
         params![memory_id],
         |row| row.get(0),
     )?;
