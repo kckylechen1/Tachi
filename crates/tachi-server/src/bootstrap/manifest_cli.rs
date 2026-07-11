@@ -15,6 +15,35 @@ fn default_scan_roots(home: &Path, app_home: &Path, git_root: Option<&PathBuf>) 
     roots
 }
 
+/// Read-only: opens the global (and project, if present) hub stores directly
+/// via `MemoryStore::open_read_only` — deliberately NOT a full `MemoryServer`
+/// (which spins up LLM clients / pools we don't need for a lint pass). Missing
+/// or unopenable DBs are tolerated silently (mirrors `collect_job_histograms`
+/// below): a doctor run must not fail just because a project DB doesn't exist
+/// yet.
+fn collect_hub_caps_for_lint(
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> Vec<memcore::HubCapability> {
+    let mut caps = Vec::new();
+    for path in std::iter::once(Some(global_db_path)).chain(std::iter::once(project_db_path)) {
+        let Some(path) = path else { continue };
+        if !path.exists() {
+            continue;
+        }
+        let Some(path_str) = path.to_str() else {
+            continue;
+        };
+        let Ok(store) = memcore::MemoryStore::open_read_only(path_str) else {
+            continue;
+        };
+        if let Ok(mut found) = store.hub_list(Some("mcp"), false) {
+            caps.append(&mut found);
+        }
+    }
+    caps
+}
+
 pub(super) async fn run_doctor_command(
     json_output: bool,
     fix: bool,
@@ -43,6 +72,11 @@ pub(super) async fn run_doctor_command(
         .warnings
         .extend(crate::doctor::project_secret_file_warnings(
             git_root.map(|p| p.as_path()),
+        ));
+    report
+        .warnings
+        .extend(crate::doctor::hub_capability_discovery_status_warnings(
+            &collect_hub_caps_for_lint(global_db_path, project_db_path),
         ));
 
     // Always update the manifest after a doctor run (idempotent; preserves notes).

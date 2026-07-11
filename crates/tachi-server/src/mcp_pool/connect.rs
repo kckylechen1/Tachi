@@ -4,7 +4,7 @@ use crate::utils::lock_or_recover;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tachi_hub::capability_callable;
+use tachi_hub::{capability_callable, capability_not_callable_reason};
 
 impl MemoryServer {
     pub(crate) async fn ensure_child_connected_with_context(
@@ -123,10 +123,12 @@ impl MemoryServer {
                     "health_status": cap.health_status,
                 }),
             );
+            let failing_field =
+                capability_not_callable_reason(&cap).unwrap_or_else(|| "unknown gate".to_string());
             return Err(rmcp::ErrorData::invalid_params(
                 format!(
-                    "MCP server '{}' is not callable (enabled={}, review_status={}, health_status={}).",
-                    server_id, cap.enabled, cap.review_status, cap.health_status
+                    "MCP server '{}' is not callable (enabled={}, review_status={}, health_status={}); failing gate: {}.",
+                    server_id, cap.enabled, cap.review_status, cap.health_status, failing_field
                 ),
                 None,
             ));

@@ -105,6 +105,47 @@ pub fn capability_callable(cap: &HubCapability) -> bool {
     }
 }
 
+/// Human-readable name of the FIRST gate that fails `capability_callable` for
+/// `cap`, or `None` if the capability is callable. Mirrors the exact gate
+/// order/logic in `capability_callable` (#995 residual 2) — this is a
+/// diagnostic helper only; it does not change what is denied, only what the
+/// resulting deny message can say about *why*.
+pub fn capability_not_callable_reason(cap: &HubCapability) -> Option<String> {
+    if !cap.enabled {
+        return Some("enabled=false".to_string());
+    }
+    if !review_status_allows_call(&cap.review_status) {
+        return Some(format!(
+            "review_status='{}' (requires approved)",
+            cap.review_status
+        ));
+    }
+    if !health_status_allows_call(&cap.health_status) {
+        return Some(format!(
+            "health_status='{}' (must not be open)",
+            cap.health_status
+        ));
+    }
+    if !cap.cap_type.eq_ignore_ascii_case("mcp") {
+        return None;
+    }
+    match serde_json::from_str::<serde_json::Value>(&cap.definition) {
+        Ok(def) => match def.get("discovery_status") {
+            None => None,
+            Some(v) => match v.as_str() {
+                Some("ready") => None,
+                Some(other) => Some(format!(
+                    "discovery_status='{other}' (requires 'ready' or absent)"
+                )),
+                None => Some(format!(
+                    "discovery_status={v} (must be a string; got non-string value)"
+                )),
+            },
+        },
+        Err(e) => Some(format!("definition is not valid JSON ({e})")),
+    }
+}
+
 pub fn sanitize_skill_tool_name(skill_id: &str) -> Option<String> {
     let raw = skill_id.strip_prefix("skill:")?;
     let mut output = String::from("tachi_skill_");
@@ -245,6 +286,84 @@ mod tests {
         let non_string = cap("mcp:non-string", "mcp", r#"{"discovery_status":42}"#);
 
         assert!(!capability_callable(&non_string));
+    }
+
+    // ── capability_not_callable_reason (#995 residual 2) ──────────────────
+
+    #[test]
+    fn not_callable_reason_is_none_for_callable_cap() {
+        let ready = cap("mcp:ready", "mcp", r#"{"discovery_status":"ready"}"#);
+        assert_eq!(capability_not_callable_reason(&ready), None);
+
+        let missing = cap("mcp:missing-ok", "mcp", r#"{}"#);
+        assert_eq!(capability_not_callable_reason(&missing), None);
+    }
+
+    #[test]
+    fn not_callable_reason_names_disabled_gate() {
+        let mut disabled = cap("mcp:disabled", "mcp", r#"{"discovery_status":"ready"}"#);
+        disabled.enabled = false;
+        let reason = capability_not_callable_reason(&disabled).expect("should be denied");
+        assert!(
+            reason.contains("enabled=false"),
+            "reason should name the enabled gate: {reason}"
+        );
+    }
+
+    #[test]
+    fn not_callable_reason_names_review_status_gate() {
+        let mut pending = cap(
+            "mcp:pending-review",
+            "mcp",
+            r#"{"discovery_status":"ready"}"#,
+        );
+        pending.review_status = "pending".to_string();
+        let reason = capability_not_callable_reason(&pending).expect("should be denied");
+        assert!(
+            reason.contains("review_status='pending'"),
+            "reason should name the review_status gate: {reason}"
+        );
+    }
+
+    #[test]
+    fn not_callable_reason_names_health_status_gate() {
+        let mut open = cap("mcp:open-circuit", "mcp", r#"{"discovery_status":"ready"}"#);
+        open.health_status = "open".to_string();
+        let reason = capability_not_callable_reason(&open).expect("should be denied");
+        assert!(
+            reason.contains("health_status='open'"),
+            "reason should name the health_status gate: {reason}"
+        );
+    }
+
+    #[test]
+    fn not_callable_reason_names_discovery_status_gate_for_explicit_pending() {
+        let pending = cap("mcp:pending", "mcp", r#"{"discovery_status":"pending"}"#);
+        let reason = capability_not_callable_reason(&pending).expect("should be denied");
+        assert!(
+            reason.contains("discovery_status='pending'"),
+            "reason should name the discovery_status gate: {reason}"
+        );
+    }
+
+    #[test]
+    fn not_callable_reason_names_discovery_status_gate_for_non_string() {
+        let non_string = cap("mcp:non-string", "mcp", r#"{"discovery_status":42}"#);
+        let reason = capability_not_callable_reason(&non_string).expect("should be denied");
+        assert!(
+            reason.contains("discovery_status"),
+            "reason should name the discovery_status gate: {reason}"
+        );
+    }
+
+    #[test]
+    fn not_callable_reason_names_malformed_definition() {
+        let malformed = cap("mcp:malformed", "mcp", "not valid json{{{");
+        let reason = capability_not_callable_reason(&malformed).expect("should be denied");
+        assert!(
+            reason.contains("not valid JSON"),
+            "reason should call out malformed definition: {reason}"
+        );
     }
 
     #[test]
