@@ -67,15 +67,6 @@ pub(crate) fn should_reinforce(
         && (REINFORCEMENT_MIN_SIMILARITY..REINFORCEMENT_DUPLICATE_SIMILARITY).contains(&similarity)
 }
 
-/// Minimum shared entities for a plain `related_to` auto-link edge (tachi#773).
-///
-/// Host DB evidence: most `related_to` edges were single-entity co-occurrence
-/// (`Sigil` / `tachi-server` alone) and formed a dense fog without ranking
-/// value. Require either multi-entity agreement or a modest vector similarity.
-pub(crate) const RELATED_TO_MIN_SHARED_ENTITIES: usize = 2;
-/// When only one entity is shared, still allow related_to if vectors are close.
-pub(crate) const RELATED_TO_MIN_VECTOR_SIMILARITY: f64 = 0.55;
-
 /// Unique entities present in both lists (order-independent). Used so duplicate
 /// labels in either entry cannot inflate `shared_count` past the fog floor.
 pub(crate) fn unique_shared_entities(a: &[String], b: &[String]) -> Vec<String> {
@@ -87,17 +78,6 @@ pub(crate) fn unique_shared_entities(a: &[String], b: &[String]) -> Vec<String> 
         }
     }
     out.into_iter().collect()
-}
-
-/// Whether to emit a weak `related_to` edge after supersede/reinforce checks fail.
-pub(crate) fn should_related_to(shared_count: usize, vector_similarity: Option<f64>) -> bool {
-    if shared_count >= RELATED_TO_MIN_SHARED_ENTITIES {
-        return true;
-    }
-    if shared_count == 0 {
-        return false;
-    }
-    vector_similarity.is_some_and(|sim| sim.is_finite() && sim >= RELATED_TO_MIN_VECTOR_SIMILARITY)
 }
 
 pub(crate) fn numbers_in_text(text: &str) -> HashSet<String> {
@@ -192,26 +172,20 @@ pub(crate) fn spawn_auto_linking(
                             supersedes,
                         )
                     });
-                    let related = !supersedes
-                        && !reinforces
-                        && should_related_to(shared.len(), vector_similarity);
-                    if !supersedes && !reinforces && !related {
-                        // Skip single-entity fog edges (ops-audit / #773).
+                    if !supersedes && !reinforces {
+                        // tachi#773 item 2: auto_link no longer emits `related_to` at
+                        // all. Entity co-occurrence without a supersede/reinforce
+                        // signal is query-time recoverable (shared-entity search)
+                        // and isn't worth a persisted fog edge — and the memcore
+                        // edge-write choke point (relation_ontology) would reject
+                        // `related_to` on new writes anyway (item 1).
                         continue;
                     }
-                    let relation = if supersedes {
-                        "supersedes"
-                    } else if reinforces {
-                        "reinforces"
-                    } else {
-                        "related_to"
-                    };
+                    let relation = if supersedes { "supersedes" } else { "reinforces" };
                     let weight = if supersedes {
                         0.9
-                    } else if reinforces {
-                        vector_similarity.unwrap_or(0.0)
                     } else {
-                        0.5
+                        vector_similarity.unwrap_or(0.0)
                     };
                     let edge = memcore::MemoryEdge {
                         source_id: auto_link_id.clone(),
@@ -383,16 +357,6 @@ mod tests {
     }
 
     #[test]
-    fn should_related_to_rejects_single_entity_without_vector_support() {
-        // Pre-fix fog: one shared entity always became related_to.
-        assert!(!should_related_to(1, None));
-        assert!(!should_related_to(1, Some(0.40)));
-        assert!(should_related_to(1, Some(0.55)));
-        assert!(should_related_to(2, None));
-        assert!(!should_related_to(0, Some(0.99)));
-    }
-
-    #[test]
     fn unique_shared_entities_dedups_duplicate_labels() {
         // Discrimination: ["sigil","sigil"] ∩ ["sigil"] must count as 1,
         // not 2 — otherwise the fog floor is bypassed by noisy entity lists.
@@ -400,12 +364,44 @@ mod tests {
         let b = vec!["sigil".into(), "sigil".into(), "sigil".into()];
         let shared = unique_shared_entities(&a, &b);
         assert_eq!(shared.len(), 1);
-        assert!(!should_related_to(shared.len(), None));
 
         let a2 = vec!["sigil".into(), "tachi-server".into(), "sigil".into()];
         let b2 = vec!["tachi-server".into(), "sigil".into()];
         let shared2 = unique_shared_entities(&a2, &b2);
         assert_eq!(shared2.len(), 2);
-        assert!(should_related_to(shared2.len(), None));
+    }
+
+    /// tachi#773 item 2: auto_link must never select `related_to` as the
+    /// emitted relation string. This mirrors `spawn_auto_linking`'s decision
+    /// logic (supersedes -> "supersedes", reinforces -> "reinforces",
+    /// otherwise -> skip entirely) without the async/store plumbing, so it
+    /// stays a fast unit test. Red pre-#773-item-2: this same shape of
+    /// decision used to fall through to `Some("related_to")` whenever
+    /// entities were shared without a supersede/reinforce signal.
+    fn auto_link_emitted_relation(supersedes: bool, reinforces: bool) -> Option<&'static str> {
+        if supersedes {
+            Some("supersedes")
+        } else if reinforces {
+            Some("reinforces")
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn auto_link_never_emits_related_to() {
+        for supersedes in [true, false] {
+            for reinforces in [true, false] {
+                let relation = auto_link_emitted_relation(supersedes, reinforces);
+                assert_ne!(
+                    relation,
+                    Some("related_to"),
+                    "auto_link must never select related_to (supersedes={supersedes}, reinforces={reinforces})"
+                );
+            }
+        }
+        // Neither signal fires -> no edge at all (query-time recoverable via
+        // shared-entity search instead of a persisted fog edge).
+        assert_eq!(auto_link_emitted_relation(false, false), None);
     }
 }
