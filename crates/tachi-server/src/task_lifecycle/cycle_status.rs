@@ -13,6 +13,7 @@ pub(crate) async fn handle_task_cycle_status(
     server: &MemoryServer,
     params: &TachiTaskParams,
 ) -> Result<String, String> {
+    let started = std::time::Instant::now();
     let requested_issue_ref = normalize_optional_issue_ref(params.issue_ref.as_deref());
     let requested_pr_ref = normalize_optional_pr_ref(params.pr_ref.as_deref());
     let flow_id = params
@@ -38,6 +39,7 @@ pub(crate) async fn handle_task_cycle_status(
         .transpose()?
         .flatten()
         .unwrap_or_else(|| json!({}));
+    let after_local = started.elapsed();
     let verification = flow_id
         .as_deref()
         .map(crate::verify_ops::read_verification_ledger)
@@ -72,6 +74,7 @@ pub(crate) async fn handle_task_cycle_status(
     .await;
     let (pr_snapshot, pr_warning) =
         maybe_pr_snapshot(server, flow_id.as_deref(), pr_ref.as_deref(), &status).await;
+    let after_github = started.elapsed();
 
     let mut linked_docs = params.doc_paths.clone();
     let mut linked_specs = params.spec_paths.clone();
@@ -168,6 +171,12 @@ pub(crate) async fn handle_task_cycle_status(
             "flow_artifacts": run_dir.as_ref().map(|dir| dir.display().to_string()),
             "read_only": true,
             "github_read": github_read_attempted,
+        },
+        // #925: phase timings so agents can tell local ledger vs GitHub enrichment cost.
+        "timing_ms": {
+            "local_artifacts": after_local.as_millis() as u64,
+            "github_enrichment": after_github.saturating_sub(after_local).as_millis() as u64,
+            "total": started.elapsed().as_millis() as u64,
         },
     }))
     .map_err(|e| format!("serialize cycle_status: {e}"))

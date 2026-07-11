@@ -1,6 +1,6 @@
 use super::{
-    string_enum_schema, CompletionPredicate, DispatchMcpAccessParams, SignatureRecordParams,
-    TachiSubagentEvalParams, TachiTaskAction,
+    string_enum_schema, CompletionPredicate, DispatchMcpAccessParams, RulingRecordParams,
+    SignatureRecordParams, TachiSubagentEvalParams, TachiTaskAction,
 };
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
@@ -8,11 +8,10 @@ use serde::Deserialize;
 fn tachi_task_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
-    // F2 (#495/#913): primary schema omits GH PR lifecycle actions — use tachi_gh.
-    // Router still accepts them for compatibility with a deprecation notice (F4 enum deserializes them).
+    // #757: GH PR lifecycle is only on tachi_gh — not accepted by tachi_task.
     string_enum_schema(
         super::action_inventory::TACHI_TASK_PRIMARY_ACTIONS,
-        "Required Tachi task facade action (primary). Prefer tachi_gh for GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note). action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'wait'/'board'/'cancel' manage dispatches; action='complete' records eval; action='recommend'/'route_simulate'/'proposals' manage routing; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs).",
+        "Required Tachi task facade action. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'wait'/'board'/'cancel' manage dispatches; action='complete' records eval; action='recommend'/'route_simulate'/'proposals' manage routing; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs).",
         generator,
     )
 }
@@ -31,8 +30,7 @@ pub struct TachiTaskParams {
     /// action="intake" binds a GitHub issue to a flow.
     /// action="cycle_status" / "cycle_plan" are read-only lifecycle models.
     /// action="ux_matrix" / "build_references" / "close_loop" close the issue loop.
-    /// GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note): **canonical is tachi_gh**.
-    /// Those variants remain accepted on this router for compatibility only and return a deprecation notice.
+    /// GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note): use **tachi_gh only** (#757).
     #[schemars(schema_with = "tachi_task_action_schema")]
     pub action: TachiTaskAction,
     /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
@@ -41,7 +39,7 @@ pub struct TachiTaskParams {
     // plan fields
     #[serde(default)]
     #[schemars(
-        description = "[action=plan|recommend|dispatch|route_simulate|complete|intake|pr_handoff|ux_matrix] Task description / prompt text."
+        description = "[action=plan|recommend|dispatch|route_simulate|complete|intake|ux_matrix] Task description / prompt text."
     )]
     pub task: Option<String>,
     #[serde(default)]
@@ -132,6 +130,9 @@ pub struct TachiTaskParams {
     #[schemars(schema_with = "crate::coerce::opt_number_from_string_or_number_schema")]
     pub quality_score: Option<f64>,
     /// [action=complete] Completion notes or summary.
+    /// [action=close_loop] When wiki_title/wiki_text are omitted and result.md
+    /// is missing, used as a draft source for the wiki body (#925).
+    /// [action=pr_handoff] Optional PR title override.
     #[serde(default)]
     pub notes: Option<String>,
     /// [action=complete] Execution trajectory. Store compact step objects, not raw transcripts.
@@ -151,6 +152,12 @@ pub struct TachiTaskParams {
     /// byte-compatible with existing callers.
     #[serde(default)]
     pub signatures: Vec<SignatureRecordParams>,
+    /// [action=complete] Leader adjudication rulings to capture as precedent
+    /// memory rows (#950 slice 1: capture only). Additive/optional — an
+    /// empty/omitted array writes no `/precedents` rows and is byte-compatible
+    /// with existing callers.
+    #[serde(default)]
+    pub rulings: Vec<RulingRecordParams>,
     /// [action=complete] Evidence references for verification.
     #[serde(default)]
     pub evidence_refs: Vec<String>,
@@ -166,6 +173,16 @@ pub struct TachiTaskParams {
     #[serde(default)]
     #[schemars(description = "[action=dispatch] Working directory for the spawned agent.")]
     pub cwd: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=dispatch] Execution-environment lease id (#894 S1); resolves the agent cwd from the daemon-owned lease (managed env)."
+    )]
+    pub env_id: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=dispatch] Explicit opt-in to dispatch into a bare cwd not backed by a lease; stamped env: unmanaged. Fail-safe default is managed."
+    )]
+    pub unmanaged_cwd: Option<bool>,
     #[serde(default)]
     #[schemars(description = "[action=dispatch] Skill ids to inject into the agent prompt.")]
     pub skills: Vec<String>,
@@ -258,7 +275,7 @@ pub struct TachiTaskParams {
     pub credential_profiles: Vec<String>,
     #[serde(default)]
     #[schemars(
-        description = "GitHub repository in owner/repo format for action='intake', action='link_pr', or action='pr_status'. Optional when issue_ref/pr_ref is owner/repo#123 or a GitHub URL."
+        description = "GitHub repository in owner/repo format for action='intake'. Optional when issue_ref is owner/repo#123 or a GitHub URL. For PR lifecycle use tachi_gh."
     )]
     pub repo: Option<String>,
     #[serde(
@@ -267,22 +284,22 @@ pub struct TachiTaskParams {
     )]
     #[schemars(
         schema_with = "crate::coerce::opt_integer_from_string_or_number_schema",
-        description = "GitHub issue/PR number for action='intake', action='link_pr', or action='pr_status' when repo is supplied."
+        description = "GitHub issue number for action='intake' when repo is supplied. For PR lifecycle use tachi_gh."
     )]
     pub number: Option<u64>,
     #[serde(default)]
     #[schemars(
-        description = "[action=intake|link_pr|pr_status|pr_handoff|dispatch|complete] GitHub issue ref, e.g. owner/repo#123 or URL."
+        description = "[action=intake|dispatch|complete] GitHub issue ref, e.g. owner/repo#123 or URL."
     )]
     pub issue_ref: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=link_pr|pr_status|pr_handoff|release_note|dispatch|complete] GitHub PR ref, e.g. owner/repo#123 or URL."
+        description = "[action=dispatch|complete] GitHub PR ref, e.g. owner/repo#123 or URL. PR lifecycle (link/status/handoff/release) is tachi_gh only."
     )]
     pub pr_ref: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Tachi flow id for feature-scoped artifacts, also linking a dispatch/complete back to its flow (briefing/intake/link_pr/pr_handoff/release_note/ux_matrix/close_loop/status/wait/dispatch/complete)."
+        description = "Tachi flow id for feature-scoped artifacts, also linking a dispatch/complete back to its flow (briefing/intake/ux_matrix/close_loop/status/wait/dispatch/complete)."
     )]
     pub flow_id: Option<String>,
     /// [action=complete|wait|status|cancel] Dispatch id linked to this task lifecycle event.
@@ -341,22 +358,22 @@ pub struct TachiTaskParams {
     pub worktree: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=merge|pr_handoff] Branch to merge from the local dispatched worktree (merge), or the branch name to record in the handoff (pr_handoff)."
+        description = "[action=merge] Branch to merge from the local dispatched worktree. For PR handoff branch recording use tachi_gh(action='pr_handoff')."
     )]
     pub branch: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Local dispatch worktree merge strategy for action='merge'. Ignored by action='pr_status', which always runs GitHub safe_merge in preview mode."
+        description = "Local dispatch worktree merge strategy for action='merge'. For PR gate preview use tachi_gh(action='pr_status')."
     )]
     pub strategy: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "GitHub PR gate policy for action='pr_status': permissive | standard | strict. Defaults to standard."
+        description = "GitHub PR gate policy passed through to tachi_gh lifecycle helpers (not a tachi_task action): permissive | standard | strict."
     )]
     pub merge_policy: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Explicitly allow pr_status/safe_merge preview to pass a PR that would close protected umbrella/no-close issues. Defaults false; plain confirm does not disable this gate."
+        description = "Explicit umbrella/no-close override for tachi_gh safe_merge/pr_status helpers shared via lifecycle field bags. Defaults false."
     )]
     pub allow_umbrella_close: bool,
     #[serde(default = "super::default_true")]

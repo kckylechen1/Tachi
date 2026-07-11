@@ -12,6 +12,8 @@ fn params() -> TachiDispatchParams {
         profile: Some("claude_plan".to_string()),
         task: "Plan issue #194".to_string(),
         cwd: None,
+        env_id: None,
+        unmanaged_cwd: None,
         skills: Vec::new(),
         context_query: None,
         model: None,

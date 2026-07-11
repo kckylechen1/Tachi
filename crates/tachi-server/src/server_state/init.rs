@@ -152,19 +152,20 @@ impl MemoryServer {
                 mcp_tool_exposure_mode,
             }),
             pool: Arc::new(McpClientPool::new()),
+            // graph/state primitives (add_edge/get_edges/memory_graph/
+            // set_state/get_state) were deleted outright (#757 surface prune;
+            // #913 dead-code round found zero remaining in-crate callers).
             tool_router: Self::continuity_tool_router()
                 + Self::component_tool_router()
                 + Self::agent_profile_tool_router()
                 + Self::copilot_tool_router()
                 + Self::dispatch_tool_router()
                 + Self::handoff_tool_router()
-                + Self::graph_state_tool_router()
                 + Self::runtime_context_tool_router()
                 + Self::hub_tool_router()
                 + Self::pipeline_tool_router()
                 + Self::kanban_tool_router()
                 + Self::memory_tool_router()
-                + Self::domain_tool_router()
                 + Self::vault_tool_router()
                 + Self::workflow_tool_router()
                 + Self::wiki_tool_router()

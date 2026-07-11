@@ -124,6 +124,18 @@ pub struct TachiGhParams {
     /// this destructive local-disk op on the GitHub path).
     #[serde(default)]
     pub reclaim_worktree: Option<bool>,
+    /// Canonical docs to fold into action="release_note" lifecycle artifacts
+    /// (in addition to any docs recorded on the flow itself).
+    #[serde(default)]
+    pub doc_paths: Vec<String>,
+    /// Canonical spec docs to fold into action="release_note" lifecycle artifacts
+    /// (in addition to any specs recorded on the flow itself).
+    #[serde(default)]
+    pub spec_paths: Vec<String>,
+    /// PR title override for action="pr_handoff" lifecycle artifacts. Falls back
+    /// to the flow's automation-plan title, then the task summary, when unset.
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 /// Parameters for reading a GitHub issue

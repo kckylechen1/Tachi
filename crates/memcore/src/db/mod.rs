@@ -3,8 +3,9 @@ mod audit;
 mod common;
 mod daily_pipeline;
 mod doctor_probe;
-mod domain;
 mod event_ledger;
+#[cfg(feature = "admin")]
+pub mod exec_env;
 #[cfg(feature = "admin")]
 pub mod foundry_config;
 #[cfg(feature = "admin")]
@@ -42,7 +43,6 @@ pub use doctor_probe::{
     count_memories_vec_rows, foundry_job_status_counts, open_for_wal_checkpoint,
     open_immutable_readonly, open_raw, schema_version, table_exists, FoundryJobStatusCounts,
 };
-pub use domain::{delete_domain, get_domain, list_domains, register_domain};
 pub use event_ledger::{continuity_metrics, insert_tachi_event, list_tachi_events};
 pub use gc_candidates::{
     list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,

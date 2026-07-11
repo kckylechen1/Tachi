@@ -101,7 +101,7 @@ async fn feed_mode_produces_digest_and_proposal_artifacts() {
     let digest = &response["digest"];
     assert_eq!(digest["title"], "Rerank Provider Seam");
     assert!(
-        digest["summary"].as_str().unwrap().len() > 0,
+        !digest["summary"].as_str().unwrap().is_empty(),
         "digest has a summary"
     );
 

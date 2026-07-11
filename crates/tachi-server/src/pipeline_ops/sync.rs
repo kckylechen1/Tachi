@@ -14,9 +14,11 @@ pub(crate) async fn handle_sync_memories(
 
     let mut all_entries: Vec<(MemoryEntry, DbScope)> = Vec::new();
 
+    // #925 follow-up: recency-first so sync surfaces newest changes under limit
+    // (path-ordered list_by_path can drop recent rows before client-side sort).
     let global_entries = server.with_global_store(|store| {
         store
-            .list_by_path(path_prefix, limit, false)
+            .list_by_path_recent(path_prefix, limit, false)
             .map_err(|e| format!("Failed to list global memories: {}", e))
     })?;
     all_entries.extend(global_entries.into_iter().map(|e| (e, DbScope::Global)));
@@ -24,7 +26,7 @@ pub(crate) async fn handle_sync_memories(
     if server.has_project_db() {
         let project_entries = server.with_project_store(|store| {
             store
-                .list_by_path(path_prefix, limit, false)
+                .list_by_path_recent(path_prefix, limit, false)
                 .map_err(|e| format!("Failed to list project memories: {}", e))
         })?;
         all_entries.extend(project_entries.into_iter().map(|e| (e, DbScope::Project)));

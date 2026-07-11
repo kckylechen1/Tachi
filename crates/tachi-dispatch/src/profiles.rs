@@ -1261,6 +1261,8 @@ mod tests {
             profile: Some(profile.to_string()),
             task: "dispatch test".to_string(),
             cwd: None,
+            env_id: None,
+            unmanaged_cwd: None,
             skills: Vec::new(),
             context_query: None,
             model: None,

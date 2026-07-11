@@ -557,3 +557,192 @@ fn migration_repairs_partial_fts_drift() {
     assert_eq!(orphan_count, 0);
     assert_eq!(missing_count, 0);
 }
+
+// --- #984 F1 round 3: compatibility transaction widened to cover
+// init_schema_inner's legacy v6/v8/v9 work -----------------------------
+
+/// Build a real (file-backed, not in-memory) legacy-shape DB carrying BOTH a
+/// non-empty `persons` column (drives the standalone v6 fold + v8 drop inside
+/// `init_schema_inner`, via `fold_and_drop_legacy_persons_column`) and a
+/// non-empty `location` column (drives the standalone v9 relocate + drop),
+/// so the fault-injection test below has real, observable legacy work to
+/// roll back — not a no-op.
+fn open_legacy_db_with_persons_and_location() -> (tempfile::NamedTempFile, std::path::PathBuf) {
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let path = tmp.path().to_path_buf();
+    let conn = Connection::open(&path).expect("open");
+    conn.execute_batch(
+        r#"
+            CREATE TABLE memories (
+                id           TEXT PRIMARY KEY,
+                path         TEXT NOT NULL DEFAULT '/',
+                summary      TEXT NOT NULL DEFAULT '',
+                text         TEXT NOT NULL DEFAULT '',
+                importance   REAL NOT NULL DEFAULT 0.7,
+                timestamp    TEXT NOT NULL,
+                category     TEXT NOT NULL DEFAULT 'fact',
+                topic        TEXT NOT NULL DEFAULT '',
+                keywords     TEXT NOT NULL DEFAULT '[]',
+                persons      TEXT NOT NULL DEFAULT '[]',
+                entities     TEXT NOT NULL DEFAULT '[]',
+                location     TEXT NOT NULL DEFAULT '',
+                source       TEXT NOT NULL DEFAULT 'manual',
+                scope        TEXT NOT NULL DEFAULT 'general',
+                archived     INTEGER NOT NULL DEFAULT 0,
+                created_at   TEXT NOT NULL DEFAULT '',
+                updated_at   TEXT NOT NULL DEFAULT '',
+                access_count INTEGER NOT NULL DEFAULT 0,
+                last_access  TEXT,
+                revision     INTEGER NOT NULL DEFAULT 1,
+                metadata     TEXT NOT NULL DEFAULT '{}',
+                retention_policy TEXT,
+                domain       TEXT
+            );
+            CREATE VIRTUAL TABLE memories_fts USING fts5(
+                id UNINDEXED, path, summary, text, keywords, entities,
+                tokenize = 'unicode61'
+            );
+            "#,
+    )
+    .unwrap();
+    conn.execute(
+        r#"INSERT INTO memories
+                (id, path, summary, text, importance, timestamp, category, topic,
+                 keywords, persons, entities, location, source, scope, archived,
+                 created_at, updated_at, access_count, last_access, revision,
+                 metadata, retention_policy, domain)
+               VALUES ('row1', '/notes/x', '', 'hello', 0.5, '2026-04-30T00:00:00Z',
+                       'fact', '', '[]', ?1, '[]', ?2, 'manual', 'general', 0,
+                       '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', 0, NULL, 1,
+                       '{}', NULL, NULL)"#,
+        params![r#"["Kyle"]"#, "/scratch/legacy-location"],
+    )
+    .unwrap();
+    drop(conn);
+    (tmp, path)
+}
+
+/// Fault-injection proof (#984 F1 round 3, the bug codex found in round 2):
+/// arm the `init_schema_with_label_mut` test hook to fail right after
+/// `init_schema_inner` (DDL + the standalone v6/v8/v9 legacy-column work)
+/// completes but before `run_data_migrations_in_tx` and the version stamp
+/// run. Assert the legacy schema/data — `persons` column, `location` column,
+/// and the row's un-relocated `location` value — are ALL still there
+/// (rolled back), the sentinel migrations never ran, and `user_version` is
+/// unchanged. Then a real (unarmed) run must apply and stamp cleanly.
+#[test]
+fn legacy_column_work_rolls_back_with_stamp_on_injected_failure() {
+    let (tmp, path) = open_legacy_db_with_persons_and_location();
+    let path_str = tmp.path().to_str().expect("utf8 tmp path").to_string();
+
+    super::test_hooks::arm_fail_after_legacy_work();
+    // Match rather than expect_err: MemoryStore (the Ok variant) is not
+    // Debug, and we don't want to derive Debug on a struct holding live
+    // connections (see the round-2 fixup for the same pattern elsewhere in
+    // this test suite).
+    let err = match crate::MemoryStore::open_with_label(&path_str, "global") {
+        Ok(_) => panic!("armed injection must fail init_schema_with_label_mut"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("injected failure"),
+        "unexpected error: {err}"
+    );
+
+    // Re-open a raw connection to inspect post-failure state directly
+    // (MemoryStore::open failed, so there's no live handle to reuse).
+    let inspect = Connection::open(&path).expect("reopen for inspection");
+
+    // 1. Legacy `persons` column must still exist — v6/v8's standalone drop
+    //    must have rolled back, not just the sentinel-gated migrations.
+    let has_persons: bool = inspect
+        .query_row(
+            "SELECT 1 FROM pragma_table_info('memories') WHERE name='persons' LIMIT 1",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    assert!(
+        has_persons,
+        "persons column must still exist after rollback — v6/v8 legacy work leaked outside the tx"
+    );
+    let persons: String = inspect
+        .query_row("SELECT persons FROM memories WHERE id='row1'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        persons, r#"["Kyle"]"#,
+        "persons data must be unfolded (original value) after rollback"
+    );
+
+    // 2. Legacy `location` column must still exist and be un-relocated — v9's
+    //    standalone relocate+drop must have rolled back too.
+    let has_location: bool = inspect
+        .query_row(
+            "SELECT 1 FROM pragma_table_info('memories') WHERE name='location' LIMIT 1",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    assert!(
+        has_location,
+        "location column must still exist after rollback — v9 legacy work leaked outside the tx"
+    );
+    let (path_col, location): (String, String) = inspect
+        .query_row(
+            "SELECT path, location FROM memories WHERE id='row1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        path_col, "/notes/x",
+        "path must be un-relocated after rollback"
+    );
+    assert_eq!(
+        location, "/scratch/legacy-location",
+        "location value must be intact after rollback"
+    );
+
+    // 3. Sentinel migrations must never have run (they're chronologically
+    //    after the injection point, but assert explicitly for clarity).
+    let sentinel_count: i64 = inspect
+        .query_row(
+            "SELECT COUNT(*) FROM hard_state WHERE namespace = 'migrations'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    assert_eq!(sentinel_count, 0, "no sentinel migration should have run");
+
+    // 4. `user_version` must be unchanged (still the pre-migration default).
+    assert_eq!(
+        crate::db::migrations::read_schema_version(&inspect).unwrap(),
+        0,
+        "user_version must not advance when init_schema_inner's legacy work rolled back"
+    );
+    drop(inspect);
+
+    // 5. A real (unarmed) run now proceeds cleanly: legacy work applied,
+    //    migrations run, and the DB ends up stamped at the current version.
+    let _store =
+        crate::MemoryStore::open_with_label(&path_str, "global").expect("unarmed run must succeed");
+    let verify = Connection::open(&path).expect("reopen to verify success run");
+    let has_persons_after: bool = verify
+        .query_row(
+            "SELECT 1 FROM pragma_table_info('memories') WHERE name='persons' LIMIT 1",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    assert!(
+        !has_persons_after,
+        "persons column must be dropped after a real run"
+    );
+    assert_eq!(
+        crate::db::migrations::read_schema_version(&verify).unwrap(),
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION,
+        "user_version must be stamped after a real run"
+    );
+}

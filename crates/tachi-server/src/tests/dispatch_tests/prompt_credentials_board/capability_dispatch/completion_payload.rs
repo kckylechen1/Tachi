@@ -13,6 +13,7 @@ async fn dispatch_response_includes_suggested_complete_payload() {
     let mut params = dispatch_params(Some("custom"), "smoke custom dispatch completion skeleton");
     params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
     params.cwd = Some(tmp.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
     params.profile = Some("glm_impl".to_string());
     params.flow_id = Some("flow-complete-skeleton".to_string());
     params.issue_ref = Some("kckylechen1/tachi#194".to_string());

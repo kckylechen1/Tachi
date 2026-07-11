@@ -39,6 +39,8 @@ fn test_dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams 
         profile: None,
         task: task.to_string(),
         cwd: None,
+        env_id: None,
+        unmanaged_cwd: None,
         skills: Vec::new(),
         context_query: None,
         model: None,
@@ -287,6 +289,7 @@ async fn opencode_serve_preflight_uses_dispatch_credential_env() {
 
     let mut params = test_dispatch_params(Some("custom"), "should pass preflight");
     params.cwd = Some(project.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
     params.harness_transport = Some("opencode_serve".to_string());
     params.harness_server_url = Some(server_url);
     params.credential_profiles = vec!["opencode_server_auth".to_string()];
@@ -359,6 +362,44 @@ async fn v2_auto_stage_rejects_unsupported_sandbox_before_plan_stage_spawn() {
     assert_eq!(
         run_dir_count, 0,
         "no run directory should exist — workspace creation (step 1) never ran"
+    );
+}
+
+/// #894 S1: the fail-safe env-binding gate must fire through the real
+/// `handle_tachi_dispatch` entrypoint, not just at the pure
+/// `resolve_env_binding` unit level (see `exec_env_ops::tests`). A bare `cwd`
+/// with neither `env_id` nor `unmanaged_cwd:true` must be rejected before any
+/// run directory is created, with the exact fail-safe error text.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn dispatch_rejects_bare_cwd_without_unmanaged_optin_or_env_id() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let run_root = dispatch_runs_root();
+    let server = crate::tests::make_server();
+    let bare_cwd = tempfile::tempdir().expect("bare cwd dir");
+
+    let mut params = test_dispatch_params(Some("custom"), "should fail the env-binding gate");
+    params.cwd = Some(bare_cwd.path().to_string_lossy().to_string());
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+
+    let err = handle_tachi_dispatch(&server, params)
+        .await
+        .expect_err("a bare cwd without unmanaged_cwd:true or env_id must be rejected (#894 S1)");
+
+    assert!(
+        err.contains("a bare cwd is only accepted with explicit unmanaged_cwd:true or an env_id"),
+        "must be the fail-safe env-binding gate rejection: {err}"
+    );
+    let run_dir_count = std::fs::read_dir(&run_root)
+        .map(|entries| entries.filter_map(Result::ok).count())
+        .unwrap_or(0);
+    assert_eq!(
+        run_dir_count, 0,
+        "the gate must fire before any run directory is created"
     );
 }
 

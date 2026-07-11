@@ -24,9 +24,6 @@ use crate::kanban::{
     handle_check_inbox, handle_post_card, handle_update_card, CheckInboxParams, PostCardParams,
     UpdateCardParams,
 };
-use crate::memory_ops::{
-    handle_delete_domain, handle_get_domain, handle_list_domains, handle_register_domain,
-};
 use crate::tool_params::*;
 use crate::verify_ops::handle_tachi_verify;
 use crate::wiki_ops::{
@@ -44,7 +41,6 @@ mod continuity_facade;
 mod dispatch_complete_defaults;
 mod dispatch_facade;
 mod formatting;
-mod graph_state_facade;
 mod handoff_facade;
 mod hub_facade;
 mod memory_facade;
@@ -68,10 +64,6 @@ use self::skill_discovery::*;
 use self::skill_facade::*;
 use self::task_facade::*;
 use self::task_router::*;
-
-pub(crate) use self::task_facade::build_task_pr_status_gh_params;
-#[cfg(test)]
-pub(crate) use self::task_facade::resolve_task_pr_status_target;
 
 #[tool_router(router = copilot_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
@@ -120,42 +112,5 @@ impl MemoryServer {
         Parameters(params): Parameters<UpdateCardParams>,
     ) -> Result<String, String> {
         handle_update_card(self, params).await
-    }
-}
-
-#[tool_router(router = domain_tool_router, vis = "pub(crate)")]
-impl MemoryServer {
-    #[tool(
-        description = "Register a domain configuration for memory routing, GC thresholds, and default retention policies."
-    )]
-    pub(crate) async fn register_domain(
-        &self,
-        Parameters(params): Parameters<RegisterDomainParams>,
-    ) -> Result<String, String> {
-        handle_register_domain(self, params).await
-    }
-
-    #[tool(description = "Get a domain configuration by name.")]
-    pub(crate) async fn get_domain(
-        &self,
-        Parameters(params): Parameters<GetDomainParams>,
-    ) -> Result<String, String> {
-        handle_get_domain(self, params).await
-    }
-
-    #[tool(description = "List all registered domain configurations.")]
-    pub(crate) async fn list_domains(
-        &self,
-        Parameters(_params): Parameters<ListDomainsParams>,
-    ) -> Result<String, String> {
-        handle_list_domains(self).await
-    }
-
-    #[tool(description = "Delete a domain configuration by name.")]
-    pub(crate) async fn delete_domain(
-        &self,
-        Parameters(params): Parameters<DeleteDomainParams>,
-    ) -> Result<String, String> {
-        handle_delete_domain(self, params).await
     }
 }

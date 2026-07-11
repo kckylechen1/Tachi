@@ -43,6 +43,13 @@ impl MemoryStore {
         &self.conn
     }
 
+    /// Mutable low-level access for bindings that need to open a transaction
+    /// (`Connection::transaction` requires `&mut`). Used by the exec-env lease
+    /// reclaim path (#894 S1), whose flip is a single atomic transaction.
+    pub fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
     /// Run a TRUNCATE WAL checkpoint to reclaim the `-wal` file.
     ///
     /// Default PASSIVE auto-checkpoints merge WAL frames into the DB but never

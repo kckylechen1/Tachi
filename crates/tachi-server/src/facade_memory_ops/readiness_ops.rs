@@ -44,6 +44,14 @@ pub(crate) async fn handle_memory_ask(
         .clone()
         .or_else(|| params.text.clone())
         .ok_or_else(|| "query or text is required when action='ask'".to_string())?;
+    // #946: runtime DB paths are authoritative. Evidence may contain stale
+    // Desktop/Sigil paths from old memories; never let synthesis invent them.
+    let runtime_binding = runtime_db_binding(server);
+
+    if is_runtime_db_path_query(&query) {
+        return answer_runtime_db_path_query(&query, &runtime_binding, params.format.as_deref());
+    }
+
     let search_params = TachiSearchParams {
         query: query.clone(),
         scope: params.scope.clone().unwrap_or_else(|| "all".to_string()),
@@ -77,7 +85,16 @@ pub(crate) async fn handle_memory_ask(
     let evidence = inject_project_tags(evidence);
     let thinking = build_thinking_scaffold("ask", &query, &evidence);
     let synthesis = if params.synthesize {
-        Some(synthesize_answer(server, &query, &evidence, params.model.as_deref()).await)
+        Some(
+            synthesize_answer(
+                server,
+                &query,
+                &evidence,
+                &runtime_binding,
+                params.model.as_deref(),
+            )
+            .await,
+        )
     } else {
         None
     };
@@ -88,6 +105,7 @@ pub(crate) async fn handle_memory_ask(
             "evidence": evidence,
             "thinking": thinking,
             "synthesis": synthesis,
+            "runtime": runtime_binding,
             "cross_store": cross_store,
             "cross_store_hint": if cross_store {
                 Some("evidence spans global and project stores; pass `project=...` to pin a library or restrict `scope` to one store".to_string())
@@ -112,6 +130,22 @@ pub(crate) async fn handle_memory_ask(
                 .unwrap_or("none")
                 .to_string(),
         ),
+        (
+            "project_db",
+            runtime_binding
+                .get("project_db")
+                .and_then(Value::as_str)
+                .unwrap_or("(none)")
+                .to_string(),
+        ),
+        (
+            "global_db",
+            runtime_binding
+                .get("global_db")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string(),
+        ),
     ];
     if cross_store {
         fields.push((
@@ -125,6 +159,92 @@ pub(crate) async fn handle_memory_ask(
         &fields,
         Some(&evidence),
         synthesis_text.as_deref(),
+    ))
+}
+
+/// Authoritative live DB paths from the running server (not memory evidence).
+fn runtime_db_binding(server: &MemoryServer) -> Value {
+    json!({
+        "global_db": server.global_db_path_buf().display().to_string(),
+        "project_db": server.project_db_path_buf().map(|p| p.display().to_string()),
+        "single_db_mode": !server.has_project_db(),
+        "source": "runtime_binding",
+    })
+}
+
+/// True when the question is about which memory DB path is currently active.
+fn is_runtime_db_path_query(query: &str) -> bool {
+    let q = query.to_ascii_lowercase();
+    let asks_path = q.contains("memory.db")
+        || q.contains("db path")
+        || q.contains("database path")
+        || q.contains("which database")
+        || q.contains("which db")
+        || q.contains("current db")
+        || q.contains("active db")
+        || (q.contains("project db") && (q.contains("path") || q.contains("where")))
+        || (q.contains("global db") && (q.contains("path") || q.contains("where")));
+    if !asks_path {
+        return false;
+    }
+    q.contains("where is")
+        || q.contains("what is")
+        || q.contains("which")
+        || q.contains("current")
+        || q.contains("active")
+        || q.contains("runtime")
+        || q.contains("using")
+}
+
+fn answer_runtime_db_path_query(
+    query: &str,
+    runtime_binding: &Value,
+    format: Option<&str>,
+) -> Result<String, String> {
+    let global = runtime_binding
+        .get("global_db")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let project = runtime_binding
+        .get("project_db")
+        .and_then(Value::as_str)
+        .unwrap_or("(none — single-DB / global-only)");
+    let answer = format!(
+        "Authoritative runtime binding (not from memory evidence):\n\
+         - global_db: {global}\n\
+         - project_db: {project}\n\
+         Use runtime_info for the full routing snapshot. Memory hits mentioning other paths are historical and may be stale."
+    );
+    if wants_json(format) {
+        return json_string(&json!({
+            "status": "completed",
+            "query": query,
+            "evidence": [],
+            "thinking": {
+                "confidence": "high",
+                "gaps": [],
+                "basis": "runtime_binding",
+            },
+            "synthesis": {
+                "status": "completed",
+                "answer": answer,
+                "source": "runtime_binding",
+            },
+            "runtime": runtime_binding,
+        }));
+    }
+    Ok(format_agent_status(
+        "Tachi ask",
+        &[
+            ("status", "completed".to_string()),
+            ("query", query.to_string()),
+            ("confidence", "high".to_string()),
+            ("basis", "runtime_binding".to_string()),
+            ("project_db", project.to_string()),
+            ("global_db", global.to_string()),
+        ],
+        None,
+        Some(&answer),
     ))
 }
 
@@ -159,7 +279,6 @@ fn inject_project_tags(evidence: Value) -> Value {
 // ---------------------------------------------------------------------------
 // Note: consolidate lifecycle (propose/review/apply) lives in consolidate_ops.rs
 // (#775). The old dry_run-only search scaffold was replaced.
-
 
 pub(crate) async fn handle_memory_readiness(
     server: &MemoryServer,
@@ -380,11 +499,19 @@ pub(crate) async fn synthesize_answer(
     server: &MemoryServer,
     query: &str,
     evidence: &Value,
+    runtime_binding: &Value,
     model: Option<&str>,
 ) -> Value {
-    let system = "Answer using only the supplied Tachi evidence. Each evidence row carries a `db` field — values are `global` for the shared library and `project` for a workspace/named project DB. When evidence spans both stores, prefer rows most relevant to the question and explicitly call out claims grounded in cross-store evidence. If evidence is insufficient, say what is missing. Keep the answer concise and cite memory ids or paths when present.";
+    let system = "Answer using the supplied Tachi evidence plus the authoritative `runtime` DB binding. \
+Each evidence row carries a `db` field — values are `global` for the shared library and `project` for a workspace/named project DB. \
+When the question is about which memory.db path is current/active, the `runtime` object is ground truth — never invent paths from evidence text (those may be stale historical mentions). \
+When evidence spans both stores, prefer rows most relevant to the question and explicitly call out claims grounded in cross-store evidence. \
+If evidence is insufficient, say what is missing. Keep the answer concise and cite memory ids or paths when present.";
     let evidence_text = serde_json::to_string(evidence).unwrap_or_else(|_| "[]".to_string());
-    let user = format!("Question:\n{query}\n\nEvidence JSON:\n{evidence_text}");
+    let runtime_text = serde_json::to_string(runtime_binding).unwrap_or_else(|_| "{}".to_string());
+    let user = format!(
+        "Question:\n{query}\n\nAuthoritative runtime binding JSON:\n{runtime_text}\n\nEvidence JSON:\n{evidence_text}"
+    );
     match tokio::time::timeout(
         std::time::Duration::from_secs(30),
         server.llm.call_extract_llm(system, &user, model, 0.2, 700),

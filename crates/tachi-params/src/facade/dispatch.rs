@@ -85,6 +85,20 @@ pub struct TachiDispatchParams {
     #[serde(default)]
     pub cwd: Option<String>,
 
+    /// Execution-environment lease id (#894 S1). When set, the dispatch cwd is
+    /// resolved from the daemon-owned `exec_envs` lease (a managed env); a bare
+    /// `cwd` is ignored/rejected in favor of the lease path, and the dispatch is
+    /// stamped `env: managed` in the ledger.
+    #[serde(default)]
+    pub env_id: Option<String>,
+
+    /// Explicit opt-in to dispatch into a bare `cwd` that is NOT backed by a
+    /// managed lease (#894 S1). Fail-safe default is managed: a bare `cwd`
+    /// without `env_id` is only accepted when this is true, and such dispatches
+    /// are stamped `env: unmanaged` in the ledger.
+    #[serde(default)]
+    pub unmanaged_cwd: Option<bool>,
+
     /// Skills to inject into the agent's prompt (capability IDs)
     #[serde(default)]
     pub skills: Vec<String>,
@@ -499,6 +513,45 @@ pub struct TachiCompleteParams {
     /// byte-compatible with pre-existing callers.
     #[serde(default)]
     pub signatures: Vec<SignatureRecordParams>,
+
+    /// Leader adjudication rulings to capture as precedent memory rows (#950
+    /// slice 1: capture only). Additive and optional: an empty/omitted array
+    /// leaves `complete` byte-compatible with pre-existing callers, writing no
+    /// `/precedents` rows. Rulings are stored faithfully as supplied; the
+    /// verdict→principle decomposition lane is a later slice.
+    #[serde(default)]
+    pub rulings: Vec<RulingRecordParams>,
+}
+
+/// One caller-supplied leader adjudication captured at `complete` (#950). Stored
+/// faithfully under `/precedents/<project>/<date>-<shortid>` with structured
+/// fields in metadata and a human-readable rendering in the body. `case` and
+/// `ruling` are the two required fields; a ruling missing either is skipped with
+/// a warning and never fails the enclosing `complete` call.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct RulingRecordParams {
+    /// The finding + context the ruling adjudicates (required).
+    pub case: String,
+
+    /// The options the leader weighed before ruling.
+    #[serde(default)]
+    pub options_considered: Option<String>,
+
+    /// The adjudication itself — the decision the leader made (required).
+    pub ruling: String,
+
+    /// Constitution clauses / prior precedents cited in support.
+    #[serde(default)]
+    pub principles_cited: Vec<String>,
+
+    /// Truth-maintenance status: "validated" | "overturned" | "pending".
+    /// Defaults to "pending" when omitted.
+    #[serde(default)]
+    pub outcome: Option<String>,
+
+    /// When `outcome` is "overturned", the ruling/precedent that overturned it.
+    #[serde(default)]
+    pub overturned_by: Option<String>,
 }
 
 /// One leader-adjudicated error signature (or resolution) recorded at

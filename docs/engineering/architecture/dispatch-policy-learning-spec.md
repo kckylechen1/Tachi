@@ -54,8 +54,8 @@ invent calls that are not exposed yet.
 | performance matrix | `tachi_agent_eval(action="aggregate_live"|"perf"|"telemetry")` | implemented |
 | skill bundle/loadout | `tachi_skill(action="bundle"|"loadout")` | implemented |
 | lifecycle UX audit | `tachi_task(action="ux_matrix")` | implemented |
-| PR gate preview | `tachi_task(action="pr_status")` | implemented |
-| release and closure | `tachi_task(action="release_note"|"close_loop")` | implemented |
+| PR gate preview | `tachi_gh(action="pr_status")` | implemented |
+| release and closure | `tachi_gh(action="release_note")` / `tachi_task(action="close_loop")` | implemented |
 
 Do not add new public facades such as `tachi_mbit`, `tachi_policy`, or
 `tachi_router` while an existing domain facade can carry the workflow. Internal
@@ -203,9 +203,9 @@ Every substantial policy-learning slice should be able to pass this workflow:
 8. leader verification and `tachi_verify`
 9. `tachi_task(action="complete", flow_id=..., dispatch_id=...)`
 10. rerun `tachi_task(action="cycle_plan", flow_id=...)` before PR handoff
-11. `tachi_task(action="link_pr", flow_id=..., pr_ref=...)`
-12. `tachi_task(action="pr_status", flow_id=..., pr_ref=...)`
-13. `tachi_task(action="release_note", flow_id=...)`
+11. `tachi_gh(action="link_pr", flow_id=..., pr_ref=...)`
+12. `tachi_gh(action="pr_status", flow_id=..., pr_ref=...)`
+13. `tachi_gh(action="release_note", flow_id=...)`
 14. `tachi_task(action="close_loop", flow_id=...)`
 
 The UX matrix is not just a checklist. It is a product test for whether Tachi
@@ -241,8 +241,9 @@ As of 2026-06-28, the baseline includes:
   weakness markers and skill demotion targets, and merged weak-against signals
   affect route recommendation scoring;
 - credentialed `opencode_builder` profile;
-- feature lifecycle actions: `intake`, `cycle_status`, `cycle_plan`, `link_pr`,
-  `pr_status`, `release_note`, `ux_matrix`, `build_references`, and `close_loop`;
+- feature lifecycle: `tachi_task` owns `intake` / `cycle_status` / `cycle_plan` /
+  `ux_matrix` / `build_references` / `close_loop`; `tachi_gh` owns `link_pr` /
+  `pr_status` / `release_note` / `pr_handoff`;
 - feature briefing, intake instructions, issue automation plans, and GitHub
   handoff text route flow/issue/PR-backed work through read-only `cycle_plan`
   before recommend, dispatch, PR handoff, release notes, or close-loop;

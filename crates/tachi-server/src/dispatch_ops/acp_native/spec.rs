@@ -218,6 +218,8 @@ mod tests {
             profile: None,
             task: "noop".to_string(),
             cwd: Some("/tmp/project".to_string()),
+            env_id: None,
+            unmanaged_cwd: None,
             skills: Vec::new(),
             context_query: None,
             model: None,

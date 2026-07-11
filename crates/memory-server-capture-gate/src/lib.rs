@@ -44,6 +44,7 @@ const BASE_BUCKETS: &[&str] = &[
     "agent",
     "sft",
     "eval",
+    "precedents",
     "checkpoints",
     "foundry",
     "ghost",

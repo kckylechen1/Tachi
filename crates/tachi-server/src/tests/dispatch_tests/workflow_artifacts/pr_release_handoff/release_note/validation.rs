@@ -1,11 +1,10 @@
 use super::*;
 
 #[tokio::test]
-async fn tachi_task_release_note_requires_flow_or_pr_ref_before_github_access() {
+async fn lifecycle_release_note_requires_flow_or_pr_ref_before_github_access() {
     let server = make_server();
-    let params = task_params("release_note");
-    let err = server
-        .tachi_task(Parameters(params))
+    let params = task_params("status");
+    let err = crate::task_lifecycle::handle_task_release_note(&server, &params)
         .await
         .expect_err("missing release note target should fail before GitHub access");
     assert_eq!(

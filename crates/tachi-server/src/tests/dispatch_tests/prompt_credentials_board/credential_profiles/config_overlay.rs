@@ -67,6 +67,7 @@ async fn dispatch_credential_profile_injects_config_overlay_env_without_response
 
     let mut params = dispatch_params(Some("custom"), "smoke credential config overlay dispatch");
     params.cwd = Some(nested.to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
     params.credential_profiles = vec!["opencode_config_profile".to_string()];
     params.command = vec![
         "python3".to_string(),

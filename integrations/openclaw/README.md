@@ -78,7 +78,6 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.8.0/scripts/in
 | `memory_search` | 语义混合检索（向量 + FTS + rerank） |
 | `memory_save` | 显式写入 durable memory |
 | `memory_get` | 按 ID 获取单条记忆 |
-| `memory_graph` | 只读查看记忆图谱邻域 |
 | `memory_runtime_info` | 查看 Tachi runtime、DB routing、OpenClaw bridge capability 状态 |
 | `continuity_board` | 读取 Tachi continuity board / A2A handoff bundle |
 | `todo_write` / `todo_read` / `todo_spawn_summary` | 当前 session 的轻量 todo 与 spawn 计数 |

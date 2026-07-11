@@ -390,3 +390,104 @@ fn resolve_remote_mcp_url_rejects_vault_expanded_loopback_host() {
         "vault-expanded loopback host should be rejected after placeholder expansion"
     );
 }
+
+// --- allow_proxy opt-in (kckylechen1/tachi#947) ---------------------------
+//
+// Owner-ratified fix: per-server `allow_proxy` opt-in, default false
+// (fail-safe/no-proxy/pinned). Any ambiguity (missing/malformed field) must
+// resolve to the pinned/no-proxy default — never to the proxy-permitted
+// path. reqwest's `Client` does not expose its proxy/resolve_to_addrs
+// configuration after `.build()`, so these tests exercise the observable
+// surfaces: the config-plumbing helper `remote_mcp_allow_proxy`, and that
+// `build_remote_mcp_http_client` succeeds (takes the branch it's told to)
+// for both the default and opt-in paths.
+
+#[test]
+fn remote_mcp_allow_proxy_defaults_false_when_absent() {
+    let def = json!({
+        "transport": "streamable-http",
+        "url": "https://example.test/mcp"
+    });
+    assert!(!remote_mcp_allow_proxy(&def));
+}
+
+#[test]
+fn remote_mcp_allow_proxy_true_when_explicitly_set() {
+    let def = json!({
+        "transport": "streamable-http",
+        "url": "https://example.test/mcp",
+        "allow_proxy": true
+    });
+    assert!(remote_mcp_allow_proxy(&def));
+}
+
+#[test]
+fn remote_mcp_allow_proxy_fails_safe_on_malformed_field() {
+    // Wrong type, null, and empty-string are all "malformed" in the sense
+    // that they are not `true` — the fail-safe rule requires every one of
+    // these to resolve to the pinned/no-proxy default, never to the
+    // proxy-permitted branch.
+    for bad in [
+        json!({"allow_proxy": "true"}),
+        json!({"allow_proxy": 1}),
+        json!({"allow_proxy": null}),
+        json!({"allow_proxy": {}}),
+        json!({"allow_proxy": []}),
+        json!({}),
+    ] {
+        assert!(
+            !remote_mcp_allow_proxy(&bad),
+            "malformed/absent allow_proxy must default to false: {bad}"
+        );
+    }
+}
+
+#[test]
+fn remote_mcp_allow_proxy_false_when_explicitly_set() {
+    let def = json!({"allow_proxy": false});
+    assert!(!remote_mcp_allow_proxy(&def));
+}
+
+#[test]
+fn build_remote_mcp_http_client_default_branch_builds_pinned_no_proxy_client() {
+    ensure_test_tls_provider();
+    let validated = ValidatedRemoteMcpUrl {
+        url: "https://example.test/mcp".to_string(),
+        resolved_addrs: Some(vec!["93.184.216.34:443".parse().expect("valid addr")]),
+    };
+    let client = build_remote_mcp_http_client(&validated, 30, false, "test-server")
+        .expect("default (no allow_proxy) branch should build a client");
+    drop(client);
+}
+
+#[test]
+fn build_remote_mcp_http_client_opt_in_branch_builds_proxy_permitted_client() {
+    ensure_test_tls_provider();
+    let validated = ValidatedRemoteMcpUrl {
+        url: "https://example.test/mcp".to_string(),
+        resolved_addrs: Some(vec!["93.184.216.34:443".parse().expect("valid addr")]),
+    };
+    let client = build_remote_mcp_http_client(&validated, 30, true, "test-server")
+        .expect("allow_proxy=true branch should build a client");
+    drop(client);
+}
+
+#[test]
+fn build_remote_mcp_http_client_takes_default_branch_end_to_end_from_def() {
+    // End-to-end: a def with no allow_proxy field flows through
+    // remote_mcp_allow_proxy into build_remote_mcp_http_client and takes the
+    // fail-safe (no-proxy/pinned) branch.
+    ensure_test_tls_provider();
+    let def = json!({
+        "transport": "streamable-http",
+        "url": "https://example.test/mcp"
+    });
+    let validated = ValidatedRemoteMcpUrl {
+        url: "https://example.test/mcp".to_string(),
+        resolved_addrs: None,
+    };
+    let allow_proxy = remote_mcp_allow_proxy(&def);
+    assert!(!allow_proxy);
+    build_remote_mcp_http_client(&validated, 30, allow_proxy, "test-server")
+        .expect("default branch should build successfully");
+}

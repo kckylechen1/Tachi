@@ -10,6 +10,8 @@ async fn dispatch_prompt_invokes_stage_and_waza_skills_for_execute_slice() {
             profile: None,
             task: "修好 tachi-server 报错，先找根因再改".to_string(),
             cwd: None,
+            env_id: None,
+            unmanaged_cwd: None,
             skills: Vec::new(),
             context_query: None,
             model: None,
@@ -68,6 +70,8 @@ async fn dispatch_prompt_invokes_native_subagent_factory_for_dispatch_stage() {
             task: "Split this implementation plan into worker slices and run review gates"
                 .to_string(),
             cwd: None,
+            env_id: None,
+            unmanaged_cwd: None,
             skills: Vec::new(),
             context_query: None,
             model: None,

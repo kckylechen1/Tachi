@@ -10,7 +10,8 @@ pub(super) fn format_facade_response(
     raw: &str,
     format: Option<&str>,
 ) -> Result<String, String> {
-    if wants_json_format(format) {
+    // format=full is the agent-facing verbose JSON receipt (#527), not human markdown.
+    if wants_json_format(format) || crate::facade_memory_ops::wants_full_format(format) {
         return normalize_json_facade_response(action, raw);
     }
     let value = serde_json::from_str::<Value>(raw).map_err(|e| {

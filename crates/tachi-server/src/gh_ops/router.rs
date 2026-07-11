@@ -144,7 +144,8 @@ pub(crate) async fn handle_tachi_gh(
                 params.allow_umbrella_close,
             )?;
             let client = gh_client_for_server(server)?;
-            handle_github_safe_merge(
+            let worktree_for_lease = params.worktree.clone();
+            let out = handle_github_safe_merge(
                 &client,
                 &target.repo,
                 target.number,
@@ -156,7 +157,18 @@ pub(crate) async fn handle_tachi_gh(
                 params.worktree.as_deref(),
                 params.reclaim_worktree.unwrap_or(true),
             )
-            .await
+            .await?;
+            // #894 S1: the exec_envs lease is the single owner of a managed env.
+            // When safe_merge reclaimed the local worktree, flip the lease
+            // through the one reclaim path — best-effort and idempotent (a
+            // worktree with no lease is a no-op; the sweep is the backstop, not
+            // a second owner). Never fails the already-successful merge.
+            if let Some(worktree) = worktree_for_lease.as_deref() {
+                if safe_merge_reclaimed_worktree(&out) {
+                    let _ = server.reclaim_exec_env_for_worktree(worktree, Some("safe_merge"));
+                }
+            }
+            Ok(out)
         }
         "ship" => handle_github_ship(server, &params).await,
         "link_pr" => {
@@ -210,7 +222,29 @@ pub(crate) async fn handle_tachi_gh(
             other
         )),
     }?;
-    normalize_gh_response(&action, &raw)
+    normalize_gh_response(&action, &raw, params.format.as_deref())
+}
+
+/// tachi_gh lifecycle actions — the only ones `format="markdown"` applies to
+/// (`TachiGhParams::format` docs it as "response shape for lifecycle
+/// actions"). GitHub primitive actions (issue_list, pr_read, …) return their
+/// own JSON shape untouched, same as before this fix.
+fn is_lifecycle_action(action: &str) -> bool {
+    matches!(action, "link_pr" | "pr_status" | "pr_handoff" | "release_note")
+}
+
+/// True iff a safe_merge response envelope reports that it genuinely reclaimed
+/// the local worktree (`reclamation.reclaimed == true`). Used to gate the
+/// exec_envs lease flip (#894 S1) on an actual fs reclamation, not a skip.
+fn safe_merge_reclaimed_worktree(envelope: &str) -> bool {
+    serde_json::from_str::<Value>(envelope)
+        .ok()
+        .and_then(|v| {
+            v.get("reclamation")
+                .and_then(|r| r.get("reclaimed"))
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or(false)
 }
 
 fn required_repo(params: &TachiGhParams, action: &str) -> Result<String, String> {
@@ -253,13 +287,39 @@ fn resolve_tachi_gh_pr_target(
 fn lifecycle_task_params(
     params: &TachiGhParams,
 ) -> Result<crate::tool_params::TachiTaskParams, String> {
-    let value = serde_json::to_value(params)
+    // Handlers ignore `action`; force a valid tachi_task primary so GH lifecycle
+    // action strings (link_pr/pr_status/…) do not fail TachiTaskAction decode
+    // after #757 removed those variants from tachi_task.
+    //
+    // INVARIANT: lifecycle handlers must not read params.action; if one starts
+    // to, this bridge must be replaced. Every callee downstream of this
+    // function — `task_lifecycle::handle_task_link_pr`, `resolve_task_pr_target`
+    // (pr_status), `handle_task_pr_handoff`, `handle_task_release_note` — must
+    // keep ignoring `params.action` on the `TachiTaskParams` it receives here,
+    // because that field is always overwritten to the literal `"status"` a few
+    // lines below regardless of which of the four tachi_gh lifecycle actions
+    // actually triggered this call. If one of those handlers starts branching
+    // on `params.action`, it will silently misroute (every lifecycle action
+    // behaves as `status`) instead of erroring.
+    // `lifecycle_task_params_bridge_routes_all_four_gh_lifecycle_actions` in
+    // `mod tests` below only proves the conversion itself is lossless for the
+    // fields the handlers *do* key off (pr_ref/flow_id/repo/number) — it does
+    // not, and cannot, catch a handler that starts reading `action`. Follow-up:
+    // #757 tracks replacing this bridge with a dedicated lifecycle params type
+    // instead of reusing `TachiTaskParams`.
+    let mut value = serde_json::to_value(params)
         .map_err(|err| format!("serialize tachi_gh lifecycle params: {err}"))?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "action".to_string(),
+            serde_json::Value::String("status".to_string()),
+        );
+    }
     serde_json::from_value(value)
         .map_err(|err| format!("convert tachi_gh lifecycle params to tachi_task params: {err}"))
 }
 
-fn normalize_gh_response(action: &str, raw: &str) -> Result<String, String> {
+fn normalize_gh_response(action: &str, raw: &str, format: Option<&str>) -> Result<String, String> {
     let Ok(mut value) = serde_json::from_str::<Value>(raw) else {
         return Ok(raw.to_string());
     };
@@ -269,7 +329,64 @@ fn normalize_gh_response(action: &str, raw: &str) -> Result<String, String> {
         obj.entry("action".to_string())
             .or_insert_with(|| Value::String(action.to_string()));
     }
+    if is_lifecycle_action(action)
+        && format
+            .map(str::trim)
+            .is_some_and(|format| format.eq_ignore_ascii_case("markdown"))
+    {
+        return Ok(render_lifecycle_markdown(action, &value));
+    }
     serde_json::to_string(&value).map_err(|err| format!("serialize normalized gh response: {err}"))
+}
+
+/// Render a tachi_gh lifecycle response (`link_pr`/`pr_status`/`pr_handoff`/
+/// `release_note`) as markdown. `TachiGhParams::format` has advertised
+/// `format="markdown"` for lifecycle actions since the field was added, but
+/// this path was never wired up — every response was JSON regardless of
+/// `format`. Field list matches what each lifecycle handler actually emits
+/// (see `task_lifecycle::issue_flow`/`release_ux::release_note`).
+fn render_lifecycle_markdown(action: &str, value: &Value) -> String {
+    let mut lines = vec![format!("## Tachi GH {action}"), format!("action: `{action}`")];
+    for field in [
+        "flow_id",
+        "issue_ref",
+        "pr_ref",
+        "branch",
+        "pr_title",
+        "safe_to_open",
+        "verification_overall",
+        "release_note_path",
+        "pr_handoff_path",
+        "run_dir",
+    ] {
+        let Some(field_value) = value.get(field) else {
+            continue;
+        };
+        match field_value {
+            Value::String(text) if !text.is_empty() => lines.push(format!("{field}: `{text}`")),
+            Value::Bool(flag) => lines.push(format!("{field}: `{flag}`")),
+            _ => {}
+        }
+    }
+    if let Some(blockers) = value.get("blocked_reasons").and_then(Value::as_array) {
+        let blockers = blockers
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !blockers.is_empty() {
+            lines.push(format!("blocked_reasons: {blockers}"));
+        }
+    }
+    for body_field in ["pr_body", "release_note"] {
+        if let Some(body) = value.get(body_field).and_then(Value::as_str) {
+            if !body.is_empty() {
+                lines.push(String::new());
+                lines.push(body.to_string());
+            }
+        }
+    }
+    lines.join("\n")
 }
 
 #[cfg(test)]
@@ -301,5 +418,129 @@ mod tests {
         let target = resolve_tachi_gh_pr_target(&params, "safe_merge").expect("target");
         assert_eq!(target.repo, "owner/repo");
         assert_eq!(target.number, 42);
+    }
+
+    /// Guard for the `lifecycle_task_params` bridge (see the invariant comment
+    /// at its definition): drives all four tachi_gh lifecycle actions
+    /// (link_pr/pr_status/pr_handoff/release_note) THROUGH the bridge — not
+    /// through the handlers — and asserts each converts without error, with
+    /// `action` forced to `status` (the bridge's whole reason to exist), and
+    /// with the fields the handlers actually key off (pr_ref/flow_id/
+    /// doc_paths/spec_paths/notes) preserved untouched per action. A
+    /// per-action-distinct pr_ref/flow_id pair means a field mix-up between
+    /// actions fails loudly instead of silently misrouting. doc_paths/
+    /// spec_paths/notes cover the terra-review finding that
+    /// `TachiGhParams` dropped these fields silently (release_note reads
+    /// doc_paths/spec_paths, pr_handoff reads notes as a title override).
+    #[test]
+    fn lifecycle_task_params_bridge_routes_all_four_gh_lifecycle_actions() {
+        for action in ["link_pr", "pr_status", "pr_handoff", "release_note"] {
+            let pr_ref = format!("owner/repo#{}", action.len());
+            let flow_id = format!("flow-{action}");
+            let doc_path = format!("docs/{action}.md");
+            let spec_path = format!("specs/{action}.md");
+            let notes = format!("notes-{action}");
+            let gh_params = params(json!({
+                "action": action,
+                "pr_ref": pr_ref,
+                "flow_id": flow_id,
+                "doc_paths": [doc_path],
+                "spec_paths": [spec_path],
+                "notes": notes,
+            }));
+
+            let task_params = lifecycle_task_params(&gh_params)
+                .unwrap_or_else(|err| panic!("{action}: bridge conversion failed: {err}"));
+
+            assert_eq!(
+                task_params.action,
+                crate::tool_params::TachiTaskAction::Status,
+                "{action}: bridge must force action=status regardless of the source tachi_gh action"
+            );
+            assert_eq!(
+                task_params.pr_ref.as_deref(),
+                Some(pr_ref.as_str()),
+                "{action}: pr_ref must round-trip through the bridge unchanged"
+            );
+            assert_eq!(
+                task_params.flow_id.as_deref(),
+                Some(flow_id.as_str()),
+                "{action}: flow_id must round-trip through the bridge unchanged"
+            );
+            assert_eq!(
+                task_params.doc_paths,
+                vec![doc_path],
+                "{action}: doc_paths must round-trip through the bridge unchanged"
+            );
+            assert_eq!(
+                task_params.spec_paths,
+                vec![spec_path],
+                "{action}: spec_paths must round-trip through the bridge unchanged"
+            );
+            assert_eq!(
+                task_params.notes.as_deref(),
+                Some(notes.as_str()),
+                "{action}: notes must round-trip through the bridge unchanged"
+            );
+
+            // resolve_task_pr_target is action-agnostic (reads repo/number/pr_ref
+            // only) — confirm routing to the right PR target still works through
+            // the bridge for the actions that rely on it (link_pr, pr_status).
+            let target = crate::task_lifecycle::resolve_task_pr_target(&task_params)
+                .unwrap_or_else(|err| panic!("{action}: resolve_task_pr_target failed: {err}"));
+            assert_eq!(target.repo, "owner/repo");
+            assert_eq!(target.number, action.len() as u64);
+        }
+    }
+
+    /// `TachiGhParams::format` advertises "json (default) or markdown" for
+    /// lifecycle actions (gh.rs doc comment). Guard that `normalize_gh_response`
+    /// actually produces markdown for a lifecycle action instead of silently
+    /// ignoring `format` and always returning JSON (the terra-review finding).
+    #[test]
+    fn normalize_gh_response_honors_markdown_format_for_lifecycle_actions() {
+        let raw = json!({
+            "ok": true,
+            "action": "pr_handoff",
+            "flow_id": "flow-1",
+            "pr_title": "Fix the thing",
+            "safe_to_open": true,
+            "pr_body": "## Summary\nDetails here.",
+        })
+        .to_string();
+
+        let markdown = normalize_gh_response("pr_handoff", &raw, Some("markdown"))
+            .expect("markdown normalize");
+        assert!(
+            markdown.contains("pr_title: `Fix the thing`"),
+            "expected rendered field in markdown output, got: {markdown}"
+        );
+        assert!(
+            markdown.contains("## Summary\nDetails here."),
+            "expected pr_body content inlined in markdown output, got: {markdown}"
+        );
+        assert!(
+            serde_json::from_str::<Value>(&markdown).is_err(),
+            "markdown output should not itself be a JSON document, got: {markdown}"
+        );
+
+        let json_default =
+            normalize_gh_response("pr_handoff", &raw, None).expect("default normalize");
+        assert!(
+            serde_json::from_str::<Value>(&json_default).is_ok(),
+            "default (no format) response must stay JSON, got: {json_default}"
+        );
+
+        // GitHub primitive actions are unaffected by format=markdown — only the
+        // four lifecycle actions render markdown (gh.rs: "response shape for
+        // lifecycle actions").
+        let primitive_raw = json!({ "ok": true, "number": 42 }).to_string();
+        let primitive_with_markdown_format =
+            normalize_gh_response("pr_read", &primitive_raw, Some("markdown"))
+                .expect("primitive normalize");
+        assert!(
+            serde_json::from_str::<Value>(&primitive_with_markdown_format).is_ok(),
+            "non-lifecycle action must stay JSON even when format=markdown, got: {primitive_with_markdown_format}"
+        );
     }
 }

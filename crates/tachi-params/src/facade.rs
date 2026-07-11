@@ -485,8 +485,8 @@ pub struct TachiHandoffParams {
 
 mod dispatch;
 pub use dispatch::{
-    CompletionPredicate, DispatchMcpAccessParams, SignatureRecordParams, TachiApproveMergeParams,
-    TachiCompleteParams, TachiDispatchParams, TachiSubagentEvalParams,
+    CompletionPredicate, DispatchMcpAccessParams, RulingRecordParams, SignatureRecordParams,
+    TachiApproveMergeParams, TachiCompleteParams, TachiDispatchParams, TachiSubagentEvalParams,
 };
 
 // ─── Facade: wiki (search / browse / write) ──────────────────────────────────
@@ -633,6 +633,11 @@ pub struct TachiWorkflowParams {
     /// energy to actually close the loop).
     #[serde(default)]
     pub flow_id: Option<String>,
+    /// Optional free-form notes. When wiki_title/wiki_text are omitted and
+    /// result.md is unavailable, close_loop drafts the wiki body from notes
+    /// (#925). Prefer explicit wiki_* fields for durable lessons.
+    #[serde(default)]
+    pub notes: Option<String>,
     #[serde(default)]
     pub wiki_title: Option<String>,
     #[serde(default)]
@@ -709,8 +714,8 @@ mod action_inventory;
 pub use action_enums::{TachiTaskAction, TachiVerifyAction};
 pub use action_inventory::{
     TACHI_GH_ACTIONS, TACHI_GH_ACTION_SOFT_MAX, TACHI_MEMORY_ACTIONS, TACHI_MEMORY_ACTION_SOFT_MAX,
-    TACHI_TASK_COMPAT_GH_LIFECYCLE_ACTIONS, TACHI_TASK_PRIMARY_ACTIONS,
-    TACHI_TASK_PRIMARY_ACTION_SOFT_MAX, TACHI_VERIFY_ACTIONS,
+    TACHI_TASK_PRIMARY_ACTIONS, TACHI_TASK_PRIMARY_ACTION_SOFT_MAX,
+    TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS, TACHI_VERIFY_ACTIONS,
 };
 
 mod orchestration;

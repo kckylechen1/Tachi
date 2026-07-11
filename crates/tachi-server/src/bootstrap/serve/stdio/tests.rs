@@ -1242,7 +1242,9 @@ fn proxy_allows_explicit_cross_project_read_override() {
 
 #[test]
 fn proxy_allows_explicit_cross_project_direct_read_override() {
-    for tool in ["memory_graph", "get_edges"] {
+    // #757 removed memory_graph/get_edges from MCP; remaining cross-project
+    // direct reads include list_memories / get_memory / tachi_search.
+    for tool in ["list_memories", "get_memory", "tachi_search"] {
         let request = rmcp::model::CallToolRequestParams::new(tool).with_arguments(
             serde_json::Map::from_iter([("project".to_string(), serde_json::json!("Quant-test"))]),
         );

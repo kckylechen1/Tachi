@@ -96,6 +96,78 @@ async fn tachi_memory_ask_can_return_compact_json() {
     assert_eq!(parsed["query"], json!("what did we implement"));
     assert!(parsed["evidence"].is_array());
     assert!(parsed["thinking"].is_object());
+    assert!(
+        parsed["runtime"]["global_db"].as_str().is_some(),
+        "ask must surface runtime binding: {parsed}"
+    );
+}
+
+/// #946 discrimination: stale memory evidence mentioning an old Desktop path
+/// must not override the live runtime project_db path for path questions.
+#[tokio::test]
+async fn tachi_memory_ask_db_path_uses_runtime_not_stale_evidence() {
+    let server = make_server();
+    let live_project = server
+        .project_db_path_buf()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| server.global_db_path_buf().display().to_string());
+    let stale_path = "/Users/kckylechen/Desktop/Sigil/.tachi/memory.db";
+    assert_ne!(
+        live_project, stale_path,
+        "test fixture requires live path != stale Desktop path"
+    );
+
+    server
+        .with_global_store(|store| {
+            let mut stale = make_entry("ask-stale-db-path");
+            stale.path = "/scratch/tachi/ask-stale-db-path".to_string();
+            stale.summary = "Old project DB location note".to_string();
+            stale.text = format!(
+                "The current project memory.db path is {stale_path}. Always use that path."
+            );
+            stale.keywords = vec![
+                "memory.db".to_string(),
+                "path".to_string(),
+                "database".to_string(),
+            ];
+            store.upsert(&stale).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed stale path memory");
+
+    let params: TachiMemoryParams = serde_json::from_value(json!({
+        "action": "ask",
+        "format": "json",
+        "query": "what is the current memory.db path",
+        "top_k": 5,
+        "synthesize": true
+    }))
+    .expect("params");
+
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect("ask should succeed");
+    let parsed: Value = serde_json::from_str(&body).expect("ask JSON");
+
+    assert_eq!(parsed["thinking"]["basis"], json!("runtime_binding"));
+    assert_eq!(parsed["thinking"]["confidence"], json!("high"));
+    let answer = parsed["synthesis"]["answer"]
+        .as_str()
+        .expect("deterministic answer");
+    assert!(
+        answer.contains(&live_project) || parsed["runtime"].to_string().contains(&live_project),
+        "must cite live runtime path, got answer={answer} runtime={}",
+        parsed["runtime"]
+    );
+    assert!(
+        !answer.contains(stale_path),
+        "must not present stale Desktop path as current: {answer}"
+    );
+    assert_eq!(
+        parsed["runtime"]["source"],
+        json!("runtime_binding"),
+        "runtime block must be authoritative: {parsed}"
+    );
 }
 
 #[tokio::test]

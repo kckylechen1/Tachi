@@ -92,9 +92,20 @@ pub(super) async fn call_daemon_vault_unlock(
         }
     );
     let _ = std::fs::remove_file(&fifo_path);
-    writer_result.map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let out = call_result.map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    Ok(out)
+    // Check the daemon call's own error first: if the daemon rejected the
+    // tool call (e.g. "tool not found"), no reader ever opens the FIFO and
+    // the writer times out with ENXIO. That ENXIO is expected collateral,
+    // not the real error — surfacing it instead of call_result's error
+    // masks the actual failure (#979).
+    match call_result {
+        Ok(out) => {
+            // Daemon call succeeded but the password write to the FIFO
+            // failed — that's a genuine, informative failure.
+            writer_result.map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            Ok(out)
+        }
+        Err(call_err) => Err(call_err.into()),
+    }
 }
 
 #[cfg(not(unix))]

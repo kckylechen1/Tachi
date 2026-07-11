@@ -64,6 +64,7 @@ async fn tachi_task_route_simulate_compares_policy_variants_from_live_eval() {
                 project: None,
                 format: None,
                 signatures: Vec::new(),
+                rulings: Vec::new(),
             }))
             .await
             .expect("seed eval row");
@@ -177,6 +178,7 @@ async fn tachi_task_route_policy_proposals_require_review_before_apply() {
                 project: None,
                 format: None,
                 signatures: Vec::new(),
+                rulings: Vec::new(),
             }))
             .await
             .expect("seed eval row");

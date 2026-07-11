@@ -3,12 +3,15 @@ use rusqlite::{params, Connection};
 use crate::error::MemoryError;
 use crate::path_router;
 
-pub(super) fn migrate_v1_path_normalize(conn: &mut Connection) -> Result<usize, MemoryError> {
-    let tx = conn.transaction()?;
+/// Callers run this inside the caller's own transactional boundary — see
+/// `run_data_migrations`'s outer transaction (#984 F1) — so this no longer
+/// opens its own nested transaction (SQLite forbids nested top-level `BEGIN`;
+/// the outer transaction already gives this loop atomicity).
+pub(super) fn migrate_v1_path_normalize(conn: &Connection) -> Result<usize, MemoryError> {
     let mut count = 0usize;
     let mut after_id = String::new();
     loop {
-        let rows = fetch_id_path_batch(&tx, &after_id, 500)?;
+        let rows = fetch_id_path_batch(conn, &after_id, 500)?;
         if rows.is_empty() {
             break;
         }
@@ -16,7 +19,7 @@ pub(super) fn migrate_v1_path_normalize(conn: &mut Connection) -> Result<usize, 
         for (id, path) in rows {
             let normalized = path_router::normalize_path(&path);
             if normalized != path {
-                tx.execute(
+                conn.execute(
                     "UPDATE memories SET path = ?1 WHERE id = ?2",
                     params![normalized, id],
                 )?;
@@ -24,7 +27,6 @@ pub(super) fn migrate_v1_path_normalize(conn: &mut Connection) -> Result<usize, 
             }
         }
     }
-    tx.commit()?;
     Ok(count)
 }
 
@@ -47,7 +49,7 @@ fn fetch_id_path_batch(
     Ok(rows)
 }
 
-pub(super) fn migrate_v2_scope_normalize(conn: &mut Connection) -> Result<usize, MemoryError> {
+pub(super) fn migrate_v2_scope_normalize(conn: &Connection) -> Result<usize, MemoryError> {
     // PR-1 already added a CHECK constraint that prevents non-canonical scope
     // values. Per-project DBs that pre-existed PR-1 should also have been
     // normalized by PR-1's migration when init_schema runs. This is a
@@ -60,7 +62,7 @@ pub(super) fn migrate_v2_scope_normalize(conn: &mut Connection) -> Result<usize,
     Ok(count)
 }
 
-pub(super) fn migrate_v3_handoff_standardize(conn: &mut Connection) -> Result<usize, MemoryError> {
+pub(super) fn migrate_v3_handoff_standardize(conn: &Connection) -> Result<usize, MemoryError> {
     // Bare "/handoff" -> "/handoff/unknown".
     let count = conn.execute(
         "UPDATE memories SET path = '/handoff/unknown' WHERE path = '/handoff'",
