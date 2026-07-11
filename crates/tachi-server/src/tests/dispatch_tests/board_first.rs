@@ -1,0 +1,287 @@
+//! kckylechen1/tachi#971 — dispatches must not be invisible to board/status
+//! pollers until the V2 plan stage (up to 180s LLM call) completes, and a
+//! plan-stage failure must not leave an orphaned kanban row.
+//!
+//! These tests drive the real V2 plan stage against a fake `claude` binary
+//! (`CLAUDE_BIN` env override, same mechanism `v2_smoke.rs` uses) so no
+//! network call / real Claude Code CLI is required. Each test isolates
+//! `TACHI_HOME` to a fresh temp dir and holds `global_test_lock()` because
+//! `CLAUDE_BIN` / `DISPATCH_V2_ENABLED` / `TACHI_HOME` are process-global env
+//! vars.
+
+use super::super::make_server;
+use super::{
+    dispatch_params, wait_for_dispatch_result, DISPATCH_TEST_WAIT_ATTEMPTS,
+    DISPATCH_TEST_WAIT_INTERVAL,
+};
+use serde_json::{json, Value};
+
+struct EnvGuard {
+    key: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let original = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        if let Some(value) = self.original.as_ref() {
+            std::env::set_var(self.key, value);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
+/// Write a fake `claude` CLI at `path` that either succeeds with a
+/// minimal-but-valid plan envelope, or exits non-zero to force
+/// `ClaudePool::call` into its `Err` branch (mirrors `v2_smoke.rs`'s fixture,
+/// with an added failure mode and an optional pre-output sleep so the
+/// success case can be observed mid-flight).
+fn write_fake_claude_binary(path: &std::path::Path, mode: FakeClaudeMode) {
+    use std::io::Write;
+    let script = match mode {
+        FakeClaudeMode::Success { sleep_secs } => format!(
+            "#!/usr/bin/env bash\nsleep {sleep_secs}\ncat <<'JSON'\n{{\"result\":\"## Goal\\nboard-first test.\\n\\n## Steps\\n1. inspect\\n\\n## Files\\n- src/lib.rs\\n\\n## Validation\\n- cargo test\\n\"}}\nJSON\n"
+        ),
+        FakeClaudeMode::Fail => "#!/usr/bin/env bash\necho 'synthetic plan failure' 1>&2\nexit 1\n"
+            .to_string(),
+    };
+    let mut f = std::fs::File::create(path).expect("create fake claude binary");
+    f.write_all(script.as_bytes())
+        .expect("write fake claude binary");
+    drop(f);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+}
+
+enum FakeClaudeMode {
+    Success { sleep_secs: u64 },
+    Fail,
+}
+
+/// Wait until exactly one subdirectory exists under `run_root` and return
+/// its path. Mirrors `dispatch_ops::dispatch::tests::single_run_dir`, which
+/// is `pub(super)`-scoped to that module and not reachable from here.
+async fn wait_for_single_run_dir(run_root: &std::path::Path) -> std::path::PathBuf {
+    for _ in 0..DISPATCH_TEST_WAIT_ATTEMPTS {
+        if let Ok(entries) = std::fs::read_dir(run_root) {
+            let dirs: Vec<_> = entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            if dirs.len() == 1 {
+                return dirs.into_iter().next().expect("one run dir");
+            }
+        }
+        tokio::time::sleep(DISPATCH_TEST_WAIT_INTERVAL).await;
+    }
+    panic!("no run dir appeared under {}", run_root.display());
+}
+
+fn read_status_json(run_dir: &std::path::Path) -> Option<Value> {
+    std::fs::read_to_string(run_dir.join("status.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+}
+
+/// (5a) A V2 plan-stage FAILURE must leave BOTH a terminal status.json
+/// (exit_code set, plan_review_status="failed") AND a kanban row in a
+/// terminal state (TASK_STATE_FAILED) — no orphaned "planning"/WORKING row.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn plan_stage_failure_closes_both_status_and_kanban_row() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let fake_claude = temp_home.path().join("claude-fail");
+    write_fake_claude_binary(&fake_claude, FakeClaudeMode::Fail);
+
+    let _tachi_home = EnvGuard::set("TACHI_HOME", temp_home.path());
+    let _claude_bin = EnvGuard::set("CLAUDE_BIN", &fake_claude);
+    let _skip_perms = EnvGuard::set("TACHI_CLAUDE_SKIP_PERMISSIONS", "true");
+    let _v2_review = EnvGuard::set("DISPATCH_V2_PLAN_REVIEW", "false");
+
+    let run_root = temp_home.path().join("runs");
+    let server = make_server();
+
+    let mut params = dispatch_params(Some("claude"), "plan stage failure should close kanban");
+    params.stage = Some("auto".to_string());
+
+    let err = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
+        .await
+        .expect_err("plan-stage failure must surface as an Err to the caller");
+    assert!(
+        err.contains("dispatch v2 stage1 (plan) failed"),
+        "unexpected error: {err}"
+    );
+
+    let run_dir = wait_for_single_run_dir(&run_root).await;
+
+    // status.json must be terminal (exit_code set, plan_review_status=failed).
+    let status = read_status_json(&run_dir).expect("status.json written");
+    assert_eq!(status["plan_review_status"], json!("failed"), "{status:#}");
+    assert_eq!(status["exit_code"], json!(1), "{status:#}");
+
+    // The kanban row (created BOARD-FIRST, before the plan stage ran) must
+    // now be terminal, not left in TASK_STATE_WORKING.
+    let dispatch_id = run_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("dispatch id from run dir name")
+        .to_string();
+    let kanban_state = crate::dispatch_ops::get_kanban_state(&server, &dispatch_id).await;
+    assert_eq!(
+        kanban_state.as_deref(),
+        Some("TASK_STATE_FAILED"),
+        "kanban row must be closed after plan-stage failure, not left orphaned in TASK_STATE_WORKING"
+    );
+}
+
+/// (5b) A successful V2 dispatch must have BOTH status.json AND the kanban
+/// row present with pre-plan content (dispatch accepted, no plan yet)
+/// BEFORE the (slow, faked) plan stage completes — proving BOARD-FIRST /
+/// RECEIPT-FIRST ordering is observable, not just eventually-true.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let fake_claude = temp_home.path().join("claude-slow-success");
+    // Sleep long enough that the polling loop below reliably observes
+    // pre-plan-completion state before the plan stage resolves.
+    write_fake_claude_binary(&fake_claude, FakeClaudeMode::Success { sleep_secs: 2 });
+
+    let _tachi_home = EnvGuard::set("TACHI_HOME", temp_home.path());
+    let _claude_bin = EnvGuard::set("CLAUDE_BIN", &fake_claude);
+    let _skip_perms = EnvGuard::set("TACHI_CLAUDE_SKIP_PERMISSIONS", "true");
+    let _v2_review = EnvGuard::set("DISPATCH_V2_PLAN_REVIEW", "false");
+
+    let run_root = temp_home.path().join("runs");
+    let server = make_server();
+    let server_for_task = (*server).clone();
+
+    let mut params = dispatch_params(Some("custom"), "board-first ordering smoke");
+    params.stage = Some("auto".to_string());
+    // Stage-2 execute uses a no-op command; the plan stage (Stage 1) is the
+    // slow part under test.
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+
+    let dispatch_task = tokio::spawn(async move {
+        crate::dispatch_ops::handle_tachi_dispatch(&server_for_task, params).await
+    });
+
+    // Run dir + status.json must appear almost immediately (receipt-first),
+    // well before the 2s fake-plan sleep elapses.
+    let run_dir = wait_for_single_run_dir(&run_root).await;
+    let dispatch_id = run_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("dispatch id from run dir name")
+        .to_string();
+
+    let early_status = read_status_json(&run_dir).expect("status.json written before plan completes");
+    assert_eq!(early_status["v2"], json!(true), "{early_status:#}");
+    assert!(
+        early_status["plan_generated_at"].is_null(),
+        "plan has not generated yet: {early_status:#}"
+    );
+    assert!(
+        early_status["exit_code"].is_null(),
+        "dispatch must still be in-flight: {early_status:#}"
+    );
+
+    // The kanban row must also exist pre-plan-completion (BOARD-FIRST).
+    let mut early_kanban_state = None;
+    for _ in 0..DISPATCH_TEST_WAIT_ATTEMPTS {
+        early_kanban_state = crate::dispatch_ops::get_kanban_state(&server, &dispatch_id).await;
+        if early_kanban_state.is_some() {
+            break;
+        }
+        tokio::time::sleep(DISPATCH_TEST_WAIT_INTERVAL).await;
+    }
+    assert_eq!(
+        early_kanban_state.as_deref(),
+        Some("TASK_STATE_WORKING"),
+        "kanban row must exist (BOARD-FIRST) before the V2 plan stage completes"
+    );
+
+    // dispatch_received must be the (or one of the) earliest trajectory
+    // events, written before plan_generated.
+    let trajectory = std::fs::read_to_string(run_dir.join("trajectory.jsonl"))
+        .unwrap_or_default();
+    assert!(
+        trajectory.contains("\"event\":\"dispatch_received\""),
+        "receipt-first trajectory event missing: {trajectory}"
+    );
+
+    // Now let the dispatch actually finish and sanity-check the final state.
+    let raw = dispatch_task
+        .await
+        .expect("dispatch task should not panic")
+        .expect("v2 dispatch should eventually succeed");
+    let response: Value = serde_json::from_str(&raw).expect("dispatch JSON");
+    assert_eq!(response["v2"], json!(true), "{response:#}");
+}
+
+/// (5c) V1 (non-V2) dispatch is unaffected by the RECEIPT-FIRST /
+/// BOARD-FIRST reorder: status.json + kanban row both land with V1's
+/// `plan_review_status: "n/a"` and the dispatch still succeeds end to end.
+/// Broad V1 coverage already exists (e.g.
+/// `workflow_artifacts::closure_dispatch_markers::dispatch_board`); this
+/// test is narrowly scoped to the ordering claim itself.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn v1_dispatch_status_and_kanban_unaffected_by_reorder() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvGuard::set("TACHI_HOME", temp_home.path());
+    let run_root = temp_home.path().join("runs");
+    let server = make_server();
+
+    let mut params = dispatch_params(Some("custom"), "v1 dispatch unaffected by reorder");
+    params.command = vec!["python3".to_string(), "-c".to_string(), "print('ok')".to_string()];
+    // No `stage`, no DISPATCH_V2_ENABLED — V1 path.
+
+    let raw = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
+        .await
+        .expect("v1 dispatch should start");
+    let response: Value = serde_json::from_str(&raw).expect("dispatch JSON");
+    assert_eq!(response["v2"], json!(false), "{response:#}");
+    let dispatch_id = response["dispatch_id"]
+        .as_str()
+        .expect("dispatch_id")
+        .to_string();
+
+    let run_dir = wait_for_single_run_dir(&run_root).await;
+    let status = read_status_json(&run_dir).expect("status.json written");
+    assert_eq!(status["plan_review_status"], json!("n/a"), "{status:#}");
+
+    let kanban_state = crate::dispatch_ops::get_kanban_state(&server, &dispatch_id).await;
+    assert!(
+        kanban_state.is_some(),
+        "kanban row must exist for a V1 dispatch too"
+    );
+
+    let _ = wait_for_dispatch_result(&run_dir).await;
+}

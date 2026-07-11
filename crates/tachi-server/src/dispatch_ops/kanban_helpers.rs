@@ -76,7 +76,7 @@ pub(super) async fn init_kanban_task(
     Ok(())
 }
 
-pub(super) async fn get_kanban_state(server: &MemoryServer, dispatch_id: &str) -> Option<String> {
+pub(crate) async fn get_kanban_state(server: &MemoryServer, dispatch_id: &str) -> Option<String> {
     let path = format!("/kanban/tasks/{}", dispatch_id);
     // Use exact path SQL query instead of semantic search to avoid
     // Foundry inline-merge returning the wrong (merged) record.

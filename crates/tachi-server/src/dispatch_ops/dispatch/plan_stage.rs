@@ -1,3 +1,4 @@
+use super::super::kanban_helpers::update_kanban_state;
 use super::*;
 
 // ─── V2 plan stage (optional Stage 1) ────────────────────────────────────────
@@ -73,6 +74,20 @@ pub(super) async fn run_v2_plan_stage(
                         "capability_bundle": inputs.capability_bundle_card.clone(),
                     })),
                 );
+                // #971: the kanban row now exists before this stage runs
+                // (BOARD-FIRST) — a plan failure must close it, not leave it
+                // orphaned in TASK_STATE_WORKING. Mirrors the watchdog's own
+                // failure-close pattern in execution.rs (reused helper, same
+                // terminal state + unreviewed flag).
+                if let Err(kanban_err) =
+                    update_kanban_state(inputs.server, inputs.dispatch_id, "TASK_STATE_FAILED", None, Some(false))
+                        .await
+                {
+                    eprintln!(
+                        "[dispatch-v2] failed to mark dispatch {} FAILED in kanban after plan failure: {}",
+                        inputs.dispatch_id, kanban_err
+                    );
+                }
                 return Err(e);
             }
             Err(_) => {
@@ -105,6 +120,18 @@ pub(super) async fn run_v2_plan_stage(
                         "capability_bundle": inputs.capability_bundle_card.clone(),
                     })),
                 );
+                // #971: same as above — plan-stage TIMEOUT must also close
+                // the kanban row (this branch previously had no kanban row
+                // to close at all, since BOARD-FIRST didn't exist yet).
+                if let Err(kanban_err) =
+                    update_kanban_state(inputs.server, inputs.dispatch_id, "TASK_STATE_FAILED", None, Some(false))
+                        .await
+                {
+                    eprintln!(
+                        "[dispatch-v2] failed to mark dispatch {} FAILED in kanban after plan timeout: {}",
+                        inputs.dispatch_id, kanban_err
+                    );
+                }
                 return Err(e);
             }
         };

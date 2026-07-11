@@ -26,6 +26,8 @@ pub(crate) use harness::{
     harness_server_attach_ready, probe_harness_server_status, probe_harness_server_status_with_env,
 };
 #[cfg(test)]
+pub(crate) use kanban_helpers::get_kanban_state;
+#[cfg(test)]
 pub(crate) use kanban_helpers::should_cleanup_run;
 pub(crate) use kanban_helpers::update_kanban_state;
 pub(crate) use predicate::{

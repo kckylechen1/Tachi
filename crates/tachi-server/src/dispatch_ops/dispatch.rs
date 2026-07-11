@@ -253,15 +253,75 @@ pub(crate) async fn handle_tachi_dispatch(
     )
     .await?;
 
+    // ─── #971 RECEIPT-FIRST ────────────────────────────────────────────────
+    // Seed status.json + the first trajectory event immediately after the
+    // run directory exists, BEFORE prompt assembly / the V2 plan stage's
+    // (up to 180s) LLM call. External pollers must see *something* the
+    // instant a dispatch is accepted, not only after the plan stage
+    // succeeds. Every field serialized here is available straight off
+    // `params` + `DispatchStart` — no prompt/artifact/plan dependency.
+    // `v2` is not yet decided (that needs `params.stage`, which IS already
+    // resolved) so compute it early too; capability_bundle/feedback_rules
+    // are not known yet (they come from `assemble_prompt_with_trace` /
+    // `write_dispatch_artifacts` below) and are seeded as neutral
+    // "pending" placeholders here, then overwritten by the existing
+    // post-artifacts `write_status_json` call once real values exist.
+    let harness_server_url = infer_harness_server_url(&params, &harness_transport);
+    let v2_decision = v2_enabled_from_env(params.stage.as_deref());
+    let v2 = matches!(v2_decision, V2Decision::Enabled);
+
+    write_status_json(
+        &workspace_dir,
+        &dispatch_id,
+        v2,
+        None,
+        None,
+        if v2 { "pending" } else { "n/a" },
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "agent": agent_norm.clone(),
+            "task": params.task.clone(),
+            "state": "TASK_STATE_WORKING",
+            "updated_at": Utc::now().to_rfc3339(),
+            "run_dir": workspace_dir.to_string_lossy(),
+            "result_written": false,
+            "harness_transport": harness_transport.clone(),
+            "harness_server_url": harness_server_url.clone(),
+            "host_adapter": host_adapter.clone(),
+            "capability_bundle": Value::Null,
+            "feedback_rules": Value::Null,
+            "timeout_secs": timeout_secs_for_status,
+            // #878-A: persist the working directory + completion predicate so
+            // the complete gate (handler.rs) and the watchdog (execution.rs) can
+            // machine-verify self-reported / exit-0 success against a contract.
+            "cwd": params.cwd.clone(),
+            "completion_predicate":
+                serde_json::to_value(&params.completion_predicate).unwrap_or(Value::Null),
+        })),
+    );
+
+    // Trajectory file does not exist yet (it is created by
+    // `write_dispatch_artifacts` below) — `append_trajectory_event` creates
+    // it on first write, and `write_dispatch_artifacts` was adapted to
+    // APPEND its `dispatch_started` event instead of truncating, so this
+    // "dispatch_received" line is preserved as the first trajectory event.
+    let trajectory_path_early = workspace_dir.join("trajectory.jsonl");
+    append_trajectory_event(
+        &trajectory_path_early,
+        json!({
+            "event": "dispatch_received",
+            "dispatch_id": dispatch_id,
+            "timestamp": Utc::now().to_rfc3339(),
+        }),
+    );
+
     // 2. Assemble prompt & write audit files to workspace
     let prompt_assembly = assemble_prompt_with_trace(server, &params).await;
     let base_prompt = prompt_assembly.prompt.clone();
     let (effective_skills_for_files, _) = resolve_effective_skills(&params);
-
-    // ─── Dispatch V2 decision ────────────────────────────────────────────
-    // V2 is opt-in. Default behaviour stays V1 (legacy single-stage).
-    let v2_decision = v2_enabled_from_env(params.stage.as_deref());
-    let v2 = matches!(v2_decision, V2Decision::Enabled);
 
     let DispatchArtifacts {
         plan_path,
@@ -283,9 +343,9 @@ pub(crate) async fn handle_tachi_dispatch(
     })
     .await?;
 
-    let harness_server_url = infer_harness_server_url(&params, &harness_transport);
-
-    // Seed status.json so external pollers see something immediately.
+    // Enrich status.json now that capability_bundle / feedback_rules are
+    // known. Same call shape as the original single seed — now the SECOND
+    // write, not the first (receipt-first seed above is the first).
     write_status_json(
         &workspace_dir,
         &dispatch_id,
@@ -319,7 +379,37 @@ pub(crate) async fn handle_tachi_dispatch(
         })),
     );
 
-    // 3. Stage 1 (V2 only): generate plan via ClaudePool
+    // 3. ─── #971 BOARD-FIRST ────────────────────────────────────────────
+    // Initialize the kanban row BEFORE the V2 plan stage (which can block
+    // for up to 180s on an LLM call) so board/status pollers see a row
+    // immediately, not only after planning succeeds. Artifacts (including
+    // the V1-placeholder plan.md) are already written above either way, so
+    // `init_kanban_task`'s `plan_path` argument is always valid here — for
+    // V2 it currently points at the not-yet-overwritten placeholder, not
+    // the real LLM plan; that's an accepted, documented consequence of
+    // moving this earlier (see report), not a functional break: V2 later
+    // overwrites plan.md in place at the same path once Stage 1 completes.
+    init_kanban_and_flow(FlowSetupInputs {
+        server,
+        dispatch_id: &dispatch_id,
+        params: &params,
+        agent_norm: &agent_norm,
+        plan_path: &plan_path,
+        workspace_dir: &workspace_dir,
+        prompt_md_path: &prompt_md_path,
+        context_md_path: &context_md_path,
+        trajectory_path: &trajectory_path,
+        capability_bundle_card: &capability_bundle_card,
+        capability_bundle_file: &capability_bundle_file,
+        evidence_required: &resolved_profile.evidence_required,
+        route_explanation: &resolved_profile.route_explanation,
+    })
+    .await?;
+
+    // 4. Stage 1 (V2 only): generate plan via ClaudePool. On failure/timeout
+    // the kanban row created above must not be left orphaned in
+    // TASK_STATE_WORKING — `run_v2_plan_stage`'s failure branches now close
+    // it (see plan_stage.rs).
     let plan_stage_outcome = run_v2_plan_stage(PlanStageInputs {
         server,
         params: &params,
@@ -345,24 +435,6 @@ pub(crate) async fn handle_tachi_dispatch(
     let prompt = plan_stage_outcome.prompt;
     let plan_duration_ms = plan_stage_outcome.plan_duration_ms;
     let plan_generated_at = plan_stage_outcome.plan_generated_at;
-
-    // 4. Initialize kanban task + flow dispatch marker
-    init_kanban_and_flow(FlowSetupInputs {
-        server,
-        dispatch_id: &dispatch_id,
-        params: &params,
-        agent_norm: &agent_norm,
-        plan_path: &plan_path,
-        workspace_dir: &workspace_dir,
-        prompt_md_path: &prompt_md_path,
-        context_md_path: &context_md_path,
-        trajectory_path: &trajectory_path,
-        capability_bundle_card: &capability_bundle_card,
-        capability_bundle_file: &capability_bundle_file,
-        evidence_required: &resolved_profile.evidence_required,
-        route_explanation: &resolved_profile.route_explanation,
-    })
-    .await?;
 
     // 5. Build execution backend
     let PreparedDispatchBackend {
