@@ -2,9 +2,31 @@ use chrono::Utc;
 use memcore::{MemoryEntry, MemoryStore};
 use serde_json::json;
 
+use crate::memory_search_ops::{scrub_secrets, scrub_think_tags};
+
 use super::claim::try_claim_sticky;
 use super::memo::{sticky_from_entry, sticky_row_is_unread, sticky_ttl_expired, sticky_visible_to};
 use super::STICKY_PATH;
+
+/// Round-3 fix (codex final review of #964/PR #1003, BUG CP4): the single
+/// row-load choke point every sticky-reading route flows through
+/// (`claim_unread_stickies_for_briefing`'s `delivered.push` below, and
+/// `list_or_claim_stickies`'s `include_read` branch) — scrubbing text HERE
+/// means the markdown renderer (`agent_markdown::briefing::format_briefing`)
+/// AND both JSON routes (briefing JSON compact/full in
+/// `facade_memory_ops::briefing_ops`, and the `sticky_check` JSON response
+/// in `handlers::handle_sticky_check`) all inherit the scrub for free,
+/// instead of each caller needing its own belt-and-suspenders re-scrub.
+/// `sticky_leave` already scrubs before persisting (see
+/// `handlers::handle_sticky_leave`), so this is defense-in-depth for a row
+/// that somehow bypassed write-time scrubbing (hand-inserted, migrated from
+/// an older build, etc.) — mirrors the exact `scrub_think_tags` ->
+/// `scrub_secrets` order used there.
+fn scrub_sticky_text_for_read(text: &str) -> String {
+    let without_think_tags = scrub_think_tags(text);
+    let (safe_text, _redactions) = scrub_secrets(&without_think_tags);
+    safe_text
+}
 
 /// All persisted sticky rows under `/sticky` (both broadcast and addressed
 /// buckets), newest first. Callers filter by visibility/unread separately.
@@ -103,7 +125,7 @@ pub(crate) fn claim_unread_stickies_for_briefing(
                 "id": sticky_id,
                 "from_agent": memo.from_agent,
                 "to": memo.to,
-                "text": memo.text,
+                "text": scrub_sticky_text_for_read(&memo.text),
                 "created_at": memo.created_at,
                 "kind": "sticky",
             }));
@@ -150,7 +172,7 @@ pub(crate) fn list_or_claim_stickies(
                         "id": memo.id,
                         "from_agent": memo.from_agent,
                         "to": memo.to,
-                        "text": memo.text,
+                        "text": scrub_sticky_text_for_read(&memo.text),
                         "created_at": memo.created_at,
                         "status": status,
                         "archived": entry.archived,

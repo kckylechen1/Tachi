@@ -22,9 +22,21 @@ fn current_agent_id(server: &MemoryServer) -> Option<String> {
         .filter(|agent_id| !agent_id.is_empty())
 }
 
+/// Round-3 fix (codex final review of #964/PR #1003, BUG CP2, sender half):
+/// this used to fall back to `TACHI_PROFILE` — the configured *tool profile*
+/// (`worker`/`delegate`/`standard`/`codex`), a capability-surface selector,
+/// not a seat identity (same defect as the delivery-path bug fixed in
+/// `resolve_caller_agent_id` below). A tool launched with `TACHI_PROFILE` set
+/// could still resolve its OWN `from_agent` (the sender identity stamped on
+/// a `sticky_leave`) to that shared profile string, so two workers on the
+/// same tool profile would author stickies under the same `from_agent`. The
+/// sender path now shares the exact same chain the delivery path
+/// (`resolve_caller_agent_id`) already trusts: no caller-supplied
+/// `agent_id` param here (there is none on the `sticky_leave` FROM side), so
+/// this is `server-side agent_profile` -> `TACHI_AGENT_SEAT` -> `None`.
 pub(super) fn fallback_agent_id(registered_agent: Option<String>) -> String {
     registered_agent
-        .or_else(|| non_empty_env("TACHI_PROFILE"))
+        .or_else(|| non_empty_env("TACHI_AGENT_SEAT"))
         .unwrap_or_else(|| "unknown-agent".to_string())
 }
 

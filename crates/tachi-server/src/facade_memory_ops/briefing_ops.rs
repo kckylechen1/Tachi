@@ -203,7 +203,7 @@ pub(crate) async fn handle_memory_briefing(
         // atomically claimed (read-once) as a side effect.
         //
         // CP2: identity is resolved server-side (params.agent_id ->
-        // agent_profile -> TACHI_PROFILE env -> leader), NOT trusted from
+        // agent_profile -> TACHI_AGENT_SEAT env -> leader), NOT trusted from
         // params.agent_id alone — an unauthenticated/param-less worker
         // briefing call must not be silently treated as the leader and
         // consume broadcast (`to`-absent) stickies meant for the real

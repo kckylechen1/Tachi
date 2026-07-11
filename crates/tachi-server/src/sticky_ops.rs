@@ -54,16 +54,33 @@
 //! prevents *two* callers from both thinking they delivered the same
 //! sticky; it does not guarantee delivery reached either).
 //!
-//! Recovery escape: the row is never deleted, so it remains visible via
-//! `action='check', include_read=true` regardless of its claimed/unread
-//! status (see `pending::list_or_claim_stickies`'s `include_read` branch,
-//! which does not filter on status/archived) — an operator or the leader can
-//! read the original text back out of the archive and hand-deliver /
-//! re-`sticky_leave` it. There is no automatic re-delivery; this module does
-//! not (and, per this adjudication, will not) add write-ahead journaling or
-//! a cross-store transaction to close the window — the residual is
-//! documented, not eliminated, and the archive is the intended manual
-//! recovery path.
+//! Recovery escape (round-3 narrowing, codex final review of #964/PR #1003,
+//! BUG CP3 — the round-2 note above overclaimed this): the row is never
+//! deleted, so it remains visible via `action='check', include_read=true`
+//! regardless of its claimed/unread status (see
+//! `pending::list_or_claim_stickies`'s `include_read` branch, which does not
+//! filter on status/archived) — BUT that branch still runs every row through
+//! `sticky_visible_to(&memo, agent_id)` (same recipient-visibility gate
+//! delivery itself uses; see `memo.rs`), so **only the identity a sticky was
+//! actually addressed to (or the leader, for an unaddressed/broadcast
+//! sticky) can recover it this way** — a leader querying `include_read` does
+//! NOT see a sticky that was `to:`-addressed to a worker seat; only that
+//! worker's own seat identity (`agent_id` param or `TACHI_AGENT_SEAT`) can.
+//! There is no leader-sees-all override today (that would be an
+//! information-flow change, out of scope for this fix — noted as a possible
+//! follow-up, not built here). The archive is also bounded: `all_sticky_entries`
+//! caps the underlying scan to the newest `STICKY_DB_LIMIT` (500) rows, and
+//! `list_or_claim_stickies`'s `include_read` branch caps its own returned
+//! page to at most 50 rows with no pagination — a sticky older than either
+//! cutoff (from the *querying identity's own visible slice*, not the whole
+//! table) is not recoverable via this path. Within those bounds, and for the
+//! identity a sticky is actually visible to, an operator/agent can read the
+//! original text back out of the archive and hand-deliver / re-`sticky_leave`
+//! it. There is no automatic re-delivery; this module does not (and, per
+//! this adjudication, will not) add write-ahead journaling or a cross-store
+//! transaction to close the crash window — the residual is documented, not
+//! eliminated, and the visibility-scoped, capped archive above is the
+//! intended manual recovery path.
 
 mod claim;
 mod gc;

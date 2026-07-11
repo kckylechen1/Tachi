@@ -845,3 +845,252 @@ fn cp2_tachi_profile_env_alone_no_longer_resolves_a_seat() {
         None => std::env::remove_var("TACHI_AGENT_SEAT"),
     }
 }
+
+// ─── CP2 round-3: sender-side identity (`resolve_from_agent`) must not
+// resolve a tool-profile string either ─────────────────────────────────────
+//
+// Round-2 only fixed the DELIVERY path (`resolve_caller_agent_id`)'s env
+// fallback. `resolve_from_agent` (used by `sticky_leave` to stamp
+// `from_agent`) still read `TACHI_PROFILE` as its fallback — so a caller
+// launched with `TACHI_PROFILE=standard` set (a tool-profile selector, not a
+// seat) but no `agent_profile` registered would author a sticky's
+// `from_agent` as `"standard"`, not its actual seat. Two tools sharing a
+// `TACHI_PROFILE` value would author stickies under the identical
+// `from_agent`, indistinguishable from each other. The sender path now
+// shares the exact `TACHI_AGENT_SEAT` fallback the delivery path already
+// uses.
+#[test]
+fn cp2_round3_sender_identity_never_resolves_to_tool_profile_string() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let original_profile = std::env::var_os("TACHI_PROFILE");
+    let original_seat = std::env::var_os("TACHI_AGENT_SEAT");
+    std::env::set_var("TACHI_PROFILE", "standard");
+    std::env::remove_var("TACHI_AGENT_SEAT");
+
+    // No agent_profile registered (the expected post-#973 runtime state) and
+    // no TACHI_AGENT_SEAT — TACHI_PROFILE must NOT leak through as the
+    // resolved sender identity.
+    let resolved = super::identity::fallback_agent_id(None);
+    assert_eq!(
+        resolved, "unknown-agent",
+        "sender identity must never resolve to a tool-profile string like \
+         'standard' even with TACHI_PROFILE set"
+    );
+    assert_ne!(resolved, "standard");
+
+    match original_profile {
+        Some(v) => std::env::set_var("TACHI_PROFILE", v),
+        None => std::env::remove_var("TACHI_PROFILE"),
+    }
+    match original_seat {
+        Some(v) => std::env::set_var("TACHI_AGENT_SEAT", v),
+        None => std::env::remove_var("TACHI_AGENT_SEAT"),
+    }
+}
+
+#[test]
+fn cp2_round3_sender_identity_uses_tachi_agent_seat_not_tachi_profile() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let original_profile = std::env::var_os("TACHI_PROFILE");
+    let original_seat = std::env::var_os("TACHI_AGENT_SEAT");
+    std::env::set_var("TACHI_PROFILE", "standard");
+    std::env::set_var("TACHI_AGENT_SEAT", "wizard-worker-3");
+
+    let resolved = super::identity::fallback_agent_id(None);
+    assert_eq!(
+        resolved, "wizard-worker-3",
+        "sender identity must resolve via TACHI_AGENT_SEAT, ignoring TACHI_PROFILE entirely"
+    );
+
+    match original_profile {
+        Some(v) => std::env::set_var("TACHI_PROFILE", v),
+        None => std::env::remove_var("TACHI_PROFILE"),
+    }
+    match original_seat {
+        Some(v) => std::env::set_var("TACHI_AGENT_SEAT", v),
+        None => std::env::remove_var("TACHI_AGENT_SEAT"),
+    }
+}
+
+// End-to-end variant through `handle_sticky_leave`: two dispatched workers
+// sharing a `TACHI_PROFILE` (tool-profile) but distinct `TACHI_AGENT_SEAT`
+// values must author stickies with distinct `from_agent` — never
+// collapsing onto the shared profile string.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cp2_round3_sticky_leave_from_agent_uses_seat_not_profile() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let original_profile = std::env::var_os("TACHI_PROFILE");
+    let original_seat = std::env::var_os("TACHI_AGENT_SEAT");
+    std::env::set_var("TACHI_PROFILE", "codex_55_review");
+    std::env::set_var("TACHI_AGENT_SEAT", "worker-a");
+
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-cp2-round3-leave-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
+    let result = super::handlers::handle_sticky_leave(
+        &server,
+        super::handlers::StickyLeaveInput {
+            text: "note from worker-a".to_string(),
+            to: None,
+            ttl_days: None,
+        },
+    )
+    .await
+    .expect("sticky_leave");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("parse sticky_leave result");
+    assert_eq!(
+        parsed["from_agent"], "worker-a",
+        "from_agent must be the TACHI_AGENT_SEAT value, not the shared TACHI_PROFILE"
+    );
+    assert_ne!(parsed["from_agent"], "codex_55_review");
+
+    let _ = std::fs::remove_file(&db_path);
+    match original_profile {
+        Some(v) => std::env::set_var("TACHI_PROFILE", v),
+        None => std::env::remove_var("TACHI_PROFILE"),
+    }
+    match original_seat {
+        Some(v) => std::env::set_var("TACHI_AGENT_SEAT", v),
+        None => std::env::remove_var("TACHI_AGENT_SEAT"),
+    }
+}
+
+// ─── CP4 round-3: JSON routes must inherit the scrub, not just markdown ───
+//
+// CP4 round-3 (codex final review of #964/PR #1003): the existing CP4 test
+// above (`sticky_leave_scrubs_secrets_in_storage_and_briefing_render`) only
+// proves masking at (a) write time (`sticky_leave` scrubs before persisting)
+// and (b) the markdown renderer's own belt-and-suspenders re-scrub. It does
+// NOT discriminate a row that bypassed write-time scrubbing (hand-inserted,
+// migrated from an older build) reaching a JSON route — briefing JSON
+// compact/full and `sticky_check` JSON all consume the raw `Vec<Value>`
+// returned by `claim_unread_stickies_for_briefing` / `list_or_claim_stickies`
+// directly, with NO markdown layer in between. These tests hand-insert a row
+// with a raw secret directly into the store (bypassing `sticky_leave`
+// entirely, mirroring the exact "bypassed write-time scrub" residual both
+// scrub comments call out), then assert the JSON `text` field itself — not
+// just a markdown rendering of it — is masked, proving the choke-point scrub
+// in `pending.rs` (not a markdown-layer-only scrub) is what covers this.
+fn raw_secret_test_memo(id: &str, to: Option<&str>) -> StickyMemo {
+    StickyMemo {
+        id: id.to_string(),
+        from_agent: "leader".to_string(),
+        to: to.map(str::to_string),
+        text: "heads up: Authorization: Bearer sk-cp4round3secretvalue000111222 is still live"
+            .to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        ttl_days: 7,
+    }
+}
+
+#[tokio::test]
+async fn cp4_round3_briefing_json_route_masks_hand_inserted_raw_secret_row() {
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-cp4-round3-briefing-json-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
+    // Bypass sticky_leave's write-time scrub entirely — hand-insert the raw
+    // row directly into the store, exactly like the residual scenario both
+    // scrub comments describe (hand-inserted / migrated-from-older-build row).
+    let memo = raw_secret_test_memo("s-cp4-round3-briefing", None);
+    server
+        .with_global_store(|store| store.upsert(&test_entry(&memo)).map_err(|e| format!("{e}")))
+        .expect("hand-insert raw-secret sticky row");
+
+    // This is exactly what the briefing JSON route (both compact and full —
+    // see facade_memory_ops::briefing_ops.rs `stickies = json!(sticky_result?)`)
+    // serializes directly with NO markdown layer involved.
+    let claimed = claim_unread_stickies_for_briefing(&server, None, 5)
+        .expect("claim hand-inserted sticky for briefing JSON");
+    assert_eq!(
+        claimed.len(),
+        1,
+        "the hand-inserted sticky must still be delivered"
+    );
+
+    let text = claimed[0]["text"].as_str().expect("text field present");
+    assert!(
+        !text.contains("sk-cp4round3secretvalue000111222"),
+        "raw bearer token must never appear in the JSON `text` field the briefing JSON route \
+         serializes directly; got: {text}"
+    );
+    assert!(
+        text.contains("[REDACTED]"),
+        "JSON `text` field must show the masked marker even for a hand-inserted (write-time-scrub-\
+         bypassing) row; got: {text}"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn cp4_round3_sticky_check_json_route_masks_hand_inserted_raw_secret_row() {
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-cp4-round3-check-json-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
+    let memo = raw_secret_test_memo("s-cp4-round3-check-unread", None);
+    server
+        .with_global_store(|store| store.upsert(&test_entry(&memo)).map_err(|e| format!("{e}")))
+        .expect("hand-insert raw-secret sticky row");
+
+    // include_read=false path — same choke point as briefing (this is what
+    // `sticky_check` JSON serializes; see handlers::handle_sticky_check).
+    let unread_rows = list_or_claim_stickies(&server, None, false, 5)
+        .expect("list unread stickies via sticky_check include_read=false");
+    assert_eq!(unread_rows.len(), 1);
+    let unread_text = unread_rows[0]["text"].as_str().expect("text field present");
+    assert!(
+        !unread_text.contains("sk-cp4round3secretvalue000111222"),
+        "sticky_check (include_read=false) JSON text must never contain the raw token; got: \
+         {unread_text}"
+    );
+    assert!(unread_text.contains("[REDACTED]"));
+
+    // include_read=true path (the archive) is a SEPARATE code path
+    // (`list_or_claim_stickies`'s `include_read` branch, ~pending.rs:149) —
+    // must independently mask too, since it does not flow through the
+    // unread-delivery closure above.
+    let memo2 = raw_secret_test_memo("s-cp4-round3-check-archive", None);
+    server
+        .with_global_store(|store| {
+            store
+                .upsert(&test_entry(&memo2))
+                .map_err(|e| format!("{e}"))
+        })
+        .expect("hand-insert second raw-secret sticky row");
+    // Claim it first so it shows up in the read/archive view.
+    let _ = list_or_claim_stickies(&server, None, false, 5).expect("claim second row first");
+    let archive_rows = list_or_claim_stickies(&server, None, true, 50)
+        .expect("list archive via sticky_check include_read=true");
+    assert!(
+        !archive_rows.is_empty(),
+        "archive view must show at least the just-claimed row"
+    );
+    for row in &archive_rows {
+        if let Some(text) = row["text"].as_str() {
+            assert!(
+                !text.contains("sk-cp4round3secretvalue000111222"),
+                "sticky_check (include_read=true) archive JSON text must never contain the raw \
+                 token; got: {text}"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_file(&db_path);
+}

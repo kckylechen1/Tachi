@@ -68,7 +68,7 @@ pub(crate) async fn handle_sticky_check(
     input: StickyCheckInput,
 ) -> Result<String, String> {
     // CP2: resolve identity server-side (params.agent_id -> agent_profile ->
-    // TACHI_PROFILE env -> leader), same chain sticky_leave already trusts
+    // TACHI_AGENT_SEAT env -> leader), same chain sticky_leave already trusts
     // via resolve_from_agent — see identity::resolve_caller_agent_id.
     let agent_id = resolve_caller_agent_id(server, input.agent_id.as_deref());
     let limit = input.limit.unwrap_or(10);
