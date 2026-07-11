@@ -148,6 +148,16 @@ pub(super) async fn write_dispatch_artifacts(
         f.write_all(format!("{}\n", line).as_bytes())
             .await
             .map_err(|e| format!("Failed to write trajectory.jsonl: {e}"))?;
+        // #971 review-fix (F1): Tokio's `File` buffers writes; a deferred
+        // write failure can surface on flush/drop instead of on
+        // `write_all`. Without an explicit flush, `write_dispatch_artifacts`
+        // can return `Ok` — and planning can proceed — without a durable
+        // "dispatch_started" record on disk. Flush and propagate any error
+        // so a write failure here fails the dispatch instead of silently
+        // dropping the receipt.
+        f.flush()
+            .await
+            .map_err(|e| format!("Failed to flush trajectory.jsonl: {e}"))?;
     }
     // progress.jsonl mirrors trajectory.jsonl's event stream 1:1 (see
     // `append_trajectory_event`) — append here too so it stays in sync with
@@ -164,6 +174,10 @@ pub(super) async fn write_dispatch_artifacts(
         f.write_all(format!("{}\n", line).as_bytes())
             .await
             .map_err(|e| format!("Failed to write progress.jsonl: {e}"))?;
+        // Same rationale as trajectory.jsonl above (F1).
+        f.flush()
+            .await
+            .map_err(|e| format!("Failed to flush progress.jsonl: {e}"))?;
     }
 
     Ok(DispatchArtifacts {

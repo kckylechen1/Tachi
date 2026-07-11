@@ -42,13 +42,27 @@ impl Drop for EnvGuard {
 /// Write a fake `claude` CLI at `path` that either succeeds with a
 /// minimal-but-valid plan envelope, or exits non-zero to force
 /// `ClaudePool::call` into its `Err` branch (mirrors `v2_smoke.rs`'s fixture,
-/// with an added failure mode and an optional pre-output sleep so the
-/// success case can be observed mid-flight).
+/// with an added failure mode).
+///
+/// #971 review-fix (F4): `Success` no longer takes a fixed wall-clock sleep.
+/// A fixed sleep is a CI flake trap — under load, polling can be delayed
+/// past the sleep window, so the pre-plan assertions can race a plan stage
+/// that already completed. Instead the fake binary spin-waits on a sentinel
+/// file (`release_path`) that the test creates only AFTER its pre-plan
+/// assertions have passed, making the pre-plan observation window
+/// test-controlled rather than timing-dependent. `poll_timeout_secs` is a
+/// generous backstop so a test bug (never creating the sentinel) fails fast
+/// instead of hanging forever.
 fn write_fake_claude_binary(path: &std::path::Path, mode: FakeClaudeMode) {
     use std::io::Write;
     let script = match mode {
-        FakeClaudeMode::Success { sleep_secs } => format!(
-            "#!/usr/bin/env bash\nsleep {sleep_secs}\ncat <<'JSON'\n{{\"result\":\"## Goal\\nboard-first test.\\n\\n## Steps\\n1. inspect\\n\\n## Files\\n- src/lib.rs\\n\\n## Validation\\n- cargo test\\n\"}}\nJSON\n"
+        FakeClaudeMode::Success {
+            release_path,
+            poll_timeout_secs,
+        } => format!(
+            "#!/usr/bin/env bash\nset -e\nRELEASE={release}\nDEADLINE=$(( $(date +%s) + {timeout} ))\nwhile [ ! -f \"$RELEASE\" ]; do\n  if [ \"$(date +%s)\" -ge \"$DEADLINE\" ]; then\n    echo 'fake claude: timed out waiting for release sentinel' 1>&2\n    exit 1\n  fi\n  sleep 0.02\ndone\ncat <<'JSON'\n{{\"result\":\"## Goal\\nboard-first test.\\n\\n## Steps\\n1. inspect\\n\\n## Files\\n- src/lib.rs\\n\\n## Validation\\n- cargo test\\n\"}}\nJSON\n",
+            release = release_path.display(),
+            timeout = poll_timeout_secs,
         ),
         FakeClaudeMode::Fail => "#!/usr/bin/env bash\necho 'synthetic plan failure' 1>&2\nexit 1\n"
             .to_string(),
@@ -67,7 +81,10 @@ fn write_fake_claude_binary(path: &std::path::Path, mode: FakeClaudeMode) {
 }
 
 enum FakeClaudeMode {
-    Success { sleep_secs: u64 },
+    Success {
+        release_path: std::path::PathBuf,
+        poll_timeout_secs: u64,
+    },
     Fail,
 }
 
@@ -178,9 +195,18 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
 
     let temp_home = tempfile::tempdir().expect("temp tachi home");
     let fake_claude = temp_home.path().join("claude-slow-success");
-    // Sleep long enough that the polling loop below reliably observes
-    // pre-plan-completion state before the plan stage resolves.
-    write_fake_claude_binary(&fake_claude, FakeClaudeMode::Success { sleep_secs: 2 });
+    // #971 review-fix (F4): the fake binary blocks on this sentinel file
+    // instead of a fixed wall-clock sleep — the test releases it only after
+    // the pre-plan assertions below have already passed, so the pre-plan
+    // observation window is deterministic, not a race against a timer.
+    let release_path = temp_home.path().join("release-plan-stage");
+    write_fake_claude_binary(
+        &fake_claude,
+        FakeClaudeMode::Success {
+            release_path: release_path.clone(),
+            poll_timeout_secs: 60,
+        },
+    );
 
     let _tachi_home = EnvGuard::set("TACHI_HOME", temp_home.path());
     let _claude_bin = EnvGuard::set("CLAUDE_BIN", &fake_claude);
@@ -201,8 +227,9 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
         crate::dispatch_ops::handle_tachi_dispatch(&server_for_task, params).await
     });
 
-    // Run dir + status.json must appear almost immediately (receipt-first),
-    // well before the 2s fake-plan sleep elapses.
+    // Run dir + status.json must appear almost immediately (receipt-first) —
+    // the fake plan-stage binary is blocked on `release_path`, which this
+    // test has not created yet, so it cannot have completed.
     let run_dir = wait_for_single_run_dir(&run_root).await;
     let dispatch_id = run_dir
         .file_name()
@@ -244,6 +271,12 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
         trajectory.contains("\"event\":\"dispatch_received\""),
         "receipt-first trajectory event missing: {trajectory}"
     );
+
+    // #971 review-fix (F4): all pre-plan assertions above have now passed —
+    // release the fake plan-stage binary so it can complete. This is the
+    // deterministic barrier replacing the old fixed 2s sleep: the plan
+    // stage cannot resolve before this point, by construction, not by luck.
+    std::fs::write(&release_path, b"go").expect("write release sentinel");
 
     // Now let the dispatch actually finish and sanity-check the final state.
     let raw = dispatch_task

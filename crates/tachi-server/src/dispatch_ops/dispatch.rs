@@ -6,7 +6,7 @@ use super::dispatch_v2::{
     append_trajectory_event, build_execute_prompt, parse_plan_sections, plan_review_required,
     plan_timeout_secs, run_plan_stage, v2_enabled_from_env, write_status_json, V2Decision,
 };
-use super::kanban_helpers::init_kanban_task;
+use super::kanban_helpers::{close_kanban_row_on_early_exit, init_kanban_task};
 use super::launcher::{
     build_claude_command, build_codex_command, build_custom_command, build_grok_command,
     build_kimi_command,
@@ -137,6 +137,7 @@ use self::backend::{prepare_dispatch_backend, DispatchBackendContext, PreparedDi
 use self::backend_failure::*;
 use self::credential_apply::{
     apply_materialized_credentials, inject_legacy_vault_env, CredentialApplyInputs,
+    CredentialApplyOutcome,
 };
 use self::credentials::*;
 use self::dedupe::*;
@@ -217,6 +218,29 @@ fn validate_dispatch_sandbox_at_entry(
     // Every other backend (claude, grok, kimi, custom/opencode) has no
     // sandbox concept.
     tachi_dispatch::reject_unsupported_sandbox(agent_norm, sandbox)
+}
+
+/// #971 review-fix (F3): output of the guarded post-BOARD-FIRST-init
+/// section in `handle_tachi_dispatch`. Either the plan stage's own
+/// pending-review early-response fires (`EarlyResponse`), or every fallible
+/// stage succeeded and execution is ready to spawn (`Ready`).
+enum PostInitDispatchOutcome {
+    EarlyResponse(String),
+    Ready(Box<ReadyDispatch>),
+}
+
+/// Everything the post-guard spawn/response-building code (steps 8-9) needs,
+/// carried out of the guarded `async` block in one bundle.
+struct ReadyDispatch {
+    execution: DispatchExecution,
+    execution_backend_name: Option<&'static str>,
+    execution_backend_metadata: Option<Value>,
+    acpx_enabled: bool,
+    native_acp_enabled: bool,
+    credentials: CredentialApplyOutcome,
+    plan_duration_ms: Option<u64>,
+    plan_generated_at: Option<String>,
+    flow_dispatch_slot: Option<PathBuf>,
 }
 
 pub(crate) async fn handle_tachi_dispatch(
@@ -406,85 +430,124 @@ pub(crate) async fn handle_tachi_dispatch(
     })
     .await?;
 
-    // 4. Stage 1 (V2 only): generate plan via ClaudePool. On failure/timeout
-    // the kanban row created above must not be left orphaned in
-    // TASK_STATE_WORKING — `run_v2_plan_stage`'s failure branches now close
-    // it (see plan_stage.rs).
-    let plan_stage_outcome = run_v2_plan_stage(PlanStageInputs {
-        server,
-        params: &params,
-        dispatch_id: &dispatch_id,
-        agent_norm: &agent_norm,
-        resolved_profile: &resolved_profile,
-        profile_payload: &profile_payload,
-        base_prompt: &base_prompt,
-        plan_path: &plan_path,
-        prompt_md_path: &prompt_md_path,
-        context_md_path: &context_md_path,
-        trajectory_path: &trajectory_path,
-        workspace_dir: &workspace_dir,
-        capability_bundle_card: &capability_bundle_card,
-        capability_bundle_file: &capability_bundle_file,
-        feedback_rules_trace: &feedback_rules_trace,
-        v2_decision,
-    })
-    .await?;
-    if let Some(early_response) = plan_stage_outcome.early_response {
-        return Ok(early_response);
-    }
-    let prompt = plan_stage_outcome.prompt;
-    let plan_duration_ms = plan_stage_outcome.plan_duration_ms;
-    let plan_generated_at = plan_stage_outcome.plan_generated_at;
-
-    // 5. Build execution backend
-    let PreparedDispatchBackend {
-        mut execution,
-        execution_backend_name,
-        execution_backend_metadata,
-        acpx_enabled,
-        native_acp_enabled,
-    } = prepare_dispatch_backend(DispatchBackendContext {
-        trajectory_path: &trajectory_path,
-        workspace_dir: &workspace_dir,
-        dispatch_id: &dispatch_id,
-        agent_norm: &agent_norm,
-        params: &params,
-        prompt: &prompt,
-        prompt_md_path: &prompt_md_path,
-        mcp_config_path: mcp_config_path.as_ref(),
-        v2,
-        plan_generated_at: plan_generated_at.as_deref(),
-        plan_duration_ms,
-        harness_transport: &harness_transport,
-        harness_server_url: &harness_server_url,
-        capability_bundle_card: &capability_bundle_card,
-        timeout_secs_for_status,
-    })?;
-
-    // 6. Inject legacy vault env + materialize credentials
-    inject_legacy_vault_env(
-        server,
-        params.cwd.as_deref().map(std::path::Path::new),
-        &mut execution,
-        &trajectory_path,
-        &dispatch_id,
-        &agent_norm,
-    );
-
-    let credentials = apply_materialized_credentials(
-        CredentialApplyInputs {
+    // ─── #971 review-fix (F3) ────────────────────────────────────────────
+    // Structural guard: everything from here through the success
+    // return/spawn handoff below runs inside this `async` block so that
+    // ANY `?` exit within it (Stage-1 plan, backend prep, credential
+    // materialization, harness preflight, slot reservation) is caught at
+    // ONE boundary and closes the BOARD-FIRST kanban row seeded above,
+    // instead of leaking it in TASK_STATE_WORKING per uncovered callsite.
+    // `close_kanban_row_on_early_exit` is idempotent-safe (checks current
+    // state first) so it does not clobber branches — like the plan stage's
+    // own failure/timeout paths and the pending-review path (F2) — that
+    // already close/transition the row themselves before their `?`
+    // propagates out of this block. A real `Drop` guard can't `.await`,
+    // so this "wrap the fallible section, match on Err" shape is the
+    // idiom that covers all current exits without per-callsite tracking.
+    let post_init: Result<PostInitDispatchOutcome, String> = async {
+        // 4. Stage 1 (V2 only): generate plan via ClaudePool. On failure/timeout
+        // the kanban row created above must not be left orphaned in
+        // TASK_STATE_WORKING — `run_v2_plan_stage`'s failure branches now close
+        // it directly (see plan_stage.rs) ahead of this guard ever seeing them.
+        let plan_stage_outcome = run_v2_plan_stage(PlanStageInputs {
             server,
             params: &params,
-            agent_norm: &agent_norm,
-            selected_profile: resolved_profile.selected_profile.as_deref(),
-            workspace_dir: &workspace_dir,
-            trajectory_path: &trajectory_path,
             dispatch_id: &dispatch_id,
+            agent_norm: &agent_norm,
+            resolved_profile: &resolved_profile,
+            profile_payload: &profile_payload,
+            base_prompt: &base_prompt,
+            plan_path: &plan_path,
+            prompt_md_path: &prompt_md_path,
+            context_md_path: &context_md_path,
+            trajectory_path: &trajectory_path,
+            workspace_dir: &workspace_dir,
+            capability_bundle_card: &capability_bundle_card,
+            capability_bundle_file: &capability_bundle_file,
+            feedback_rules_trace: &feedback_rules_trace,
+            v2_decision,
+        })
+        .await?;
+        if let Some(early_response) = plan_stage_outcome.early_response {
+            return Ok(PostInitDispatchOutcome::EarlyResponse(early_response));
+        }
+        let prompt = plan_stage_outcome.prompt;
+        let plan_duration_ms = plan_stage_outcome.plan_duration_ms;
+        let plan_generated_at = plan_stage_outcome.plan_generated_at;
+
+        // 5. Build execution backend
+        let PreparedDispatchBackend {
+            mut execution,
+            execution_backend_name,
+            execution_backend_metadata,
+            acpx_enabled,
+            native_acp_enabled,
+        } = prepare_dispatch_backend(DispatchBackendContext {
+            trajectory_path: &trajectory_path,
+            workspace_dir: &workspace_dir,
+            dispatch_id: &dispatch_id,
+            agent_norm: &agent_norm,
+            params: &params,
+            prompt: &prompt,
+            prompt_md_path: &prompt_md_path,
+            mcp_config_path: mcp_config_path.as_ref(),
             v2,
             plan_generated_at: plan_generated_at.as_deref(),
             plan_duration_ms,
             harness_transport: &harness_transport,
             harness_server_url: &harness_server_url,
+            capability_bundle_card: &capability_bundle_card,
+            timeout_secs_for_status,
+        })?;
+
+        // 6. Inject legacy vault env + materialize credentials
+        inject_legacy_vault_env(
+            server,
+            params.cwd.as_deref().map(std::path::Path::new),
+            &mut execution,
+            &trajectory_path,
+            &dispatch_id,
+            &agent_norm,
+        );
+
+        let credentials = apply_materialized_credentials(
+            CredentialApplyInputs {
+                server,
+                params: &params,
+                agent_norm: &agent_norm,
+                selected_profile: resolved_profile.selected_profile.as_deref(),
+                workspace_dir: &workspace_dir,
+                trajectory_path: &trajectory_path,
+                dispatch_id: &dispatch_id,
+                v2,
+                plan_generated_at: plan_generated_at.as_deref(),
+                plan_duration_ms,
+                harness_transport: &harness_transport,
+                harness_server_url: &harness_server_url,
+                host_adapter: &host_adapter,
+                execution_backend_name,
+                execution_backend_metadata: &execution_backend_metadata,
+                acpx_enabled,
+                native_acp_enabled,
+                capability_bundle_card: &capability_bundle_card,
+                timeout_secs_for_status,
+            },
+            &mut execution,
+        )?;
+
+        // 7. Harness preflight (opencode_serve only)
+        run_harness_preflight(HarnessPreflightInputs {
+            harness_transport: &harness_transport,
+            harness_server_url: &harness_server_url,
+            credential_env: &credentials.env,
+            dispatch_id: &dispatch_id,
+            agent_norm: &agent_norm,
+            task: &params.task,
+            trajectory_path: &trajectory_path,
+            workspace_dir: &workspace_dir,
+            v2,
+            plan_generated_at: plan_generated_at.as_deref(),
+            plan_duration_ms,
             host_adapter: &host_adapter,
             execution_backend_name,
             execution_backend_metadata: &execution_backend_metadata,
@@ -492,34 +555,45 @@ pub(crate) async fn handle_tachi_dispatch(
             native_acp_enabled,
             capability_bundle_card: &capability_bundle_card,
             timeout_secs_for_status,
-        },
-        &mut execution,
-    )?;
+        })?;
 
-    // 7. Harness preflight (opencode_serve only)
-    run_harness_preflight(HarnessPreflightInputs {
-        harness_transport: &harness_transport,
-        harness_server_url: &harness_server_url,
-        credential_env: &credentials.env,
-        dispatch_id: &dispatch_id,
-        agent_norm: &agent_norm,
-        task: &params.task,
-        trajectory_path: &trajectory_path,
-        workspace_dir: &workspace_dir,
-        v2,
-        plan_generated_at: plan_generated_at.as_deref(),
-        plan_duration_ms,
-        host_adapter: &host_adapter,
+        let flow_dispatch_slot =
+            reserve_dispatch_slot(params.flow_id.as_deref(), &params.task, &dispatch_id)?;
+
+        Ok(PostInitDispatchOutcome::Ready(Box::new(ReadyDispatch {
+            execution,
+            execution_backend_name,
+            execution_backend_metadata,
+            acpx_enabled,
+            native_acp_enabled,
+            credentials,
+            plan_duration_ms,
+            plan_generated_at,
+            flow_dispatch_slot,
+        })))
+    }
+    .await;
+
+    let ReadyDispatch {
+        mut execution,
         execution_backend_name,
-        execution_backend_metadata: &execution_backend_metadata,
+        execution_backend_metadata,
         acpx_enabled,
         native_acp_enabled,
-        capability_bundle_card: &capability_bundle_card,
-        timeout_secs_for_status,
-    })?;
-
-    let flow_dispatch_slot =
-        reserve_dispatch_slot(params.flow_id.as_deref(), &params.task, &dispatch_id)?;
+        credentials,
+        plan_duration_ms,
+        plan_generated_at,
+        flow_dispatch_slot,
+    } = match post_init {
+        Ok(PostInitDispatchOutcome::EarlyResponse(early_response)) => {
+            return Ok(early_response);
+        }
+        Ok(PostInitDispatchOutcome::Ready(ready)) => *ready,
+        Err(e) => {
+            close_kanban_row_on_early_exit(server, &dispatch_id, "post-init dispatch stage").await;
+            return Err(e);
+        }
+    };
 
     // 8. Spawn background task with Watchdog
     let workspace_dir_for_response = workspace_dir.clone();

@@ -184,6 +184,33 @@ pub(super) async fn run_v2_plan_stage(
                     "timestamp": Utc::now().to_rfc3339(),
                 }),
             );
+            // #971 review-fix (F2): the kanban row was seeded
+            // TASK_STATE_WORKING by BOARD-FIRST init (`init_kanban_task`).
+            // This branch returns an early response reporting
+            // TASK_STATE_PENDING_REVIEW to the caller without spawning the
+            // watchdog that would otherwise eventually reconcile the row —
+            // so without this call the row is stuck WORKING indefinitely.
+            // `TASK_STATE_PENDING_REVIEW` is an existing, board-recognized
+            // state (see `dispatch_ops::board::status`'s in-flight/pending
+            // set and `task_facade.rs`'s terminal-state check, which
+            // correctly excludes it), so this is not a new vocabulary term.
+            // Best-effort: log but do not fail the dispatch response over a
+            // kanban write hiccup — the plan itself already succeeded and
+            // the caller needs the response to act on it.
+            if let Err(kanban_err) = update_kanban_state(
+                inputs.server,
+                inputs.dispatch_id,
+                "TASK_STATE_PENDING_REVIEW",
+                None,
+                None,
+            )
+            .await
+            {
+                eprintln!(
+                    "[dispatch-v2] failed to mark dispatch {} PENDING_REVIEW in kanban: {}",
+                    inputs.dispatch_id, kanban_err
+                );
+            }
             let response = json!({
                 "dispatch_id": inputs.dispatch_id,
                 "task": {

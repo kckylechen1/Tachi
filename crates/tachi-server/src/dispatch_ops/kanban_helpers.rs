@@ -204,3 +204,44 @@ pub(crate) async fn update_kanban_state(
 pub(crate) fn should_cleanup_run(exit_code: Option<i32>, kanban_state: Option<&str>) -> bool {
     exit_code == Some(0) && kanban_state == Some("TASK_STATE_COMPLETED")
 }
+
+/// #971 review-fix (F3): idempotent-safe close for the BOARD-FIRST kanban
+/// row on an early exit out of `handle_tachi_dispatch`'s post-init section.
+///
+/// The row is seeded `TASK_STATE_WORKING` by `init_kanban_task` before any
+/// of the fallible post-init stages (V2 plan stage, backend prep, credential
+/// materialization, harness preflight, slot reservation) run. Some of those
+/// stages (the plan stage's own failure/timeout branches) already close the
+/// row to a terminal state themselves before propagating their `Err` — this
+/// helper must NOT clobber that with a second, possibly-redundant write, so
+/// it checks the current state first and only writes `TASK_STATE_FAILED`
+/// if the row is still non-terminal (i.e. still WORKING/PENDING/etc.).
+/// Best-effort: a kanban write failure here is logged, not escalated — the
+/// caller is already on an error path and must propagate the original error,
+/// not a secondary bookkeeping failure.
+pub(crate) async fn close_kanban_row_on_early_exit(
+    server: &MemoryServer,
+    dispatch_id: &str,
+    context: &str,
+) {
+    let is_terminal = matches!(
+        get_kanban_state(server, dispatch_id).await.as_deref(),
+        Some(
+            "TASK_STATE_COMPLETED"
+                | "TASK_STATE_FAILED"
+                | "TASK_STATE_CANCELED"
+                | "TASK_STATE_PENDING_REVIEW"
+        )
+    );
+    if is_terminal {
+        return;
+    }
+    if let Err(kanban_err) =
+        update_kanban_state(server, dispatch_id, "TASK_STATE_FAILED", None, Some(false)).await
+    {
+        eprintln!(
+            "[dispatch] failed to mark dispatch {} FAILED in kanban after early exit ({}): {}",
+            dispatch_id, context, kanban_err
+        );
+    }
+}
