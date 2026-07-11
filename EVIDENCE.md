@@ -174,14 +174,45 @@ test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 1615 filtered out; 
 `cargo clippy -p tachi-server --lib -- -D warnings`: clean, no warnings.
 `cargo fmt -p tachi-server`: applied (formatting-only diff after logic changes).
 
+## Continuation-seat independent re-verification (this pass)
+
+The seat that authored the above (Findings 1+2, `8a96a211`) died mid-run
+right after pushing. This continuation seat independently re-ran everything
+above rather than trusting the self-report, per constitution `自报勿信`:
+
+- `cargo test -p tachi-server --lib curator_ops::` against
+  `$CARGO_TARGET_DIR=$HOME/.cache/sigil-shared-target`: 30/30 green,
+  reproduces verbatim.
+- `cargo fmt -p tachi-server -- --check`: clean (no diff).
+- `cargo clippy -p tachi-server --all-targets --no-deps -- -D warnings`:
+  clean (the only warning printed is a pre-existing multi-bin-target Cargo
+  metadata note on `main.rs`, unrelated to clippy lints or this change).
+- Read `persist_curator_verdict`, `DispatchLaneRunner::reverify`,
+  `build_packet`, `fetch_issue_body_and_anchors`/`enrich_candidate_from_issue_json`
+  in full: confirmed the empty-evidence gate is a genuine single choke point
+  (`save_curator_verdict` has no other production caller) and the Finding #2
+  fetch/anchor/packet-render logic matches what's claimed.
+- Ran `cargo test -p tachi-server --lib` (full crate, no filter): **2
+  failures outside curator_ops** —
+  `arena_ops::tests::harness::arena_spawn_launches_opencode_dispatch_and_collects_result`
+  and `bootstrap::serve::stdio::tests::stdio_proxy_allows_explicit_cross_project_read`.
+  Confirmed via `git diff b87b1dc8..HEAD --stat` that neither `arena_ops/`
+  nor `bootstrap/` is touched by this branch. Re-ran both individually with
+  `--test-threads=1` in a fully isolated `$CARGO_TARGET_DIR` (not the shared
+  cache) — both pass in isolation, confirming full-suite parallel-run
+  flakiness (one is a literal `timed out` assertion), not a regression from
+  this rework. Flagging for Oz to weigh whether these should be
+  de-flaked/marked `#[ignore]` separately — out of this PR's scope.
+
 ## Still open / not done in this pass
 
-- PR body update (opus CONCERN, accepted): the PR #1005 body/comment still
-  needs a follow-up edit describing the real synchronous-wait behavior and
-  its timeout bound, replacing the old "live path is complete" framing.
-  NOT done as part of this commit — needs `gh pr edit 1005` or a PR comment,
-  which is a `tachi_gh` write action outside this file-scope worktree's
-  immediate compile/test loop. Flagging so it isn't silently dropped.
+- PR body update (opus CONCERN, accepted): DONE — `gh pr view 1005` body now
+  carries a "Codex review fixes (commit `8a96a211`)" section describing both
+  findings and the real synchronous-poll/timeout-bound behavior, replacing
+  the stale "fire-and-report" framing. (Corrected from this file's earlier
+  note, which was written before that edit landed.) Still outstanding: a PR
+  *comment* summarizing both findings + evidence for reviewer visibility
+  (distinct from the body edit) — see continuation seat's report.
 - `DispatchLaneRunner::reverify`'s poll loop is not exercised by an
   integration test against a real `handle_tachi_dispatch` run (that would
   require a live dispatch/subprocess spawn, out of scope for this crate's
