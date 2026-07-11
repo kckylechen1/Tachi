@@ -64,7 +64,9 @@ pub(crate) fn format_briefing(
         .cloned()
         .unwrap_or_default();
     if !presence_items.is_empty() || !presence_warnings.is_empty() {
-        out.push("\n### Presence 工位表 (who's working what) [AUTHORITY: WORKFLOW STATE]".to_string());
+        out.push(
+            "\n### Presence 工位表 (who's working what) [AUTHORITY: WORKFLOW STATE]".to_string(),
+        );
         out.push(
             "_Advisory only — never a lock. TTL-expired claims disappear on their own._"
                 .to_string(),
@@ -76,11 +78,14 @@ pub(crate) fn format_briefing(
                 .unwrap_or("?");
             let issue_ref = row.get("issue_ref").and_then(Value::as_str);
             let flow_id = row.get("flow_id").and_then(Value::as_str);
-            let heartbeat = row.get("heartbeat_at").and_then(Value::as_str).unwrap_or("");
-            let target = issue_ref
-                .or(flow_id)
-                .unwrap_or("(no issue/flow declared)");
-            out.push(format!("- **{session}** → {target} (heartbeat {heartbeat})"));
+            let heartbeat = row
+                .get("heartbeat_at")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let target = issue_ref.or(flow_id).unwrap_or("(no issue/flow declared)");
+            out.push(format!(
+                "- **{session}** → {target} (heartbeat {heartbeat})"
+            ));
         }
         for warning in &presence_warnings {
             if let Some(text) = warning.as_str() {

@@ -198,9 +198,7 @@ pub(crate) fn handle_manual_claim(
     declared_file_scope: Option<Vec<String>>,
 ) -> Result<serde_json::Value, String> {
     if issue_ref.is_none() && flow_id.is_none() {
-        return Err(
-            "tachi_memory(action='claim') requires issue_ref and/or flow_id".to_string(),
-        );
+        return Err("tachi_memory(action='claim') requires issue_ref and/or flow_id".to_string());
     }
     let session_client = resolve_session_client(server);
     let live = list_live_claims_for_briefing(server);
@@ -335,8 +333,7 @@ mod tests {
             flow_id: None,
             dispatch_id: None,
             branch: "feat/x".to_string(),
-            declared_file_scope: scope
-                .map(|s| serde_json::to_string(&s).unwrap_or_default()),
+            declared_file_scope: scope.map(|s| serde_json::to_string(&s).unwrap_or_default()),
             state: memcore::ClaimState::Active,
             release_reason: None,
             created_at: "2026-07-11T00:00:00Z".to_string(),

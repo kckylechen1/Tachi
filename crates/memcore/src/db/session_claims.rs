@@ -752,6 +752,10 @@ mod tests {
         upsert_or_heartbeat_claim(&mut conn, &b).unwrap();
 
         let all = list_claims(&conn, Some(ClaimState::Active)).unwrap();
-        assert_eq!(all.len(), 2, "distinct issue/flow identities get distinct rows");
+        assert_eq!(
+            all.len(),
+            2,
+            "distinct issue/flow identities get distinct rows"
+        );
     }
 }

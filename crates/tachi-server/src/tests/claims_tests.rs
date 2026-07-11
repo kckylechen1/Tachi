@@ -118,10 +118,10 @@ async fn two_sessions_each_see_the_others_claim_through_the_real_server() {
     assert_eq!(live_from_a.len(), 2, "session A must see both claims");
     let live_from_b = list_live_claims_for_briefing(&server_b);
     assert_eq!(live_from_b.len(), 2, "session B must see both claims");
-    assert!(live_from_a
-        .iter()
-        .any(|c| c.session_client.as_deref() == Some("claude-code-seat-a")
-            && c.issue_ref.as_deref() == Some("org/repo#500")));
+    assert!(live_from_a.iter().any(
+        |c| c.session_client.as_deref() == Some("claude-code-seat-a")
+            && c.issue_ref.as_deref() == Some("org/repo#500")
+    ));
     assert!(live_from_b
         .iter()
         .any(|c| c.session_client.as_deref() == Some("codex-seat-b")
