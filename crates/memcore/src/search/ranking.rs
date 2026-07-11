@@ -117,7 +117,12 @@ pub(super) fn rank_candidate_entries(
     apply_tier_boosts(&entries_ref, &mut scores);
     apply_entity_recency_boosts(&entries_ref, &superseded_ids, &mut scores);
     apply_decision_and_research_boosts(query, &entries_ref, &mut scores);
-    apply_lexical_overlap_boost(query, opts.path_prefix.as_deref(), &entries_ref, &mut scores);
+    apply_lexical_overlap_boost(
+        query,
+        opts.path_prefix.as_deref(),
+        &entries_ref,
+        &mut scores,
+    );
 
     // Decorate each candidate with its parsed instant once (epoch millis), then
     // sort — the comparator compares the pre-parsed key, never the raw string
@@ -244,17 +249,12 @@ fn apply_decision_and_research_boosts(
     const DECISION_IMPORTANCE_FLOOR: f64 = 0.85;
     /// provisional decision boost (tachi#708/#896 same-store precision).
     const DECISION_BOOST: f64 = 1.55;
-    /// Provisional governance-intent decision boost (tachi#958): a query
-    /// asking for a governance framing seeks the owner decision, not the
-    /// repeated inventory vocabulary of registry stubs.
-    const GOVERNANCE_DECISION_BOOST: f64 = 1.20;
     /// provisional research-path boost under /wiki/**/research/**
     /// (calibrated so labeled research notes beat denser architecture wikis
     /// on the ops-audit adjacent-wiki case).
     const RESEARCH_PATH_BOOST: f64 = 2.85;
 
     let research_query = query_looks_research_shaped(query);
-    let governance_query = query_looks_governance_shaped(query);
 
     for (id, entry) in entries_ref {
         let mut mult = 1.0_f64;
@@ -262,9 +262,6 @@ fn apply_decision_and_research_boosts(
             && entry.importance >= DECISION_IMPORTANCE_FLOOR
         {
             mult *= DECISION_BOOST;
-            if governance_query {
-                mult *= GOVERNANCE_DECISION_BOOST;
-            }
         }
         if research_query && is_research_wiki_path(&entry.path) {
             mult *= RESEARCH_PATH_BOOST;
@@ -289,15 +286,6 @@ fn query_looks_research_shaped(query: &str) -> bool {
         || q.contains("evaluation protocol")
 }
 
-fn query_looks_governance_shaped(query: &str) -> bool {
-    let q = query.to_ascii_lowercase();
-    q.contains("governance")
-        || q.contains("framing")
-        || q.contains("owner stance")
-        || q.contains("owner ratified")
-        || q.contains("adjudicat")
-}
-
 fn is_research_wiki_path(path: &str) -> bool {
     // Allocation-free case-insensitive scan (Gemini #903): avoid
     // `to_ascii_lowercase()` per candidate under load. Match any path segment
@@ -309,7 +297,6 @@ fn is_research_wiki_path(path: &str) -> bool {
         .windows(9)
         .any(|w| w.eq_ignore_ascii_case(b"/research"))
 }
-
 
 /// Phase C (#708): lexical-overlap precision boost via soft-stem token coverage
 /// and char 4-gram Jaccard. Lifts paraphrase-heavy summary queries without
@@ -328,11 +315,38 @@ fn apply_lexical_overlap_boost(
     const TOKEN_COVERAGE_FLOOR: f64 = 0.40;
     const NGRAM_JACCARD_FLOOR: f64 = 0.12;
     const MAX_BOOST: f64 = 2.4;
+    /// Provisional candidate-pool cutoff: a lexical-overlap boost is precision
+    /// evidence only when it includes a query term that distinguishes a
+    /// bounded share of the candidate set. Terms repeated across many
+    /// candidates are already represented by the base retrieval channels and
+    /// must not amplify templated inventories.
+    const DISCRIMINATIVE_TOKEN_DOCUMENT_FREQUENCY_DENOMINATOR: usize = 4;
 
     let q_tokens = soft_token_set(query);
     let q_ngrams = char_ngrams(query, 4);
     if q_tokens.len() < 3 && q_ngrams.len() < 8 {
         return;
+    }
+    // Pools below four candidates keep base retrieval ordering because quarter-share evidence is undefined.
+    if entries_ref.len() < DISCRIMINATIVE_TOKEN_DOCUMENT_FREQUENCY_DENOMINATOR {
+        return;
+    }
+    let mut query_token_document_frequencies = HashMap::new();
+    for entry in entries_ref.values() {
+        let mut text = String::new();
+        text.push_str(&entry.summary);
+        text.push(' ');
+        text.push_str(&entry.text);
+        for keyword in &entry.keywords {
+            text.push(' ');
+            text.push_str(keyword);
+        }
+        let entry_tokens = soft_token_set(&text);
+        for token in q_tokens.intersection(&entry_tokens) {
+            *query_token_document_frequencies
+                .entry(token.clone())
+                .or_insert(0_usize) += 1;
+        }
     }
 
     for (id, entry) in entries_ref {
@@ -355,6 +369,17 @@ fn apply_lexical_overlap_boost(
         let e_tokens = soft_token_set(&text);
         let e_ngrams = char_ngrams(&text, 4);
         if e_tokens.is_empty() && e_ngrams.is_empty() {
+            continue;
+        }
+        let has_discriminative_token_overlap = q_tokens.intersection(&e_tokens).any(|token| {
+            query_token_document_frequencies
+                .get(token)
+                .is_some_and(|frequency| {
+                    frequency.saturating_mul(DISCRIMINATIVE_TOKEN_DOCUMENT_FREQUENCY_DENOMINATOR)
+                        <= entries_ref.len()
+                })
+        });
+        if !has_discriminative_token_overlap {
             continue;
         }
 
@@ -602,6 +627,13 @@ mod tests {
         }
     }
 
+    fn lexical_entry(id: &str, text: &str) -> MemoryEntry {
+        let mut entry = entry(id, &format!("/notes/{id}"), "fact", 0.5);
+        entry.summary = text.to_string();
+        entry.text = text.to_string();
+        entry
+    }
+
     /// Ranks (descending by `final_score`) among `ids`, using the same
     /// tie-break precedence (`final_score` desc) the rest of this module
     /// uses; ties are not exercised by these fixtures.
@@ -642,9 +674,18 @@ mod tests {
             &mut scores,
         );
 
-        assert_eq!(scores.get("a").unwrap().final_score, before["a"].final_score);
-        assert_eq!(scores.get("b").unwrap().final_score, before["b"].final_score);
-        assert_eq!(scores.get("c").unwrap().final_score, before["c"].final_score);
+        assert_eq!(
+            scores.get("a").unwrap().final_score,
+            before["a"].final_score
+        );
+        assert_eq!(
+            scores.get("b").unwrap().final_score,
+            before["b"].final_score
+        );
+        assert_eq!(
+            scores.get("c").unwrap().final_score,
+            before["c"].final_score
+        );
         assert_eq!(
             ranked_ids(&scores, &["a", "b", "c"]),
             vec!["a".to_string(), "b".to_string(), "c".to_string()]
@@ -772,5 +813,88 @@ mod tests {
             ranked_ids(&scores, &["r1", "r2"]),
             vec!["r1".to_string(), "r2".to_string()]
         );
+    }
+
+    #[test]
+    fn lexical_overlap_boost_requires_a_token_in_at_most_one_quarter_of_candidates() {
+        // `alpha` occurs in two of five candidates (40%), so neither entry
+        // that matches it may receive the auxiliary lexical boost. This is a
+        // boundary proof for the exact candidate-pool cutoff; the former
+        // rounded cutoff would have incorrectly treated two matches as <=25%.
+        let entries: HashMap<String, MemoryEntry> = [
+            lexical_entry("a", "alpha beta gamma"),
+            lexical_entry("b", "alpha beta gamma"),
+            lexical_entry("c", "beta gamma"),
+            lexical_entry("d", "beta gamma"),
+            lexical_entry("e", "beta gamma"),
+        ]
+        .into_iter()
+        .map(|entry| (entry.id.clone(), entry))
+        .collect();
+        let entries_ref: HashMap<String, &MemoryEntry> = entries
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry))
+            .collect();
+        let mut scores: HashMap<String, HybridScore> =
+            entries.keys().map(|id| (id.clone(), score(1.0))).collect();
+
+        apply_lexical_overlap_boost("alpha beta gamma", None, &entries_ref, &mut scores);
+
+        for id in entries.keys() {
+            assert_eq!(
+                scores[id].final_score, 1.0,
+                "{id} used only common query terms"
+            );
+        }
+    }
+
+    #[test]
+    fn lexical_overlap_boost_accepts_a_token_at_exactly_one_quarter_frequency() {
+        // `alpha` occurs in one of four candidates (25%), so it is a
+        // discriminative match and the lexical boost remains available.
+        let entries: HashMap<String, MemoryEntry> = [
+            lexical_entry("target", "alpha beta gamma"),
+            lexical_entry("b", "beta gamma"),
+            lexical_entry("c", "beta gamma"),
+            lexical_entry("d", "beta gamma"),
+        ]
+        .into_iter()
+        .map(|entry| (entry.id.clone(), entry))
+        .collect();
+        let entries_ref: HashMap<String, &MemoryEntry> = entries
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry))
+            .collect();
+        let mut scores: HashMap<String, HybridScore> =
+            entries.keys().map(|id| (id.clone(), score(1.0))).collect();
+
+        apply_lexical_overlap_boost("alpha beta gamma", None, &entries_ref, &mut scores);
+
+        assert!(scores["target"].final_score > 1.0);
+        assert_eq!(scores["b"].final_score, 1.0);
+        assert_eq!(scores["c"].final_score, 1.0);
+        assert_eq!(scores["d"].final_score, 1.0);
+    }
+
+    #[test]
+    fn lexical_overlap_boost_is_disabled_for_a_pool_of_two() {
+        let entries: HashMap<String, MemoryEntry> = [
+            lexical_entry("target", "alpha beta gamma"),
+            lexical_entry("other", "beta gamma"),
+        ]
+        .into_iter()
+        .map(|entry| (entry.id.clone(), entry))
+        .collect();
+        let entries_ref: HashMap<String, &MemoryEntry> = entries
+            .iter()
+            .map(|(id, entry)| (id.clone(), entry))
+            .collect();
+        let mut scores: HashMap<String, HybridScore> =
+            entries.keys().map(|id| (id.clone(), score(1.0))).collect();
+
+        apply_lexical_overlap_boost("alpha beta gamma", None, &entries_ref, &mut scores);
+
+        assert_eq!(scores["target"].final_score, 1.0);
+        assert_eq!(scores["other"].final_score, 1.0);
     }
 }
