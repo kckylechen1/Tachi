@@ -4,12 +4,14 @@ use serde_json::json;
 use crate::error::MemoryError;
 use crate::types::apply_location_relocation;
 
-/// Called both from inside `run_data_migrations`'s outer transaction (#984
-/// F1) and standalone from `init_schema_inner`'s pre-migration bridge (no
-/// outer transaction there) — so this uses a `SAVEPOINT` rather than a raw
-/// `BEGIN`, which nests cleanly in either context (SQLite forbids nested
-/// top-level `BEGIN` but savepoints nest, and a savepoint with no enclosing
-/// transaction behaves like one).
+/// Called from inside `run_data_migrations`'s outer transaction (#984 F1),
+/// AND from `init_schema_inner`'s pre-migration bridge — which itself now
+/// runs either standalone (via `init_schema`, no enclosing transaction) or
+/// nested inside `init_schema_with_label_mut`'s outer transaction (#984 F1
+/// round 3) — so this uses a `SAVEPOINT` rather than a raw `BEGIN`, which
+/// nests cleanly in any of these contexts (SQLite forbids nested top-level
+/// `BEGIN` but savepoints nest, and a savepoint with no enclosing transaction
+/// behaves like one).
 pub(super) fn migrate_v6_fold_persons_into_entities(
     conn: &Connection,
 ) -> Result<usize, MemoryError> {
@@ -133,11 +135,13 @@ pub fn fold_and_drop_legacy_persons_column(conn: &Connection) -> Result<usize, M
 
 /// Relocate legacy `location` values, then drop the physical column.
 ///
-/// Called both from inside `run_data_migrations`'s outer transaction (#984
-/// F1) and standalone from `init_schema_inner`'s pre-migration bridge (no
-/// outer transaction there) — so this uses a `SAVEPOINT` (via raw SQL, since
-/// it only holds `&Connection`) rather than `Transaction::new_unchecked`'s
-/// raw `BEGIN`, which would fail to nest inside the outer transaction.
+/// Called from inside `run_data_migrations`'s outer transaction (#984 F1),
+/// AND from `init_schema_inner`'s pre-migration bridge — which itself now
+/// runs either standalone (via `init_schema`, no enclosing transaction) or
+/// nested inside `init_schema_with_label_mut`'s outer transaction (#984 F1
+/// round 3) — so this uses a `SAVEPOINT` (via raw SQL, since it only holds
+/// `&Connection`) rather than `Transaction::new_unchecked`'s raw `BEGIN`,
+/// which would fail to nest inside any outer transaction.
 pub fn migrate_v9_relocate_and_drop_location(
     conn: &Connection,
 ) -> Result<(usize, usize), MemoryError> {

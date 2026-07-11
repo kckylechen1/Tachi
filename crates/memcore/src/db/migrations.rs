@@ -31,6 +31,21 @@
 //! sentinel migrations (v1..v11) plus the pre-sentinel baseline schema (v0),
 //! so the current stamp is 11. Bump this const (and add a `vN` doc line
 //! above) whenever a new migration is appended to [`run_data_migrations`].
+//!
+//! ### Compatibility transaction widened to cover `init_schema_inner` (#984 F1 round 3)
+//!
+//! The `BEGIN IMMEDIATE`/stamp boundary described above was originally scoped
+//! to just this module's sentinel migrations. That left a hole:
+//! `schema::init_schema_with_label_mut` called `schema::init_schema_inner`
+//! (DDL + `bridge_hypertachi_memory_columns` + the standalone v6/v8/v9
+//! legacy-column work in `legacy_columns.rs`) BEFORE opening this module's
+//! transaction — so a crash between that legacy work committing and this
+//! module's stamp being written left newer schema/data on disk under an old
+//! or zero `user_version`, exactly what the gate exists to prevent. Round 3
+//! fixes this by having `init_schema_with_label_mut` open ONE outer
+//! transaction that covers `init_schema_inner` AND
+//! [`run_data_migrations_in_tx`] AND the final stamp — see that function's
+//! doc comment in `schema.rs`.
 
 use std::path::Path;
 
@@ -100,6 +115,18 @@ fn write_schema_version(conn: &Connection, version: u32) -> Result<(), MemoryErr
     Ok(())
 }
 
+/// Stamp the current [`EXPECTED_SCHEMA_VERSION`]. Exposed to `schema.rs` so
+/// `init_schema_with_label_mut` can write the final stamp itself, inside the
+/// SAME outer transaction it opened for `init_schema_inner`'s legacy work —
+/// see that function's doc comment (#984 F1 round 3) for why the stamp can no
+/// longer be delegated to the public [`run_data_migrations`] wrapper (that
+/// wrapper opens its OWN transaction, which would either double-BEGIN or
+/// leave `init_schema_inner`'s earlier legacy mutations outside the window
+/// this stamp is meant to cover).
+pub(crate) fn write_schema_version_stamp(conn: &Connection) -> Result<(), MemoryError> {
+    write_schema_version(conn, EXPECTED_SCHEMA_VERSION)
+}
+
 /// Hard-fail gate: refuse to open/operate on a DB stamped with a schema
 /// version newer than this kernel supports. Called at the top of
 /// [`run_data_migrations`] (i.e. from `init_schema_with_label_mut`'s entry
@@ -131,6 +158,21 @@ pub fn check_schema_version_gate(conn: &Connection) -> Result<(), MemoryError> {
 /// (version 0/absent), DBs at an older version, and DBs already at the
 /// current version all end this call stamped at `EXPECTED_SCHEMA_VERSION`.
 ///
+/// This function is `pub` (downstream callers may invoke it directly, outside
+/// `init_schema_with_label_mut`), so it is unconditionally transactional on
+/// its own: it opens its own `BEGIN IMMEDIATE` here and commits only after
+/// every migration and the version stamp have succeeded, exactly as it did
+/// before #984 F1 round 3. What changed in round 3 is the PUBLIC ENTRY POINT
+/// (`init_schema_with_label_mut`): that function no longer calls this
+/// function. It calls [`run_data_migrations_in_tx`] directly against its OWN
+/// outer transaction — one that also covers `init_schema_inner`'s legacy
+/// v6/v8/v9 work, which used to commit standalone before this transaction
+/// even opened (the original compatibility hole this round fixes). Called
+/// standalone (this function), the boundary here still only covers the
+/// sentinel migrations, not `init_schema_inner`'s DDL/legacy work — exactly
+/// as before; the difference is that `init_schema_with_label_mut` no longer
+/// takes this path.
+///
 /// ## Transactional compatibility boundary (#984 F1)
 ///
 /// The migration effects (sentinel writes and the final `user_version` stamp
@@ -153,7 +195,7 @@ pub fn run_data_migrations(
 
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let report = run_data_migrations_in_tx(&tx, db_label, current_db_path)?;
-    write_schema_version(&tx, EXPECTED_SCHEMA_VERSION)?;
+    write_schema_version_stamp(&tx)?;
     tx.commit()?;
 
     Ok(report)
@@ -163,7 +205,12 @@ pub fn run_data_migrations(
 /// Split out from [`run_data_migrations`] so tests can inject a failure
 /// between individual migration steps and the final stamp while still
 /// exercising the real transaction boundary.
-fn run_data_migrations_in_tx(
+///
+/// Also called directly by `schema.rs`'s `init_schema_with_label_mut` (#984
+/// F1 round 3), which opens its OWN outer `BEGIN IMMEDIATE` covering
+/// `init_schema_inner`'s legacy work as well, and drives this + the final
+/// stamp against that same transaction — see that function's doc comment.
+pub(crate) fn run_data_migrations_in_tx(
     conn: &Connection,
     db_label: &str,
     current_db_path: &Path,

@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, TransactionBehavior};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -9,6 +9,7 @@ use super::common::normalize_utc_iso;
 mod ddl;
 
 pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
+    apply_connection_pragmas(conn)?;
     init_schema_inner(conn)
 }
 
@@ -19,6 +20,20 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
 /// Hard-fails before touching the DB (#984) if it is stamped with a schema
 /// version newer than this kernel's `EXPECTED_SCHEMA_VERSION` supports — see
 /// `crate::db::migrations::check_schema_version_gate`.
+///
+/// ## Compatibility transaction boundary (#984 F1 round 3)
+///
+/// Everything that mutates schema or data in a way another kernel's
+/// [`crate::db::migrations::check_schema_version_gate`] would care about —
+/// `init_schema_inner`'s DDL/legacy-column work (including the v6/v8/v9
+/// standalone migrations previously committed outside any outer transaction)
+/// AND `run_data_migrations`'s sentinel-gated migrations AND the final
+/// `user_version` stamp — now run inside ONE `BEGIN IMMEDIATE` opened here
+/// and committed only after all of it succeeds. Only work that literally
+/// cannot run inside a transaction (the `journal_mode`/`foreign_keys`/
+/// `busy_timeout`/`cache_size` connection PRAGMAs) and the pre-migration file
+/// backup (a live-connection `rusqlite::backup::Backup`, not a DB write)
+/// happen outside the transaction, before it opens.
 pub fn init_schema_with_label_mut(
     conn: &mut Connection,
     db_label: &str,
@@ -26,10 +41,58 @@ pub fn init_schema_with_label_mut(
 ) -> Result<crate::db::migrations::MigrationReport, MemoryError> {
     crate::db::migrations::check_schema_version_gate(conn)?;
     maybe_backup_before_migration(conn, current_db_path)?;
-    init_schema_inner(conn)?;
-    let report = crate::db::migrations::run_data_migrations(conn, db_label, current_db_path)?;
+    apply_connection_pragmas(conn)?;
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    init_schema_inner(&tx)?;
+    #[cfg(test)]
+    test_hooks::fail_after_legacy_work_before_stamp()?;
+    let report = crate::db::migrations::run_data_migrations_in_tx(&tx, db_label, current_db_path)?;
+    crate::db::migrations::write_schema_version_stamp(&tx)?;
+    tx.commit()?;
+
     remember_migration_fingerprint(conn, current_db_path)?;
     Ok(report)
+}
+
+/// Test-only fault-injection hook for proving the compatibility transaction
+/// (#984 F1 round 3) actually rolls `init_schema_inner`'s legacy work back on
+/// failure, not just the sentinel migrations. Real callers never touch this;
+/// production builds don't compile it.
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    use crate::error::MemoryError;
+    use std::cell::Cell;
+
+    thread_local! {
+        static FAIL_AFTER_LEGACY_WORK: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Arm the injection: the NEXT call to `init_schema_with_label_mut` on
+    /// this thread will fail right after `init_schema_inner` (DDL + legacy
+    /// v6/v8/v9 work) completes but before `run_data_migrations_in_tx` and
+    /// the version stamp run. Auto-disarms after firing once.
+    pub(crate) fn arm_fail_after_legacy_work() {
+        FAIL_AFTER_LEGACY_WORK.with(|flag| flag.set(true));
+    }
+
+    pub(super) fn fail_after_legacy_work_before_stamp() -> Result<(), MemoryError> {
+        let armed = FAIL_AFTER_LEGACY_WORK.with(|flag| flag.replace(false));
+        if armed {
+            return Err(MemoryError::InvalidArg(
+                "test_hooks: injected failure after init_schema_inner, before stamp".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Connection-level PRAGMAs (`journal_mode`, `foreign_keys`, `busy_timeout`,
+/// `cache_size`). These MUST run outside any transaction — `journal_mode` in
+/// particular is a no-op/error mid-transaction — so callers apply this before
+/// opening the compatibility transaction, not inside `init_schema_inner`.
+fn apply_connection_pragmas(conn: &Connection) -> Result<(), MemoryError> {
+    execute_batch_retry(conn, ddl::CONNECTION_PRAGMA_SQL)
 }
 
 fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
@@ -256,10 +319,16 @@ fn bridge_hypertachi_memory_columns(conn: &Connection) -> Result<(), MemoryError
     Ok(())
 }
 
+/// Called from inside `init_schema_inner`, which itself runs either
+/// standalone (via [`init_schema`], no enclosing transaction) or nested
+/// inside `init_schema_with_label_mut`'s outer `BEGIN IMMEDIATE` (#984 F1
+/// round 3) — so this uses a `SAVEPOINT` rather than a raw `BEGIN`, which
+/// nests cleanly in either context (SQLite forbids nested top-level `BEGIN`
+/// but savepoints nest, and a savepoint with no enclosing transaction
+/// behaves like one).
 fn normalize_memory_validity_columns(conn: &Connection) -> Result<(), MemoryError> {
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let rows = {
-        let mut stmt = tx.prepare(
+        let mut stmt = conn.prepare(
             "SELECT id, timestamp, valid_from, valid_until FROM memories \
              WHERE valid_from = '' OR valid_from IS NULL",
         )?;
@@ -278,31 +347,44 @@ fn normalize_memory_validity_columns(conn: &Connection) -> Result<(), MemoryErro
         rows
     };
 
-    for (id, timestamp, valid_from, valid_until) in rows {
-        let valid_from_raw = valid_from
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(timestamp.trim());
-        let normalized_from =
-            normalize_utc_iso(valid_from_raw).unwrap_or_else(|_| valid_from_raw.to_string());
-        let normalized_until = valid_until
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| normalize_utc_iso(value).unwrap_or_else(|_| value.to_string()));
-        if valid_from.as_deref() == Some(normalized_from.as_str())
-            && valid_until == normalized_until
-        {
-            continue;
+    conn.execute_batch("SAVEPOINT normalize_memory_validity_columns")?;
+    let result = (|| -> Result<(), MemoryError> {
+        for (id, timestamp, valid_from, valid_until) in rows {
+            let valid_from_raw = valid_from
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(timestamp.trim());
+            let normalized_from =
+                normalize_utc_iso(valid_from_raw).unwrap_or_else(|_| valid_from_raw.to_string());
+            let normalized_until = valid_until
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| normalize_utc_iso(value).unwrap_or_else(|_| value.to_string()));
+            if valid_from.as_deref() == Some(normalized_from.as_str())
+                && valid_until == normalized_until
+            {
+                continue;
+            }
+            conn.execute(
+                "UPDATE memories SET valid_from = ?2, valid_until = ?3 WHERE id = ?1",
+                params![id, normalized_from, normalized_until],
+            )?;
         }
-        tx.execute(
-            "UPDATE memories SET valid_from = ?2, valid_until = ?3 WHERE id = ?1",
-            params![id, normalized_from, normalized_until],
-        )?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            conn.execute_batch("RELEASE normalize_memory_validity_columns")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO normalize_memory_validity_columns");
+            let _ = conn.execute_batch("RELEASE normalize_memory_validity_columns");
+            Err(e)
+        }
     }
-    tx.commit()?;
-    Ok(())
 }
 
 /// Idempotent migration that:
@@ -316,6 +398,12 @@ fn normalize_memory_validity_columns(conn: &Connection) -> Result<(), MemoryErro
 ///
 /// The standalone `memories_fts` virtual table is independent of the rebuild
 /// and is preserved across the rename.
+///
+/// Called from inside `init_schema_inner`, which itself runs either
+/// standalone (via [`init_schema`], no enclosing transaction) or nested
+/// inside `init_schema_with_label_mut`'s outer `BEGIN IMMEDIATE` (#984 F1
+/// round 3) — so this uses a `SAVEPOINT` rather than a raw `BEGIN`, which
+/// nests cleanly in either context.
 fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
     let existing_sql: Option<String> = conn
         .query_row(
@@ -333,9 +421,8 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         }
     }
 
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    conn.execute_batch("SAVEPOINT migrate_enum_constraints")?;
     let migration_result = (|| -> Result<(), MemoryError> {
-        let conn = &tx;
         normalize_source(conn)?;
         normalize_category(conn)?;
         normalize_scope(conn)?;
@@ -345,9 +432,17 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         Ok(())
     })();
 
-    migration_result?;
-    tx.commit()?;
-    Ok(())
+    match migration_result {
+        Ok(()) => {
+            conn.execute_batch("RELEASE migrate_enum_constraints")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO migrate_enum_constraints");
+            let _ = conn.execute_batch("RELEASE migrate_enum_constraints");
+            Err(e)
+        }
+    }
 }
 
 const CANONICAL_SOURCES: &[&str] = &[
