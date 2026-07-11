@@ -193,3 +193,88 @@ new timer, no new config knob, reuses the existing "quiet moment" cadence.
 - `cargo clippy -p memcore --all-targets --no-deps -- -D warnings` — clean.
 - `cargo clippy -p tachi-server --all-targets --no-deps -- -D warnings` —
   clean.
+
+---
+
+## Item 4 — `get_access_times` LIMIT (`access_history` is the fastest-growing table)
+
+**Semantics check first**: `get_access_times`' result feeds ACT-R
+base-level activation (`base_level_activation` in `scorer.rs`):
+`B_i = ln(Σ t_j^(-d))` — a plain sum over every returned access age, so it
+is order-independent, and each term's contribution shrinks with `-d` decay
+as `t_j` (age) grows. The existing query already orders
+`accessed_at DESC` (most recent first). So capping to the N *most recent*
+accesses per memory_id preserves the dominant terms of the sum and only
+drops the vanishingly-small-contribution tail — not an approximation that
+changes ranking behavior in any observable way, only a bound on unbounded
+growth.
+
+**Cap chosen**: `ACCESS_TIMES_MAX_PER_MEMORY = 256`, matching
+`GcConfig::access_history_keep_per_memory` (default 256,
+`crates/memcore/src/types/entry.rs:160`) — the number of rows GC already
+prunes each memory_id down to in steady state
+(`crates/memcore/src/db/stats_gc.rs`). Confirmed on the live DB: the
+busiest memory_ids in `access_history` (15,608 rows total) sit at exactly
+256 rows each (GC-steady-state), so this cap changes nothing for GC'd data
+and only bounds worst-case cost for memory_ids whose history grew past 256
+between GC runs.
+
+```
+$ sqlite3 memory_readonly_copy.db \
+    "SELECT memory_id, COUNT(*) c FROM access_history GROUP BY memory_id ORDER BY c DESC LIMIT 5;"
+21d97267-...|256
+38010cb3-...|256
+4ebf65d3-...|256
+6112ba35-...|256
+708b7fe8-...|256
+```
+
+**Before** (unbounded, `EXPLAIN QUERY PLAN` for two busy ids):
+
+```
+QUERY PLAN
+|--SEARCH access_history USING COVERING INDEX idx_access_hist_mem_time (memory_id=?)
+`--USE TEMP B-TREE FOR ORDER BY
+```
+
+**After** (bounded via `ROW_NUMBER() OVER (PARTITION BY memory_id ORDER BY
+accessed_at DESC)`, same covering index still used for the
+partition/order):
+
+```
+QUERY PLAN
+|--CO-ROUTINE ranked
+|  |--CO-ROUTINE (subquery-3)
+|  |  `--SEARCH access_history USING COVERING INDEX idx_access_hist_mem_time (memory_id=?)
+|  `--SCAN (subquery-3)
+|--SCAN ranked
+`--USE TEMP B-TREE FOR ORDER BY
+```
+
+Row-count check on the two busiest live ids (both already at the 256 GC
+ceiling) confirmed identical output before/after — zero behavior change on
+real data, as expected.
+
+**Implementation**: `crates/memcore/src/db/memory_crud/access.rs`
+`get_access_times` — added `ACCESS_TIMES_MAX_PER_MEMORY: i64 = 256` and
+rewrote the per-batch query to select from a `ROW_NUMBER()`-ranked subquery
+filtered to `rn <= 256`, following the exact partition/order pattern
+`stats_gc.rs`'s GC query already uses (same shape, same covering index).
+
+**File:line**: `crates/memcore/src/db/memory_crud/access.rs`
+(`ACCESS_TIMES_MAX_PER_MEMORY` const + `get_access_times` body).
+
+**Verification**:
+- New test module `get_access_times_tests` in the same file:
+  - `caps_at_max_per_memory_and_keeps_most_recent` — seeds 257 access rows
+    for one memory_id (one over the cap), asserts the result is truncated
+    to exactly 256 and the oldest (dropped) row's age never appears.
+  - `under_cap_is_unaffected` — 3 rows in, 3 rows out (no accidental
+    over-truncation).
+- `cargo test -p memcore --lib` — 331 passed (329 + 2 new), 0 failed,
+  including all `golden_corpus`/`ops_audit_corpus` recall-ranking tests
+  unchanged (confirms no observable ranking-order regression).
+- `cargo fmt -p memcore -- --check` — clean.
+- `cargo clippy -p memcore --all-targets --no-deps -- -D warnings` — clean.
+- Real-DB `EXPLAIN QUERY PLAN` + row-count before/after captured above via
+  `sqlite3` CLI against the read-only production-data copy.
