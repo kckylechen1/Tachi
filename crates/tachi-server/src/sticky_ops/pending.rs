@@ -55,13 +55,50 @@ pub(crate) fn claim_unread_stickies_for_briefing(
                 mark_expired(store, entry)?;
                 continue;
             }
-            // Atomic claim: exactly one caller among concurrent readers wins.
+            // CP3 (opus xhigh review of #964/PR #1003): claim + mark are two
+            // separate non-transactional writes on two different stores
+            // (hard_state KV vs. the memories row). `MemoryStore` has no
+            // public cross-write transaction primitive today — `db::upsert`
+            // takes `&mut Connection` and opens its OWN transaction
+            // internally, so it cannot be composed inside an outer
+            // transaction on the same connection without a larger API
+            // change — so a true single-transaction wrap across both stores
+            // is impractical here without expanding memcore's surface. We
+            // take the INVERTED-ORDER option the review offered instead,
+            // reordered from a literal swap so it stays correct: the
+            // `hard_state` CAS (`try_claim_sticky`) MUST still run first and
+            // stay authoritative for "who won" — that's the only atomic
+            // primitive in this pair, so it cannot move without breaking
+            // CP1's single-winner guarantee. What moves is: this caller is
+            // queued into `delivered` (this request's own return value)
+            // immediately after winning the CAS, BEFORE `mark_claimed` runs,
+            // and `mark_claimed`'s own failure is now non-fatal — logged,
+            // not propagated with `?` — so it can never take down the
+            // current caller's already-decided delivery or the rest of this
+            // batch's already-collected `delivered` rows.
+            //
+            // Why this changes the failure mode from permanent silent loss
+            // to at-most a stale display flag: previously,
+            // `mark_claimed(..)?` propagated its error out of the WHOLE
+            // closure — a crash there discarded every sticky already queued
+            // in `delivered` for THIS request (not just the one that failed
+            // to mark), on top of leaving hard_state permanently "claimed"
+            // while the row still read "unread": every future caller would
+            // pass the row's unread gate, lose the CAS (`Ok(false)`), and
+            // silently skip forever — nobody delivered, nobody warned, no
+            // way to ever retry. Now, a `mark_claimed` failure after a
+            // successful CAS win only means the row's display/TTL-sweep
+            // mirror lags (`status` may still read "unread" in
+            // `include_read`/GC views even though the sticky was genuinely
+            // delivered) — a cosmetic inconsistency, not a delivery loss —
+            // and the CURRENT caller still receives the content, and the
+            // REST of this batch's already-collected `delivered` rows are
+            // unaffected by one entry's mark failure.
             let sticky_id = memo.id.clone();
             let won = try_claim_sticky(store, &sticky_id, Some(&claimed_by))?;
             if !won {
                 continue;
             }
-            mark_claimed(store, entry, &claimed_by)?;
             delivered.push(json!({
                 "id": sticky_id,
                 "from_agent": memo.from_agent,
@@ -70,6 +107,13 @@ pub(crate) fn claim_unread_stickies_for_briefing(
                 "created_at": memo.created_at,
                 "kind": "sticky",
             }));
+            if let Err(e) = mark_claimed(store, entry, &claimed_by) {
+                eprintln!(
+                    "warning: sticky {sticky_id} claimed but failed to mirror status onto \
+                     memory row (delivery already committed via hard_state CAS; row may show \
+                     stale 'unread' until GC/manual repair): {e}"
+                );
+            }
         }
         Ok(delivered)
     })
@@ -126,7 +170,10 @@ pub(crate) fn list_or_claim_stickies(
 /// TTL sweep / include_read archive). This write happens AFTER the atomic
 /// `hard_state` claim already succeeded, so it never itself needs to be a
 /// CAS — at most one caller ever reaches this function for a given sticky.
-fn mark_claimed(
+/// `pub(super)` (rather than private) only so the CP3 crash-safety unit test
+/// in `tests.rs` can exercise its error branch directly — production code
+/// only ever reaches it through `claim_unread_stickies_for_briefing` above.
+pub(super) fn mark_claimed(
     store: &mut MemoryStore,
     mut entry: MemoryEntry,
     claimed_by: &str,

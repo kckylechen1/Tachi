@@ -31,3 +31,36 @@ pub(super) fn fallback_agent_id(registered_agent: Option<String>) -> String {
 pub(super) fn resolve_from_agent(server: &MemoryServer) -> String {
     fallback_agent_id(current_agent_id(server))
 }
+
+/// Server-side identity resolution for the sticky DELIVERY path (briefing
+/// inclusion + `sticky_check`), mirroring the same three-step chain
+/// `sticky_leave` already trusts via `resolve_from_agent` above (CP2,
+/// opus xhigh review of #964/PR #1003).
+///
+/// `sticky_leave` resolves `from_agent` server-side; the delivery path used
+/// to trust ONLY the caller-supplied `params.agent_id`, with no fallback —
+/// so a worker briefing call with no `agent_id` param was silently treated
+/// as the leader and consumed broadcast (`to`-absent) stickies meant for the
+/// real leader.
+///
+/// Chain: `params.agent_id` -> server-side `agent_profile.agent_id` ->
+/// `TACHI_PROFILE` env var -> `None` (leader). The middle link
+/// (`agent_profile`) is expected to be structurally `None` once #973 retires
+/// `agent_register` at runtime; it is kept here only because this function
+/// mirrors the exact chain `handoff_ops::identity` already uses, and because
+/// a future non-dispatch caller could still populate it. Dispatch-bound
+/// worker seats get `TACHI_PROFILE` injected by the dispatch harness;
+/// handcrafted worker sessions calling the MCP tool directly must pass
+/// `agent_id` explicitly (or address via `to:`) — otherwise they resolve to
+/// `None` (leader) here, same as an identity-less caller.
+pub(crate) fn resolve_caller_agent_id(
+    server: &MemoryServer,
+    params_agent_id: Option<&str>,
+) -> Option<String> {
+    params_agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| current_agent_id(server))
+        .or_else(|| non_empty_env("TACHI_PROFILE"))
+}

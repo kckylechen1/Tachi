@@ -201,10 +201,19 @@ pub(crate) async fn handle_memory_briefing(
         // #3/#4) — worker seats only see stickies explicitly addressed to
         // their seat name. Inclusion here IS the read: each row returned is
         // atomically claimed (read-once) as a side effect.
+        //
+        // CP2: identity is resolved server-side (params.agent_id ->
+        // agent_profile -> TACHI_PROFILE env -> leader), NOT trusted from
+        // params.agent_id alone — an unauthenticated/param-less worker
+        // briefing call must not be silently treated as the leader and
+        // consume broadcast (`to`-absent) stickies meant for the real
+        // leader. See sticky_ops::identity::resolve_caller_agent_id.
         async {
+            let resolved_agent_id =
+                crate::sticky_ops::resolve_caller_agent_id(server, params.agent_id.as_deref());
             crate::sticky_ops::claim_unread_stickies_for_briefing(
                 server,
-                params.agent_id.as_deref(),
+                resolved_agent_id.as_deref(),
                 sticky_cap,
             )
         },

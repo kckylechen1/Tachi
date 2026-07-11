@@ -1,9 +1,10 @@
 use chrono::Utc;
 use serde_json::json;
 
+use crate::memory_search_ops::{scrub_secrets, scrub_think_tags};
 use crate::MemoryServer;
 
-use super::identity::resolve_from_agent;
+use super::identity::{resolve_caller_agent_id, resolve_from_agent};
 use super::memo::{sticky_to_memory_entry, StickyMemo};
 use super::pending::list_or_claim_stickies;
 
@@ -25,11 +26,20 @@ pub(crate) async fn handle_sticky_leave(
     let from_agent = resolve_from_agent(server);
     let ttl_days = input.ttl_days.unwrap_or(DEFAULT_TTL_DAYS).max(1);
 
+    // CP4 (security): scrub before persisting — sticky bodies are stored
+    // verbatim in the global DB and rendered verbatim into the leader
+    // briefing markdown, so a bearer token / API key / AWS key left in a
+    // sticky body must never round-trip raw. Mirrors
+    // memory_search_ops::save_memory::handler::handle_save_memory's
+    // scrub_think_tags -> scrub_secrets order.
+    let scrubbed_text = scrub_think_tags(&input.text);
+    let (safe_text, _secret_redactions) = scrub_secrets(&scrubbed_text);
+
     let memo = StickyMemo {
         id: uuid::Uuid::new_v4().to_string(),
         from_agent: from_agent.clone(),
         to: input.to.clone(),
-        text: input.text.clone(),
+        text: safe_text,
         created_at: Utc::now().to_rfc3339(),
         ttl_days,
     };
@@ -57,9 +67,12 @@ pub(crate) async fn handle_sticky_check(
     server: &MemoryServer,
     input: StickyCheckInput,
 ) -> Result<String, String> {
-    let agent_id = input.agent_id.as_deref();
+    // CP2: resolve identity server-side (params.agent_id -> agent_profile ->
+    // TACHI_PROFILE env -> leader), same chain sticky_leave already trusts
+    // via resolve_from_agent — see identity::resolve_caller_agent_id.
+    let agent_id = resolve_caller_agent_id(server, input.agent_id.as_deref());
     let limit = input.limit.unwrap_or(10);
-    let rows = list_or_claim_stickies(server, agent_id, input.include_read, limit)?;
+    let rows = list_or_claim_stickies(server, agent_id.as_deref(), input.include_read, limit)?;
 
     serde_json::to_string(&json!({
         "count": rows.len(),

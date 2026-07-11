@@ -21,6 +21,16 @@
 //!    via `include_read=true`.
 //! 7. Replaces the retired kanban trio / handoff_leave semantics for this use
 //!    case — no permanent board CRUD.
+//!
+//! Crash-safety (CP3, opus xhigh review of PR #1003): the hard_state CAS
+//! claim and the memory-row status mirror are two non-transactional writes.
+//! The CAS runs first (it alone decides the single winner); delivery to the
+//! current caller is decided immediately after winning the CAS, before the
+//! row-mirror write, and the row-mirror write's failure is logged, not
+//! fatal — so a crash there can never silently and permanently drop a
+//! sticky (see `pending::claim_unread_stickies_for_briefing` for the full
+//! reasoning: a real cross-store transaction was not practical without
+//! expanding `memcore`'s `MemoryStore` API).
 
 mod claim;
 mod gc;
@@ -39,6 +49,7 @@ pub(crate) use gc::gc_expired_sticky_memories;
 pub(crate) use handlers::{
     handle_sticky_check, handle_sticky_leave, StickyCheckInput, StickyLeaveInput,
 };
+pub(crate) use identity::resolve_caller_agent_id;
 pub(crate) use pending::claim_unread_stickies_for_briefing;
 
 #[cfg(test)]
@@ -48,4 +59,4 @@ use memo::{
     sticky_from_entry, sticky_row_is_unread, sticky_ttl_expired, sticky_visible_to, StickyMemo,
 };
 #[cfg(test)]
-use pending::{all_sticky_entries, list_or_claim_stickies};
+use pending::{all_sticky_entries, list_or_claim_stickies, mark_claimed};
