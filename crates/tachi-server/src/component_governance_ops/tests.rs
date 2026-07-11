@@ -203,21 +203,30 @@ async fn component_check_classifies_tachi_checkout_as_kernel_drift() {
     assert_eq!(parsed["status"], json!("completed"));
     // The remote matches kckylechen1/tachi. Both tachi-memory-kernel and
     // tachi-event-projection-bridge share that owner_repo, so the classifier
-    // must tie-break to the strongest match. Since the remote matches BOTH
-    // equally (both Remote-strength), the kernel record wins by path-specificity:
-    // it declares crates/memcore (which exists) and is the canonical surface.
-    // We assert it matched ONE of the two kckylechen1/tachi records (not a
-    // wrong owner) and that the matched_component_id is correct, with no
-    // evidence gaps (remote match = confident).
+    // must tie-break to the strongest match. Both are Remote-strength, so the
+    // path_match_count tie-break decides between them: the kernel fixture
+    // declares `crates/memcore; crates/tachi-server;
+    // docs/.../kernel-surface-v1.fixture.json` — all 3 subpaths exist under
+    // this checkout — while the bridge's owner_path
+    // (`crates/tachi-server event projection and continuity paths`) is a
+    // single prose phrase with no `;` separator and contains spaces, so it is
+    // filtered out entirely by the path-match scan (0 matched subpaths).
+    // 3 > 0 is not a fragile near-tie: on this fixture the kernel must win
+    // deterministically, every time — asserting "kernel_drift OR bridge" would
+    // silently tolerate the tie-break picking the wrong side (codex review,
+    // PR #1006 CP5). A synthetic fixture-level test for the tie-break
+    // mechanism itself (independent of this real checkout's fixture data)
+    // lives in `classify_repo_prefers_higher_path_match_count_on_remote_tie`
+    // below.
     let category = parsed["category"].as_str().expect("category");
     let matched = parsed["matched_component_id"].as_str().unwrap_or("(none)");
-    assert!(
-        category == CATEGORY_KERNEL_DRIFT || category == CATEGORY_BRIDGE,
-        "tachi checkout must classify as kernel_drift or bridge, got {category}"
+    assert_eq!(
+        category, CATEGORY_KERNEL_DRIFT,
+        "tachi checkout must classify as kernel_drift (count tie-break must favor the kernel's 3 matched owner_path subpaths over the bridge's 0), got {category}"
     );
-    assert!(
-        matched == "tachi-memory-kernel" || matched == "tachi-event-projection-bridge",
-        "must match a kckylechen1/tachi component, got {matched}"
+    assert_eq!(
+        matched, "tachi-memory-kernel",
+        "must match tachi-memory-kernel, got {matched}"
     );
     // Evidence-gap expectation is derived from the checkout's ACTUAL git
     // origin remote rather than hardcoded, so the test is hermetic across
@@ -255,6 +264,151 @@ async fn component_check_classifies_tachi_checkout_as_kernel_drift() {
             "expected the fork/drift evidence gap, got {gaps:?}"
         );
     }
+}
+
+/// Fixture-level, checkout-independent proof of the count tie-break itself
+/// (codex review, PR #1006 CP5): two synthetic records tied at Remote
+/// strength (same owner_repo, real git origin configured to match), one
+/// declaring 2 owner_path subpaths that exist under the checkout and the
+/// other declaring only 1. The classifier must select the higher-count
+/// record — this does not depend on the real tachi-memory-kernel /
+/// tachi-event-projection-bridge fixture data, so it stays discriminating
+/// even if that fixture's path counts ever change.
+#[test]
+fn classify_repo_prefers_higher_path_match_count_on_remote_tie() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let repo_path = temp.path();
+    run_git_readonly(repo_path, &["init"]).expect("git init");
+    run_git_readonly(
+        repo_path,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/kckylechen1/tie-break-fixture.git",
+        ],
+    )
+    .expect("git remote add");
+
+    // two_path_dirs/{a,b} exist; one_path_dir/a exists but one_path_dir/b does not.
+    std::fs::create_dir_all(repo_path.join("two_path_dirs/a")).expect("mkdir a");
+    std::fs::create_dir_all(repo_path.join("two_path_dirs/b")).expect("mkdir b");
+    std::fs::create_dir_all(repo_path.join("one_path_dir/a")).expect("mkdir c");
+
+    let records = vec![
+        json!({
+            "component_id": "fixture-two-path-matches",
+            "component_type": "kernel",
+            "owner_repo": "kckylechen1/tie-break-fixture",
+            "owner_path": "two_path_dirs/a; two_path_dirs/b",
+        }),
+        json!({
+            "component_id": "fixture-one-path-match",
+            "component_type": "workflow_bridge",
+            "owner_repo": "kckylechen1/tie-break-fixture",
+            "owner_path": "one_path_dir/a; one_path_dir/does-not-exist",
+        }),
+    ];
+
+    let (category, matched, gaps) = classify_repo(&records, repo_path, None);
+    assert_eq!(
+        category, CATEGORY_KERNEL_DRIFT,
+        "the record with more matched owner_path subpaths (2) must win the \
+         Remote-strength tie over the record with fewer (1)"
+    );
+    assert_eq!(matched.as_deref(), Some("fixture-two-path-matches"));
+    assert!(
+        gaps.is_empty(),
+        "a Remote-strength match must carry no evidence gaps, got {gaps:?}"
+    );
+}
+
+/// Controlled structural proof that `classify_repo` resolves the true
+/// checkout root before evaluating owner_path evidence, adapted (rebase of
+/// PR #1006 onto main, #987/#997) for a checkout-root fix that landed on
+/// `main` independently of, and via a different mechanism than, this
+/// branch's own `nth(1)` -> `nth(2)` call-site fix. `main`'s `classify_repo`
+/// runs `git rev-parse --show-toplevel` on whatever `repo_path` the caller
+/// passes (`checkout_root` above) and walks UP to the enclosing `.git` — so
+/// a caller-supplied subdirectory INSIDE a git tree (this branch's original
+/// `nth(1)` bug shape, landing one level short of the checkout root) is
+/// transparently self-corrected regardless of the call site's ancestor-count
+/// choice. #1006's original fixture proved this by nesting the short root
+/// inside a real git repo and asserting failure at the short root — that no
+/// longer discriminates on `main`, since `checkout_root` corrects it. This
+/// version keeps the git-nested case as the PRIMARY proof (it must now
+/// SUCCEED via the walk-up — the regression this guards against is
+/// `checkout_root`'s resolution being removed or broken), and additionally
+/// proves the one shape that still cannot be corrected: a `repo_path` with
+/// NO enclosing `.git` at all, where `--show-toplevel` fails and
+/// `checkout_root` falls back to `repo_path` unresolved.
+#[test]
+fn classify_repo_path_evidence_requires_correct_checkout_root_depth() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let repo_root = temp.path();
+    run_git_readonly(repo_root, &["init"]).expect("git init");
+
+    // The kernel's real owner_path subpath, present only at the true root.
+    std::fs::create_dir_all(repo_root.join("crates/memcore")).expect("mkdir memcore");
+    // Simulate `<repo_root>/crates/tachi-server` (2 levels deep) as the
+    // caller-supplied CARGO_MANIFEST_DIR-shaped path — the original `nth(1)`
+    // bug's one-level-short resolution, still INSIDE the same git tree.
+    let nested_in_git = repo_root.join("crates").join("tachi-server");
+    std::fs::create_dir_all(&nested_in_git).expect("mkdir nested");
+    assert_ne!(
+        nested_in_git, repo_root,
+        "sanity: the simulated short-root path must differ from the true root"
+    );
+
+    let records = vec![json!({
+        "component_id": "fixture-kernel",
+        "component_type": "kernel",
+        "owner_repo": "does-not-matter-for-this-fixture/no-origin",
+        "owner_path": "crates/memcore",
+    })];
+
+    // PRIMARY proof: a subdirectory one level short of the true root, but
+    // still inside the same git tree, must classify correctly — `main`'s
+    // `checkout_root` resolves it back to `repo_root` via
+    // `git rev-parse --show-toplevel` before evaluating owner_path evidence.
+    // This is the regression guard: if that walk-up were removed or broken,
+    // `nested_in_git.join("crates/memcore")` would not exist and this would
+    // report CATEGORY_UNKNOWN instead.
+    let (nested_category, nested_matched, nested_gaps) =
+        classify_repo(&records, &nested_in_git, None);
+    assert_eq!(
+        nested_category, CATEGORY_KERNEL_DRIFT,
+        "a caller-supplied subdirectory one level short of the true root, but still \
+         inside the same git tree, must classify via checkout_root's walk-up to the \
+         real root; got matched={nested_matched:?} gaps={nested_gaps:?}"
+    );
+    assert_eq!(nested_matched.as_deref(), Some("fixture-kernel"));
+    assert!(
+        nested_gaps
+            .iter()
+            .any(|g| g.contains("git origin remote is unavailable")),
+        "a PathOnly match with no origin remote at all must surface the \
+         remote-unavailable fork/drift evidence gap, got {nested_gaps:?}"
+    );
+
+    // SECONDARY proof: a caller-supplied subdirectory with NO enclosing git
+    // tree at all is the one shape `checkout_root`'s walk-up cannot correct
+    // — `--show-toplevel` fails there and falls back to the path unresolved.
+    let no_git_temp = tempfile::tempdir().expect("temp dir (no git)");
+    let no_git_root = no_git_temp.path();
+    std::fs::create_dir_all(no_git_root.join("crates/memcore")).expect("mkdir memcore");
+    let no_git_nested = no_git_root.join("crates").join("tachi-server");
+    std::fs::create_dir_all(&no_git_nested).expect("mkdir nested");
+
+    let (short_root_category, short_root_matched, short_root_gaps) =
+        classify_repo(&records, &no_git_nested, None);
+    assert_eq!(
+        short_root_category, CATEGORY_UNKNOWN,
+        "a caller-supplied subdirectory with no enclosing git tree must fail to \
+         classify — evidence lives at the true repo root, not at `crates/tachi-server`; \
+         got matched={short_root_matched:?} gaps={short_root_gaps:?}"
+    );
+    assert!(short_root_matched.is_none());
 }
 
 #[tokio::test]
