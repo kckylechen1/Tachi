@@ -1,6 +1,6 @@
 [package]
 name = "portable-kernel"
-version = "1.8.0"
+version = "1.9.0"
 edition = "2021"
 description = "Portable Tachi memory kernel for downstream forks (HyperTachi / HyperMemory / adapters)"
 license = "AGPL-3.0-only"
