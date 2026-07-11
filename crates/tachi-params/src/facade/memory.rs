@@ -530,22 +530,32 @@ pub struct TachiMemoryParams {
     #[schemars(description = "[action=ingest] Ingest mode: \"event\" or \"source\" (default).")]
     pub ingest_type: String,
     #[serde(default)]
-    #[schemars(description = "[action=ingest|ingest_source] Optional source URL or canonical reference.")]
+    #[schemars(
+        description = "[action=ingest|ingest_source] Optional source URL or canonical reference."
+    )]
     pub source_url: Option<String>,
     #[serde(default = "default_facade_true")]
-    #[schemars(description = "[action=ingest|ingest_source] Whether to chunk long content before storage.")]
+    #[schemars(
+        description = "[action=ingest|ingest_source] Whether to chunk long content before storage."
+    )]
     pub auto_chunk: bool,
     #[serde(default = "default_facade_true")]
-    #[schemars(description = "[action=ingest|ingest_source] Whether to generate summaries for stored chunks.")]
+    #[schemars(
+        description = "[action=ingest|ingest_source] Whether to generate summaries for stored chunks."
+    )]
     pub auto_summarize: bool,
     #[serde(default = "default_facade_true")]
-    #[schemars(description = "[action=ingest|ingest_source] Whether to build graph edges against similar memories.")]
+    #[schemars(
+        description = "[action=ingest|ingest_source] Whether to build graph edges against similar memories."
+    )]
     pub auto_link: bool,
     #[serde(default = "default_facade_chunk_size_chars")]
     #[schemars(description = "[action=ingest|ingest_source] Chunk size in characters.")]
     pub chunk_size_chars: usize,
     #[serde(default = "default_facade_chunk_overlap_chars")]
-    #[schemars(description = "[action=ingest|ingest_source] Overlap between adjacent chunks in characters.")]
+    #[schemars(
+        description = "[action=ingest|ingest_source] Overlap between adjacent chunks in characters."
+    )]
     pub chunk_overlap_chars: usize,
     #[serde(default)]
     #[schemars(description = "[action=ingest] Conversation identifier for event ingestion.")]
