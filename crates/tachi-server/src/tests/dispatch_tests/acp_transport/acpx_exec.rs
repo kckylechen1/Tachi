@@ -34,6 +34,7 @@ print(json.dumps({"event": "end_turn", "final_response": "acpx done"}))
     let mut params = dispatch_params(Some("codex"), "Run through fake acpx");
     params.harness_transport = Some("acpx".to_string());
     params.cwd = Some(temp_home.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
     params.timeout_secs = 5;
 
     let response = crate::dispatch_ops::handle_tachi_dispatch(&server, params)

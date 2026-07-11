@@ -73,6 +73,11 @@ pub(super) async fn handle_dispatch_action(
             profile: params.profile.clone(),
             task: prompt,
             cwd: params.cwd.clone(),
+            // Shell dispatch supplies a bare cwd; declare it unmanaged so the
+            // fail-safe env gate accepts it and stamps `env: unmanaged` (#894
+            // S1 §1.3 escape hatch until an env_id bridge exists here).
+            env_id: None,
+            unmanaged_cwd: Some(true),
             skills: Vec::new(),
             context_query: None,
             model: None,

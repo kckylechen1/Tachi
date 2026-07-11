@@ -261,7 +261,24 @@ pub(crate) async fn handle_tachi_dispatch(
         host_adapter,
     } = resolve_dispatch_start(server, &mut params, now)?;
 
-    // 0. Validate `params.sandbox` before ANY stage/preflight/spawn work.
+    // 0a. Resolve the execution-environment binding through the fail-safe gate
+    // (#894 S1) before ANY workspace/preflight/spawn work. env_id → cwd from the
+    // managed lease; a bare cwd is rejected unless explicitly opted-in as
+    // unmanaged. The resolved cwd replaces params.cwd for all downstream use
+    // (status ledger, completion predicate, launcher), and the resolution is
+    // stamped into status.json so the ledger records managed/unmanaged/default.
+    let env_resolution = server.resolve_dispatch_env_binding(
+        params.env_id.as_deref(),
+        params.cwd.as_deref(),
+        params.unmanaged_cwd.unwrap_or(false),
+    )?;
+    if let Some(resolved_cwd) = env_resolution.cwd() {
+        params.cwd = Some(resolved_cwd.to_string());
+    }
+    let env_stamp = env_resolution.stamp();
+    let env_id_stamp = env_resolution.env_id().map(str::to_string);
+
+    // 0b. Validate `params.sandbox` before ANY stage/preflight/spawn work.
     let harness_transport = effective_harness_transport(&params, &agent_norm);
     validate_dispatch_sandbox_at_entry(&agent_norm, &harness_transport, params.sandbox.as_deref())?;
 
@@ -398,6 +415,11 @@ pub(crate) async fn handle_tachi_dispatch(
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
             // machine-verify self-reported / exit-0 success against a contract.
             "cwd": params.cwd.clone(),
+            // #894 S1: record how the working directory was bound so the ledger
+            // distinguishes managed (leased) envs from opted-in unmanaged cwds
+            // and the daemon default.
+            "env": env_stamp,
+            "env_id": env_id_stamp,
             "completion_predicate":
                 serde_json::to_value(&params.completion_predicate).unwrap_or(Value::Null),
         })),

@@ -144,7 +144,8 @@ pub(crate) async fn handle_tachi_gh(
                 params.allow_umbrella_close,
             )?;
             let client = gh_client_for_server(server)?;
-            handle_github_safe_merge(
+            let worktree_for_lease = params.worktree.clone();
+            let out = handle_github_safe_merge(
                 &client,
                 &target.repo,
                 target.number,
@@ -156,7 +157,18 @@ pub(crate) async fn handle_tachi_gh(
                 params.worktree.as_deref(),
                 params.reclaim_worktree.unwrap_or(true),
             )
-            .await
+            .await?;
+            // #894 S1: the exec_envs lease is the single owner of a managed env.
+            // When safe_merge reclaimed the local worktree, flip the lease
+            // through the one reclaim path — best-effort and idempotent (a
+            // worktree with no lease is a no-op; the sweep is the backstop, not
+            // a second owner). Never fails the already-successful merge.
+            if let Some(worktree) = worktree_for_lease.as_deref() {
+                if safe_merge_reclaimed_worktree(&out) {
+                    let _ = server.reclaim_exec_env_for_worktree(worktree, Some("safe_merge"));
+                }
+            }
+            Ok(out)
         }
         "ship" => handle_github_ship(server, &params).await,
         "link_pr" => {
@@ -219,6 +231,20 @@ pub(crate) async fn handle_tachi_gh(
 /// own JSON shape untouched, same as before this fix.
 fn is_lifecycle_action(action: &str) -> bool {
     matches!(action, "link_pr" | "pr_status" | "pr_handoff" | "release_note")
+}
+
+/// True iff a safe_merge response envelope reports that it genuinely reclaimed
+/// the local worktree (`reclamation.reclaimed == true`). Used to gate the
+/// exec_envs lease flip (#894 S1) on an actual fs reclamation, not a skip.
+fn safe_merge_reclaimed_worktree(envelope: &str) -> bool {
+    serde_json::from_str::<Value>(envelope)
+        .ok()
+        .and_then(|v| {
+            v.get("reclamation")
+                .and_then(|r| r.get("reclaimed"))
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or(false)
 }
 
 fn required_repo(params: &TachiGhParams, action: &str) -> Result<String, String> {

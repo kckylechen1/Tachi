@@ -30,6 +30,8 @@ async fn dispatch_rejects_unknown_agent_with_fleet_hint() {
             profile: None,
             task: "noop".to_string(),
             cwd: None,
+            env_id: None,
+            unmanaged_cwd: None,
             skills: Vec::new(),
             context_query: None,
             model: None,

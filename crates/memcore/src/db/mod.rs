@@ -5,6 +5,8 @@ mod daily_pipeline;
 mod doctor_probe;
 mod event_ledger;
 #[cfg(feature = "admin")]
+pub mod exec_env;
+#[cfg(feature = "admin")]
 pub mod foundry_config;
 #[cfg(feature = "admin")]
 pub mod foundry_jobs;

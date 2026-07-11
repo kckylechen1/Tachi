@@ -50,6 +50,11 @@ pub use db::foundry_jobs::{
     update_foundry_job_status_with_reason, FoundryJobLease, FoundryJobSummary, FoundryRetryPolicy,
     JobStatusHistogram, PersistedFoundryJob, RequeueOutcome,
 };
+#[cfg(feature = "admin")]
+pub use db::exec_env::{
+    find_active_exec_env_by_path, get_exec_env, insert_exec_env, list_exec_envs, reclaim_exec_env,
+    ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, ReclaimOutcome,
+};
 pub use db::row_to_entry;
 pub use db::{CategoryPathPrefixMemoryRow, FoundryJobStatusCounts, PathPrefixMemoryRow};
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};

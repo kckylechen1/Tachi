@@ -35,6 +35,7 @@ async fn dispatch_run_dir_is_created_with_0o700() {
         "print('ok')".to_string(),
     ];
     params.cwd = Some(tmp.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
 
     let raw = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
         .await
