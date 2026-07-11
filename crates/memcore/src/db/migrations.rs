@@ -628,4 +628,100 @@ mod tests {
         assert_eq!(report.domains_table_dropped, 0);
         assert!(!table_present(&conn, "domains"));
     }
+
+    /// Hold `BEGIN EXCLUSIVE` on `db_path` from a second, rollback-journal
+    /// connection until `release` fires. While held, any other connection's
+    /// read against `sqlite_master` (or any table) with `busy_timeout(0)`
+    /// fails immediately with `SQLITE_BUSY` instead of blocking — a
+    /// realistic stand-in for the transient lock/I/O/authorizer failure
+    /// #978 describes: the existence-check itself errors, rather than
+    /// legitimately finding the table absent.
+    fn hold_exclusive_lock(
+        db_path: std::path::PathBuf,
+    ) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            // Rollback journal mode (not WAL) so EXCLUSIVE blocks other
+            // connections' reads, matching the test DB created without WAL.
+            let holder = Connection::open(&db_path).expect("open lock-holder conn");
+            holder
+                .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
+                .expect("acquire exclusive lock");
+            // Touch the DB so the lock is actually taken out, not just queued.
+            holder
+                .execute_batch("CREATE TABLE IF NOT EXISTS __lock_probe(x)")
+                .expect("write under exclusive lock");
+            ready_tx.send(()).expect("signal ready");
+            let _ = release_rx.recv();
+            holder.execute_batch("ROLLBACK").expect("release lock");
+        });
+        ready_rx.recv().expect("wait for lock to be held");
+        (handle, release_tx)
+    }
+
+    #[test]
+    fn v10_propagates_existence_check_error_and_does_not_mark_sentinel() {
+        let (conn, tmp) = open_test_db();
+        drop(conn); // release our handle so the lock-holder thread can open cleanly
+
+        let (lock_thread, release) = hold_exclusive_lock(tmp.path().to_path_buf());
+
+        let locked = Connection::open(tmp.path()).expect("open under lock");
+        locked
+            .busy_timeout(std::time::Duration::from_millis(0))
+            .expect("set zero busy timeout so the lock fails fast");
+
+        let err = migrate_v10_drop_pack_tables(&locked)
+            .expect_err("existence-check error must propagate, not collapse to absent");
+        assert!(
+            err.to_string().to_lowercase().contains("lock")
+                || err.to_string().to_lowercase().contains("busy"),
+            "unexpected error shape: {err}"
+        );
+        drop(locked);
+
+        release.send(()).expect("release lock");
+        lock_thread.join().expect("lock-holder thread panicked");
+
+        // Once the lock is released, a fresh connection must show the
+        // sentinel was never written — the failed existence-check must not
+        // have let `run_data_migrations` reach `mark_run`.
+        let healthy = Connection::open(tmp.path()).expect("reopen after lock release");
+        assert!(
+            !was_run(&healthy, "v10_drop_pack_tables").unwrap(),
+            "sentinel must stay unset after a failed existence-check so the migration retries"
+        );
+    }
+
+    #[test]
+    fn v11_propagates_existence_check_error_and_does_not_mark_sentinel() {
+        let (conn, tmp) = open_test_db();
+        drop(conn);
+
+        let (lock_thread, release) = hold_exclusive_lock(tmp.path().to_path_buf());
+
+        let locked = Connection::open(tmp.path()).expect("open under lock");
+        locked
+            .busy_timeout(std::time::Duration::from_millis(0))
+            .expect("set zero busy timeout so the lock fails fast");
+
+        let err = migrate_v11_drop_domains_table(&locked)
+            .expect_err("existence-check error must propagate, not collapse to absent");
+        assert!(
+            err.to_string().to_lowercase().contains("lock")
+                || err.to_string().to_lowercase().contains("busy"),
+            "unexpected error shape: {err}"
+        );
+        drop(locked);
+
+        release.send(()).expect("release lock");
+        lock_thread.join().expect("lock-holder thread panicked");
+
+        let healthy = Connection::open(tmp.path()).expect("reopen after lock release");
+        assert!(
+            !was_run(&healthy, "v11_drop_domains_table").unwrap(),
+            "sentinel must stay unset after a failed existence-check so the migration retries"
+        );
+    }
 }

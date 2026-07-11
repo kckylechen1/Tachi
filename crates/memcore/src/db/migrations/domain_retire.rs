@@ -16,23 +16,20 @@ use crate::error::MemoryError;
 ///
 /// Returns the number of tables actually dropped (0 or 1).
 pub(super) fn migrate_v11_drop_domains_table(conn: &Connection) -> Result<usize, MemoryError> {
-    // `unwrap_or(0)` treats a failed existence-check (lock/I/O/authorizer
-    // error) as "table absent", so the sentinel below still gets written and
-    // the migration is not retried. This mirrors the same trade-off in v10's
-    // `exists()` (pack_retire.rs) — an established framework pattern here,
-    // not something specific to this migration.
-    fn exists(conn: &Connection, name: &str) -> bool {
-        let n: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
-                rusqlite::params![name],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        n > 0
+    // Propagate existence-check errors (lock/I/O/authorizer) instead of
+    // collapsing them to "table absent" — a swallowed error here would let
+    // `run_data_migrations` mark this migration's sentinel as run even
+    // though the DROP never ran, permanently skipping the retry (#978).
+    fn exists(conn: &Connection, name: &str) -> Result<bool, MemoryError> {
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+            rusqlite::params![name],
+            |row| row.get(0),
+        )?;
+        Ok(n > 0)
     }
 
-    if exists(conn, "domains") {
+    if exists(conn, "domains")? {
         conn.execute_batch("DROP TABLE domains")?;
         return Ok(1);
     }
