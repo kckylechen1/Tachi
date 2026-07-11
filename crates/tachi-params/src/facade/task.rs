@@ -42,6 +42,11 @@ pub struct TachiTaskParams {
         description = "[action=plan|recommend|dispatch|route_simulate|complete|intake|ux_matrix] Task description / prompt text."
     )]
     pub task: Option<String>,
+    /// [action=dispatch] Declared side-effect level: L0 source/metadata read,
+    /// L1 temporary local state, L2 product-data diagnostics, or L3 product
+    /// data/resident runtime side effects. Omitted dispatches default to L1.
+    #[serde(default)]
+    pub execution_level: Option<super::ExecutionLevel>,
     #[serde(default)]
     #[schemars(description = "[action=plan|recommend|dispatch] Requesting agent id.")]
     pub agent_id: Option<String>,

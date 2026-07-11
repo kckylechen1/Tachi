@@ -247,6 +247,11 @@ pub(crate) async fn handle_tachi_dispatch(
     server: &MemoryServer,
     mut params: TachiDispatchParams,
 ) -> Result<String, String> {
+    // Fail before ANY run directory, workspace, prompt, or child process is
+    // created. This is the machine boundary; confirmation for a permitted L3
+    // action remains the responsibility of that action's existing gate.
+    let (host_profile, execution_level) =
+        crate::host_profile::authorize_dispatch(params.execution_level)?;
     let now = Utc::now();
     let DispatchStart {
         dispatch_id,
@@ -332,6 +337,8 @@ pub(crate) async fn handle_tachi_dispatch(
             "harness_transport": harness_transport.clone(),
             "harness_server_url": harness_server_url.clone(),
             "host_adapter": host_adapter.clone(),
+            "host_profile": host_profile.name(),
+            "execution_level": execution_level.as_str(),
             "capability_bundle": Value::Null,
             "feedback_rules": Value::Null,
             "timeout_secs": timeout_secs_for_status,
@@ -408,6 +415,8 @@ pub(crate) async fn handle_tachi_dispatch(
             "harness_transport": harness_transport.clone(),
             "harness_server_url": harness_server_url.clone(),
             "host_adapter": host_adapter.clone(),
+            "host_profile": host_profile.name(),
+            "execution_level": execution_level.as_str(),
             "capability_bundle": capability_bundle_card.clone(),
             "feedback_rules": feedback_rules_trace.clone(),
             "timeout_secs": timeout_secs_for_status,

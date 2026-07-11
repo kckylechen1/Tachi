@@ -91,6 +91,10 @@ async fn render_one(
         let mut v = serde_json::to_value(&snapshot)?;
         if let Some(obj) = v.as_object_mut() {
             obj.insert(
+                "host_profile".to_string(),
+                crate::host_profile::runtime_json(),
+            );
+            obj.insert(
                 "provider_probes".to_string(),
                 serde_json::to_value(&provider_probe_report.probes)?,
             );
@@ -105,6 +109,21 @@ async fn render_one(
 
     println!("tachi status @ {}", chrono::Utc::now().to_rfc3339());
     println!("  app_home: {}", app_home.display());
+    let host_profile = crate::host_profile::runtime_json();
+    if let Some(error) = host_profile
+        .get("configuration_error")
+        .and_then(serde_json::Value::as_str)
+    {
+        println!("  host_profile: [X] {error}");
+    } else {
+        println!(
+            "  host_profile: {} (max {})",
+            host_profile["profile"].as_str().unwrap_or("unknown"),
+            host_profile["max_execution_level"]
+                .as_str()
+                .unwrap_or("unknown")
+        );
+    }
     println!();
 
     println!("Daemon");

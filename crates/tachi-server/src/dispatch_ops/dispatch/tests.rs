@@ -10,6 +10,12 @@ struct EnvGuard {
 }
 
 impl EnvGuard {
+    fn set_value(key: &'static str, value: &str) -> Self {
+        let original = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, original }
+    }
+
     fn set_path(key: &'static str, value: &std::path::Path) -> Self {
         let original = std::env::var_os(key);
         std::env::set_var(key, value);
@@ -38,6 +44,7 @@ fn test_dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams 
         agent: agent.map(str::to_string),
         profile: None,
         task: task.to_string(),
+        execution_level: None,
         cwd: None,
         env_id: None,
         unmanaged_cwd: None,
@@ -178,6 +185,7 @@ async fn opencode_serve_dispatch_fails_fast_when_probe_auth_fails() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp home");
     let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let _host_profile = EnvGuard::set_value("TACHI_HOST_PROFILE", "development");
     let run_root = dispatch_runs_root();
     let _password = EnvGuard::remove("OPENCODE_SERVER_PASSWORD");
     let _username = EnvGuard::remove("OPENCODE_SERVER_USERNAME");
@@ -223,6 +231,8 @@ async fn opencode_serve_dispatch_fails_fast_when_probe_auth_fails() {
         serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
             .expect("status JSON");
     assert_eq!(status["state"], json!("TASK_STATE_FAILED"));
+    assert_eq!(status["host_profile"], json!("development"));
+    assert_eq!(status["execution_level"], json!("L1"));
     assert_eq!(
         status["harness_server_status"]["doc_error"],
         json!("OpenCode /doc returned HTTP 401")
@@ -400,6 +410,43 @@ async fn dispatch_rejects_bare_cwd_without_unmanaged_optin_or_env_id() {
     assert_eq!(
         run_dir_count, 0,
         "the gate must fire before any run directory is created"
+    );
+}
+
+/// #1010: an L2 request on a development machine must be rejected before the
+/// existing environment/workspace setup path can create a run directory.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn dispatch_rejects_level_above_host_profile_before_workspace_creation() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let _host_profile = EnvGuard::set_value("TACHI_HOST_PROFILE", "development");
+    let run_root = dispatch_runs_root();
+    let server = crate::tests::make_server();
+
+    let mut params = test_dispatch_params(Some("custom"), "read product diagnostics");
+    params.execution_level = Some(tachi_params::ExecutionLevel::L2);
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+
+    let err = handle_tachi_dispatch(&server, params)
+        .await
+        .expect_err("development profile must reject L2 before dispatch setup");
+    assert!(
+        err.contains("host_profile_mismatch"),
+        "unexpected error: {err}"
+    );
+    assert!(err.contains("development"), "unexpected error: {err}");
+    assert!(err.contains("L2"), "unexpected error: {err}");
+
+    let run_dir_count = std::fs::read_dir(&run_root)
+        .map(|entries| entries.filter_map(Result::ok).count())
+        .unwrap_or(0);
+    assert_eq!(
+        run_dir_count, 0,
+        "host-profile rejection must fire before any run directory exists"
     );
 }
 
