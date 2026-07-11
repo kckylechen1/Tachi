@@ -9,7 +9,6 @@
       "memory_search",
       "memory_get",
       "memory_save",
-      "memory_graph",
       "memory_runtime_info",
       "continuity_board",
       "todo_write",

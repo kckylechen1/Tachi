@@ -77,10 +77,9 @@ async fn tachi_task_ux_matrix_writes_feature_workflow_artifact() {
     )
     .expect("write verification");
 
-    let mut release_params = task_params("release_note");
+    let mut release_params = task_params("status");
     release_params.flow_id = Some(flow_id.to_string());
-    server
-        .tachi_task(Parameters(release_params))
+    crate::task_lifecycle::handle_task_release_note(&server, &release_params)
         .await
         .expect("release note should be generated");
 

@@ -86,8 +86,6 @@ pub(crate) fn explicit_project_can_cross_binding(tool_name: &str, args: &JsonObj
         | "find_similar_memory"
         | "get_memory"
         | "list_memories"
-        | "memory_graph"
-        | "get_edges"
         | "tachi_search" => true,
         "tachi_memory" => args
             .get("action")

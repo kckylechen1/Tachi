@@ -22,10 +22,10 @@
 | 检索历史 | `tachi_memory(action="search")` | 默认 hybrid（vector + FTS + graph + decay）。指定 `path_prefix` 可大幅提速。 |
 | 写入事实 | `tachi_save` | `path` 形如 `/<project>/<topic>/<subtopic>`，**不要**用 `/`。 |
 | 统一记忆面 | `tachi_memory(action=...)` | `search` / `get` / `save` / `extract_facts` / `briefing` / `ask` / `consolidate` / `progress` / `readiness`。 |
-| 任务调度 | `tachi_task(action=...)` | `plan` / `briefing` / `recommend` / `dispatch` / `complete` / `board` / `merge` / `pr_status`。 |
+| 任务调度 | `tachi_task(action=...)` | `plan` / `briefing` / `recommend` / `dispatch` / `complete` / `board` / `merge`。PR 生命周期用 `tachi_gh`。 |
 | 工作验证 | `tachi_verify(action=...)` | `start` / `record` / `status` / `board`，记录后台验证证据。 |
 | 工作 arena | `tachi_arena(action=...)` | `open` / `spawn` / `board` / `collect` / `close` / `reap` / `abort`，跟踪已派外部 Agent。主 Agent 需要派/收 subagent 时可用。 |
-| 查关联 | `tachi_memory(action="ask")` 或底层 `memory_graph` | 给 memory_id 或 query，返回邻居 + 边。 |
+| 查关联 | `tachi_memory(action="ask")` | 给 memory_id 或 query，返回邻居 + 边（底层 graph 原语已内化，非 MCP 表面）。 |
 | GitHub 生命周期 | `tachi_gh(action=...)` | issue/PR/review/safe-merge/close-loop。 |
 | 找技能 | `tachi_skill(action="discover")` | 按自然语言任务找技能。 |
 | 执行技能 | `tachi_skill(action="run")` | 入参 `skill_id` + `args`。 |

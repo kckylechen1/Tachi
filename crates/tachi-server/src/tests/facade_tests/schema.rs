@@ -173,11 +173,11 @@ fn tachi_task_action_schema_declares_feature_briefing() {
     assert!(values.contains(&json!("ux_matrix")));
     assert!(values.contains(&json!("build_references")));
     assert!(values.contains(&json!("close_loop")));
-    // F2 (#495/#913): GH PR lifecycle is canonical on tachi_gh, not primary task schema.
-    for deprecated in ["link_pr", "pr_status", "pr_handoff", "release_note"] {
+    // #757: GH PR lifecycle is tachi_gh only — not on tachi_task schema at all.
+    for removed in tachi_params::TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS {
         assert!(
-            !values.contains(&json!(deprecated)),
-            "tachi_task primary schema must not advertise {deprecated}"
+            !values.contains(&json!(*removed)),
+            "tachi_task schema must not advertise removed lifecycle action {removed}"
         );
     }
     assert_eq!(

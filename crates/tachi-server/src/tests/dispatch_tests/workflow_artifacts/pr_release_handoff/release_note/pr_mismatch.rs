@@ -2,7 +2,7 @@ use super::*;
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn tachi_task_release_note_rejects_mismatched_pr_ref_for_cached_flow_pr() {
+async fn lifecycle_release_note_rejects_mismatched_pr_ref_for_cached_flow_pr() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -45,11 +45,10 @@ async fn tachi_task_release_note_rejects_mismatched_pr_ref_for_cached_flow_pr() 
     crate::task_lifecycle::write_link_pr_artifacts(flow_id, &pr, None)
         .expect("write link_pr artifacts");
 
-    let mut params = task_params("release_note");
+    let mut params = task_params("status");
     params.flow_id = Some(flow_id.to_string());
     params.pr_ref = Some("kckylechen1/tachi#999".to_string());
-    let err = server
-        .tachi_task(Parameters(params))
+    let err = crate::task_lifecycle::handle_task_release_note(&server, &params)
         .await
         .expect_err("mismatched pr_ref should be rejected");
     assert!(

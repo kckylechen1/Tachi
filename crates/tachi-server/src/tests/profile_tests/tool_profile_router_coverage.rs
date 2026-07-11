@@ -78,17 +78,13 @@ fn bundle_count(tool_name: &str) -> usize {
 }
 
 const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
-    "add_edge",
     "chain_skills",
     "check_inbox",
-    "delete_domain",
     "delete_memory",
     "distill_trajectory",
     "dlq_list",
     "dlq_retry",
-    "get_domain",
     "get_memory",
-    "get_state",
     "hub_export_skills",
     "hub_feedback",
     "hub_get",
@@ -100,10 +96,8 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "hub_stats",
     "ingest",
     "ingest_source",
-    "list_domains",
     "memory_gc",
     "post_card",
-    "register_domain",
     "remember",
     "sandbox_check",
     "sandbox_exec_audit",
@@ -113,10 +107,10 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "sandbox_set_rule",
     "save_memory",
     "search_memory",
-    "set_state",
     "skill_evolve",
     "tachi_audit_log",
     "tachi_init_project_db",
+    "tachi_research",
     "tachi_task_brief",
     "tachi_wiki_organize",
     "vault_get",
@@ -133,6 +127,18 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "vc_register",
     "vc_resolve",
     "update_card",
+];
+
+/// #757: graph/state primitives are no longer MCP-registered. #913 deleted
+/// the in-crate handler/facade layer outright (zero remaining callers), so
+/// these names must never resurface as routed tools, bundle members, or
+/// cache-policy entries.
+const INTERNALIZED_GRAPH_STATE_MCP_NAMES: &[&str] = &[
+    "add_edge",
+    "set_state",
+    "get_state",
+    "get_edges",
+    "memory_graph",
 ];
 
 const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
@@ -293,6 +299,39 @@ fn retired_native_aliases_stay_retired() {
         assert!(
             !cacheable.contains(alias) && !invalidating.contains(alias),
             "retired native alias '{alias}' must not remain in cache policy lists"
+        );
+    }
+}
+
+/// Discrimination (#757): graph/state primitives must not reappear on the MCP
+/// router. The in-crate handler/facade layer was deleted in #913 (dead code,
+/// zero callers); only the memcore store layer (with its own live callers —
+/// auto_link, contradiction, etc.) remains.
+#[test]
+fn f757_graph_state_primitives_are_not_mcp_registered() {
+    let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
+    let cacheable: BTreeSet<&str> = crate::server_state::CACHEABLE_TOOLS
+        .iter()
+        .copied()
+        .collect();
+    let invalidating: BTreeSet<&str> = crate::server_state::CACHE_INVALIDATING_TOOLS
+        .iter()
+        .copied()
+        .collect();
+
+    for name in INTERNALIZED_GRAPH_STATE_MCP_NAMES {
+        assert!(
+            !route_names.contains(*name),
+            "internalized graph/state tool '{name}' must not be registered on the MCP router"
+        );
+        assert_eq!(
+            bundle_count(name),
+            0,
+            "internalized graph/state tool '{name}' must not appear in profile bundles"
+        );
+        assert!(
+            !cacheable.contains(name) && !invalidating.contains(name),
+            "internalized graph/state tool '{name}' must not remain in cache policy lists"
         );
     }
 }

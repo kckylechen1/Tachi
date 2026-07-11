@@ -386,18 +386,6 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             updated_by               TEXT NOT NULL DEFAULT 'default'
         );
 
-        -- Domain configuration for memory routing and per-domain GC
-        CREATE TABLE IF NOT EXISTS domains (
-            name              TEXT PRIMARY KEY,
-            description       TEXT NOT NULL DEFAULT '',
-            gc_threshold_days INTEGER,
-            default_retention TEXT,
-            default_path_prefix TEXT,
-            metadata          TEXT NOT NULL DEFAULT '{}',
-            created_at        TEXT NOT NULL DEFAULT '',
-            updated_at        TEXT NOT NULL DEFAULT ''
-        );
-
         -- Recall cache: rendered hybrid-search result rows keyed by a query
         -- context hash. Lives OUTSIDE `memories` on purpose — a prior design
         -- stored these as memory rows and they leaked into every long-lived

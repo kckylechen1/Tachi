@@ -1,8 +1,7 @@
 use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
 use crate::shared_defs::{slim_entry, slim_entry_with_enrichment};
 use crate::tool_params::{
-    ArchiveMemoryParams, DeleteDomainParams, DeleteMemoryParams, GetDomainParams, GetMemoryParams,
-    ListMemoriesParams, RegisterDomainParams,
+    ArchiveMemoryParams, DeleteMemoryParams, GetMemoryParams, ListMemoriesParams,
 };
 use crate::{DbScope, MemoryServer};
 use memcore::{GcConfig, MemoryEntry};
@@ -422,84 +421,6 @@ pub(crate) async fn handle_archive_memory(
         "archived": archived,
         "db": if archived { "global" } else { "not_found" },
         "id": params.id,
-    }))
-    .map_err(|e| format!("Failed to serialize: {}", e))
-}
-
-// ─── Domain CRUD ────────────────────────────────────────────────────────────
-
-pub(crate) async fn handle_register_domain(
-    server: &MemoryServer,
-    params: RegisterDomainParams,
-) -> Result<String, String> {
-    let domain = memcore::DomainConfig {
-        name: params.name.clone(),
-        description: params.description.unwrap_or_default(),
-        gc_threshold_days: params.gc_threshold_days,
-        default_retention: params.default_retention,
-        default_path_prefix: params.default_path_prefix,
-        metadata: params.metadata.unwrap_or(json!({})),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        updated_at: chrono::Utc::now().to_rfc3339(),
-    };
-
-    server.with_global_store(|store| {
-        store
-            .register_domain(&domain)
-            .map_err(|e| format!("Failed to register domain: {}", e))
-    })?;
-
-    serde_json::to_string(&json!({
-        "registered": true,
-        "domain": params.name,
-    }))
-    .map_err(|e| format!("Failed to serialize: {}", e))
-}
-
-pub(crate) async fn handle_get_domain(
-    server: &MemoryServer,
-    params: GetDomainParams,
-) -> Result<String, String> {
-    let domain = server.with_global_store_read(|store| {
-        store
-            .get_domain(&params.name)
-            .map_err(|e| format!("Failed to get domain: {}", e))
-    })?;
-
-    match domain {
-        Some(d) => serde_json::to_string(&d).map_err(|e| format!("Failed to serialize: {}", e)),
-        None => serde_json::to_string(&json!({ "error": "Domain not found", "name": params.name }))
-            .map_err(|e| format!("Failed to serialize: {}", e)),
-    }
-}
-
-pub(crate) async fn handle_list_domains(server: &MemoryServer) -> Result<String, String> {
-    let domains = server.with_global_store_read(|store| {
-        store
-            .list_domains()
-            .map_err(|e| format!("Failed to list domains: {}", e))
-    })?;
-
-    serde_json::to_string(&json!({
-        "count": domains.len(),
-        "domains": domains,
-    }))
-    .map_err(|e| format!("Failed to serialize: {}", e))
-}
-
-pub(crate) async fn handle_delete_domain(
-    server: &MemoryServer,
-    params: DeleteDomainParams,
-) -> Result<String, String> {
-    let deleted = server.with_global_store(|store| {
-        store
-            .delete_domain(&params.name)
-            .map_err(|e| format!("Failed to delete domain: {}", e))
-    })?;
-
-    serde_json::to_string(&json!({
-        "deleted": deleted,
-        "domain": params.name,
     }))
     .map_err(|e| format!("Failed to serialize: {}", e))
 }

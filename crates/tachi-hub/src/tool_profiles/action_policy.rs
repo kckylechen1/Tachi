@@ -139,8 +139,9 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             | "profile" | "card" | "cycle_status" | "cycle_plan" | "ux_matrix"
             | "build_references" => Some(ToolBundle::Observe),
             "complete" => Some(ToolBundle::Remember),
-            "dispatch" | "recommend" | "cancel" | "merge" | "intake" | "close_loop" | "link_pr"
-            | "pr_status" | "pr_handoff" | "release_note" => Some(ToolBundle::Coordinate),
+            "dispatch" | "recommend" | "cancel" | "merge" | "intake" | "close_loop" => {
+                Some(ToolBundle::Coordinate)
+            }
             "route_simulate" | "proposals" | "review_proposal" | "apply_proposals" => {
                 Some(ToolBundle::Operate)
             }

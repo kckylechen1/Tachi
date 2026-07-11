@@ -167,10 +167,6 @@ pub(super) async fn handle_tachi_task_facade(
             .map_err(|e| format!("serialize dispatch profiles: {e}"))
         }
         TachiTaskAction::Intake => crate::task_lifecycle::handle_task_intake(server, &params).await,
-        TachiTaskAction::LinkPr => Ok(with_gh_lifecycle_deprecation(
-            "link_pr",
-            crate::task_lifecycle::handle_task_link_pr(server, &params).await?,
-        )),
         TachiTaskAction::CycleStatus => {
             crate::task_lifecycle::handle_task_cycle_status(server, &params).await
         }
@@ -248,21 +244,6 @@ pub(super) async fn handle_tachi_task_facade(
             };
             tachi_merge_ops::handle_approve_merge(merge_params).await
         }
-        TachiTaskAction::PrStatus => {
-            let gh_params = build_task_pr_status_gh_params(&params)?;
-            Ok(with_gh_lifecycle_deprecation(
-                "pr_status",
-                crate::gh_ops::handle_tachi_gh(server, gh_params).await?,
-            ))
-        }
-        TachiTaskAction::PrHandoff => Ok(with_gh_lifecycle_deprecation(
-            "pr_handoff",
-            crate::task_lifecycle::handle_task_pr_handoff(&params)?,
-        )),
-        TachiTaskAction::ReleaseNote => Ok(with_gh_lifecycle_deprecation(
-            "release_note",
-            crate::task_lifecycle::handle_task_release_note(server, &params).await?,
-        )),
         TachiTaskAction::UxMatrix => crate::task_lifecycle::handle_task_ux_matrix(&params),
         TachiTaskAction::BuildReferences | TachiTaskAction::CloseLoop => {
             let workflow_params = TachiWorkflowParams {
@@ -333,22 +314,4 @@ fn reject_delegate_task_action(server: &MemoryServer, action: &str) -> Result<()
     Ok(())
 }
 
-/// F2 (#495/#913): keep compat execution on `tachi_task` but mark GH lifecycle
-/// as non-primary. Canonical surface is `tachi_gh(action=...)`.
-fn with_gh_lifecycle_deprecation(action: &str, body: String) -> String {
-    let notice = format!(
-        "tachi_task(action='{action}') is a compatibility alias; prefer tachi_gh(action='{action}')"
-    );
-    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&body) {
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert("deprecated_surface".to_string(), serde_json::json!(true));
-            obj.insert("canonical_tool".to_string(), serde_json::json!("tachi_gh"));
-            obj.insert("deprecation_notice".to_string(), serde_json::json!(notice));
-            if let Ok(serialized) = serde_json::to_string(&value) {
-                return serialized;
-            }
-        }
-    }
-    // Non-JSON responses: prefix a one-line notice.
-    format!("DEPRECATION: {notice}\n{body}")
-}
+

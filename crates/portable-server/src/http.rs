@@ -237,7 +237,13 @@ mod tests {
 
     fn boot() -> PortableServer {
         let store = MemoryStore::open_in_memory().expect("open_in_memory");
-        PortableServer::new(store, None, "default".to_string(), ":memory:".to_string())
+        PortableServer::new(
+            store,
+            Vec::new(),
+            None,
+            "default".to_string(),
+            ":memory:".to_string(),
+        )
     }
 
     /// Install the rustls `ring` crypto provider as the process default —
@@ -276,7 +282,10 @@ mod tests {
         )
         .await;
 
-        assert!(fire.is_ok(), "watchdog must eventually fire, not hang forever");
+        assert!(
+            fire.is_ok(),
+            "watchdog must eventually fire, not hang forever"
+        );
         // Deterministic sequence: (LIMIT-1) fails, 1 success (resets), then
         // exactly LIMIT fails to fire — 2*LIMIT probes total. If the
         // success hadn't reset the streak, it would've fired after LIMIT
@@ -325,10 +334,11 @@ mod tests {
 
         // /health answers 200 over plain HTTP.
         let health_url = format!("http://{local_addr}/health");
-        let resp = tokio::time::timeout(std::time::Duration::from_secs(5), reqwest::get(&health_url))
-            .await
-            .expect("GET /health timed out")
-            .expect("GET /health");
+        let resp =
+            tokio::time::timeout(std::time::Duration::from_secs(5), reqwest::get(&health_url))
+                .await
+                .expect("GET /health timed out")
+                .expect("GET /health");
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
         let body: serde_json::Value = resp.json().await.expect("health json");
         assert_eq!(body["status"], "ok");
@@ -343,10 +353,13 @@ mod tests {
         let mcp_url = format!("http://{local_addr}/mcp");
         let transport_config = StreamableHttpClientTransportConfig::with_uri(mcp_url);
         let transport = StreamableHttpClientTransport::from_config(transport_config);
-        let client = tokio::time::timeout(std::time::Duration::from_secs(5), ServiceExt::serve((), transport))
-            .await
-            .expect("mcp initialize timed out")
-            .expect("mcp initialize handshake");
+        let client = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ServiceExt::serve((), transport),
+        )
+        .await
+        .expect("mcp initialize timed out")
+        .expect("mcp initialize handshake");
 
         let peer = client.peer().clone();
         let tools = tokio::time::timeout(std::time::Duration::from_secs(5), peer.list_tools(None))
@@ -354,9 +367,25 @@ mod tests {
             .expect("tools/list timed out")
             .expect("tools/list");
         let names: Vec<String> = tools.tools.iter().map(|t| t.name.to_string()).collect();
+        let expected = [
+            "save",
+            "search",
+            "get",
+            "status",
+            "hapi_memory",
+            "hapi_save",
+            "hapi_search",
+            "hapi_runtime",
+            "tachi_memory",
+            "tachi_save",
+            "tachi_search",
+            "runtime_info",
+        ];
         assert!(
-            names.contains(&"save".to_string()) && names.contains(&"status".to_string()),
-            "expected the stdio tool surface (save/search/get/status) over HTTP too, got {names:?}"
+            expected
+                .iter()
+                .all(|name| names.contains(&name.to_string())),
+            "expected Quant-compatible MCP tool surface over HTTP, got {names:?}"
         );
 
         drop(client);
