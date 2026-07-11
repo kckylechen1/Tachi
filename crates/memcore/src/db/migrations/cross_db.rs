@@ -6,8 +6,12 @@ use crate::error::MemoryError;
 
 use super::{now_utc_iso, SANITY_QUARANTINE_FRACTION};
 
+/// Callers run this inside the caller's own transactional boundary — see
+/// `run_data_migrations`'s outer transaction (#984 F1) — so this no longer
+/// opens its own nested transaction (SQLite forbids nested top-level `BEGIN`;
+/// the outer transaction already gives this loop atomicity).
 pub(super) fn migrate_v4_quarantine_cross_db(
-    conn: &mut Connection,
+    conn: &Connection,
     db_label: &str,
     current_db_path: &Path,
 ) -> Result<(usize, bool), MemoryError> {
@@ -37,11 +41,10 @@ pub(super) fn migrate_v4_quarantine_cross_db(
     }
 
     let detected_at = now_utc_iso();
-    let tx = conn.transaction()?;
     let mut moved = 0usize;
     let mut after_id = String::new();
     loop {
-        let rows = fetch_cross_db_candidate_batch(&tx, &after_id, 500)?;
+        let rows = fetch_cross_db_candidate_batch(conn, &after_id, 500)?;
         if rows.is_empty() {
             break;
         }
@@ -73,11 +76,11 @@ pub(super) fn migrate_v4_quarantine_cross_db(
                     obj.insert("quarantine".into(), q);
                 }
                 let new_meta = serde_json::to_string(&meta)?;
-                tx.execute(
+                conn.execute(
                     "UPDATE memories SET path = ?1, metadata = ?2 WHERE id = ?3",
                     params![new_path, new_meta, id],
                 )?;
-                if let Err(e) = tx.execute(
+                if let Err(e) = conn.execute(
                     "UPDATE memories_fts SET path = ?1 WHERE id = ?2",
                     params![&format!("/_quarantine/cross-db{original_suffix}"), id],
                 ) {
@@ -87,7 +90,6 @@ pub(super) fn migrate_v4_quarantine_cross_db(
             }
         }
     }
-    tx.commit()?;
     Ok((moved, false))
 }
 

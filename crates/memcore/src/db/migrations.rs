@@ -16,6 +16,36 @@
 //! - v9: relocate non-empty `location` into `path` / metadata, then drop `location`
 //! - v10: drop retired skill-pack tables (`packs`, `agent_projections`)
 //! - v11: drop retired `domains` registry table (#757)
+//!
+//! ## Schema version stamp (#984)
+//!
+//! In addition to the sentinel-row idempotency above, the DB carries an
+//! integer version stamp in `PRAGMA user_version` (SQLite's canonical slot
+//! for this; unused anywhere else in this codebase prior to #984). This is a
+//! *coarse* hard-fail gate, orthogonal to the fine-grained sentinel
+//! migrations: it exists so a downstream reader (e.g. HyperMem) opening a DB
+//! written by a newer kernel fails loudly instead of silently proceeding
+//! against data/columns it doesn't understand yet.
+//!
+//! [`EXPECTED_SCHEMA_VERSION`] counts the migration sequence above: 11
+//! sentinel migrations (v1..v11) plus the pre-sentinel baseline schema (v0),
+//! so the current stamp is 11. Bump this const (and add a `vN` doc line
+//! above) whenever a new migration is appended to [`run_data_migrations`].
+//!
+//! ### Compatibility transaction widened to cover `init_schema_inner` (#984 F1 round 3)
+//!
+//! The `BEGIN IMMEDIATE`/stamp boundary described above was originally scoped
+//! to just this module's sentinel migrations. That left a hole:
+//! `schema::init_schema_with_label_mut` called `schema::init_schema_inner`
+//! (DDL + `bridge_hypertachi_memory_columns` + the standalone v6/v8/v9
+//! legacy-column work in `legacy_columns.rs`) BEFORE opening this module's
+//! transaction — so a crash between that legacy work committing and this
+//! module's stamp being written left newer schema/data on disk under an old
+//! or zero `user_version`, exactly what the gate exists to prevent. Round 3
+//! fixes this by having `init_schema_with_label_mut` open ONE outer
+//! transaction that covers `init_schema_inner` AND
+//! [`run_data_migrations_in_tx`] AND the final stamp — see that function's
+//! doc comment in `schema.rs`.
 
 use std::path::Path;
 
@@ -24,6 +54,12 @@ use rusqlite::Connection;
 use crate::error::MemoryError;
 
 use super::common::now_utc_iso;
+
+/// Current schema version stamp, persisted via `PRAGMA user_version`.
+///
+/// See the module doc comment ("Schema version stamp (#984)") for what this
+/// counts and when to bump it.
+pub const EXPECTED_SCHEMA_VERSION: u32 = 11;
 
 mod basic;
 mod cross_db;
@@ -62,14 +98,120 @@ pub struct MigrationReport {
     pub domains_table_dropped: usize,
 }
 
+/// Read the schema version stamp (`PRAGMA user_version`). Absent/fresh DBs
+/// read back `0`.
+pub fn read_schema_version(conn: &Connection) -> Result<u32, MemoryError> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    Ok(version.max(0) as u32)
+}
+
+/// Persist `version` as the schema version stamp (`PRAGMA user_version`).
+///
+/// `PRAGMA` statements don't accept bound parameters, so the value is
+/// interpolated directly; it is always a `u32` we control (never
+/// attacker-controlled input), so this is not a SQL-injection surface.
+fn write_schema_version(conn: &Connection, version: u32) -> Result<(), MemoryError> {
+    conn.execute_batch(&format!("PRAGMA user_version = {version}"))?;
+    Ok(())
+}
+
+/// Stamp the current [`EXPECTED_SCHEMA_VERSION`]. Exposed to `schema.rs` so
+/// `init_schema_with_label_mut` can write the final stamp itself, inside the
+/// SAME outer transaction it opened for `init_schema_inner`'s legacy work —
+/// see that function's doc comment (#984 F1 round 3) for why the stamp can no
+/// longer be delegated to the public [`run_data_migrations`] wrapper (that
+/// wrapper opens its OWN transaction, which would either double-BEGIN or
+/// leave `init_schema_inner`'s earlier legacy mutations outside the window
+/// this stamp is meant to cover).
+pub(crate) fn write_schema_version_stamp(conn: &Connection) -> Result<(), MemoryError> {
+    write_schema_version(conn, EXPECTED_SCHEMA_VERSION)
+}
+
+/// Hard-fail gate: refuse to open/operate on a DB stamped with a schema
+/// version newer than this kernel supports. Called at the top of
+/// [`run_data_migrations`] (i.e. from `init_schema_with_label_mut`'s entry
+/// path), before any migration touches the DB.
+///
+/// - stamped version > `EXPECTED_SCHEMA_VERSION` → hard error, never proceed.
+/// - stamped version <= `EXPECTED_SCHEMA_VERSION` (including the `0` fresh/
+///   absent case) → caller proceeds to run migrations and re-stamp.
+pub fn check_schema_version_gate(conn: &Connection) -> Result<(), MemoryError> {
+    let stored = read_schema_version(conn)?;
+    if stored > EXPECTED_SCHEMA_VERSION {
+        return Err(MemoryError::InvalidArg(format!(
+            "db schema version {stored} newer than supported {EXPECTED_SCHEMA_VERSION}"
+        )));
+    }
+    Ok(())
+}
+
 /// Run all data-fix migrations in order. Idempotent.
 ///
 /// `db_label` is the manifest role/project label for this DB ("global",
 /// "wiki", a project name, or "unknown"). `current_db_path` is the canonical
 /// filesystem path to this DB file (used by v4 to detect rows whose
 /// `metadata.provenance.db_path` points elsewhere).
+///
+/// Enforces the [`EXPECTED_SCHEMA_VERSION`] hard-fail gate on entry (a stored
+/// version newer than this kernel supports errors out before any migration
+/// runs) and stamps the current version on successful exit — fresh DBs
+/// (version 0/absent), DBs at an older version, and DBs already at the
+/// current version all end this call stamped at `EXPECTED_SCHEMA_VERSION`.
+///
+/// This function is `pub` (downstream callers may invoke it directly, outside
+/// `init_schema_with_label_mut`), so it is unconditionally transactional on
+/// its own: it opens its own `BEGIN IMMEDIATE` here and commits only after
+/// every migration and the version stamp have succeeded, exactly as it did
+/// before #984 F1 round 3. What changed in round 3 is the PUBLIC ENTRY POINT
+/// (`init_schema_with_label_mut`): that function no longer calls this
+/// function. It calls [`run_data_migrations_in_tx`] directly against its OWN
+/// outer transaction — one that also covers `init_schema_inner`'s legacy
+/// v6/v8/v9 work, which used to commit standalone before this transaction
+/// even opened (the original compatibility hole this round fixes). Called
+/// standalone (this function), the boundary here still only covers the
+/// sentinel migrations, not `init_schema_inner`'s DDL/legacy work — exactly
+/// as before; the difference is that `init_schema_with_label_mut` no longer
+/// takes this path.
+///
+/// ## Transactional compatibility boundary (#984 F1)
+///
+/// The migration effects (sentinel writes and the final `user_version` stamp
+/// included) all run inside a single `BEGIN IMMEDIATE` transaction opened
+/// here and committed only after every migration and the version stamp have
+/// succeeded. A crash or error partway through rolls the *entire* call back
+/// — there is no window where the DB is left partially migrated but still
+/// carrying an old/zero version stamp (which would let an older kernel pass
+/// [`check_schema_version_gate`] against data it doesn't understand).
+/// `PRAGMA user_version` is a page in the database header and is journaled
+/// like any other write, so it participates in the same rollback as the
+/// schema/data changes (see `stamp_and_migration_effects_roll_back_together`
+/// in the test module for a fault-injection proof).
 pub fn run_data_migrations(
     conn: &mut Connection,
+    db_label: &str,
+    current_db_path: &Path,
+) -> Result<MigrationReport, MemoryError> {
+    check_schema_version_gate(conn)?;
+
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let report = run_data_migrations_in_tx(&tx, db_label, current_db_path)?;
+    write_schema_version_stamp(&tx)?;
+    tx.commit()?;
+
+    Ok(report)
+}
+
+/// The actual migration sequence, run against an already-open transaction.
+/// Split out from [`run_data_migrations`] so tests can inject a failure
+/// between individual migration steps and the final stamp while still
+/// exercising the real transaction boundary.
+///
+/// Also called directly by `schema.rs`'s `init_schema_with_label_mut` (#984
+/// F1 round 3), which opens its OWN outer `BEGIN IMMEDIATE` covering
+/// `init_schema_inner`'s legacy work as well, and drives this + the final
+/// stamp against that same transaction — see that function's doc comment.
+pub(crate) fn run_data_migrations_in_tx(
+    conn: &Connection,
     db_label: &str,
     current_db_path: &Path,
 ) -> Result<MigrationReport, MemoryError> {
@@ -151,7 +293,7 @@ pub fn run_data_migrations(
 /// `run_data_migrations` relies on for every versioned migration, rather
 /// than a parallel reimplementation of the gate.
 fn apply_versioned_migration<T>(
-    conn: &mut Connection,
+    conn: &Connection,
     key: &str,
     migrate: impl FnOnce(&Connection) -> Result<T, MemoryError>,
 ) -> Result<Option<T>, MemoryError> {
@@ -653,6 +795,295 @@ mod tests {
         assert!(!table_present(&conn, "domains"));
     }
 
+    // --- #984: schema version stamp / hard-fail gate ---------------------
+
+    #[test]
+    fn schema_version_gate_errors_on_db_stamped_newer_than_supported() {
+        let (conn, _tmp) = open_test_db();
+        write_schema_version(&conn, EXPECTED_SCHEMA_VERSION + 1).unwrap();
+
+        let err = check_schema_version_gate(&conn).expect_err("newer stamp must hard-fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!(
+                "db schema version {} newer than supported {}",
+                EXPECTED_SCHEMA_VERSION + 1,
+                EXPECTED_SCHEMA_VERSION
+            )),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn fresh_db_migrates_and_ends_stamped_at_expected_version() {
+        let (mut conn, tmp) = open_test_db();
+        assert_eq!(read_schema_version(&conn).unwrap(), 0);
+
+        run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+
+        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn older_stamped_db_migrates_forward_and_re_stamps() {
+        let (mut conn, tmp) = open_test_db();
+        // A DB with an explicit older-than-current stamp (but no legacy data
+        // and no sentinels — see `unstamped_db_with_existing_sentinels_skips_and_restamps`
+        // below for the genuine "already migrated by an older kernel" case)
+        // must still migrate forward (no-op, nothing to touch) and re-stamp.
+        write_schema_version(&conn, EXPECTED_SCHEMA_VERSION - 1).unwrap();
+
+        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+
+        // No legacy tables/rows to touch on a freshly-initialized DB, so the
+        // report is all-zero; the assertion under test is the re-stamp.
+        assert_eq!(report.domains_table_dropped, 0);
+        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+    }
+
+    /// #984 F3(a): a genuine fixture for "DB last migrated by an older
+    /// kernel" — sentinel rows actually exist (inserted directly via
+    /// `mark_run`, the same mechanism the migrations themselves use) for
+    /// every migration, and the version stamp is left at 0 (as it would be
+    /// for any real DB written before #984 introduced the stamp). Unlike
+    /// `older_stamped_db_migrates_forward_and_re_stamps`, this proves the
+    /// sentinel-skip path itself, not just "nothing to migrate on a fresh DB".
+    #[test]
+    fn unstamped_db_with_existing_sentinels_skips_and_restamps() {
+        let (mut conn, tmp) = open_test_db();
+        assert_eq!(read_schema_version(&conn).unwrap(), 0);
+
+        for key in ALL_MIGRATION_SENTINEL_KEYS {
+            assert!(!was_run(&conn, key).unwrap(), "sentinel {key} pre-seeded?");
+            mark_run(&conn, key).unwrap();
+        }
+
+        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+
+        // Every migration was already marked run, so every counted field is
+        // zero — the sentinels actually skipped the work, not "there was no
+        // work regardless".
+        assert_eq!(report.paths_normalized, 0);
+        assert_eq!(report.scopes_fixed, 0);
+        assert_eq!(report.handoff_paths_standardized, 0);
+        assert_eq!(report.quarantined, 0);
+        assert_eq!(report.hypertachi_legacy_columns_dropped, 0);
+        assert_eq!(report.persons_folded_into_entities, 0);
+        assert_eq!(report.legacy_columns_reconciled, 0);
+        assert_eq!(report.persons_columns_dropped, 0);
+        assert_eq!(report.locations_relocated, 0);
+        assert_eq!(report.location_columns_dropped, 0);
+        assert_eq!(report.pack_tables_dropped, 0);
+        assert_eq!(report.domains_table_dropped, 0);
+
+        // Sentinels skipped the data work, but the version stamp — which is
+        // independent of the sentinel mechanism — still advances.
+        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn gate_is_checked_before_any_migration_runs() {
+        let (mut conn, tmp) = open_test_db();
+        write_schema_version(&conn, EXPECTED_SCHEMA_VERSION + 5).unwrap();
+
+        // init_schema_with_label_mut (the real entry point) must refuse too.
+        let result = crate::db::init_schema_with_label_mut(&mut conn, "global", tmp.path());
+        assert!(
+            result.is_err(),
+            "gate must reject via the schema.rs entry point too"
+        );
+    }
+
+    // --- #984 F2: read-only opens are gated too ---------------------------
+
+    #[test]
+    fn read_only_open_rejects_db_stamped_newer_than_supported() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        {
+            let _ = libsimple::enable_auto_extension();
+            register_sqlite_vec();
+            let conn = Connection::open(tmp.path()).expect("open");
+            let _ = try_load_sqlite_vec(&conn);
+            init_schema(&conn).expect("init_schema");
+            write_schema_version(&conn, EXPECTED_SCHEMA_VERSION + 1).unwrap();
+        }
+
+        let path = tmp.path().to_str().expect("utf8 tmp path");
+        // Match rather than expect_err: MemoryStore (the Ok variant) is not Debug,
+        // and we don't want to derive Debug on a struct holding live connections.
+        let err = match crate::MemoryStore::open_read_only(path) {
+            Ok(_) => panic!("read-only open of a newer-stamped DB must hard-fail"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!(
+                "db schema version {} newer than supported {}",
+                EXPECTED_SCHEMA_VERSION + 1,
+                EXPECTED_SCHEMA_VERSION
+            )),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn read_only_open_permits_older_stamped_db() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        {
+            let _ = libsimple::enable_auto_extension();
+            register_sqlite_vec();
+            let conn = Connection::open(tmp.path()).expect("open");
+            let _ = try_load_sqlite_vec(&conn);
+            init_schema(&conn).expect("init_schema");
+            write_schema_version(&conn, EXPECTED_SCHEMA_VERSION - 1).unwrap();
+        }
+
+        let path = tmp.path().to_str().expect("utf8 tmp path");
+        // Read-only opens never migrate; an older-stamped DB must still be
+        // readable (only NEWER-than-supported is fatal).
+        crate::MemoryStore::open_read_only(path)
+            .expect("read-only open of an older-stamped DB must succeed");
+    }
+
+    #[test]
+    fn read_only_open_permits_db_at_current_version() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        {
+            let _ = libsimple::enable_auto_extension();
+            register_sqlite_vec();
+            let conn = Connection::open(tmp.path()).expect("open");
+            let _ = try_load_sqlite_vec(&conn);
+            init_schema(&conn).expect("init_schema");
+            write_schema_version(&conn, EXPECTED_SCHEMA_VERSION).unwrap();
+        }
+
+        let path = tmp.path().to_str().expect("utf8 tmp path");
+        crate::MemoryStore::open_read_only(path)
+            .expect("read-only open at the current version must succeed");
+    }
+
+    // --- #984 F1: transactional compatibility boundary ---------------------
+
+    /// Fault-injection proof that the migration effects, sentinel writes, and
+    /// final `user_version` stamp are one atomic unit: force a failure after
+    /// several migrations have run (and been marked) but before the final
+    /// stamp, and assert BOTH the schema/data changes and the stamp are
+    /// rolled back together — not just the stamp.
+    #[test]
+    fn stamp_and_migration_effects_roll_back_together() {
+        let (mut conn, tmp) = open_test_db();
+        // Seed a legacy `packs` table so v10 has real, observable work to do
+        // (and roll back) rather than being a no-op.
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS packs (id TEXT PRIMARY KEY, name TEXT);")
+            .unwrap();
+        assert_eq!(read_schema_version(&conn).unwrap(), 0);
+
+        // Run migrations for real up through a known point, then simulate a
+        // crash by rolling back the outer transaction ourselves instead of
+        // letting `run_data_migrations` commit — this stands in for "the
+        // process dies between the migrations and the final PRAGMA write",
+        // which we cannot deterministically inject through the public API
+        // without a fault-injection connection wrapper. What this proves:
+        // the migration effects (sentinel rows, `packs` table drop) and the
+        // version stamp live in the SAME transaction, so any rollback of
+        // that transaction — crash or otherwise — takes both together. If
+        // they were separate autocommit statements (the pre-fix behavior),
+        // this rollback would be a no-op on already-committed sub-steps.
+        {
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            let report = run_data_migrations_in_tx(&tx, "global", tmp.path()).unwrap();
+            assert_eq!(report.pack_tables_dropped, 1, "v10 should have real work here");
+            write_schema_version(&tx, EXPECTED_SCHEMA_VERSION).unwrap();
+            // Do NOT commit — roll back instead, simulating the crash.
+            tx.rollback().unwrap();
+        }
+
+        // Both the data effect (packs table still present) and the sentinel
+        // (v10 not marked run) and the version stamp (still 0) must have
+        // rolled back together.
+        assert_eq!(
+            read_schema_version(&conn).unwrap(),
+            0,
+            "version stamp must roll back with the migration effects"
+        );
+        assert!(
+            !was_run(&conn, "v10_drop_pack_tables").unwrap(),
+            "sentinel must roll back with the migration effects"
+        );
+        let packs_still_present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='packs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            packs_still_present, 1,
+            "packs table drop must roll back with the version stamp"
+        );
+
+        // And a real run (commit path) now proceeds cleanly from scratch.
+        let report2 = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+        assert_eq!(report2.pack_tables_dropped, 1);
+        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+    }
+
+    // --- #984 F3(e): EXPECTED_SCHEMA_VERSION invariant ----------------------
+
+    /// All sentinel keys `run_data_migrations` gates on, in the same order
+    /// the runner checks them. Shared by the "genuine existing sentinels"
+    /// fixture above and the invariant test below so both stay in lockstep
+    /// with the runner's actual migration list.
+    const ALL_MIGRATION_SENTINEL_KEYS: &[&str] = &[
+        "v1_path_normalize_legacy",
+        "v2_scope_self_normalize",
+        "v3_handoff_path_standardize",
+        "v4_quarantine_cross_db_rows",
+        "v5_drop_hypertachi_legacy_columns",
+        "v6_fold_persons_into_entities",
+        "v7_reconcile_legacy_memory_columns",
+        "v8_drop_legacy_persons_column",
+        "v9_relocate_and_drop_location",
+        "v10_drop_pack_tables",
+        "v11_drop_domains_table",
+    ];
+
+    /// Ties `EXPECTED_SCHEMA_VERSION` to the migration count the runner
+    /// *itself* produces — not a hand-maintained duplicate list — by running
+    /// the real `run_data_migrations` against a fresh DB and counting the
+    /// sentinel rows it actually wrote to `hard_state`. Appending a
+    /// `v12_...` migration to `run_data_migrations_in_tx` (with its own
+    /// `mark_run` call, as every migration above does) increases this count
+    /// automatically; forgetting to bump `EXPECTED_SCHEMA_VERSION` to match
+    /// then fails this test — silently under-stamping newly-migrated DBs
+    /// would otherwise defeat the #984 gate for the new migration.
+    ///
+    /// `ALL_MIGRATION_SENTINEL_KEYS` above is a separate, hand-maintained
+    /// list used only to seed the "genuine existing sentinels" fixture; this
+    /// test intentionally does not depend on it being complete or in sync.
+    #[test]
+    fn expected_schema_version_matches_migration_count() {
+        let (mut conn, tmp) = open_test_db();
+
+        run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+
+        let sentinel_count: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM hard_state WHERE namespace = ?1",
+                params![MIGRATION_NS],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            sentinel_count, EXPECTED_SCHEMA_VERSION,
+            "EXPECTED_SCHEMA_VERSION ({EXPECTED_SCHEMA_VERSION}) must equal the number of \
+             sentinel migrations run_data_migrations actually marks run ({sentinel_count}) — \
+             bump the const (and add a vN doc line) when a new migration is appended"
+        );
+    }
     /// A deterministic stand-in for the transient lock/I/O/authorizer
     /// failure #978 describes: the existence-check QUERY itself errors,
     /// rather than legitimately finding the table absent.
@@ -739,11 +1170,11 @@ mod tests {
     /// sentinel.
     #[test]
     fn apply_versioned_migration_gates_sentinel_on_real_runner_helper() {
-        let (mut conn, _tmp) = open_test_db();
+        let (conn, _tmp) = open_test_db();
         let key = "v978_test_migration";
         assert!(!was_run(&conn, key).unwrap());
 
-        let err = apply_versioned_migration(&mut conn, key, |_conn| {
+        let err = apply_versioned_migration(&conn, key, |_conn| {
             Err::<(), MemoryError>(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
                 Some("simulated migration failure (#978)".to_string()),
@@ -760,7 +1191,7 @@ mod tests {
             "sentinel must stay unset after apply_versioned_migration's migrate fails"
         );
 
-        let ran = apply_versioned_migration(&mut conn, key, |_conn| Ok::<_, MemoryError>(42usize))
+        let ran = apply_versioned_migration(&conn, key, |_conn| Ok::<_, MemoryError>(42usize))
             .expect("succeeding migrate closure must return Ok");
         assert_eq!(ran, Some(42));
         assert!(
@@ -771,7 +1202,7 @@ mod tests {
         // Idempotent: a second call with a closure that would panic if
         // invoked proves the sentinel-already-set path skips `migrate`
         // entirely.
-        let skipped = apply_versioned_migration(&mut conn, key, |_conn| -> Result<usize, MemoryError> {
+        let skipped = apply_versioned_migration(&conn, key, |_conn| -> Result<usize, MemoryError> {
             panic!("migrate must not be invoked once the sentinel is already set")
         })
         .expect("already-run migration must short-circuit to Ok(None), not invoke migrate");
