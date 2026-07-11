@@ -15,11 +15,16 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
 /// Initialize schema and run data migrations with a known DB label and path.
 /// Backs up the DB file before migrating when the schema fingerprint has
 /// changed since the last successful init (see `maybe_backup_before_migration`).
+///
+/// Hard-fails before touching the DB (#984) if it is stamped with a schema
+/// version newer than this kernel's `EXPECTED_SCHEMA_VERSION` supports — see
+/// `crate::db::migrations::check_schema_version_gate`.
 pub fn init_schema_with_label_mut(
     conn: &mut Connection,
     db_label: &str,
     current_db_path: &Path,
 ) -> Result<crate::db::migrations::MigrationReport, MemoryError> {
+    crate::db::migrations::check_schema_version_gate(conn)?;
     maybe_backup_before_migration(conn, current_db_path)?;
     init_schema_inner(conn)?;
     let report = crate::db::migrations::run_data_migrations(conn, db_label, current_db_path)?;

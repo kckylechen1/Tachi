@@ -16,6 +16,21 @@
 //! - v9: relocate non-empty `location` into `path` / metadata, then drop `location`
 //! - v10: drop retired skill-pack tables (`packs`, `agent_projections`)
 //! - v11: drop retired `domains` registry table (#757)
+//!
+//! ## Schema version stamp (#984)
+//!
+//! In addition to the sentinel-row idempotency above, the DB carries an
+//! integer version stamp in `PRAGMA user_version` (SQLite's canonical slot
+//! for this; unused anywhere else in this codebase prior to #984). This is a
+//! *coarse* hard-fail gate, orthogonal to the fine-grained sentinel
+//! migrations: it exists so a downstream reader (e.g. HyperMem) opening a DB
+//! written by a newer kernel fails loudly instead of silently proceeding
+//! against data/columns it doesn't understand yet.
+//!
+//! [`EXPECTED_SCHEMA_VERSION`] counts the migration sequence above: 11
+//! sentinel migrations (v1..v11) plus the pre-sentinel baseline schema (v0),
+//! so the current stamp is 11. Bump this const (and add a `vN` doc line
+//! above) whenever a new migration is appended to [`run_data_migrations`].
 
 use std::path::Path;
 
@@ -24,6 +39,12 @@ use rusqlite::Connection;
 use crate::error::MemoryError;
 
 use super::common::now_utc_iso;
+
+/// Current schema version stamp, persisted via `PRAGMA user_version`.
+///
+/// See the module doc comment ("Schema version stamp (#984)") for what this
+/// counts and when to bump it.
+pub const EXPECTED_SCHEMA_VERSION: u32 = 11;
 
 mod basic;
 mod cross_db;
@@ -62,17 +83,60 @@ pub struct MigrationReport {
     pub domains_table_dropped: usize,
 }
 
+/// Read the schema version stamp (`PRAGMA user_version`). Absent/fresh DBs
+/// read back `0`.
+pub fn read_schema_version(conn: &Connection) -> Result<u32, MemoryError> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    Ok(version.max(0) as u32)
+}
+
+/// Persist `version` as the schema version stamp (`PRAGMA user_version`).
+///
+/// `PRAGMA` statements don't accept bound parameters, so the value is
+/// interpolated directly; it is always a `u32` we control (never
+/// attacker-controlled input), so this is not a SQL-injection surface.
+fn write_schema_version(conn: &Connection, version: u32) -> Result<(), MemoryError> {
+    conn.execute_batch(&format!("PRAGMA user_version = {version}"))?;
+    Ok(())
+}
+
+/// Hard-fail gate: refuse to open/operate on a DB stamped with a schema
+/// version newer than this kernel supports. Called at the top of
+/// [`run_data_migrations`] (i.e. from `init_schema_with_label_mut`'s entry
+/// path), before any migration touches the DB.
+///
+/// - stamped version > `EXPECTED_SCHEMA_VERSION` → hard error, never proceed.
+/// - stamped version <= `EXPECTED_SCHEMA_VERSION` (including the `0` fresh/
+///   absent case) → caller proceeds to run migrations and re-stamp.
+pub fn check_schema_version_gate(conn: &Connection) -> Result<(), MemoryError> {
+    let stored = read_schema_version(conn)?;
+    if stored > EXPECTED_SCHEMA_VERSION {
+        return Err(MemoryError::InvalidArg(format!(
+            "db schema version {stored} newer than supported {EXPECTED_SCHEMA_VERSION}"
+        )));
+    }
+    Ok(())
+}
+
 /// Run all data-fix migrations in order. Idempotent.
 ///
 /// `db_label` is the manifest role/project label for this DB ("global",
 /// "wiki", a project name, or "unknown"). `current_db_path` is the canonical
 /// filesystem path to this DB file (used by v4 to detect rows whose
 /// `metadata.provenance.db_path` points elsewhere).
+///
+/// Enforces the [`EXPECTED_SCHEMA_VERSION`] hard-fail gate on entry (a stored
+/// version newer than this kernel supports errors out before any migration
+/// runs) and stamps the current version on successful exit — fresh DBs
+/// (version 0/absent), DBs at an older version, and DBs already at the
+/// current version all end this call stamped at `EXPECTED_SCHEMA_VERSION`.
 pub fn run_data_migrations(
     conn: &mut Connection,
     db_label: &str,
     current_db_path: &Path,
 ) -> Result<MigrationReport, MemoryError> {
+    check_schema_version_gate(conn)?;
+
     let mut report = MigrationReport::default();
 
     if !was_run(conn, "v1_path_normalize_legacy")? {
@@ -135,6 +199,8 @@ pub fn run_data_migrations(
         report.domains_table_dropped = migrate_v11_drop_domains_table(conn)?;
         mark_run(conn, "v11_drop_domains_table")?;
     }
+
+    write_schema_version(conn, EXPECTED_SCHEMA_VERSION)?;
 
     Ok(report)
 }
@@ -627,5 +693,64 @@ mod tests {
         let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
         assert_eq!(report.domains_table_dropped, 0);
         assert!(!table_present(&conn, "domains"));
+    }
+
+    // --- #984: schema version stamp / hard-fail gate ---------------------
+
+    #[test]
+    fn schema_version_gate_errors_on_db_stamped_newer_than_supported() {
+        let (conn, _tmp) = open_test_db();
+        write_schema_version(&conn, EXPECTED_SCHEMA_VERSION + 1).unwrap();
+
+        let err = check_schema_version_gate(&conn).expect_err("newer stamp must hard-fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!(
+                "db schema version {} newer than supported {}",
+                EXPECTED_SCHEMA_VERSION + 1,
+                EXPECTED_SCHEMA_VERSION
+            )),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn fresh_db_migrates_and_ends_stamped_at_expected_version() {
+        let (mut conn, tmp) = open_test_db();
+        assert_eq!(read_schema_version(&conn).unwrap(), 0);
+
+        run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+
+        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn older_stamped_db_migrates_forward_and_re_stamps() {
+        let (mut conn, tmp) = open_test_db();
+        // Simulate a DB last migrated by an older kernel: sentinel rows exist
+        // for all migrations (so run_data_migrations is a data no-op) but the
+        // version stamp predates the #984 gate (never written -> 0), and we
+        // also exercise an explicit older-than-current stamp.
+        write_schema_version(&conn, EXPECTED_SCHEMA_VERSION - 1).unwrap();
+
+        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+
+        // No legacy tables/rows to touch on a freshly-initialized DB, so the
+        // report is all-zero; the assertion under test is the re-stamp.
+        assert_eq!(report.domains_table_dropped, 0);
+        assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn gate_is_checked_before_any_migration_runs() {
+        let (mut conn, tmp) = open_test_db();
+        write_schema_version(&conn, EXPECTED_SCHEMA_VERSION + 5).unwrap();
+
+        // init_schema_with_label_mut (the real entry point) must refuse too.
+        let result = crate::db::init_schema_with_label_mut(&mut conn, "global", tmp.path());
+        assert!(
+            result.is_err(),
+            "gate must reject via the schema.rs entry point too"
+        );
     }
 }
