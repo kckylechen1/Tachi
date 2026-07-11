@@ -2376,6 +2376,7 @@ dependencies = [
  "futures",
  "glob",
  "http",
+ "icu_properties",
  "libc",
  "libsimple",
  "memcore",

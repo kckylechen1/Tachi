@@ -357,3 +357,135 @@ SHA). What I actually verified locally, and how:
 
 HEAD after this round: `7a0b12e2`. PR comment posted:
 https://github.com/kckylechen1/tachi/pull/1007#issuecomment-4948548161
+
+## Round 4 (codex verdict on PR #1007, round-3 sanitizer STILL incomplete)
+
+Codex found round 3's `sanitize_presence_field` fix incomplete a 2nd time —
+same root cause both times: a hand-maintained enumeration under-covering the
+thing it claims to cover.
+
+1. **Backslash missing from the Markdown-metachar set**
+   (`crates/tachi-server/src/claims_ops.rs:129-131` — `MD_METACHARS`).
+   Both renderers (`agent_markdown/briefing.rs:87`,
+   `feature_briefing/markdown.rs:157`) write a fixed
+   `format!("- **{session}** → ...")`. A `session_client` ending in a bare
+   `\` used to sanitize through untouched, so the rendered text ended in
+   `\**` — a CommonMark-compliant renderer reads that as a backslash-escaped
+   literal `*` followed by one still-open `*`, so the intended closing `**`
+   never actually closes, leaving emphasis open past where the fixed
+   template intended it to end and letting the payload's own trailing
+   content re-open Markdown structure in whatever follows in the document.
+   Fixed: added `\\` to `MD_METACHARS`.
+
+2. **Hand-maintained Cf enumeration, not a category check (root fix, not a
+   2nd manual addition)** (`crates/tachi-server/src/claims_ops.rs:33-40,
+   140-158`). Round 3's `is_bidi_or_format_char` was an explicit code-point
+   list (bidi embeds/overrides, ZW joiners, BOM, soft hyphen) that covered
+   the vector's most common instances but was, by round 3's own admission in
+   this file ("no such crate is a dependency of this workspace today"), not
+   a real Unicode `General_Category` classifier — codex's round-4 finding
+   named the concrete gap: U+061C ARABIC LETTER MARK (`Cf`) is not in that
+   list and survives. Rather than add U+061C to the list (the same fix
+   shape that already failed once), replaced the function with a real
+   category lookup: `icu_properties::CodePointMapData::<GeneralCategory>::new().get(ch)
+   == GeneralCategory::Format`. `icu_properties` v2.2.0 was already resolved
+   in this workspace's dependency graph before this change (`url` → `idna`
+   → `idna_adapter` → `icu_properties`, confirmed via `cargo tree -i
+   icu_properties`); adding it as a **direct** `tachi-server` dependency at
+   the same already-locked version added exactly one edge to `Cargo.lock`
+   (`"icu_properties"` under `tachi-server`'s existing dependency list) and
+   compiled zero new crates — verified by diffing `Cargo.lock` before/after
+   and by `cargo check -p tachi-server` showing no new `Compiling` lines
+   beyond `icu_properties` itself. Uses the `compiled_data` feature (on by
+   default), which embeds Unicode Character Database tables at compile
+   time — no network fetch, no runtime data file, `no_std`+`alloc`
+   compatible. `is_bidi_or_format_char` was removed (superseded by
+   `is_unicode_format_char`), not kept alongside the new check, per the
+   mission's "root-fix it, not another manual addition" instruction.
+
+3. **Regression tests added** (`crates/tachi-server/src/claims_ops.rs`,
+   `mod tests`, "#1001 round 4" block):
+   - `sanitize_presence_field_leaves_ordinary_cjk_untouched` — pins that
+     ordinary CJK (`你好世界`) survives unchanged, proving the fix strips
+     `Cf` specifically, not "anything non-ASCII"/non-Latin (a category
+     mistake in the other direction would have silently mangled every
+     non-English presence field).
+   - `sanitize_presence_field_strips_u061c_and_other_cf_chars_by_category` —
+     the exact U+061C code point codex named, plus U+2062 INVISIBLE TIMES
+     (a `Cf` char outside round 3's enumerated ranges), both now stripped.
+   - `is_unicode_format_char_matches_cf_category_not_a_hand_list` — direct
+     classifier check against a spread of `Cf` code points from several
+     Unicode blocks (soft hyphen, ALM, BOM, invisible times, RLO) and known
+     non-`Cf` code points (ASCII letter, CJK ideograph, digit, emoji),
+     pinning the category lookup itself, not just this one call site's
+     behavior.
+   - `sanitize_presence_field_strips_backslash` — direct unit check.
+   - `backslash_terminated_payload_cannot_escape_closing_bold_in_either_renderer`
+     — end-to-end: reproduces both renderers' exact `format!("- **{session}**
+     → {target} (heartbeat {heartbeat})")` literal (same pattern as round
+     3's `malicious_claim_field_renders_inert_in_both_briefing_markdown_surfaces`)
+     with a `\`-terminated `session_client`, asserts the rendered line
+     contains no backslash at all and never produces the `\*` escape
+     sequence in either surface.
+   - Extended the existing
+     `sanitize_presence_field_neutralizes_markdown_metacharacters` test's
+     metachar loop to include `\\`.
+
+### Test evidence (round 4 — this baton's own verification)
+
+Unlike round 3, this round I DID run the real workspace test suite (not just
+a standalone `rustc` extraction) — the fix required adding a real dependency
+edge, so a standalone extraction couldn't prove it compiles/resolves against
+this workspace's actual `Cargo.lock`.
+
+- **`cargo check -p tachi-server`**: clean, no new crates compiled beyond
+  `icu_properties` v2.2.0 itself (all its own transitive deps — `idna`,
+  `idna_adapter`, `url`, `reqwest`, `rmcp` — were already being compiled for
+  other reasons).
+- **Red, standalone, before this round's fix**: extracted round-3's
+  `sanitize_presence_field` + `is_bidi_or_format_char` verbatim into a
+  scratch file, compiled with plain `rustc --edition 2021`, ran the two
+  round-4 regression inputs against it:
+  - `sanitize_presence_field("seat-a\\", 200)` → `"seat-a\\"` (backslash
+    **survives** — confirms the round-3 gap codex found).
+  - `sanitize_presence_field("seat-a\u{061C}mid\u{2062}tail", 200)` →
+    `"seat-a\u{61c}midtail"` (U+061C **survives**; U+2062 happened to already
+    be caught by round 3's `\u{2060}..=\u{2064}` range — a coincidence of
+    that one code point, not evidence of category coverage, since U+061C
+    sits outside every range in that list).
+- **Green, real workspace, after this round's fix**:
+  `cargo test -p tachi-server claims_ops::` → **22 passed, 0 failed** (all
+  pre-existing sanitize/collision tests plus all 6 new round-4 tests).
+  Re-ran after `cargo fmt` to confirm formatting didn't regress anything —
+  still 22/22.
+- **`cargo fmt -p tachi-server -- --check`**: found 4 formatting diffs in the
+  newly-added test code (line-wrapping style), ran `cargo fmt -p
+  tachi-server` to apply, re-checked clean.
+- **`cargo clippy -p tachi-server --all-targets -- -D warnings`**: clean, 0
+  warnings, 0 errors.
+- **Pre-existing, unrelated failures found while running the broader
+  suite (NOT caused by this round's change, NOT in this round's file
+  scope)**:
+  - `tachi_server::tests::claims_tests::briefing_surfaces_file_scope_collision_using_the_calling_sessions_own_declared_scope`
+    fails at HEAD `40175904` **before** this round's edit too (verified via
+    `git stash` + re-run) — the test asserts a collision warning contains
+    the literal substring `"claims_ops.rs"`, but round 3 already put `_`
+    in `MD_METACHARS`, so the file-path fixture
+    `crates/tachi-server/src/claims_ops.rs` has its underscores stripped by
+    the sanitizer the test itself exercises. Pre-existing round-3 test bug,
+    unrelated to backslash/Cf — out of this mission's scope, flagging for
+    visibility, not fixing (mission scope is the two named codex findings).
+  - `memcore::db::session_claims::tests::two_concurrent_same_identity_upserts_both_succeed_exactly_one_row`
+    is flaky (`SqliteFailure(DatabaseBusy, "automatic extension loading
+    failed")` on some runs, passes on immediate retry) — a real-thread WAL
+    concurrency test in `memcore`, outside this baton's
+    `crates/tachi-server/**` scope and outside this mission's 2 named
+    findings. Retried and confirmed it passes standalone.
+  - Full `cargo test -p tachi-server` (whole crate, not just `claims_ops::`)
+    was still running in the background at the time this file was written;
+    not included in these notes — Oz should run it fresh against the pushed
+    SHA regardless.
+- Did **not** run `cargo test -p memcore` in full, `cargo clippy` on the
+  whole workspace, or any suite outside `tachi-server`'s own — Oz's job per
+  the dispatch contract, and this baton's file scope is `tachi-server`
+  only.

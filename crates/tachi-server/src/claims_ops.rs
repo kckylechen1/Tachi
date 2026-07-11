@@ -16,6 +16,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use icu_properties::{props::GeneralCategory, CodePointMapData};
 use memcore::{ClaimSelector, NewSessionClaim, ReleaseOutcome, SessionClaim};
 
 use crate::server_state::MemoryServer;
@@ -32,50 +33,72 @@ const SANITIZE_IDENTIFIER_CAP: usize = 64;
 /// (a collision warning line, a declared file-scope path).
 const SANITIZE_TEXT_CAP: usize = 160;
 
-/// #1001 round 2 item 5 / round 3 item 5 (codex "markdown injection"
-/// finding): every presence field originates from ANOTHER session/agent's
+/// #1001 round 2 item 5 / round 3 item 5 / round 4 (codex "markdown
+/// injection" finding, now hardened a 2nd time after round 3 was found still
+/// incomplete): every presence field originates from ANOTHER session/agent's
 /// caller-supplied strings (`session_client`, `issue_ref`, `flow_id`,
 /// `branch`, `declared_file_scope`) and is interpolated verbatim into
 /// another session's briefing markdown
 /// (`agent_markdown::briefing::format_briefing`,
 /// `copilot_ops::feature_briefing::markdown::markdown_presence_section`)
-/// with no escaping or bounds. A newline, Markdown-metacharacter, or
-/// Unicode bidi/format payload in one of those fields could alter the
-/// rendered structure of a DIFFERENT session's briefing — close **bold**,
-/// open a link/HTML-shaped span, or visually reorder text via a bidi
-/// override (the injection vector the mission calls out). This is the
-/// single sanitize choke point both the board projection
-/// (`briefing_claims_board`) and the collision-warning strings
-/// (`collision_warnings`) route every caller-supplied field through before
-/// it is placed in a `serde_json::Value`/`String` that a renderer will later
-/// interpolate — so both consumers (feature-briefing markdown and the
-/// legacy `format_briefing` markdown) inherit the same sanitization from one
+/// with no escaping or bounds. A newline, Markdown-metacharacter, trailing
+/// backslash, or Unicode bidi/format payload in one of those fields could
+/// alter the rendered structure of a DIFFERENT session's briefing — close
+/// **bold**, open a link/HTML-shaped span, escape the fixed closing `**` a
+/// renderer writes, or visually reorder text via a bidi override (the
+/// injection vector the mission calls out). This is the single sanitize
+/// choke point both the board projection (`briefing_claims_board`) and the
+/// collision-warning strings (`collision_warnings`) route every
+/// caller-supplied field through before it is placed in a
+/// `serde_json::Value`/`String` that a renderer will later interpolate — so
+/// both consumers (feature-briefing markdown and the legacy
+/// `format_briefing` markdown) inherit the same sanitization from one
 /// source, rather than each renderer having to remember to escape on read.
 ///
 /// Sanitization, in order:
 /// 1. Strip ASCII control characters (including `\n`/`\r`, which is what lets
 ///    a claim's field break out of its single markdown list-item line) and
 ///    Unicode `Cc` control characters.
-/// 2. Strip Unicode `Cf` (format) characters — bidi controls (LRM/RLM,
-///    LRE/RLE/LRO/RLO, the LRI/RLI/FSI/PDI isolates), zero-width
-///    joiners/non-joiners, the BOM, soft hyphen, etc. `char::is_control()`
-///    only covers `Cc`, not `Cf` — a bidi override character is fully
+/// 2. Strip every Unicode `Cf` (format) character, by CATEGORY rather than by
+///    a hand-maintained enumeration — round 3's fix used an explicit code
+///    point list (`is_bidi_or_format_char`, since removed) that missed
+///    `Cf` characters outside the specific bidi/ZW set it enumerated (e.g.
+///    U+061C ARABIC LETTER MARK, round-4 codex finding); this is the second
+///    time a hand-maintained enumeration under-covered a category, so the
+///    fix is now a real category lookup
+///    (`icu_properties::CodePointMapData::<GeneralCategory>::new()`, the
+///    `unicode-general-category` role filled by a crate already resolved
+///    in this workspace's graph — see the `icu_properties` dependency
+///    comment in `Cargo.toml`) that covers every `Cf` code point by
+///    construction, current and future Unicode versions alike, not just the
+///    ones an author happened to enumerate. `char::is_control()` only
+///    covers `Cc`, not `Cf` — a bidi override or format character is fully
 ///    "printable" by that definition, so it survives step 1 untouched and
-///    can still reorder how the rendered line visually reads even though the
-///    underlying bytes are unchanged (`is_bidi_or_format_char`).
-/// 3. Strip Markdown-active metacharacters (`* _ \` [ ] ( ) # < > | ~`) so a
-///    claim field can never close/open emphasis, links, headings, inline
-///    HTML/autolinks, table cells, or strikethrough in a DIFFERENT session's
-///    rendered briefing — every consumer of this field renders it raw
-///    (`format!("- **{session}** → {target} ...")`), so the guarantee must
-///    live here, not be an opt-in the renderer remembers to apply.
+///    can still reorder how the rendered line visually reads, or hide
+///    payload, even though the underlying bytes are unchanged
+///    (`is_unicode_format_char`).
+/// 3. Strip Markdown-active metacharacters, INCLUDING backslash (`* _ \ ` `
+///    [ ] ( ) # < > | ~`) so a claim field can never close/open emphasis,
+///    links, headings, inline HTML/autolinks, table cells, or strikethrough
+///    in a DIFFERENT session's rendered briefing, and can never escape the
+///    renderer's own fixed closing `**` either — every consumer of this
+///    field renders it raw (`format!("- **{session}** → {target} ...")`),
+///    so a `session` value ending in a bare `\` would otherwise make the
+///    literal text end in `\**`, which a CommonMark-compliant renderer
+///    reads as an escaped literal `*` followed by one still-open `*`,
+///    leaving emphasis open past the intended closing marker (round-4
+///    codex finding: backslash was missing from the round-3 metachar set).
+///    The guarantee must live here, not be an opt-in the renderer remembers
+///    to apply.
 /// 4. Collapse to a single line (whitespace-joined), trim, then cap to `cap`
 ///    chars with a `…` suffix when truncated.
 pub(crate) fn sanitize_presence_field(raw: &str, cap: usize) -> String {
-    const MD_METACHARS: &[char] = &['*', '_', '`', '[', ']', '(', ')', '#', '<', '>', '|', '~'];
+    const MD_METACHARS: &[char] = &[
+        '*', '_', '`', '[', ']', '(', ')', '#', '<', '>', '|', '~', '\\',
+    ];
     let stripped: String = raw
         .chars()
-        .filter(|ch| !is_bidi_or_format_char(*ch))
+        .filter(|ch| !is_unicode_format_char(*ch))
         .map(|ch| {
             if ch.is_control() {
                 ' '
@@ -100,32 +123,22 @@ pub(crate) fn sanitize_presence_field(raw: &str, cap: usize) -> String {
     }
 }
 
-/// Unicode `Cf` (format) characters relevant to a text-structural/bidi
-/// injection vector — `char::is_control()` in Rust corresponds to Unicode
-/// `Cc` only, so these must be checked separately. Covers the bidi controls
-/// (explicit embeddings/overrides U+202A–U+202E, marks U+200E/U+200F, the
-/// isolates U+2066–U+2069), the zero-width joiner/non-joiner (U+200C/U+200D),
-/// the zero-width space/word-joiner/invisible operators (U+200B,
-/// U+2060–U+2064), soft hyphen (U+00AD), and the byte-order mark (U+FEFF).
-/// This is a fixed, stable set (these code points have been assigned this
-/// category since early Unicode versions and are not expected to change), not
-/// a general Unicode-category classifier — sufficient for the concrete vector
-/// this guards without adding a Unicode-database dependency for one field
-/// sanitizer.
-fn is_bidi_or_format_char(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{00AD}' // soft hyphen
-            | '\u{200B}' // zero width space
-            | '\u{200C}' // zero width non-joiner
-            | '\u{200D}' // zero width joiner
-            | '\u{200E}' // left-to-right mark (LRM)
-            | '\u{200F}' // right-to-left mark (RLM)
-            | '\u{2060}'..='\u{2064}' // word joiner, invisible +/x/separator, invisible plus
-            | '\u{2066}'..='\u{2069}' // LRI, RLI, FSI, PDI (bidi isolates)
-            | '\u{202A}'..='\u{202E}' // LRE, RLE, PDF, LRO, RLO (bidi embeds/overrides)
-            | '\u{FEFF}' // BOM / zero width no-break space
-    )
+/// True iff `ch`'s Unicode `General_Category` is `Cf` (Format) — bidi
+/// controls, zero-width joiners/non-joiners, the BOM, soft hyphen, the
+/// Arabic Letter Mark (U+061C), and every other code point Unicode assigns
+/// to the Format category, current and future versions alike. Backed by
+/// `icu_properties`' compiled Unicode Character Database data
+/// (`compiled_data` feature, on by default — no network fetch, no runtime
+/// data file), not a hand-maintained enumeration: round 3 of this fix
+/// enumerated a specific bidi/zero-width code point set
+/// (`is_bidi_or_format_char`) that covered the vector's most common
+/// instances but under-covered the category itself (missed U+061C and any
+/// other `Cf` code point outside that list) — the exact "manual subset,
+/// not all `Cf`" gap codex's round-4 review called out. A real category
+/// classifier closes that gap by construction instead of by a second round
+/// of manual additions.
+fn is_unicode_format_char(ch: char) -> bool {
+    CodePointMapData::<GeneralCategory>::new().get(ch) == GeneralCategory::Format
 }
 
 /// [`sanitize_presence_field`] scoped to an `Option<&str>` identifier-shaped
@@ -705,9 +718,11 @@ mod tests {
 
     #[test]
     fn sanitize_presence_field_neutralizes_markdown_metacharacters() {
-        let raw = "**bold** [x](javascript:alert(1)) #heading <script>alert(1)</script> `code` ~~strike~~ | pipe";
+        let raw = "**bold** [x](javascript:alert(1)) #heading <script>alert(1)</script> `code` ~~strike~~ | pipe \\escaped";
         let out = sanitize_presence_field(raw, 200);
-        for meta in ['*', '_', '`', '[', ']', '(', ')', '#', '<', '>', '|', '~'] {
+        for meta in [
+            '*', '_', '`', '[', ']', '(', ')', '#', '<', '>', '|', '~', '\\',
+        ] {
             assert!(
                 !out.contains(meta),
                 "output must not contain markdown metachar {meta:?}: {out:?}"
@@ -829,5 +844,164 @@ mod tests {
         assert!(!sanitized_scope.contains('#'));
         assert!(!sanitized_scope.contains('`'));
         assert!(sanitized_scope.starts_with("seat"));
+    }
+
+    // --- #1001 round 4: backslash-escape + Cf-by-category (codex verdict:
+    // round 3's sanitizer was STILL incomplete — 2nd time the same field
+    // leaked via a hand-maintained enumeration) --------------------------
+
+    /// (a) Ordinary CJK text must pass through unchanged — proves the
+    /// sanitizer strips Unicode `Cf` (Format), not "anything non-ASCII".
+    /// A category-based Cf filter that accidentally over-broadened to
+    /// "non-ASCII" or "non-Latin" would silently mangle every non-English
+    /// session_client/branch/scope value; this pins that it does not.
+    #[test]
+    fn sanitize_presence_field_leaves_ordinary_cjk_untouched() {
+        let raw = "你好世界";
+        let out = sanitize_presence_field(raw, 200);
+        assert_eq!(out, "你好世界", "CJK letters (Lo) must survive: {out:?}");
+    }
+
+    /// (b) U+061C ARABIC LETTER MARK — the exact code point codex's round-4
+    /// review named as missing from round 3's hand-maintained bidi/format
+    /// enumeration — and a second representative `Cf` char from outside
+    /// that enumeration (U+2062 INVISIBLE TIMES) must both be stripped now
+    /// that the check is by category, not by list membership.
+    #[test]
+    fn sanitize_presence_field_strips_u061c_and_other_cf_chars_by_category() {
+        let raw = "seat-a\u{061C}mid\u{2062}tail";
+        let out = sanitize_presence_field(raw, 200);
+        assert!(
+            !out.contains('\u{061C}'),
+            "U+061C ARABIC LETTER MARK (Cf) must be stripped: {out:?}"
+        );
+        assert!(
+            !out.contains('\u{2062}'),
+            "U+2062 INVISIBLE TIMES (Cf) must be stripped: {out:?}"
+        );
+        assert_eq!(out, "seat-amidtail");
+    }
+
+    /// Direct category-classifier check: every code point in `is_unicode_format_char`'s
+    /// contract is `Cf`, verified against a small spread of known `Cf` code
+    /// points (not just the round-3 bidi/ZW subset) and known non-`Cf`
+    /// code points (ASCII letter, CJK ideograph, emoji), so the category
+    /// lookup itself — not just this one sanitizer's behavior — is pinned.
+    #[test]
+    fn is_unicode_format_char_matches_cf_category_not_a_hand_list() {
+        // Cf: soft hyphen, ALM, BOM, invisible times, RLO — spans several
+        // Unicode blocks, unlike round 3's single contiguous-range style list.
+        for cf in ['\u{00AD}', '\u{061C}', '\u{FEFF}', '\u{2062}', '\u{202E}'] {
+            assert!(
+                is_unicode_format_char(cf),
+                "{:04X} must classify as Cf",
+                cf as u32
+            );
+        }
+        // Non-Cf: ASCII letter, CJK ideograph (Lo), digit (Nd), emoji (So).
+        for non_cf in ['a', '你', '5', '🎃'] {
+            assert!(
+                !is_unicode_format_char(non_cf),
+                "{:04X} must NOT classify as Cf",
+                non_cf as u32
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_presence_field_strips_backslash() {
+        let raw = "seat\\a";
+        let out = sanitize_presence_field(raw, 200);
+        assert!(!out.contains('\\'), "{out:?}");
+    }
+
+    /// (c) end-to-end: a `session_client` ending in a bare backslash must not
+    /// be able to escape the renderer's own fixed closing `**` in EITHER
+    /// briefing render surface. Reproduces both renderers' exact
+    /// `format!("- **{session}** → {target} (heartbeat {heartbeat})")`
+    /// shape (same pattern as
+    /// `malicious_claim_field_renders_inert_in_both_briefing_markdown_surfaces`)
+    /// so this is pinned against the real production `format!` string, not
+    /// just the sanitize function in isolation.
+    #[test]
+    fn backslash_terminated_payload_cannot_escape_closing_bold_in_either_renderer() {
+        // Round-3 fix stripped Markdown metachars but NOT backslash, so this
+        // raw value used to sanitize down to a trailing `\`, and the fixed
+        // `**{session}**` wrapper would render as `**seat-a\**` — a
+        // CommonMark-compliant renderer reads a backslash-escaped literal
+        // `*` there, leaving the SECOND `*` of the closing `**` with no
+        // partner, so emphasis stays open past the intended boundary.
+        let raw_session = "seat-a\\";
+        let sanitized_session = sanitize_presence_identifier(Some(raw_session)).unwrap_or_default();
+        assert!(
+            !sanitized_session.ends_with('\\'),
+            "sanitized session must not end in a bare backslash: {sanitized_session:?}"
+        );
+
+        let board_row = serde_json::json!({
+            "session_client": sanitized_session,
+            "issue_ref": "org/repo#1",
+            "flow_id": serde_json::Value::Null,
+            "branch": "feat/x",
+            "heartbeat_at": "2026-07-12T00:00:00Z",
+        });
+
+        // Legacy `agent_markdown::format_briefing` presence row shape.
+        let legacy_line = {
+            let session = board_row
+                .get("session_client")
+                .and_then(serde_json::Value::as_str)
+                .unwrap();
+            let issue_ref = board_row
+                .get("issue_ref")
+                .and_then(serde_json::Value::as_str);
+            let heartbeat = board_row
+                .get("heartbeat_at")
+                .and_then(serde_json::Value::as_str)
+                .unwrap();
+            format!(
+                "- **{session}** → {} (heartbeat {heartbeat})",
+                issue_ref.unwrap()
+            )
+        };
+        // `feature_briefing::markdown::markdown_presence_section` row shape
+        // (identical `format!` literal in production).
+        let feature_line = {
+            let session = board_row
+                .get("session_client")
+                .and_then(serde_json::Value::as_str)
+                .unwrap();
+            let issue_ref = board_row
+                .get("issue_ref")
+                .and_then(serde_json::Value::as_str);
+            let heartbeat = board_row
+                .get("heartbeat_at")
+                .and_then(serde_json::Value::as_str)
+                .unwrap();
+            format!(
+                "- **{session}** → {} (heartbeat {heartbeat})",
+                issue_ref.unwrap()
+            )
+        };
+
+        for rendered in [&legacy_line, &feature_line] {
+            assert!(
+                rendered.starts_with("- **seat-a** →"),
+                "the renderer's own fixed closing `**` must land un-escaped \
+                 right after the session text (no stray backslash swallowing \
+                 half of it): {rendered:?}"
+            );
+            assert!(
+                !rendered.contains('\\'),
+                "no backslash from the payload may reach the rendered line at all: {rendered:?}"
+            );
+            // The literal two-char sequence `\*` (escaped asterisk) must
+            // never appear — that is the CommonMark escape that would eat
+            // one half of the closing `**`.
+            assert!(
+                !rendered.contains("\\*"),
+                "payload must never produce a backslash-escaped asterisk in the rendered line: {rendered:?}"
+            );
+        }
     }
 }
