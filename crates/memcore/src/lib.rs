@@ -29,6 +29,7 @@ pub mod namespace;
 pub mod noise;
 pub mod path_router;
 pub mod recall_config;
+pub mod relation_ontology;
 pub mod scorer;
 pub mod search;
 pub mod store;

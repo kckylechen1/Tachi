@@ -111,6 +111,79 @@ fn graph_expand_bfs() {
 }
 
 #[test]
+fn add_edge_rejects_illegal_relation() {
+    let mut conn = make_conn();
+    let e1 = make_entry("illegal-src", "source");
+    let e2 = make_entry("illegal-tgt", "target");
+    upsert(&mut conn, &e1, false).unwrap();
+    upsert(&mut conn, &e2, false).unwrap();
+
+    let edge = MemoryEdge {
+        source_id: "illegal-src".into(),
+        target_id: "illegal-tgt".into(),
+        relation: "shares_entities".into(),
+        weight: 0.5,
+        metadata: serde_json::json!({}),
+        created_at: String::new(),
+        valid_from: String::new(),
+        valid_to: None,
+    };
+    let err = add_edge(&conn, &edge).unwrap_err();
+    assert!(err.to_string().contains("shares_entities"));
+
+    // Never reached the INSERT.
+    let out = get_edges(&conn, "illegal-src", "outgoing", None).unwrap();
+    assert!(out.is_empty(), "rejected edge must not be persisted");
+}
+
+#[test]
+fn add_edge_rejects_related_to_new_writes() {
+    let mut conn = make_conn();
+    let e1 = make_entry("dep-src", "source");
+    let e2 = make_entry("dep-tgt", "target");
+    upsert(&mut conn, &e1, false).unwrap();
+    upsert(&mut conn, &e2, false).unwrap();
+
+    let edge = MemoryEdge {
+        source_id: "dep-src".into(),
+        target_id: "dep-tgt".into(),
+        relation: "related_to".into(),
+        weight: 0.5,
+        metadata: serde_json::json!({}),
+        created_at: String::new(),
+        valid_from: String::new(),
+        valid_to: None,
+    };
+    let err = add_edge(&conn, &edge).unwrap_err();
+    assert!(err.to_string().contains("related_to"));
+}
+
+#[test]
+fn add_edge_accepts_ontology_v1_and_about() {
+    let mut conn = make_conn();
+    let e1 = make_entry("ok-src", "source");
+    let e2 = make_entry("ok-tgt", "target");
+    upsert(&mut conn, &e1, false).unwrap();
+    upsert(&mut conn, &e2, false).unwrap();
+
+    for relation in ["causes", "about", "supports", "supersedes"] {
+        let edge = MemoryEdge {
+            source_id: "ok-src".into(),
+            target_id: "ok-tgt".into(),
+            relation: relation.into(),
+            weight: 0.5,
+            metadata: serde_json::json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        };
+        add_edge(&conn, &edge).unwrap_or_else(|e| panic!("{relation} should be legal: {e}"));
+    }
+    let out = get_edges(&conn, "ok-src", "outgoing", None).unwrap();
+    assert_eq!(out.len(), 4);
+}
+
+#[test]
 fn delete_cascades_edges() {
     let mut conn = make_conn();
     let e1 = make_entry("del-e1", "source");

@@ -8,6 +8,7 @@ use super::common::{normalize_utc_iso_or_now, now_utc_iso};
 use super::memory_crud::fetch_by_ids;
 
 pub fn add_edge(conn: &Connection, edge: &MemoryEdge) -> Result<(), MemoryError> {
+    crate::relation_ontology::validate_relation_for_write(&edge.relation)?;
     let created = if edge.created_at.is_empty() {
         now_utc_iso()
     } else {
