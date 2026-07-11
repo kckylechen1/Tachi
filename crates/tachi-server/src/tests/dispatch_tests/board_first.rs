@@ -57,9 +57,9 @@ impl Drop for EnvGuard {
 /// #971 review-fix (F4, second pass): `release_path` is derived from the
 /// test's isolated `TACHI_HOME`, which itself derives from the process
 /// `TMPDIR` — a directory this test does not control the naming of. The
-/// generated `RELEASE=...` assignment must therefore be quoted; an
-/// unquoted interpolation breaks under a `TMPDIR` containing spaces or
-/// shell metacharacters (real on some CI/sandboxed macOS environments).
+/// generated `RELEASE=...` assignment must therefore be a single-quoted
+/// shell literal (with embedded `'` escaped as `'\''`): double quotes stop
+/// spaces but still expand `$()`/backticks under a hostile `TMPDIR`.
 fn write_fake_claude_binary(path: &std::path::Path, mode: FakeClaudeMode) {
     use std::io::Write;
     let script = match mode {
@@ -67,8 +67,8 @@ fn write_fake_claude_binary(path: &std::path::Path, mode: FakeClaudeMode) {
             release_path,
             poll_timeout_secs,
         } => format!(
-            "#!/usr/bin/env bash\nset -e\nRELEASE=\"{release}\"\nDEADLINE=$(( $(date +%s) + {timeout} ))\nwhile [ ! -f \"$RELEASE\" ]; do\n  if [ \"$(date +%s)\" -ge \"$DEADLINE\" ]; then\n    echo 'fake claude: timed out waiting for release sentinel' 1>&2\n    exit 1\n  fi\n  sleep 0.02\ndone\ncat <<'JSON'\n{{\"result\":\"## Goal\\nboard-first test.\\n\\n## Steps\\n1. inspect\\n\\n## Files\\n- src/lib.rs\\n\\n## Validation\\n- cargo test\\n\"}}\nJSON\n",
-            release = release_path.display(),
+            "#!/usr/bin/env bash\nset -e\nRELEASE='{release}'\nDEADLINE=$(( $(date +%s) + {timeout} ))\nwhile [ ! -f \"$RELEASE\" ]; do\n  if [ \"$(date +%s)\" -ge \"$DEADLINE\" ]; then\n    echo 'fake claude: timed out waiting for release sentinel' 1>&2\n    exit 1\n  fi\n  sleep 0.02\ndone\ncat <<'JSON'\n{{\"result\":\"## Goal\\nboard-first test.\\n\\n## Steps\\n1. inspect\\n\\n## Files\\n- src/lib.rs\\n\\n## Validation\\n- cargo test\\n\"}}\nJSON\n",
+            release = release_path.display().to_string().replace('\'', "'\\''"),
             timeout = poll_timeout_secs,
         ),
         FakeClaudeMode::Fail => "#!/usr/bin/env bash\necho 'synthetic plan failure' 1>&2\nexit 1\n"
