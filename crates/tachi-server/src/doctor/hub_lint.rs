@@ -35,7 +35,7 @@ pub fn hub_capability_discovery_status_warnings(caps: &[HubCapability]) -> Vec<D
             code: "mcp_cap_missing_discovery_status".to_string(),
             path: cap.id.clone(),
             message: format!(
-                "MCP capability '{}' is enabled+approved+healthy but has no discovery_status \
+                "MCP capability '{}' is enabled+approved (health_status != 'open') but has no discovery_status \
                  stamp in its definition; it is grandfathered into `capability_callable` under \
                  the #968 option-B backward-compat carve-out instead of having passed live \
                  discovery",
