@@ -1006,7 +1006,7 @@ export const memoryHybridBridgePlugin = {
           const entryId = rawPath.replace(/^(?:shadow-store|memory)\//, "");
           const agentId = resolveAgentId((context as AgentLikeContext | undefined)?.agentId);
           const result = await runWithClient(
-            "delete_memory",
+            "memory_delete",
             async (client) => await client.deleteMemory(entryId),
             agentId,
           );

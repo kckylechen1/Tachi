@@ -49,6 +49,21 @@ fn tachi_memory_action_schema_declares_enum_values() {
         .as_array()
         .expect("action enum")
         .contains(&json!("apply_recall_proposals")));
+    // #757 fold: standalone tools re-fronted as tachi_memory actions.
+    for folded in ["delete", "gc", "doctor_scan", "ingest", "ingest_source"] {
+        assert!(
+            action["enum"]
+                .as_array()
+                .expect("action enum")
+                .contains(&json!(folded)),
+            "folded action '{folded}' must be advertised in the tachi_memory action schema"
+        );
+    }
+    assert_eq!(
+        action["enum"].as_array().expect("action enum").len(),
+        crate::tool_params::TACHI_MEMORY_ACTIONS.len(),
+        "advertised action enum must match the TACHI_MEMORY_ACTIONS inventory"
+    );
 }
 
 #[test]

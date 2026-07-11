@@ -80,7 +80,6 @@ fn bundle_count(tool_name: &str) -> usize {
 const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "chain_skills",
     "check_inbox",
-    "delete_memory",
     "distill_trajectory",
     "dlq_list",
     "dlq_retry",
@@ -94,9 +93,6 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "hub_set_active_version",
     "hub_set_enabled",
     "hub_stats",
-    "ingest",
-    "ingest_source",
-    "memory_gc",
     "post_card",
     "remember",
     "sandbox_check",

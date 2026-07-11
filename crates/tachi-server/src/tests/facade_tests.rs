@@ -57,6 +57,18 @@ fn tachi_memory_params(action: &str) -> TachiMemoryParams {
         notes: None,
         confirm: false,
         state_filter: None,
+        content: None,
+        ingest_type: "source".to_string(),
+        source_url: None,
+        auto_chunk: true,
+        auto_summarize: true,
+        auto_link: true,
+        chunk_size_chars: 1200,
+        chunk_overlap_chars: 120,
+        conversation_id: None,
+        turn_id: None,
+        event_type: None,
+        messages: Vec::new(),
     }
 }
 
@@ -65,6 +77,7 @@ mod briefing;
 mod cli_daemon;
 mod domain_adapter;
 mod event;
+mod fold_757;
 mod memory_actions;
 mod memory_search;
 mod receipt_golden;

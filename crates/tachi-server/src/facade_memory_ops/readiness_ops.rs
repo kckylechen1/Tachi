@@ -295,7 +295,7 @@ pub(crate) async fn handle_memory_readiness(
         "tachi_wiki",
         "tachi_briefing",
     ];
-    let advanced_tool_names = ["tachi_shell", "tachi_orchestrator", "tachi_doctor_scan"];
+    let advanced_tool_names = ["tachi_shell", "tachi_orchestrator"];
     let native_tools = server.native_tool_visibility();
     let total_tools = native_tools.len();
     let tool_rows = native_tools

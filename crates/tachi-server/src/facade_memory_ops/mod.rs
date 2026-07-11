@@ -235,8 +235,118 @@ pub(crate) async fn handle_tachi_memory(
         }
         "progress" => progress_ops::handle_memory_progress(server, &params).await,
         "readiness" => readiness_ops::handle_memory_readiness(server, &params).await,
+        // #757 fold: standalone memory-admin + pipeline tools re-fronted as
+        // tachi_memory actions. Each arm delegates to the SAME handler the old
+        // #[tool] entry point used — re-fronting, not re-implementation.
+        "delete" => {
+            if let Some(body) =
+                crate::cli_client::maybe_forward_server_write(server, "tachi_memory", &params)
+                    .await?
+            {
+                return Ok(body);
+            }
+            let id = params
+                .id
+                .clone()
+                .ok_or_else(|| "id is required when action='delete'".to_string())?;
+            crate::memory_ops::handle_delete_memory(
+                server,
+                crate::tool_params::DeleteMemoryParams {
+                    id,
+                    project: params.project.clone(),
+                },
+            )
+            .await
+        }
+        "gc" => crate::memory_ops::handle_memory_gc(server).await,
+        "doctor_scan" => crate::doctor_ops::handle_tachi_doctor_scan().await,
+        "ingest" => {
+            crate::pipeline_ops::handle_ingest(
+                server,
+                crate::tool_params::IngestParams {
+                    ingest_type: params.ingest_type.clone(),
+                    content: params.content.clone(),
+                    source_url: params.source_url.clone(),
+                    source: params.source.clone(),
+                    path_prefix: params.path_prefix.clone(),
+                    auto_chunk: params.auto_chunk,
+                    auto_summarize: params.auto_summarize,
+                    auto_link: params.auto_link,
+                    importance: params.importance.unwrap_or(0.7),
+                    scope: params
+                        .scope
+                        .clone()
+                        .unwrap_or_else(|| "project".to_string()),
+                    project: params.project.clone(),
+                    domain: params.domain.clone(),
+                    chunk_size_chars: params.chunk_size_chars,
+                    chunk_overlap_chars: params.chunk_overlap_chars,
+                    conversation_id: params.conversation_id.clone(),
+                    turn_id: params.turn_id.clone(),
+                    event_type: params.event_type.clone(),
+                    messages: params.messages.clone(),
+                    metadata: params.metadata.clone(),
+                },
+            )
+            .await
+        }
+        "ingest_source" => {
+            // #757-fold fix (gpt-5.6-terra review): the standalone
+            // `ingest_source` tool required `content: String` — a missing or
+            // non-string `content` failed deserialization before the handler
+            // ever ran (tachi-params/src/memory/ingest.rs `IngestSourceParams`).
+            // The fold silently widened that to "any JSON value, coerced to
+            // text, defaulting to empty on omission" — restore the original
+            // boundary: reject omission and non-string content with a clear
+            // error instead of coercing. (Handler-level whitespace/empty
+            // *string* content is still a legitimate, deterministic no-op
+            // "skipped" response — that behavior belongs to
+            // `handle_ingest_source` itself, see
+            // `ingest_source_empty_content_records_skip_audit`, and is
+            // unaffected by this type-level check.)
+            let content = match params.content.clone() {
+                Some(serde_json::Value::String(text)) => text,
+                Some(_) => {
+                    return Err(
+                        "content must be a string when action='ingest_source' (matches the \
+                         standalone ingest_source tool's required content: String contract)"
+                            .to_string(),
+                    )
+                }
+                None => {
+                    return Err(
+                        "content is required when action='ingest_source' (matches the \
+                         standalone ingest_source tool's required content: String contract)"
+                            .to_string(),
+                    )
+                }
+            };
+            crate::pipeline_ops::handle_ingest_source(
+                server,
+                crate::tool_params::IngestSourceParams {
+                    content,
+                    source_url: params.source_url.clone(),
+                    source: params.source.clone(),
+                    path_prefix: params.path_prefix.clone(),
+                    auto_chunk: params.auto_chunk,
+                    auto_summarize: params.auto_summarize,
+                    auto_link: params.auto_link,
+                    importance: params.importance.unwrap_or(0.7),
+                    scope: params
+                        .scope
+                        .clone()
+                        .unwrap_or_else(|| "project".to_string()),
+                    project: params.project.clone(),
+                    domain: params.domain.clone(),
+                    chunk_size_chars: params.chunk_size_chars,
+                    chunk_overlap_chars: params.chunk_overlap_chars,
+                    metadata: params.metadata.clone(),
+                },
+            )
+            .await
+        }
         _ => Err(format!(
-            "Invalid action '{}'. Use 'search', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'recall_simulate', 'recall_proposals', 'review_recall_proposal', 'apply_recall_proposals', 'pattern_feedback', 'progress', or 'readiness'.",
+            "Invalid action '{}'. Use 'search', 'get', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'recall_simulate', 'recall_proposals', 'review_recall_proposal', 'apply_recall_proposals', 'pattern_feedback', 'progress', 'readiness', 'delete', 'gc', 'doctor_scan', 'ingest', or 'ingest_source'.",
             params.action
         )),
     }
