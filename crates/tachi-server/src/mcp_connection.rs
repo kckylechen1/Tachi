@@ -55,10 +55,12 @@ use self::env::{
 use self::env::{expand_env_placeholders, resolve_env_fallback_chain, resolve_header_map};
 use self::remote::{
     build_remote_mcp_http_client, parse_remote_mcp_jsonrpc_response, read_remote_mcp_body,
-    remote_mcp_error_summary, resolve_remote_mcp_url_with_secret_resolver,
+    remote_mcp_allow_proxy, remote_mcp_error_summary, resolve_remote_mcp_url_with_secret_resolver,
     send_remote_mcp_initialized_notification, validate_remote_mcp_url_for_connect,
 };
 #[cfg(test)]
-use self::remote::{parse_sse_payload, remote_mcp_url, validate_mcp_remote_url};
+use self::remote::{
+    parse_sse_payload, remote_mcp_url, validate_mcp_remote_url, ValidatedRemoteMcpUrl,
+};
 
 pub(crate) use self::remote::{is_bigmodel_remote_mcp, is_remote_http_mcp};
