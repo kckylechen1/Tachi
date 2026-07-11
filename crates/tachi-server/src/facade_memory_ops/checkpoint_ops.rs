@@ -193,6 +193,10 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         turn_id: None,
         event_type: None,
         messages: Vec::new(),
+        to: None,
+        ttl_days: None,
+        include_read: false,
+        agent_id: None,
     };
     let (saved, display_path, already_formatted, echo) =
         save_memory_checkpoint(server, params).await?;

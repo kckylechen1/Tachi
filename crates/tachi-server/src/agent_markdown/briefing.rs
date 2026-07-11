@@ -3,6 +3,7 @@ use super::*;
 pub(crate) fn format_briefing(
     query: &str,
     project_label: Option<&str>,
+    stickies: &Value,
     memories: &Value,
     wiki: &Value,
     cross_project: &Value,
@@ -36,6 +37,28 @@ pub(crate) fn format_briefing(
         "Layer authority: [AUTHORITY: docs/specs > guide/SOP > wiki > memory/eval]. This compatibility briefing shows memory/wiki/evidence; use `tachi_task(action='briefing')` for feature-scoped canonical docs/specs."
             .to_string(),
     );
+
+    // #964: unread stickies render FIRST (frozen semantics #4 — surfaced at
+    // the top of the briefing, ahead of open loops/cross-project/everything
+    // else). Each row shown here was already atomically claimed as a side
+    // effect of this briefing call.
+    if let Some(rows) = stickies.as_array() {
+        if !rows.is_empty() {
+            out.push("\n### 📌 Sticky notes (unread) [AUTHORITY: WORKFLOW STATE]".to_string());
+            out.push(
+                "_Read-once notes addressed to you. Already marked read by this briefing call — use `tachi_memory(action='sticky_check', include_read=true)` to see the archive._"
+                    .to_string(),
+            );
+            for row in rows {
+                let from = row.get("from_agent").and_then(Value::as_str).unwrap_or("?");
+                let text = row.get("text").and_then(Value::as_str).unwrap_or("");
+                out.push(format!(
+                    "- from **{from}**: {}",
+                    md_escape(&compact_text_line(text, 200))
+                ));
+            }
+        }
+    }
 
     if !open_loops.is_empty() {
         out.push("\n### ⚠️ Open Loops (closure debt) [AUTHORITY: WORKFLOW STATE]".to_string());

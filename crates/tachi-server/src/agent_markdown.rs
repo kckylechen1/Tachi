@@ -42,6 +42,7 @@ mod tests {
         let out = format_briefing(
             "q",
             Some("sigil"),
+            &serde_json::json!([]),
             &memories,
             &wiki,
             &cross,
@@ -102,6 +103,7 @@ mod tests {
         let compact = format_briefing(
             "q",
             None,
+            &serde_json::json!([]),
             &serde_json::json!(memories),
             &serde_json::json!(wiki),
             &cross,
@@ -116,6 +118,7 @@ mod tests {
         let full = format_briefing(
             "q",
             None,
+            &serde_json::json!([]),
             &serde_json::json!(memories),
             &serde_json::json!(wiki),
             &cross,
@@ -198,6 +201,7 @@ mod tests {
         let compact = format_briefing(
             "q",
             Some("sigil"),
+            &empty,
             &empty,
             &empty,
             &empty,

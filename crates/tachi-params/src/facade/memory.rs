@@ -68,6 +68,9 @@ fn tachi_memory_action_schema(
             "doctor_scan",
             "ingest",
             "ingest_source",
+            // #964: read-once agent-to-agent ephemeral notes.
+            "sticky_leave",
+            "sticky_check",
         ],
         "Required Tachi memory facade action.",
         generator,
@@ -300,7 +303,7 @@ fn default_memory_top_k() -> usize {
 pub struct TachiMemoryParams {
     #[schemars(
         schema_with = "tachi_memory_action_schema",
-        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), recall_simulate (replay labeled query→expected-id cases and report recall@k/MRR without mutating access counters), recall_proposals (generate/list evidence-backed RecallConfig proposals), review_recall_proposal (approve/reject one recall proposal), apply_recall_proposals (persist approved TACHI_RECALL_* config.env values), pattern_feedback (record explicit hit/miss/stale/seen feedback for projected pattern memory), progress (long-running flow status), readiness (health + tool visibility), delete (permanently remove a memory entry by id; folded from delete_memory), gc (run garbage collection on growing tables; folded from memory_gc), doctor_scan (read-only scan of memory.db roots; folded from tachi_doctor_scan), ingest (unified event/source ingest; folded from ingest), ingest_source (batch source ingest with chunking/enrichment; folded from ingest_source)."
+        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), recall_simulate (replay labeled query→expected-id cases and report recall@k/MRR without mutating access counters), recall_proposals (generate/list evidence-backed RecallConfig proposals), review_recall_proposal (approve/reject one recall proposal), apply_recall_proposals (persist approved TACHI_RECALL_* config.env values), pattern_feedback (record explicit hit/miss/stale/seen feedback for projected pattern memory), progress (long-running flow status), readiness (health + tool visibility), delete (permanently remove a memory entry by id; folded from delete_memory), gc (run garbage collection on growing tables; folded from memory_gc), doctor_scan (read-only scan of memory.db roots; folded from tachi_doctor_scan), ingest (unified event/source ingest; folded from ingest), ingest_source (batch source ingest with chunking/enrichment; folded from ingest_source), sticky_leave (leave a read-once ephemeral note for the leader or a named seat), sticky_check (claim/list unread stickies addressed to the caller; include_read=true shows the read/expired archive)."
     )]
     pub action: String,
     #[serde(default, alias = "output_format")]
@@ -378,7 +381,7 @@ pub struct TachiMemoryParams {
     // --- save fields ---
     #[serde(default)]
     #[schemars(
-        description = "[action=save|checkpoint|extract_facts] Full text to persist (or atomize source)."
+        description = "[action=save|checkpoint|extract_facts|sticky_leave] Full text to persist (or atomize source; sticky note body)."
     )]
     pub text: Option<String>,
     #[serde(default)]
@@ -569,4 +572,26 @@ pub struct TachiMemoryParams {
     #[serde(default)]
     #[schemars(description = "[action=ingest] Messages in the conversation turn.")]
     pub messages: Vec<Message>,
+
+    // --- sticky fields (#964) ---
+    #[serde(default)]
+    #[schemars(
+        description = "[action=sticky_leave] Seat/agent name this sticky is addressed to. Omit for a leader-only broadcast (worker seats never see unaddressed stickies)."
+    )]
+    pub to: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=sticky_leave] Days until an unread sticky auto-archives (default 7)."
+    )]
+    pub ttl_days: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=sticky_check] When true, show the read/expired archive instead of claiming unread stickies (read-only, does not consume anything)."
+    )]
+    pub include_read: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=sticky_check|briefing] Caller's seat/agent name for addressing. Omit to be treated as the leader/main session."
+    )]
+    pub agent_id: Option<String>,
 }

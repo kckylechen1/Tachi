@@ -23,6 +23,8 @@ pub enum MemoryCategory {
     Wiki,
     Guide,
     Eval,
+    /// #964: sticky notes (read-once agent-to-agent ephemeral memos).
+    Sticky,
 }
 
 impl MemoryCategory {
@@ -40,6 +42,7 @@ impl MemoryCategory {
             Self::Wiki => "wiki",
             Self::Guide => "guide",
             Self::Eval => "eval",
+            Self::Sticky => "sticky",
         }
     }
 
@@ -57,6 +60,7 @@ impl MemoryCategory {
             "wiki" => Self::Wiki,
             "guide" => Self::Guide,
             "eval" => Self::Eval,
+            "sticky" => Self::Sticky,
             _ => Self::Other,
         }
     }
