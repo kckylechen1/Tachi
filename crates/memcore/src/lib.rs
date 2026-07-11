@@ -42,6 +42,11 @@ pub use agent_profile::{
     RenderedAgentProfile, AGENT_PROFILE_PACK_SCHEMA_VERSION,
 };
 #[cfg(feature = "admin")]
+pub use db::dispatch_outcomes::{
+    derive_idempotency_key, get_outcome, list_outcomes_by_issue_ref, list_outcomes_by_signature,
+    list_outcomes_by_vendor_window, upsert_outcome, DispatchOutcomeRow, NewDispatchOutcome,
+};
+#[cfg(feature = "admin")]
 pub use db::exec_env::{
     find_active_exec_env_by_path, get_exec_env, insert_exec_env, list_exec_envs, reclaim_exec_env,
     ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, ReclaimOutcome,

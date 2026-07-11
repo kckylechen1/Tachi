@@ -438,6 +438,56 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_exec_envs_state ON exec_envs(state);
         CREATE INDEX IF NOT EXISTS idx_exec_envs_path ON exec_envs(path);
         CREATE INDEX IF NOT EXISTS idx_exec_envs_dispatch ON exec_envs(dispatch_id);
+
+        -- Canonical dispatch outcome ledger (#773 v4 sol carve). Append-only:
+        -- one row per (dispatch_id, task_type) completion, written FIRST by
+        -- the `tachi_complete` seam before any derived row (eval memory,
+        -- signature evidence, precedent) — a derivation failure must never
+        -- lose this row (see `complete_ops::dispatch_outcome`). This is the
+        -- future router's real read surface; `/eval` stays the searchable
+        -- narrative projection and cards remain a reviewed projection on
+        -- top. Graph edges (seat->performed->dispatch, dispatch->produced->
+        -- outcome, outcome->judged_by->adjudicator, outcome->classified_as->
+        -- signature, outcome->about->issue/PR) are deferred to the S4 seat;
+        -- every ref this row carries (issue_ref/pr_ref/flow_id/dispatch_id/
+        -- eval_memory_id/signature) is present so those edges can be derived
+        -- later without a re-migration.
+        CREATE TABLE IF NOT EXISTS dispatch_outcomes (
+            outcome_id       TEXT PRIMARY KEY,
+            dispatch_id      TEXT NOT NULL DEFAULT '',
+            eval_memory_id   TEXT,
+            model            TEXT,
+            vendor           TEXT NOT NULL DEFAULT 'unknown',
+            role             TEXT,
+            seat             TEXT,
+            task_type        TEXT,
+            execution_outcome    TEXT NOT NULL,
+            adjudicated_verdict  TEXT,
+            adjudicator          TEXT,
+            retry_count      INTEGER NOT NULL DEFAULT 0,
+            error_class      TEXT,
+            error_signature  TEXT,
+            issue_ref        TEXT,
+            pr_ref           TEXT,
+            flow_id          TEXT,
+            cost_tokens      INTEGER,
+            cost_usd         REAL,
+            verification_present INTEGER NOT NULL DEFAULT 0,
+            diff_present         INTEGER NOT NULL DEFAULT 0,
+            evidence_refs    TEXT NOT NULL DEFAULT '[]',
+            idempotency_key  TEXT NOT NULL,
+            created_at       TEXT NOT NULL DEFAULT '',
+            updated_at       TEXT NOT NULL DEFAULT '',
+            UNIQUE (idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_dispatch_outcomes_vendor_ts
+            ON dispatch_outcomes(vendor, created_at);
+        CREATE INDEX IF NOT EXISTS idx_dispatch_outcomes_signature
+            ON dispatch_outcomes(error_signature);
+        CREATE INDEX IF NOT EXISTS idx_dispatch_outcomes_issue_ref
+            ON dispatch_outcomes(issue_ref);
+        CREATE INDEX IF NOT EXISTS idx_dispatch_outcomes_dispatch_id
+            ON dispatch_outcomes(dispatch_id);
 "#;
 
 pub(super) const MIGRATED_INDEXES_SQL: &str = r#"
