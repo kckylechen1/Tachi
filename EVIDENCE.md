@@ -111,3 +111,85 @@ $ cargo fmt -p memcore -- --check      # clean
 $ cargo clippy -p memcore --all-targets --no-deps -- -D warnings   # clean
 $ cargo test -p memcore --lib          # 328 passed, 0 failed, 2 ignored (baseline, unrelated)
 ```
+
+---
+
+## Item 3 — ANALYZE/optimize (planner mis-pick root cause)
+
+**Before** (real DB, no `sqlite_stat1` ever populated — this DB predates
+any `ANALYZE`):
+
+```
+sqlite> SELECT COUNT(*) FROM sqlite_stat1;
+Error: no such table: sqlite_stat1
+
+sqlite> EXPLAIN QUERY PLAN
+   ...> SELECT id FROM memories WHERE archived = 0 AND path = '/facts/readonly'
+   ...> ORDER BY timestamp DESC LIMIT 20;
+QUERY PLAN
+|--SEARCH memories USING INDEX idx_memories_archived (archived=?)
+`--USE TEMP B-TREE FOR ORDER BY
+```
+
+Without planner statistics, SQLite falls back to structural heuristics and
+picks `idx_memories_archived` — a boolean column, 237/474 rows match
+(barely better than a full scan) — over the much more selective
+`idx_memories_path` (2 rows/path on average) or the purpose-built partial
+index `idx_memories_path_active_ts ON memories(path, timestamp DESC) WHERE
+archived = 0 AND superseded_by IS NULL`, confirming opus's "planner
+mis-picking idx_memories_archived" diagnosis on live data.
+
+**After** (`PRAGMA optimize;` run once):
+
+```
+sqlite> SELECT COUNT(*) FROM sqlite_stat1;
+74
+sqlite> SELECT * FROM sqlite_stat1 WHERE tbl='memories';
+memories|idx_memories_path_active_ts|370 2 1
+memories|idx_memories_archived|474 237
+memories|idx_memories_path|474 2
+... (11 more rows, one per index)
+
+sqlite> EXPLAIN QUERY PLAN
+   ...> SELECT id FROM memories WHERE archived = 0 AND path = '/facts/readonly'
+   ...> ORDER BY timestamp DESC LIMIT 20;
+QUERY PLAN
+|--SEARCH memories USING INDEX idx_memories_path (path=?)
+`--USE TEMP B-TREE FOR ORDER BY
+```
+
+With `sqlite_stat1` populated, the planner switches off the low-selectivity
+`idx_memories_archived` to the far more selective `idx_memories_path`.
+
+**Implementation**: `MemoryStore::run_optimize()` (new method,
+`crates/memcore/src/store/crud.rs`, next to the existing
+`checkpoint_wal_truncate`) runs `PRAGMA optimize;` — SQLite's own built-in
+heuristic for "ANALYZE only the tables likely to have stale stats," safe
+and cheap to call often per SQLite's own docs. Wired into the same periodic
+background loop that already runs WAL-checkpoint maintenance
+(`crates/tachi-server/src/bootstrap/serve/background.rs`
+`spawn_wal_checkpoint`, cadence `TACHI_WAL_CHECKPOINT_SECS`, default 300s)
+for the global store, project store, and every named-project store — no
+new timer, no new config knob, reuses the existing "quiet moment" cadence.
+
+**File:line**:
+- `crates/memcore/src/store/crud.rs` (`run_optimize`, added after
+  `checkpoint_wal_truncate`)
+- `crates/tachi-server/src/bootstrap/serve/background.rs`
+  (`spawn_wal_checkpoint`, `run_optimize()` calls added alongside each
+  existing `checkpoint_wal_truncate()` call)
+
+**Verification**:
+- New unit test `run_optimize_refreshes_planner_statistics` in
+  `crates/memcore/src/lib_tests.rs` — seeds 50 rows, calls `run_optimize`,
+  asserts `sqlite_stat1` now has rows for `memories`, and asserts a second
+  call doesn't error (repeat-safe).
+- `cargo test -p memcore --lib` — 329 passed (328 + 1 new), 0 failed.
+- Real-DB `sqlite_stat1`/`EXPLAIN QUERY PLAN` before/after captured above
+  via `sqlite3` CLI against the read-only production-data copy (temp copy,
+  discarded after).
+- `cargo build -p memcore -p tachi-server` — clean.
+- `cargo fmt -p memcore -p tachi-server -- --check` — clean.
+- `cargo clippy -p memcore --all-targets --no-deps -- -D warnings` — clean.
+- `cargo clippy -p tachi-server --all-targets --no-deps -- -D warnings` —
+  clean.
