@@ -345,8 +345,34 @@ pub(crate) async fn handle_tachi_memory(
             )
             .await
         }
+        "sticky_leave" => {
+            let text = params
+                .text
+                .clone()
+                .ok_or_else(|| "text is required when action='sticky_leave'".to_string())?;
+            crate::sticky_ops::handle_sticky_leave(
+                server,
+                crate::sticky_ops::StickyLeaveInput {
+                    text,
+                    to: params.to.clone(),
+                    ttl_days: params.ttl_days,
+                },
+            )
+            .await
+        }
+        "sticky_check" => {
+            crate::sticky_ops::handle_sticky_check(
+                server,
+                crate::sticky_ops::StickyCheckInput {
+                    agent_id: params.agent_id.clone(),
+                    include_read: params.include_read,
+                    limit: Some(crate::clamp_facade_top_k(params.top_k)),
+                },
+            )
+            .await
+        }
         _ => Err(format!(
-            "Invalid action '{}'. Use 'search', 'get', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'recall_simulate', 'recall_proposals', 'review_recall_proposal', 'apply_recall_proposals', 'pattern_feedback', 'progress', 'readiness', 'delete', 'gc', 'doctor_scan', 'ingest', or 'ingest_source'.",
+            "Invalid action '{}'. Use 'search', 'get', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'recall_simulate', 'recall_proposals', 'review_recall_proposal', 'apply_recall_proposals', 'pattern_feedback', 'progress', 'readiness', 'delete', 'gc', 'doctor_scan', 'ingest', 'ingest_source', 'sticky_leave', or 'sticky_check'.",
             params.action
         )),
     }

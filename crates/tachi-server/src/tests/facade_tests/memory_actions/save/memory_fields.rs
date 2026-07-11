@@ -127,6 +127,10 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
             turn_id: None,
             event_type: None,
             messages: Vec::new(),
+            to: None,
+            ttl_days: None,
+            include_read: false,
+            agent_id: None,
         },
     )
     .await

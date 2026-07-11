@@ -140,6 +140,7 @@ mod signature_evidence;
 mod skill_chain_ops;
 mod skill_policy;
 mod status_ops;
+mod sticky_ops;
 mod task_lifecycle;
 #[cfg(test)]
 mod test_support;
