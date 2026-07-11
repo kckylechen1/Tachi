@@ -1,7 +1,7 @@
 use memcore::MemoryStore;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
@@ -280,7 +280,7 @@ pub struct DbRuntime {
     pub global_db_path: Arc<PathBuf>,
     pub global_vec_available: bool,
     pub project_db: Arc<StdRwLock<Option<ProjectDbState>>>,
-    pub attached_project_dbs: Arc<StdRwLock<HashMap<PathBuf, ProjectDbState>>>,
+    pub attached_project_dbs: Arc<StdRwLock<HashMap<PathBuf, AttachedProjectEntry>>>,
     pub project_attach_init_gate: Arc<StdMutex<()>>,
 }
 
@@ -342,13 +342,16 @@ impl DbRuntime {
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
         let key = project_db_read_cache_key(db_path)?;
-        if let Some(state) = self
+        let cached = self
             .attached_project_dbs
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(&key)
-            .cloned()
-        {
+            .map(|entry| {
+                entry.touch();
+                entry.state.clone()
+            });
+        if let Some(state) = cached {
             let _gate = read_or_recover(&state.rw_gate, "path_db_rw_gate");
             return state.read_pool.with_store(label, f);
         }
@@ -360,25 +363,13 @@ impl DbRuntime {
 
     fn attached_project_state(&self, db_path: &Path) -> Result<ProjectDbState, String> {
         let key = project_db_cache_key(db_path)?;
-        if let Some(state) = self
-            .attached_project_dbs
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-            .cloned()
-        {
+        if let Some(state) = Self::touch_and_clone(&self.attached_project_dbs, &key) {
             return Ok(state);
         }
 
         let _init_gate =
             lock_or_recover(&self.project_attach_init_gate, "project_attach_init_gate");
-        if let Some(state) = self
-            .attached_project_dbs
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-            .cloned()
-        {
+        if let Some(state) = Self::touch_and_clone(&self.attached_project_dbs, &key) {
             return Ok(state);
         }
 
@@ -387,7 +378,53 @@ impl DbRuntime {
             .attached_project_dbs
             .write()
             .unwrap_or_else(|e| e.into_inner());
-        Ok(guard.entry(key).or_insert(state).clone())
+        Self::evict_lru_if_needed(&mut guard, ATTACHED_PROJECT_DBS_MAX_ENTRIES, &key);
+        Ok(guard
+            .entry(key)
+            .or_insert_with(|| AttachedProjectEntry::new(state))
+            .state
+            .clone())
+    }
+
+    /// Read-then-touch a cached entry's last-used timestamp and clone its
+    /// state out, without holding the lock across the caller's DB work.
+    fn touch_and_clone(
+        map: &Arc<StdRwLock<HashMap<PathBuf, AttachedProjectEntry>>>,
+        key: &Path,
+    ) -> Option<ProjectDbState> {
+        map.read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .map(|entry| {
+                entry.touch();
+                entry.state.clone()
+            })
+    }
+
+    /// Evict the least-recently-used entry/entries when inserting `new_key`
+    /// would push the map past `max_entries`. Eviction only drops the map's
+    /// `Arc` reference to the entry's `ProjectDbState` — any clone already
+    /// held by an in-flight caller keeps its own `Arc`s alive (see
+    /// `ProjectDbState`'s fields), so this cannot kill an in-flight
+    /// connection.
+    fn evict_lru_if_needed(
+        map: &mut HashMap<PathBuf, AttachedProjectEntry>,
+        max_entries: usize,
+        new_key: &Path,
+    ) {
+        if max_entries == 0 || map.contains_key(new_key) {
+            return;
+        }
+        while map.len() >= max_entries {
+            let Some(oldest_key) = map
+                .iter()
+                .min_by_key(|(_, entry)| entry.recency_tick())
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            map.remove(&oldest_key);
+        }
     }
 
     pub fn with_global_store<T>(
@@ -525,6 +562,62 @@ pub struct ProjectDbState {
     pub rw_gate: Arc<StdRwLock<()>>,
     pub db_path: Arc<PathBuf>,
     pub vec_available: bool,
+}
+
+/// Maximum number of distinct project DBs the daemon keeps warm
+/// (live SQLite read pool + rw_gate) in `attached_project_dbs` before
+/// evicting the least-recently-used entry. Bounds the daemon's fd/memory
+/// footprint against unbounded distinct project-DB paths (kckylechen1/tachi#969);
+/// 32 mirrors `MAX_MEMORY_READ_POOL_SIZE`'s ceiling and comfortably covers a
+/// single agent's realistic number of concurrently-active repos/worktrees
+/// without keeping every project a daemon has ever touched attached forever.
+pub const ATTACHED_PROJECT_DBS_MAX_ENTRIES: usize = 32;
+
+/// Cache entry for a per-project DB attachment: the shared, `Arc`-backed
+/// `ProjectDbState` plus a last-used timestamp used for LRU eviction.
+/// Cloning `state` out of the map (see `attached_project_state`) is safe to
+/// evict later — every field of `ProjectDbState` is `Arc`-wrapped, so the
+/// map only ever holds one of potentially many references; dropping the
+/// map's entry drops one refcount, not the underlying pool/mutex.
+///
+/// `last_used` is an `Arc<AtomicU64>` recency ordinal (see
+/// `next_recency_tick`) rather than a plain `Instant` so cache-hit reads can
+/// bump recency under a shared `RwLock::read()` instead of forcing every
+/// hot-path read to take the map's write lock just to update a timestamp.
+#[derive(Clone)]
+pub struct AttachedProjectEntry {
+    pub state: ProjectDbState,
+    pub last_used: Arc<AtomicU64>,
+}
+
+impl AttachedProjectEntry {
+    fn new(state: ProjectDbState) -> Self {
+        Self {
+            state,
+            last_used: Arc::new(AtomicU64::new(next_recency_tick())),
+        }
+    }
+
+    fn touch(&self) {
+        self.last_used.store(next_recency_tick(), Ordering::Relaxed);
+    }
+
+    fn recency_tick(&self) -> u64 {
+        self.last_used.load(Ordering::Relaxed)
+    }
+}
+
+/// Monotonically increasing recency counter for LRU ordering.
+///
+/// Deliberately not wall-clock time: two touches within the same
+/// millisecond (or, on some platforms, sub-microsecond scheduling) would
+/// otherwise tie and make "least recently used" ambiguous. A global atomic
+/// counter gives every touch a strictly distinct, strictly increasing
+/// ordinal, which is all LRU comparison needs.
+static RECENCY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn next_recency_tick() -> u64 {
+    RECENCY_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 impl ProjectDbState {
@@ -829,6 +922,105 @@ mod tests {
                 .len(),
             1
         );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn attached_project_dbs_evicts_least_recently_used_past_cap() {
+        let temp = unique_temp_dir("path-store-lru-evict");
+        let global_db = temp.join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        let runtime = test_runtime(global_db);
+
+        // Fill the cache to the cap.
+        let mut project_dbs = Vec::new();
+        for i in 0..ATTACHED_PROJECT_DBS_MAX_ENTRIES {
+            let project_db = temp.join(format!("project-{i}/.tachi/memory.db"));
+            runtime
+                .with_path_store(&project_db, |_| Ok(()))
+                .unwrap_or_else(|e| panic!("attach project {i}: {e}"));
+            project_dbs.push(project_db);
+        }
+        assert_eq!(
+            runtime
+                .attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            ATTACHED_PROJECT_DBS_MAX_ENTRIES,
+            "cache should be exactly at the cap"
+        );
+
+        // Re-touch every entry except the first (index 0) so it becomes the
+        // strict least-recently-used entry once a new one is inserted.
+        // (Re-attaching, not just reading, since attached_project_state is
+        // the writer-side path under test.)
+        for project_db in project_dbs.iter().skip(1) {
+            runtime
+                .with_path_store(project_db, |_| Ok(()))
+                .expect("re-touch project");
+        }
+
+        // Clone out the stale (about-to-be-evicted) entry's state before
+        // eviction, to prove a held clone survives eviction.
+        let stale_key = project_db_cache_key(&project_dbs[0]).expect("stale key");
+        let stale_state_before_eviction = runtime
+            .attached_project_dbs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&stale_key)
+            .expect("stale entry present before eviction")
+            .state
+            .clone();
+
+        // Insert one more distinct project DB, pushing past the cap.
+        let fresh_db = temp.join("project-fresh/.tachi/memory.db");
+        runtime
+            .with_path_store(&fresh_db, |_| Ok(()))
+            .expect("attach fresh project");
+
+        let guard = runtime
+            .attached_project_dbs
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            guard.len(),
+            ATTACHED_PROJECT_DBS_MAX_ENTRIES,
+            "map size must stay bounded at the cap after eviction"
+        );
+        assert!(
+            !guard.contains_key(&stale_key),
+            "least-recently-used entry must be evicted"
+        );
+        let fresh_key = project_db_cache_key(&fresh_db).expect("fresh key");
+        assert!(
+            guard.contains_key(&fresh_key),
+            "freshly inserted entry must remain"
+        );
+        for project_db in project_dbs.iter().skip(1) {
+            let key = project_db_cache_key(project_db).expect("touched key");
+            assert!(
+                guard.contains_key(&key),
+                "recently-touched entries must remain: {}",
+                project_db.display()
+            );
+        }
+        drop(guard);
+
+        // The clone taken before eviction must still be usable: eviction
+        // only drops the map's Arc reference, not the underlying pool.
+        {
+            let _gate = stale_state_before_eviction
+                .rw_gate
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let mut store = stale_state_before_eviction
+                .store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let _ = store.vec_available;
+        }
 
         let _ = std::fs::remove_dir_all(temp);
     }
