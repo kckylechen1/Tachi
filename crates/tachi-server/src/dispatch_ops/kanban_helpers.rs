@@ -230,7 +230,16 @@ pub(crate) async fn close_kanban_row_on_early_exit(
             "TASK_STATE_COMPLETED"
                 | "TASK_STATE_FAILED"
                 | "TASK_STATE_CANCELED"
-                | "TASK_STATE_PENDING_REVIEW"
+                // #971 review-fix (F2, second pass): the plan-review early
+                // response now writes TASK_STATE_INPUT_REQUIRED to the
+                // kanban row (see `plan_stage.rs`), not
+                // TASK_STATE_PENDING_REVIEW. That early return is a
+                // legitimate non-failure exit out of
+                // `handle_tachi_dispatch`'s post-init section, so this guard
+                // must treat INPUT_REQUIRED as already-settled here too —
+                // otherwise this early-exit closer would immediately stomp
+                // the just-written INPUT_REQUIRED row to FAILED.
+                | "TASK_STATE_INPUT_REQUIRED"
         )
     );
     if is_terminal {

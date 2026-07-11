@@ -53,6 +53,13 @@ impl Drop for EnvGuard {
 /// test-controlled rather than timing-dependent. `poll_timeout_secs` is a
 /// generous backstop so a test bug (never creating the sentinel) fails fast
 /// instead of hanging forever.
+///
+/// #971 review-fix (F4, second pass): `release_path` is derived from the
+/// test's isolated `TACHI_HOME`, which itself derives from the process
+/// `TMPDIR` — a directory this test does not control the naming of. The
+/// generated `RELEASE=...` assignment must therefore be quoted; an
+/// unquoted interpolation breaks under a `TMPDIR` containing spaces or
+/// shell metacharacters (real on some CI/sandboxed macOS environments).
 fn write_fake_claude_binary(path: &std::path::Path, mode: FakeClaudeMode) {
     use std::io::Write;
     let script = match mode {
@@ -60,7 +67,7 @@ fn write_fake_claude_binary(path: &std::path::Path, mode: FakeClaudeMode) {
             release_path,
             poll_timeout_secs,
         } => format!(
-            "#!/usr/bin/env bash\nset -e\nRELEASE={release}\nDEADLINE=$(( $(date +%s) + {timeout} ))\nwhile [ ! -f \"$RELEASE\" ]; do\n  if [ \"$(date +%s)\" -ge \"$DEADLINE\" ]; then\n    echo 'fake claude: timed out waiting for release sentinel' 1>&2\n    exit 1\n  fi\n  sleep 0.02\ndone\ncat <<'JSON'\n{{\"result\":\"## Goal\\nboard-first test.\\n\\n## Steps\\n1. inspect\\n\\n## Files\\n- src/lib.rs\\n\\n## Validation\\n- cargo test\\n\"}}\nJSON\n",
+            "#!/usr/bin/env bash\nset -e\nRELEASE=\"{release}\"\nDEADLINE=$(( $(date +%s) + {timeout} ))\nwhile [ ! -f \"$RELEASE\" ]; do\n  if [ \"$(date +%s)\" -ge \"$DEADLINE\" ]; then\n    echo 'fake claude: timed out waiting for release sentinel' 1>&2\n    exit 1\n  fi\n  sleep 0.02\ndone\ncat <<'JSON'\n{{\"result\":\"## Goal\\nboard-first test.\\n\\n## Steps\\n1. inspect\\n\\n## Files\\n- src/lib.rs\\n\\n## Validation\\n- cargo test\\n\"}}\nJSON\n",
             release = release_path.display(),
             timeout = poll_timeout_secs,
         ),
@@ -285,6 +292,90 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
         .expect("v2 dispatch should eventually succeed");
     let response: Value = serde_json::from_str(&raw).expect("dispatch JSON");
     assert_eq!(response["v2"], json!(true), "{response:#}");
+}
+
+/// (5b2) #971 review-fix (F2, second pass): a plan-review early response
+/// must project `TASK_STATE_INPUT_REQUIRED` — not `TASK_STATE_PENDING_REVIEW`
+/// — in THREE places, and all three must agree:
+///   1. the synchronous dispatch response's `task.status.state`,
+///   2. the kanban row (`get_kanban_state`), and
+///   3. the run's `status.json` (`status_state()`'s existing
+///      `plan_review_status == "pending_review"` -> `TASK_STATE_INPUT_REQUIRED`
+///      mapping).
+/// `TASK_STATE_INPUT_REQUIRED` (unlike the old `PENDING_REVIEW`) is also in
+/// `kanban::KANBAN_DISPATCH_NON_TERMINAL_STATES`, so an abandoned row is
+/// reapable by `gc_expired_kanban_cards` instead of pinned forever — this
+/// test only asserts the vocabulary is consistent; GC aging itself is
+/// covered at the `kanban::gc` unit level, not re-driven end-to-end here.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn plan_review_pending_response_projects_input_required_kanban_state() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let fake_claude = temp_home.path().join("claude-pending-review");
+    let release_path = temp_home.path().join("release-plan-stage");
+    write_fake_claude_binary(
+        &fake_claude,
+        FakeClaudeMode::Success {
+            release_path: release_path.clone(),
+            poll_timeout_secs: 60,
+        },
+    );
+    // Nothing blocks on the sentinel pre-plan in this test — release it
+    // immediately so the plan stage can complete and hand back the
+    // pending-review early response.
+    std::fs::write(&release_path, b"go").expect("write release sentinel");
+
+    let _tachi_home = EnvGuard::set("TACHI_HOME", temp_home.path());
+    let _claude_bin = EnvGuard::set("CLAUDE_BIN", &fake_claude);
+    let _skip_perms = EnvGuard::set("TACHI_CLAUDE_SKIP_PERMISSIONS", "true");
+    let _v2_review = EnvGuard::set("DISPATCH_V2_PLAN_REVIEW", "true");
+
+    let run_root = temp_home.path().join("runs");
+    let server = make_server();
+
+    let mut params = dispatch_params(Some("claude"), "plan review pending state projection");
+    params.stage = Some("auto".to_string());
+
+    let raw = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
+        .await
+        .expect("plan-review early response is Ok, not Err");
+    let response: Value = serde_json::from_str(&raw).expect("dispatch JSON");
+
+    // (1) synchronous response
+    assert_eq!(
+        response["task"]["status"]["state"],
+        json!("TASK_STATE_INPUT_REQUIRED"),
+        "early response must not report the retired TASK_STATE_PENDING_REVIEW vocabulary: {response:#}"
+    );
+    assert_eq!(response["plan_review_status"], json!("pending_review"), "{response:#}");
+
+    let run_dir = wait_for_single_run_dir(&run_root).await;
+    let dispatch_id = run_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("dispatch id from run dir name")
+        .to_string();
+
+    // (2) kanban row
+    let kanban_state = crate::dispatch_ops::get_kanban_state(&server, &dispatch_id).await;
+    assert_eq!(
+        kanban_state.as_deref(),
+        Some("TASK_STATE_INPUT_REQUIRED"),
+        "kanban row must project TASK_STATE_INPUT_REQUIRED for a pending plan review, matching status.json"
+    );
+
+    // (3) status.json carries the same `plan_review_status: "pending_review"`
+    // fact that `board::status::status_state()` maps to
+    // `TASK_STATE_INPUT_REQUIRED` for status.json/board readers (see that
+    // function's `plan_review_status == "pending_review"` branch) — so this
+    // is the same vocabulary as the kanban row asserted above, not a
+    // separately-drifting one.
+    let status = read_status_json(&run_dir).expect("status.json written");
+    assert_eq!(status["plan_review_status"], json!("pending_review"), "{status:#}");
 }
 
 /// (5c) V1 (non-V2) dispatch is unaffected by the RECEIPT-FIRST /

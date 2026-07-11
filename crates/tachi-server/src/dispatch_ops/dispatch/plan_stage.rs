@@ -184,30 +184,37 @@ pub(super) async fn run_v2_plan_stage(
                     "timestamp": Utc::now().to_rfc3339(),
                 }),
             );
-            // #971 review-fix (F2): the kanban row was seeded
+            // #971 review-fix (F2, second pass): the kanban row was seeded
             // TASK_STATE_WORKING by BOARD-FIRST init (`init_kanban_task`).
-            // This branch returns an early response reporting
-            // TASK_STATE_PENDING_REVIEW to the caller without spawning the
-            // watchdog that would otherwise eventually reconcile the row —
-            // so without this call the row is stuck WORKING indefinitely.
-            // `TASK_STATE_PENDING_REVIEW` is an existing, board-recognized
-            // state (see `dispatch_ops::board::status`'s in-flight/pending
-            // set and `task_facade.rs`'s terminal-state check, which
-            // correctly excludes it), so this is not a new vocabulary term.
+            // This branch returns an early response with no approve/resume
+            // action — the documented recovery is re-dispatch with plan
+            // review disabled, which allocates a *new* dispatch_id and never
+            // touches this row. So the kanban projection here must be
+            // `TASK_STATE_INPUT_REQUIRED`, not `TASK_STATE_PENDING_REVIEW`:
+            // (1) it matches what `status.json`/`status_state()` already
+            // projects for this exact state (`board/status.rs`: a
+            // `plan_review_status == "pending_review"` status.json maps to
+            // TASK_STATE_INPUT_REQUIRED) — one vocabulary, no drift between
+            // the two projections of the same run; and (2) unlike
+            // TASK_STATE_PENDING_REVIEW, TASK_STATE_INPUT_REQUIRED IS in
+            // `kanban::KANBAN_DISPATCH_NON_TERMINAL_STATES`
+            // (`kanban.rs`), so an abandoned row (caller never re-dispatches)
+            // ages out through `gc_expired_kanban_cards` instead of staying
+            // pinned as a phantom "in review" card forever.
             // Best-effort: log but do not fail the dispatch response over a
             // kanban write hiccup — the plan itself already succeeded and
             // the caller needs the response to act on it.
             if let Err(kanban_err) = update_kanban_state(
                 inputs.server,
                 inputs.dispatch_id,
-                "TASK_STATE_PENDING_REVIEW",
+                "TASK_STATE_INPUT_REQUIRED",
                 None,
                 None,
             )
             .await
             {
                 eprintln!(
-                    "[dispatch-v2] failed to mark dispatch {} PENDING_REVIEW in kanban: {}",
+                    "[dispatch-v2] failed to mark dispatch {} INPUT_REQUIRED in kanban: {}",
                     inputs.dispatch_id, kanban_err
                 );
             }
@@ -215,7 +222,12 @@ pub(super) async fn run_v2_plan_stage(
                 "dispatch_id": inputs.dispatch_id,
                 "task": {
                     "id": inputs.dispatch_id,
-                    "status": { "state": "TASK_STATE_PENDING_REVIEW" },
+                    // #971 review-fix (F2, second pass): mirror the kanban
+                    // row and status.json projection above — both now say
+                    // TASK_STATE_INPUT_REQUIRED for this state. Keeping this
+                    // in sync avoids handing the caller a task state string
+                    // that a subsequent board/status poll will never repeat.
+                    "status": { "state": "TASK_STATE_INPUT_REQUIRED" },
                 },
                 "agent": inputs.agent_norm,
                 "profile": inputs.profile_payload,
