@@ -25,6 +25,9 @@ pub const DEFAULT_PORT: u16 = 7919;
 pub struct Config {
     /// DB path, or [`IN_MEMORY`] for an ephemeral store.
     pub db_path: String,
+    /// Project databases attached to the global kernel store. The runtime keeps
+    /// a collection so future store classes do not force a two-slot redesign.
+    pub project_db_paths: Vec<String>,
     /// Name of the selected decay policy (for status/reporting).
     pub decay_policy_name: String,
     /// Resolved policy; `None` = kernel default (current behavior).
@@ -50,6 +53,7 @@ impl Config {
         F: Fn(&str) -> Option<String>,
     {
         let mut db_path: Option<String> = None;
+        let mut project_db_paths = Vec::new();
         let mut decay_policy_name: Option<String> = None;
         let mut daemon = false;
         let mut port: Option<u16> = None;
@@ -61,6 +65,12 @@ impl Config {
                     db_path = Some(
                         it.next()
                             .ok_or_else(|| "--global-db requires a path".to_string())?,
+                    );
+                }
+                "--project-db" => {
+                    project_db_paths.push(
+                        it.next()
+                            .ok_or_else(|| "--project-db requires a path".to_string())?,
                     );
                 }
                 "--decay-policy" => {
@@ -81,6 +91,9 @@ impl Config {
                 other if other.starts_with("--global-db=") => {
                     db_path = Some(other["--global-db=".len()..].to_string());
                 }
+                other if other.starts_with("--project-db=") => {
+                    project_db_paths.push(other["--project-db=".len()..].to_string());
+                }
                 other if other.starts_with("--decay-policy=") => {
                     decay_policy_name = Some(other["--decay-policy=".len()..].to_string());
                 }
@@ -89,7 +102,7 @@ impl Config {
                 }
                 other => {
                     return Err(format!(
-                        "unknown argument '{other}' (supported: --global-db, --decay-policy, --daemon, --port)"
+                        "unknown argument '{other}' (supported: --global-db, --project-db, --decay-policy, --daemon, --port)"
                     ));
                 }
             }
@@ -99,6 +112,12 @@ impl Config {
             .or_else(|| env("PORTABLE_MEMORY_DB"))
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| IN_MEMORY.to_string());
+
+        if project_db_paths.is_empty() {
+            if let Some(path) = env("PORTABLE_PROJECT_DB").filter(|path| !path.trim().is_empty()) {
+                project_db_paths.push(path);
+            }
+        }
 
         let decay_policy_name = decay_policy_name
             .or_else(|| env("PORTABLE_DECAY_POLICY"))
@@ -122,6 +141,7 @@ impl Config {
 
         Ok(Self {
             db_path,
+            project_db_paths,
             decay_policy_name,
             decay_policy,
             daemon,
@@ -143,7 +163,10 @@ fn parse_port(raw: &str) -> Result<u16, String> {
 /// workspace: `1`/`true`/`yes`/`on` (case-insensitive) enable, anything else
 /// (including unset) does not.
 fn is_truthy(v: &str) -> bool {
-    matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 #[cfg(test)]
@@ -158,11 +181,15 @@ mod tests {
     fn defaults_to_in_memory_and_default_policy() {
         let c = Config::parse(Vec::<String>::new(), no_env).expect("parse");
         assert_eq!(c.db_path, IN_MEMORY);
+        assert!(c.project_db_paths.is_empty());
         assert_eq!(c.decay_policy_name, "default");
         assert!(c.decay_policy.is_none());
         assert!(!c.daemon, "daemon mode must default off (stdio)");
         assert_eq!(c.port, DEFAULT_PORT);
-        assert_eq!(DEFAULT_PORT, 7919, "must not default to the full daemon's 6919");
+        assert_eq!(
+            DEFAULT_PORT, 7919,
+            "must not default to the full daemon's 6919"
+        );
     }
 
     #[test]
@@ -179,6 +206,7 @@ mod tests {
         };
         let c = Config::parse(args, env).expect("parse");
         assert_eq!(c.db_path, "/tmp/mem.db");
+        assert!(c.project_db_paths.is_empty());
         assert_eq!(c.decay_policy_name, "flat");
         assert!(c.decay_policy.is_some());
     }
@@ -205,6 +233,19 @@ mod tests {
     fn unknown_flag_errors() {
         let args = vec!["--bogus-flag".to_string()];
         assert!(Config::parse(args, no_env).is_err());
+    }
+
+    #[test]
+    fn project_db_flag_is_accepted_for_downstream_dual_store_clients() {
+        let args = vec![
+            "--global-db".to_string(),
+            "/tmp/global.db".to_string(),
+            "--project-db".to_string(),
+            "/tmp/trading.db".to_string(),
+        ];
+
+        let config = Config::parse(args, no_env).expect("project db must parse");
+        assert_eq!(config.project_db_paths, vec!["/tmp/trading.db"]);
     }
 
     #[test]
@@ -241,7 +282,10 @@ mod tests {
             _ => None,
         };
         let c_off = Config::parse(Vec::<String>::new(), env_off).expect("parse");
-        assert!(!c_off.daemon, "non-truthy PORTABLE_DAEMON must not enable daemon mode");
+        assert!(
+            !c_off.daemon,
+            "non-truthy PORTABLE_DAEMON must not enable daemon mode"
+        );
     }
 
     #[test]

@@ -18,10 +18,10 @@ GitHub issue -> linked docs/specs -> dispatch/implementation -> PR -> verificati
 It is not a new workflow engine. The existing surfaces remain the write paths:
 
 - `tachi_task(action="intake")` binds a GitHub issue and seeds `.tachi/runs/<flow_id>/`.
-- `tachi_task(action="link_pr")` attaches a PR to the flow.
+- `tachi_gh(action="link_pr")` attaches a PR to the flow.
 - `tachi_verify` records required checks.
-- `tachi_task(action="pr_status")` previews GitHub PR gates.
-- `tachi_task(action="release_note")` writes release context.
+- `tachi_gh(action="pr_status")` previews GitHub PR gates.
+- `tachi_gh(action="release_note")` writes release context.
 - `tachi_task(action="close_loop")` records the final issue/docs/wiki sink.
 - `tachi_gh(action="safe_merge")` remains the GitHub PR merge surface.
 - `tachi_task(action="merge")` remains local dispatched worktree merge only.

@@ -40,8 +40,14 @@ pub(crate) fn parse_json_or_empty(raw: String) -> Value {
 // requested — keep them through the compact receipt so a silent downgrade
 // (e.g. `scope=project` falling back to global on a single-DB daemon) stays
 // visible instead of being dropped by this allowlist.
-const SAVE_BASE_RECEIPT_KEYS: &[&str] =
-    &["id", "path", "status", "enrichment", "scope", "scope_warning"];
+const SAVE_BASE_RECEIPT_KEYS: &[&str] = &[
+    "id",
+    "path",
+    "status",
+    "enrichment",
+    "scope",
+    "scope_warning",
+];
 /// Per-route identity fields — kept whole when present, never echoed input text.
 const SAVE_VARIANT_ROUTE_KEYS: &[&str] =
     &["wiki_path", "note_file", "note_path", "continuity_event"];
@@ -109,7 +115,18 @@ fn receipt_eval_entry(value: Option<&Value>) -> Value {
 }
 
 /// Pipeline stages whose value is structured route output, not a single status scalar.
-const PIPELINE_VARIANT_OBJECT_STAGES: &[&str] = &["pattern_feedback", "kanban_update"];
+///
+/// `precedent_recording` carries `{recorded, skipped}` (#950/#962): without
+/// this entry, `pipeline_stage_status`'s generic object handling below drops
+/// straight to the `recorded` field and silently discards `skipped`, so a
+/// capture-gate rejection under the *default* (non-`full`) receipt format
+/// looked identical to a clean run — exactly the silent-data-loss shape this
+/// module exists to prevent. `signature_recording` (`signature_evidence.rs`)
+/// returns the same `{recorded, skipped}` shape and has the identical latent
+/// gap; it is not added here because fixing it is outside this fix's scope,
+/// but the same one-line addition is the fix if/when it's picked up.
+const PIPELINE_VARIANT_OBJECT_STAGES: &[&str] =
+    &["pattern_feedback", "kanban_update", "precedent_recording"];
 
 fn pipeline_stage_status(value: &Value) -> Option<Value> {
     match value {
@@ -501,6 +518,10 @@ pub(crate) fn slim_memory_rows(value: Value) -> Value {
 }
 
 pub(crate) fn slim_kanban(value: Value) -> Value {
+    // #925: mark aged WORKING rows so zombie in-flight dispatches are not
+    // presented as "current work" without age context.
+    const STALE_WORKING_SECS: i64 = 6 * 3600;
+    let now = chrono::Utc::now();
     json!({
         "count": value.get("count"),
         "tasks": value
@@ -510,10 +531,21 @@ pub(crate) fn slim_kanban(value: Value) -> Value {
             .flatten()
             .take(5)
             .map(|task| {
+                let state = task.get("state").and_then(Value::as_str).unwrap_or("");
+                let updated_at = task.get("updated_at").and_then(Value::as_str);
+                let age_secs = updated_at.and_then(|ts| {
+                    chrono::DateTime::parse_from_rfc3339(ts)
+                        .ok()
+                        .map(|dt| (now - dt.with_timezone(&chrono::Utc)).num_seconds().max(0))
+                });
+                let stale = matches!(state, "TASK_STATE_WORKING" | "working" | "in_progress")
+                    && age_secs.is_some_and(|age| age >= STALE_WORKING_SECS);
                 json!({
                     "summary": task.get("summary"),
                     "state": task.get("state"),
                     "updated_at": task.get("updated_at"),
+                    "age_secs": age_secs,
+                    "stale": stale,
                 })
             })
             .collect::<Vec<_>>(),
@@ -544,6 +576,34 @@ pub(crate) fn parse_evidence_array(raw: String) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slim_kanban_marks_stale_working_rows() {
+        let old = (chrono::Utc::now() - chrono::Duration::hours(12)).to_rfc3339();
+        let fresh = chrono::Utc::now().to_rfc3339();
+        let board = json!({
+            "count": 2,
+            "tasks": [
+                {
+                    "summary": "zombie dispatch",
+                    "state": "TASK_STATE_WORKING",
+                    "updated_at": old,
+                },
+                {
+                    "summary": "fresh work",
+                    "state": "TASK_STATE_WORKING",
+                    "updated_at": fresh,
+                }
+            ]
+        });
+        let slim = slim_kanban(board);
+        let tasks = slim["tasks"].as_array().expect("tasks");
+        assert_eq!(tasks[0]["stale"], json!(true));
+        assert_eq!(tasks[1]["stale"], json!(false));
+        assert!(tasks[0]["age_secs"]
+            .as_i64()
+            .is_some_and(|age| age >= 6 * 3600));
+    }
 
     #[test]
     fn thinking_scaffold_summarizes_key_evidence() {

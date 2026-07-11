@@ -238,10 +238,6 @@ fn native_tool_sources() -> Vec<(&'static str, &'static str)> {
             include_str!("dispatch_facade.rs"),
         ),
         (
-            "src/tools/graph_state_facade.rs",
-            include_str!("graph_state_facade.rs"),
-        ),
-        (
             "src/tools/handoff_facade.rs",
             include_str!("handoff_facade.rs"),
         ),

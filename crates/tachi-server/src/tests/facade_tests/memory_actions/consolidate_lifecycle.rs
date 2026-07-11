@@ -58,10 +58,7 @@ async fn consolidate_propose_review_apply_supersedes_older_scratch_duplicate() {
         "expected at least one supersede proposal: {parsed}"
     );
 
-    let proposals = parsed["generated"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let proposals = parsed["generated"].as_array().cloned().unwrap_or_default();
     // Near-duplicate summaries → merge_into (not plain supersede).
     let merge = proposals
         .iter()
@@ -271,7 +268,10 @@ async fn consolidate_promote_distilled_after_diverse_recall() {
         apply_json["apply_result"]["lifecycle_action"],
         json!("promote_distilled")
     );
-    assert_eq!(apply_json["apply_result"]["tier_after"], json!("consolidated"));
+    assert_eq!(
+        apply_json["apply_result"]["tier_after"],
+        json!("consolidated")
+    );
 
     let after = server
         .with_global_store_read(|store| {
@@ -307,9 +307,9 @@ async fn consolidate_refuses_to_propose_archive_for_protected_wiki() {
         .expect("propose");
     let parsed: Value = serde_json::from_str(&body).expect("json");
     let generated = parsed["generated"].as_array().cloned().unwrap_or_default();
-    let hits_wiki = generated.iter().any(|p| {
-        p.get("source_id").and_then(Value::as_str) == Some("life-wiki-1")
-    });
+    let hits_wiki = generated
+        .iter()
+        .any(|p| p.get("source_id").and_then(Value::as_str) == Some("life-wiki-1"));
     assert!(
         !hits_wiki,
         "wiki rows must not appear as archive/supersede sources: {parsed}"

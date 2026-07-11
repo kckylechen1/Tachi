@@ -91,12 +91,17 @@ pub fn capability_callable(cap: &HubCapability) -> bool {
         return true;
     }
     match serde_json::from_str::<serde_json::Value>(&cap.definition) {
-        Ok(def) => def
-            .get("discovery_status")
-            .and_then(|v| v.as_str())
-            .map(|s| s == "ready")
-            .unwrap_or(true),
-        Err(_) => cap.enabled,
+        // Backward-compat (owner-ratified option B, #968 regression fix): a
+        // capability that already passed enabled + approved + healthy is trusted
+        // even without a discovery_status stamp (existing pre-#968 caps + caps
+        // registered outside the review-discovery flow). Only an EXPLICIT
+        // non-"ready" discovery_status, a non-string value, or malformed JSON
+        // fails closed.
+        Ok(def) => match def.get("discovery_status") {
+            None => true,
+            Some(v) => v.as_str() == Some("ready"),
+        },
+        Err(_) => false,
     }
 }
 
@@ -215,6 +220,31 @@ mod tests {
 
         assert!(capability_callable(&ready));
         assert!(!capability_callable(&pending));
+    }
+
+    #[test]
+    fn mcp_capability_missing_discovery_status_is_callable_backward_compat() {
+        // #968 option B (owner-ratified): a cap that already passed
+        // enabled + approved + healthy but predates the discovery_status
+        // stamp (or was registered outside the review-discovery flow) must
+        // stay callable, not brick on upgrade.
+        let missing = cap("mcp:missing", "mcp", r#"{"other_field":"value"}"#);
+
+        assert!(capability_callable(&missing));
+    }
+
+    #[test]
+    fn mcp_capability_malformed_definition_fails_closed() {
+        let malformed = cap("mcp:malformed", "mcp", "not valid json{{{");
+
+        assert!(!capability_callable(&malformed));
+    }
+
+    #[test]
+    fn mcp_capability_non_string_discovery_status_fails_closed() {
+        let non_string = cap("mcp:non-string", "mcp", r#"{"discovery_status":42}"#);
+
+        assert!(!capability_callable(&non_string));
     }
 
     #[test]

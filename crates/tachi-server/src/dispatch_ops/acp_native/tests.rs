@@ -149,11 +149,19 @@ fn classifier_buckets_kinds_into_taxonomy() {
     // ACP spec ToolKind read values only: read, search.
     for kind in ["read", "search"] {
         let (variant, _) = classify_acp_request_kind(&json!({"toolCall": {"kind": kind}}));
-        assert_eq!(variant, AcpRequestKind::ReadOp, "expected read_op for {kind}");
+        assert_eq!(
+            variant,
+            AcpRequestKind::ReadOp,
+            "expected read_op for {kind}"
+        );
     }
     for kind in ["write", "edit", "delete", "remove", "create", "move"] {
         let (variant, _) = classify_acp_request_kind(&json!({"toolCall": {"kind": kind}}));
-        assert_eq!(variant, AcpRequestKind::WriteOp, "expected write_op for {kind}");
+        assert_eq!(
+            variant,
+            AcpRequestKind::WriteOp,
+            "expected write_op for {kind}"
+        );
     }
     for kind in ["execute", "exec", "terminal", "shell", "run"] {
         let (variant, _) = classify_acp_request_kind(&json!({"toolCall": {"kind": kind}}));
@@ -178,7 +186,11 @@ fn classifier_buckets_kinds_into_taxonomy() {
         "bogus",
     ] {
         let (variant, _) = classify_acp_request_kind(&json!({"toolCall": {"kind": kind}}));
-        assert_eq!(variant, AcpRequestKind::Unknown, "expected unknown for {kind}");
+        assert_eq!(
+            variant,
+            AcpRequestKind::Unknown,
+            "expected unknown for {kind}"
+        );
     }
 }
 

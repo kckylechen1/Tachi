@@ -18,6 +18,8 @@ pub(in crate::bootstrap::poke_cli) async fn probe_dispatch_mock(
             profile: None,
             task: "Poke no-op mock dispatch".to_string(),
             cwd: Some(cwd.to_string_lossy().to_string()),
+            env_id: None,
+            unmanaged_cwd: Some(true),
             skills: Vec::new(),
             context_query: None,
             model: None,

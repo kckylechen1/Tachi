@@ -4,6 +4,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 
 mod acp_transport;
+mod board_first;
 mod completion_eval;
 mod prompt_credentials_board;
 mod recommend_policy;
@@ -16,6 +17,8 @@ fn dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams {
         profile: None,
         task: task.to_string(),
         cwd: None,
+        env_id: None,
+        unmanaged_cwd: None,
         skills: Vec::new(),
         context_query: None,
         model: None,
@@ -74,11 +77,14 @@ fn task_params(action: &str) -> TachiTaskParams {
         subagents: Vec::new(),
         feedback_rules_applied: Vec::new(),
         signatures: Vec::new(),
+        rulings: Vec::new(),
         evidence_refs: Vec::new(),
         tests_run: Vec::new(),
         diff_present: None,
         scope: None,
         cwd: None,
+        env_id: None,
+        unmanaged_cwd: None,
         skills: Vec::new(),
         context_query: None,
         model: None,
@@ -182,6 +188,18 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         notes: None,
         confirm: false,
         state_filter: None,
+        content: None,
+        ingest_type: "source".to_string(),
+        source_url: None,
+        auto_chunk: true,
+        auto_summarize: true,
+        auto_link: true,
+        chunk_size_chars: 1200,
+        chunk_overlap_chars: 120,
+        conversation_id: None,
+        turn_id: None,
+        event_type: None,
+        messages: Vec::new(),
     }
 }
 

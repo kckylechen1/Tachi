@@ -573,8 +573,17 @@ fn classify_repo(
         return (CATEGORY_UNKNOWN.to_string(), None, gaps);
     }
 
+    // Callers may pass a package directory instead of the checkout root. Resolve
+    // it before evaluating the fixture's repo-relative owner paths, otherwise a
+    // valid Tachi checkout such as `crates/` loses its canonical path evidence.
+    let checkout_root = run_git_readonly(repo_path, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| repo_path.to_path_buf());
+
     // Detect git remote (origin). Missing remote is evidence-weak but not fatal.
-    let remote = run_git_readonly(repo_path, &["remote", "get-url", "origin"]).ok();
+    let remote = run_git_readonly(&checkout_root, &["remote", "get-url", "origin"]).ok();
     let remote_normalized = remote.as_deref().map(normalize_remote_to_owner_repo);
     if remote_normalized.is_none() {
         gaps.push("no git origin remote detected (cannot match owner_repo)".to_string());
@@ -595,14 +604,14 @@ fn classify_repo(
         .collect();
 
     // Score each candidate: remote-match (strong) ranks above path-only-match (weak).
-    // This tie-break prevents a path-sorted record (e.g. tachi-event-projection-bridge,
-    // which shares owner_repo kckylechen1/tachi with the kernel) from shadowing the
-    // correct record when both could match.
+    // Within either rank, prefer the record with more matching owner paths. This
+    // prevents a documentation-only reference on a downstream record from
+    // shadowing the canonical kernel surface in a source checkout.
     #[derive(Clone, Copy)]
     enum MatchStrength {
         None,
-        PathOnly,
-        Remote,
+        PathOnly(usize),
+        Remote(usize),
     }
     let mut best: Option<(&Value, MatchStrength)> = None;
     for record in &candidates {
@@ -627,14 +636,14 @@ fn classify_repo(
             .collect();
         let path_matches: Vec<&str> = owner_paths
             .iter()
-            .filter(|p| repo_path.join(p).exists())
+            .filter(|p| checkout_root.join(p).exists())
             .copied()
             .collect();
 
         let strength = if remote_matches {
-            MatchStrength::Remote
+            MatchStrength::Remote(path_matches.len())
         } else if !path_matches.is_empty() {
-            MatchStrength::PathOnly
+            MatchStrength::PathOnly(path_matches.len())
         } else {
             MatchStrength::None
         };
@@ -642,12 +651,21 @@ fn classify_repo(
         if matches!(strength, MatchStrength::None) {
             continue;
         }
-        // Prefer the strongest match; on ties keep the first (stable).
-        // best only ever holds PathOnly or Remote (None is skipped above).
+        // Prefer the strongest match, then the most specific path evidence.
+        // On an exact tie keep the first result (stable). `best` only ever
+        // holds PathOnly or Remote because None is skipped above.
         let stronger = match (&best, strength) {
             (None, _) => true,
-            (Some((_, MatchStrength::PathOnly)), MatchStrength::Remote) => true,
-            (Some((_, MatchStrength::Remote)), _) => false,
+            (Some((_, MatchStrength::PathOnly(_))), MatchStrength::Remote(_)) => true,
+            (Some((_, MatchStrength::Remote(_))), MatchStrength::PathOnly(_)) => false,
+            (
+                Some((_, MatchStrength::Remote(best_paths))),
+                MatchStrength::Remote(candidate_paths),
+            ) => candidate_paths > *best_paths,
+            (
+                Some((_, MatchStrength::PathOnly(best_paths))),
+                MatchStrength::PathOnly(candidate_paths),
+            ) => candidate_paths > *best_paths,
             _ => false,
         };
         if stronger {
@@ -675,10 +693,12 @@ fn classify_repo(
         // surface a gap so the caller knows this is not a confident canonical match
         // (e.g. a fork whose owner_path dirs happen to exist).
         let mut result_gaps: Vec<String> = Vec::new();
-        if matches!(strength, MatchStrength::PathOnly) {
-            result_gaps.push(
-                "matched by owner_path only; git origin remote differs from the declared owner_repo (possible fork / drift)".to_string(),
-            );
+        if matches!(strength, MatchStrength::PathOnly(_)) {
+            result_gaps.push(if remote_normalized.is_some() {
+                "matched by owner_path only; git origin remote differs from the declared owner_repo (possible fork / drift)".to_string()
+            } else {
+                "matched by owner_path only; git origin remote is unavailable (possible fork / drift)".to_string()
+            });
         }
         return (
             category.to_string(),

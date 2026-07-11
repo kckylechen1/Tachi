@@ -6,9 +6,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tachi_bootstrap::cli::{HubAction, McpAction};
 
-use super::super::{
-    evaluate_cli_capability_enabled, open_cli_store, print_pretty_json,
-};
+use super::super::{evaluate_cli_capability_enabled, open_cli_store, print_pretty_json};
 
 pub(super) async fn run_hub_command(
     action: HubAction,

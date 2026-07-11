@@ -41,6 +41,7 @@ async fn dispatch_legacy_vault_env_binding_still_injects_without_credential_prof
 
     let mut params = dispatch_params(Some("custom"), "smoke legacy vault env dispatch");
     params.cwd = Some(nested.to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
     params.command = vec![
         "python3".to_string(),
         "-c".to_string(),

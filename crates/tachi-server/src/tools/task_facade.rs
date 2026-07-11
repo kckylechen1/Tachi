@@ -227,34 +227,6 @@ pub(super) fn is_terminal_task_state(state: &str) -> bool {
     )
 }
 
-pub(crate) fn resolve_task_pr_status_target(
-    params: &TachiTaskParams,
-) -> Result<(String, u64), String> {
-    crate::task_lifecycle::resolve_task_pr_target(params)
-        .map(|target| (target.repo, target.number))
-        .map_err(|_| {
-            "pr_status requires either repo+number or pr_ref='owner/repo#123' / GitHub PR URL"
-                .to_string()
-        })
-}
-
-pub(crate) fn build_task_pr_status_gh_params(
-    params: &TachiTaskParams,
-) -> Result<TachiGhParams, String> {
-    let (repo, number) = resolve_task_pr_status_target(params)?;
-    Ok(TachiGhParams {
-        action: "safe_merge".to_string(),
-        repo: Some(repo),
-        number: Some(number),
-        dry_run: Some(true),
-        confirm: false,
-        flow_id: params.flow_id.clone(),
-        merge_policy: params.merge_policy.clone(),
-        allow_umbrella_close: params.allow_umbrella_close,
-        ..Default::default()
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

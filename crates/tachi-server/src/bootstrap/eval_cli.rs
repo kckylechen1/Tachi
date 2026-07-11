@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use memcore::{EvalEvidenceRow, MemoryStore};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tachi_bootstrap::cli::EvalAction;
 
 #[derive(Debug, Clone)]
@@ -457,7 +457,10 @@ mod tests {
 
         assert_eq!(cases.len(), 1, "well-formed row must still produce a case");
         assert_eq!(cases[0].case["query"], json!("well-formed query"));
-        assert_eq!(skipped_rows, 1, "malformed row must be counted, not dropped silently");
+        assert_eq!(
+            skipped_rows, 1,
+            "malformed row must be counted, not dropped silently"
+        );
     }
 
     #[test]

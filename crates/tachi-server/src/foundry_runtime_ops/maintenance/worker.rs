@@ -67,39 +67,28 @@ async fn handle_foundry_maintenance_item(
             process_memory_neighborhood_job(server, item)
                 .await
                 .map(|_| {
-                    FoundryMaintenanceOutcome::Terminal(
-                        memcore::FoundryJobStatus::Completed,
-                        None,
-                    )
+                    FoundryMaintenanceOutcome::Terminal(memcore::FoundryJobStatus::Completed, None)
                 })
         }
-        memcore::FoundryJobKind::RecallRerankCache => {
-            process_recall_rerank_cache_job(server, item)
-                .await
-                .map(|_| {
-                    FoundryMaintenanceOutcome::Terminal(
-                        memcore::FoundryJobStatus::Completed,
-                        None,
-                    )
-                })
-        }
+        memcore::FoundryJobKind::RecallRerankCache => process_recall_rerank_cache_job(server, item)
+            .await
+            .map(|_| {
+                FoundryMaintenanceOutcome::Terminal(memcore::FoundryJobStatus::Completed, None)
+            }),
         memcore::FoundryJobKind::MemoryDistill => process_memory_distill_job(server, item)
             .await
             .map(|outcome| match outcome {
-                DistillOutcome::Wrote => FoundryMaintenanceOutcome::Terminal(
-                    memcore::FoundryJobStatus::Completed,
-                    None,
-                ),
+                DistillOutcome::Wrote => {
+                    FoundryMaintenanceOutcome::Terminal(memcore::FoundryJobStatus::Completed, None)
+                }
                 DistillOutcome::Skipped(reason) => FoundryMaintenanceOutcome::Terminal(
                     memcore::FoundryJobStatus::Skipped,
                     Some(reason),
                 ),
             }),
-        memcore::FoundryJobKind::ForgetSweep => {
-            process_forget_sweep_job(server, item).map(|_| {
-                FoundryMaintenanceOutcome::Terminal(memcore::FoundryJobStatus::Completed, None)
-            })
-        }
+        memcore::FoundryJobKind::ForgetSweep => process_forget_sweep_job(server, item).map(|_| {
+            FoundryMaintenanceOutcome::Terminal(memcore::FoundryJobStatus::Completed, None)
+        }),
         _ => Ok(FoundryMaintenanceOutcome::Terminal(
             memcore::FoundryJobStatus::Skipped,
             Some(unsupported_foundry_job_reason(&item.job.kind)),

@@ -2,12 +2,37 @@ use super::string_enum_schema;
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
+use crate::memory::Message;
+
 fn default_facade_search_scope() -> String {
     "all".to_string()
 }
 
 fn default_facade_top_k() -> usize {
     6
+}
+
+// ─── Ingest action defaults (mirror crates/tachi-params/src/memory/ingest.rs) ─
+//
+// `tachi_memory(action='ingest'|'ingest_source')` fronts the same pipeline
+// handlers as the standalone tools, so the wire defaults must match byte-for-byte.
+// Scope/importance defaults are applied in the handler arm (the shared `scope`
+// and `importance` fields already carry their own serde defaults).
+
+fn default_facade_ingest_type() -> String {
+    "source".to_string()
+}
+
+fn default_facade_chunk_size_chars() -> usize {
+    1200
+}
+
+fn default_facade_chunk_overlap_chars() -> usize {
+    120
+}
+
+fn default_facade_true() -> bool {
+    true
 }
 
 pub const MAX_FACADE_TOP_K: usize = 100;
@@ -37,6 +62,12 @@ fn tachi_memory_action_schema(
             "pattern_feedback",
             "progress",
             "readiness",
+            // #757 fold: memory-admin + pipeline tools re-fronted as actions.
+            "delete",
+            "gc",
+            "doctor_scan",
+            "ingest",
+            "ingest_source",
         ],
         "Required Tachi memory facade action.",
         generator,
@@ -269,7 +300,7 @@ fn default_memory_top_k() -> usize {
 pub struct TachiMemoryParams {
     #[schemars(
         schema_with = "tachi_memory_action_schema",
-        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), recall_simulate (replay labeled query→expected-id cases and report recall@k/MRR without mutating access counters), recall_proposals (generate/list evidence-backed RecallConfig proposals), review_recall_proposal (approve/reject one recall proposal), apply_recall_proposals (persist approved TACHI_RECALL_* config.env values), pattern_feedback (record explicit hit/miss/stale/seen feedback for projected pattern memory), progress (long-running flow status), readiness (health + tool visibility)."
+        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), recall_simulate (replay labeled query→expected-id cases and report recall@k/MRR without mutating access counters), recall_proposals (generate/list evidence-backed RecallConfig proposals), review_recall_proposal (approve/reject one recall proposal), apply_recall_proposals (persist approved TACHI_RECALL_* config.env values), pattern_feedback (record explicit hit/miss/stale/seen feedback for projected pattern memory), progress (long-running flow status), readiness (health + tool visibility), delete (permanently remove a memory entry by id; folded from delete_memory), gc (run garbage collection on growing tables; folded from memory_gc), doctor_scan (read-only scan of memory.db roots; folded from tachi_doctor_scan), ingest (unified event/source ingest; folded from ingest), ingest_source (batch source ingest with chunking/enrichment; folded from ingest_source)."
     )]
     pub action: String,
     #[serde(default, alias = "output_format")]
@@ -484,4 +515,58 @@ pub struct TachiMemoryParams {
     #[serde(default)]
     #[schemars(description = "[action=recall_proposals] Optional proposal status filter.")]
     pub state_filter: Option<String>,
+
+    // --- ingest / ingest_source fields (#757 fold from standalone pipeline tools) ---
+    //
+    // All additive + #[serde(default)] so existing callers are byte-compatible.
+    // Defaults mirror crates/tachi-params/src/memory/ingest.rs exactly so the
+    // folded actions produce handler-identical results.
+    #[serde(default)]
+    #[schemars(
+        description = "[action=ingest|ingest_source] Raw source content or structured event payload. For ingest_source a JSON string is unwrapped to text."
+    )]
+    pub content: Option<serde_json::Value>,
+    #[serde(default = "default_facade_ingest_type")]
+    #[schemars(description = "[action=ingest] Ingest mode: \"event\" or \"source\" (default).")]
+    pub ingest_type: String,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=ingest|ingest_source] Optional source URL or canonical reference."
+    )]
+    pub source_url: Option<String>,
+    #[serde(default = "default_facade_true")]
+    #[schemars(
+        description = "[action=ingest|ingest_source] Whether to chunk long content before storage."
+    )]
+    pub auto_chunk: bool,
+    #[serde(default = "default_facade_true")]
+    #[schemars(
+        description = "[action=ingest|ingest_source] Whether to generate summaries for stored chunks."
+    )]
+    pub auto_summarize: bool,
+    #[serde(default = "default_facade_true")]
+    #[schemars(
+        description = "[action=ingest|ingest_source] Whether to build graph edges against similar memories."
+    )]
+    pub auto_link: bool,
+    #[serde(default = "default_facade_chunk_size_chars")]
+    #[schemars(description = "[action=ingest|ingest_source] Chunk size in characters.")]
+    pub chunk_size_chars: usize,
+    #[serde(default = "default_facade_chunk_overlap_chars")]
+    #[schemars(
+        description = "[action=ingest|ingest_source] Overlap between adjacent chunks in characters."
+    )]
+    pub chunk_overlap_chars: usize,
+    #[serde(default)]
+    #[schemars(description = "[action=ingest] Conversation identifier for event ingestion.")]
+    pub conversation_id: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=ingest] Turn identifier for event ingestion.")]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=ingest] Event type label for event ingestion.")]
+    pub event_type: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=ingest] Messages in the conversation turn.")]
+    pub messages: Vec<Message>,
 }

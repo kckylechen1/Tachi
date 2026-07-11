@@ -990,41 +990,6 @@ export const memoryHybridBridgePlugin = {
       },
     });
 
-    api.registerTool({
-      name: "memory_graph",
-      label: "Memory Graph",
-      description: "Inspect a read-only neighborhood in Tachi's memory graph by memory id or query.",
-      parameters: Type.Object({
-        memory_id: Type.Optional(Type.String({ description: "Seed memory id" })),
-        query: Type.Optional(Type.String({ description: "Natural language graph lookup query" })),
-        top_k: Type.Optional(Type.Number({ description: "Query seed count (default: 5)" })),
-        depth: Type.Optional(Type.Number({ description: "Traversal depth (default: 1)" })),
-      }),
-      async execute(_toolCallId, params, _signal, context) {
-        const { memory_id, query, top_k, depth } = params as {
-          memory_id?: string;
-          query?: string;
-          top_k?: number;
-          depth?: number;
-        };
-        const agentId = resolveAgentId((context as AgentLikeContext | undefined)?.agentId);
-        const result = await runWithClient(
-          "memory_graph",
-          async (client) =>
-            await client.memoryGraph({
-              memory_id,
-              query,
-              top_k,
-              depth,
-            }),
-          agentId,
-        );
-
-        return result.ok
-          ? textResult(JSON.stringify(result.value))
-          : textResult("Tachi MCP client unavailable.");
-      },
-    });
 
     if (config.exposeExperimentalTachiTools) {
       api.registerTool({
@@ -1041,7 +1006,7 @@ export const memoryHybridBridgePlugin = {
           const entryId = rawPath.replace(/^(?:shadow-store|memory)\//, "");
           const agentId = resolveAgentId((context as AgentLikeContext | undefined)?.agentId);
           const result = await runWithClient(
-            "delete_memory",
+            "memory_delete",
             async (client) => await client.deleteMemory(entryId),
             agentId,
           );

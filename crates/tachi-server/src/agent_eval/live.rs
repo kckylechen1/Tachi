@@ -65,15 +65,17 @@ pub(crate) fn load_live_eval_rows(
     server: &MemoryServer,
     limit: usize,
 ) -> Result<Vec<EvalRow>, String> {
+    // #925 follow-up (#931 shape): recency-first list so limit does not
+    // truncate before sort when path ASC buries newer /eval rows.
     let mut entries = server.with_global_store_read(|store| {
         store
-            .list_by_path("/eval", limit, false)
+            .list_by_path_recent("/eval", limit, false)
             .map_err(|e| format!("list global eval rows: {e}"))
     })?;
     if server.has_project_db() {
         let mut project_entries = server.with_project_store_read(|store| {
             store
-                .list_by_path("/eval", limit, false)
+                .list_by_path_recent("/eval", limit, false)
                 .map_err(|e| format!("list project eval rows: {e}"))
         })?;
         entries.append(&mut project_entries);

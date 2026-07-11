@@ -18,3 +18,12 @@ pub use hub::*;
 pub use memory::*;
 pub use project_db::*;
 pub use sandbox::*;
+
+/// Public value-level coercion helpers shared with callers outside this
+/// crate (e.g. the RPC transport layer, see #970) that need the same
+/// lenient Null/Number/String coercion `TachiTaskParams` and friends use
+/// via `deserialize_with`, but as a plain function on a `&serde_json::Value`
+/// rather than a serde deserializer. Only the lenient, non-erroring helper
+/// is exported; the strict `deserialize_with` functions stay crate-private
+/// since they're serde plumbing, not a public API surface.
+pub use coerce::opt_u64_from_value;

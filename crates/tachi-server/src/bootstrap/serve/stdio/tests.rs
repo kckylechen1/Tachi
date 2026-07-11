@@ -827,11 +827,14 @@ fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
 
         let deleted = call_tool_via_stdio_proxy(
             proxy.clone(),
-            "delete_memory",
-            serde_json::Map::from_iter([(
-                "id".to_string(),
-                serde_json::json!("global-proxy-delete-e2e"),
-            )]),
+            "tachi_memory",
+            serde_json::Map::from_iter([
+                ("action".to_string(), serde_json::json!("delete")),
+                (
+                    "id".to_string(),
+                    serde_json::json!("global-proxy-delete-e2e"),
+                ),
+            ]),
         )
         .await
         .expect("proxied delete should succeed");
@@ -1089,6 +1092,11 @@ fn proxy_injects_bound_project_for_tachi_memory_project_actions() {
         "recall_proposals",
         "review_recall_proposal",
         "apply_recall_proposals",
+        // #757 fold: delete/ingest/ingest_source now default to bound project
+        // (previously standalone delete_memory/ingest/ingest_source did).
+        "delete",
+        "ingest",
+        "ingest_source",
     ] {
         let request = rmcp::model::CallToolRequestParams::new("tachi_memory").with_arguments(
             serde_json::Map::from_iter([("action".to_string(), serde_json::json!(action))]),
@@ -1109,11 +1117,8 @@ fn proxy_injects_bound_project_for_raw_project_tools() {
         "find_similar_memory",
         "get_memory",
         "list_memories",
-        "delete_memory",
         "archive_memory",
-        "ingest",
         "ingest_event",
-        "ingest_source",
         "tachi_search",
     ] {
         let mapped = prepare_proxy_tool_call(
@@ -1176,7 +1181,7 @@ fn proxy_rejects_explicit_cross_project_write_override() {
         ("tachi_memory", Some("save")),
         ("tachi_memory", Some("extract_facts")),
         ("tachi_memory", Some("checkpoint")),
-        ("delete_memory", None),
+        ("tachi_memory", Some("delete")),
         ("save_memory", None),
         ("tachi_event", Some("emit")),
     ] {
@@ -1237,7 +1242,9 @@ fn proxy_allows_explicit_cross_project_read_override() {
 
 #[test]
 fn proxy_allows_explicit_cross_project_direct_read_override() {
-    for tool in ["memory_graph", "get_edges"] {
+    // #757 removed memory_graph/get_edges from MCP; remaining cross-project
+    // direct reads include list_memories / get_memory / tachi_search.
+    for tool in ["list_memories", "get_memory", "tachi_search"] {
         let request = rmcp::model::CallToolRequestParams::new(tool).with_arguments(
             serde_json::Map::from_iter([("project".to_string(), serde_json::json!("Quant-test"))]),
         );

@@ -2,12 +2,9 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
 use crate::pipeline_ops::{
-    handle_extract_facts, handle_get_pipeline_status, handle_ingest, handle_ingest_event,
-    handle_ingest_source, handle_sync_memories,
+    handle_extract_facts, handle_get_pipeline_status, handle_ingest_event, handle_sync_memories,
 };
-use crate::tool_params::{
-    ExtractFactsParams, IngestEventParams, IngestParams, IngestSourceParams, SyncMemoriesParams,
-};
+use crate::tool_params::{ExtractFactsParams, IngestEventParams, SyncMemoriesParams};
 use crate::MemoryServer;
 
 #[tool_router(router = pipeline_tool_router, vis = "pub(crate)")]
@@ -31,26 +28,6 @@ impl MemoryServer {
         Parameters(params): Parameters<IngestEventParams>,
     ) -> Result<String, String> {
         handle_ingest_event(self, params).await
-    }
-
-    #[tool(
-        description = "Unified ingest entrypoint for conversation events and source documents. Use ingest_type to select event vs source behavior."
-    )]
-    pub(crate) async fn ingest(
-        &self,
-        Parameters(params): Parameters<IngestParams>,
-    ) -> Result<String, String> {
-        handle_ingest(self, params).await
-    }
-
-    #[tool(
-        description = "Batch ingest source content with optional chunking, enrichment, and graph edge building."
-    )]
-    pub(crate) async fn ingest_source(
-        &self,
-        Parameters(params): Parameters<IngestSourceParams>,
-    ) -> Result<String, String> {
-        handle_ingest_source(self, params).await
     }
 
     #[tool(description = "Get pipeline status and statistics.")]

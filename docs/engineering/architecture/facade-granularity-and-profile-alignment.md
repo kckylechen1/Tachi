@@ -18,7 +18,8 @@ It answers three questions raised during a facade review:
 
 ## TL;DR
 
-- Facades are the right idea, but several are **overloaded**. `tachi_task` carries **28 actions**;
+- Facades are the right idea, but several are **overloaded**. `tachi_task` carries **24 actions**
+  (28 before the 4 PR-lifecycle duplicates were removed to `tachi_gh` in #757);
   `tachi_memory` and `tachi_gh` carry **16 each**.
 - Neither extreme (flatten to 100+ tools, or keep stuffing mega-facades) is correct. The fix is
   **re-slicing facades along agent cognitive domains**, keeping each facade at roughly **7±2 actions**.
@@ -34,7 +35,7 @@ It answers three questions raised during a facade review:
 
 | Facade | Actions | Verdict |
 | :--- | ---: | :--- |
-| `tachi_task` | 28 | Overloaded — lifecycle + self-tuning + PR duplication all in one |
+| `tachi_task` | 24 | Overloaded — lifecycle + self-tuning still bundled (PR duplication resolved, #757) |
 | `tachi_memory` | 16 | Overloaded — `recall_*` tuning mixed with daily ops |
 | `tachi_gh` | 16 | Duplicates task's PR lifecycle |
 | `tachi_arena` | 7 | Healthy |
@@ -46,10 +47,9 @@ It answers three questions raised during a facade review:
 
 ### Concrete confusion points
 
-1. **PR lifecycle is defined twice.** `link_pr` / `pr_status` / `pr_handoff` / `release_note` exist in
-   both `tachi_task` and `tachi_gh`. The schema itself says *"remain accepted here for compatibility,
-   but their canonical surface is `tachi_gh`"* — the designers already know it is redundant. Agents
-   must guess which entry point to call every time.
+1. **PR lifecycle dual entry (resolved #757).** `link_pr` / `pr_status` / `pr_handoff` / `release_note`
+   now live only on `tachi_gh`. The previous `tachi_task` compatibility aliases were deleted so agents
+   no longer guess which entry point to call.
 2. **`merge` is semantically split.** `tachi_task(merge)` = local worktree merge;
    `tachi_gh(safe_merge)` = GitHub PR merge. Same word, different machine.
 3. **`briefing` appears in three places** — `tachi_briefing` (standalone), `tachi_memory(briefing)`,
@@ -76,9 +76,9 @@ by the **agent's mental task**.
 
 ```diagram
 Now                            Proposed
-tachi_task (28) ─────┬──▶ tachi_task    execution core: plan/dispatch/complete/status/board/wait (6)
+tachi_task (24) ─────┬──▶ tachi_task    execution core: plan/dispatch/complete/status/board/wait (6)
                      ├──▶ tachi_flow    lifecycle: intake/cycle_status/cycle_plan/close_loop/ux_matrix (5)
-                     ├──▶ tachi_gh      all PR lifecycle (delete the 4 duplicates in task)
+                     ├──▶ tachi_gh      all PR lifecycle (already isolated, #757)
                      └──▶ tachi_tune    self-tuning: route_simulate/proposals/review/apply (isolated)
 
 tachi_memory (16) ───┬──▶ tachi_memory  daily: search/get/save/ask/checkpoint/alerts (~7)
@@ -109,7 +109,7 @@ someone hand-types `--profile observe+coordinate`. That is dead design.
 
 `ToolProfile` trims by **tool name** via glob matching
 ([`profiles/matching.rs#L77-L112`](../../../crates/tachi-server/src/profiles/matching.rs)).
-But a facade packs many capabilities behind one name (`tachi_task` = 28 actions), so a profile can
+But a facade packs many capabilities behind one name (`tachi_task` = 24 actions), so a profile can
 only allow or deny the *entire* `tachi_task` — it cannot deny just `dispatch`.
 
 ## 4. Case study: the `delegate`/worker surface proves the mismatch

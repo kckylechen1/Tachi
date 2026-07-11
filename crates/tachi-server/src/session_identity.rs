@@ -39,9 +39,17 @@ pub(crate) fn enforce_session_project(
         {
             return Ok(());
         }
+        let requested = explicit_project
+            .as_str()
+            .map(|s| format!("\"{s}\""))
+            .unwrap_or_else(|| explicit_project.to_string());
+        // #925: agent-hostile bare rejection → explicit repair hint. Semantic
+        // names (e.g. "hyperion") are not session bindings; omit project so
+        // the bound identity is used, or pass the exact bound name.
         return Err(rmcp::ErrorData::invalid_params(
             format!(
-                "{transport_label} project binding mismatch: session is bound to '{project}', but tool call requested project={explicit_project}"
+                "{transport_label} project binding mismatch: session is bound to '{project}', but tool call requested project={requested}. \
+repair: omit the project parameter (session binding wins) or set project=\"{project}\"; semantic aliases are not accepted as project="
             ),
             None,
         ));
@@ -78,8 +86,6 @@ pub(crate) fn explicit_project_can_cross_binding(tool_name: &str, args: &JsonObj
         | "find_similar_memory"
         | "get_memory"
         | "list_memories"
-        | "memory_graph"
-        | "get_edges"
         | "tachi_search" => true,
         "tachi_memory" => args
             .get("action")
@@ -110,13 +116,10 @@ pub(crate) fn project_defaults_to_bound_project(tool_name: &str, args: &JsonObje
             | "find_similar_memory"
             | "get_memory"
             | "list_memories"
-            | "delete_memory"
             | "archive_memory"
             | "save_memory"
             | "remember"
-            | "ingest"
             | "ingest_event"
-            | "ingest_source"
             | "extract_facts"
             | "tachi_search"
             | "tachi_save"
@@ -139,8 +142,11 @@ fn tachi_memory_action_defaults_to_project(action: &str) -> bool {
             | "briefing"
             | "checkpoint"
             | "consolidate"
+            | "delete"
             | "extract_facts"
             | "get"
+            | "ingest"
+            | "ingest_source"
             | "apply_recall_proposals"
             | "pattern_feedback"
             | "progress"
@@ -253,6 +259,14 @@ mod tests {
         assert!(
             err.message.contains("project binding mismatch"),
             "got: {}",
+            err.message
+        );
+        // #925: bare mismatch is agent-hostile — must name the repair.
+        assert!(
+            err.message.contains("repair:")
+                && err.message.contains("omit the project parameter")
+                && err.message.contains("project=\"sigil\""),
+            "mismatch must include repair hint, got: {}",
             err.message
         );
     }

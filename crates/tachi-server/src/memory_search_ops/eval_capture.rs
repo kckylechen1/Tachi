@@ -101,7 +101,9 @@ fn is_eval_path(path: &str) -> bool {
 }
 
 fn first_capture_candidate(results: &[SearchResult]) -> Option<&SearchResult> {
-    results.iter().find(|r| !is_eval_entry(&r.entry) && !is_eval_path(&r.entry.path))
+    results
+        .iter()
+        .find(|r| !is_eval_entry(&r.entry) && !is_eval_path(&r.entry.path))
 }
 
 fn count_captures_today(store: &MemoryStore) -> Result<u64, String> {
@@ -212,7 +214,9 @@ mod tests {
         {
             expected_ids.push(id.to_string());
         }
-        if let Some(array) = source.get("expected_ids").and_then(serde_json::Value::as_array)
+        if let Some(array) = source
+            .get("expected_ids")
+            .and_then(serde_json::Value::as_array)
         {
             for id in array
                 .iter()
@@ -236,10 +240,16 @@ mod tests {
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
-    fn with_capture_env<T>(enabled: Option<&str>, max_per_day: Option<&str>, f: impl FnOnce() -> T) -> T {
+    fn with_capture_env<T>(
+        enabled: Option<&str>,
+        max_per_day: Option<&str>,
+        f: impl FnOnce() -> T,
+    ) -> T {
         let _guard = env_lock();
         let prev_enabled = std::env::var_os(CAPTURE_ENV);
         let prev_max = std::env::var_os(MAX_PER_DAY_ENV);
@@ -377,7 +387,11 @@ mod tests {
     fn capture_off_writes_nothing() {
         with_capture_env(None, None, || {
             let mut store = open_store();
-            seed_fact(&mut store, "fact-off-1", "unique capture off sentinel alpha");
+            seed_fact(
+                &mut store,
+                "fact-off-1",
+                "unique capture off sentinel alpha",
+            );
             let results = store
                 .search(
                     "unique capture off sentinel alpha",
@@ -396,9 +410,7 @@ mod tests {
             )
             .expect("capture attempt");
             assert_eq!(outcome, CaptureOutcome::Disabled);
-            let rows = store
-                .list_eval_evidence(7, 100, false)
-                .expect("list eval");
+            let rows = store.list_eval_evidence(7, 100, false).expect("list eval");
             assert!(
                 rows.iter().all(|r| !r.path.starts_with("/eval/recall/")),
                 "capture-off must not write /eval/recall rows: {rows:?}"
@@ -430,19 +442,13 @@ mod tests {
 
             let outcome =
                 try_capture_after_access(&mut store, &params(query, 5), &results).expect("capture");
-            let CaptureOutcome::Captured {
-                path,
-                expected_id,
-            } = outcome
-            else {
+            let CaptureOutcome::Captured { path, expected_id } = outcome else {
                 panic!("expected Captured, got {outcome:?}");
             };
             assert!(path.starts_with("/eval/recall/"), "path={path}");
             assert_eq!(expected_id, fact_id);
 
-            let rows = store
-                .list_eval_evidence(7, 100, false)
-                .expect("list eval");
+            let rows = store.list_eval_evidence(7, 100, false).expect("list eval");
             let case_row = rows
                 .iter()
                 .find(|r| r.path == path)
@@ -468,10 +474,7 @@ mod tests {
             let query = "unique eval contamination sentinel gamma";
             seed_eval_row(&mut store, eval_id, query);
             // Fabricate results as if hybrid ranked the eval row first (pre-filter).
-            let eval_entry = store
-                .get(eval_id)
-                .expect("get")
-                .expect("seeded eval");
+            let eval_entry = store.get(eval_id).expect("get").expect("seeded eval");
             let results = vec![fake_result(eval_entry)];
             let outcome =
                 try_capture_after_access(&mut store, &params(query, 3), &results).expect("capture");

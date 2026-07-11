@@ -77,14 +77,6 @@ type CompactContextParams = {
   persist?: boolean;
 };
 
-type MemoryGraphParams = {
-  memory_id?: string;
-  query?: string;
-  path_prefix?: string;
-  top_k?: number;
-  depth?: number;
-};
-
 type LaunchConfig = {
   command: string;
   args: string[];
@@ -105,7 +97,7 @@ const REQUIRED_TOOLS = [
   "save_memory",
   "search_memory",
   "get_memory",
-  "memory_graph",
+  // memory_graph removed from MCP surface (#757); graph is internal-only
   "memory_stats",
   "list_memories",
 ] as const;
@@ -622,10 +614,6 @@ export class MemoryMcpClient {
     return coerceMemoryEntry(payload);
   }
 
-  async memoryGraph(params: MemoryGraphParams): Promise<unknown> {
-    return await this.callJson("memory_graph", params);
-  }
-
   async listMemories(limit: number): Promise<MemoryEntry[]> {
     const payload = await this.callJson<unknown>("list_memories", {
       path_prefix: "/",
@@ -782,10 +770,13 @@ export class MemoryMcpClient {
   }
 
   async deleteMemory(id: string): Promise<boolean> {
-    if (!this.availableTools.has("delete_memory")) {
-      throw new Error("delete_memory tool is unavailable");
+    if (!this.availableTools.has("tachi_memory")) {
+      throw new Error("tachi_memory tool is unavailable");
     }
-    const payload = await this.callJson<unknown>("delete_memory", { id });
+    const payload = await this.callJson<unknown>("tachi_memory", {
+      action: "delete",
+      id,
+    });
     if (!isRecord(payload)) {
       return false;
     }

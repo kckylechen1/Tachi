@@ -2,7 +2,7 @@ use super::*;
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn tachi_task_release_note_writes_flow_artifact_with_refs() {
+async fn lifecycle_release_note_writes_flow_artifact_with_refs() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -53,7 +53,7 @@ async fn tachi_task_release_note_writes_flow_artifact_with_refs() {
         serde_json::to_string_pretty(&json!({
             "overall": "passed",
             "items": [
-                { "command": "cargo test -p tachi-server tachi_task_release_note", "status": "passed" },
+                { "command": "cargo test -p tachi-server lifecycle_release_note", "status": "passed" },
                 { "kind": "gitleaks", "status": "passed" }
             ]
         }))
@@ -61,11 +61,10 @@ async fn tachi_task_release_note_writes_flow_artifact_with_refs() {
     )
     .expect("write verification");
 
-    let mut params = task_params("release_note");
+    let mut params = task_params("status");
     params.format = Some("json".to_string());
     params.flow_id = Some(flow_id.to_string());
-    let raw = server
-        .tachi_task(Parameters(params))
+    let raw = crate::task_lifecycle::handle_task_release_note(&server, &params)
         .await
         .expect("release note should be generated");
     let parsed: Value = serde_json::from_str(&raw).expect("release_note response JSON");
@@ -89,7 +88,7 @@ async fn tachi_task_release_note_writes_flow_artifact_with_refs() {
         "spec: `docs/engineering/specs/dispatch-policy.md`",
         "doc: `docs/engineering/architecture/subagent-eval-system.md`",
         "Overall: `passed`",
-        "`passed` cargo test -p tachi-server tachi_task_release_note",
+        "`passed` cargo test -p tachi-server lifecycle_release_note",
     ] {
         assert!(note.contains(expected), "missing {expected}: {note}");
     }

@@ -97,9 +97,7 @@ pub(crate) fn should_related_to(shared_count: usize, vector_similarity: Option<f
     if shared_count == 0 {
         return false;
     }
-    vector_similarity.is_some_and(|sim| {
-        sim.is_finite() && sim >= RELATED_TO_MIN_VECTOR_SIMILARITY
-    })
+    vector_similarity.is_some_and(|sim| sim.is_finite() && sim >= RELATED_TO_MIN_VECTOR_SIMILARITY)
 }
 
 pub(crate) fn numbers_in_text(text: &str) -> HashSet<String> {

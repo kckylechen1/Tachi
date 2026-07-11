@@ -95,7 +95,10 @@ The OpenClaw plugin now keeps its default Tachi-facing model tool surface focuse
 - `memory_search`
 - `memory_save`
 - `memory_get`
-- `memory_graph`
+
+`memory_graph` was dropped from the plugin's registered tools (and from the
+Tachi MCP surface entirely — internalized in #757; the underlying graph
+engine remains, just not tool-callable).
 
 High-risk passthroughs and runtime-only helpers are now hidden by default. They can be re-enabled explicitly with `TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS=1`.
 

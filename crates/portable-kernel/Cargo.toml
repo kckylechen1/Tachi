@@ -1,6 +1,6 @@
 [package]
 name = "portable-kernel"
-version = "1.8.0"
+version = "1.9.0"
 edition = "2021"
 description = "Portable Tachi memory kernel for downstream forks (HyperTachi / HyperMemory / adapters)"
 license = "AGPL-3.0-only"
@@ -16,6 +16,18 @@ publish = false
 [dependencies]
 memcore = { path = "../memcore", default-features = false }
 
+[features]
+# Enables the isolated integration test that proves this facade resolves
+# `memcore` without the full product's `admin` feature. It must not be enabled
+# by the workspace-wide test build, where Cargo intentionally unifies features
+# for the shared memcore package.
+portable-contract-test = []
+
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = "3"
+
+[[test]]
+name = "portable_contract"
+path = "tests/portable_contract.rs"
+required-features = ["portable-contract-test"]

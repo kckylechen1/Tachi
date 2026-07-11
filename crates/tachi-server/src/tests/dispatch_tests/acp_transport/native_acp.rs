@@ -124,6 +124,7 @@ for raw in sys.stdin:
         fake_acp.to_string_lossy().to_string(),
     ];
     first.cwd = Some(project.path().to_string_lossy().to_string());
+    first.unmanaged_cwd = Some(true);
     first.timeout_secs = 5;
 
     let first_response = crate::dispatch_ops::handle_tachi_dispatch(&server, first.clone())

@@ -31,6 +31,7 @@ print(json.dumps({"event": "end_turn", "final_response": "raven done"}))
     let mut params = dispatch_params(Some("codex"), "Review through fake acpx session");
     params.harness_transport = Some("acpx".to_string());
     params.cwd = Some(temp_home.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
     params.profile = Some("codex_55_review".to_string());
     params.timeout_secs = 5;
 

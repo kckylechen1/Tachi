@@ -59,7 +59,6 @@ pub(super) fn categorize_error(error: &str) -> String {
 
 const NON_IDEMPOTENT_TOOL_NAMES: &[&str] = &[
     "save_memory",
-    "delete_memory",
     "tachi_save",
     "tachi_wiki_write",
     "vault_set",

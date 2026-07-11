@@ -2,10 +2,9 @@
 //!
 //! Machine-checkable lists of primary MCP facade actions so action-count
 //! regressions are visible. GitHub PR lifecycle actions live only on
-//! `tachi_gh` (canonical); `tachi_task` keeps them as compatibility aliases
-//! at the router layer but **not** in the primary schema enum after F2.
+//! `tachi_gh` (canonical); they were removed from `tachi_task` in #757.
 
-/// Primary `tachi_task` actions advertised in the MCP schema (F2: no GH lifecycle).
+/// Primary `tachi_task` actions advertised in the MCP schema.
 pub const TACHI_TASK_PRIMARY_ACTIONS: &[&str] = &[
     "plan",
     "briefing",
@@ -33,8 +32,9 @@ pub const TACHI_TASK_PRIMARY_ACTIONS: &[&str] = &[
     "close_loop",
 ];
 
-/// Compatibility-only `tachi_task` actions (still accepted by the router; use `tachi_gh`).
-pub const TACHI_TASK_COMPAT_GH_LIFECYCLE_ACTIONS: &[&str] =
+/// GH PR lifecycle actions removed from `tachi_task` (#757). Canonical surface
+/// is `tachi_gh`. Kept as a machine-checkable deny-list for schema/router tests.
+pub const TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS: &[&str] =
     &["link_pr", "pr_status", "pr_handoff", "release_note"];
 
 /// Canonical `tachi_gh` actions (includes lifecycle).
@@ -75,6 +75,12 @@ pub const TACHI_MEMORY_ACTIONS: &[&str] = &[
     "pattern_feedback",
     "progress",
     "readiness",
+    // #757 fold: standalone memory-admin + pipeline tools re-fronted as actions.
+    "delete",
+    "gc",
+    "doctor_scan",
+    "ingest",
+    "ingest_source",
 ];
 
 /// `tachi_verify` actions.
@@ -82,7 +88,7 @@ pub const TACHI_VERIFY_ACTIONS: &[&str] = &["start", "record", "status", "board"
 
 /// Soft ceilings for F0 monitoring (primary schema actions only).
 pub const TACHI_TASK_PRIMARY_ACTION_SOFT_MAX: usize = 28;
-pub const TACHI_MEMORY_ACTION_SOFT_MAX: usize = 20;
+pub const TACHI_MEMORY_ACTION_SOFT_MAX: usize = 25;
 pub const TACHI_GH_ACTION_SOFT_MAX: usize = 20;
 
 #[cfg(test)]
@@ -91,7 +97,7 @@ mod tests {
 
     #[test]
     fn f0_task_primary_does_not_advertise_gh_lifecycle() {
-        for action in TACHI_TASK_COMPAT_GH_LIFECYCLE_ACTIONS {
+        for action in TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS {
             assert!(
                 !TACHI_TASK_PRIMARY_ACTIONS.contains(action),
                 "primary task schema must not advertise {action}; use tachi_gh"
@@ -103,7 +109,7 @@ mod tests {
 
     #[test]
     fn f0_gh_owns_lifecycle_actions() {
-        for action in TACHI_TASK_COMPAT_GH_LIFECYCLE_ACTIONS {
+        for action in TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS {
             assert!(
                 TACHI_GH_ACTIONS.contains(action),
                 "tachi_gh must own lifecycle action {action}"
@@ -115,7 +121,7 @@ mod tests {
 
     #[test]
     fn f0_memory_and_verify_counts() {
-        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 16);
+        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 21);
         assert!(TACHI_MEMORY_ACTIONS.len() <= TACHI_MEMORY_ACTION_SOFT_MAX);
         assert_eq!(TACHI_VERIFY_ACTIONS.len(), 4);
     }

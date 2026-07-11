@@ -63,6 +63,10 @@ pub(super) fn dispatch_params_for_mission(
         credential_profiles: params.credential_profiles.clone(),
         task: tracked_prompt.to_string(),
         cwd: params.cwd.clone(),
+        // Arena spawn bridges a bare cwd into dispatch; declare it unmanaged for
+        // the fail-safe env gate (#894 S1 §1.3 escape hatch).
+        env_id: None,
+        unmanaged_cwd: Some(true),
         skills: params.skills.clone(),
         context_query: None,
         model: params.model.clone(),

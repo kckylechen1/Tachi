@@ -571,7 +571,11 @@ fn render_disk_volume(volume: &crate::status_ops::disk::DiskVolumeStatus) {
         println!("  [!] {}: {} ({err})", volume.label, volume.path);
         return;
     }
-    let marker = if volume.warning.is_some() { "[!]" } else { "[OK]" };
+    let marker = if volume.warning.is_some() {
+        "[!]"
+    } else {
+        "[OK]"
+    };
     let free_gb = volume
         .free_bytes
         .map(|b| b as f64 / (1024.0 * 1024.0 * 1024.0));

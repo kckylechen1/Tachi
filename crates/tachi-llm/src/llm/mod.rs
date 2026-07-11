@@ -16,13 +16,13 @@ mod rerank;
 
 pub(crate) use circuit_breaker::CircuitBreakerRegistry;
 pub use provider_health::ProviderSecret;
-pub use rerank::{
-    RerankConfig, RerankProviderKind, RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV,
-    RERANK_VOYAGE_ENDPOINT_ENV,
-};
 use provider_health::{
     ChatLaneConfig, ClaudeCliFailure, ProviderHealthPersistState, ProviderHealthReloadState,
     ProviderState,
+};
+pub use rerank::{
+    RerankConfig, RerankProviderKind, RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV,
+    RERANK_VOYAGE_ENDPOINT_ENV,
 };
 
 /// LLM and embedding client using Voyage API for embeddings
@@ -74,10 +74,7 @@ impl LlmClient {
     /// Last provider arm entered by `rerank()`. Test discrimination only.
     #[cfg(test)]
     pub fn last_rerank_dispatch_for_tests(&self) -> Option<RerankProviderKind> {
-        self.last_rerank_dispatch
-            .lock()
-            .ok()
-            .and_then(|slot| *slot)
+        self.last_rerank_dispatch.lock().ok().and_then(|slot| *slot)
     }
 
     /// Configured rerank provider (resolved at construction).

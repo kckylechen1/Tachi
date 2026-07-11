@@ -68,6 +68,7 @@ async fn dispatch_profile_declared_credentials_materialize_without_explicit_para
     let mut params = dispatch_params(None, "smoke profile-declared credential dispatch");
     params.profile = Some("opencode_builder".to_string());
     params.cwd = Some(nested.to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
     params.command = vec![
         "python3".to_string(),
         "-c".to_string(),
@@ -169,6 +170,7 @@ async fn dispatch_profile_declared_credentials_respect_profile_allowlist() {
     let mut params = dispatch_params(None, "should fail before spawn");
     params.profile = Some("glm_impl".to_string());
     params.cwd = Some(project.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
     params.credential_profiles = vec!["opencode_shared".to_string()];
     params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
 
@@ -234,6 +236,7 @@ async fn dispatch_profile_credentials_can_allow_backend_agent_name() {
     let mut params = dispatch_params(None, "profile selected but agent allowlist is backend");
     params.profile = Some("glm_impl".to_string());
     params.cwd = Some(project.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
     params.credential_profiles = vec!["backend_agent_profile".to_string()];
     params.command = vec![
         "python3".to_string(),

@@ -23,7 +23,7 @@ OpenClaw Gateway (Node.js)
 ### 一键安装（推荐）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.8.0/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.0/scripts/install.sh | bash
 ```
 
 该脚本会：
@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.8.0/scripts/in
 ### 仅安装 OpenClaw 插件
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.8.0/scripts/install_openclaw_ext.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.0/scripts/install_openclaw_ext.sh | bash
 ```
 
 这是兼容旧流程的包装脚本，等价于执行 `scripts/install.sh --skip-brew`。
@@ -78,7 +78,6 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.8.0/scripts/in
 | `memory_search` | 语义混合检索（向量 + FTS + rerank） |
 | `memory_save` | 显式写入 durable memory |
 | `memory_get` | 按 ID 获取单条记忆 |
-| `memory_graph` | 只读查看记忆图谱邻域 |
 | `memory_runtime_info` | 查看 Tachi runtime、DB routing、OpenClaw bridge capability 状态 |
 | `continuity_board` | 读取 Tachi continuity board / A2A handoff bundle |
 | `todo_write` / `todo_read` / `todo_spawn_summary` | 当前 session 的轻量 todo 与 spawn 计数 |

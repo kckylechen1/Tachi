@@ -1,9 +1,15 @@
-pub(super) const BASE_SCHEMA_SQL: &str = r#"
+/// Connection-level PRAGMAs that must run OUTSIDE any transaction.
+/// `journal_mode` in particular is a no-op (and on some SQLite builds an
+/// error) when issued mid-transaction, so this is executed before any
+/// `BEGIN` — see `init_schema_with_label_mut` (#984 F1 round 3).
+pub(super) const CONNECTION_PRAGMA_SQL: &str = r#"
         PRAGMA journal_mode = WAL;
         PRAGMA foreign_keys = ON;
         PRAGMA busy_timeout = 5000;
         PRAGMA cache_size = -16000;   -- 16 MB page cache
+"#;
 
+pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE TABLE IF NOT EXISTS memories (
             id           TEXT PRIMARY KEY,
             path         TEXT NOT NULL DEFAULT '/',
@@ -386,18 +392,6 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             updated_by               TEXT NOT NULL DEFAULT 'default'
         );
 
-        -- Domain configuration for memory routing and per-domain GC
-        CREATE TABLE IF NOT EXISTS domains (
-            name              TEXT PRIMARY KEY,
-            description       TEXT NOT NULL DEFAULT '',
-            gc_threshold_days INTEGER,
-            default_retention TEXT,
-            default_path_prefix TEXT,
-            metadata          TEXT NOT NULL DEFAULT '{}',
-            created_at        TEXT NOT NULL DEFAULT '',
-            updated_at        TEXT NOT NULL DEFAULT ''
-        );
-
         -- Recall cache: rendered hybrid-search result rows keyed by a query
         -- context hash. Lives OUTSIDE `memories` on purpose — a prior design
         -- stored these as memory rows and they leaked into every long-lived
@@ -418,6 +412,32 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             last_hit_at   TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_recall_cache_updated ON recall_cache(updated_at);
+
+        -- Execution-environment leases (#894 S1). Daemon-owned rows are the
+        -- single source of truth for a provisioned worktree/env: worktree
+        -- markers (`.tachi-worktree.json`) and the global `worktrees.json`
+        -- become read-only projections/backstops for offline tools (the
+        -- sweep), never a second owner. `state` is the S1 lifecycle
+        -- (`active` -> `reclaimed`); the reclaim transition is a transactional
+        -- state flip written by exactly one reclaim function. `dispatch_id`
+        -- links a lease to the dispatch that owns it.
+        CREATE TABLE IF NOT EXISTS exec_envs (
+            env_id         TEXT PRIMARY KEY,
+            kind           TEXT NOT NULL DEFAULT 'worktree',
+            path           TEXT NOT NULL,
+            repo_root      TEXT NOT NULL DEFAULT '',
+            branch         TEXT NOT NULL DEFAULT '',
+            base_sha       TEXT NOT NULL DEFAULT '',
+            dispatch_id    TEXT,
+            state          TEXT NOT NULL DEFAULT 'active',
+            reclaim_reason TEXT,
+            schema_version INTEGER NOT NULL DEFAULT 1,
+            created_at     TEXT NOT NULL DEFAULT '',
+            reclaimed_at   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_exec_envs_state ON exec_envs(state);
+        CREATE INDEX IF NOT EXISTS idx_exec_envs_path ON exec_envs(path);
+        CREATE INDEX IF NOT EXISTS idx_exec_envs_dispatch ON exec_envs(dispatch_id);
 "#;
 
 pub(super) const MIGRATED_INDEXES_SQL: &str = r#"

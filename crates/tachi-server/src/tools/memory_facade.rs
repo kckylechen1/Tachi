@@ -3,14 +3,14 @@ use rmcp::{tool, tool_router};
 use serde_json::json;
 
 use crate::memory_ops::{
-    handle_archive_memory, handle_delete_memory, handle_get_memory, handle_list_memories,
-    handle_memory_gc, handle_memory_stats, handle_runtime_info,
+    handle_archive_memory, handle_get_memory, handle_list_memories, handle_memory_stats,
+    handle_runtime_info,
 };
 use crate::memory_search_ops::{handle_find_similar_memory, handle_remember, handle_save_memory};
 use crate::project_db_ops::handle_tachi_init_project_db;
 use crate::tool_params::{
-    ArchiveMemoryParams, DeleteMemoryParams, FindSimilarMemoryParams, GetMemoryParams,
-    InitProjectDbParams, ListMemoriesParams, RememberParams, SaveMemoryParams, SearchMemoryParams,
+    ArchiveMemoryParams, FindSimilarMemoryParams, GetMemoryParams, InitProjectDbParams,
+    ListMemoriesParams, RememberParams, SaveMemoryParams, SearchMemoryParams,
 };
 use crate::MemoryServer;
 
@@ -152,28 +152,6 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Doctor v2 — scan known memory.db roots, classify each (healthy / vec_extension_missing / wal_orphan / corrupt / legacy_schema / placeholder / backup), return JSON report. Read-only; no mutations."
-    )]
-    pub(crate) async fn tachi_doctor_scan(&self) -> Result<String, String> {
-        crate::doctor_ops::handle_tachi_doctor_scan().await
-    }
-
-    #[tool(
-        description = "Delete a memory entry permanently. Removes from main table, FTS, vectors, graph edges, and access history."
-    )]
-    pub(crate) async fn delete_memory(
-        &self,
-        Parameters(params): Parameters<DeleteMemoryParams>,
-    ) -> Result<String, String> {
-        if let Some(body) =
-            crate::cli_client::maybe_forward_server_write(self, "delete_memory", &params).await?
-        {
-            return Ok(body);
-        }
-        handle_delete_memory(self, params).await
-    }
-
-    #[tool(
         description = "Archive a memory entry (soft-delete, set archived=1). Entry is hidden from default searches but can be retrieved with include_archived=true."
     )]
     pub(crate) async fn archive_memory(
@@ -181,13 +159,6 @@ impl MemoryServer {
         Parameters(params): Parameters<ArchiveMemoryParams>,
     ) -> Result<String, String> {
         handle_archive_memory(self, params).await
-    }
-
-    #[tool(
-        description = "Run garbage collection on growing tables. Prunes old access_history (keep latest 256 per memory), processed_events (30d), audit_log (30d + 100k cap), and agent_known_state (90d)."
-    )]
-    pub(crate) async fn memory_gc(&self) -> Result<String, String> {
-        handle_memory_gc(self).await
     }
 
     #[tool(

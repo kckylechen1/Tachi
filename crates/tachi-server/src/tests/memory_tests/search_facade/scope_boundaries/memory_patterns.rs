@@ -104,6 +104,18 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         notes: None,
         confirm: false,
         state_filter: None,
+        content: None,
+        ingest_type: "source".to_string(),
+        source_url: None,
+        auto_chunk: true,
+        auto_summarize: true,
+        auto_link: true,
+        chunk_size_chars: 1200,
+        chunk_overlap_chars: 120,
+        conversation_id: None,
+        turn_id: None,
+        event_type: None,
+        messages: Vec::new(),
     }
 }
 
@@ -385,6 +397,7 @@ async fn tachi_complete_records_pattern_hit_from_evidence_ref() {
             project: None,
             format: None,
             signatures: Vec::new(),
+            rulings: Vec::new(),
         }))
         .await
         .expect("complete with pattern ref");
@@ -423,6 +436,7 @@ async fn close_loop_attaches_pattern_refs_and_records_hit_feedback() {
             related_issues: vec![],
             post_comment: Some(false),
             flow_id: None,
+            notes: None,
             wiki_title: Some("UniquePatternCloseLoopNeedle closure".to_string()),
             wiki_text: Some(
                 "Reviewed closure should cite UniquePatternCloseLoopNeedle.".to_string(),

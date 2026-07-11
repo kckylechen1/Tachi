@@ -2,7 +2,7 @@ use super::*;
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn tachi_task_release_note_skips_empty_optional_github_fields() {
+async fn lifecycle_release_note_skips_empty_optional_github_fields() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -47,11 +47,10 @@ async fn tachi_task_release_note_skips_empty_optional_github_fields() {
     crate::task_lifecycle::write_link_pr_artifacts(flow_id, &pr, None)
         .expect("write link_pr artifacts");
 
-    let mut params = task_params("release_note");
+    let mut params = task_params("status");
     params.format = Some("json".to_string());
     params.flow_id = Some(flow_id.to_string());
-    let raw = server
-        .tachi_task(Parameters(params))
+    let raw = crate::task_lifecycle::handle_task_release_note(&server, &params)
         .await
         .expect("release note should be generated");
     let parsed: Value = serde_json::from_str(&raw).expect("release_note response JSON");

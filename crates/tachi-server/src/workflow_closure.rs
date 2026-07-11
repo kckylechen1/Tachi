@@ -257,18 +257,7 @@ async fn draft_from_result(
         return None;
     }
 
-    let title = trimmed
-        .lines()
-        .find_map(|line| {
-            let heading = line.trim_start();
-            let text = heading.trim_start_matches('#').trim();
-            if heading.starts_with('#') && !text.is_empty() {
-                Some(text.to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| format!("Closure: {issue_ref}"));
+    let title = first_heading_or_closure_title(trimmed, issue_ref);
 
     // Deterministic fallback body: the capped raw result. Always available.
     const MAX_BODY_CHARS: usize = 4000;
@@ -304,6 +293,61 @@ async fn draft_from_result(
     Some((title, fallback_body, "result_md"))
 }
 
+/// Draft wiki title/body from caller `notes` when result.md is unavailable (#925).
+fn draft_from_notes(notes: &str, issue_ref: &str) -> Option<(String, String, &'static str)> {
+    let trimmed = notes.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let title = first_heading_or_closure_title(trimmed, issue_ref);
+    const MAX_BODY_CHARS: usize = 4000;
+    let body = if trimmed.chars().take(MAX_BODY_CHARS + 1).count() > MAX_BODY_CHARS {
+        let capped: String = trimmed.chars().take(MAX_BODY_CHARS).collect();
+        format!(
+            "{capped}\n\n_(drafted from notes; truncated at {MAX_BODY_CHARS} chars — edit before relying on it)_"
+        )
+    } else {
+        trimmed.to_string()
+    };
+    Some((title, body, "notes"))
+}
+
+fn first_heading_or_closure_title(text: &str, issue_ref: &str) -> String {
+    text.lines()
+        .find_map(|line| {
+            let heading = line.trim_start();
+            let text = heading.trim_start_matches('#').trim();
+            if heading.starts_with('#') && !text.is_empty() {
+                Some(text.to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| format!("Closure: {issue_ref}"))
+}
+
+fn close_loop_missing_draft_error(flow_id: Option<&str>, has_notes: bool) -> String {
+    // Minimal template so agents can repair without a second discovery round (#925).
+    let flow = flow_id.unwrap_or("<flow_id>");
+    format!(
+        "close_loop needs wiki content. Provide one of:\n\
+         - wiki_title + wiki_text (preferred durable lesson)\n\
+         - flow_id with result.md at .tachi/runs/{flow}/result.md\n\
+         - notes (draft source when result.md is missing)\n\
+         Missing now: wiki_title/wiki_text{}; notes={}.",
+        if flow_id.is_some() {
+            "; result.md unavailable or empty"
+        } else {
+            "; flow_id not set"
+        },
+        if has_notes {
+            "present-but-empty?"
+        } else {
+            "absent"
+        }
+    )
+}
+
 pub(crate) async fn handle_workflow(
     server: &MemoryServer,
     params: TachiWorkflowParams,
@@ -321,7 +365,7 @@ pub(crate) async fn handle_workflow(
             let doc_paths = trimmed_nonempty_unique(&params.doc_paths);
             let spec_paths = trimmed_nonempty_unique(&params.spec_paths);
             // Resolve the wiki title/text. If either is omitted, draft it from
-            // the flow's result.md (Gap C: lower the cost of closing the loop).
+            // the flow's result.md, then from notes (#925).
             let explicit_title = params.wiki_title.clone().filter(|s| !s.trim().is_empty());
             let explicit_text = params.wiki_text.clone().filter(|s| !s.trim().is_empty());
             let mut auto_drafted = false;
@@ -333,6 +377,13 @@ pub(crate) async fn handle_workflow(
                         Some(fid) => draft_from_result(server, fid, &issue_ref).await,
                         None => None,
                     };
+                    let drafted = match drafted {
+                        Some(d) => Some(d),
+                        None => params
+                            .notes
+                            .as_deref()
+                            .and_then(|notes| draft_from_notes(notes, &issue_ref)),
+                    };
                     match drafted {
                         Some((dt, dx, src)) => {
                             auto_drafted = maybe_t.is_none() || maybe_x.is_none();
@@ -340,7 +391,13 @@ pub(crate) async fn handle_workflow(
                             (maybe_t.unwrap_or(dt), maybe_x.unwrap_or(dx))
                         }
                         None => {
-                            return Err("close_loop needs wiki_title + wiki_text, or a flow_id whose result.md can be drafted from".to_string());
+                            return Err(close_loop_missing_draft_error(
+                                params.flow_id.as_deref(),
+                                params
+                                    .notes
+                                    .as_deref()
+                                    .is_some_and(|n| !n.trim().is_empty()),
+                            ));
                         }
                     }
                 }

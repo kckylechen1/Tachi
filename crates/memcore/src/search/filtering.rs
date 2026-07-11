@@ -132,10 +132,7 @@ pub(super) fn is_search_noise_entry(entry: &MemoryEntry, path_prefix: Option<&st
 /// bucket via `path_prefix`. Unscoped mixed search (`path_prefix = None`) keeps
 /// them at 1.0 so older wiki/roadmap pages do not systematically bury fresh
 /// project decisions (ops-audit rank-dilution / adjacent-wiki shapes).
-pub(super) fn quality_multiplier(
-    entry: &MemoryEntry,
-    path_prefix: Option<&str>,
-) -> f64 {
+pub(super) fn quality_multiplier(entry: &MemoryEntry, path_prefix: Option<&str>) -> f64 {
     let wiki_scoped = path_prefix.is_some_and(|p| p == "/wiki" || p.starts_with("/wiki/"));
     let guide_scoped = path_prefix.is_some_and(|p| p == "/guide" || p.starts_with("/guide/"));
 

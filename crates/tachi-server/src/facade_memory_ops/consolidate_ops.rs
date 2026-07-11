@@ -203,7 +203,8 @@ fn handle_apply(server: &MemoryServer, params: &TachiMemoryParams) -> Result<Str
         ));
     }
 
-    let apply_result = apply_lifecycle_action(server, params, &action, &source_id, target_id.as_deref())?;
+    let apply_result =
+        apply_lifecycle_action(server, params, &action, &source_id, target_id.as_deref())?;
     let applied_at = Utc::now().to_rfc3339();
     proposal["status"] = json!("applied");
     proposal["applied_at"] = json!(applied_at);
@@ -420,8 +421,8 @@ fn generate_and_persist_proposals(
                     }
                 }
             }
-            let raw = serde_json::to_string(proposal)
-                .map_err(|e| format!("serialize proposal: {e}"))?;
+            let raw =
+                serde_json::to_string(proposal).map_err(|e| format!("serialize proposal: {e}"))?;
             store
                 .set_state(LIFECYCLE_PROPOSAL_NS, id, &raw)
                 .map_err(|e| format!("persist proposal: {e}"))?;
@@ -450,9 +451,7 @@ fn propose_same_path_lifecycle(entries: &[MemoryEntry], path_prefix: &str) -> Ve
         if group.len() < 2 {
             continue;
         }
-        group.sort_by(|a, b| {
-            cmp_entry_timestamp_desc(a, b).then_with(|| a.id.cmp(&b.id))
-        });
+        group.sort_by(|a, b| cmp_entry_timestamp_desc(a, b).then_with(|| a.id.cmp(&b.id)));
         let survivor = group[0];
         for older in group.iter().skip(1) {
             if older.id == survivor.id {
@@ -519,8 +518,7 @@ fn propose_promote_distilled(entries: &[MemoryEntry], path_prefix: &str) -> Vec<
         if !entry.tier.eq_ignore_ascii_case("raw") {
             continue;
         }
-        if entry.recall_count < PROMOTE_RECALL_MIN
-            || entry.query_diversity < PROMOTE_DIVERSITY_MIN
+        if entry.recall_count < PROMOTE_RECALL_MIN || entry.query_diversity < PROMOTE_DIVERSITY_MIN
         {
             continue;
         }
@@ -554,10 +552,8 @@ fn propose_promote_distilled(entries: &[MemoryEntry], path_prefix: &str) -> Vec<
 
 fn summary_token_jaccard(a: &str, b: &str) -> f64 {
     // `tokenize` is re-exported from the scorer module path used by memcore.
-    let ta: std::collections::HashSet<String> =
-        memcore::scorer::tokenize(a).into_iter().collect();
-    let tb: std::collections::HashSet<String> =
-        memcore::scorer::tokenize(b).into_iter().collect();
+    let ta: std::collections::HashSet<String> = memcore::scorer::tokenize(a).into_iter().collect();
+    let tb: std::collections::HashSet<String> = memcore::scorer::tokenize(b).into_iter().collect();
     if ta.is_empty() || tb.is_empty() {
         return 0.0;
     }
@@ -709,7 +705,12 @@ fn with_proposal_store<T>(
     f: impl FnOnce(&mut memcore::MemoryStore) -> Result<T, String>,
 ) -> Result<T, String> {
     // Named project pin first; else project DB; else global.
-    if let Some(name) = params.project.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(name) = params
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         return server.with_named_project_store(name, f);
     }
     if server.has_project_db() {
@@ -724,7 +725,12 @@ fn with_proposal_store_read<T>(
     f: impl FnOnce(&mut memcore::MemoryStore) -> Result<T, String>,
 ) -> Result<T, String> {
     // *_store_read still takes &mut MemoryStore (shared lock style).
-    if let Some(name) = params.project.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(name) = params
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         return server.with_named_project_store_read(name, f);
     }
     if server.has_project_db() {

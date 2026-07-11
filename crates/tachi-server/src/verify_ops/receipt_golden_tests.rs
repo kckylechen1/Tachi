@@ -123,13 +123,17 @@ async fn g2_batch_record_receipt_lists_both_ids() {
     let status: Value = serde_json::from_str(&status_resp).expect("status JSON");
     assert!(status.get("verification").is_none());
     assert_eq!(status["overall"], json!("failed"));
-    assert!(status["problems"].as_array().unwrap().iter().any(|p| {
-        p.get("id").and_then(Value::as_str) == Some("clippy")
-    }));
+    assert!(status["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| { p.get("id").and_then(Value::as_str) == Some("clippy") }));
 
     let mut full = verify_params("status");
     full.format = Some("full".to_string());
-    let full_resp = handle_tachi_verify(&server, full).await.expect("full status");
+    let full_resp = handle_tachi_verify(&server, full)
+        .await
+        .expect("full status");
     let full_status: Value = serde_json::from_str(&full_resp).expect("full JSON");
     let ids: Vec<String> = full_status["verification"]["items"]
         .as_array()
@@ -210,7 +214,10 @@ async fn f1_status_compact_omits_passed_rows_and_stays_small() {
         resp.len()
     );
     let lower = resp.to_ascii_lowercase();
-    assert!(!lower.contains("gitleaks"), "passed check must not be echoed: {resp}");
+    assert!(
+        !lower.contains("gitleaks"),
+        "passed check must not be echoed: {resp}"
+    );
     assert!(lower.contains("clippy"));
     assert!(lower.contains("problems"));
 

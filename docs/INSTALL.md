@@ -45,7 +45,7 @@ tachi status             # runtime.build.git_sha / runtime.binary
 ### macOS / Linux (Shell Installer)
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.8.0/scripts/install.sh)" -- --skip-plugin
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.0/scripts/install.sh)" -- --skip-plugin
 ```
 
 On macOS, the shell installer also installs and restarts a user LaunchAgent for
@@ -446,7 +446,7 @@ Live SQLite databases should stay local. Sync encrypted bundles, append-only eve
 If you use OpenClaw, the full installer configures both the binary and the plugin:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.8.0/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.0/scripts/install.sh)"
 ```
 
 This will:
@@ -498,23 +498,41 @@ Once connected, Tachi exposes a profile-filtered MCP surface. The full `admin` c
 
 ### Core Memory
 
-`save_memory`, `search_memory`, `get_memory`, `list_memories`, `delete_memory`, `archive_memory`, `memory_stats`, `memory_gc`, `remember`, `find_similar_memory`
+`save_memory`, `search_memory`, `get_memory`, `list_memories`, `archive_memory`, `memory_stats`, `remember`, `find_similar_memory`
 
 `get_memory` remains available in the full admin/backcompat catalog. Daily
-agent profiles should use `tachi_memory(action="get")` instead.
+agent profiles should use `tachi_memory(action="get")` instead. Permanent
+deletion and garbage collection are folded into `tachi_memory(action="delete")`
+and `tachi_memory(action="gc")` (#757).
 
 ### Knowledge Graph & Domains
 
-`add_edge`, `get_edges`, `memory_graph`
-`register_domain`, `get_domain`, `list_domains`, `delete_domain`
+Graph primitives (`add_edge`, `get_edges`, `memory_graph`) were internalized
+off the MCP surface in #757 — no live tool call reaches them anymore; the
+tachi-server facade helper layer that used to wrap them was deleted outright
+once #913 found zero remaining in-crate callers, so only the
+`memcore::MemoryStore` boundary remains. Agents get graph behavior through
+`tachi_save`/`tachi_memory` auto-linking and recall's graph-spreading-activation
+channel — there is no standalone graph-traversal action.
+
+The domain registry (`register_domain`, `get_domain`, `list_domains`,
+`delete_domain`) was retired in #972 — domains are no longer a first-class
+MCP concept; there is no replacement action.
 
 ### State & Config
 
-`set_state`, `get_state`, `runtime_info`
+State primitives (`set_state`, `get_state`) were internalized off the MCP
+surface in #757 for the same reason — there is no facade equivalent for raw
+KV state.
+
+`runtime_info`
 
 ### Extraction & Ingestion
 
-`extract_facts`, `ingest_event`, `ingest`, `ingest_source`
+`extract_facts`, `ingest_event`
+
+Source/event ingestion is folded into `tachi_memory(action="ingest")` and
+`tachi_memory(action="ingest_source")` (#757).
 
 ### Neural Foundry (Context Lifecycle & Evolution)
 
@@ -620,7 +638,9 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 ### Utilities
 
-`skill_evolve`, `run_skill`, `chain_skills`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`, `tachi_doctor_scan`
+`skill_evolve`, `run_skill`, `chain_skills`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`
+
+`tachi_doctor_scan` is folded into `tachi_memory(action="doctor_scan")` (#757).
 
 ---
 

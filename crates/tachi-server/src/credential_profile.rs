@@ -35,6 +35,4 @@ pub(crate) use types::{
 };
 // Test constructors used via `crate::credential_profile::*` in credential_tests.
 #[cfg(test)]
-pub(crate) use types::{
-    AllowedConsumers, CredentialMaterializer, CredentialProfileDocument,
-};
+pub(crate) use types::{AllowedConsumers, CredentialMaterializer, CredentialProfileDocument};

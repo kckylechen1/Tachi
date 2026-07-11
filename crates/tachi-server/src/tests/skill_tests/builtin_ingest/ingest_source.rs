@@ -39,8 +39,9 @@ async fn ingest_source_chunks_content_and_builds_graph_edges() {
         })
         .expect("seed comparable memory");
 
-    let response = server
-        .ingest_source(Parameters(IngestSourceParams {
+    let response = crate::pipeline_ops::handle_ingest_source(
+        &server,
+        IngestSourceParams {
             content:
                 "cargo workspace chunking graph edge reference\nsecond paragraph for another chunk"
                     .to_string(),
@@ -57,9 +58,10 @@ async fn ingest_source_chunks_content_and_builds_graph_edges() {
             chunk_size_chars: 32,
             chunk_overlap_chars: 0,
             metadata: None,
-        }))
-        .await
-        .expect("ingest_source should succeed");
+        },
+    )
+    .await
+    .expect("ingest_source should succeed");
     let response_json: Value =
         serde_json::from_str(&response).expect("ingest_source response json");
     let saved = response_json["chunks_saved"].as_u64().unwrap_or(0);
@@ -85,8 +87,9 @@ async fn ingest_source_chunks_content_and_builds_graph_edges() {
 async fn ingest_source_empty_content_records_skip_audit() {
     let server = make_server();
 
-    let response = server
-        .ingest_source(Parameters(IngestSourceParams {
+    let response = crate::pipeline_ops::handle_ingest_source(
+        &server,
+        IngestSourceParams {
             content: "   ".to_string(),
             source_url: Some("https://example.com/empty".to_string()),
             source: Some("empty-source".to_string()),
@@ -101,9 +104,10 @@ async fn ingest_source_empty_content_records_skip_audit() {
             chunk_size_chars: 1200,
             chunk_overlap_chars: 120,
             metadata: None,
-        }))
-        .await
-        .expect("empty ingest_source should return skipped response");
+        },
+    )
+    .await
+    .expect("empty ingest_source should return skipped response");
 
     let json: Value = serde_json::from_str(&response).expect("json");
     assert_eq!(json["status"], "skipped");

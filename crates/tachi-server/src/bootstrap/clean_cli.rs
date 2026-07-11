@@ -31,18 +31,20 @@ fn run_worktree_command_sync(action: WorktreeAction) -> Result<(), String> {
             name,
             dry_run,
             json,
-        } => wt_open::run_wt_open(OpenOptions {
-            repo_root: repo,
-            path,
-            branch,
-            base,
-            task,
-            role,
-            dispatch_id,
-            name,
-            dry_run,
-            output: output_format(json),
-        }),
+        } => provision_managed_env_cli(
+            crate::exec_env_ops::ProvisionEnvOptions {
+                repo_root: repo,
+                path,
+                branch,
+                base,
+                task,
+                role,
+                dispatch_id,
+                name,
+                dry_run,
+            },
+            output_format(json),
+        ),
         WorktreeAction::Close {
             path,
             force,
@@ -87,6 +89,78 @@ fn output_format(json: bool) -> OutputFormat {
         OutputFormat::Json
     } else {
         OutputFormat::Text
+    }
+}
+
+/// CLI wrapper over the single provisioning entrypoint (#894 S1): opens the
+/// managed worktree AND records a daemon-owned `exec_envs` lease through
+/// `exec_env_ops::provision_managed_env`, so the CLI and the daemon share one
+/// source of provisioning logic instead of a divergent copy.
+///
+/// If the global store cannot be opened (e.g. no `TACHI_HOME` in this context),
+/// falls back to the lease-less worktree open so the CLI never regresses.
+fn provision_managed_env_cli(
+    opts: crate::exec_env_ops::ProvisionEnvOptions,
+    output: OutputFormat,
+) -> Result<(), String> {
+    let global_db = crate::path_utils::tachi_home()
+        .join("global")
+        .join("memory.db");
+    if let Some(parent) = global_db.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let db_str = global_db
+        .to_str()
+        .ok_or("global db path is not valid UTF-8")?;
+
+    match memcore::MemoryStore::open_with_label(db_str, "global") {
+        Ok(store) => {
+            let provisioned =
+                crate::exec_env_ops::provision_managed_env(store.connection(), &opts)?;
+            wt_open::emit_open_report(&provisioned.report, output)?;
+            // Surface the lease id (#894 S1) so callers learn what to pass as
+            // `env_id` on a later dispatch. `emit_open_report` only knows the
+            // vendor-neutral `OpenReport` (no lease concept), so the lease id
+            // is reported here rather than threaded into that shared struct.
+            match &provisioned.env_id {
+                Some(env_id) => {
+                    if matches!(output, OutputFormat::Text) {
+                        println!("  env_id: {env_id}");
+                    }
+                    tracing::info!(env_id = %env_id, "provisioned exec_env lease");
+                }
+                None => {
+                    tracing::debug!(
+                        "worktree provisioned without an exec_env lease (see report warnings)"
+                    );
+                }
+            }
+            if provisioned.report.errors.is_empty() {
+                Ok(())
+            } else {
+                Err(provisioned.report.errors.join("; "))
+            }
+        }
+        Err(err) => {
+            // Fail-open on the lease record only: still provision the worktree
+            // (lease-less) so the CLI stays usable without a daemon DB.
+            tracing::warn!(
+                error = %err,
+                "exec_env lease store unavailable; opening worktree without a lease"
+            );
+            wt_open::run_wt_open_with_emit(OpenOptions {
+                repo_root: opts.repo_root,
+                path: opts.path,
+                branch: opts.branch,
+                base: opts.base,
+                task: opts.task,
+                role: opts.role,
+                dispatch_id: opts.dispatch_id,
+                name: opts.name,
+                dry_run: opts.dry_run,
+                output,
+            })
+        }
     }
 }
 

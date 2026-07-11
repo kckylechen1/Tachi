@@ -345,9 +345,7 @@ mod tests {
         assert!(!should_skip_query(
             "How to implement hybrid search in Rust?"
         ));
-        assert!(!should_skip_query(
-            "什么是 memcore 的 ACT-R decay 公式？"
-        ));
+        assert!(!should_skip_query("什么是 memcore 的 ACT-R decay 公式？"));
         assert!(!should_skip_query(
             "Show me the database schema for memories"
         ));

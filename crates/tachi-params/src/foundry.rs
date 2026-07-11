@@ -25,10 +25,6 @@ fn default_recommend_limit() -> usize {
     5
 }
 
-fn default_memory_graph_depth() -> usize {
-    1
-}
-
 fn default_compact_trigger() -> String {
     "token_pressure".to_string()
 }
@@ -486,33 +482,4 @@ pub struct PrepareCapabilityBundleParams {
     /// If true, include a rendered section artifact in the response
     #[serde(default = "default_true")]
     pub include_section: bool,
-}
-
-// ─── Memory Graph ───────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
-pub struct MemoryGraphParams {
-    /// Optional seed memory id
-    #[serde(default)]
-    pub memory_id: Option<String>,
-
-    /// Optional natural language lookup query when memory_id is not known
-    #[serde(default)]
-    pub query: Option<String>,
-
-    /// Optional path prefix filter for query-based lookup
-    #[serde(default)]
-    pub path_prefix: Option<String>,
-
-    /// Optional named project DB
-    #[serde(default)]
-    pub project: Option<String>,
-
-    /// Number of seed memories to resolve from a query
-    #[serde(default = "default_recommend_limit")]
-    pub top_k: usize,
-
-    /// Graph hop depth to traverse from each seed
-    #[serde(default = "default_memory_graph_depth")]
-    pub depth: usize,
 }

@@ -117,6 +117,8 @@ fn standard_profile_restricts_to_allow_list() {
             test_tool("tachi_web_search"),
             test_tool("tachi_wiki"),
             test_tool("tachi_skill"),
+            test_tool("vault_unlock"),
+            test_tool("vault_lock"),
             test_tool("vault_status"),
             test_tool("tachi_gh"),
             test_tool("search_memory"),
@@ -135,8 +137,6 @@ fn standard_profile_restricts_to_allow_list() {
             test_tool("tachi_complete"),
             test_tool("approve_merge"),
             test_tool("tachi_board"),
-            test_tool("vault_unlock"),
-            test_tool("vault_lock"),
             test_tool("vault_get"),
             test_tool("vault_lease_api_key"),
             test_tool("vault_set_api_key_pool"),
@@ -164,6 +164,8 @@ fn standard_profile_restricts_to_allow_list() {
             "tachi_web_search".to_string(),
             "tachi_wiki".to_string(),
             "tachi_skill".to_string(),
+            "vault_unlock".to_string(),
+            "vault_lock".to_string(),
             "vault_status".to_string(),
             "tachi_gh".to_string(),
         ]
@@ -183,6 +185,7 @@ fn delegate_profile_restricts_to_allow_list() {
             test_tool("tachi_task"),
             test_tool("tachi_complete"),
             test_tool("tachi_skill"),
+            // #517: standalone run_skill no longer on default delegate tray
             test_tool("run_skill"),
             // Old tools that should be excluded from delegate
             test_tool("tachi_search"),
@@ -218,7 +221,10 @@ fn delegate_profile_restricts_to_allow_list() {
             "tachi_task".to_string(),
             "tachi_complete".to_string(),
             "tachi_skill".to_string(),
-            "run_skill".to_string(),
         ]
+    );
+    assert!(
+        !names.iter().any(|n| n == "run_skill"),
+        "run_skill must not appear on default delegate tray (#517 soft-deprecate)"
     );
 }

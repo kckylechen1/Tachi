@@ -250,7 +250,7 @@ fn build_cycle_plan_from_status(status: &Value) -> Value {
         cycle_plan_step(
             "pr_handoff",
             "Prepare PR handoff",
-            "tachi_task",
+            "tachi_gh",
             "pr_handoff",
             pr_handoff_status,
             true,
@@ -264,7 +264,7 @@ fn build_cycle_plan_from_status(status: &Value) -> Value {
         cycle_plan_step(
             "link_pr",
             "Link GitHub PR",
-            "tachi_task",
+            "tachi_gh",
             "link_pr",
             link_pr_status,
             true,
@@ -275,7 +275,7 @@ fn build_cycle_plan_from_status(status: &Value) -> Value {
         cycle_plan_step(
             "pr_status",
             "Run PR gate preview",
-            "tachi_task",
+            "tachi_gh",
             "pr_status",
             pr_status_status,
             true,
@@ -286,7 +286,7 @@ fn build_cycle_plan_from_status(status: &Value) -> Value {
         cycle_plan_step(
             "release_note",
             "Generate release note",
-            "tachi_task",
+            "tachi_gh",
             "release_note",
             release_status,
             true,
