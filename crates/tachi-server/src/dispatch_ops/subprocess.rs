@@ -223,8 +223,25 @@ mod tests {
             std::env::var_os("PATH").expect("PATH must exist for shell fixture"),
         );
 
-        let result = tokio::time::timeout(Duration::from_secs(5), async {
-            let run = tokio::spawn(run_agent_subprocess(cmd, Duration::from_secs(1)));
+        // Root cause (issue #997, confirmed via tracing): the simulated
+        // "agent hung" timeout passed to `run_agent_subprocess` shared the
+        // same budget as the fixture's own startup latency (fork+exec `sh`,
+        // background a sub-shell, `echo $! > file`). With a 1s simulated
+        // timeout, `run_agent_subprocess_inner`'s internal `tokio::time::timeout`
+        // occasionally fired and SIGTERM'd the fixture's process group BEFORE
+        // the fixture reached its `echo $! > file` line under scheduler
+        // latency (observed even with zero build contention, an isolated
+        // target dir, and a quiet machine) — once the process group is
+        // killed, the pid file can never be written, so no `wait_for_file`
+        // deadline, however large, fixes this: the resource being polled for
+        // genuinely never gets created. Widening the simulated timeout to 4s
+        // gives the fixture's startup line real headroom to run before the
+        // timeout fires, decoupling "time for the fixture to announce itself"
+        // from "time until the simulated hang is treated as timed out" —
+        // this still exercises a real reap (the fixture's `sleep 60` still
+        // vastly outlasts 4s) without weakening what the test proves.
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            let run = tokio::spawn(run_agent_subprocess(cmd, Duration::from_secs(4)));
             wait_for_file(&child_pid_path_for_wait).await;
             run.await.expect("subprocess runner task should not panic")
         })
@@ -251,7 +268,16 @@ mod tests {
 
     #[cfg(unix)]
     async fn wait_for_file(path: &std::path::Path) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        // 10s: a poll-with-deadline safety net on fork+exec/scheduler latency
+        // for a trivial shell fixture (not a fixed sleep, and not a
+        // functional wait — it normally resolves in well under a second).
+        // The real fix for issue #997's "fixture did not write child pid
+        // file" flake is the widened simulated-timeout in the caller above
+        // (this deadline being too short was never the root cause: tracing
+        // showed the fixture's process group was killed by the *simulated*
+        // 1s timeout before it could reach `echo $! > file`, so the file
+        // could never appear no matter how long this polled).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while tokio::time::Instant::now() < deadline {
             if path.exists() {
                 return;
@@ -263,7 +289,7 @@ mod tests {
 
     #[cfg(unix)]
     async fn wait_for_process_exit(pid: libc::pid_t) -> bool {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while tokio::time::Instant::now() < deadline {
             // SAFETY: `kill(pid, 0)` performs a signal-0 existence probe — it
             // sends no signal, passes no pointers across the FFI boundary, and
