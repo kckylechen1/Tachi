@@ -63,7 +63,7 @@ The target split is:
 - `operate`
   - `remember` +
   - runtime hook primitives (`recall_context`, `capture_session`, `compact_*`, `section_build`)
-  - routed execution / evolution helpers (`hub_call`, proposal queue/review/project tools, `agent_register`)
+  - routed execution helpers (`hub_call`, `hub_disconnect`, `archive_memory`, `find_similar_memory`, `get_pipeline_status`, `sync_memories`, `wiki_lint`, `vault_unlock`/`vault_lock`/`vault_status`) — the proposal queue/review/project tools and `agent_register` this bundle used to route were retired under #757, superseded by the memory-line promotion path (#950, #534)
 - `admin`
   - full surface, including hub governance, pack management, vault, sandbox, VC, and destructive operations
 

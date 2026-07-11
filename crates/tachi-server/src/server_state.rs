@@ -9,8 +9,8 @@ pub(crate) use self::cache::{
 };
 pub(crate) use self::tachi_server::MemoryServer;
 pub(crate) use memory_server_runtime::{
-    configured_memory_read_pool_size, AgentProfile, CachedVaultKey, DbRuntime, DbScope,
-    HandoffMemo, ProjectDbState, RateLimiter, ReadStorePool, VaultState, DEFAULT_RATE_LIMIT_BURST,
+    configured_memory_read_pool_size, CachedVaultKey, DbRuntime, DbScope, HandoffMemo,
+    ProjectDbState, RateLimiter, ReadStorePool, VaultState, DEFAULT_RATE_LIMIT_BURST,
     DEFAULT_RATE_LIMIT_RPM,
 };
 #[cfg(test)]

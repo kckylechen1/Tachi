@@ -1,5 +1,6 @@
 use super::*;
-use crate::tool_params::AgentRegisterParams;
+use chrono::Utc;
+use memory_server_runtime::AgentProfile;
 
 async fn init_agent_acl_vault(password: &str) -> crate::tests::TestServer {
     let server = make_server();
@@ -242,17 +243,18 @@ async fn vault_acl_g5_agent_register_is_not_a_vault_binding() {
         .await
         .expect("G5 seed should succeed");
 
-    server
-        .agent_register(Parameters(AgentRegisterParams {
+    {
+        let mut guard = server.agent_runtime_write();
+        guard.agent_profile = Some(AgentProfile {
             agent_id: "alice".to_string(),
-            display_name: None,
+            display_name: "alice".to_string(),
             capabilities: Vec::new(),
             tool_filter: None,
             rate_limit_rpm: None,
             rate_limit_burst: None,
-        }))
-        .await
-        .expect("G5 agent_register should succeed");
+            registered_at: Utc::now().to_rfc3339(),
+        });
+    }
 
     let denied = server
         .vault_get(Parameters(VaultGetParams {

@@ -276,13 +276,15 @@ Status:
 
 - foundations in progress
 
-Already done:
+Already done (historical — this manual tool surface has since been retired, see note below):
 
 - `synthesize_agent_evolution` now persists proposal artifacts into Foundry proposal storage
 - `queue_agent_evolution` can run synthesis in the background and persist job state
 - **`queue_agent_evolution` idempotency**: job ids are deterministic from input fingerprint; re-queue with the same inputs returns `deduped` for active or terminal jobs instead of spawning duplicate synthesis. Stale `running` jobs (>30 minutes) can be reclaimed before retry.
 - `list_agent_evolution_proposals` exposes stored proposals for operator review
 - `review_agent_evolution_proposal` adds approval / rejection / applied review state
+
+**Retired (#757):** `synthesize_agent_evolution`, `queue_agent_evolution`, `list_agent_evolution_proposals`, and `review_agent_evolution_proposal` are no longer on the MCP tool surface — the manual proposal-review workflow they backed was superseded by the memory-line promotion path (#950, #534). The underlying Foundry proposal storage still exists internally (`crates/tachi-server/src/foundry_ops/`) but is not agent-invocable.
 
 Still missing:
 
@@ -302,11 +304,13 @@ Status:
 
 - foundations in progress
 
-Already done:
+Already done (historical — this manual tool surface has since been retired, see note below):
 
 - `project_agent_profile` can load persisted proposals, filter them by approval state, and project them into host documents in memory
 - projection is section-aware for markdown-backed targets, so approved proposals can replace or append specific sections instead of rewriting whole files
 - `write=true` can write projected content back to disk and mark the applied proposals as `applied`
+
+**Retired (#757):** `project_agent_profile` is no longer on the MCP tool surface — the review-and-project proposal flow it consumed was superseded by the memory-line promotion path (#950, #534).
 
 Still missing:
 

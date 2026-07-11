@@ -61,17 +61,18 @@ async fn handoff_check_reads_and_acks_persisted_memos_after_restart() {
 
     {
         let server = test_server(db_path.clone());
-        server
-            .agent_register(Parameters(AgentRegisterParams {
+        {
+            let mut guard = server.agent_runtime_write();
+            guard.agent_profile = Some(AgentProfile {
                 agent_id: "agent-a".to_string(),
-                display_name: None,
+                display_name: "agent-a".to_string(),
                 capabilities: vec![],
                 tool_filter: None,
                 rate_limit_rpm: None,
                 rate_limit_burst: None,
-            }))
-            .await
-            .expect("register source agent");
+                registered_at: Utc::now().to_rfc3339(),
+            });
+        }
         server
             .handoff_leave(Parameters(HandoffLeaveParams {
                 summary: "persist across restart".to_string(),

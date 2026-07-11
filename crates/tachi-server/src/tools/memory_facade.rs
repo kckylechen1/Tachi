@@ -7,9 +7,10 @@ use crate::memory_ops::{
     handle_runtime_info,
 };
 use crate::memory_search_ops::{handle_find_similar_memory, handle_remember, handle_save_memory};
+use crate::project_db_ops::handle_tachi_init_project_db;
 use crate::tool_params::{
-    ArchiveMemoryParams, FindSimilarMemoryParams, GetMemoryParams, ListMemoriesParams,
-    RememberParams, SaveMemoryParams, SearchMemoryParams,
+    ArchiveMemoryParams, FindSimilarMemoryParams, GetMemoryParams, InitProjectDbParams,
+    ListMemoriesParams, RememberParams, SaveMemoryParams, SearchMemoryParams,
 };
 use crate::MemoryServer;
 
@@ -158,5 +159,15 @@ impl MemoryServer {
         Parameters(params): Parameters<ArchiveMemoryParams>,
     ) -> Result<String, String> {
         handle_archive_memory(self, params).await
+    }
+
+    #[tool(
+        description = "Initialize a project-scoped Tachi memory DB under the current or target git repository."
+    )]
+    pub(crate) async fn tachi_init_project_db(
+        &self,
+        Parameters(params): Parameters<InitProjectDbParams>,
+    ) -> Result<String, String> {
+        handle_tachi_init_project_db(self, params).await
     }
 }

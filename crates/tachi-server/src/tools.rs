@@ -35,7 +35,6 @@ use crate::MemoryServer;
 const TASK_WAIT_INITIAL_POLL_DELAY: StdDuration = StdDuration::from_millis(250);
 const TASK_WAIT_MAX_POLL_DELAY: StdDuration = StdDuration::from_secs(2);
 
-mod agent_profile_facade;
 mod component_facade;
 mod continuity_facade;
 mod dispatch_complete_defaults;

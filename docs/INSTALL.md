@@ -537,7 +537,6 @@ Source/event ingestion is folded into `tachi_memory(action="ingest")` and
 ### Neural Foundry (Context Lifecycle & Evolution)
 
 `recall_context`, `capture_session`, `compact_context`, `section_build`, `compact_rollup`, `compact_session_memory`
-`synthesize_agent_evolution`, `queue_agent_evolution`, `list_agent_evolution_proposals`, `review_agent_evolution_proposal`, `project_agent_profile`
 
 ### Capability Hub
 
@@ -557,9 +556,9 @@ Source/event ingestion is folded into `tachi_memory(action="ingest")` and
 
 *(Aliases: `ghost_whisper`, `ghost_listen`, `ghost_channels`)*
 
-### Agent Identity & Handoff
+### Handoff
 
-`agent_register`, `agent_whoami`, `handoff_leave`, `handoff_check`
+`handoff_leave`, `handoff_check`
 
 ### Kanban (Inter-Agent)
 
@@ -653,7 +652,7 @@ Tachi does not need to expose the full tool catalog to every host. Use `--profil
 |---|---|---|
 | `standard` | Daily facade surface: `tachi_save`, `tachi_memory`, `tachi_task`, `tachi_arena`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `vault_status`, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. | IDE agents (Claude, Cursor, Codex, Windsurf, Trae, Antigravity). |
 | `coordinate` | `remember` + `coordinate` bundles: adds `handoff_*`, `post_card`, `check_inbox`, `update_card`, `approve_merge`, `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`; dispatch runs through `tachi_task(action='dispatch')`. | Leader/orchestrator agents. |
-| `operate` | `remember` + `operate` bundles: adds Foundry lifecycle, `agent_register`, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters and OpenClaw. |
+| `operate` | `remember` + `operate` bundles: adds Foundry lifecycle, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters and OpenClaw. |
 | `delegate` | Curated 7-tool surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_complete`, `run_skill`. | Worker subagents spawned by `tachi_task(action='dispatch')`. |
 | `admin` | Full catalog. | Maintenance and development. |
 

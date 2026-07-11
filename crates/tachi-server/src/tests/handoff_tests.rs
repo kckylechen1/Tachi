@@ -1,8 +1,10 @@
 use super::make_server;
 use crate::tool_params::{
-    AgentRegisterParams, ChainSkillsParams, ChainStep, GetMemoryParams, HandoffCheckParams,
-    HandoffLeaveParams, HubRegisterParams,
+    ChainSkillsParams, ChainStep, GetMemoryParams, HandoffCheckParams, HandoffLeaveParams,
+    HubRegisterParams,
 };
+use chrono::Utc;
+use memory_server_runtime::AgentProfile;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 
@@ -123,17 +125,18 @@ async fn handoff_leave_and_check_roundtrip() {
     let server = make_server();
 
     // Register as "agent-a" first
-    server
-        .agent_register(Parameters(AgentRegisterParams {
+    {
+        let mut guard = server.agent_runtime_write();
+        guard.agent_profile = Some(AgentProfile {
             agent_id: "agent-a".to_string(),
-            display_name: Some("Agent A".to_string()),
+            display_name: "Agent A".to_string(),
             capabilities: vec![],
             tool_filter: None,
             rate_limit_rpm: None,
             rate_limit_burst: None,
-        }))
-        .await
-        .expect("register agent-a");
+            registered_at: Utc::now().to_rfc3339(),
+        });
+    }
 
     // Leave a handoff memo targeted at agent-b
     let leave = server

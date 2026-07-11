@@ -686,7 +686,10 @@ impl ProjectDbState {
     }
 }
 
-/// Agent profile registered via `agent_register`. Stored per-session (in-memory).
+/// Per-session agent identity (rate-limit overrides, tool filter, provenance
+/// attribution). Stored in-memory; populated directly onto `agent_runtime`
+/// state by callers (the `agent_register`/`agent_whoami` MCP tools were
+/// retired under #757 — no facade currently sets this at runtime).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentProfile {
     pub agent_id: String,

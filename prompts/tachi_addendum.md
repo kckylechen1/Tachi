@@ -98,7 +98,6 @@ tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry
 - 不要无 `coherence_key`/`topic`/`entity` 的高频写入 —— 会被 distill 跳过，浪费配额。
 - 不要把活的 SQLite 库放进 iCloud / Dropbox / OneDrive；同步加密 bundle 和 event log 即可。
 - **`tachi env sync` 必须加 `--apply` 才写盘**；默认只是 preview。`.tachi/env.generated` 含明文，勿 commit。
-- **`queue_agent_evolution` 同输入会去重**；重复 queue 会返回 `deduped`，不要靠反复 queue 来“重试”。
 
 ## 出错怎么办
 
