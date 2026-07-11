@@ -15,9 +15,12 @@ const ORCHESTRATOR_NS: &str = "orchestrator";
 const TODO_UPDATE_MAX_ATTEMPTS: usize = 3;
 
 #[cfg(test)]
+type TodoUpdateSnapshotCallback = Box<dyn FnOnce(&MemoryServer, &str) + Send>;
+
+#[cfg(test)]
 struct TodoUpdateSnapshotHook {
     task_key: String,
-    callback: Box<dyn FnOnce(&MemoryServer, &str) + Send>,
+    callback: TodoUpdateSnapshotCallback,
 }
 
 #[cfg(test)]
