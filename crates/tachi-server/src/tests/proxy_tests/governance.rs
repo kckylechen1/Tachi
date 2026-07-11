@@ -59,7 +59,7 @@ async fn proxy_call_requires_sandbox_policy_and_records_preflight_denial() {
         name: "needs-policy".to_string(),
         version: 1,
         description: "test policy requirement".to_string(),
-        definition: r#"{"transport":"stdio","command":"npx","args":["-y","dummy-mcp"]}"#
+        definition: r#"{"transport":"stdio","command":"npx","args":["-y","dummy-mcp"],"discovery_status":"ready"}"#
             .to_string(),
         enabled: true,
         review_status: "approved".to_string(),

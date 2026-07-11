@@ -281,6 +281,11 @@ mod tests {
     use super::*;
 
     fn open_conn() -> Connection {
+        // Keep this raw-connection fixture equivalent to MemoryStore's open
+        // path: schema initialization creates FTS tables that require the
+        // registered simple tokenizer.
+        libsimple::enable_auto_extension().unwrap();
+        crate::db::register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
         conn

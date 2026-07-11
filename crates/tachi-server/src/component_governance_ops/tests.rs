@@ -183,40 +183,43 @@ fn check_params(repo: &str) -> TachiComponentParams {
 async fn component_check_classifies_tachi_checkout_as_kernel_drift() {
     let server = make_server();
     seed_component_records(&server).expect("seed");
-    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    // Pass the `crates/` subdirectory as callers commonly do. The classifier
+    // must resolve the checkout root before testing repo-relative owner paths.
+    let repo_subdir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(1)
         .unwrap();
-    let body = handle_tachi_component(&server, check_params(&repo_root.display().to_string()))
+    let body = handle_tachi_component(&server, check_params(&repo_subdir.display().to_string()))
         .await
         .expect("check action");
     let parsed: Value = serde_json::from_str(&body).expect("json");
     assert_eq!(parsed["status"], json!("completed"));
-    // The remote matches kckylechen1/tachi. Both tachi-memory-kernel and
-    // tachi-event-projection-bridge share that owner_repo, so the classifier
-    // must tie-break to the strongest match. Since the remote matches BOTH
-    // equally (both Remote-strength), the kernel record wins by path-specificity:
-    // it declares crates/memcore (which exists) and is the canonical surface.
-    // We assert it matched ONE of the two kckylechen1/tachi records (not a
-    // wrong owner) and that the matched_component_id is correct, with no
-    // evidence gaps (remote match = confident).
+    // The canonical kernel owner paths are rooted at the checkout, not at its
+    // `crates/` child. A remote-equipped clone is confident; an exported source
+    // tree without `origin` remains correctly classified but carries a gap.
     let category = parsed["category"].as_str().expect("category");
     let matched = parsed["matched_component_id"].as_str().unwrap_or("(none)");
-    assert!(
-        category == CATEGORY_KERNEL_DRIFT || category == CATEGORY_BRIDGE,
-        "tachi checkout must classify as kernel_drift or bridge, got {category}"
+    assert_eq!(
+        category, CATEGORY_KERNEL_DRIFT,
+        "tachi checkout must classify as its kernel"
     );
-    assert!(
-        matched == "tachi-memory-kernel" || matched == "tachi-event-projection-bridge",
-        "must match a kckylechen1/tachi component, got {matched}"
-    );
-    // Remote match = confident: no path-only-fork evidence gap.
+    assert_eq!(matched, "tachi-memory-kernel");
     let empty = Vec::new();
     let gaps = parsed["evidence_gaps"].as_array().unwrap_or(&empty);
-    assert!(
-        gaps.is_empty(),
-        "remote-matched checkout must have no evidence gaps, got {gaps:?}"
-    );
+    let has_origin = run_git_readonly(repo_subdir, &["remote", "get-url", "origin"]).is_ok();
+    if has_origin {
+        assert!(
+            gaps.is_empty(),
+            "remote-matched checkout must have no evidence gaps, got {gaps:?}"
+        );
+    } else {
+        assert!(
+            gaps.iter().any(|gap| gap
+                .as_str()
+                .is_some_and(|gap| gap.contains("git origin remote is unavailable"))),
+            "source checkout without origin must disclose path-only evidence, got {gaps:?}"
+        );
+    }
 }
 
 #[tokio::test]

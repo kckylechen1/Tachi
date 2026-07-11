@@ -134,6 +134,23 @@ fn read_status_json(run_dir: &std::path::Path) -> Option<Value> {
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
 }
 
+/// A run directory is created before its receipt is atomically published.
+/// Wait for the receipt itself, while the fake plan stage remains blocked on
+/// its sentinel, so this test observes the required ordering rather than a
+/// directory-creation race.
+async fn wait_for_status_json(run_dir: &std::path::Path) -> Value {
+    for _ in 0..DISPATCH_TEST_WAIT_ATTEMPTS {
+        if let Some(status) = read_status_json(run_dir) {
+            return status;
+        }
+        tokio::time::sleep(DISPATCH_TEST_WAIT_INTERVAL).await;
+    }
+    panic!(
+        "status.json did not appear under {} before the blocked plan stage timed out",
+        run_dir.display()
+    );
+}
+
 /// (5a) A V2 plan-stage FAILURE must leave BOTH a terminal status.json
 /// (exit_code set, plan_review_status="failed") AND a kanban row in a
 /// terminal state (TASK_STATE_FAILED) — no orphaned "planning"/WORKING row.
@@ -244,8 +261,7 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
         .expect("dispatch id from run dir name")
         .to_string();
 
-    let early_status =
-        read_status_json(&run_dir).expect("status.json written before plan completes");
+    let early_status = wait_for_status_json(&run_dir).await;
     assert_eq!(early_status["v2"], json!(true), "{early_status:#}");
     assert!(
         early_status["plan_generated_at"].is_null(),

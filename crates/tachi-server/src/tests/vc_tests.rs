@@ -167,7 +167,9 @@ async fn vc_register_and_bind_workflow() {
         name: "concrete".to_string(),
         version: 1,
         description: "concrete capability".to_string(),
-        definition: r#"{"transport":"stdio","command":"echo","args":["test"]}"#.to_string(),
+        definition:
+            r#"{"transport":"stdio","command":"echo","args":["test"],"discovery_status":"ready"}"#
+                .to_string(),
         enabled: true,
         review_status: "approved".to_string(),
         health_status: "healthy".to_string(),

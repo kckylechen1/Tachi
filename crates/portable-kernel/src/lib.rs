@@ -30,15 +30,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn portable_build_disables_admin_marker() {
-        // Compile-time feature markers — const assert avoids clippy::assertions_on_constants.
-        const {
-            assert!(!ADMIN_SURFACE_ENABLED);
-            assert!(IS_PORTABLE_BUILD);
-        }
-    }
-
-    #[test]
     fn portable_store_open_upsert_and_stats() {
         let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
 

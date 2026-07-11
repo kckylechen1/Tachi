@@ -345,6 +345,7 @@ fn make_mcp_capability(id: &str, version: u32) -> HubCapability {
             "transport": "stdio",
             "command": "/usr/bin/true",
             "args": [],
+            "discovery_status": "ready",
         })
         .to_string(),
         enabled: true,
