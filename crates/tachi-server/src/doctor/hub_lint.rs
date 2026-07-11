@@ -1,17 +1,19 @@
-//! Hub capability lint: flags approved+enabled MCP capabilities that are
-//! missing a `discovery_status` stamp in their `definition` JSON.
+//! Hub capability lint: flags approved+enabled+non-open-health MCP
+//! capabilities that are missing a `discovery_status` stamp in their
+//! `definition` JSON.
 //!
 //! Context (#968 option B / #995): `capability_callable` treats a MISSING
-//! `discovery_status` as callable for enabled+approved+healthy MCP caps —
-//! a deliberate backward-compat carve-out for legacy/grandfathered rows
-//! registered before the discovery-status contract existed (or via a write
-//! path outside the register→review flow). That carve-out is safe today
-//! because every in-band register+approve path stamps `discovery_status`
-//! at review time, but it is safe **by convention, not enforcement** — a
-//! future import/sync path that writes approved rows verbatim could
-//! silently grandfather MCP caps into callable without ever running
-//! discovery. This lint gives that silent case visibility (a warning-tier
-//! finding), without changing `capability_callable` semantics at all.
+//! `discovery_status` as callable for enabled+approved+(health != open) MCP
+//! caps — a deliberate backward-compat carve-out for legacy/grandfathered
+//! rows registered before the discovery-status contract existed (or via a
+//! write path outside the register→review flow). That carve-out is safe
+//! today because every in-band register+approve path stamps
+//! `discovery_status` at review time, but it is safe **by convention, not
+//! enforcement** — a future import/sync path that writes approved rows
+//! verbatim could silently grandfather MCP caps into callable without ever
+//! running discovery. This lint gives that silent case visibility (a
+//! warning-tier finding), without changing `capability_callable` semantics
+//! at all.
 
 use memcore::HubCapability;
 
@@ -19,10 +21,13 @@ use super::DoctorWarning;
 use tachi_hub::{health_status_allows_call, review_status_allows_call};
 
 /// Scan a set of hub capabilities and return one [`DoctorWarning`] per
-/// approved+enabled+healthy MCP capability whose `definition` JSON is
-/// missing (or does not parse to an object containing) a `discovery_status`
-/// field. Read-only / pure — callers own where the `HubCapability` rows
-/// come from (global store, project store, or both).
+/// approved+enabled MCP capability, with `health_status` not equal to
+/// `"open"` (mirrors `capability_callable`'s exact gate: only an open
+/// circuit fails this check — `unknown`/`healthy`/`degraded` all pass),
+/// whose `definition` JSON is missing (or does not parse to an object
+/// containing) a `discovery_status` field. Read-only / pure — callers own
+/// where the `HubCapability` rows come from (global store, project store,
+/// or both).
 pub fn hub_capability_discovery_status_warnings(caps: &[HubCapability]) -> Vec<DoctorWarning> {
     caps.iter()
         .filter(|cap| is_approved_enabled_mcp_missing_discovery_status(cap))
@@ -142,6 +147,22 @@ mod tests {
         let skill = cap("skill:code-review", "skill", r#"{}"#);
         let warnings = hub_capability_discovery_status_warnings(&[skill]);
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn fires_for_uppercase_mcp_cap_type_missing_discovery_status() {
+        // #995 finding 2: cap_type case must not matter to the lint itself
+        // (the pure function already uses eq_ignore_ascii_case; the bug was
+        // in the SQL-backed collector upstream, covered separately in
+        // tachi-server/src/bootstrap/manifest_cli.rs tests).
+        let upper = cap("mcp:UPPER", "MCP", r#"{"other_field":"value"}"#);
+        let warnings = hub_capability_discovery_status_warnings(&[upper]);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "uppercase cap_type=MCP must still fire: {warnings:?}"
+        );
+        assert_eq!(warnings[0].path, "mcp:UPPER");
     }
 
     #[test]
