@@ -1015,7 +1015,7 @@ mod tests {
                 .rw_gate
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
-            let mut store = stale_state_before_eviction
+            let store = stale_state_before_eviction
                 .store
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
