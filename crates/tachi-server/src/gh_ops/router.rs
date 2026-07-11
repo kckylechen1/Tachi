@@ -308,12 +308,17 @@ async fn handle_issue_freshness_scan(
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_default();
-    let mut stale_scan_error: Option<String> = None;
+    // `stale_scan_hard_error` distinguishes "the scan itself failed" (no
+    // fresh authoritative hit set — must NOT reap) from
+    // `stale_scan_warning` ("the scan ran, but some anchors couldn't be
+    // verified" — the hit set IS still fresh/authoritative, reaping is safe).
+    let mut stale_scan_hard_error: Option<String> = None;
+    let mut stale_scan_warning: Option<String> = None;
     let stale_candidates =
         match crate::gh_ops::fetch_and_scan_stale_candidates(server, &repo, &repo_root, limit) {
             Ok((candidates, warnings)) => {
                 if !warnings.is_empty() {
-                    stale_scan_error = Some(format!(
+                    stale_scan_warning = Some(format!(
                         "{} anchor(s) could not be verified: {}",
                         warnings.len(),
                         warnings.join("; ")
@@ -322,7 +327,7 @@ async fn handle_issue_freshness_scan(
                 candidates
             }
             Err(e) => {
-                stale_scan_error = Some(e);
+                stale_scan_hard_error = Some(e);
                 Vec::new()
             }
         };
@@ -343,12 +348,11 @@ async fn handle_issue_freshness_scan(
             save_errors.push(format!("{issue_ref}: {e}"));
         }
     }
-    // Reap stale_candidate rows only when this scan actually ran (an error
-    // means we have no fresh authoritative set — reaping on an empty vec
-    // from a FAILED scan would wrongly delete every real row). Only reap on
-    // a successful scan (stale_scan_error carries a warning, not a hard
-    // failure, when candidates were still produced).
-    let stale_reaped = if stale_scan_error.is_none() || !stale_candidates.is_empty() {
+    // Reap stale_candidate rows only when this scan actually produced a
+    // fresh, authoritative hit set — a hard scan failure means `stale_refs`
+    // is empty for the WRONG reason (I/O error, not "nothing stale found"),
+    // and reaping on it would wrongly delete every real row.
+    let stale_reaped = if stale_scan_hard_error.is_none() {
         crate::gh_ops::reap_stale_kind_rows(
             server,
             crate::gh_ops::STALE_CANDIDATE_NS,
@@ -449,7 +453,8 @@ async fn handle_issue_freshness_scan(
         "rows_saved": zombies.len() + stale_candidates.len() + churn_candidates.len() - save_errors.len(),
         "rows_reaped": zombie_reaped + stale_reaped + churn_reaped,
         "save_errors": save_errors,
-        "stale_scan_error": stale_scan_error,
+        "stale_scan_error": stale_scan_hard_error,
+        "stale_scan_warning": stale_scan_warning,
         "churn_scan_error": churn_scan_error,
     }))
     .map_err(|e| format!("serialize: {e}"))
