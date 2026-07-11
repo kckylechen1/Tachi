@@ -17,10 +17,6 @@ pub(crate) fn render_daily_report_markdown(
         report.health_check.summary
     ));
     out.push_str(&format!(
-        "- Agent Evolution: {}\n",
-        report.agent_evolution.summary
-    ));
-    out.push_str(&format!(
         "- Skill Evolution: {}\n",
         report.skill_evolution.summary
     ));
@@ -32,14 +28,6 @@ pub(crate) fn render_daily_report_markdown(
     out.push_str("## Health Check\n\n");
     out.push_str("```json\n");
     out.push_str(&serde_json::to_string_pretty(health_json).unwrap_or_else(|_| "{}".to_string()));
-    out.push_str("\n```\n\n");
-
-    out.push_str("## Agent Evolution\n\n");
-    out.push_str("```json\n");
-    out.push_str(
-        &serde_json::to_string_pretty(&report.agent_evolution.details)
-            .unwrap_or_else(|_| "{}".to_string()),
-    );
     out.push_str("\n```\n\n");
 
     out.push_str("## Skill Evolution\n\n");
