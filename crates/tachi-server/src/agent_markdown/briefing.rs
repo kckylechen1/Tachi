@@ -12,6 +12,7 @@ pub(crate) fn format_briefing(
     checkpoints: &Value,
     open_loops: &[Value],
     component_governance: &Value,
+    issue_freshness: &Value,
     compact: bool,
 ) -> String {
     let memory_cap = if compact { 6 } else { 12 };
@@ -48,6 +49,44 @@ pub(crate) fn format_briefing(
                 Some(action) => out.push(format!("- {detail} → `{action}`")),
                 None => out.push(format!("- {detail}")),
             }
+        }
+    }
+
+    let zombie_count = issue_freshness["zombies"]["count"].as_u64().unwrap_or(0);
+    let stale_count = issue_freshness["stale_candidates"]["count"]
+        .as_u64()
+        .unwrap_or(0);
+    if zombie_count > 0 || stale_count > 0 {
+        out.push("\n### Issue freshness [AUTHORITY: WORKFLOW STATE]".to_string());
+        out.push(
+            "_GitHub is truth for content; these are judgment-free verdict rows, not auto-closes._"
+                .to_string(),
+        );
+        if zombie_count > 0 {
+            out.push(format!(
+                "- **{zombie_count} zombie(s)** (fixed, still open) — top: {}",
+                issue_freshness["zombies"]["items"]
+                    .as_array()
+                    .map(|items| items
+                        .iter()
+                        .filter_map(|i| i.get("issue_ref").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join(", "))
+                    .unwrap_or_default()
+            ));
+        }
+        if stale_count > 0 {
+            out.push(format!(
+                "- **{stale_count} stale-spec candidate(s)** (review, no verdict) — top: {}",
+                issue_freshness["stale_candidates"]["items"]
+                    .as_array()
+                    .map(|items| items
+                        .iter()
+                        .filter_map(|i| i.get("issue_ref").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join(", "))
+                    .unwrap_or_default()
+            ));
         }
     }
 

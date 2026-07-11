@@ -278,6 +278,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
         &memory_rows,
     );
     let open_loops = crate::shell_ops::scan_open_loops(8);
+    let issue_freshness = crate::gh_ops::briefing_freshness_queues(server, 5);
     let wiki_hits = compact_layer_rows(wiki_rows, top_k, Some("wiki"), Some("advisory"));
     let memory_fragments = compact_layer_rows(memory_rows, top_k, Some("memory"), Some("context"));
     let eval_evidence = compact_layer_rows(eval_rows, top_k.min(5), Some("eval"), Some("evidence"));
@@ -329,6 +330,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
         "doc_index": doc_index,
         "next_action": next_action,
         "open_loops": open_loops,
+        "issue_freshness": issue_freshness,
         "layering": {
             "project_work_record": "GitHub issues/PRs and linked flow state; source of truth for active work",
             "docs": "canonical repo specs/design docs; source of truth for feature/API truth",
