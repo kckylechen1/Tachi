@@ -135,13 +135,19 @@ async fn capability_with_pending_discovery_status_remains_not_callable() {
         "discovery_status = \"pending\" (not \"ready\") must not be callable"
     );
 
+    // #968 option B (owner-ratified 2026-07-11): a cap that is already
+    // enabled + approved + healthy but has NO discovery_status stamp is a
+    // grandfathered/legacy row (every register+approve path stamps it), and
+    // discovery_status is a liveness/exposure cache, not a security property —
+    // so it stays callable. Only EXPLICIT non-ready (pending, above),
+    // non-string, or malformed JSON fail closed.
     cap.definition = json!({
         "transport": "stdio",
         "command": "/opt/homebrew/bin/pending-tool",
     })
     .to_string();
     assert!(
-        !capability_callable(&cap),
-        "missing discovery_status must not be callable"
+        capability_callable(&cap),
+        "missing discovery_status on an approved+healthy cap stays callable (backward-compat, #968 option B)"
     );
 }
