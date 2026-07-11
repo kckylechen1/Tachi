@@ -253,3 +253,107 @@ so the build was isolated per the workspace-module contamination protocol
 rather than trusted through the contention.
 
 HEAD after this round: `ac435923`.
+
+## Round 3 (codex verdict on PR #1007, 2 remaining BUGs) — commit `7a0b12e2`
+
+Codex's round-3 review found the DB-level unique index from round 2 was
+necessary but not sufficient (item #2 below), and that the round-2 sanitizer
+deliberately left Markdown metacharacters + Unicode format/bidi chars
+untouched (item #5, security). Both fixed this round.
+
+1. **Identity upsert not atomic**
+   (`crates/memcore/src/db/session_claims.rs:291-328`).
+   `upsert_or_heartbeat_claim` was still read-then-write: a `SELECT` for an
+   existing active claim inside a transaction, then a separate
+   `UPDATE`/`INSERT`. This is a real TOCTOU race even inside a transaction —
+   SQLite's default deferred transaction does not take a write lock until
+   its first write, so two concurrent same-identity callers could both
+   observe "no existing row" via their own `SELECT` before either commits,
+   and one of the two subsequent `INSERT`s would then hit the round-2 unique
+   index with no path to convert that failure into a heartbeat (the loser
+   errors, and the host's fail-safe swallow turns that into a silent
+   no-heartbeat no-op — exactly the bug the mission named). Replaced with a
+   single `INSERT ... ON CONFLICT (COALESCE(session_client, ''),
+   COALESCE(issue_ref, ''), COALESCE(flow_id, '')) WHERE state = 'active' DO
+   UPDATE SET ... RETURNING claim_id` statement. The `ON CONFLICT` target is
+   the exact expression list + partial predicate of
+   `idx_session_claims_identity_active` — SQLite requires this to match the
+   index verbatim to resolve against it. Verified the exact SQL (including
+   the NULL-coalesced identity semantics — two active rows both NULL in
+   `flow_id` still upsert onto each other) against real sqlite3 3.51
+   (bundled version) in isolation before landing it in Rust.
+
+2. **Markdown injection / bidi format chars (security)**
+   (`crates/tachi-server/src/claims_ops.rs:74-131`).
+   `sanitize_presence_field` bounded newlines/control chars/length but
+   intentionally kept Markdown metacharacters (`* _ \` [ ] ( ) # < > | ~`),
+   and `char::is_control()` only covers Unicode `Cc` — a bidi override
+   character (`Cf` category) is fully "printable" by that check and survived
+   untouched, letting an agent close `**bold**`, inject a
+   `[link](javascript:...)`/HTML-shaped span, or visually reorder rendered
+   text via a bidi override into a DIFFERENT session's briefing. Both
+   briefing renderers (`agent_markdown/briefing.rs:87`,
+   `feature_briefing/markdown.rs:157`) interpolate this field raw with no
+   per-renderer escaping, so the fix lives at the single sanitize choke
+   point both already route through, not in either renderer. Added
+   `is_bidi_or_format_char` (explicit, documented code-point set — bidi
+   embeds/overrides U+202A–202E, marks U+200E/U+200F, isolates
+   U+2066–U+2069, ZWJ/ZWNJ, zero-width space, soft hyphen, BOM) and strip
+   the Markdown metacharacter set, both applied before the existing
+   control-char/collapse/cap steps.
+
+### Test evidence (round 3 — this baton's own verification)
+
+I did NOT run `cargo test`/`cargo clippy` myself this round (Wizard doesn't
+build/test per the dispatch contract — that is Oz's job against the pushed
+SHA). What I actually verified locally, and how:
+
+- **Syntax/logic sanity, standalone**: extracted `sanitize_presence_field` +
+  `is_bidi_or_format_char` into a scratch file, compiled with plain
+  `rustc --edition 2021` (no workspace deps needed for this pure-logic
+  function), ran it against the mission's literal adversarial example
+  (`"**bold** [x](javascript:..) \u{202E}"` → `"bold x javascript:.."`, no
+  `*`/`[`/`]`/`(`/`)`/bidi char survives) and a mixed bidi/format-char
+  string (`"seat-a\u{202E}reversed\u{200E}\u{FEFF}\u{200B}tail"` →
+  `"seat-areversedtail"`).
+- **SQL correctness, standalone**: ran the exact `INSERT ... ON CONFLICT ...
+  DO UPDATE ... RETURNING` statement (same expressions/predicate as
+  production) against Python's bundled sqlite3 (3.51.0, same major version
+  as the workspace's bundled rusqlite) with an in-memory DB carrying the
+  real partial unique index — confirmed: (a) a second same-identity insert
+  resolves onto the first row's `claim_id` and bumps `heartbeat_at`, (b)
+  NULL-`flow_id` rows collide the same way, (c) both calls return the same
+  `claim_id`.
+- **Format**: `rustfmt --edition 2021 --check` on both changed files —
+  clean (ran the standalone `rustfmt` binary directly on the two files, not
+  a full `cargo fmt` across the workspace).
+- **New tests added, NOT run by me** (Oz must run these against
+  `7a0b12e2`):
+  - `memcore::db::session_claims::tests::two_concurrent_same_identity_upserts_both_succeed_exactly_one_row`
+    — real OS threads (`std::thread::spawn`), two separate `Connection`s to
+    one shared file-backed `tempfile::NamedTempFile` DB (WAL mode, per
+    `apply_connection_pragmas`), a `std::sync::Barrier` forcing both callers
+    to hit the `INSERT ... ON CONFLICT` at the same instant. Asserts both
+    results are `Ok`, both resolve to the identical `claim_id`, and exactly
+    one active row exists for the raced identity afterward.
+  - `tachi_server::claims_ops::tests::sanitize_presence_field_neutralizes_markdown_metacharacters`
+  - `..._strips_bidi_and_format_chars`
+  - `..._mission_example_renders_inert`
+  - `..._malicious_claim_field_renders_inert_in_both_briefing_markdown_surfaces`
+    — reproduces both renderers' exact `format!("- **{session}** →
+    {target} (heartbeat {heartbeat})")` shape inline and asserts the
+    malicious payload never survives as active markdown/bidi in either.
+
+### Not done / explicitly out of scope this round
+
+- Did not add a `proptest`/fuzz-style sweep over the full Unicode `Cf`
+  category — `is_bidi_or_format_char` is a fixed, documented set of the
+  specific bidi/format code points relevant to the described vector, not a
+  general Unicode-database classifier (no such crate is a dependency of
+  this workspace today; adding one for a single field sanitizer was judged
+  out of scope for a round-3 bug-fix pass).
+- Full `cargo test -p tachi-server -p memcore` / `cargo clippy --all-targets
+  -- -D warnings` at `7a0b12e2` — pending Oz.
+
+HEAD after this round: `7a0b12e2`. PR comment posted:
+https://github.com/kckylechen1/tachi/pull/1007#issuecomment-4948548161
