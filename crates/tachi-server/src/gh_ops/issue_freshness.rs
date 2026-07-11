@@ -1,21 +1,32 @@
 //! Issue freshness layer (#1000): zombie scan + stale-candidate heuristics.
 //!
 //! GitHub remains the only source of truth for issue *content* — this module
-//! never mirrors issue bodies. It only ever produces judgment-free verdict
-//! rows: `(issue_ref, verified_at_sha, verdict, evidence_refs)`. Durable
+//! never mirrors issue bodies. It only ever produces judgment-free rows:
+//! zombie evidence is `(issue_ref, verified_at_sha, verdict, evidence_refs)`
+//! (a "candidate: fixed-awaiting-closure" claim, never a final verdict —
+//! closing is always a leader/owner action). Stale candidates are NOT
+//! verdicts at all — they live in a separate candidate-queue rowset (see
+//! `STALE_CANDIDATE_NS` below) because the frozen #1000 constraint is
+//! "圈候选不判决" (circle the candidate, do not judge it). Durable
 //! conclusions write back to GitHub's own medium (label/comment) so they are
-//! visible without a Tachi consumer. Closing an issue is always a
-//! leader/owner action — this module never auto-closes anything.
+//! visible without a Tachi consumer.
 //!
-//! Two independent detectors, both read-only:
-//!   - `scan_zombies`: reverse-scans merged PR bodies/titles for `Refs #N` /
-//!     `(#N)` references, cross-checked against the open-issue set. A hit
-//!     means "a merged PR says it fixed #N, and #N is still open" — the
-//!     mechanical prototype of what the leader did by hand on 2026-07-11.
+//! Three independent detectors, all read-only:
+//!   - `scan_zombies`: reverse-scans merged PR bodies/titles **and merged
+//!     commit messages** for `Refs #N` / `(#N)` references, cross-checked
+//!     against the open-issue set. A hit means "a merged PR/commit says it
+//!     fixed #N, and #N is still open" — the mechanical prototype of what the
+//!     leader did by hand on 2026-07-11.
 //!   - `scan_stale_candidates`: heuristic-only (never a verdict) — issues
 //!     whose referenced file:line anchors have vanished from HEAD, or whose
-//!     referenced gate issues are already closed. Produces a review queue,
-//!     not a judgment.
+//!     referenced *gate* issues (explicitly marked "gated on"/"blocked
+//!     by"/"depends on" in the same sentence as the `#N` — plain `Refs #N` is
+//!     related, not a gate) are already closed. Produces a review queue, not
+//!     a judgment.
+//!   - `scan_same_surface_churn`: heuristic-only — an issue whose file:line
+//!     anchors sit on a surface that recent merged PRs have repeatedly
+//!     touched, while the issue itself shows zero activity, is a stale-spec
+//!     candidate (the code moved on, the issue text did not).
 
 use super::*;
 
@@ -38,6 +49,12 @@ pub(crate) struct MergedPr {
     pub title: String,
     pub body: String,
     pub merge_commit_sha: Option<String>,
+    /// Commit messages (headline + body) for every commit `gh` reports as
+    /// part of this PR — includes the squash/merge commit. Commit-only
+    /// `Refs #N` references (never repeated in the PR title/body) are only
+    /// visible here; scanning title+body alone misses them (#1000 codex
+    /// review finding 1).
+    pub commit_messages: Vec<String>,
 }
 
 /// Extract issue numbers referenced via `Refs #N`, `Ref #N`, `Refs #N, #M`,
@@ -125,14 +142,20 @@ pub(crate) fn extract_referenced_issue_numbers(text: &str) -> Vec<u64> {
 }
 
 /// Cross-check merged PRs against the open-issue set: any issue number
-/// referenced by a merged PR that is still in `open_issue_numbers` is a
-/// zombie (fixed, never closed). Pure function — no I/O — so it is directly
-/// fixture-testable against the #979/#947 acceptance anchor without hitting
-/// live GitHub.
+/// referenced by a merged PR — its title, body, **or any of its commit
+/// messages** (a commit-only `Refs #N` that never made it into the PR
+/// title/body is otherwise invisible, #1000 codex review finding 1) — that
+/// is still in `open_issue_numbers` is a zombie (fixed, never closed). Pure
+/// function — no I/O — so it is directly fixture-testable against the
+/// #979/#947 acceptance anchor without hitting live GitHub.
 pub(crate) fn scan_zombies(merged_prs: &[MergedPr], open_issue_numbers: &[u64]) -> Vec<ZombieHit> {
     let mut hits = Vec::new();
     for pr in merged_prs {
-        let text = format!("{}\n{}", pr.title, pr.body);
+        let mut text = format!("{}\n{}", pr.title, pr.body);
+        for commit_message in &pr.commit_messages {
+            text.push('\n');
+            text.push_str(commit_message);
+        }
         for issue_number in extract_referenced_issue_numbers(&text) {
             if open_issue_numbers.contains(&issue_number) {
                 hits.push(ZombieHit {
@@ -169,37 +192,70 @@ pub(crate) struct OpenIssueForStaleCheck {
     /// `path:line` anchors parsed out of the issue body (already extracted
     /// by the caller — this module does not parse markdown).
     pub file_line_anchors: Vec<(String, u64)>,
-    /// Gate/dependency issue numbers this issue's body references as blockers.
+    /// Gate/dependency issue numbers this issue's body references as blockers
+    /// — ONLY numbers whose reference is explicitly marked "gated on"/
+    /// "blocked by"/"depends on" in the same sentence (see
+    /// `extract_gate_issue_numbers`). Plain `Refs #N` is related, not a gate
+    /// (#1000 codex review finding 3): closing a merely-related issue must
+    /// not falsely mark this issue stale.
     pub gate_issue_numbers: Vec<u64>,
+}
+
+/// Result of probing one anchored file's current state on HEAD — kept
+/// distinct from a plain `Option<u64>` so "file genuinely does not exist"
+/// (a real stale signal) and "read failed for some other reason" (a scan
+/// error, NOT a stale signal) don't collapse into the same `None` the way
+/// `.ok()` used to (#1000 codex review finding 4).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum FileProbe {
+    /// File exists on HEAD with this many lines.
+    Found(u64),
+    /// File does not exist on HEAD (`NotFound` I/O error) — a real stale
+    /// signal: the anchor's target is genuinely gone.
+    NotFound,
+    /// File could not be read for a reason other than not-found (permission
+    /// denied, not valid UTF-8, etc.) — a scan warning, never a stale signal;
+    /// the caller cannot tell from this whether the anchor is still valid.
+    Unreadable(String),
 }
 
 /// Heuristic-only stale-candidate scan (Scope item 2). Two independent
 /// signals, either one is enough to surface a candidate:
 ///   - a referenced `file:line` anchor no longer exists at that line count
 ///     (or the file itself is gone) on HEAD;
-///   - a referenced gate/dependency issue is already closed.
+///   - a referenced gate/dependency issue (explicitly marked as a gate, see
+///     `OpenIssueForStaleCheck::gate_issue_numbers`) is already closed.
 ///
-/// `existing_file_line_counts` maps repo-relative path -> current line count
-/// (None means file does not exist on HEAD). `closed_issue_numbers` is the
-/// set of issue numbers known to be closed. Never produces a verdict —
-/// only a reason + evidence to re-read the issue.
+/// `file_probes` maps repo-relative path -> its `FileProbe` outcome.
+/// `closed_issue_numbers` is the set of issue numbers known to be closed.
+/// Never produces a verdict — only a reason + evidence to re-read the issue.
+/// Returns `(candidates, scan_warnings)`: `Unreadable` probes never become
+/// stale evidence, but are surfaced as warnings so a read failure isn't
+/// silently indistinguishable from "nothing to report" (finding 4).
 pub(crate) fn scan_stale_candidates(
     issues: &[OpenIssueForStaleCheck],
-    existing_file_line_counts: &std::collections::HashMap<String, Option<u64>>,
+    file_probes: &std::collections::HashMap<String, FileProbe>,
     closed_issue_numbers: &[u64],
-) -> Vec<StaleCandidate> {
+) -> (Vec<StaleCandidate>, Vec<String>) {
     let mut out = Vec::new();
+    let mut warnings = Vec::new();
     for issue in issues {
         let mut evidence = Vec::new();
         for (path, line) in &issue.file_line_anchors {
-            match existing_file_line_counts.get(path) {
-                Some(Some(current_lines)) if line > current_lines => {
+            match file_probes.get(path) {
+                Some(FileProbe::Found(current_lines)) if line > current_lines => {
                     evidence.push(format!(
                         "{path}:{line} anchor exceeds current file length ({current_lines} lines)"
                     ));
                 }
-                Some(None) | None if existing_file_line_counts.contains_key(path) => {
+                Some(FileProbe::NotFound) => {
                     evidence.push(format!("{path} no longer exists on HEAD"));
+                }
+                Some(FileProbe::Unreadable(reason)) => {
+                    warnings.push(format!(
+                        "issue #{}: could not verify anchor {path}: {reason}",
+                        issue.number
+                    ));
                 }
                 _ => {}
             }
@@ -219,6 +275,131 @@ pub(crate) fn scan_stale_candidates(
                 issue_number: issue.number,
                 reason,
                 evidence,
+            });
+        }
+    }
+    out.sort_by_key(|c| c.issue_number);
+    (out, warnings)
+}
+
+/// Extract every literal `#N` occurrence within `span` (no keyword
+/// requirement — used once the caller has already confirmed the span is a
+/// gate-marked sentence, e.g. "gated on #894" has no "Refs" keyword at all).
+fn extract_hash_numbers(span: &str) -> Vec<u64> {
+    let mut out = Vec::new();
+    let bytes = span.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            let start = i + 1;
+            let mut end = start;
+            while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+                end += 1;
+            }
+            if end > start {
+                if let Ok(n) = span[start..end].parse::<u64>() {
+                    out.push(n);
+                }
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Extract issue numbers this text marks as **gates** — i.e. the `#N`
+/// reference sits in the same sentence as "gated on" / "blocked by" /
+/// "depends on" (case-insensitive). A plain `Refs #N` elsewhere in the text
+/// does NOT count: ordinary references are related, not gate dependencies
+/// (#1000 codex review finding 3). "Sentence" is approximated as a
+/// newline-or-period-delimited span, matching how issue bodies actually
+/// write these clauses (e.g. "gated on #894"). Byte offsets are tracked by
+/// walking the split iterator directly (not `str::find`) so duplicate
+/// sentence text within the same body cannot collide on the wrong span.
+pub(crate) fn extract_gate_issue_numbers(text: &str) -> Vec<u64> {
+    const GATE_PHRASES: [&str; 3] = ["gated on", "blocked by", "depends on"];
+    let lower = text.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    for sentence in lower.split(['\n', '.', ';']) {
+        let start = offset;
+        let end = (start + sentence.len()).min(text.len());
+        offset = end + 1; // skip the one-byte delimiter consumed by split
+        if GATE_PHRASES.iter().any(|p| sentence.contains(p)) {
+            if let Some(original_span) = text.get(start..end) {
+                out.extend(extract_hash_numbers(original_span));
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// One same-surface-churn candidate: NOT a verdict — a review-queue reason
+/// (#1000 Scope item 2's third heuristic: "同面文件近期落了 N 个 PR 而 issue 零活动").
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ChurnCandidate {
+    pub issue_number: u64,
+    pub touching_pr_count: usize,
+    pub touching_pr_numbers: Vec<u64>,
+}
+
+/// Minimal open-issue shape for the churn heuristic: its file-surface
+/// (derived from its `file_line_anchors`' paths) plus whether it has had any
+/// activity (a comment, or an owner body edit) since `since`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct OpenIssueForChurnCheck {
+    pub number: u64,
+    /// Repo-relative file paths this issue's body anchors to (its "surface").
+    pub surface_paths: Vec<String>,
+    /// True when the issue has had any activity (comment or body update)
+    /// at or after the churn-window cutoff.
+    pub has_recent_activity: bool,
+}
+
+/// A merged PR's touched-file surface, for the churn heuristic.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MergedPrSurface {
+    pub pr_number: u64,
+    pub touched_paths: Vec<String>,
+}
+
+/// Third stale-candidate heuristic (#1000 Scope item 2): an issue whose
+/// surface (the files its `path:line` anchors point at) has been touched by
+/// `churn_threshold` or more *distinct* recently-merged PRs, while the issue
+/// itself shows zero activity in that same window, is a stale-spec
+/// candidate — the code moved on under it and nobody revisited the issue
+/// text. Heuristic-only: never a verdict, only a reason to re-read the issue
+/// (same posture as `scan_stale_candidates`).
+pub(crate) fn scan_same_surface_churn(
+    issues: &[OpenIssueForChurnCheck],
+    recent_prs: &[MergedPrSurface],
+    churn_threshold: usize,
+) -> Vec<ChurnCandidate> {
+    let mut out = Vec::new();
+    for issue in issues {
+        if issue.has_recent_activity || issue.surface_paths.is_empty() {
+            continue;
+        }
+        let mut touching_pr_numbers: Vec<u64> = recent_prs
+            .iter()
+            .filter(|pr| {
+                pr.touched_paths
+                    .iter()
+                    .any(|p| issue.surface_paths.contains(p))
+            })
+            .map(|pr| pr.pr_number)
+            .collect();
+        touching_pr_numbers.sort_unstable();
+        touching_pr_numbers.dedup();
+        if touching_pr_numbers.len() >= churn_threshold {
+            out.push(ChurnCandidate {
+                issue_number: issue.number,
+                touching_pr_count: touching_pr_numbers.len(),
+                touching_pr_numbers,
             });
         }
     }
@@ -271,20 +452,53 @@ fn fetch_merged_prs(
     limit: u32,
 ) -> Result<Vec<MergedPr>, String> {
     let (mut cmd, token) = build_gh_command(server)?;
+    // `commits` (not part of the original #1000 shipped fields) carries every
+    // commit's messageHeadline/messageBody per PR, including the merge/squash
+    // commit — this is how commit-only `Refs #N` references (never repeated
+    // in the PR title/body) become visible to the scan (codex review finding
+    // 1). `gh pr list --json mergeCommit` itself only returns `{oid}`, no
+    // message text, so `commits` is the only field that carries it.
     cmd.args(["pr", "list"])
         .args(["--repo", repo])
         .args(["--state", "merged"])
         .args(["--limit", &limit.to_string()])
-        .args(["--json", "number,title,body,mergeCommit"]);
+        .args(["--json", "number,title,body,mergeCommit,commits"]);
     let output = run_gh_json(cmd, &token)?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse pr list json: {e}"))?;
-    let prs = value
+    Ok(parse_merged_prs_json(&value))
+}
+
+/// Pure parser for `gh pr list --json number,title,body,mergeCommit,commits`
+/// output — extracted so field-path parsing is fixture-testable without live
+/// GitHub (#1000 codex review finding 8: I/O layer field names unverified).
+pub(crate) fn parse_merged_prs_json(value: &Value) -> Vec<MergedPr> {
+    value
         .as_array()
         .map(|rows| {
             rows.iter()
                 .filter_map(|r| {
                     let number = r.get("number").and_then(Value::as_u64)?;
+                    let commit_messages = r
+                        .get("commits")
+                        .and_then(Value::as_array)
+                        .map(|commits| {
+                            commits
+                                .iter()
+                                .map(|c| {
+                                    let headline = c
+                                        .get("messageHeadline")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default();
+                                    let body = c
+                                        .get("messageBody")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default();
+                                    format!("{headline}\n{body}")
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     Some(MergedPr {
                         number,
                         title: r
@@ -302,12 +516,12 @@ fn fetch_merged_prs(
                             .and_then(|mc| mc.get("oid"))
                             .and_then(Value::as_str)
                             .map(str::to_string),
+                        commit_messages,
                     })
                 })
                 .collect()
         })
-        .unwrap_or_default();
-    Ok(prs)
+        .unwrap_or_default()
 }
 
 /// Extract `path:line` anchors from issue body text (e.g. `crates/foo/src/bar.rs:123`).
@@ -350,34 +564,50 @@ pub(crate) fn extract_file_line_anchors(text: &str) -> Vec<(String, u64)> {
     out
 }
 
+/// Probe one repo-relative path's current state on HEAD, distinguishing
+/// "genuinely gone" from "could not read for some other reason" (#1000 codex
+/// review finding 4 — `.ok()` used to collapse both into the same `None`,
+/// which meant a permissions error or non-UTF8 file was silently reported as
+/// "no longer exists on HEAD", a false stale signal).
+fn probe_file(repo_root: &std::path::Path, path: &str) -> FileProbe {
+    match std::fs::read_to_string(repo_root.join(path)) {
+        Ok(contents) => FileProbe::Found(contents.lines().count() as u64),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileProbe::NotFound,
+        Err(e) => FileProbe::Unreadable(e.to_string()),
+    }
+}
+
 /// Live entry point for the stale-candidate scan (Scope item 2). Fetches
 /// open issue bodies, parses anchors, checks each anchored file's current
 /// line count under `repo_root`, and cross-checks referenced gate issues
 /// against the closed set. Heuristic-only — callers must not treat the
 /// result as a verdict (no `save_freshness_verdict` call here); it is a
 /// review queue, same posture as `scan_open_loops`'s `spec_drift` kind.
+/// Returns `(candidates, scan_warnings)` — warnings surface unreadable
+/// anchors distinctly from stale evidence (finding 4).
 pub(crate) fn fetch_and_scan_stale_candidates(
     server: &MemoryServer,
     repo: &str,
     repo_root: &std::path::Path,
     limit: u32,
-) -> Result<Vec<StaleCandidate>, String> {
+) -> Result<(Vec<StaleCandidate>, Vec<String>), String> {
     let open = fetch_open_issues_with_body(server, repo, limit)?;
     let closed_issue_numbers = fetch_closed_issue_numbers(server, repo)?;
 
-    let mut file_lines: std::collections::HashMap<String, Option<u64>> =
+    let mut file_probes: std::collections::HashMap<String, FileProbe> =
         std::collections::HashMap::new();
     let mut issues = Vec::with_capacity(open.len());
     for (number, body) in &open {
         let anchors = extract_file_line_anchors(body);
         for (path, _) in &anchors {
-            file_lines.entry(path.clone()).or_insert_with(|| {
-                std::fs::read_to_string(repo_root.join(path))
-                    .ok()
-                    .map(|contents| contents.lines().count() as u64)
-            });
+            file_probes
+                .entry(path.clone())
+                .or_insert_with(|| probe_file(repo_root, path));
         }
-        let gates = extract_referenced_issue_numbers(body);
+        // Only explicitly gate-marked references ("gated on"/"blocked by"/
+        // "depends on #N") count as gate dependencies — a plain `Refs #N`
+        // is related, not a gate (finding 3).
+        let gates = extract_gate_issue_numbers(body);
         issues.push(OpenIssueForStaleCheck {
             number: *number,
             file_line_anchors: anchors,
@@ -386,7 +616,7 @@ pub(crate) fn fetch_and_scan_stale_candidates(
     }
     Ok(scan_stale_candidates(
         &issues,
-        &file_lines,
+        &file_probes,
         &closed_issue_numbers,
     ))
 }
@@ -437,6 +667,150 @@ fn fetch_closed_issue_numbers(server: &MemoryServer, repo: &str) -> Result<Vec<u
                 .collect()
         })
         .unwrap_or_default())
+}
+
+/// Live entry point for the third stale heuristic (#1000 Scope item 2,
+/// codex review finding 2): open issues whose file-surface has been
+/// repeatedly touched by recent merged PRs while the issue itself shows no
+/// activity in the same window. `activity_since` is an RFC3339 cutoff —
+/// issues with `updatedAt` at/after the cutoff, or a comment at/after it,
+/// count as active and are excluded. `churn_threshold` is the minimum number
+/// of distinct touching PRs required to flag (default policy: 3, chosen by
+/// the caller).
+pub(crate) fn fetch_and_scan_same_surface_churn(
+    server: &MemoryServer,
+    repo: &str,
+    limit: u32,
+    activity_since: &str,
+    churn_threshold: usize,
+) -> Result<Vec<ChurnCandidate>, String> {
+    let open = fetch_open_issues_with_activity(server, repo, limit)?;
+    let recent_prs = fetch_merged_pr_surfaces(server, repo, limit)?;
+
+    let issues: Vec<OpenIssueForChurnCheck> = open
+        .into_iter()
+        .map(|(number, body, updated_at, last_comment_at)| {
+            let surface_paths = extract_file_line_anchors(&body)
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect();
+            let has_recent_activity = updated_at.as_str() >= activity_since
+                || last_comment_at
+                    .as_deref()
+                    .is_some_and(|c| c >= activity_since);
+            OpenIssueForChurnCheck {
+                number,
+                surface_paths,
+                has_recent_activity,
+            }
+        })
+        .collect();
+
+    Ok(scan_same_surface_churn(
+        &issues,
+        &recent_prs,
+        churn_threshold,
+    ))
+}
+
+/// Fetch `(number, body, updatedAt, most_recent_comment_createdAt)` for open
+/// issues — the activity signal for the churn heuristic.
+fn fetch_open_issues_with_activity(
+    server: &MemoryServer,
+    repo: &str,
+    limit: u32,
+) -> Result<Vec<(u64, String, String, Option<String>)>, String> {
+    let (mut cmd, token) = build_gh_command(server)?;
+    cmd.args(["issue", "list"])
+        .args(["--repo", repo])
+        .args(["--state", "open"])
+        .args(["--limit", &limit.to_string()])
+        .args(["--json", "number,body,updatedAt,comments"]);
+    let output = run_gh_json(cmd, &token)?;
+    let value: Value =
+        serde_json::from_str(&output).map_err(|e| format!("parse issue list json: {e}"))?;
+    Ok(parse_open_issues_with_activity_json(&value))
+}
+
+/// Pure parser for `gh issue list --json number,body,updatedAt,comments`
+/// (#1000 codex review finding 8: fixture-testable field-path parsing).
+pub(crate) fn parse_open_issues_with_activity_json(
+    value: &Value,
+) -> Vec<(u64, String, String, Option<String>)> {
+    value
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| {
+                    let number = r.get("number").and_then(Value::as_u64)?;
+                    let body = r.get("body").and_then(Value::as_str).unwrap_or_default();
+                    let updated_at = r
+                        .get("updatedAt")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let last_comment_at = r
+                        .get("comments")
+                        .and_then(Value::as_array)
+                        .and_then(|comments| {
+                            comments
+                                .iter()
+                                .filter_map(|c| c.get("createdAt").and_then(Value::as_str))
+                                .max()
+                        })
+                        .map(str::to_string);
+                    Some((number, body.to_string(), updated_at.to_string(), last_comment_at))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Fetch the touched-file surface for recently merged PRs, for the churn
+/// heuristic's "same surface" cross-check.
+fn fetch_merged_pr_surfaces(
+    server: &MemoryServer,
+    repo: &str,
+    limit: u32,
+) -> Result<Vec<MergedPrSurface>, String> {
+    let (mut cmd, token) = build_gh_command(server)?;
+    cmd.args(["pr", "list"])
+        .args(["--repo", repo])
+        .args(["--state", "merged"])
+        .args(["--limit", &limit.to_string()])
+        .args(["--json", "number,files"]);
+    let output = run_gh_json(cmd, &token)?;
+    let value: Value =
+        serde_json::from_str(&output).map_err(|e| format!("parse pr list json: {e}"))?;
+    Ok(parse_merged_pr_surfaces_json(&value))
+}
+
+/// Pure parser for `gh pr list --json number,files` (finding 8).
+pub(crate) fn parse_merged_pr_surfaces_json(value: &Value) -> Vec<MergedPrSurface> {
+    value
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| {
+                    let pr_number = r.get("number").and_then(Value::as_u64)?;
+                    let touched_paths = r
+                        .get("files")
+                        .and_then(Value::as_array)
+                        .map(|files| {
+                            files
+                                .iter()
+                                .filter_map(|f| f.get("path").and_then(Value::as_str))
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some(MergedPrSurface {
+                        pr_number,
+                        touched_paths,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ─── Verdict storage (state_kv, per scouted precedent) ─────────────────────
@@ -556,6 +930,14 @@ mod tests {
             title: title.to_string(),
             body: body.to_string(),
             merge_commit_sha: Some(format!("sha-{number}")),
+            commit_messages: Vec::new(),
+        }
+    }
+
+    fn pr_with_commits(number: u64, title: &str, body: &str, commit_messages: &[&str]) -> MergedPr {
+        MergedPr {
+            commit_messages: commit_messages.iter().map(|s| s.to_string()).collect(),
+            ..pr(number, title, body)
         }
     }
 
@@ -674,6 +1056,35 @@ mod tests {
         assert_eq!(hits.len(), 1);
     }
 
+    /// #1000 codex review finding 1: commit-only references (never repeated
+    /// in the PR title/body) must not be missed.
+    #[test]
+    fn scan_zombies_catches_commit_only_reference() {
+        let merged_prs = vec![pr_with_commits(
+            42,
+            "release: prepare v1.9.0",
+            "no issue reference here in title or body",
+            &["fix: squashed commit\n\nRefs #979"],
+        )];
+        let open_issue_numbers = vec![979];
+        let hits = scan_zombies(&merged_prs, &open_issue_numbers);
+        assert_eq!(hits.len(), 1, "expected commit-only Refs to be caught, got: {hits:?}");
+        assert_eq!(hits[0].issue_number, 979);
+        assert_eq!(hits[0].pr_number, 42);
+    }
+
+    #[test]
+    fn scan_zombies_dedupes_when_same_ref_in_body_and_commit() {
+        let merged_prs = vec![pr_with_commits(
+            1,
+            "fix",
+            "Refs #100",
+            &["same commit message\n\nRefs #100"],
+        )];
+        let hits = scan_zombies(&merged_prs, &[100]);
+        assert_eq!(hits.len(), 1, "body+commit repeat must dedupe, got: {hits:?}");
+    }
+
     fn stale_issue(number: u64, anchors: &[(&str, u64)], gates: &[u64]) -> OpenIssueForStaleCheck {
         OpenIssueForStaleCheck {
             number,
@@ -685,38 +1096,120 @@ mod tests {
     #[test]
     fn stale_candidate_flags_vanished_file_line_anchor() {
         let issues = vec![stale_issue(1, &[("src/foo.rs", 500)], &[])];
-        let mut file_lines = std::collections::HashMap::new();
-        file_lines.insert("src/foo.rs".to_string(), Some(50)); // file shrank
-        let out = scan_stale_candidates(&issues, &file_lines, &[]);
+        let mut file_probes = std::collections::HashMap::new();
+        file_probes.insert("src/foo.rs".to_string(), FileProbe::Found(50)); // file shrank
+        let (out, warnings) = scan_stale_candidates(&issues, &file_probes, &[]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].issue_number, 1);
+        assert!(warnings.is_empty());
     }
 
     #[test]
     fn stale_candidate_flags_deleted_file() {
         let issues = vec![stale_issue(2, &[("src/gone.rs", 10)], &[])];
-        let mut file_lines = std::collections::HashMap::new();
-        file_lines.insert("src/gone.rs".to_string(), None);
-        let out = scan_stale_candidates(&issues, &file_lines, &[]);
+        let mut file_probes = std::collections::HashMap::new();
+        file_probes.insert("src/gone.rs".to_string(), FileProbe::NotFound);
+        let (out, warnings) = scan_stale_candidates(&issues, &file_probes, &[]);
         assert_eq!(out.len(), 1);
         assert!(out[0].evidence[0].contains("no longer exists"));
+        assert!(warnings.is_empty());
+    }
+
+    /// #1000 codex review finding 4: an unreadable (not merely missing) file
+    /// must surface as a scan warning, never as a stale signal.
+    #[test]
+    fn stale_candidate_unreadable_file_is_warning_not_stale_signal() {
+        let issues = vec![stale_issue(9, &[("src/perm-denied.rs", 10)], &[])];
+        let mut file_probes = std::collections::HashMap::new();
+        file_probes.insert(
+            "src/perm-denied.rs".to_string(),
+            FileProbe::Unreadable("permission denied".to_string()),
+        );
+        let (out, warnings) = scan_stale_candidates(&issues, &file_probes, &[]);
+        assert!(
+            out.is_empty(),
+            "unreadable file must not become a stale candidate, got: {out:?}"
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("perm-denied.rs"));
+        assert!(warnings[0].contains("permission denied"));
     }
 
     #[test]
     fn stale_candidate_flags_closed_gate_dependency() {
         let issues = vec![stale_issue(3, &[], &[42])];
-        let out = scan_stale_candidates(&issues, &std::collections::HashMap::new(), &[42]);
+        let (out, warnings) =
+            scan_stale_candidates(&issues, &std::collections::HashMap::new(), &[42]);
         assert_eq!(out.len(), 1);
         assert!(out[0].evidence[0].contains("#42"));
+        assert!(warnings.is_empty());
     }
 
     #[test]
     fn stale_candidate_clean_issue_not_flagged() {
         let issues = vec![stale_issue(4, &[("src/ok.rs", 5)], &[7])];
-        let mut file_lines = std::collections::HashMap::new();
-        file_lines.insert("src/ok.rs".to_string(), Some(500));
-        let out = scan_stale_candidates(&issues, &file_lines, &[]); // gate 7 not closed
+        let mut file_probes = std::collections::HashMap::new();
+        file_probes.insert("src/ok.rs".to_string(), FileProbe::Found(500));
+        let (out, _warnings) = scan_stale_candidates(&issues, &file_probes, &[]); // gate 7 not closed
         assert!(out.is_empty());
+    }
+
+    /// #1000 codex review finding 3: a plain `Refs #N` in the issue body must
+    /// NOT be treated as a gate dependency — only "gated on"/"blocked by"/
+    /// "depends on #N" counts.
+    #[test]
+    fn extract_gate_issue_numbers_ignores_plain_refs() {
+        let body = "This work continues #734. Refs #906 #428.";
+        assert_eq!(
+            extract_gate_issue_numbers(body),
+            Vec::<u64>::new(),
+            "plain Refs must not be treated as a gate"
+        );
+    }
+
+    #[test]
+    fn extract_gate_issue_numbers_catches_explicit_gate_phrases() {
+        assert_eq!(extract_gate_issue_numbers("gated on #894"), vec![894]);
+        assert_eq!(extract_gate_issue_numbers("blocked by #12"), vec![12]);
+        assert_eq!(extract_gate_issue_numbers("depends on #55"), vec![55]);
+        assert_eq!(
+            extract_gate_issue_numbers("Some context. Gated On #77 for now."),
+            vec![77],
+            "case-insensitive"
+        );
+    }
+
+    /// Direction 2 (both directions per the finding's test requirement):
+    /// closing a merely-*related* issue (plain Refs) must not falsely mark
+    /// this issue stale, but closing an explicit *gate* issue must.
+    #[test]
+    fn stale_candidate_gate_vs_related_both_directions() {
+        // Direction A: plain Refs to a closed issue — NOT a gate, must not flag.
+        let related_only = OpenIssueForStaleCheck {
+            number: 10,
+            file_line_anchors: vec![],
+            gate_issue_numbers: extract_gate_issue_numbers("Refs #500 for background"),
+        };
+        let (out, _) =
+            scan_stale_candidates(&[related_only], &std::collections::HashMap::new(), &[500]);
+        assert!(
+            out.is_empty(),
+            "closing a merely-related issue must not flag as stale, got: {out:?}"
+        );
+
+        // Direction B: explicit gate to a closed issue — IS a gate, must flag.
+        let gated = OpenIssueForStaleCheck {
+            number: 11,
+            file_line_anchors: vec![],
+            gate_issue_numbers: extract_gate_issue_numbers("gated on #500 until it lands"),
+        };
+        let (out, _) =
+            scan_stale_candidates(&[gated], &std::collections::HashMap::new(), &[500]);
+        assert_eq!(
+            out.len(),
+            1,
+            "closing an explicit gate dependency must flag as stale"
+        );
     }
 
     #[test]

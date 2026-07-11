@@ -97,6 +97,15 @@ pub fn get_state(
     }
 }
 
+/// Delete a single state row. Returns whether a row was actually removed.
+pub fn delete_state(conn: &Connection, namespace: &str, key: &str) -> Result<bool, MemoryError> {
+    let changed = conn.execute(
+        "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
+        params![namespace, key],
+    )?;
+    Ok(changed > 0)
+}
+
 /// List state rows in a namespace, newest first.
 pub fn list_state(conn: &Connection, namespace: &str) -> Result<Vec<StateRow>, MemoryError> {
     let mut stmt = conn.prepare(
@@ -282,5 +291,15 @@ mod tests {
             .expect("state exists");
         assert_eq!(version, 1);
         assert_eq!(value, r#"{"status":"running"}"#);
+    }
+
+    #[test]
+    fn delete_state_removes_row_and_reports_whether_present() {
+        let conn = open_state_db();
+        set_state(&conn, "ns", "k1", r#"{"a":1}"#).expect("seed");
+
+        assert!(delete_state(&conn, "ns", "k1").expect("delete existing"));
+        assert!(get_state(&conn, "ns", "k1").expect("get after delete").is_none());
+        assert!(!delete_state(&conn, "ns", "k1").expect("delete missing is a no-op"));
     }
 }
