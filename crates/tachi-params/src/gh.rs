@@ -146,6 +146,21 @@ pub struct TachiGhParams {
     )]
     #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
     pub scan_limit: Option<u32>,
+    /// Minimum number of distinct recently-merged PRs touching the same
+    /// file-surface as an inactive open issue before action="issue_freshness_scan"
+    /// flags it as a same-surface-churn candidate (default 3).
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u32_from_string_or_number"
+    )]
+    #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
+    pub churn_threshold: Option<u32>,
+    /// RFC3339 activity cutoff for action="issue_freshness_scan"'s
+    /// same-surface-churn heuristic: issues updated/commented at or after this
+    /// timestamp count as active and are excluded. Defaults to 30 days before
+    /// the scan runs.
+    #[serde(default)]
+    pub churn_activity_since: Option<String>,
 }
 
 /// Parameters for adding/removing labels on a GitHub issue or PR (write-back arc).

@@ -581,7 +581,7 @@ fn probe_file(repo_root: &std::path::Path, path: &str) -> FileProbe {
 /// open issue bodies, parses anchors, checks each anchored file's current
 /// line count under `repo_root`, and cross-checks referenced gate issues
 /// against the closed set. Heuristic-only — callers must not treat the
-/// result as a verdict (no `save_freshness_verdict` call here); it is a
+/// result as a verdict (no `save_freshness_row` call here); it is a
 /// review queue, same posture as `scan_open_loops`'s `spec_drift` kind.
 /// Returns `(candidates, scan_warnings)` — warnings surface unreadable
 /// anchors distinctly from stale evidence (finding 4).
@@ -813,70 +813,134 @@ pub(crate) fn parse_merged_pr_surfaces_json(value: &Value) -> Vec<MergedPrSurfac
         .unwrap_or_default()
 }
 
-// ─── Verdict storage (state_kv, per scouted precedent) ─────────────────────
+// ─── Candidate storage (state_kv, per scouted precedent) ───────────────────
+//
+// #1000 codex review finding 5 ("圈候选不判决" — circle the candidate, do not
+// judge it): NOTHING this module stores is a final verdict. Even a zombie hit
+// is a "candidate: fixed-awaiting-closure" claim — closing an issue is always
+// a leader/owner action taken on GitHub itself, never automated here. The
+// on-disk shape reflects that: every row's `kind` is one of `"zombie"` /
+// `"stale_candidate"` / `"churn_candidate"`, and none of them are named or
+// treated as a "verdict".
+//
+// Two namespaces, not one, so the zombie candidate-claim rowset (evidence: a
+// specific merged PR/commit) and the heuristic candidate-queue rowset
+// (evidence: free-form reasons, never a specific fixing PR) don't share a
+// key/shape that would make the caller's fixing-PR field mean two different
+// things depending on kind.
+//
+// #1000 codex review finding 7 (verdict rows never die + kind/issue key
+// collision): rows are keyed `{kind}:{issue_ref}` (not just `{issue_ref}`) so
+// a zombie row and a stale-candidate row for the *same* issue cannot
+// overwrite each other. Each scan is authoritative for its own kind: after a
+// scan of kind K produces its current hit set, `reap_stale_kind_rows` deletes
+// every existing row of kind K whose issue_ref is NOT in that fresh set — a
+// zombie that got closed, or a stale-candidate whose anchor drift got fixed,
+// disappears from the briefing on the very next scan instead of living
+// forever as a ghost row.
+pub(crate) const ZOMBIE_NS: &str = "issue_freshness_zombie";
+pub(crate) const STALE_CANDIDATE_NS: &str = "issue_freshness_stale_candidate";
 
-pub(crate) const ISSUE_FRESHNESS_NS: &str = "issue_freshness";
+pub(crate) const KIND_ZOMBIE: &str = "zombie";
+pub(crate) const KIND_STALE_CANDIDATE: &str = "stale_candidate";
+pub(crate) const KIND_CHURN_CANDIDATE: &str = "churn_candidate";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct FreshnessVerdict {
+pub(crate) struct FreshnessRow {
     pub issue_ref: String,
+    /// "zombie" | "stale_candidate" | "churn_candidate" — never "verdict".
+    pub kind: String,
+    /// Empty for heuristic candidates (they have no single fixing commit).
     pub verified_at_sha: String,
-    /// "zombie" | "stale_candidate"
-    pub verdict: String,
     pub evidence_refs: Vec<String>,
     pub checked_at: String,
 }
 
-fn issue_freshness_key(issue_ref: &str) -> String {
-    format!("verdict:{issue_ref}")
+fn freshness_row_key(kind: &str, issue_ref: &str) -> String {
+    format!("{kind}:{issue_ref}")
 }
 
-pub(crate) fn save_freshness_verdict(
+pub(crate) fn save_freshness_row(
     server: &MemoryServer,
-    verdict: &FreshnessVerdict,
+    namespace: &str,
+    row: &FreshnessRow,
 ) -> Result<(), String> {
-    let json = serde_json::to_string(verdict).map_err(|e| format!("serialize verdict: {e}"))?;
+    let json = serde_json::to_string(row).map_err(|e| format!("serialize freshness row: {e}"))?;
     server.with_global_store(|store| -> Result<(), String> {
         store
-            .set_state(
-                ISSUE_FRESHNESS_NS,
-                &issue_freshness_key(&verdict.issue_ref),
-                &json,
-            )
+            .set_state(namespace, &freshness_row_key(&row.kind, &row.issue_ref), &json)
             .map_err(|e| format!("issue_freshness set_state: {e}"))?;
         Ok(())
     })
 }
 
-pub(crate) fn list_freshness_verdicts(
+pub(crate) fn list_freshness_rows(
     server: &MemoryServer,
-) -> Result<Vec<FreshnessVerdict>, String> {
+    namespace: &str,
+) -> Result<Vec<FreshnessRow>, String> {
     let rows = server.with_global_store_read(|store| {
         store
-            .list_state(ISSUE_FRESHNESS_NS)
+            .list_state(namespace)
             .map_err(|e| format!("issue_freshness list_state: {e}"))
     })?;
     Ok(rows
         .into_iter()
-        .filter_map(|row| serde_json::from_str::<FreshnessVerdict>(&row.value_json).ok())
+        .filter_map(|row| serde_json::from_str::<FreshnessRow>(&row.value_json).ok())
         .collect())
+}
+
+/// Reap: delete every existing row of `kind` in `namespace` whose issue_ref is
+/// NOT present in `current_issue_refs` (the fresh, authoritative hit set this
+/// scan just produced). Returns the number of rows actually removed.
+/// (#1000 codex review finding 7 — "verdict rows never die": without this,
+/// a zombie that got closed, or a stale candidate whose drift got fixed,
+/// stays in the briefing forever because nothing ever re-scans-and-clears
+/// rows that no longer reproduce.)
+pub(crate) fn reap_stale_kind_rows(
+    server: &MemoryServer,
+    namespace: &str,
+    kind: &str,
+    current_issue_refs: &[String],
+) -> Result<usize, String> {
+    let existing = list_freshness_rows(server, namespace)?;
+    let mut reaped = 0usize;
+    for row in existing.into_iter().filter(|r| r.kind == kind) {
+        if !current_issue_refs.contains(&row.issue_ref) {
+            let removed = server.with_global_store(|store| {
+                store
+                    .delete_state(namespace, &freshness_row_key(&row.kind, &row.issue_ref))
+                    .map_err(|e| format!("issue_freshness delete_state: {e}"))
+            })?;
+            if removed {
+                reaped += 1;
+            }
+        }
+    }
+    Ok(reaped)
 }
 
 use serde::{Deserialize, Serialize};
 
 /// Briefing projection (Scope item 3): both queues, capped, counts +
 /// overflow markers — never a silent cap (same convention as
-/// `scan_open_loops`). Reads only the already-stored verdict rows
+/// `scan_open_loops`). Reads only the already-stored candidate rows
 /// (`state_kv`) — this function does not call `gh` itself; population of
 /// those rows happens via `issue_freshness_scan` (a `tachi_gh` action) so
-/// briefing reads stay cheap and offline-safe.
+/// briefing reads stay cheap and offline-safe. `stale_candidates` folds both
+/// heuristic kinds (`stale_candidate` + `churn_candidate`) into one bucket —
+/// they are both "review this, no verdict" reasons from the caller's point of
+/// view; the on-disk `kind` distinction only matters for reap correctness.
 pub(crate) fn briefing_freshness_queues(server: &MemoryServer, limit: usize) -> Value {
-    let verdicts = list_freshness_verdicts(server).unwrap_or_default();
-    let mut zombies: Vec<&FreshnessVerdict> =
-        verdicts.iter().filter(|v| v.verdict == "zombie").collect();
-    let mut stale: Vec<&FreshnessVerdict> = verdicts
+    let zombie_rows_all = list_freshness_rows(server, ZOMBIE_NS).unwrap_or_default();
+    let stale_rows_all = list_freshness_rows(server, STALE_CANDIDATE_NS).unwrap_or_default();
+
+    let mut zombies: Vec<&FreshnessRow> = zombie_rows_all
         .iter()
-        .filter(|v| v.verdict == "stale_candidate")
+        .filter(|v| v.kind == KIND_ZOMBIE)
+        .collect();
+    let mut stale: Vec<&FreshnessRow> = stale_rows_all
+        .iter()
+        .filter(|v| v.kind == KIND_STALE_CANDIDATE || v.kind == KIND_CHURN_CANDIDATE)
         .collect();
     zombies.sort_by(|a, b| a.issue_ref.cmp(&b.issue_ref));
     stale.sort_by(|a, b| a.issue_ref.cmp(&b.issue_ref));
@@ -900,6 +964,7 @@ pub(crate) fn briefing_freshness_queues(server: &MemoryServer, limit: usize) -> 
         .map(|v| {
             json!({
                 "issue_ref": v.issue_ref,
+                "kind": v.kind,
                 "evidence_refs": v.evidence_refs,
                 "verified_at_sha": v.verified_at_sha,
             })
@@ -1213,18 +1278,18 @@ mod tests {
     }
 
     #[test]
-    fn freshness_verdict_roundtrips_through_json() {
-        let verdict = FreshnessVerdict {
+    fn freshness_row_roundtrips_through_json() {
+        let row = FreshnessRow {
             issue_ref: "kckylechen1/tachi#979".to_string(),
+            kind: KIND_ZOMBIE.to_string(),
             verified_at_sha: "deadbeef".to_string(),
-            verdict: "zombie".to_string(),
             evidence_refs: vec!["kckylechen1/tachi#980".to_string()],
             checked_at: "2026-07-11T00:00:00Z".to_string(),
         };
-        let json = serde_json::to_string(&verdict).expect("serialize");
-        let back: FreshnessVerdict = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.issue_ref, verdict.issue_ref);
-        assert_eq!(back.verdict, verdict.verdict);
+        let json = serde_json::to_string(&row).expect("serialize");
+        let back: FreshnessRow = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.issue_ref, row.issue_ref);
+        assert_eq!(back.kind, row.kind);
     }
 
     fn test_server() -> MemoryServer {
@@ -1235,53 +1300,168 @@ mod tests {
         MemoryServer::new(db, None).expect("test server")
     }
 
-    fn verdict(issue_ref: &str, kind: &str, evidence: &[&str]) -> FreshnessVerdict {
-        FreshnessVerdict {
+    fn row(issue_ref: &str, kind: &str, evidence: &[&str]) -> FreshnessRow {
+        FreshnessRow {
             issue_ref: issue_ref.to_string(),
+            kind: kind.to_string(),
             verified_at_sha: "sha1".to_string(),
-            verdict: kind.to_string(),
             evidence_refs: evidence.iter().map(|s| s.to_string()).collect(),
             checked_at: "2026-07-11T00:00:00Z".to_string(),
         }
     }
 
     #[test]
-    fn save_and_list_freshness_verdicts_roundtrips_via_state_kv() {
+    fn save_and_list_freshness_rows_roundtrips_via_state_kv() {
         let server = test_server();
-        save_freshness_verdict(&server, &verdict("o/r#979", "zombie", &["o/r#980"]))
+        save_freshness_row(&server, ZOMBIE_NS, &row("o/r#979", KIND_ZOMBIE, &["o/r#980"]))
             .expect("save zombie");
-        save_freshness_verdict(&server, &verdict("o/r#500", "stale_candidate", &[]))
-            .expect("save stale");
+        save_freshness_row(
+            &server,
+            STALE_CANDIDATE_NS,
+            &row("o/r#500", KIND_STALE_CANDIDATE, &[]),
+        )
+        .expect("save stale");
 
-        let all = list_freshness_verdicts(&server).expect("list");
-        assert_eq!(all.len(), 2);
-        assert!(all
+        let zombies = list_freshness_rows(&server, ZOMBIE_NS).expect("list zombies");
+        assert_eq!(zombies.len(), 1);
+        assert!(zombies
             .iter()
-            .any(|v| v.issue_ref == "o/r#979" && v.verdict == "zombie"));
-        assert!(all
+            .any(|v| v.issue_ref == "o/r#979" && v.kind == KIND_ZOMBIE));
+
+        let stale = list_freshness_rows(&server, STALE_CANDIDATE_NS).expect("list stale");
+        assert_eq!(stale.len(), 1);
+        assert!(stale
             .iter()
-            .any(|v| v.issue_ref == "o/r#500" && v.verdict == "stale_candidate"));
+            .any(|v| v.issue_ref == "o/r#500" && v.kind == KIND_STALE_CANDIDATE));
+    }
+
+    /// #1000 codex review finding 7: kind+issue_ref keys — a zombie row and a
+    /// stale-candidate row for the SAME issue must not collide/overwrite each
+    /// other even though (pre-fix) both used to key off `issue_ref` alone.
+    #[test]
+    fn save_freshness_row_does_not_collide_across_kinds_for_same_issue() {
+        let server = test_server();
+        save_freshness_row(
+            &server,
+            STALE_CANDIDATE_NS,
+            &row("o/r#1", KIND_STALE_CANDIDATE, &[]),
+        )
+        .expect("save stale");
+        save_freshness_row(
+            &server,
+            STALE_CANDIDATE_NS,
+            &row("o/r#1", KIND_CHURN_CANDIDATE, &["o/r#2"]),
+        )
+        .expect("save churn");
+
+        let all = list_freshness_rows(&server, STALE_CANDIDATE_NS).expect("list");
+        assert_eq!(
+            all.len(),
+            2,
+            "same issue_ref, different kind, must coexist as two rows, got: {all:?}"
+        );
+        assert!(all.iter().any(|v| v.kind == KIND_STALE_CANDIDATE));
+        assert!(all.iter().any(|v| v.kind == KIND_CHURN_CANDIDATE));
     }
 
     #[test]
-    fn save_freshness_verdict_overwrites_same_issue_ref() {
+    fn save_freshness_row_overwrites_same_kind_and_issue_ref() {
         let server = test_server();
-        save_freshness_verdict(&server, &verdict("o/r#1", "stale_candidate", &[]))
+        save_freshness_row(&server, ZOMBIE_NS, &row("o/r#1", KIND_ZOMBIE, &["o/r#2"]))
             .expect("save first");
-        save_freshness_verdict(&server, &verdict("o/r#1", "zombie", &["o/r#2"]))
+        save_freshness_row(&server, ZOMBIE_NS, &row("o/r#1", KIND_ZOMBIE, &["o/r#3"]))
             .expect("save second");
 
-        let all = list_freshness_verdicts(&server).expect("list");
-        assert_eq!(all.len(), 1, "same issue_ref must overwrite, not duplicate");
-        assert_eq!(all[0].verdict, "zombie");
+        let all = list_freshness_rows(&server, ZOMBIE_NS).expect("list");
+        assert_eq!(
+            all.len(),
+            1,
+            "same kind+issue_ref must overwrite, not duplicate"
+        );
+        assert_eq!(all[0].evidence_refs, vec!["o/r#3".to_string()]);
+    }
+
+    /// #1000 codex review finding 7 acceptance test: a zombie that the leader
+    /// closed on GitHub must disappear from the briefing after the NEXT scan
+    /// reaps it — it must not live forever as a ghost row just because it was
+    /// saved once.
+    #[test]
+    fn reap_stale_kind_rows_drops_rows_missing_from_fresh_hit_set() {
+        let server = test_server();
+        save_freshness_row(&server, ZOMBIE_NS, &row("o/r#979", KIND_ZOMBIE, &["o/r#980"]))
+            .expect("save");
+        save_freshness_row(&server, ZOMBIE_NS, &row("o/r#947", KIND_ZOMBIE, &["o/r#981"]))
+            .expect("save");
+
+        // Briefing sees both before the reap.
+        let before = briefing_freshness_queues(&server, 8);
+        assert_eq!(before["zombies"]["count"], 2);
+
+        // Next scan only reproduces #947 (the leader closed #979 by hand) —
+        // reap must drop #979's row, keep #947's.
+        let reaped = reap_stale_kind_rows(
+            &server,
+            ZOMBIE_NS,
+            KIND_ZOMBIE,
+            &["o/r#947".to_string()],
+        )
+        .expect("reap");
+        assert_eq!(reaped, 1, "expected exactly #979's row reaped");
+
+        let after = briefing_freshness_queues(&server, 8);
+        assert_eq!(after["zombies"]["count"], 1, "closed zombie must be gone");
+        let refs: Vec<&str> = after["zombies"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["issue_ref"].as_str().unwrap())
+            .collect();
+        assert!(!refs.contains(&"o/r#979"));
+        assert!(refs.contains(&"o/r#947"));
     }
 
     #[test]
-    fn briefing_freshness_queues_splits_by_verdict_with_counts() {
+    fn reap_stale_kind_rows_only_touches_its_own_kind() {
         let server = test_server();
-        save_freshness_verdict(&server, &verdict("o/r#979", "zombie", &["o/r#980"])).expect("save");
-        save_freshness_verdict(&server, &verdict("o/r#947", "zombie", &["o/r#981"])).expect("save");
-        save_freshness_verdict(&server, &verdict("o/r#500", "stale_candidate", &[])).expect("save");
+        save_freshness_row(
+            &server,
+            STALE_CANDIDATE_NS,
+            &row("o/r#1", KIND_STALE_CANDIDATE, &[]),
+        )
+        .expect("save stale");
+        save_freshness_row(
+            &server,
+            STALE_CANDIDATE_NS,
+            &row("o/r#1", KIND_CHURN_CANDIDATE, &[]),
+        )
+        .expect("save churn");
+
+        // A churn-kind scan that no longer sees #1 must reap ONLY the churn
+        // row, leaving the unrelated stale_candidate row for the same issue
+        // untouched (each scan is authoritative for its own kind only).
+        let reaped =
+            reap_stale_kind_rows(&server, STALE_CANDIDATE_NS, KIND_CHURN_CANDIDATE, &[])
+                .expect("reap");
+        assert_eq!(reaped, 1);
+
+        let remaining = list_freshness_rows(&server, STALE_CANDIDATE_NS).expect("list");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].kind, KIND_STALE_CANDIDATE);
+    }
+
+    #[test]
+    fn briefing_freshness_queues_splits_by_kind_with_counts() {
+        let server = test_server();
+        save_freshness_row(&server, ZOMBIE_NS, &row("o/r#979", KIND_ZOMBIE, &["o/r#980"]))
+            .expect("save");
+        save_freshness_row(&server, ZOMBIE_NS, &row("o/r#947", KIND_ZOMBIE, &["o/r#981"]))
+            .expect("save");
+        save_freshness_row(
+            &server,
+            STALE_CANDIDATE_NS,
+            &row("o/r#500", KIND_STALE_CANDIDATE, &[]),
+        )
+        .expect("save");
 
         let out = briefing_freshness_queues(&server, 8);
         assert_eq!(out["zombies"]["count"], 2);
@@ -1298,10 +1478,33 @@ mod tests {
     }
 
     #[test]
+    fn briefing_freshness_queues_folds_both_heuristic_kinds_into_stale_bucket() {
+        let server = test_server();
+        save_freshness_row(
+            &server,
+            STALE_CANDIDATE_NS,
+            &row("o/r#1", KIND_STALE_CANDIDATE, &[]),
+        )
+        .expect("save");
+        save_freshness_row(
+            &server,
+            STALE_CANDIDATE_NS,
+            &row("o/r#2", KIND_CHURN_CANDIDATE, &[]),
+        )
+        .expect("save");
+
+        let out = briefing_freshness_queues(&server, 8);
+        assert_eq!(
+            out["stale_candidates"]["count"], 2,
+            "both stale_candidate and churn_candidate kinds fold into one bucket"
+        );
+    }
+
+    #[test]
     fn briefing_freshness_queues_reports_overflow_never_silently_caps() {
         let server = test_server();
         for n in 0..5 {
-            save_freshness_verdict(&server, &verdict(&format!("o/r#{n}"), "zombie", &[]))
+            save_freshness_row(&server, ZOMBIE_NS, &row(&format!("o/r#{n}"), KIND_ZOMBIE, &[]))
                 .expect("save");
         }
         let out = briefing_freshness_queues(&server, 2);
@@ -1311,7 +1514,7 @@ mod tests {
     }
 
     #[test]
-    fn briefing_freshness_queues_empty_when_no_verdicts_saved() {
+    fn briefing_freshness_queues_empty_when_no_rows_saved() {
         let server = test_server();
         let out = briefing_freshness_queues(&server, 8);
         assert_eq!(out["zombies"]["count"], 0);

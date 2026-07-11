@@ -91,85 +91,7 @@ pub(crate) async fn handle_tachi_gh(
             )
             .await
         }
-        "issue_freshness_scan" => {
-            let repo = required_repo(&params, "issue_freshness_scan")?;
-            let limit = params.scan_limit.unwrap_or(100);
-            let zombies = crate::gh_ops::fetch_and_scan_zombies(server, &repo, limit)?;
-            // Persist a judgment-free verdict row per zombie hit (state_kv,
-            // #1000 scope) so the briefing queues (read-only) see it without
-            // re-scanning GitHub. Best-effort: a save failure surfaces in the
-            // response but does not fail the scan itself (the scan result is
-            // still useful even if storage hiccups).
-            let mut save_errors = Vec::new();
-            for hit in &zombies {
-                let issue_ref = format!("{repo}#{}", hit.issue_number);
-                let verdict = crate::gh_ops::FreshnessVerdict {
-                    issue_ref: issue_ref.clone(),
-                    verified_at_sha: hit.merge_commit_sha.clone().unwrap_or_default(),
-                    verdict: "zombie".to_string(),
-                    evidence_refs: vec![format!("{repo}#{}", hit.pr_number)],
-                    checked_at: chrono::Utc::now().to_rfc3339(),
-                };
-                if let Err(e) = crate::gh_ops::save_freshness_verdict(server, &verdict) {
-                    save_errors.push(format!("{issue_ref}: {e}"));
-                }
-            }
-
-            // Stale-candidate heuristic (Scope item 2) — best-effort, only
-            // when a repo checkout root is resolvable (defaults to process
-            // cwd, mirrors action="ship"'s `cwd` semantics). A missing/invalid
-            // root degrades to zombies-only rather than failing the scan.
-            let repo_root = params
-                .cwd
-                .as_deref()
-                .map(std::path::PathBuf::from)
-                .or_else(|| std::env::current_dir().ok())
-                .unwrap_or_default();
-            let stale_candidates = crate::gh_ops::fetch_and_scan_stale_candidates(
-                server, &repo, &repo_root, limit,
-            )
-            .unwrap_or_default();
-            for candidate in &stale_candidates {
-                let issue_ref = format!("{repo}#{}", candidate.issue_number);
-                let verdict = crate::gh_ops::FreshnessVerdict {
-                    issue_ref: issue_ref.clone(),
-                    verified_at_sha: String::new(),
-                    verdict: "stale_candidate".to_string(),
-                    evidence_refs: candidate.evidence.clone(),
-                    checked_at: chrono::Utc::now().to_rfc3339(),
-                };
-                if let Err(e) = crate::gh_ops::save_freshness_verdict(server, &verdict) {
-                    save_errors.push(format!("{issue_ref}: {e}"));
-                }
-            }
-
-            serde_json::to_string(&json!({
-                "tool": "tachi_gh_issue_freshness_scan",
-                "repo": repo,
-                "zombies": zombies
-                    .iter()
-                    .map(|h| json!({
-                        "issue_number": h.issue_number,
-                        "pr_number": h.pr_number,
-                        "pr_title": h.pr_title,
-                        "merge_commit_sha": h.merge_commit_sha,
-                    }))
-                    .collect::<Vec<_>>(),
-                "stale_candidates": stale_candidates
-                    .iter()
-                    .map(|c| json!({
-                        "issue_number": c.issue_number,
-                        "reason": c.reason,
-                        "evidence": c.evidence,
-                    }))
-                    .collect::<Vec<_>>(),
-                "zombie_count": zombies.len(),
-                "stale_candidate_count": stale_candidates.len(),
-                "verdicts_saved": zombies.len() + stale_candidates.len() - save_errors.len(),
-                "save_errors": save_errors,
-            }))
-            .map_err(|e| format!("serialize: {e}"))
-        }
+        "issue_freshness_scan" => handle_issue_freshness_scan(server, &params).await,
         "pr_comment" => {
             let target = resolve_tachi_gh_pr_target(&params, "pr_comment")?;
             handle_gh_comment(
@@ -317,6 +239,221 @@ pub(crate) async fn handle_tachi_gh(
         )),
     }?;
     normalize_gh_response(&action, &raw, params.format.as_deref())
+}
+
+/// #1000 issue-freshness scan: three independent detectors (zombie / stale
+/// gate+anchor / same-surface churn), each writing its OWN candidate rowset
+/// and reaping its own kind on every run.
+///
+/// Frozen posture (codex review finding 5, "圈候选不判决"): NONE of these are
+/// verdicts. Zombie hits are "candidate: fixed-awaiting-closure" claims;
+/// stale/churn hits are pure review-queue reasons. Closing an issue stays a
+/// leader/owner action on GitHub itself — this handler never calls
+/// `issue_close` or similar.
+///
+/// Error-arm honesty (codex review finding 6): the zombie arm is the primary
+/// signal this action exists for — a `gh` failure there is surfaced as a hard
+/// error (`?`), not swallowed. The stale/churn arms are best-effort
+/// enhancements (they need a resolvable repo root / activity cutoff that may
+/// not always be available) — a failure there degrades the scan to
+/// zombies-only, but LOUDLY: the failure reason is captured in
+/// `stale_scan_error`/`churn_scan_error` fields on the response, never
+/// silently swallowed into an empty vec the caller can't distinguish from
+/// "scanned, found nothing".
+async fn handle_issue_freshness_scan(
+    server: &MemoryServer,
+    params: &TachiGhParams,
+) -> Result<String, String> {
+    let repo = required_repo(params, "issue_freshness_scan")?;
+    let limit = params.scan_limit.unwrap_or(100);
+
+    // Zombie arm: hard-fails the whole action on a `gh` error — this is the
+    // scan's primary signal, not a best-effort extra (finding 6).
+    let zombies = crate::gh_ops::fetch_and_scan_zombies(server, &repo, limit)?;
+
+    let mut save_errors = Vec::new();
+    let mut zombie_refs = Vec::with_capacity(zombies.len());
+    for hit in &zombies {
+        let issue_ref = format!("{repo}#{}", hit.issue_number);
+        zombie_refs.push(issue_ref.clone());
+        let row = crate::gh_ops::FreshnessRow {
+            issue_ref: issue_ref.clone(),
+            kind: crate::gh_ops::KIND_ZOMBIE.to_string(),
+            verified_at_sha: hit.merge_commit_sha.clone().unwrap_or_default(),
+            evidence_refs: vec![format!("{repo}#{}", hit.pr_number)],
+            checked_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Err(e) = crate::gh_ops::save_freshness_row(server, crate::gh_ops::ZOMBIE_NS, &row) {
+            save_errors.push(format!("{issue_ref}: {e}"));
+        }
+    }
+    // Each scan is authoritative for its own kind (finding 7): any
+    // previously-saved zombie row not reproduced by THIS scan (the leader
+    // closed it, or it otherwise stopped being a zombie) is reaped so it
+    // does not live forever as a ghost row in the briefing.
+    let zombie_reaped = crate::gh_ops::reap_stale_kind_rows(
+        server,
+        crate::gh_ops::ZOMBIE_NS,
+        crate::gh_ops::KIND_ZOMBIE,
+        &zombie_refs,
+    )
+    .unwrap_or(0);
+
+    // Stale gate+anchor arm: best-effort, degrades LOUDLY on failure (finding
+    // 6) — a missing/invalid repo root or `gh` error is captured in
+    // `stale_scan_error`, never silently collapsed into an empty vec.
+    let repo_root = params
+        .cwd
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    let mut stale_scan_error: Option<String> = None;
+    let stale_candidates = match crate::gh_ops::fetch_and_scan_stale_candidates(
+        server, &repo, &repo_root, limit,
+    ) {
+        Ok((candidates, warnings)) => {
+            if !warnings.is_empty() {
+                stale_scan_error = Some(format!(
+                    "{} anchor(s) could not be verified: {}",
+                    warnings.len(),
+                    warnings.join("; ")
+                ));
+            }
+            candidates
+        }
+        Err(e) => {
+            stale_scan_error = Some(e);
+            Vec::new()
+        }
+    };
+    let mut stale_refs = Vec::with_capacity(stale_candidates.len());
+    for candidate in &stale_candidates {
+        let issue_ref = format!("{repo}#{}", candidate.issue_number);
+        stale_refs.push(issue_ref.clone());
+        let row = crate::gh_ops::FreshnessRow {
+            issue_ref: issue_ref.clone(),
+            kind: crate::gh_ops::KIND_STALE_CANDIDATE.to_string(),
+            verified_at_sha: String::new(),
+            evidence_refs: candidate.evidence.clone(),
+            checked_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Err(e) =
+            crate::gh_ops::save_freshness_row(server, crate::gh_ops::STALE_CANDIDATE_NS, &row)
+        {
+            save_errors.push(format!("{issue_ref}: {e}"));
+        }
+    }
+    // Reap stale_candidate rows only when this scan actually ran (an error
+    // means we have no fresh authoritative set — reaping on an empty vec
+    // from a FAILED scan would wrongly delete every real row). Only reap on
+    // a successful scan (stale_scan_error carries a warning, not a hard
+    // failure, when candidates were still produced).
+    let stale_reaped = if stale_scan_error.is_none() || !stale_candidates.is_empty() {
+        crate::gh_ops::reap_stale_kind_rows(
+            server,
+            crate::gh_ops::STALE_CANDIDATE_NS,
+            crate::gh_ops::KIND_STALE_CANDIDATE,
+            &stale_refs,
+        )
+        .unwrap_or(0)
+    } else {
+        0
+    };
+
+    // Same-surface-churn arm (Scope item 2's third heuristic, codex review
+    // finding 2) — best-effort, same loud-degrade posture as the stale arm.
+    // Default policy: 30-day activity window, 3+ distinct touching PRs.
+    let churn_threshold = params.churn_threshold.unwrap_or(3) as usize;
+    let activity_since = params
+        .churn_activity_since
+        .clone()
+        .unwrap_or_else(|| (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339());
+    let mut churn_scan_error: Option<String> = None;
+    let churn_candidates = match crate::gh_ops::fetch_and_scan_same_surface_churn(
+        server,
+        &repo,
+        limit,
+        &activity_since,
+        churn_threshold,
+    ) {
+        Ok(candidates) => candidates,
+        Err(e) => {
+            churn_scan_error = Some(e);
+            Vec::new()
+        }
+    };
+    let mut churn_refs = Vec::with_capacity(churn_candidates.len());
+    for candidate in &churn_candidates {
+        let issue_ref = format!("{repo}#{}", candidate.issue_number);
+        churn_refs.push(issue_ref.clone());
+        let row = crate::gh_ops::FreshnessRow {
+            issue_ref: issue_ref.clone(),
+            kind: crate::gh_ops::KIND_CHURN_CANDIDATE.to_string(),
+            verified_at_sha: String::new(),
+            evidence_refs: candidate
+                .touching_pr_numbers
+                .iter()
+                .map(|n| format!("{repo}#{n}"))
+                .collect(),
+            checked_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Err(e) =
+            crate::gh_ops::save_freshness_row(server, crate::gh_ops::STALE_CANDIDATE_NS, &row)
+        {
+            save_errors.push(format!("{issue_ref}: {e}"));
+        }
+    }
+    let churn_reaped = if churn_scan_error.is_none() {
+        crate::gh_ops::reap_stale_kind_rows(
+            server,
+            crate::gh_ops::STALE_CANDIDATE_NS,
+            crate::gh_ops::KIND_CHURN_CANDIDATE,
+            &churn_refs,
+        )
+        .unwrap_or(0)
+    } else {
+        0
+    };
+
+    serde_json::to_string(&json!({
+        "tool": "tachi_gh_issue_freshness_scan",
+        "repo": repo,
+        "zombies": zombies
+            .iter()
+            .map(|h| json!({
+                "issue_number": h.issue_number,
+                "pr_number": h.pr_number,
+                "pr_title": h.pr_title,
+                "merge_commit_sha": h.merge_commit_sha,
+            }))
+            .collect::<Vec<_>>(),
+        "stale_candidates": stale_candidates
+            .iter()
+            .map(|c| json!({
+                "issue_number": c.issue_number,
+                "reason": c.reason,
+                "evidence": c.evidence,
+            }))
+            .collect::<Vec<_>>(),
+        "churn_candidates": churn_candidates
+            .iter()
+            .map(|c| json!({
+                "issue_number": c.issue_number,
+                "touching_pr_count": c.touching_pr_count,
+                "touching_pr_numbers": c.touching_pr_numbers,
+            }))
+            .collect::<Vec<_>>(),
+        "zombie_count": zombies.len(),
+        "stale_candidate_count": stale_candidates.len(),
+        "churn_candidate_count": churn_candidates.len(),
+        "rows_saved": zombies.len() + stale_candidates.len() + churn_candidates.len() - save_errors.len(),
+        "rows_reaped": zombie_reaped + stale_reaped + churn_reaped,
+        "save_errors": save_errors,
+        "stale_scan_error": stale_scan_error,
+        "churn_scan_error": churn_scan_error,
+    }))
+    .map_err(|e| format!("serialize: {e}"))
 }
 
 /// tachi_gh lifecycle actions — the only ones `format="markdown"` applies to
