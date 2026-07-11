@@ -293,7 +293,7 @@ pub(crate) fn run_data_migrations_in_tx(
 /// `run_data_migrations` relies on for every versioned migration, rather
 /// than a parallel reimplementation of the gate.
 fn apply_versioned_migration<T>(
-    conn: &mut Connection,
+    conn: &Connection,
     key: &str,
     migrate: impl FnOnce(&Connection) -> Result<T, MemoryError>,
 ) -> Result<Option<T>, MemoryError> {
@@ -1170,11 +1170,11 @@ mod tests {
     /// sentinel.
     #[test]
     fn apply_versioned_migration_gates_sentinel_on_real_runner_helper() {
-        let (mut conn, _tmp) = open_test_db();
+        let (conn, _tmp) = open_test_db();
         let key = "v978_test_migration";
         assert!(!was_run(&conn, key).unwrap());
 
-        let err = apply_versioned_migration(&mut conn, key, |_conn| {
+        let err = apply_versioned_migration(&conn, key, |_conn| {
             Err::<(), MemoryError>(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
                 Some("simulated migration failure (#978)".to_string()),
@@ -1191,7 +1191,7 @@ mod tests {
             "sentinel must stay unset after apply_versioned_migration's migrate fails"
         );
 
-        let ran = apply_versioned_migration(&mut conn, key, |_conn| Ok::<_, MemoryError>(42usize))
+        let ran = apply_versioned_migration(&conn, key, |_conn| Ok::<_, MemoryError>(42usize))
             .expect("succeeding migrate closure must return Ok");
         assert_eq!(ran, Some(42));
         assert!(
@@ -1202,7 +1202,7 @@ mod tests {
         // Idempotent: a second call with a closure that would panic if
         // invoked proves the sentinel-already-set path skips `migrate`
         // entirely.
-        let skipped = apply_versioned_migration(&mut conn, key, |_conn| -> Result<usize, MemoryError> {
+        let skipped = apply_versioned_migration(&conn, key, |_conn| -> Result<usize, MemoryError> {
             panic!("migrate must not be invoked once the sentinel is already set")
         })
         .expect("already-run migration must short-circuit to Ok(None), not invoke migrate");
