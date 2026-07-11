@@ -101,6 +101,7 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
             out.push(format!("- {detail} → `{action}`"));
         }
     }
+    out.push(markdown_presence_section(value));
     out.push(format!(
         "\n## Next Action\n{}",
         value
@@ -108,6 +109,59 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
             .and_then(Value::as_str)
             .unwrap_or("Continue from the canonical docs/specs.")
     ));
+    out.join("\n")
+}
+
+/// Presence 工位表 (#1001 round 2 item 4): the task-facing `feature_briefing`
+/// markdown used to render every section EXCEPT presence — the JSON payload
+/// carried `value["presence"]` (board + advisory collision warnings) but the
+/// text a harness actually reads never showed it, silently dropping the
+/// "who else is touching this" signal for any caller using the markdown
+/// format. Mirrors `agent_markdown::briefing::format_briefing`'s presence
+/// rendering (same row shape, same advisory framing) so the two briefing
+/// surfaces agree. Returns an empty string (no section, no stray heading)
+/// when there is nothing to show — both board and warnings empty.
+pub(super) fn markdown_presence_section(value: &Value) -> String {
+    let presence = value.get("presence").unwrap_or(&Value::Null);
+    let items = presence
+        .get("board")
+        .and_then(|b| b.get("items"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let warnings = presence
+        .get("warnings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if items.is_empty() && warnings.is_empty() {
+        return String::new();
+    }
+    let mut out = vec!["\n## Presence 工位表 (who's working what)".to_string()];
+    out.push(
+        "_Advisory only — never a lock. TTL-expired claims disappear on their own._".to_string(),
+    );
+    for row in &items {
+        let session = row
+            .get("session_client")
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let issue_ref = row.get("issue_ref").and_then(Value::as_str);
+        let flow_id = row.get("flow_id").and_then(Value::as_str);
+        let heartbeat = row
+            .get("heartbeat_at")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let target = issue_ref.or(flow_id).unwrap_or("(no issue/flow declared)");
+        out.push(format!(
+            "- **{session}** → {target} (heartbeat {heartbeat})"
+        ));
+    }
+    for warning in &warnings {
+        if let Some(text) = warning.as_str() {
+            out.push(format!("- ⚠️ {text}"));
+        }
+    }
     out.join("\n")
 }
 

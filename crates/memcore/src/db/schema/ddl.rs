@@ -467,6 +467,18 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_session_claims_state ON session_claims(state);
         CREATE INDEX IF NOT EXISTS idx_session_claims_issue ON session_claims(issue_ref);
         CREATE INDEX IF NOT EXISTS idx_session_claims_flow ON session_claims(flow_id);
+        -- #1001 round 2 item 2: DB-level uniqueness for the identity triple
+        -- upsert_or_heartbeat_claim's read-then-write relies on at the
+        -- application level. Partial (WHERE state='active') so a released
+        -- historical row never blocks a fresh active claim for the same
+        -- identity; COALESCE(..., '') on each nullable column so two active
+        -- rows that are both NULL in the same slot collide the same way the
+        -- upsert's `IS ?` lookup already treats them as one identity (see
+        -- `migrations/session_claims_identity.rs` for the full rationale and
+        -- the migration that retrofits this onto pre-existing DBs).
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_session_claims_identity_active
+            ON session_claims(COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, ''))
+            WHERE state = 'active';
 "#;
 
 pub(super) const MIGRATED_INDEXES_SQL: &str = r#"

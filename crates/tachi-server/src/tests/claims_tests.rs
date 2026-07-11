@@ -163,3 +163,94 @@ async fn collision_warning_fires_when_second_session_claims_the_same_issue() {
     assert!(warnings[0].as_str().unwrap().contains("double-claim"));
     assert!(warnings[0].as_str().unwrap().contains("seat-a"));
 }
+
+/// #1001 round 2 item 3: `presence_briefing_section` used to always pass an
+/// empty `new_scope` to `collision_warnings`, which made the file-scope-
+/// overlap half of that check structurally unreachable from briefing (it
+/// only fires when `new_scope` is non-empty). This proves the fix: session B
+/// declares a live claim with a file scope that overlaps session A's live
+/// claim, and B's OWN briefing read (using its own declared scope, since a
+/// read-only briefing call has no scope parameter of its own) surfaces the
+/// overlap warning — the acceptance criterion the mission states verbatim:
+/// "两 session 声明重叠 scope → 双方 briefing 都出预警".
+#[tokio::test]
+async fn briefing_surfaces_file_scope_collision_using_the_calling_sessions_own_declared_scope() {
+    let server_a = make_server();
+    let db_path = server_a.global_db_path_buf();
+    let server_b =
+        crate::server_state::MemoryServer::new(db_path, None).expect("second server handle");
+
+    server_a.set_session_identity(Some("seat-a".to_string()), None, None);
+    auto_register_or_heartbeat_claim(
+        &server_a,
+        &ClaimHookInput {
+            issue_ref: Some("org/repo#1001".to_string()),
+            flow_id: Some("flow-a".to_string()),
+            dispatch_id: None,
+            branch: Some("feat/a".to_string()),
+            declared_file_scope: Some(vec!["crates/tachi-server/src/claims_ops.rs".to_string()]),
+        },
+    );
+
+    server_b.set_session_identity(Some("seat-b".to_string()), None, None);
+    auto_register_or_heartbeat_claim(
+        &server_b,
+        &ClaimHookInput {
+            issue_ref: Some("org/repo#1002".to_string()),
+            flow_id: Some("flow-b".to_string()),
+            dispatch_id: None,
+            branch: Some("feat/b".to_string()),
+            declared_file_scope: Some(vec!["crates/tachi-server/src/claims_ops.rs".to_string()]),
+        },
+    );
+
+    // B reads its own briefing (no explicit issue_ref match to A's — this is
+    // a file-scope collision, not a double-claim-on-the-same-issue one).
+    let section = presence_briefing_section(&server_b, Some("org/repo#1002"));
+    let warnings = section["warnings"].as_array().unwrap();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "must surface exactly the file-scope overlap, no double-claim (different issue_refs): {warnings:?}"
+    );
+    assert!(warnings[0].as_str().unwrap().contains("file-scope overlap"));
+    assert!(warnings[0].as_str().unwrap().contains("seat-a"));
+    assert!(warnings[0].as_str().unwrap().contains("claims_ops.rs"));
+
+    // And session A's own briefing symmetrically surfaces the same overlap
+    // against B.
+    let section_a = presence_briefing_section(&server_a, Some("org/repo#1001"));
+    let warnings_a = section_a["warnings"].as_array().unwrap();
+    assert_eq!(warnings_a.len(), 1);
+    assert!(warnings_a[0]
+        .as_str()
+        .unwrap()
+        .contains("file-scope overlap"));
+    assert!(warnings_a[0].as_str().unwrap().contains("seat-b"));
+}
+
+/// A session's own live claim must never be reported as colliding with
+/// itself once `presence_briefing_section` starts passing a real scope
+/// through (self-exclusion parity with `handle_manual_claim`).
+#[tokio::test]
+async fn briefing_does_not_self_collide_on_its_own_declared_scope() {
+    let server = make_server();
+    server.set_session_identity(Some("solo-seat".to_string()), None, None);
+    auto_register_or_heartbeat_claim(
+        &server,
+        &ClaimHookInput {
+            issue_ref: Some("org/repo#2000".to_string()),
+            flow_id: None,
+            dispatch_id: None,
+            branch: None,
+            declared_file_scope: Some(vec!["crates/foo/src/lib.rs".to_string()]),
+        },
+    );
+
+    let section = presence_briefing_section(&server, Some("org/repo#2000"));
+    let warnings = section["warnings"].as_array().unwrap();
+    assert!(
+        warnings.is_empty(),
+        "a session must never see its own claim reported as a collision: {warnings:?}"
+    );
+}
