@@ -44,15 +44,30 @@ pub(super) fn resolve_from_agent(server: &MemoryServer) -> String {
 /// real leader.
 ///
 /// Chain: `params.agent_id` -> server-side `agent_profile.agent_id` ->
-/// `TACHI_PROFILE` env var -> `None` (leader). The middle link
-/// (`agent_profile`) is expected to be structurally `None` once #973 retires
-/// `agent_register` at runtime; it is kept here only because this function
-/// mirrors the exact chain `handoff_ops::identity` already uses, and because
-/// a future non-dispatch caller could still populate it. Dispatch-bound
-/// worker seats get `TACHI_PROFILE` injected by the dispatch harness;
-/// handcrafted worker sessions calling the MCP tool directly must pass
-/// `agent_id` explicitly (or address via `to:`) — otherwise they resolve to
-/// `None` (leader) here, same as an identity-less caller.
+/// `TACHI_AGENT_SEAT` env var -> `None` (leader).
+///
+/// Round-2 fix (codex final review of #964/PR #1003, BUG CP2): the env
+/// fallback used to read `TACHI_PROFILE` — but that variable carries the
+/// configured *tool profile* (`worker`/`delegate`/`standard`/`codex`, see
+/// `dispatch_ops/mcp_config.rs`), a capability-surface selector, not a seat
+/// identity. A leader launched with `TACHI_PROFILE=standard` would resolve
+/// here as `Some("standard")`, not `None` (leader), and would silently stop
+/// consuming its own broadcasts; workers would resolve to a shared
+/// capability-profile name instead of their individual seat. `TACHI_AGENT_SEAT`
+/// is a dedicated env var, set only by the dispatch harness alongside
+/// `TACHI_PROFILE` (see `dispatch_ops/mcp_config.rs::generate_mcp_config`),
+/// carrying the actual per-worker seat name.
+///
+/// The middle link (`agent_profile`) is expected to be structurally `None`
+/// once #973 retires `agent_register` at runtime; it is kept here only
+/// because this function mirrors the exact chain `handoff_ops::identity`
+/// already uses, and because a future non-dispatch caller could still
+/// populate it. Dispatch-bound worker seats get `TACHI_AGENT_SEAT` injected
+/// by the dispatch harness; handcrafted worker sessions calling the MCP tool
+/// directly must pass `agent_id` explicitly (or address via `to:`) —
+/// otherwise they resolve to `None` (leader) here, same as an identity-less
+/// caller (documented caller-honesty residual: a handcrafted session cannot
+/// be forced to self-identify).
 pub(crate) fn resolve_caller_agent_id(
     server: &MemoryServer,
     params_agent_id: Option<&str>,
@@ -62,5 +77,5 @@ pub(crate) fn resolve_caller_agent_id(
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .or_else(|| current_agent_id(server))
-        .or_else(|| non_empty_env("TACHI_PROFILE"))
+        .or_else(|| non_empty_env("TACHI_AGENT_SEAT"))
 }

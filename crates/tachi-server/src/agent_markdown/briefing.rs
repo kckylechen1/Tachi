@@ -52,9 +52,18 @@ pub(crate) fn format_briefing(
             for row in rows {
                 let from = row.get("from_agent").and_then(Value::as_str).unwrap_or("?");
                 let text = row.get("text").and_then(Value::as_str).unwrap_or("");
+                // CP4 belt-and-suspenders (codex final review of #964/PR
+                // #1003): `sticky_leave` already scrubs secrets before
+                // persisting, so no post-merge DB should contain a raw
+                // token/key in a sticky row. Re-scrub here anyway, at the
+                // render boundary, as defense-in-depth — a row that somehow
+                // bypassed write-time scrubbing (hand-inserted, migrated
+                // from an older build, etc.) still cannot leak a live
+                // secret into rendered briefing output.
+                let (scrubbed_text, _redactions) = scrub_secrets(text);
                 out.push(format!(
                     "- from **{from}**: {}",
-                    md_escape(&compact_text_line(text, 200))
+                    md_escape(&compact_text_line(&scrubbed_text, 200))
                 ));
             }
         }

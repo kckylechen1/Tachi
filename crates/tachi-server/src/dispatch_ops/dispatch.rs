@@ -283,6 +283,19 @@ pub(crate) async fn handle_tachi_dispatch(
     validate_dispatch_sandbox_at_entry(&agent_norm, &harness_transport, params.sandbox.as_deref())?;
 
     // 1. Create isolated workspace directory + MCP config
+    //
+    // `agent_seat` (round-2 fix, codex final review of #964/PR #1003, BUG
+    // CP2): the seat identity written to `TACHI_AGENT_SEAT` for the spawned
+    // worker, distinct from `params.tool_profile` (the capability/tool
+    // surface). Prefer the caller-supplied dispatch `profile` name (the
+    // closest thing to a real seat this dispatch call carries); fall back to
+    // the resolved agent/backend name so every worker still gets SOME real
+    // seat identity even when no `profile` was given.
+    let agent_seat = params
+        .profile
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or(Some(agent_norm.as_str()));
     let mcp_config_path = prepare_workspace_and_mcp(
         server,
         &workspace_dir,
@@ -290,6 +303,7 @@ pub(crate) async fn handle_tachi_dispatch(
         inject_tachi,
         inject_hub,
         params.tool_profile.as_deref(),
+        agent_seat,
         &params.allowed_mcp_servers,
     )
     .await?;

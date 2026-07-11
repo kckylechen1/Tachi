@@ -131,7 +131,7 @@ async fn generate_mcp_config_sets_owner_only_permissions() {
     std::env::remove_var("TACHI_HOME");
 
     let server = crate::tests::make_server();
-    let path = generate_mcp_config(&server, "test-perms", true, false, None, &[])
+    let path = generate_mcp_config(&server, "test-perms", true, false, None, None, &[])
         .await
         .expect("generate mcp config")
         .expect("config path");

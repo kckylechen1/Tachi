@@ -430,6 +430,79 @@ fn mark_claimed_error_branch_is_reachable_and_does_not_affect_cas_outcome() {
     let _ = std::fs::remove_file(&db_path);
 }
 
+// ─── CP3 round-2: recovery escape claimed by the module doc is real ───────
+//
+// Round-2 (codex final review of #964/PR #1003, BUG CP3): the module doc
+// used to claim a sticky "can never silently and permanently drop", which
+// codex correctly flagged as false — a process death between the CAS commit
+// and the response reaching the caller leaves a row whose content nobody
+// live ever received. The doc rewrite instead documents that exact window
+// and points at `include_read=true` as the recovery escape: the row is never
+// deleted and is NOT filtered by claimed/unread status in the `include_read`
+// branch, so its text remains readable there regardless of what the
+// row-mirror write did. This test hand-simulates the crash window (CAS won,
+// row-mirror write never ran, row metadata still says "unread") and proves
+// the row's text is still recoverable via include_read — i.e. that the
+// recovery-escape claim the doc makes is true in code, not aspirational.
+#[test]
+fn cp3_row_stuck_unread_after_cas_win_is_still_recoverable_via_include_read() {
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-cp3-recovery-escape-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
+    server
+        .with_global_store(|store| {
+            let memo = test_memo("s-cp3-crash-window", None);
+            store.upsert(&test_entry(&memo)).map_err(|e| format!("{e}"))
+        })
+        .expect("seed sticky");
+
+    // Simulate exactly the crash window: win the durable CAS (step 1 in the
+    // module doc), then DO NOT call mark_claimed — i.e. the process is
+    // assumed to have died before the row-mirror write (step 2) and before
+    // the response reached any caller (step 3). The row's own metadata
+    // therefore still reads "unread".
+    server
+        .with_global_store(|store| {
+            let won = try_claim_sticky(store, "s-cp3-crash-window", Some("leader"))?;
+            assert!(won, "CAS must win on a fresh sticky");
+            Ok(())
+        })
+        .expect("simulate CAS win without the row-mirror write");
+
+    // A fresh, non-crashed briefing call for the SAME caller must now see
+    // NOTHING unread — the CAS already recorded a winner, so this sticky can
+    // never be delivered again through the normal unread path. This is the
+    // "silently drop" half of CP3 that the doc is honest about: no live
+    // caller receives the text again automatically.
+    let normal_view = claim_unread_stickies_for_briefing(&server, None, 5)
+        .expect("normal claim path after the simulated crash");
+    assert!(
+        normal_view.is_empty(),
+        "post-crash-window sticky must not be re-delivered through the normal unread path"
+    );
+
+    // Recovery escape: include_read=true must still surface the row with its
+    // original text intact, DESPITE its DB status metadata still reading
+    // "unread" (because the mirror write never ran) — this is the exact
+    // claim the module doc makes and this test exists to keep honest.
+    let archive_view = list_or_claim_stickies(&server, None, true, 10)
+        .expect("include_read archive view after the simulated crash");
+    let recovered = archive_view
+        .iter()
+        .find(|row| row["id"] == serde_json::json!("s-cp3-crash-window"))
+        .expect("the crash-window sticky must still be visible via include_read");
+    assert_eq!(
+        recovered["text"],
+        serde_json::json!("do the thing"),
+        "include_read must recover the original text even though the row-mirror mark never ran"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
 // ─── Briefing surfaces unread once, then disappears ────────────────────────
 
 #[tokio::test]
@@ -569,28 +642,36 @@ fn gc_sweep_archives_expired_unread_stickies() {
 // briefing with no `agent_id` param was silently treated as leader and
 // consumed broadcast (`to`-absent) stickies meant for the real leader.
 //
+// Round-2 (codex final review of #964/PR #1003, BUG CP2): the env fallback
+// used to read `TACHI_PROFILE` — a tool-profile selector
+// (worker/delegate/standard/codex), NOT a seat identity, so a leader
+// dispatched with `TACHI_PROFILE=standard` would resolve as `Some("standard")`
+// instead of `None` (leader) and silently lose its own broadcasts. The env
+// fallback now reads the dedicated `TACHI_AGENT_SEAT` var instead.
+//
 // `resolve_caller_agent_id` implements the three-step chain: params ->
-// agent_profile (server-side, expected None post-#973) -> TACHI_PROFILE env
-// -> None (leader). These tests cover exactly the three adjudicated cases.
-fn with_tachi_profile_env<F: FnOnce()>(value: Option<&str>, f: F) {
+// agent_profile (server-side, expected None post-#973) -> TACHI_AGENT_SEAT
+// env -> None (leader). These tests cover the three adjudicated cases plus
+// the caller-honesty residual for handcrafted sessions.
+fn with_tachi_agent_seat_env<F: FnOnce()>(value: Option<&str>, f: F) {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let original = std::env::var_os("TACHI_PROFILE");
+    let original = std::env::var_os("TACHI_AGENT_SEAT");
     match value {
-        Some(v) => std::env::set_var("TACHI_PROFILE", v),
-        None => std::env::remove_var("TACHI_PROFILE"),
+        Some(v) => std::env::set_var("TACHI_AGENT_SEAT", v),
+        None => std::env::remove_var("TACHI_AGENT_SEAT"),
     }
     f();
     match original {
-        Some(v) => std::env::set_var("TACHI_PROFILE", v),
-        None => std::env::remove_var("TACHI_PROFILE"),
+        Some(v) => std::env::set_var("TACHI_AGENT_SEAT", v),
+        None => std::env::remove_var("TACHI_AGENT_SEAT"),
     }
 }
 
 #[test]
 fn cp2_caller_with_explicit_agent_id_consumes_only_its_own_addressed_stickies() {
-    with_tachi_profile_env(Some("some-other-profile-must-be-ignored"), || {
+    with_tachi_agent_seat_env(Some("some-other-seat-must-be-ignored"), || {
         let db_path = std::env::temp_dir().join(format!(
             "sticky-cp2-explicit-{}.sqlite",
             uuid::Uuid::new_v4()
@@ -611,7 +692,7 @@ fn cp2_caller_with_explicit_agent_id_consumes_only_its_own_addressed_stickies() 
             .expect("seed stickies");
 
         // (a) caller with agent_id set consumes only its own addressed
-        // stickies — never the broadcast one, even though TACHI_PROFILE is
+        // stickies — never the broadcast one, even though TACHI_AGENT_SEAT is
         // ALSO set (explicit param must win over the env fallback).
         let resolved = resolve_caller_agent_id(&server, Some("wizard"));
         assert_eq!(resolved.as_deref(), Some("wizard"));
@@ -630,8 +711,8 @@ fn cp2_caller_with_explicit_agent_id_consumes_only_its_own_addressed_stickies() 
 }
 
 #[test]
-fn cp2_param_less_caller_with_tachi_profile_env_does_not_consume_broadcast() {
-    with_tachi_profile_env(Some("wizard"), || {
+fn cp2_param_less_caller_with_tachi_agent_seat_env_does_not_consume_broadcast() {
+    with_tachi_agent_seat_env(Some("wizard"), || {
         let db_path = std::env::temp_dir().join(format!(
             "sticky-cp2-env-fallback-{}.sqlite",
             uuid::Uuid::new_v4()
@@ -647,23 +728,23 @@ fn cp2_param_less_caller_with_tachi_profile_env_does_not_consume_broadcast() {
             })
             .expect("seed broadcast sticky");
 
-        // (b) caller with NO param but TACHI_PROFILE=wizard set must resolve
-        // to "wizard" and therefore NOT consume the to:-absent broadcast —
-        // this is the exact CP2 regression: before the fix, a param-less
-        // call here would have been silently treated as leader and eaten
-        // the broadcast meant for the real leader.
+        // (b) caller with NO param but TACHI_AGENT_SEAT=wizard set must
+        // resolve to "wizard" and therefore NOT consume the to:-absent
+        // broadcast — this is the exact CP2 regression: before the fix, a
+        // param-less call here would have been silently treated as leader
+        // and eaten the broadcast meant for the real leader.
         let resolved = resolve_caller_agent_id(&server, None);
         assert_eq!(
             resolved.as_deref(),
             Some("wizard"),
-            "param-less caller must resolve via the TACHI_PROFILE env fallback"
+            "param-less caller must resolve via the TACHI_AGENT_SEAT env fallback"
         );
 
         let delivered = claim_unread_stickies_for_briefing(&server, resolved.as_deref(), 5)
             .expect("claim as resolved wizard seat");
         assert!(
             delivered.is_empty(),
-            "a worker seat resolved via TACHI_PROFILE must NOT consume a broadcast sticky"
+            "a worker seat resolved via TACHI_AGENT_SEAT must NOT consume a broadcast sticky"
         );
 
         // The broadcast is still there, unclaimed, waiting for the real leader.
@@ -681,7 +762,7 @@ fn cp2_param_less_caller_with_tachi_profile_env_does_not_consume_broadcast() {
 
 #[test]
 fn cp2_identity_less_caller_resolves_to_leader() {
-    with_tachi_profile_env(None, || {
+    with_tachi_agent_seat_env(None, || {
         let db_path = std::env::temp_dir().join(format!(
             "sticky-cp2-identity-less-{}.sqlite",
             uuid::Uuid::new_v4()
@@ -689,11 +770,13 @@ fn cp2_identity_less_caller_resolves_to_leader() {
         let server = test_server(db_path.clone());
 
         // (c) identity-less caller (no param, no env) still resolves to
-        // leader. Dispatch-bound worker seats get TACHI_PROFILE injected by
-        // the dispatch harness (see mcp_config.rs); handcrafted worker
+        // leader. Dispatch-bound worker seats get TACHI_AGENT_SEAT injected
+        // by the dispatch harness (see mcp_config.rs); handcrafted worker
         // sessions calling the MCP tool directly must pass agent_id
         // explicitly (or address via `to:`) — otherwise, same as any other
-        // identity-less caller, they resolve to the leader here.
+        // identity-less caller, they resolve to the leader here (documented
+        // caller-honesty residual: a handcrafted session cannot be forced
+        // to self-identify).
         let resolved = resolve_caller_agent_id(&server, None);
         assert_eq!(
             resolved, None,
@@ -702,4 +785,63 @@ fn cp2_identity_less_caller_resolves_to_leader() {
 
         let _ = std::fs::remove_file(&db_path);
     });
+}
+
+#[test]
+fn cp2_tachi_profile_env_alone_no_longer_resolves_a_seat() {
+    // Round-2 regression guard (BUG CP2): TACHI_PROFILE is a tool-profile
+    // selector, not a seat identity. A caller with TACHI_PROFILE set (e.g. a
+    // leader whose harness happened to export TACHI_PROFILE=standard) but no
+    // TACHI_AGENT_SEAT and no param must NOT resolve to a named seat — it
+    // must fall through to leader (None). This is the exact BUG CP2 failure
+    // mode this round-2 fix closes: before the fix, this env var alone would
+    // have resolved the leader as "standard" and caused it to miss its own
+    // broadcasts.
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let original_profile = std::env::var_os("TACHI_PROFILE");
+    let original_seat = std::env::var_os("TACHI_AGENT_SEAT");
+    std::env::set_var("TACHI_PROFILE", "standard");
+    std::env::remove_var("TACHI_AGENT_SEAT");
+
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-cp2-profile-not-seat-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
+    server
+        .with_global_store(|store| {
+            let broadcast = test_memo("s-cp2-profile-not-seat-broadcast", None);
+            store
+                .upsert(&test_entry(&broadcast))
+                .map_err(|e| format!("{e}"))
+        })
+        .expect("seed broadcast sticky");
+
+    let resolved = resolve_caller_agent_id(&server, None);
+    assert_eq!(
+        resolved, None,
+        "TACHI_PROFILE alone (no TACHI_AGENT_SEAT, no param) must resolve to leader, \
+         not a tool-profile-named seat"
+    );
+
+    let leader_view = claim_unread_stickies_for_briefing(&server, resolved.as_deref(), 5)
+        .expect("claim as leader");
+    assert_eq!(
+        leader_view.len(),
+        1,
+        "the leader must still consume its own broadcast even with TACHI_PROFILE set"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    match original_profile {
+        Some(v) => std::env::set_var("TACHI_PROFILE", v),
+        None => std::env::remove_var("TACHI_PROFILE"),
+    }
+    match original_seat {
+        Some(v) => std::env::set_var("TACHI_AGENT_SEAT", v),
+        None => std::env::remove_var("TACHI_AGENT_SEAT"),
+    }
 }

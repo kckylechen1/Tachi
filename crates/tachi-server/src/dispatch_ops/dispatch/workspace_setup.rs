@@ -9,6 +9,7 @@ pub(super) async fn prepare_workspace_and_mcp(
     inject_tachi: bool,
     inject_hub: bool,
     tool_profile: Option<&str>,
+    agent_seat: Option<&str>,
     allowed_mcp_servers: &[String],
 ) -> Result<Option<PathBuf>, String> {
     // Create isolated workspace directory
@@ -31,6 +32,7 @@ pub(super) async fn prepare_workspace_and_mcp(
             inject_tachi,
             inject_hub,
             tool_profile,
+            agent_seat,
             allowed_mcp_servers,
         )
         .await?
