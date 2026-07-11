@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Unified GitHub facade — one tool for all GitHub operations.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct TachiGhParams {
-    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "issue_comment", "issue_label", "issue_freshness_scan", "pr_list", "pr_read", "pr_comments", "pr_comment", "pr_review_digest", "safe_merge", "ship", "link_pr", "pr_status", "pr_handoff", "release_note"
+    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "issue_comment", "issue_label", "issue_freshness_scan", "issue_curator_batch", "pr_list", "pr_read", "pr_comments", "pr_comment", "pr_review_digest", "safe_merge", "ship", "link_pr", "pr_status", "pr_handoff", "release_note"
     pub action: String,
     /// Repository in "owner/repo" format. Required for GitHub primitive actions; lifecycle actions may infer from issue_ref/pr_ref/flow_id.
     #[serde(default)]
@@ -146,6 +146,32 @@ pub struct TachiGhParams {
     )]
     #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
     pub scan_limit: Option<u32>,
+    /// Explicit issue refs to re-verify for action="issue_curator_batch"
+    /// (e.g. "owner/repo#123"). When empty, candidates default to the
+    /// #1000 freshness layer's already-stored zombie/stale-candidate rows.
+    #[serde(default)]
+    pub curator_issue_refs: Vec<String>,
+    /// Per-batch token budget cap for action="issue_curator_batch". `None`
+    /// (default) is unbounded — an explicit caller choice, never a silent
+    /// default cap; skipped-for-budget candidates are always named in the
+    /// response, never silently dropped.
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
+    #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
+    pub curator_budget_tokens: Option<u64>,
+    /// When true, action="issue_curator_batch" posts each verdict's drafted
+    /// comment + applies its label via the existing issue_comment/issue_label
+    /// write-back actions. Defaults to false (#1002 non-goal: curator never
+    /// auto-writes to GitHub without an explicit opt-in per run).
+    #[serde(default)]
+    pub curator_post_writeback: bool,
+    /// Dispatch profile used by action="issue_curator_batch" lane calls.
+    /// Defaults to "codex_55_review" (#1002: audit/verify is codex's lane
+    /// card strong suit).
+    #[serde(default)]
+    pub curator_profile: Option<String>,
 }
 
 /// Parameters for adding/removing labels on a GitHub issue or PR (write-back arc).

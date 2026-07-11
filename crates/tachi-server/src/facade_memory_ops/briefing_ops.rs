@@ -286,6 +286,14 @@ pub(crate) async fn handle_memory_briefing(
     // + verdict save, kept out of the briefing hot path.
     let issue_freshness = crate::gh_ops::briefing_freshness_queues(server, 5);
 
+    // Issue curator (#1002): semantic re-verification queues — pending_closure
+    // (curator thinks it's fixed, evidence attached) + pending_respec
+    // (curator thinks the fix is stale relative to HEAD). Reads only —
+    // population happens via `tachi_gh(action='issue_curator_batch')`.
+    // Curator never auto-closes/auto-rewrites; these are advisory queues for
+    // the leader/owner to batch-clear.
+    let issue_curator = crate::curator_ops::briefing_curator_queue(server, 5);
+
     // Component governance for the active workspace (#799): registry-only,
     // never presented as memory-derived current truth.
     let component_governance = crate::component_governance_ops::component_governance_context(
@@ -366,6 +374,17 @@ pub(crate) async fn handle_memory_briefing(
             {
                 response.insert("issue_freshness".to_string(), issue_freshness.clone());
             }
+            if issue_curator["pending_closure"]["count"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+                || issue_curator["pending_respec"]["count"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    > 0
+            {
+                response.insert("issue_curator".to_string(), issue_curator.clone());
+            }
             insert_non_empty_compact_section(&mut response, "recent_checkpoints", checkpoints);
             if component_governance
                 .get("matches")
@@ -391,6 +410,7 @@ pub(crate) async fn handle_memory_briefing(
             "kanban": board,
             "open_loops": open_loops,
             "issue_freshness": issue_freshness,
+            "issue_curator": issue_curator,
             "recent_checkpoints": checkpoints,
             "component_governance": component_governance,
             "layer_authority": {

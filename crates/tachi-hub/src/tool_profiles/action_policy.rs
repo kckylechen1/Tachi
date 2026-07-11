@@ -238,8 +238,16 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             | "pr_comments"
             | "pr_review_digest"
             | "pr_status" => Some(ToolBundle::Observe),
-            "issue_create" | "issue_comment" | "issue_label" | "pr_comment" | "safe_merge"
-            | "ship" | "link_pr" | "pr_handoff" | "release_note" => Some(ToolBundle::Coordinate),
+            "issue_create"
+            | "issue_comment"
+            | "issue_label"
+            | "issue_curator_batch"
+            | "pr_comment"
+            | "safe_merge"
+            | "ship"
+            | "link_pr"
+            | "pr_handoff"
+            | "release_note" => Some(ToolBundle::Coordinate),
             _ => None,
         },
         "tachi_event" => match action.as_str() {

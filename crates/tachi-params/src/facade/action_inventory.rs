@@ -46,6 +46,7 @@ pub const TACHI_GH_ACTIONS: &[&str] = &[
     "issue_comment",
     "issue_label",
     "issue_freshness_scan",
+    "issue_curator_batch",
     "pr_list",
     "pr_read",
     "pr_comments",
@@ -117,7 +118,7 @@ mod tests {
                 "tachi_gh must own lifecycle action {action}"
             );
         }
-        assert_eq!(TACHI_GH_ACTIONS.len(), 18);
+        assert_eq!(TACHI_GH_ACTIONS.len(), 19);
         assert!(TACHI_GH_ACTIONS.len() <= TACHI_GH_ACTION_SOFT_MAX);
     }
 

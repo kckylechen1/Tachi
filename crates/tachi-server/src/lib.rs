@@ -88,6 +88,7 @@ mod continuity_ops;
 mod continuity_projector;
 mod copilot_ops;
 mod credential_profile;
+mod curator_ops;
 mod daemon_lock;
 mod daily_pipeline;
 mod dispatch_ops;

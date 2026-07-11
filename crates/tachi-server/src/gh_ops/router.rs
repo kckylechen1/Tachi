@@ -170,6 +170,9 @@ pub(crate) async fn handle_tachi_gh(
             }))
             .map_err(|e| format!("serialize: {e}"))
         }
+        "issue_curator_batch" => {
+            crate::curator_ops::handle_issue_curator_batch(server, params.clone()).await
+        }
         "pr_comment" => {
             let target = resolve_tachi_gh_pr_target(&params, "pr_comment")?;
             handle_gh_comment(

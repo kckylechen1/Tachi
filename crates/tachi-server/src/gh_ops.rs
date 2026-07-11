@@ -40,7 +40,6 @@ mod safe_merge_tests;
 mod ship_tests;
 
 use self::issues::*;
-use self::labels::*;
 use self::prs::*;
 use self::repo::*;
 use self::review_digest::*;
@@ -52,7 +51,8 @@ pub(crate) use self::ci_watch::{daemon_ci_reader, spawn_ci_watch};
 pub(crate) use self::comments::{gh_comment_marker_present, handle_gh_comment};
 pub(crate) use self::issue_freshness::{
     briefing_freshness_queues, fetch_and_scan_stale_candidates, fetch_and_scan_zombies,
-    save_freshness_verdict, FreshnessVerdict,
+    list_freshness_verdicts, save_freshness_verdict, FreshnessVerdict,
 };
+pub(crate) use self::labels::handle_gh_label;
 pub(crate) use self::router::handle_tachi_gh;
 pub(crate) use self::safe_merge::{gh_client_for_server, handle_github_safe_merge};
