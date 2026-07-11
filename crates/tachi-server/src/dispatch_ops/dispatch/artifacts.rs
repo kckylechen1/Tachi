@@ -105,6 +105,17 @@ pub(super) async fn write_dispatch_artifacts(
         .await
         .map_err(|e| format!("Failed to write context.md: {e}"))?;
 
+    // #971 receipt-first: `handle_tachi_dispatch` now appends a
+    // "dispatch_received" event to this same trajectory.jsonl path BEFORE
+    // this function runs (right after the workspace directory is created,
+    // ahead of prompt assembly / the V2 plan stage). Use APPEND here
+    // (not overwrite) so that earlier event survives as line 1 and
+    // "dispatch_started" lands as line 2 — no reader depends on
+    // "dispatch_started" being the first line (grep confirmed: existing
+    // trajectory assertions are all `.contains(...)`, not first-line/
+    // ordinal checks). `create(true)` covers the V1-only / direct-unit-test
+    // callers of this function that never went through the receipt-first
+    // seed and so find no file here yet.
     let trajectory_path = ctx.workspace_dir.join("trajectory.jsonl");
     let started_event = json!({
         "event": "dispatch_started",
@@ -126,13 +137,48 @@ pub(super) async fn write_dispatch_artifacts(
     });
     let line = serde_json::to_string(&started_event)
         .map_err(|e| format!("Failed to serialize started event: {e}"))?;
-    tokio::fs::write(&trajectory_path, format!("{}\n", line))
-        .await
-        .map_err(|e| format!("Failed to write trajectory.jsonl: {e}"))?;
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut f = tokio::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&trajectory_path)
+            .await
+            .map_err(|e| format!("Failed to open trajectory.jsonl: {e}"))?;
+        f.write_all(format!("{}\n", line).as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write trajectory.jsonl: {e}"))?;
+        // #971 review-fix (F1): Tokio's `File` buffers writes; a deferred
+        // write failure can surface on flush/drop instead of on
+        // `write_all`. Without an explicit flush, `write_dispatch_artifacts`
+        // can return `Ok` — and planning can proceed — without a durable
+        // "dispatch_started" record on disk. Flush and propagate any error
+        // so a write failure here fails the dispatch instead of silently
+        // dropping the receipt.
+        f.flush()
+            .await
+            .map_err(|e| format!("Failed to flush trajectory.jsonl: {e}"))?;
+    }
+    // progress.jsonl mirrors trajectory.jsonl's event stream 1:1 (see
+    // `append_trajectory_event`) — append here too so it stays in sync with
+    // the pre-existing "dispatch_received" line already written there.
     let progress_path = ctx.workspace_dir.join("progress.jsonl");
-    tokio::fs::write(&progress_path, format!("{}\n", line))
-        .await
-        .map_err(|e| format!("Failed to write progress.jsonl: {e}"))?;
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut f = tokio::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&progress_path)
+            .await
+            .map_err(|e| format!("Failed to open progress.jsonl: {e}"))?;
+        f.write_all(format!("{}\n", line).as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write progress.jsonl: {e}"))?;
+        // Same rationale as trajectory.jsonl above (F1).
+        f.flush()
+            .await
+            .map_err(|e| format!("Failed to flush progress.jsonl: {e}"))?;
+    }
 
     Ok(DispatchArtifacts {
         plan_path,
