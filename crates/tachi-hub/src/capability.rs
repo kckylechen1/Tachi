@@ -95,8 +95,8 @@ pub fn capability_callable(cap: &HubCapability) -> bool {
             .get("discovery_status")
             .and_then(|v| v.as_str())
             .map(|s| s == "ready")
-            .unwrap_or(true),
-        Err(_) => cap.enabled,
+            .unwrap_or(false),
+        Err(_) => false,
     }
 }
 
@@ -215,6 +215,27 @@ mod tests {
 
         assert!(capability_callable(&ready));
         assert!(!capability_callable(&pending));
+    }
+
+    #[test]
+    fn mcp_capability_missing_discovery_status_fails_closed() {
+        let missing = cap("mcp:missing", "mcp", r#"{"other_field":"value"}"#);
+
+        assert!(!capability_callable(&missing));
+    }
+
+    #[test]
+    fn mcp_capability_malformed_definition_fails_closed() {
+        let malformed = cap("mcp:malformed", "mcp", "not valid json{{{");
+
+        assert!(!capability_callable(&malformed));
+    }
+
+    #[test]
+    fn mcp_capability_non_string_discovery_status_fails_closed() {
+        let non_string = cap("mcp:non-string", "mcp", r#"{"discovery_status":42}"#);
+
+        assert!(!capability_callable(&non_string));
     }
 
     #[test]

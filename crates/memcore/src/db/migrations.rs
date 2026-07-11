@@ -268,17 +268,41 @@ pub(crate) fn run_data_migrations_in_tx(
         mark_run(conn, "v9_relocate_and_drop_location")?;
     }
 
-    if !was_run(conn, "v10_drop_pack_tables")? {
-        report.pack_tables_dropped = migrate_v10_drop_pack_tables(conn)?;
-        mark_run(conn, "v10_drop_pack_tables")?;
-    }
+    report.pack_tables_dropped =
+        apply_versioned_migration(conn, "v10_drop_pack_tables", migrate_v10_drop_pack_tables)?
+            .unwrap_or(0);
 
-    if !was_run(conn, "v11_drop_domains_table")? {
-        report.domains_table_dropped = migrate_v11_drop_domains_table(conn)?;
-        mark_run(conn, "v11_drop_domains_table")?;
-    }
+    report.domains_table_dropped = apply_versioned_migration(
+        conn,
+        "v11_drop_domains_table",
+        migrate_v11_drop_domains_table,
+    )?
+    .unwrap_or(0);
 
     Ok(report)
+}
+
+/// Run a single sentinel-gated migration: skip if `key`'s sentinel is
+/// already set, otherwise run `migrate`, and — only on success — mark the
+/// sentinel run. Returns `Ok(None)` when skipped (already run), `Ok(Some(_))`
+/// with the migration's result when it actually ran.
+///
+/// This is the REAL caller-gating code path (#978): a test driving a
+/// failing `migrate` closure through this helper exercises the same
+/// "propagate the error, do not mark the sentinel" logic that
+/// `run_data_migrations` relies on for every versioned migration, rather
+/// than a parallel reimplementation of the gate.
+fn apply_versioned_migration<T>(
+    conn: &mut Connection,
+    key: &str,
+    migrate: impl FnOnce(&Connection) -> Result<T, MemoryError>,
+) -> Result<Option<T>, MemoryError> {
+    if was_run(conn, key)? {
+        return Ok(None);
+    }
+    let result = migrate(conn)?;
+    mark_run(conn, key)?;
+    Ok(Some(result))
 }
 
 #[cfg(test)]
@@ -1059,5 +1083,129 @@ mod tests {
              sentinel migrations run_data_migrations actually marks run ({sentinel_count}) — \
              bump the const (and add a vN doc line) when a new migration is appended"
         );
+    }
+    /// A deterministic stand-in for the transient lock/I/O/authorizer
+    /// failure #978 describes: the existence-check QUERY itself errors,
+    /// rather than legitimately finding the table absent.
+    ///
+    /// Two earlier mechanisms were tried and abandoned as non-deterministic
+    /// or infeasible on this codebase:
+    /// - Racing a real `BEGIN EXCLUSIVE` held on a second thread against a
+    ///   `busy_timeout(0)` reader: `SQLITE_BUSY` was not reliably
+    ///   reproducible against the specific `sqlite_master` read the
+    ///   migration performs, and the lock-holder thread's own `.expect()`
+    ///   calls could panic before the test body ran its assertion.
+    /// - Corrupting the DB file's on-disk header bytes and reopening: this
+    ///   codebase's `Connection::open` path auto-loads a SQLite extension
+    ///   that reads the header eagerly, so `Connection::open` itself fails
+    ///   immediately on a corrupted file — there is no window in which a
+    ///   corrupt-but-openable connection exists to call the migration fn on.
+    ///
+    /// This version injects the failure at the QUERY boundary, one level
+    /// below where the previous (refuted) version injected it:
+    /// `exists_with_query` in `pack_retire.rs` / `domain_retire.rs` is real,
+    /// unmodified production code — the `?`-propagation that decides
+    /// "error propagates" vs. "collapses to absent" lives inside it. A test
+    /// substitutes only `exists_with_query`'s `query: impl Fn(&Connection,
+    /// &str) -> Result<i64, rusqlite::Error>` parameter with a closure that
+    /// always errors, so reverting `exists_with_query`'s body to
+    /// `query(conn, name).unwrap_or(0) > 0` flips these tests from green to
+    /// RED (see the discrimination proof in the PR/commit description).
+    fn injected_failing_query(_conn: &Connection, _name: &str) -> Result<i64, rusqlite::Error> {
+        Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("simulated existence-check query failure (#978)".to_string()),
+        ))
+    }
+
+    #[test]
+    fn v10_propagates_existence_check_error_and_does_not_mark_sentinel() {
+        let (conn, _tmp) = open_test_db();
+        assert!(!was_run(&conn, "v10_drop_pack_tables").unwrap());
+
+        let err = migrate_v10_inner(&conn, injected_failing_query)
+            .expect_err("existence-check error must propagate, not collapse to absent");
+        assert!(
+            matches!(err, MemoryError::Sqlite(_)),
+            "unexpected error shape: {err}"
+        );
+
+        assert!(
+            !was_run(&conn, "v10_drop_pack_tables").unwrap(),
+            "sentinel must stay unset after a failed existence-check so the migration retries"
+        );
+    }
+
+    #[test]
+    fn v11_propagates_existence_check_error_and_does_not_mark_sentinel() {
+        let (conn, _tmp) = open_test_db();
+        assert!(!was_run(&conn, "v11_drop_domains_table").unwrap());
+
+        let err = migrate_v11_inner(&conn, injected_failing_query)
+            .expect_err("existence-check error must propagate, not collapse to absent");
+        assert!(
+            matches!(err, MemoryError::Sqlite(_)),
+            "unexpected error shape: {err}"
+        );
+
+        assert!(
+            !was_run(&conn, "v11_drop_domains_table").unwrap(),
+            "sentinel must stay unset after a failed existence-check so the migration retries"
+        );
+    }
+
+    // The real-path (healthy DB, existence-check succeeds) behavior for
+    // both migrations — success return value, tables actually dropped, and
+    // sentinel written so a second run is a no-op — is already covered by
+    // `v10_drops_legacy_pack_tables` and `v11_drops_legacy_domains_table`
+    // above via the public `run_data_migrations` entry point; not
+    // duplicated here.
+
+    /// Proves `apply_versioned_migration` — the REAL helper
+    /// `run_data_migrations` calls for v10/v11 — is the thing gating the
+    /// sentinel, not a parallel test-only reimplementation of the gate
+    /// (#978). A failing `migrate` closure must propagate the error AND
+    /// leave the sentinel unset (so the migration retries on the next run);
+    /// a subsequent succeeding call through the same helper must write the
+    /// sentinel.
+    #[test]
+    fn apply_versioned_migration_gates_sentinel_on_real_runner_helper() {
+        let (mut conn, _tmp) = open_test_db();
+        let key = "v978_test_migration";
+        assert!(!was_run(&conn, key).unwrap());
+
+        let err = apply_versioned_migration(&mut conn, key, |_conn| {
+            Err::<(), MemoryError>(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("simulated migration failure (#978)".to_string()),
+            )
+            .into())
+        })
+        .expect_err("failing migrate closure must propagate through apply_versioned_migration");
+        assert!(
+            matches!(err, MemoryError::Sqlite(_)),
+            "unexpected error shape: {err}"
+        );
+        assert!(
+            !was_run(&conn, key).unwrap(),
+            "sentinel must stay unset after apply_versioned_migration's migrate fails"
+        );
+
+        let ran = apply_versioned_migration(&mut conn, key, |_conn| Ok::<_, MemoryError>(42usize))
+            .expect("succeeding migrate closure must return Ok");
+        assert_eq!(ran, Some(42));
+        assert!(
+            was_run(&conn, key).unwrap(),
+            "sentinel must be written after apply_versioned_migration's migrate succeeds"
+        );
+
+        // Idempotent: a second call with a closure that would panic if
+        // invoked proves the sentinel-already-set path skips `migrate`
+        // entirely.
+        let skipped = apply_versioned_migration(&mut conn, key, |_conn| -> Result<usize, MemoryError> {
+            panic!("migrate must not be invoked once the sentinel is already set")
+        })
+        .expect("already-run migration must short-circuit to Ok(None), not invoke migrate");
+        assert_eq!(skipped, None);
     }
 }

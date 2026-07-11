@@ -18,9 +18,11 @@ impl MemoryServer {
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(format!("validate remote MCP URL: {e}"), None)
             })?;
-        let client = build_remote_mcp_http_client(&validated, 90).map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("build http client: {e}"), None)
-        })?;
+        let allow_proxy = remote_mcp_allow_proxy(def);
+        let client = build_remote_mcp_http_client(&validated, 90, allow_proxy, capability_id)
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("build http client: {e}"), None)
+            })?;
         let url = validated.url;
 
         let mut headers = reqwest::header::HeaderMap::new();
@@ -156,7 +158,8 @@ impl MemoryServer {
     ) -> Result<Vec<rmcp::model::Tool>, String> {
         let url = self.resolve_remote_mcp_url_for_capability(capability_id, def)?;
         let validated = validate_remote_mcp_url_for_connect(&url).await?;
-        let client = build_remote_mcp_http_client(&validated, 90)?;
+        let allow_proxy = remote_mcp_allow_proxy(def);
+        let client = build_remote_mcp_http_client(&validated, 90, allow_proxy, capability_id)?;
         let url = validated.url;
 
         let mut headers = reqwest::header::HeaderMap::new();
