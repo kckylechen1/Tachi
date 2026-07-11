@@ -1,10 +1,11 @@
 //! Issue freshness layer (#1000): zombie scan + stale-candidate heuristics.
 //!
 //! GitHub remains the only source of truth for issue *content* — this module
-//! never mirrors issue bodies. It only ever produces judgment-free rows:
-//! zombie evidence is `(issue_ref, verified_at_sha, verdict, evidence_refs)`
-//! (a "candidate: fixed-awaiting-closure" claim, never a final verdict —
-//! closing is always a leader/owner action). Stale candidates are NOT
+//! never mirrors issue bodies. It only ever produces judgment-free rows
+//! (`FreshnessRow { issue_ref, kind, verified_at_sha, evidence_refs,
+//! checked_at }`, see the storage section below): zombie evidence is a
+//! "candidate: fixed-awaiting-closure" claim, never a final verdict —
+//! closing is always a leader/owner action. Stale/churn candidates are NOT
 //! verdicts at all — they live in a separate candidate-queue rowset (see
 //! `STALE_CANDIDATE_NS` below) because the frozen #1000 constraint is
 //! "圈候选不判决" (circle the candidate, do not judge it). Durable
