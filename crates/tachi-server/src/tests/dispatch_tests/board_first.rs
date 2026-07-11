@@ -74,6 +74,18 @@ enum FakeClaudeMode {
 /// Wait until exactly one subdirectory exists under `run_root` and return
 /// its path. Mirrors `dispatch_ops::dispatch::tests::single_run_dir`, which
 /// is `pub(super)`-scoped to that module and not reachable from here.
+///
+/// Excludes `.dispatch-dedupe` (see `dispatch_ops::dispatch::dedupe::
+/// dispatch_dedupe_root`), which lives as a sibling directory directly under
+/// `run_root` and is created by `reserve_global_dispatch_slot` once a
+/// dispatch reaches its final "spawn background task + return" step. For a
+/// fast V1 dispatch, `handle_tachi_dispatch` can already be back from that
+/// `.await` (dedupe dir included) before this helper's first poll runs, so
+/// counting *all* directories under `run_root` — including the dedupe
+/// lock dir — makes the "exactly one dir" check permanently false for V1
+/// and only accidentally true for the slower V2 fixtures here (which are
+/// polled while still mid-plan-stage, before step 8 creates the dedupe
+/// dir). Filter by name instead of relying on that timing.
 async fn wait_for_single_run_dir(run_root: &std::path::Path) -> std::path::PathBuf {
     for _ in 0..DISPATCH_TEST_WAIT_ATTEMPTS {
         if let Ok(entries) = std::fs::read_dir(run_root) {
@@ -81,6 +93,7 @@ async fn wait_for_single_run_dir(run_root: &std::path::Path) -> std::path::PathB
                 .filter_map(Result::ok)
                 .map(|e| e.path())
                 .filter(|p| p.is_dir())
+                .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some(".dispatch-dedupe"))
                 .collect();
             if dirs.len() == 1 {
                 return dirs.into_iter().next().expect("one run dir");
