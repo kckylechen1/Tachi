@@ -1006,6 +1006,131 @@ mod tests {
         }
     }
 
+    /// #1000 codex review finding 8: `gh pr list --json
+    /// number,title,body,mergeCommit,commits` field-path parsing is
+    /// fixture-tested against the REAL shape `gh` emits — not just asserted
+    /// through the live I/O boundary. Shape mirrors `gh pr view --json commits`
+    /// output (`commits[].messageHeadline` / `commits[].messageBody`).
+    #[test]
+    fn parse_merged_prs_json_extracts_commit_messages_from_real_gh_shape() {
+        let value = serde_json::json!([
+            {
+                "number": 980,
+                "title": "fix(vault): standard profile allow-list (#979)",
+                "body": "Fixes #979.",
+                "mergeCommit": { "oid": "abc123" },
+                "commits": [
+                    {
+                        "messageHeadline": "fix(vault): standard profile allow-list",
+                        "messageBody": "Refs #979"
+                    },
+                    {
+                        "messageHeadline": "fixup: typo",
+                        "messageBody": ""
+                    }
+                ]
+            }
+        ]);
+        let prs = parse_merged_prs_json(&value);
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].number, 980);
+        assert_eq!(prs[0].merge_commit_sha.as_deref(), Some("abc123"));
+        assert_eq!(prs[0].commit_messages.len(), 2);
+        assert!(prs[0].commit_messages[0].contains("Refs #979"));
+    }
+
+    #[test]
+    fn parse_merged_prs_json_defaults_missing_fields_without_panicking() {
+        // `mergeCommit` and `commits` can be null/absent (e.g. a squash-merge
+        // strategy or a PR fetched before `commits` was requested).
+        let value = serde_json::json!([
+            { "number": 1, "title": "t", "body": "b", "mergeCommit": null }
+        ]);
+        let prs = parse_merged_prs_json(&value);
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].merge_commit_sha, None);
+        assert!(prs[0].commit_messages.is_empty());
+    }
+
+    #[test]
+    fn parse_merged_prs_json_skips_rows_missing_required_number_field() {
+        let value = serde_json::json!([
+            { "title": "no number field" },
+            { "number": 2, "title": "t", "body": "b" }
+        ]);
+        let prs = parse_merged_prs_json(&value);
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].number, 2);
+    }
+
+    /// #1000 codex review finding 8: `gh issue list --json
+    /// number,body,updatedAt,comments` field-path parsing, including the
+    /// most-recent-comment extraction from a real multi-comment shape.
+    #[test]
+    fn parse_open_issues_with_activity_json_extracts_latest_comment() {
+        let value = serde_json::json!([
+            {
+                "number": 500,
+                "body": "some body",
+                "updatedAt": "2026-01-01T00:00:00Z",
+                "comments": [
+                    { "createdAt": "2026-02-01T00:00:00Z" },
+                    { "createdAt": "2026-03-01T00:00:00Z" },
+                    { "createdAt": "2026-01-15T00:00:00Z" }
+                ]
+            }
+        ]);
+        let rows = parse_open_issues_with_activity_json(&value);
+        assert_eq!(rows.len(), 1);
+        let (number, body, updated_at, last_comment_at) = &rows[0];
+        assert_eq!(*number, 500);
+        assert_eq!(body, "some body");
+        assert_eq!(updated_at, "2026-01-01T00:00:00Z");
+        assert_eq!(last_comment_at.as_deref(), Some("2026-03-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn parse_open_issues_with_activity_json_handles_no_comments() {
+        let value = serde_json::json!([
+            { "number": 1, "body": "", "updatedAt": "2026-01-01T00:00:00Z", "comments": [] }
+        ]);
+        let rows = parse_open_issues_with_activity_json(&value);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].3, None);
+    }
+
+    /// #1000 codex review finding 8: `gh pr list --json number,files` shape.
+    #[test]
+    fn parse_merged_pr_surfaces_json_extracts_touched_paths() {
+        let value = serde_json::json!([
+            {
+                "number": 42,
+                "files": [
+                    { "path": "crates/foo/src/bar.rs", "additions": 3, "deletions": 1 },
+                    { "path": "crates/foo/src/baz.rs", "additions": 10, "deletions": 0 }
+                ]
+            }
+        ]);
+        let surfaces = parse_merged_pr_surfaces_json(&value);
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(surfaces[0].pr_number, 42);
+        assert_eq!(
+            surfaces[0].touched_paths,
+            vec![
+                "crates/foo/src/bar.rs".to_string(),
+                "crates/foo/src/baz.rs".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_merged_pr_surfaces_json_empty_files_yields_empty_paths() {
+        let value = serde_json::json!([{ "number": 1, "files": [] }]);
+        let surfaces = parse_merged_pr_surfaces_json(&value);
+        assert_eq!(surfaces.len(), 1);
+        assert!(surfaces[0].touched_paths.is_empty());
+    }
+
     #[test]
     fn extracts_refs_hash_n_form() {
         let text = "Fixes the bug.\n\nRefs #979";
@@ -1275,6 +1400,91 @@ mod tests {
             1,
             "closing an explicit gate dependency must flag as stale"
         );
+    }
+
+    fn churn_issue(number: u64, surface_paths: &[&str], has_recent_activity: bool) -> OpenIssueForChurnCheck {
+        OpenIssueForChurnCheck {
+            number,
+            surface_paths: surface_paths.iter().map(|s| s.to_string()).collect(),
+            has_recent_activity,
+        }
+    }
+
+    fn pr_surface(pr_number: u64, touched_paths: &[&str]) -> MergedPrSurface {
+        MergedPrSurface {
+            pr_number,
+            touched_paths: touched_paths.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// #1000 Scope item 2 / codex review finding 2: an inactive issue whose
+    /// surface has been touched by >= threshold distinct merged PRs is a
+    /// churn candidate.
+    #[test]
+    fn scan_same_surface_churn_flags_inactive_issue_with_enough_touching_prs() {
+        let issues = vec![churn_issue(1, &["src/foo.rs"], false)];
+        let recent_prs = vec![
+            pr_surface(10, &["src/foo.rs"]),
+            pr_surface(11, &["src/foo.rs", "src/bar.rs"]),
+            pr_surface(12, &["src/foo.rs"]),
+        ];
+        let out = scan_same_surface_churn(&issues, &recent_prs, 3);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].issue_number, 1);
+        assert_eq!(out[0].touching_pr_count, 3);
+        assert_eq!(out[0].touching_pr_numbers, vec![10, 11, 12]);
+    }
+
+    #[test]
+    fn scan_same_surface_churn_ignores_issue_with_recent_activity() {
+        // Same surface/PR shape as the flagged case above, but the issue has
+        // recent activity — must NOT be flagged even though the code churned.
+        let issues = vec![churn_issue(2, &["src/foo.rs"], true)];
+        let recent_prs = vec![
+            pr_surface(10, &["src/foo.rs"]),
+            pr_surface(11, &["src/foo.rs"]),
+            pr_surface(12, &["src/foo.rs"]),
+        ];
+        let out = scan_same_surface_churn(&issues, &recent_prs, 3);
+        assert!(
+            out.is_empty(),
+            "issue with recent activity must not be flagged, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn scan_same_surface_churn_requires_meeting_threshold() {
+        let issues = vec![churn_issue(3, &["src/foo.rs"], false)];
+        let recent_prs = vec![pr_surface(10, &["src/foo.rs"]), pr_surface(11, &["src/foo.rs"])];
+        // Only 2 distinct touching PRs, threshold is 3 — must not flag.
+        let out = scan_same_surface_churn(&issues, &recent_prs, 3);
+        assert!(out.is_empty(), "below-threshold churn must not flag, got: {out:?}");
+    }
+
+    #[test]
+    fn scan_same_surface_churn_ignores_issue_with_no_surface_anchors() {
+        let issues = vec![churn_issue(4, &[], false)];
+        let recent_prs = vec![
+            pr_surface(10, &["src/foo.rs"]),
+            pr_surface(11, &["src/foo.rs"]),
+            pr_surface(12, &["src/foo.rs"]),
+        ];
+        let out = scan_same_surface_churn(&issues, &recent_prs, 3);
+        assert!(
+            out.is_empty(),
+            "an issue with no file-surface anchors has nothing to cross-check, must not flag"
+        );
+    }
+
+    #[test]
+    fn scan_same_surface_churn_dedupes_pr_touching_multiple_anchor_paths() {
+        // Issue anchors two paths in the SAME PR's file list — that PR must
+        // only count once toward the threshold, not twice.
+        let issues = vec![churn_issue(5, &["src/foo.rs", "src/bar.rs"], false)];
+        let recent_prs = vec![pr_surface(10, &["src/foo.rs", "src/bar.rs"])];
+        let out = scan_same_surface_churn(&issues, &recent_prs, 1);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].touching_pr_count, 1);
     }
 
     #[test]
