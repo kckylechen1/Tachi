@@ -181,7 +181,11 @@ pub(crate) fn spawn_auto_linking(
                         // `related_to` on new writes anyway (item 1).
                         continue;
                     }
-                    let relation = if supersedes { "supersedes" } else { "reinforces" };
+                    let relation = if supersedes {
+                        "supersedes"
+                    } else {
+                        "reinforces"
+                    };
                     let weight = if supersedes {
                         0.9
                     } else {

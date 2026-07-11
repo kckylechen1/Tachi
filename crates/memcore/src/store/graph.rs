@@ -2,6 +2,7 @@
 
 use crate::{
     db,
+    db::AnchorKind,
     error::MemoryError,
     types::{GraphExpandResult, MemoryEdge},
     MemoryStore,
@@ -63,5 +64,13 @@ impl MemoryStore {
     /// from a maintenance sweep. Returns the number of rows closed.
     pub fn close_related_to_fog(&self) -> Result<usize, MemoryError> {
         db::close_related_to_fog(&self.conn)
+    }
+
+    /// Ensure a deterministic anchor row exists for `(kind, key)` (tachi#773
+    /// item 4). `INSERT OR IGNORE` semantics — idempotent, fails closed on a
+    /// kind/key mismatch at an existing id. Returns the anchor's
+    /// deterministic id.
+    pub fn ensure_anchor(&self, kind: AnchorKind, key: &str) -> Result<String, MemoryError> {
+        db::ensure_anchor(&self.conn, kind, key)
     }
 }

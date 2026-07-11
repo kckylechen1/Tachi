@@ -206,7 +206,11 @@ fn close_related_to_fog_closes_open_rows_and_excludes_from_get_edges() {
 
     // Red: before closure, the legacy fog edge is still traversable.
     let before = get_edges(&conn, "fog-src", "outgoing", None).unwrap();
-    assert_eq!(before.len(), 1, "legacy related_to edge should be open pre-closure");
+    assert_eq!(
+        before.len(),
+        1,
+        "legacy related_to edge should be open pre-closure"
+    );
     assert!(before[0].valid_to.is_none());
 
     let closed = close_related_to_fog(&conn).unwrap();
@@ -218,6 +222,43 @@ fn close_related_to_fog_closes_open_rows_and_excludes_from_get_edges() {
         after.is_empty(),
         "closed related_to edge must leave get_edges traversal, got {after:?}"
     );
+}
+
+#[test]
+fn ensure_anchor_composes_with_add_edge_via_about_relation() {
+    // tachi#773 item 4 guard (d): both edge endpoints must exist in the same
+    // physical DB. Since ensure_anchor and add_edge share one Connection,
+    // this composes naturally — a memory row can point an `about` edge at a
+    // freshly-ensured anchor with no cross-DB id smuggling possible.
+    let mut conn = make_conn();
+    let memory = make_entry("about-src", "note about issue 773");
+    upsert(&mut conn, &memory, false).unwrap();
+
+    let anchor = ensure_anchor(&conn, AnchorKind::Issue, "kckylechen1/tachi:773").unwrap();
+    assert_eq!(
+        anchor,
+        anchor_id(AnchorKind::Issue, "kckylechen1/tachi:773")
+    );
+
+    add_edge(
+        &conn,
+        &MemoryEdge {
+            source_id: "about-src".into(),
+            target_id: anchor.clone(),
+            relation: "about".into(),
+            weight: 1.0,
+            metadata: serde_json::json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        },
+    )
+    .unwrap();
+
+    let out = get_edges(&conn, "about-src", "outgoing", None).unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].target_id, anchor);
+    assert_eq!(out[0].relation, "about");
 }
 
 #[test]
@@ -255,7 +296,10 @@ fn close_related_to_fog_is_idempotent() {
 
     // Second pass: nothing left open, so nothing is closed again.
     let second = close_related_to_fog(&conn).unwrap();
-    assert_eq!(second, 0, "idempotent re-run must not re-touch already-closed rows");
+    assert_eq!(
+        second, 0,
+        "idempotent re-run must not re-touch already-closed rows"
+    );
 }
 
 #[test]
@@ -281,11 +325,17 @@ fn close_related_to_fog_leaves_other_relations_untouched() {
     .unwrap();
 
     let closed = close_related_to_fog(&conn).unwrap();
-    assert_eq!(closed, 0, "no related_to rows exist; causes edge must be untouched");
+    assert_eq!(
+        closed, 0,
+        "no related_to rows exist; causes edge must be untouched"
+    );
 
     let out = get_edges(&conn, "fog-other-src", "outgoing", None).unwrap();
     assert_eq!(out.len(), 1);
-    assert!(out[0].valid_to.is_none(), "non-related_to edge must stay open");
+    assert!(
+        out[0].valid_to.is_none(),
+        "non-related_to edge must stay open"
+    );
 }
 
 #[test]

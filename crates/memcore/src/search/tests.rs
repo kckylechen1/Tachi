@@ -8,6 +8,7 @@ use rusqlite::Connection;
 use serde_json::json;
 
 mod access;
+mod anchor;
 mod baseline;
 mod config;
 mod decay_policy;
