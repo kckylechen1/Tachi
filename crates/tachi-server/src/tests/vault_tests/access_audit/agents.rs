@@ -1,6 +1,6 @@
 use super::*;
-use memory_server_runtime::AgentProfile;
 use chrono::Utc;
+use memory_server_runtime::AgentProfile;
 
 async fn init_agent_acl_vault(password: &str) -> crate::tests::TestServer {
     let server = make_server();

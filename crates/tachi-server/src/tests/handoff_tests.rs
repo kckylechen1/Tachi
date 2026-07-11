@@ -1,10 +1,10 @@
 use super::make_server;
-use memory_server_runtime::AgentProfile;
 use crate::tool_params::{
     ChainSkillsParams, ChainStep, GetMemoryParams, HandoffCheckParams, HandoffLeaveParams,
     HubRegisterParams,
 };
 use chrono::Utc;
+use memory_server_runtime::AgentProfile;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 

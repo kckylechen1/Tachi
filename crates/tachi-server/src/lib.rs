@@ -103,7 +103,6 @@ mod facade_memory_ops;
 mod facade_save_ops;
 mod facade_search_ops;
 mod feedback_rule_ops;
-mod foundry_ops;
 mod foundry_runtime_ops;
 mod foundry_scheduler;
 mod gh_ops;
