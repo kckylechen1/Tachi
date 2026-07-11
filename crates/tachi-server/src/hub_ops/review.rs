@@ -5,8 +5,41 @@ use crate::tool_params::{HubReviewParams, HubSetActiveVersionParams, HubSetEnabl
 use crate::{DbScope, MemoryServer};
 use memcore::HubCapability;
 use serde_json::json;
-use tachi_hub::{capability_callable, normalize_review_status, should_expose_skill_tool};
+use tachi_hub::{
+    capability_callable, health_status_allows_call, normalize_review_status,
+    review_status_allows_call, should_expose_skill_tool,
+};
 
+/// Whether an MCP capability is eligible to attempt (re)discovery.
+///
+/// This is deliberately **narrower** than [`capability_callable`]: it checks
+/// every non-discovery condition (enabled, review approved, health not
+/// "open"/circuit-broken) but does NOT require `discovery_status == "ready"`.
+/// If it required that, a freshly-approved MCP could never bootstrap its
+/// *first* discovery, because discovery is exactly what produces that status
+/// (codex review on #968, commit 9204844a: registration intentionally
+/// withholds discovery metadata until review, so the execution gate and the
+/// discovery-refresh gate must differ).
+fn mcp_discovery_eligible(cap: &HubCapability) -> bool {
+    cap.enabled
+        && review_status_allows_call(&cap.review_status)
+        && health_status_allows_call(&cap.health_status)
+}
+
+/// Refresh discovery state for an MCP capability after a review/enable
+/// transition.
+///
+/// Two-gate design, do not collapse them:
+/// - **Execution gate** (`capability_callable`, in `tachi-hub`, unchanged by
+///   this fix): fail-closed — a capability is only callable once discovery
+///   has actually succeeded (`discovery_status == "ready"`). This is what
+///   `hub_call` and friends check before invoking an MCP tool.
+/// - **Discovery-refresh gate** (`mcp_discovery_eligible`, above): whether we
+///   are even *allowed to attempt* discovery right now. It deliberately
+///   excludes `discovery_status`, because requiring "already discovered" as
+///   a precondition to "go discover" is a deadlock — no approved+enabled MCP
+///   would ever reach its first discovery, execution would stay permanently
+///   fail-closed, and registration/quick-add flows would be bricked.
 async fn refresh_mcp_capability_state(
     server: &MemoryServer,
     target_db: DbScope,
@@ -16,7 +49,7 @@ async fn refresh_mcp_capability_state(
         return Ok(cap.clone());
     };
 
-    if !capability_callable(cap) {
+    if !mcp_discovery_eligible(cap) {
         server.clear_proxy_tools(server_name);
         return Ok(cap.clone());
     }
