@@ -7,6 +7,7 @@ pub(crate) async fn run_status(
     json_out: bool,
     hide_orphans: bool,
     probe_keys: bool,
+    all_dbs: bool,
     app_home: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
@@ -16,6 +17,7 @@ pub(crate) async fn run_status(
             json_out,
             hide_orphans,
             probe_keys,
+            all_dbs,
             app_home,
             global_db_path,
             project_db_path,
@@ -28,6 +30,7 @@ pub(crate) async fn run_status(
             true,
             hide_orphans,
             probe_keys,
+            all_dbs,
             app_home,
             global_db_path,
             project_db_path,
@@ -41,6 +44,7 @@ pub(crate) async fn run_status(
             false,
             hide_orphans,
             probe_keys,
+            all_dbs,
             app_home,
             global_db_path,
             project_db_path,
@@ -57,6 +61,7 @@ async fn render_one(
     json_out: bool,
     hide_orphans: bool,
     probe_keys: bool,
+    all_dbs: bool,
     app_home: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
@@ -77,6 +82,10 @@ async fn render_one(
             rotation_groups: Vec::new(),
         }
     };
+    // --probe-keys implies the full provider-value-compare snapshot path
+    // regardless of --all-dbs (live key probing is opt-in and rare, so it
+    // isn't worth a second scoping axis); otherwise honor --all-dbs to pick
+    // between the default global+project-only probe and the full fleet.
     let snapshot = if probe_keys {
         crate::status_ops::collect_snapshot_with_provider_value_compare(
             app_home,
@@ -84,7 +93,12 @@ async fn render_one(
             project_db_path,
         )
     } else {
-        crate::status_ops::collect_snapshot(app_home, global_db_path, project_db_path)
+        crate::status_ops::collect_snapshot_scoped(
+            app_home,
+            global_db_path,
+            project_db_path,
+            all_dbs,
+        )
     };
 
     if json_out {
@@ -97,6 +111,13 @@ async fn render_one(
             obj.insert(
                 "provider_rotation_groups".to_string(),
                 serde_json::to_value(&provider_probe_report.rotation_groups)?,
+            );
+            // Machine consumers need to know `dbs` was scoped (perf pack item
+            // 5) rather than silently reading a shorter fleet as the whole
+            // manifest.
+            obj.insert(
+                "dbs_scoped_to_global_and_project".to_string(),
+                (!all_dbs).into(),
             );
         }
         println!("{}", serde_json::to_string_pretty(&v)?);
@@ -174,6 +195,9 @@ async fn render_one(
     let hidden_orphans = snapshot.dbs.len() - visible_dbs.len();
 
     println!("Manifest ({} dbs)", snapshot.dbs.len());
+    if !all_dbs {
+        println!("  [i] scoped to global + current-project db; pass --all-dbs for the full fleet");
+    }
     if snapshot.dbs.is_empty() {
         println!("  [!] manifest empty or missing — run `tachi doctor` to populate it");
     }

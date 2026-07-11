@@ -278,3 +278,92 @@ filtered to `rn <= 256`, following the exact partition/order pattern
 - `cargo clippy -p memcore --all-targets --no-deps -- -D warnings` — clean.
 - Real-DB `EXPLAIN QUERY PLAN` + row-count before/after captured above via
   `sqlite3` CLI against the read-only production-data copy.
+
+---
+
+## Item 5 — coldpath: scope default `tachi status` probe, gate fleet view behind `--all-dbs`
+
+**Before**: `collect_snapshot`/`collect_snapshot_inner` iterated every entry
+in `manifest.dbs` unconditionally, opening each as a read-only `MemoryStore`
+and running a full probe (job histogram, vector health, namespace counts,
+continuity metrics — several queries each). On this machine's real
+`~/.tachi/manifest.json`, that's 7 DBs:
+
+```
+$ python3 -c "import json; m=json.load(open('~/.tachi/manifest.json')); print(len(m['dbs']))"
+7
+```
+
+Timed via the built `tachi` binary, `tachi status --json`, warm runs
+(first run excluded — cold page cache):
+
+| scope | wall time (5 warm runs) |
+|---|---|
+| `--all-dbs` (old default, full 7-db fleet) | 0.38s, 0.16s, 0.17s, 0.18s, 0.18s |
+| default (new, global+project only) | 0.08s, 0.08s, 0.08s, 0.09s, 0.23s |
+
+Consistent with opus's "~220ms -> ~60ms" characterization for this class
+of change (exact numbers vary with OS scheduling noise, but the *shape* —
+2-3x faster scoped to 2 DBs vs 7 — reproduces every run).
+
+**After**: `collect_snapshot_scoped(app_home, global_db_path,
+project_db_path, all_dbs)` — when `all_dbs = false` (the new CLI default),
+`manifest.dbs` is filtered to only the entries whose path equals
+`global_db_path` or `project_db_path` (via the existing `paths_equal`
+canonicalization helper — the same one `is_orphan_entry` already used) BEFORE
+the probe loop runs, so skipped entries never open a `MemoryStore` at all.
+`--all-dbs` restores the exact prior fleet-wide behavior; the new
+`collect_snapshot_with_provider_value_compare` path (used only by
+`--probe-keys`, live network provider probing, already opt-in and rare)
+is left as full-fleet unconditionally — not worth a second scoping axis.
+
+This does NOT change what's IN the manifest, and does not affect any other
+manifest consumer (`tachi doctor`, `tachi manifest`, etc.) — only which
+entries `tachi status`'s render probes for a given invocation. The human
+render prints `[i] scoped to global + current-project db; pass --all-dbs
+for the full fleet` under the `Manifest (N dbs)` line when scoped, and the
+JSON output carries `dbs_scoped_to_global_and_project: true/false` so
+machine consumers don't silently read a partial fleet as the whole
+manifest.
+
+**File:line**:
+- `crates/tachi-server/src/status_ops/snapshot.rs` (`collect_snapshot_scoped`,
+  `collect_snapshot_inner`'s new `all_dbs` parameter + `scoped_entries`
+  filter)
+- `crates/tachi-server/src/status_ops/status_cli/status_render.rs`
+  (`run_status`/`render_one` thread `all_dbs` through; human + JSON output
+  additions)
+- `crates/tachi-bootstrap/src/cli/commands.rs` (`Commands::Status` new
+  `all_dbs: bool` field, `--all-dbs` flag)
+- `crates/tachi-server/src/bootstrap/serve/cli_commands.rs` (wires the new
+  field through to `run_status`)
+
+**Verification**:
+- New test module `crates/tachi-server/src/status_ops/tests/coldpath_scoping.rs`
+  (registered in `status_ops/tests.rs`): builds a real 3-DB manifest fixture
+  (global + project + one "extra" agent DB standing in for the rest of a
+  fleet) and asserts:
+  - `default_scope_probes_only_global_and_project` — scoped snapshot has
+    exactly 2 `dbs` entries (global + project), not 3.
+  - `all_dbs_flag_restores_full_fleet` — `all_dbs=true` returns all 3.
+  - `default_scope_with_no_project_db_probes_only_global` — no project db
+    path -> exactly 1 entry (global only), not a false-positive match.
+- `cargo test -p tachi-server --lib status_ops` — 64 passed, 0 failed.
+- `cargo test -p tachi-server --lib manifest` — 50 passed, 0 failed.
+- Full-suite run: `cargo test -p tachi-server --lib` — 1577/1580 passed on
+  one run, with 1-5 failures varying run-to-run entirely in
+  `bootstrap::serve::stdio::tests::*` (async proxy timeouts) and
+  `gh_ops::ship_tests::*` (temp-file races) — **none in `status_ops`,
+  `manifest`, or any file this item touches**, each individually passes
+  when re-run in isolation, and the failing set changes between runs
+  (confirmed pre-existing parallel-test-load flakiness on this machine, not
+  a regression from this change — see also this repo's own
+  `feedback_test_worktree_race` operational note on shared-cache test
+  contention).
+- `cargo build -p tachi-server -p tachi-bootstrap` — clean.
+- `cargo fmt -p tachi-server -p tachi-bootstrap -- --check` — clean.
+- `cargo clippy -p tachi-server -p tachi-bootstrap --all-targets --no-deps -- -D warnings` — clean.
+- Real-binary timing above captured directly against this machine's live
+  `~/.tachi/manifest.json` (7 DBs) via the built `tachi` binary,
+  `status --json` (read-only; verified no writes happen on this path
+  outside `--probe-keys`).
