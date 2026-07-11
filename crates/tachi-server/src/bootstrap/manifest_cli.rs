@@ -15,6 +15,42 @@ fn default_scan_roots(home: &Path, app_home: &Path, git_root: Option<&PathBuf>) 
     roots
 }
 
+/// Read-only: opens the global (and project, if present) hub stores directly
+/// via `MemoryStore::open_read_only` — deliberately NOT a full `MemoryServer`
+/// (which spins up LLM clients / pools we don't need for a lint pass). Missing
+/// or unopenable DBs are tolerated silently (mirrors `collect_job_histograms`
+/// below): a doctor run must not fail just because a project DB doesn't exist
+/// yet.
+///
+/// Deliberately does NOT filter by `cap_type` in the SQL query (`hub_list`'s
+/// `type = ?` filter is case-sensitive, memcore/src/db/hub_db.rs:100-103, so a
+/// `cap_type="MCP"` row would silently never reach a `Some("mcp")` filter here
+/// — #995 finding 2). Collect every capability and let
+/// `hub_capability_discovery_status_warnings` apply its own
+/// `eq_ignore_ascii_case("mcp")` check, which is already case-insensitive.
+fn collect_hub_caps_for_lint(
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> Vec<memcore::HubCapability> {
+    let mut caps = Vec::new();
+    for path in std::iter::once(Some(global_db_path)).chain(std::iter::once(project_db_path)) {
+        let Some(path) = path else { continue };
+        if !path.exists() {
+            continue;
+        }
+        let Some(path_str) = path.to_str() else {
+            continue;
+        };
+        let Ok(store) = memcore::MemoryStore::open_read_only(path_str) else {
+            continue;
+        };
+        if let Ok(mut found) = store.hub_list(None, false) {
+            caps.append(&mut found);
+        }
+    }
+    caps
+}
+
 pub(super) async fn run_doctor_command(
     json_output: bool,
     fix: bool,
@@ -43,6 +79,11 @@ pub(super) async fn run_doctor_command(
         .warnings
         .extend(crate::doctor::project_secret_file_warnings(
             git_root.map(|p| p.as_path()),
+        ));
+    report
+        .warnings
+        .extend(crate::doctor::hub_capability_discovery_status_warnings(
+            &collect_hub_caps_for_lint(global_db_path, project_db_path),
         ));
 
     // Always update the manifest after a doctor run (idempotent; preserves notes).
@@ -167,6 +208,63 @@ mod tests {
     fn manifest_path_lives_directly_under_app_home() {
         let app_home = std::path::Path::new("/tmp/tachi-app-home");
         assert_eq!(manifest_path(app_home), app_home.join("manifest.json"));
+    }
+
+    fn test_hub_capability(id: &str, cap_type: &str, definition: &str) -> memcore::HubCapability {
+        memcore::HubCapability {
+            id: id.to_string(),
+            name: id.to_string(),
+            cap_type: cap_type.to_string(),
+            version: 1,
+            description: String::new(),
+            definition: definition.to_string(),
+            enabled: true,
+            review_status: "approved".to_string(),
+            health_status: "healthy".to_string(),
+            last_error: None,
+            last_success_at: None,
+            last_failure_at: None,
+            fail_streak: 0,
+            active_version: None,
+            exposure_mode: "direct".to_string(),
+            uses: 0,
+            successes: 0,
+            failures: 0,
+            avg_rating: 0.0,
+            last_used: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    /// #995 finding 2 (codex review): `hub_list`'s SQL `type = ?` filter
+    /// (memcore/src/db/hub_db.rs:100-103) is case-sensitive. A cap_type of
+    /// "MCP" (uppercase) registered in the DB must still reach the lint —
+    /// collection must not silently drop it via a case-sensitive
+    /// `Some("mcp")` filter.
+    #[test]
+    fn collect_hub_caps_for_lint_finds_uppercase_mcp_cap_type() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("global.db");
+        let store =
+            memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("open store for write");
+        let cap = test_hub_capability("mcp:UPPER", "MCP", r#"{"other_field":"value"}"#);
+        store.hub_register(&cap).expect("register cap");
+        drop(store);
+
+        let caps = collect_hub_caps_for_lint(&db_path, None);
+        assert!(
+            caps.iter().any(|c| c.id == "mcp:UPPER"),
+            "collector must return the uppercase cap_type=MCP row so the lint's \
+             case-insensitive check can see it: {caps:?}"
+        );
+
+        let warnings = crate::doctor::hub_capability_discovery_status_warnings(&caps);
+        assert!(
+            warnings.iter().any(|w| w.path == "mcp:UPPER"),
+            "lint must fire on the enabled+approved+healthy uppercase MCP cap missing \
+             discovery_status: {warnings:?}"
+        );
     }
 
     #[test]

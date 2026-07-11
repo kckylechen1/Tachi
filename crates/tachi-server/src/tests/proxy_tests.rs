@@ -11,6 +11,7 @@ use serde_json::json;
 
 use super::{make_server, make_test_tool};
 
+mod connect;
 mod exposure;
 mod governance;
 mod retry;
