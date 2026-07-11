@@ -31,9 +31,9 @@ use issue::{
     upsert_promoting_entry,
 };
 #[cfg(test)]
-use memo::memo_from_entry;
-#[cfg(test)]
 use memcore::{MemoryEntry, MemoryStore};
+#[cfg(test)]
+use memo::memo_from_entry;
 #[cfg(test)]
 use pending::{pending_handoff_entries, supersede_pending_handoffs, upsert_acknowledged_entry};
 #[cfg(test)]

@@ -61,9 +61,7 @@ pub(in crate::foundry_runtime_ops) fn build_foundry_event_hash(
     }
     signatures.sort();
     let job_scope = match item.job.kind {
-        memcore::FoundryJobKind::RecallRerankCache => {
-            stable_hash(&item.job.metadata.to_string())
-        }
+        memcore::FoundryJobKind::RecallRerankCache => stable_hash(&item.job.metadata.to_string()),
         _ => String::new(),
     };
 

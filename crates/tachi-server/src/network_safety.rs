@@ -86,12 +86,16 @@ mod tests {
     use std::net::IpAddr;
 
     fn assert_blocked(raw: &str) {
-        let ip = raw.parse::<IpAddr>().unwrap_or_else(|e| panic!("parse {raw}: {e}"));
+        let ip = raw
+            .parse::<IpAddr>()
+            .unwrap_or_else(|e| panic!("parse {raw}: {e}"));
         assert!(is_private_or_local_ip(ip), "{raw} should be blocked");
     }
 
     fn assert_allowed(raw: &str) {
-        let ip = raw.parse::<IpAddr>().unwrap_or_else(|e| panic!("parse {raw}: {e}"));
+        let ip = raw
+            .parse::<IpAddr>()
+            .unwrap_or_else(|e| panic!("parse {raw}: {e}"));
         assert!(!is_private_or_local_ip(ip), "{raw} should be allowed");
     }
 

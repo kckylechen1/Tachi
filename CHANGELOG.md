@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Quick Navigation
 
 - [Unreleased](#unreleased)
+- [1.9.0](#190---2026-07-11) — portable runtime, execution environments, precedent memory, and reliability hardening
 - [1.8.0](#180---2026-07-10) — Tachi crate branding, action-level profiles, recall discrimination, CI-state ingest
 - [1.7.0](#170---2026-07-08) — portable memory kernel, vector auditability, and dispatch canon
 - [1.6.4](#164---2026-07-06) — multi-project daemon stdio repair
@@ -43,9 +44,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
 
+## [1.9.0] - 2026-07-11
+
+### Added
+
+- Portable-server and execution-environment foundations, including leases, provisioning, and dispatch environment binding (#924, #938, #976).
+- Precedent-memory capture from completion rulings, plus a first-class evidence path for runtime judgment (#950, #962).
+- Dispatch receipt-first status, board persistence, and completion artifacts that prevent orphaned work from being reported as complete (#971, #988).
+- New memory lifecycle and recall capabilities: research feed mode, rerank provider seams, recall evaluation, and write-side enrichment (#530, #724, #921).
+
 ### Changed
 
 - **`memcore` `SearchOptions` gains a `decay_policy` field and `DecayPolicy` now requires `Send + Sync`** (#891), so downstream policy injection can reach the live hybrid search path without forking `scorer.rs`. This is a source-breaking change for downstream code that builds `SearchOptions` via a full struct literal (add `decay_policy: None` or use `..Default::default()`) or implements `DecayPolicy` on a non-`Send`/non-`Sync` type — intentional, by design, to keep the trait usable behind `Arc<dyn DecayPolicy>` on the ranking hot path.
+- The public tool surface was consolidated around the remaining memory and dispatch facades; obsolete aliases and reach-through layers were removed (#757, #974).
+
+### Fixed
+
+- Fail-closed authorization and remote-MCP safety checks, daemon liveness behavior, project-DB migration boundaries, and bounded daemon/project attachment behavior (#894, #947, #969, #978, #984).
+- Recall-ranking, provider degradation, vault, proxy, and release-signing defects found in the post-1.8.0 hardening wave (#724, #936, #937, #958, #970, #979).
 
 ## [1.8.0] - 2026-07-10
 

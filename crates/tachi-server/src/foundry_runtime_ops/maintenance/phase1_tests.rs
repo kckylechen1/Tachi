@@ -50,8 +50,7 @@ async fn capture_specs_exclude_disabled_jobs_and_gate_recall_cache() {
         let server = crate::MemoryServer::new(db_path, None).expect("server");
         let specs = capture_maintenance_specs(&server, "agent", "/a/b", &memory_ids, 0, 0);
 
-        let kinds: Vec<memcore::FoundryJobKind> =
-            specs.iter().map(|s| s.kind.clone()).collect();
+        let kinds: Vec<memcore::FoundryJobKind> = specs.iter().map(|s| s.kind.clone()).collect();
         assert!(
             !kinds.contains(&memcore::FoundryJobKind::MemoryDistill),
             "Phase 1: capture must not enqueue MemoryDistill (got {kinds:?})"
@@ -71,8 +70,7 @@ async fn capture_specs_exclude_disabled_jobs_and_gate_recall_cache() {
         let server = crate::MemoryServer::new(db_path, None).expect("server");
         let specs = capture_maintenance_specs(&server, "agent", "/a/b", &memory_ids, 0, 0);
 
-        let kinds: Vec<memcore::FoundryJobKind> =
-            specs.iter().map(|s| s.kind.clone()).collect();
+        let kinds: Vec<memcore::FoundryJobKind> = specs.iter().map(|s| s.kind.clone()).collect();
         assert!(kinds.contains(&memcore::FoundryJobKind::RecallRerankCache));
     }
 }

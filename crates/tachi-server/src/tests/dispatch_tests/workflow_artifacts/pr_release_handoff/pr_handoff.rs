@@ -49,8 +49,8 @@ async fn tachi_gh_pr_handoff_writes_pr_body_with_verification_and_gaps() {
     // pr_handoff is no longer a tachi_task facade action (#757/#974 moved
     // GitHub PR lifecycle actions to tachi_gh exclusively); call the
     // lifecycle handler directly, same as tachi_gh's router does.
-    let raw = crate::task_lifecycle::handle_task_pr_handoff(&params)
-        .expect("pr_handoff should succeed");
+    let raw =
+        crate::task_lifecycle::handle_task_pr_handoff(&params).expect("pr_handoff should succeed");
     let parsed: Value = serde_json::from_str(&raw).expect("pr_handoff JSON");
     assert_eq!(parsed["ok"], json!(true));
     assert_eq!(parsed["safe_to_open"], json!(true));

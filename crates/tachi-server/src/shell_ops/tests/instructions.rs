@@ -101,7 +101,10 @@ fn resolve_meta_skill_falls_back_to_central_library() {
             "probe rel_path must not exist in the repo tree"
         );
     }
-    assert!(!PathBuf::from(rel).exists(), "probe must not exist under cwd");
+    assert!(
+        !PathBuf::from(rel).exists(),
+        "probe must not exist under cwd"
+    );
 
     let base = Utc::now().format("%Y%m%dT%H%M%S%fZ").to_string();
     let central = std::env::temp_dir().join(format!("tachi-central-skills-full-{base}"));

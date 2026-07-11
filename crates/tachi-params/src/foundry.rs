@@ -483,4 +483,3 @@ pub struct PrepareCapabilityBundleParams {
     #[serde(default = "default_true")]
     pub include_section: bool,
 }
-

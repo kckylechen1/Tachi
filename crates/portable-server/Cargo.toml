@@ -1,6 +1,6 @@
 [package]
 name = "portable-server"
-version = "1.8.0"
+version = "1.9.0"
 edition = "2021"
 description = "Portable memory-kernel MCP server (stdio): save/search/get/status over portable-kernel, no Tachi operator surfaces"
 license = "AGPL-3.0-only"

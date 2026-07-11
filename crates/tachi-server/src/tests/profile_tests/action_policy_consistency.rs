@@ -33,10 +33,7 @@ fn assert_all_classified(tool_name: &str, actions: &[&str]) {
 
 #[test]
 fn f919_tachi_task_primary_actions_are_all_classified() {
-    assert_all_classified(
-        "tachi_task",
-        tachi_params::TACHI_TASK_PRIMARY_ACTIONS,
-    );
+    assert_all_classified("tachi_task", tachi_params::TACHI_TASK_PRIMARY_ACTIONS);
 }
 
 #[test]

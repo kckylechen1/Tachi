@@ -268,10 +268,7 @@ impl MemoryServer {
         worktree_path: &str,
         reason: Option<&str>,
     ) -> Result<ReclaimOutcome, String> {
-        self.reclaim_exec_env(
-            &ExecEnvSelector::Path(worktree_path.to_string()),
-            reason,
-        )
+        self.reclaim_exec_env(&ExecEnvSelector::Path(worktree_path.to_string()), reason)
     }
 }
 
@@ -342,7 +339,12 @@ mod tests {
     #[test]
     fn bare_cwd_with_optin_is_unmanaged() {
         let out = resolve_env_binding(None, Some("/some/dir"), true, None).unwrap();
-        assert_eq!(out, EnvResolution::Unmanaged { cwd: "/some/dir".to_string() });
+        assert_eq!(
+            out,
+            EnvResolution::Unmanaged {
+                cwd: "/some/dir".to_string()
+            }
+        );
         assert_eq!(out.stamp(), "unmanaged");
         assert_eq!(out.env_id(), None);
     }

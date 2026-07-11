@@ -31,13 +31,7 @@ pub(crate) fn model_lanes_json() -> serde_json::Value {
                     None::<String>,
                 )
             }
-            Err(err) => (
-                "invalid",
-                None,
-                json!([]),
-                None,
-                Some(err.clone()),
-            ),
+            Err(err) => ("invalid", None, json!([]), None, Some(err.clone())),
         };
 
     let mut rerank_lane = json!({

@@ -47,6 +47,9 @@ jobs:
       - name: Run workspace tests
         run: cargo nextest run --workspace --locked --profile ci
 
+      - name: Verify portable-kernel feature boundary
+        run: cargo test -p portable-kernel --features portable-contract-test --locked
+
       - name: Run doc tests
         run: cargo test --workspace --locked --doc
 

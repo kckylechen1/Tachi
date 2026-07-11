@@ -190,8 +190,7 @@ pub(crate) async fn search_memory_rows_with_recall_config(
                 params.query_vec = Some(query_vec);
             }
             Err(e) => {
-                embed_degraded =
-                    Some(crate::memory_search_ops::recall_short_reason(&e));
+                embed_degraded = Some(crate::memory_search_ops::recall_short_reason(&e));
                 eprintln!(
                     "[search_memory] query embedding failed, falling back to lexical-only search: {e}"
                 );
@@ -398,10 +397,8 @@ pub(crate) async fn search_memory_rows_with_recall_config(
     // recent project decisions are not buried under older global noise. Also
     // provides Project-before-Global tie-break. Skips wiki-scoped queries.
     // If preference does not sort (single-scope / wiki / empty), plain score sort.
-    if !super::cross_library::apply_cross_library_project_preference(
-        &mut combined_results,
-        &params,
-    ) {
+    if !super::cross_library::apply_cross_library_project_preference(&mut combined_results, &params)
+    {
         combined_results.sort_by(|a, b| {
             b.0.score
                 .final_score

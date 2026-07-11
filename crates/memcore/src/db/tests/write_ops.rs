@@ -139,14 +139,10 @@ fn update_enrichment_fields_preserves_unresolved_keyword_failure() {
         "aggregate status must remain failed: {metadata:?}"
     );
     assert_eq!(metadata["enrichment"]["failed_stage"], "keywords");
-    assert_eq!(
-        metadata["enrichment"]["last_error"],
-        "extract lane timeout"
-    );
+    assert_eq!(metadata["enrichment"]["last_error"], "extract lane timeout");
     assert_eq!(metadata["enrichment"]["keywords_status"], "failed");
     assert_eq!(
-        metadata["enrichment"]["partial_success_status"],
-        "embedded",
+        metadata["enrichment"]["partial_success_status"], "embedded",
         "successful stage still recorded: {metadata:?}"
     );
     assert!(

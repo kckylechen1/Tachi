@@ -1,8 +1,8 @@
 mod accessors;
 mod cache;
 mod init;
-mod tachi_server;
 mod runtime;
+mod tachi_server;
 
 pub(crate) use self::cache::{
     CachedResult, CACHEABLE_TOOLS, CACHE_INVALIDATING_TOOLS, TOOL_CACHE_MAX_ENTRIES, TOOL_CACHE_TTL,

@@ -104,15 +104,13 @@ async fn tachi_status_surfaces_recall_eval_health_without_private_case_data() {
 
     assert_eq!(parsed["recall_eval"]["status"], json!("failed"));
     assert_eq!(parsed["recall_eval"]["current"]["recall_at_k"], json!(0.5));
-    assert!(
-        parsed["warnings"]
-            .as_array()
-            .expect("warnings")
-            .iter()
-            .any(|warning| warning
-                .as_str()
-                .is_some_and(|warning| warning.contains("personal recall eval failed")))
-    );
+    assert!(parsed["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .any(|warning| warning
+            .as_str()
+            .is_some_and(|warning| warning.contains("personal recall eval failed"))));
     assert!(!body.contains("private query"));
     assert!(!body.contains("private-id"));
 }

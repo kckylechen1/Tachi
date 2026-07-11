@@ -79,9 +79,14 @@ pub(super) async fn run_v2_plan_stage(
                 // orphaned in TASK_STATE_WORKING. Mirrors the watchdog's own
                 // failure-close pattern in execution.rs (reused helper, same
                 // terminal state + unreviewed flag).
-                if let Err(kanban_err) =
-                    update_kanban_state(inputs.server, inputs.dispatch_id, "TASK_STATE_FAILED", None, Some(false))
-                        .await
+                if let Err(kanban_err) = update_kanban_state(
+                    inputs.server,
+                    inputs.dispatch_id,
+                    "TASK_STATE_FAILED",
+                    None,
+                    Some(false),
+                )
+                .await
                 {
                     eprintln!(
                         "[dispatch-v2] failed to mark dispatch {} FAILED in kanban after plan failure: {}",
@@ -123,9 +128,14 @@ pub(super) async fn run_v2_plan_stage(
                 // #971: same as above — plan-stage TIMEOUT must also close
                 // the kanban row (this branch previously had no kanban row
                 // to close at all, since BOARD-FIRST didn't exist yet).
-                if let Err(kanban_err) =
-                    update_kanban_state(inputs.server, inputs.dispatch_id, "TASK_STATE_FAILED", None, Some(false))
-                        .await
+                if let Err(kanban_err) = update_kanban_state(
+                    inputs.server,
+                    inputs.dispatch_id,
+                    "TASK_STATE_FAILED",
+                    None,
+                    Some(false),
+                )
+                .await
                 {
                     eprintln!(
                         "[dispatch-v2] failed to mark dispatch {} FAILED in kanban after plan timeout: {}",

@@ -355,13 +355,7 @@ pub(crate) async fn handle_tachi_memory(
 fn should_forward_facade_read(action: &str) -> bool {
     matches!(
         action,
-        "search"
-            | "get"
-            | "briefing"
-            | "alerts"
-            | "ask"
-            | "recall_simulate"
-            | "readiness"
+        "search" | "get" | "briefing" | "alerts" | "ask" | "recall_simulate" | "readiness"
     )
 }
 

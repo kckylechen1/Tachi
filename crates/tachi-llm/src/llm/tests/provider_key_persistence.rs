@@ -180,8 +180,15 @@ async fn provider_key_health_reloads_external_db_cooldowns_before_selection() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn provider_key_health_reload_clears_local_cooldown_on_external_success() {
     const KEY: &str = "TACHI_TEST_ONLY_API_KEY_RELOAD_SUCCESS";
+    let _guard = crate::test_support::global_test_lock().lock();
+    // The local rate-limit helper persists asynchronously in production. This
+    // fixture is specifically testing an *external* DB success superseding
+    // local cooldown state, so suppress that local write and avoid a stale
+    // background rate-limit write racing the external success below.
+    let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
     let temp = tempfile::tempdir().expect("temp vault db");
     let db_path = temp.path().join("vault.db");
     let client = LlmClient::new_with_vault_db(Some(&db_path)).expect("client should initialize");

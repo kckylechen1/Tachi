@@ -163,7 +163,11 @@ async fn voyage_request_shape_unchanged() {
     assert_eq!(body["documents"], json!(["alpha", "beta"]));
     assert_eq!(body["top_k"], json!(2));
     let obj = body.as_object().expect("object");
-    assert_eq!(obj.len(), 4, "wire body must keep exactly four pre-seam keys");
+    assert_eq!(
+        obj.len(),
+        4,
+        "wire body must keep exactly four pre-seam keys"
+    );
     assert_eq!(
         g.last_auth.as_deref(),
         Some("Bearer test-voyage-key"),

@@ -83,9 +83,10 @@ pub fn default_worktrees_root() -> Result<PathBuf, String> {
         }
     }
     match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        Some(home) if !home.is_empty() => {
-            Ok(PathBuf::from(home).join(".cache").join("tachi").join("worktrees"))
-        }
+        Some(home) if !home.is_empty() => Ok(PathBuf::from(home)
+            .join(".cache")
+            .join("tachi")
+            .join("worktrees")),
         _ => Err(
             "cannot determine managed worktrees root: HOME (and USERPROFILE) is unset and \
              TACHI_WORKTREES_ROOT is not set; refusing to fall back to the current directory"
@@ -126,9 +127,9 @@ pub fn default_shared_cargo_target_dir() -> Result<PathBuf, String> {
         }
     }
     match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        Some(home) if !home.is_empty() => {
-            Ok(PathBuf::from(home).join(".cache").join("sigil-shared-target"))
-        }
+        Some(home) if !home.is_empty() => Ok(PathBuf::from(home)
+            .join(".cache")
+            .join("sigil-shared-target")),
         _ => Err(
             "cannot determine shared cargo target dir: HOME (and USERPROFILE) is unset and \
              TACHI_SHARED_CARGO_TARGET_DIR is not set"
@@ -296,10 +297,9 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
     }
 
     if path.exists() {
-        report.errors.push(format!(
-            "worktree path already exists: {}",
-            path.display()
-        ));
+        report
+            .errors
+            .push(format!("worktree path already exists: {}", path.display()));
         return Ok(report);
     }
 
@@ -329,7 +329,9 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
     // residual risk for this single-user local tool; full TOCTOU-safety
     // (locking / openat / O_NOFOLLOW) is deliberately out of scope.
     if let Some(reason) = path_outside_managed_root_reason(&path, &managed_root) {
-        report.errors.push(format!("re-check before create: {reason}"));
+        report
+            .errors
+            .push(format!("re-check before create: {reason}"));
         return Ok(report);
     }
 
@@ -446,7 +448,12 @@ fn resolve_names(options: &OpenOptions) -> Result<(String, String), String> {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("{task}-{role}-{short}"));
 
-    let branch = match options.branch.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let branch = match options
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(b) => {
             if b.starts_with('-') {
                 return Err(format!(
@@ -787,9 +794,8 @@ mod tests {
             "unexpected reason: {reason}"
         );
 
-        let icloud = PathBuf::from(
-            "/Users/me/Library/Mobile Documents/com~apple~CloudDocs/worktrees/x",
-        );
+        let icloud =
+            PathBuf::from("/Users/me/Library/Mobile Documents/com~apple~CloudDocs/worktrees/x");
         let reason = forbidden_location_reason(&icloud, Path::new("/tmp/repo")).expect("icloud");
         assert!(reason.contains("iCloud"), "{reason}");
 
@@ -809,10 +815,7 @@ mod tests {
 
         let planned = plan_managed_worktree_path(Path::new("/tmp/my-repo"), "484-executor-aa")
             .expect("managed root resolves when TACHI_WORKTREES_ROOT is set");
-        assert_eq!(
-            planned,
-            root.join("my-repo").join("484-executor-aa")
-        );
+        assert_eq!(planned, root.join("my-repo").join("484-executor-aa"));
 
         match old {
             Some(v) => std::env::set_var("TACHI_WORKTREES_ROOT", v),
@@ -896,15 +899,16 @@ mod tests {
         })
         .unwrap();
 
-        assert!(
-            report.errors.is_empty(),
-            "open errors: {:?}",
-            report.errors
-        );
+        assert!(report.errors.is_empty(), "open errors: {:?}", report.errors);
         assert!(report.opened);
         assert!(report.registered);
         let path = PathBuf::from(&report.path);
-        assert!(path.starts_with(&cache), "path={} cache={}", path.display(), cache.display());
+        assert!(
+            path.starts_with(&cache),
+            "path={} cache={}",
+            path.display(),
+            cache.display()
+        );
         assert!(path.join(".tachi-worktree.json").exists());
         assert!(path.join("README").exists());
         assert!(registry::registry_contains(&path));
@@ -1034,10 +1038,7 @@ mod tests {
             "option-shaped base ref must be rejected before git rev-parse, got {result:?}"
         );
         let err = result.unwrap_err();
-        assert!(
-            err.contains("refusing base ref"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("refusing base ref"), "unexpected error: {err}");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1071,10 +1072,7 @@ mod tests {
             "leading-dash base ref must be rejected, got {result:?}"
         );
         let err = result.unwrap_err();
-        assert!(
-            err.contains("refusing base ref"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("refusing base ref"), "unexpected error: {err}");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1143,8 +1141,7 @@ mod tests {
 
         let outcome = provision_shared_cargo_target_config(&root).expect("provision ok");
         assert_eq!(outcome, CargoTargetProvision::SkippedExisting);
-        let contents =
-            std::fs::read_to_string(root.join(".cargo").join("config.toml")).unwrap();
+        let contents = std::fs::read_to_string(root.join(".cargo").join("config.toml")).unwrap();
         assert_eq!(contents, custom, "existing config.toml must be untouched");
 
         match old {
@@ -1201,8 +1198,7 @@ mod tests {
 
         let outcome = provision_shared_cargo_target_config(&root).expect("provision ok");
         assert_eq!(outcome, CargoTargetProvision::Written(target.clone()));
-        let contents =
-            std::fs::read_to_string(root.join(".cargo").join("config.toml")).unwrap();
+        let contents = std::fs::read_to_string(root.join(".cargo").join("config.toml")).unwrap();
         assert!(
             contents.contains(&format!("target-dir = \"{}\"", target.display())),
             "absolute override should be written verbatim, got: {contents}"

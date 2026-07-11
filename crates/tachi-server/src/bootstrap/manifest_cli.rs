@@ -318,9 +318,11 @@ async fn run_daily_pipeline_remediation(
 }
 
 async fn collect_provider_key_report(global_db_path: &Path, probe_keys: bool) -> ProviderKeyReport {
-    let (keys, probes) =
-        crate::status_ops::status_health::collect_doctor_provider_key_report(global_db_path, probe_keys)
-            .await;
+    let (keys, probes) = crate::status_ops::status_health::collect_doctor_provider_key_report(
+        global_db_path,
+        probe_keys,
+    )
+    .await;
     ProviderKeyReport {
         keys: keys.into_iter().map(ProviderKeyStatus::from).collect(),
         probes,

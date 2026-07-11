@@ -68,9 +68,7 @@ async fn f2_cycle_status_next_action_coaches_tachi_gh_for_release_note() {
         .expect("cycle_status should succeed");
     let parsed: Value = serde_json::from_str(&raw).expect("cycle_status JSON");
 
-    let next = parsed["next_action"]
-        .as_str()
-        .expect("next_action string");
+    let next = parsed["next_action"].as_str().expect("next_action string");
     assert!(
         next.contains("tachi_gh(action='release_note'"),
         "ready PR without release_note must coach tachi_gh release_note, got: {next}"
@@ -109,9 +107,7 @@ async fn f2_cycle_status_next_action_coaches_tachi_gh_to_link_pr() {
         .await
         .expect("cycle_status should succeed");
     let parsed: Value = serde_json::from_str(&raw).expect("cycle_status JSON");
-    let next = parsed["next_action"]
-        .as_str()
-        .expect("next_action string");
+    let next = parsed["next_action"].as_str().expect("next_action string");
     assert!(
         next.contains("tachi_gh(action='pr_handoff'") && next.contains("tachi_gh(action='link_pr'"),
         "missing PR must coach tachi_gh pr_handoff+link_pr, got: {next}"

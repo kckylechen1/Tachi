@@ -416,10 +416,7 @@ fn model_lanes_reports_default_voyage_rerank_provider() {
         json!("voyage")
     );
 
-    restore_env(
-        tachi_llm::RERANK_LOCAL_ENDPOINT_ENV,
-        original_endpoint,
-    );
+    restore_env(tachi_llm::RERANK_LOCAL_ENDPOINT_ENV, original_endpoint);
 }
 
 #[test]

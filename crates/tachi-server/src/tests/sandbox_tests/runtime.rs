@@ -51,7 +51,9 @@ async fn sandbox_policy_prevents_unregistered_capability_startup() {
         name: "unregistered-policy".to_string(),
         version: 1,
         description: "test capability without policy".to_string(),
-        definition: r#"{"transport":"stdio","command":"echo","args":["test"]}"#.to_string(),
+        definition:
+            r#"{"transport":"stdio","command":"echo","args":["test"],"discovery_status":"ready"}"#
+                .to_string(),
         enabled: true,
         review_status: "approved".to_string(),
         health_status: "healthy".to_string(),

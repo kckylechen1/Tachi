@@ -123,7 +123,6 @@ impl CircuitBreaker {
     }
 }
 
-
 #[derive(Clone, Default)]
 pub(crate) struct CircuitBreakerRegistry {
     breakers: Arc<RwLock<HashMap<String, CircuitBreaker>>>,

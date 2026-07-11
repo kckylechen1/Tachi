@@ -333,7 +333,13 @@ fn digest_deterministic(doc: &FetchedDocument) -> ResearchDigest {
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .map(|line| line.trim_start_matches('#').trim().chars().take(120).collect())
+        .map(|line| {
+            line.trim_start_matches('#')
+                .trim()
+                .chars()
+                .take(120)
+                .collect()
+        })
         .unwrap_or_else(|| "Untitled source".to_string());
 
     let sentences: Vec<String> = plain
@@ -393,7 +399,10 @@ fn sanitize_header_text(input: &str, max_chars: usize) -> String {
         .chars()
         .filter(|c| {
             c.is_ascii_alphanumeric()
-                || matches!(*c, ' ' | '-' | '_' | ':' | ',' | '.' | '\'' | '(' | ')' | '#')
+                || matches!(
+                    *c,
+                    ' ' | '-' | '_' | ':' | ',' | '.' | '\'' | '(' | ')' | '#'
+                )
         })
         .collect();
     let trimmed = cleaned.trim();
@@ -594,7 +603,9 @@ fn route_impact(
             target: quoted.clone(),
             kind: "issue".to_string(),
             rationale: format!("Source references {quoted} (extracted from fetched content)."),
-            suggested_action: format!("Leader review: confirm relevance of {quoted} before acting on it."),
+            suggested_action: format!(
+                "Leader review: confirm relevance of {quoted} before acting on it."
+            ),
         });
     }
 
@@ -822,7 +833,9 @@ fn render_wiki_draft_markdown(doc: &FetchedDocument, digest: &ResearchDigest) ->
         "# {} (DRAFT — advisory tier)\n\n",
         sanitize_header_text(&digest.title, 80)
     ));
-    body.push_str("> Machine-drafted wiki entry. NOT persisted to the wiki store by the research\n");
+    body.push_str(
+        "> Machine-drafted wiki entry. NOT persisted to the wiki store by the research\n",
+    );
     body.push_str("> verb — advisory only until a leader ratifies it.\n\n");
     body.push_str("## Content (source-derived — UNTRUSTED, quoted as data)\n\n");
     let mut content_blob = String::new();

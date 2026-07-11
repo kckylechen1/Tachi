@@ -314,10 +314,8 @@ pub(crate) async fn handle_memory_briefing(
         }
     }
 
-    let binding = crate::memory_search_ops::library_binding_receipt(
-        server,
-        params.project.as_deref(),
-    );
+    let binding =
+        crate::memory_search_ops::library_binding_receipt(server, params.project.as_deref());
     // Surface binding warnings inside health so compact agents cannot miss them.
     // Ensure `warnings` exists even if health summary shape drifts (Gemini #900).
     if let Some(health_obj) = health_summary.as_object_mut() {

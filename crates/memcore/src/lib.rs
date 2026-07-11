@@ -42,6 +42,11 @@ pub use agent_profile::{
     RenderedAgentProfile, AGENT_PROFILE_PACK_SCHEMA_VERSION,
 };
 #[cfg(feature = "admin")]
+pub use db::exec_env::{
+    find_active_exec_env_by_path, get_exec_env, insert_exec_env, list_exec_envs, reclaim_exec_env,
+    ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, ReclaimOutcome,
+};
+#[cfg(feature = "admin")]
 pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};
 #[cfg(feature = "admin")]
 pub use db::foundry_jobs::{
@@ -49,11 +54,6 @@ pub use db::foundry_jobs::{
     job_status_histogram, load_pending_foundry_jobs, requeue_retryable_foundry_jobs,
     update_foundry_job_status_with_reason, FoundryJobLease, FoundryJobSummary, FoundryRetryPolicy,
     JobStatusHistogram, PersistedFoundryJob, RequeueOutcome,
-};
-#[cfg(feature = "admin")]
-pub use db::exec_env::{
-    find_active_exec_env_by_path, get_exec_env, insert_exec_env, list_exec_envs, reclaim_exec_env,
-    ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, ReclaimOutcome,
 };
 pub use db::row_to_entry;
 pub use db::{CategoryPathPrefixMemoryRow, FoundryJobStatusCounts, PathPrefixMemoryRow};

@@ -9,7 +9,11 @@ use super::*;
 /// lexicographically-later (but chronologically newer) path was ever reached.
 #[tokio::test]
 async fn tachi_memory_briefing_recent_checkpoints_orders_newest_first_global() {
-    let server = make_server();
+    // Briefing may resolve a named project from the active workspace for
+    // read-only calls. Keep this global-store regression fixture under a
+    // temporary Tachi home so a developer's real project database cannot
+    // replace the checkpoints seeded below.
+    let (server, _temp_home) = make_server_with_temp_home();
 
     server
         .with_global_store(|store| {

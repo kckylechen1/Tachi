@@ -272,7 +272,9 @@ pub(super) async fn serve_http_daemon(
             {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("[watchdog] failed to build probe client: {e}; liveness watchdog disabled");
+                    eprintln!(
+                        "[watchdog] failed to build probe client: {e}; liveness watchdog disabled"
+                    );
                     return;
                 }
             };
@@ -305,7 +307,9 @@ pub(super) async fn serve_http_daemon(
                     Err(e) => {
                         // No HTTP response at all: connection refused, timeout, or
                         // a transport error — the surface is presumed dead.
-                        eprintln!("[watchdog] /health/live probe transport failure (no response): {e}");
+                        eprintln!(
+                            "[watchdog] /health/live probe transport failure (no response): {e}"
+                        );
                         Probe::Unreachable
                     }
                 };
@@ -794,23 +798,47 @@ mod tests {
     fn watchdog_exits_after_max_consecutive_failures() {
         let mut c = WatchdogCounter::new(4);
         // Grace elapsed → failures count. First 3 keep going, 4th exits(2).
-        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
-        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
-        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(
+            c.record(Probe::Unreachable, true),
+            WatchdogVerdict::Continue
+        );
+        assert_eq!(
+            c.record(Probe::Unreachable, true),
+            WatchdogVerdict::Continue
+        );
+        assert_eq!(
+            c.record(Probe::Unreachable, true),
+            WatchdogVerdict::Continue
+        );
         assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Exit(2));
     }
 
     #[test]
     fn watchdog_success_resets_the_counter() {
         let mut c = WatchdogCounter::new(4);
-        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
-        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(
+            c.record(Probe::Unreachable, true),
+            WatchdogVerdict::Continue
+        );
+        assert_eq!(
+            c.record(Probe::Unreachable, true),
+            WatchdogVerdict::Continue
+        );
         // A single healthy probe wipes the streak…
         assert_eq!(c.record(Probe::Healthy, true), WatchdogVerdict::Continue);
         // …so it now takes another full run of 4 to exit.
-        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
-        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
-        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(
+            c.record(Probe::Unreachable, true),
+            WatchdogVerdict::Continue
+        );
+        assert_eq!(
+            c.record(Probe::Unreachable, true),
+            WatchdogVerdict::Continue
+        );
+        assert_eq!(
+            c.record(Probe::Unreachable, true),
+            WatchdogVerdict::Continue
+        );
         assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Exit(2));
     }
 
@@ -818,11 +846,23 @@ mod tests {
     fn watchdog_ignores_failures_inside_grace_window() {
         let mut c = WatchdogCounter::new(2);
         // grace not yet elapsed and no success yet → failures ignored entirely.
-        assert_eq!(c.record(Probe::Unreachable, false), WatchdogVerdict::Continue);
-        assert_eq!(c.record(Probe::Unreachable, false), WatchdogVerdict::Continue);
-        assert_eq!(c.record(Probe::Unreachable, false), WatchdogVerdict::Continue);
+        assert_eq!(
+            c.record(Probe::Unreachable, false),
+            WatchdogVerdict::Continue
+        );
+        assert_eq!(
+            c.record(Probe::Unreachable, false),
+            WatchdogVerdict::Continue
+        );
+        assert_eq!(
+            c.record(Probe::Unreachable, false),
+            WatchdogVerdict::Continue
+        );
         // Once grace elapses, counting starts from zero.
-        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(
+            c.record(Probe::Unreachable, true),
+            WatchdogVerdict::Continue
+        );
         assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Exit(2));
     }
 
@@ -832,8 +872,14 @@ mod tests {
         // First success arms the counter, so a later failure counts even though
         // the grace window has not elapsed.
         assert_eq!(c.record(Probe::Healthy, false), WatchdogVerdict::Continue);
-        assert_eq!(c.record(Probe::Unreachable, false), WatchdogVerdict::Continue);
-        assert_eq!(c.record(Probe::Unreachable, false), WatchdogVerdict::Exit(2));
+        assert_eq!(
+            c.record(Probe::Unreachable, false),
+            WatchdogVerdict::Continue
+        );
+        assert_eq!(
+            c.record(Probe::Unreachable, false),
+            WatchdogVerdict::Exit(2)
+        );
     }
 
     #[test]
@@ -841,7 +887,10 @@ mod tests {
         // max_failures == 0 is the disabled sentinel; record must never exit.
         let mut c = WatchdogCounter::new(0);
         for _ in 0..100 {
-            assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+            assert_eq!(
+                c.record(Probe::Unreachable, true),
+                WatchdogVerdict::Continue
+            );
         }
     }
 
@@ -856,9 +905,15 @@ mod tests {
             assert_eq!(c.record(Probe::Degraded, true), WatchdogVerdict::Continue);
         }
         // A degraded answer also resets an in-progress transport-failure streak.
-        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(
+            c.record(Probe::Unreachable, true),
+            WatchdogVerdict::Continue
+        );
         assert_eq!(c.record(Probe::Degraded, true), WatchdogVerdict::Continue);
-        assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Continue);
+        assert_eq!(
+            c.record(Probe::Unreachable, true),
+            WatchdogVerdict::Continue
+        );
         assert_eq!(c.record(Probe::Unreachable, true), WatchdogVerdict::Exit(2));
     }
 
@@ -939,7 +994,11 @@ mod tests {
                 Ok(r) if r.status().is_success() => Probe::Healthy,
                 _ => Probe::Unreachable,
             };
-            assert_eq!(probe, Probe::Unreachable, "surface must be dead post-cancel");
+            assert_eq!(
+                probe,
+                Probe::Unreachable,
+                "surface must be dead post-cancel"
+            );
             last = counter.record(probe, true);
         }
         assert_eq!(last, WatchdogVerdict::Exit(2));

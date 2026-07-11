@@ -38,7 +38,11 @@ async fn delete_action_matches_delete_memory_handler() {
         .await
         .expect("facade delete should succeed");
     let facade_json: Value = serde_json::from_str(&via_facade).expect("facade delete json");
-    assert_eq!(facade_json["deleted"], json!(true), "facade delete removed row");
+    assert_eq!(
+        facade_json["deleted"],
+        json!(true),
+        "facade delete removed row"
+    );
 
     // Re-seed the same id so the direct handler sees the identical pre-state.
     crate::facade_memory_ops::handle_tachi_memory(&server, seed)
@@ -54,7 +58,10 @@ async fn delete_action_matches_delete_memory_handler() {
     .await
     .expect("direct delete should succeed");
 
-    assert_eq!(via_facade, via_direct, "facade action='delete' must match delete_memory handler byte-for-byte");
+    assert_eq!(
+        via_facade, via_direct,
+        "facade action='delete' must match delete_memory handler byte-for-byte"
+    );
 }
 
 #[tokio::test]
