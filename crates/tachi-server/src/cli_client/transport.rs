@@ -41,13 +41,26 @@ const LONG_POLL_TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 /// capped at [`DAEMON_CALL_TIMEOUT_CEILING`].
 ///
 /// Currently the only known long-poll daemon tool is `tachi_task` with
-/// `action == "wait"` (see #970). Argument parsing is defensive: a missing,
-/// non-numeric, or negative `timeout_secs` falls back to the 60s default —
-/// never to the cap — matching `handle_tachi_task_wait`'s own
-/// `unwrap_or(600)` semantics being the daemon-side source of truth; the
-/// RPC layer only needs to *not undercut* whatever the daemon will actually
-/// do, and 60s is the safe/conservative fallback when that can't be
-/// determined client-side.
+/// `action == "wait"` (see #970, and the review-fix that closed the
+/// string/null gap #970's first pass left open). `timeout_secs` is coerced
+/// with [`tachi_params::opt_u64_from_value`] — the same lenient
+/// Null/Number/String-or-number mapping the daemon-side
+/// `TachiTaskParams::timeout_secs` field uses via
+/// `opt_u64_from_string_or_number` — so a JSON number, a numeric string
+/// (`"600"`), `null`, an empty string, or an absent key all resolve to the
+/// *same* effective timeout the daemon will actually apply
+/// (`unwrap_or(600)` in `handle_tachi_task_wait`), instead of the RPC layer
+/// silently disagreeing with the daemon about what "no timeout supplied"
+/// means.
+///
+/// A non-numeric garbage string (e.g. `"abc"`) also maps to `None` → the
+/// 600s wait default here, even though daemon-side `TachiTaskParams`
+/// deserialization would *reject* that value outright (a hard parse error
+/// before the wait loop ever starts). That's intentionally harmless: the
+/// whole `tachi_task` call fails fast on the daemon's strict param parse,
+/// so no real 600s-or-longer wait is ever entered — the derived 630s RPC
+/// timeout here only needs to not undercut/race that fast failure, and it
+/// doesn't.
 pub(super) fn daemon_call_timeout(params: &CallToolRequestParams) -> Duration {
     if params.name.as_ref() != "tachi_task" {
         return DAEMON_CALL_TIMEOUT;
@@ -65,20 +78,16 @@ pub(super) fn daemon_call_timeout(params: &CallToolRequestParams) -> Duration {
     }
 
     // Mirror handle_tachi_task_wait's own default (600s) when the caller
-    // didn't supply timeout_secs, so an absent value derives the same
-    // timeout the daemon will actually use rather than falling back to a
-    // generic default that would just recreate #970 for the common case of
-    // "wait with no explicit timeout_secs".
+    // didn't supply timeout_secs, or supplied a value that coerces to
+    // `None` (null, "", or a non-numeric string — see doc comment above),
+    // so all of those derive the same timeout the daemon will actually use
+    // rather than falling back to a generic 60s default that would
+    // recreate #970 for anything but a bare JSON number.
     const WAIT_DEFAULT_SECS: u64 = 600;
-    let requested_secs = match arguments.get("timeout_secs") {
-        None => WAIT_DEFAULT_SECS,
-        Some(value) => match value.as_u64() {
-            Some(secs) if secs > 0 => secs,
-            // Malformed (non-numeric, negative, zero, or not representable
-            // as u64): fall back to the 60s default per spec, not the cap.
-            _ => return DAEMON_CALL_TIMEOUT,
-        },
-    };
+    let requested_secs = arguments
+        .get("timeout_secs")
+        .and_then(tachi_params::opt_u64_from_value)
+        .unwrap_or(WAIT_DEFAULT_SECS);
 
     let requested = Duration::from_secs(requested_secs);
     let derived = requested.saturating_add(LONG_POLL_TIMEOUT_MARGIN);
@@ -303,22 +312,71 @@ mod tests {
         assert_eq!(daemon_call_timeout(&params), DAEMON_CALL_TIMEOUT);
     }
 
+    // --- Review-fix (#970 follow-up): string/null timeout_secs must not
+    // truncate the wait. `opt_u64_from_value` is the same lenient
+    // Null/Number/String-or-number coercion the daemon-side
+    // `TachiTaskParams::timeout_secs` field uses, so a numeric string, an
+    // explicit null, an absent key, and an empty string must all derive
+    // the *same* timeout the daemon will actually apply — the wait
+    // default (600s) + margin (30s) = 630s — not the generic 60s
+    // baseline. This replaces the old (wrong) assertion that null → 60s,
+    // which locked in the truncation bug this test module now guards
+    // against.
+
     #[test]
-    fn malformed_timeout_secs_falls_back_to_default_not_cap() {
-        for bad in [json!("not-a-number"), json!(-5), json!(0), json!(null)] {
-            let params = wait_params(Some(bad.clone()));
-            assert_eq!(
-                daemon_call_timeout(&params),
-                DAEMON_CALL_TIMEOUT,
-                "bad timeout_secs value {bad:?} should fall back to the 60s default"
-            );
-        }
+    fn wait_with_numeric_string_timeout_gets_timeout_plus_margin() {
+        let params = wait_params(Some(json!("600")));
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(630));
+    }
+
+    #[test]
+    fn wait_with_null_timeout_mirrors_wait_default() {
+        let params = wait_params(Some(json!(null)));
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(630));
+    }
+
+    #[test]
+    fn wait_with_empty_string_timeout_mirrors_wait_default() {
+        let params = wait_params(Some(json!("")));
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(630));
+    }
+
+    #[test]
+    fn wait_with_garbage_string_timeout_falls_back_to_wait_default_not_60s() {
+        // A non-numeric string ("abc") coerces to `None` here, same as
+        // null/absent, and derives the wait default (630s) rather than the
+        // generic 60s baseline. This is deliberately harmless even though
+        // it looks generous: daemon-side `TachiTaskParams` deserialization
+        // uses the *strict* `opt_u64_from_string_or_number` deserializer,
+        // which hard-errors on a non-numeric string — the whole
+        // `tachi_task` call fails fast on the daemon's param parse before
+        // any wait loop starts, so a real 600s+ wait is never actually
+        // entered under this value. Garbage->None->default is chosen for
+        // consistency with null/absent/empty-string rather than adding a
+        // separate garbage->60s special case that would just be a second
+        // codepath to keep in sync for no behavioral benefit (the call
+        // errors out well within either 60s or 630s regardless).
+        let params = wait_params(Some(json!("not-a-number")));
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(630));
+    }
+
+    #[test]
+    fn wait_with_negative_number_timeout_falls_back_to_wait_default() {
+        // Same reasoning as the garbage-string case: a negative JSON
+        // number isn't representable as u64, coerces to `None`, and the
+        // daemon-side strict deserializer would hard-error on it too (the
+        // call fails fast, no real long wait is ever entered).
+        let params = wait_params(Some(json!(-5)));
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(630));
     }
 
     #[test]
     fn missing_arguments_map_entirely_gets_default_timeout() {
         // tachi_task with action=wait but no arguments map at all (not just
-        // a missing key) must still fail safe to the 60s default.
+        // a missing key) must still fail safe to the 60s default — there is
+        // no `arguments` map to read `timeout_secs` from at all, which is a
+        // distinct case from a present-but-absent/null `timeout_secs` key
+        // (those go through the wait-default path above).
         let params = CallToolRequestParams::new("tachi_task".to_string());
         assert_eq!(daemon_call_timeout(&params), DAEMON_CALL_TIMEOUT);
     }
