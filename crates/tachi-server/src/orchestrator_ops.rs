@@ -9,6 +9,58 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 const ORCHESTRATOR_NS: &str = "orchestrator";
+/// A todo update reads, modifies, and writes one shared list. Retrying a small,
+/// fixed number of CAS conflicts preserves independent concurrent updates without
+/// turning the orchestrator into an unbounded write loop.
+const TODO_UPDATE_MAX_ATTEMPTS: usize = 3;
+
+#[cfg(test)]
+struct TodoUpdateSnapshotHook {
+    task_key: String,
+    callback: Box<dyn FnOnce(&MemoryServer, &str) + Send>,
+}
+
+#[cfg(test)]
+fn todo_update_snapshot_hook() -> &'static std::sync::Mutex<Option<TodoUpdateSnapshotHook>> {
+    static HOOK: std::sync::OnceLock<std::sync::Mutex<Option<TodoUpdateSnapshotHook>>> =
+        std::sync::OnceLock::new();
+    HOOK.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) fn set_todo_update_snapshot_hook(
+    task_key: impl Into<String>,
+    callback: impl FnOnce(&MemoryServer, &str) + Send + 'static,
+) {
+    let mut hook = todo_update_snapshot_hook()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert!(
+        hook.is_none(),
+        "todo-update snapshot hook already installed"
+    );
+    *hook = Some(TodoUpdateSnapshotHook {
+        task_key: task_key.into(),
+        callback: Box::new(callback),
+    });
+}
+
+#[cfg(test)]
+fn run_todo_update_snapshot_hook(server: &MemoryServer, key: &str) {
+    let hook = {
+        let mut slot = todo_update_snapshot_hook()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if slot.as_ref().is_some_and(|hook| hook.task_key == key) {
+            slot.take()
+        } else {
+            None
+        }
+    };
+    if let Some(hook) = hook {
+        (hook.callback)(server, key);
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -102,6 +154,23 @@ fn load_json<T: for<'de> Deserialize<'de>>(
     })
 }
 
+fn load_json_with_version<T: for<'de> Deserialize<'de>>(
+    server: &MemoryServer,
+    key: &str,
+) -> Result<Option<(T, u32)>, String> {
+    server.with_global_store(|store| -> Result<Option<(T, u32)>, String> {
+        let raw = store
+            .get_state_kv(ORCHESTRATOR_NS, key)
+            .map_err(|e| format!("orchestrator get_state: {e}"))?;
+        raw.map(|(json, version)| {
+            serde_json::from_str(&json)
+                .map(|parsed| (parsed, version))
+                .map_err(|e| format!("orchestrator parse {key}: {e}"))
+        })
+        .transpose()
+    })
+}
+
 fn save_json<T: Serialize>(server: &MemoryServer, key: &str, value: &T) -> Result<(), String> {
     let json = serde_json::to_string(value).map_err(|e| format!("orchestrator serialize: {e}"))?;
     server.with_global_store(|store| -> Result<(), String> {
@@ -109,6 +178,22 @@ fn save_json<T: Serialize>(server: &MemoryServer, key: &str, value: &T) -> Resul
             .set_state(ORCHESTRATOR_NS, key, &json)
             .map_err(|e| format!("orchestrator set_state: {e}"))?;
         Ok(())
+    })
+}
+
+fn save_json_if_version<T: Serialize>(
+    server: &MemoryServer,
+    key: &str,
+    value: &T,
+    version: Option<u32>,
+) -> Result<bool, String> {
+    let json = serde_json::to_string(value).map_err(|e| format!("orchestrator serialize: {e}"))?;
+    server.with_global_store(|store| {
+        match version {
+            Some(version) => store.set_state_if_version(ORCHESTRATOR_NS, key, &json, version),
+            None => store.insert_state_if_absent(ORCHESTRATOR_NS, key, &json),
+        }
+        .map_err(|e| format!("orchestrator compare-and-set: {e}"))
     })
 }
 
@@ -188,90 +273,110 @@ pub(crate) async fn handle_orchestrator(
             serde_json::to_string(&list).map_err(|e| format!("serialize todo_list: {e}"))
         }
         "todo_update" => {
-            let mut list = load_json::<OrchestratorTodoList>(server, &todos_key(&task_id))?
-                .unwrap_or_else(|| OrchestratorTodoList {
-                    task_id: task_id.clone(),
-                    todos: Vec::new(),
-                    updated_at: Utc::now().to_rfc3339(),
-                });
-            let now = Utc::now().to_rfc3339();
             let todo_id = params
                 .todo_id
                 .clone()
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            let status = match params.todo_status.as_deref() {
-                Some(raw) => parse_todo_status(raw)?,
-                None => list
-                    .todos
-                    .iter()
-                    .find(|todo| todo.id == todo_id)
-                    .map(|todo| todo.status.clone())
-                    .unwrap_or(TodoStatus::Pending),
-            };
-            if let Some(existing) = list.todos.iter_mut().find(|t| t.id == todo_id) {
-                if let Some(content) = params.todo_content.as_ref().filter(|c| !c.trim().is_empty())
-                {
-                    existing.content = content.clone();
-                }
-                if let Some(agent) = params.agent.as_ref().filter(|a| !a.trim().is_empty()) {
-                    existing.agent = agent.clone();
-                }
-                if status == TodoStatus::Done {
-                    if existing.status != TodoStatus::Done {
-                        existing.completed_at = Some(now.clone());
+            let key = todos_key(&task_id);
+            for attempt in 0..TODO_UPDATE_MAX_ATTEMPTS {
+                let (mut list, state_version) =
+                    match load_json_with_version::<OrchestratorTodoList>(server, &key)? {
+                        Some((list, version)) => (list, Some(version)),
+                        None => (
+                            OrchestratorTodoList {
+                                task_id: task_id.clone(),
+                                todos: Vec::new(),
+                                updated_at: Utc::now().to_rfc3339(),
+                            },
+                            None,
+                        ),
+                    };
+                // Test-only controlled interleaving: a competing write after this
+                // snapshot must make the insert/CAS fail and force a fresh merge.
+                #[cfg(test)]
+                run_todo_update_snapshot_hook(server, &key);
+                let now = Utc::now().to_rfc3339();
+                let status = match params.todo_status.as_deref() {
+                    Some(raw) => parse_todo_status(raw)?,
+                    None => list
+                        .todos
+                        .iter()
+                        .find(|todo| todo.id == todo_id)
+                        .map(|todo| todo.status.clone())
+                        .unwrap_or(TodoStatus::Pending),
+                };
+                if let Some(existing) = list.todos.iter_mut().find(|t| t.id == todo_id) {
+                    if let Some(content) = params.todo_content.as_ref().filter(|c| !c.trim().is_empty())
+                    {
+                        existing.content = content.clone();
                     }
-                } else {
-                    existing.completed_at = None;
-                }
-                if status == TodoStatus::Blocked {
-                    if let Some(reason) = params.blocked_reason.clone() {
-                        existing.blocked_reason = Some(reason);
+                    if let Some(agent) = params.agent.as_ref().filter(|a| !a.trim().is_empty()) {
+                        existing.agent = agent.clone();
                     }
-                } else {
-                    existing.blocked_reason = None;
-                }
-                existing.status = status.clone();
-                existing.updated_at = now.clone();
-                if let Some(verification) = params.verification.clone() {
-                    existing.verification = Some(verification);
-                }
-            } else {
-                let content = params
-                    .todo_content
-                    .clone()
-                    .filter(|c| !c.trim().is_empty())
-                    .ok_or_else(|| "todo_content is required when creating a new todo".to_string())?;
-                list.todos.push(OrchestratorTodo {
-                    id: todo_id.clone(),
-                    issue_ref: params.issue_ref.clone(),
-                    parent_id: params.parent_todo_id.clone(),
-                    agent: params
-                        .agent
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    status: status.clone(),
-                    content,
-                    blocked_reason: params.blocked_reason.clone(),
-                    verification: params.verification.clone(),
-                    references: params.references.clone(),
-                    created_at: now.clone(),
-                    updated_at: now.clone(),
-                    completed_at: if status == TodoStatus::Done {
-                        Some(now.clone())
+                    if status == TodoStatus::Done {
+                        if existing.status != TodoStatus::Done {
+                            existing.completed_at = Some(now.clone());
+                        }
                     } else {
-                        None
-                    },
-                });
+                        existing.completed_at = None;
+                    }
+                    if status == TodoStatus::Blocked {
+                        if let Some(reason) = params.blocked_reason.clone() {
+                            existing.blocked_reason = Some(reason);
+                        }
+                    } else {
+                        existing.blocked_reason = None;
+                    }
+                    existing.status = status.clone();
+                    existing.updated_at = now.clone();
+                    if let Some(verification) = params.verification.clone() {
+                        existing.verification = Some(verification);
+                    }
+                } else {
+                    let content = params
+                        .todo_content
+                        .clone()
+                        .filter(|c| !c.trim().is_empty())
+                        .ok_or_else(|| "todo_content is required when creating a new todo".to_string())?;
+                    list.todos.push(OrchestratorTodo {
+                        id: todo_id.clone(),
+                        issue_ref: params.issue_ref.clone(),
+                        parent_id: params.parent_todo_id.clone(),
+                        agent: params
+                            .agent
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        status: status.clone(),
+                        content,
+                        blocked_reason: params.blocked_reason.clone(),
+                        verification: params.verification.clone(),
+                        references: params.references.clone(),
+                        created_at: now.clone(),
+                        updated_at: now.clone(),
+                        completed_at: if status == TodoStatus::Done {
+                            Some(now.clone())
+                        } else {
+                            None
+                        },
+                    });
+                }
+                list.updated_at = now;
+                if save_json_if_version(server, &key, &list, state_version)? {
+                    return serde_json::to_string(&json!({
+                        "ok": true,
+                        "task_id": task_id,
+                        "todo_count": list.todos.len(),
+                    }))
+                    .map_err(|e| format!("serialize todo_update: {e}"));
+                }
+                if attempt + 1 == TODO_UPDATE_MAX_ATTEMPTS {
+                    return Err(format!(
+                        "todo_update could not preserve concurrent updates for task '{task_id}' after {TODO_UPDATE_MAX_ATTEMPTS} attempts"
+                    ));
+                }
             }
-            list.updated_at = now;
-            save_json(server, &todos_key(&task_id), &list)?;
-            serde_json::to_string(&json!({
-                "ok": true,
-                "task_id": task_id,
-                "todo_count": list.todos.len(),
-            }))
-            .map_err(|e| format!("serialize todo_update: {e}"))
+            unreachable!("todo update either persisted or returned a conflict error")
         }
         "handoff_write" => {
             let objective = params
