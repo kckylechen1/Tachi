@@ -7,6 +7,17 @@ pub(crate) fn is_bigmodel_remote_mcp(def: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+/// Per-server opt-in to allow this remote MCP server's HTTP client to honor a
+/// configured/system proxy (HTTP_PROXY/HTTPS_PROXY/etc). Defaults to `false`
+/// (fail-safe): any absent or malformed `allow_proxy` field resolves to the
+/// pinned/no-proxy default — never to the proxy-permitted path. See
+/// `kckylechen1/tachi#947`.
+pub(super) fn remote_mcp_allow_proxy(def: &serde_json::Value) -> bool {
+    def.get("allow_proxy")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
 pub(super) fn remote_mcp_url(def: &serde_json::Value) -> Option<&str> {
     if let Some(url) = def.get("url").and_then(|value| value.as_str()) {
         return Some(url);
@@ -145,6 +156,8 @@ pub(super) async fn validate_remote_mcp_url_for_connect(
 pub(super) fn build_remote_mcp_http_client(
     validated: &ValidatedRemoteMcpUrl,
     timeout_secs: u64,
+    allow_proxy: bool,
+    server_label: &str,
 ) -> Result<reqwest::Client, String> {
     // reqwest is built with rustls-no-provider; install ring before building
     // any HTTPS-capable client so the first request doesn't panic.
@@ -153,14 +166,44 @@ pub(super) fn build_remote_mcp_http_client(
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(timeout_secs));
-    if let Some(addrs) = &validated.resolved_addrs {
-        if let Some(host) = url::Url::parse(&validated.url)
-            .ok()
-            .and_then(|parsed| parsed.host_str().map(str::to_string))
-        {
-            builder = builder.resolve_to_addrs(host.as_str(), addrs);
+
+    if allow_proxy {
+        // Owner-ratified escape hatch (kckylechen1/tachi#947): a per-server
+        // `allow_proxy: true` opt-in permits a configured/system proxy
+        // (HTTP_PROXY/HTTPS_PROXY/etc) to handle this server's connection.
+        // The `resolve_to_addrs` IP pin below is meaningless behind a proxy
+        // (the proxy — not us — does DNS + connect), so it is intentionally
+        // skipped in this branch. This is a conscious, per-server bypass of
+        // SSRF IP pinning, never a blanket default.
+        tracing::warn!(
+            server = %server_label,
+            "remote MCP server '{server_label}' has allow_proxy=true: SSRF IP pinning is \
+             bypassed for this server because its HTTP client is permitted to use a \
+             configured/system proxy"
+        );
+    } else {
+        // SECURITY (fail-safe default, kckylechen1/tachi#947): tachi-server's
+        // reqwest is built with the `system-proxy` feature, which by default
+        // honors $HTTP_PROXY/$HTTPS_PROXY/system proxy settings. Without
+        // `.no_proxy()`, our pre-connect SSRF validation (resolving the host
+        // and rejecting private/local IPs, then pinning the connection to
+        // those exact resolved addresses via `resolve_to_addrs`) is dead
+        // weight: a proxy that rebinds the hostname to 127.x/private
+        // (attacker-controlled or misconfigured proxy) bypasses the guard
+        // entirely. `.no_proxy()` clears any configured proxy AND disables
+        // the automatic system-proxy lookup, so this client always connects
+        // directly to the addresses we already validated.
+        builder = builder.no_proxy();
+        if let Some(addrs) = &validated.resolved_addrs {
+            if let Some(host) = url::Url::parse(&validated.url)
+                .ok()
+                .and_then(|parsed| parsed.host_str().map(str::to_string))
+            {
+                builder = builder.resolve_to_addrs(host.as_str(), addrs);
+            }
         }
     }
+
     builder
         .build()
         .map_err(|e| format!("build http client: {e}"))
