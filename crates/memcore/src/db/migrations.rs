@@ -838,8 +838,12 @@ mod tests {
         }
 
         let path = tmp.path().to_str().expect("utf8 tmp path");
-        let err = crate::MemoryStore::open_read_only(path)
-            .expect_err("read-only open of a newer-stamped DB must hard-fail");
+        // Match rather than expect_err: MemoryStore (the Ok variant) is not Debug,
+        // and we don't want to derive Debug on a struct holding live connections.
+        let err = match crate::MemoryStore::open_read_only(path) {
+            Ok(_) => panic!("read-only open of a newer-stamped DB must hard-fail"),
+            Err(e) => e,
+        };
         let msg = err.to_string();
         assert!(
             msg.contains(&format!(
