@@ -244,12 +244,17 @@ fn apply_decision_and_research_boosts(
     const DECISION_IMPORTANCE_FLOOR: f64 = 0.85;
     /// provisional decision boost (tachi#708/#896 same-store precision).
     const DECISION_BOOST: f64 = 1.55;
+    /// Provisional governance-intent decision boost (tachi#958): a query
+    /// asking for a governance framing seeks the owner decision, not the
+    /// repeated inventory vocabulary of registry stubs.
+    const GOVERNANCE_DECISION_BOOST: f64 = 1.20;
     /// provisional research-path boost under /wiki/**/research/**
     /// (calibrated so labeled research notes beat denser architecture wikis
     /// on the ops-audit adjacent-wiki case).
     const RESEARCH_PATH_BOOST: f64 = 2.85;
 
     let research_query = query_looks_research_shaped(query);
+    let governance_query = query_looks_governance_shaped(query);
 
     for (id, entry) in entries_ref {
         let mut mult = 1.0_f64;
@@ -257,6 +262,9 @@ fn apply_decision_and_research_boosts(
             && entry.importance >= DECISION_IMPORTANCE_FLOOR
         {
             mult *= DECISION_BOOST;
+            if governance_query {
+                mult *= GOVERNANCE_DECISION_BOOST;
+            }
         }
         if research_query && is_research_wiki_path(&entry.path) {
             mult *= RESEARCH_PATH_BOOST;
@@ -279,6 +287,15 @@ fn query_looks_research_shaped(query: &str) -> bool {
         || q.contains("paper")
         || q.contains("arxiv")
         || q.contains("evaluation protocol")
+}
+
+fn query_looks_governance_shaped(query: &str) -> bool {
+    let q = query.to_ascii_lowercase();
+    q.contains("governance")
+        || q.contains("framing")
+        || q.contains("owner stance")
+        || q.contains("owner ratified")
+        || q.contains("adjudicat")
 }
 
 fn is_research_wiki_path(path: &str) -> bool {
