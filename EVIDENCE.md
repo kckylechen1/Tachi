@@ -349,3 +349,132 @@ a nonexistent placeholder constant, under the (correct, in hindsight) assumption
 tool transport might not have applied it — once the transport recovered, `git diff` confirmed
 the placeholder edit never actually landed on disk, so no revert was needed. Recorded here for
 completeness; it does not affect the verified code above.
+
+---
+
+# #1016 — `handoff_ops` deprecation chore — verification evidence
+
+Branch: `chore/handoff-ops-deprecation` off `origin/main` @ `71460133`
+(`fix(#987,#997): deflake stdio_proxy / component_check / subprocess-reap families (#1006)`).
+
+Scope: `crates/tachi-server/**` only, per packet. No deletion — `handoff_ops` marked
+deprecated (module doc, facade tool descriptions, `deprecated` field on
+`handoff_leave`/`handoff_check` responses), `promote_issue` left untouched (no replacement
+yet), one doc paragraph added recording the #1016 ruling.
+
+## Grep sweep — in-tree callers of `handoff_leave`/`handoff_check`
+
+```
+$ grep -rn "handoff_leave\|handoff_check\|handle_handoff_leave\|handle_handoff_check\|HandoffLeaveParams\|HandoffCheckParams\|tachi_handoff\b" crates \
+  | grep -v "/tests\.rs\|/tests/\|handoff_ops/handlers.rs\|handoff_ops.rs\|handoff_facade.rs"
+
+crates/tachi-server/src/sticky_ops.rs:22:  (doc comment, references old semantics being replaced)
+crates/tachi-server/src/shared_defs.rs:69:            "handoff_leave",   (NON_IDEMPOTENT_TOOL_NAMES registry entry)
+crates/tachi-server/src/server_state/cache.rs:64-65,77: "handoff_leave"/"handoff_check"/"tachi_handoff" (idempotency-key registry entries)
+crates/tachi-server/src/handoff_ops/memo.rs:25:          "handoff_leave"  (memo category tag, internal to handoff_ops itself)
+crates/tachi-server/src/agent_markdown/briefing.rs:94:   cross-project briefing prose pointing agents at tachi_handoff
+crates/tachi-hub/src/tool_profiles/patterns.rs:62-65:    tool-name allow-list entries (policy registry, not a caller)
+crates/tachi-params/src/agent.rs:15,33:                  HandoffLeaveParams/HandoffCheckParams struct defs (not a call site)
+```
+
+Only one is a genuine "production caller" beyond the handoff_ops module and its own facade/tests:
+`agent_markdown/briefing.rs:94`, the cross-project-handoffs briefing section that tells agents to
+call `tachi_handoff(action='check'/'leave')`. Not trivially mechanical to migrate (it renders
+pre-existing `/handoff`-path memory rows written by the old code path; switching the *read* side to
+sticky/HandoffPacket without a data migration would silently stop surfacing old pending handoffs) —
+updated its prose in place to point at the replacements as a follow-up pointer rather than migrating
+the read path in this chore. Listed here as the PR-body follow-up per the packet's instruction.
+The registry/pattern-list entries (`shared_defs.rs`, `server_state/cache.rs`,
+`tachi-hub/tool_profiles/patterns.rs`) are tool-name classification lists (idempotency /
+profile-allow-list), not call sites — deprecated tools still need to be classified there, so no
+change needed.
+
+## Build
+
+```
+$ export CARGO_TARGET_DIR=<worktree>/isolated-target
+$ cargo build -p tachi-server
+   ... (workspace deps)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 54s
+(exit 0)
+```
+
+## Touched tests — GREEN (includes two new `deprecated`-field assertions)
+
+```
+$ cargo test -p tachi-server handoff
+running 28 tests
+test handoff_ops::tests::agent_resolution::resolve_from_agent_falls_back_to_profile_env_then_unknown ... ok
+test handoff_ops::tests::promotion::existing_issue_url_extracts_from_metadata ... ok
+test handoff_ops::tests::promotion::promoted_status_is_not_pending ... ok
+test handoff_ops::tests::persisted_ack::pending_handoff_entries_reads_persisted_memory ... ok
+test handoff_ops::tests::persisted_ack::acknowledge_updates_persisted_handoff_metadata ... ok
+test handoff_ops::tests::promotion::promoting_intermediate_state_is_set_before_issue_creation ... ok
+test handoff_ops::tests::cleanup_supersede::test_gc_expired_handoff_memories ... ok
+test handoff_ops::tests::cleanup_supersede::test_handoff_leave_supersedes_pending_duplicate ... ok
+test handoff_ops::tests::promotion::promote_rejects_invalid_flow_id_before_issue_creation ... ok
+test handoff_ops::tests::promotion::promote_dedup_returns_already_promoted_without_force ... ok
+test handoff_ops::tests::persisted_ack::handoff_check_reads_and_acks_persisted_memos_after_restart ... ok
+test handoff_ops::tests::promotion::promote_force_creates_new_issue_even_if_already_promoted ... ok
+test handoff_ops::tests::cleanup_supersede::supersede_pending_handoffs_propagates_db_errors ... ok
+test tests::dispatch_tests::workflow_artifacts::pr_release_handoff::release_note::validation::lifecycle_release_note_requires_flow_or_pr_ref_before_github_access ... ok
+test tests::handoff_tests::chain_skills_mock_step_reports_simulated_raw_output ... ok
+test tests::handoff_tests::chain_skills_document_steps_pipe_verbatim_without_simulation_marker ... ok
+test tests::dispatch_tests::workflow_artifacts::pr_release_handoff::release_note::validation::tachi_gh_release_note_uses_lifecycle_validation_without_repo ... ok
+test handoff_ops::tests::promotion::promote_handoff_issue_updates_memory_and_flow_artifacts ... ok
+test tests::handoff_tests::handoff_leave_and_check_roundtrip ... ok
+test tests::handoff_tests::handoff_leave_persists_to_memory_store ... ok
+test tests::handoff_tests::handoff_untargeted_memo_visible_to_all ... ok
+test tests::orchestrator_tests::orchestrator_recovery_briefing_ignores_completed_todo_without_handoff ... ok
+test tests::orchestrator_tests::orchestrator_todos_and_handoff_persist ... ok
+test tests::dispatch_tests::workflow_artifacts::briefing_doc_index::feature_briefing::handoff_board::tachi_task_briefing_returns_feature_scoped_handoff_board ... ok
+test tests::dispatch_tests::workflow_artifacts::pr_release_handoff::pr_handoff::tachi_gh_pr_handoff_writes_pr_body_with_verification_and_gaps ... ok
+test tests::dispatch_tests::workflow_artifacts::pr_release_handoff::release_note::flow_artifact::lifecycle_release_note_writes_flow_artifact_with_refs ... ok
+test tests::dispatch_tests::workflow_artifacts::pr_release_handoff::release_note::optional_fields::lifecycle_release_note_skips_empty_optional_github_fields ... ok
+test tests::dispatch_tests::workflow_artifacts::pr_release_handoff::release_note::pr_mismatch::lifecycle_release_note_rejects_mismatched_pr_ref_for_cached_flow_pr ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 1576 filtered out; finished in 3.42s
+```
+
+New assertions added to `handoff_leave_and_check_roundtrip` (in
+`crates/tachi-server/src/tests/handoff_tests.rs`) verify the `deprecated` field exists on both
+the `leave` and `check` JSON responses and names `#1016`, `sticky_leave`, and `handoff_write` —
+this is deliberately not a red/green pair (deprecation is additive, no prior behavior to break),
+but the assertions fail-closed if the field is ever dropped.
+
+## Full `tachi-server --lib` suite — GREEN
+
+```
+$ cargo test -p tachi-server --lib
+test result: ok. 1602 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 180.96s
+```
+
+## fmt --check — clean
+
+```
+$ cargo fmt --check
+(no output, exit 0)
+```
+
+## clippy -p tachi-server --all-targets --no-deps -- -D warnings — clean
+
+```
+$ cargo clippy -p tachi-server --all-targets --no-deps -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 08s
+(exit 0, zero warnings)
+```
+
+## Files touched
+
+- `crates/tachi-server/src/handoff_ops.rs` — module doc (deprecation + replacement split) +
+  `DEPRECATION_NOTICE` const.
+- `crates/tachi-server/src/handoff_ops/handlers.rs` — `deprecated` field on both response JSONs.
+- `crates/tachi-server/src/tools/handoff_facade.rs` — `DEPRECATED (#1016): ...` prefix on
+  `handoff_leave`/`handoff_check`/`tachi_handoff` tool descriptions.
+- `crates/tachi-server/src/orchestrator_ops.rs` — module doc cross-reference to the #1016 ruling
+  (HandoffPacket = canonical baton).
+- `crates/tachi-server/src/agent_markdown/briefing.rs` — briefing prose pointer to sticky/HandoffPacket.
+- `crates/tachi-server/src/tests/handoff_tests.rs` — `deprecated`-field assertions.
+- `docs/engineering/architecture/facade-granularity-and-profile-alignment.md` — new §4b recording
+  the #1016 ruling (closest existing doc that already tracks facade-consolidation rulings, e.g.
+  the #757 PR-lifecycle dedup; no dedicated handoff/sticky architecture doc exists yet).

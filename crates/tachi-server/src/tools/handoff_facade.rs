@@ -15,7 +15,7 @@ use crate::MemoryServer;
 #[tool_router(router = handoff_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
     #[tool(
-        description = "Leave a handoff memo for the next agent session. Contains session summary, next steps, and optional context."
+        description = "DEPRECATED (#1016): use tachi_memory(action='sticky_leave') for a short agent-to-agent note, or tachi_orchestrator(action='handoff_write') for a structured task baton. Leave a handoff memo for the next agent session. Contains session summary, next steps, and optional context."
     )]
     pub(crate) async fn handoff_leave(
         &self,
@@ -25,7 +25,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Check for pending handoff memos from previous agent sessions. Call this at the start of a new session."
+        description = "DEPRECATED (#1016): use tachi_memory(action='sticky_check') or tachi_orchestrator(action='handoff_read'). Check for pending handoff memos from previous agent sessions. Call this at the start of a new session."
     )]
     pub(crate) async fn handoff_check(
         &self,
@@ -65,7 +65,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Unified handoff: 'leave' a memo, 'check' pending memos, or 'promote_issue' to create/link a GitHub issue from a handoff memo."
+        description = "DEPRECATED for 'leave'/'check' (#1016): prefer tachi_memory(action='sticky_leave'/'sticky_check') for a short agent-to-agent note, or tachi_orchestrator(action='handoff_write'/'handoff_read') for a structured task baton. 'promote_issue' (memo -> GitHub issue) is unaffected and has no replacement yet. Unified handoff: 'leave' a memo, 'check' pending memos, or 'promote_issue' to create/link a GitHub issue from a handoff memo."
     )]
     pub(crate) async fn tachi_handoff(
         &self,

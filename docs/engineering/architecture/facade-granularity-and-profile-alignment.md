@@ -148,6 +148,27 @@ moved into a facade.
 > This is the smoking gun: **`delegate` still needs a pile of un-faceted legacy tools precisely because
 > the facade is too coarse for `ToolProfile` to deny `dispatch` alone.**
 
+## 4b. `handoff_ops` deprecated — memo vs. baton split (resolved #1016)
+
+`handoff_ops` (#157-era `handoff_leave`/`handoff_check`/`tachi_handoff`) tried to cover two
+different jobs with one loosely-addressed, read-then-write memo shape. Both jobs now have a
+purpose-built home, and #1016 rules `handoff_ops` **deprecated, not deleted**:
+
+- **Short agent-to-agent note, read-once** → `sticky_ops` (#964,
+  `tachi_memory(action='sticky_leave'|'sticky_check')`). Atomic-claim delivery via `hard_state`
+  CAS, TTL, and explicit addressing replace the old acknowledge-loop's last-write-wins race.
+- **Structured baton for a resumed/handed-off task** → `orchestrator_ops::HandoffPacket`
+  (`tachi_orchestrator(action='handoff_write'|'handoff_read')`). Carries objective /
+  current_state / completed_steps / remaining_steps / files_touched / commands_run / tests_run /
+  known_blockers / next_action, keyed by `task_id` — the shape a resuming session needs, which the
+  memo shape never had.
+
+`promote_issue` (memo → GitHub issue) has no replacement yet and is unaffected. Deletion of
+`handoff_ops` is a later, separately-audited cut (#757-style) once callers are confirmed migrated;
+this ruling only marks the surface deprecated (module doc, facade tool descriptions, and a
+`deprecated` field on `handoff_leave`/`handoff_check` responses) so agents see the pointer at call
+time. Refs #1016.
+
 ## 5. DispatchProfile — keep it
 
 `DispatchProfile` (`claude_plan`, `codex_55_review`, `kimi_arch`, …) answers "which sub-agent/model to
