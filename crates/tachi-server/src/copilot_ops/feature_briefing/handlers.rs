@@ -142,97 +142,94 @@ pub(crate) async fn handle_tachi_feature_briefing(
         crate::clamp_facade_top_k(params.top_k.unwrap_or(6))
     };
     let query = feature_briefing_query(params);
-    let board = feature_board(server, params, top_k).await;
     let project_work_record = project_work_records(params);
     let canonical_docs = canonical_doc_refs(params);
     let run_artifacts = feature_run_artifacts(params.flow_id.as_deref())?;
 
-    let wiki_rows = search_memory_rows(
-        server,
-        SearchMemoryParams {
-            query: query.clone(),
-            query_vec: None,
-            top_k,
-            path_prefix: Some("/wiki".to_string()),
-            include_training: false,
-            include_archived: false,
-            candidates_per_channel: top_k.max(20),
-            mmr_threshold: Some(0.85),
-            graph_expand_hops: 1,
-            graph_relation_filter: None,
-            weights: None,
-            context_symbols: Vec::new(),
-            agent_role: params.agent_id.clone(),
-            project: None,
-            domain: params.domain.clone(),
-            file_context: None,
-            error_context: None,
-            enable_rerank: false,
-            as_of: None,
-            include_metadata: true,
-        },
-        false,
-    )
-    .await
-    .unwrap_or_default();
-
-    let memory_rows = search_memory_rows(
-        server,
-        SearchMemoryParams {
-            query: query.clone(),
-            query_vec: None,
-            top_k,
-            path_prefix: params.path_prefix.clone(),
-            include_training: false,
-            include_archived: false,
-            candidates_per_channel: top_k.max(20),
-            mmr_threshold: Some(0.85),
-            graph_expand_hops: 1,
-            graph_relation_filter: None,
-            weights: None,
-            context_symbols: Vec::new(),
-            agent_role: params.agent_id.clone(),
-            project: params.project.clone(),
-            domain: params.domain.clone(),
-            file_context: None,
-            error_context: None,
-            enable_rerank: false,
-            as_of: None,
-            include_metadata: true,
-        },
-        !params.include_global,
-    )
-    .await
-    .unwrap_or_default();
-
-    let eval_rows = search_memory_rows(
-        server,
-        SearchMemoryParams {
-            query: query.clone(),
-            query_vec: None,
-            top_k: top_k.min(5),
-            path_prefix: Some("/eval".to_string()),
-            include_training: false,
-            include_archived: false,
-            candidates_per_channel: top_k.max(20),
-            mmr_threshold: Some(0.85),
-            graph_expand_hops: 0,
-            graph_relation_filter: None,
-            weights: None,
-            context_symbols: Vec::new(),
-            agent_role: params.agent_id.clone(),
-            project: params.project.clone(),
-            domain: params.domain.clone(),
-            file_context: None,
-            error_context: None,
-            enable_rerank: false,
-            as_of: None,
-            include_metadata: true,
-        },
-        !params.include_global,
-    )
-    .await
-    .unwrap_or_default();
+    let (board, wiki_rows, memory_rows, eval_rows) = tokio::join!(
+        feature_board(server, params, top_k),
+        search_memory_rows(
+            server,
+            SearchMemoryParams {
+                query: query.clone(),
+                query_vec: None,
+                top_k,
+                path_prefix: Some("/wiki".to_string()),
+                include_training: false,
+                include_archived: false,
+                candidates_per_channel: top_k.max(20),
+                mmr_threshold: Some(0.85),
+                graph_expand_hops: 1,
+                graph_relation_filter: None,
+                weights: None,
+                context_symbols: Vec::new(),
+                agent_role: params.agent_id.clone(),
+                project: None,
+                domain: params.domain.clone(),
+                file_context: None,
+                error_context: None,
+                enable_rerank: false,
+                as_of: None,
+                include_metadata: true,
+            },
+            false,
+        ),
+        search_memory_rows(
+            server,
+            SearchMemoryParams {
+                query: query.clone(),
+                query_vec: None,
+                top_k,
+                path_prefix: params.path_prefix.clone(),
+                include_training: false,
+                include_archived: false,
+                candidates_per_channel: top_k.max(20),
+                mmr_threshold: Some(0.85),
+                graph_expand_hops: 1,
+                graph_relation_filter: None,
+                weights: None,
+                context_symbols: Vec::new(),
+                agent_role: params.agent_id.clone(),
+                project: params.project.clone(),
+                domain: params.domain.clone(),
+                file_context: None,
+                error_context: None,
+                enable_rerank: false,
+                as_of: None,
+                include_metadata: true,
+            },
+            !params.include_global,
+        ),
+        search_memory_rows(
+            server,
+            SearchMemoryParams {
+                query: query.clone(),
+                query_vec: None,
+                top_k: top_k.min(5),
+                path_prefix: Some("/eval".to_string()),
+                include_training: false,
+                include_archived: false,
+                candidates_per_channel: top_k.max(20),
+                mmr_threshold: Some(0.85),
+                graph_expand_hops: 0,
+                graph_relation_filter: None,
+                weights: None,
+                context_symbols: Vec::new(),
+                agent_role: params.agent_id.clone(),
+                project: params.project.clone(),
+                domain: params.domain.clone(),
+                file_context: None,
+                error_context: None,
+                enable_rerank: false,
+                as_of: None,
+                include_metadata: true,
+            },
+            !params.include_global,
+        ),
+    );
+    let wiki_rows = wiki_rows.unwrap_or_default();
+    let memory_rows = memory_rows.unwrap_or_default();
+    let eval_rows = eval_rows.unwrap_or_default();
 
     let skills = recommend_skills_light(server, &query, 5).unwrap_or_default();
     let routing = build_task_brief_routing(&query, &skills);
