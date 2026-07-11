@@ -23,6 +23,7 @@ mod tests {
             agent: Some("codex".to_string()),
             profile: None,
             task: "noop".to_string(),
+            execution_level: None,
             cwd: Some("/tmp/project".to_string()),
             env_id: None,
             unmanaged_cwd: None,

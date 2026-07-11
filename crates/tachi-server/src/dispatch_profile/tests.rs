@@ -11,6 +11,7 @@ fn params() -> TachiDispatchParams {
         agent: None,
         profile: Some("claude_plan".to_string()),
         task: "Plan issue #194".to_string(),
+        execution_level: None,
         cwd: None,
         env_id: None,
         unmanaged_cwd: None,

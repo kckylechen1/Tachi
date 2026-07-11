@@ -145,6 +145,7 @@ pub(crate) fn runtime_observability_json(
         },
         "provider_secret_count": server.llm.provider_secret_count(),
         "vault": vault,
+        "host_profile": crate::host_profile::runtime_json(),
     });
     // The full provider_health/provider_pools arrays are heavy (~20 entries
     // each) and duplicate what the status `api_keys` block already carries.
