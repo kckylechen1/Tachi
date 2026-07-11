@@ -5,7 +5,23 @@ pub(crate) fn build_issue_automation_plan(
     risk_override: Option<&str>,
 ) -> Value {
     let has_acceptance_criteria = issue_has_acceptance_criteria(issue);
-    let high_risk_reasons = issue_high_risk_reasons(issue, risk_override);
+    let risk_signals = issue_risk_signals(issue, risk_override);
+    // Only high-confidence signals gate dispatch (#925). Body-only keyword
+    // hits stay advisory so renderer/CLI issues mentioning "token" in prose
+    // do not false-positive into needs_leader.
+    let high_risk_reasons: Vec<String> = risk_signals
+        .iter()
+        .filter(|signal| signal.confidence == "high")
+        .map(|signal| signal.reason.clone())
+        .collect();
+    let mut high_risk_reasons = high_risk_reasons;
+    dedupe_strings(&mut high_risk_reasons);
+    let risk_advisory: Vec<Value> = risk_signals
+        .iter()
+        .filter(|signal| signal.confidence == "low")
+        .map(RiskSignal::to_json)
+        .collect();
+    let risk_evidence: Vec<Value> = risk_signals.iter().map(RiskSignal::to_json).collect();
     let mut leader_gate_reasons = Vec::new();
     if !has_acceptance_criteria {
         leader_gate_reasons.push("missing_acceptance_criteria".to_string());
@@ -14,6 +30,13 @@ pub(crate) fn build_issue_automation_plan(
     dedupe_strings(&mut leader_gate_reasons);
 
     let dispatch_allowed = leader_gate_reasons.is_empty();
+    let risk_level = if !high_risk_reasons.is_empty() {
+        "high"
+    } else if !risk_advisory.is_empty() {
+        "advisory"
+    } else {
+        "standard"
+    };
     let branch = format!(
         "tachi/issue-{}-{}",
         issue.number,
@@ -29,10 +52,12 @@ pub(crate) fn build_issue_automation_plan(
         "status": if dispatch_allowed { "ready_for_dispatch" } else { "needs_leader" },
         "dispatch_allowed": dispatch_allowed,
         "requires_leader": !dispatch_allowed,
-        "risk": if high_risk_reasons.is_empty() { "standard" } else { "high" },
+        "risk": risk_level,
         "has_acceptance_criteria": has_acceptance_criteria,
         "missing_acceptance_criteria": !has_acceptance_criteria,
         "high_risk_reasons": high_risk_reasons,
+        "risk_evidence": risk_evidence,
+        "risk_advisory": risk_advisory,
         "leader_gate_reasons": leader_gate_reasons,
         "branch": branch,
         "pr_title": issue.title,
@@ -70,7 +95,10 @@ pub(crate) async fn handle_task_intake(
     let briefing =
         crate::copilot_ops::handle_tachi_feature_briefing(server, &briefing_params).await?;
     let pr_handoff_path = run_dir_for_flow_id(&flow_id)?.join("pr_handoff.md");
-    serde_json::to_string(&json!({
+    // #527: default intake is a receipt (plan + paths). Full briefing is a
+    // large read model — include only on format=full (was 50KB+ in dogfood).
+    let full = crate::facade_memory_ops::wants_full_format(params.format.as_deref());
+    let mut receipt = json!({
         "ok": true,
         "action": "intake",
         "flow_id": flow_id,
@@ -81,9 +109,19 @@ pub(crate) async fn handle_task_intake(
         "spec_paths": issue.spec_paths,
         "pr_handoff_path": pr_handoff_path.to_string_lossy(),
         "run_dir": run_dir_for_flow_id(&flow_id)?.to_string_lossy(),
-        "briefing": serde_json::from_str::<Value>(&briefing).unwrap_or(json!(briefing)),
-    }))
-    .map_err(|e| format!("serialize intake: {e}"))
+    });
+    if full {
+        receipt.as_object_mut().expect("receipt object").insert(
+            "briefing".to_string(),
+            serde_json::from_str::<Value>(&briefing).unwrap_or(json!(briefing)),
+        );
+    } else {
+        receipt.as_object_mut().expect("receipt object").insert(
+            "note".to_string(),
+            json!("receipt: briefing omitted; format=full for feature briefing board, or tachi_task(action='briefing')"),
+        );
+    }
+    serde_json::to_string(&receipt).map_err(|e| format!("serialize intake: {e}"))
 }
 
 pub(crate) async fn handle_task_link_pr(
@@ -113,6 +151,7 @@ pub(crate) async fn handle_task_link_pr(
 }
 
 pub(crate) fn handle_task_pr_handoff(params: &TachiTaskParams) -> Result<String, String> {
+    let started = std::time::Instant::now();
     let flow_id = params
         .flow_id
         .as_deref()
@@ -122,6 +161,7 @@ pub(crate) fn handle_task_pr_handoff(params: &TachiTaskParams) -> Result<String,
     let run_dir = run_dir_for_flow_id(flow_id)?;
     let status = read_json_file(&run_dir.join("status.json"))?
         .ok_or_else(|| format!("flow status not found for flow_id '{flow_id}'"))?;
+    let after_status = started.elapsed();
     let task = params
         .task
         .clone()
@@ -136,6 +176,7 @@ pub(crate) fn handle_task_pr_handoff(params: &TachiTaskParams) -> Result<String,
         .cloned()
         .unwrap_or_else(|| json!({ "status": "unknown", "dispatch_allowed": true }));
     let verification = crate::verify_ops::read_verification_ledger(flow_id)?;
+    let after_verification = started.elapsed();
     let verification_overall = verification
         .as_ref()
         .and_then(|ledger| ledger.get("overall"))
@@ -179,6 +220,7 @@ pub(crate) fn handle_task_pr_handoff(params: &TachiTaskParams) -> Result<String,
     );
     let path = run_dir.join("pr_handoff.md");
     write_text_atomic(&path, &pr_body)?;
+    let after_write = started.elapsed();
     let path_string = path.to_string_lossy().to_string();
     merge_flow_status(
         &run_dir,
@@ -193,7 +235,10 @@ pub(crate) fn handle_task_pr_handoff(params: &TachiTaskParams) -> Result<String,
             "updated_at": Utc::now().to_rfc3339(),
         }),
     )?;
-    serde_json::to_string(&json!({
+    // #527: default receipt keeps the path, not the full body (caller can
+    // open the file). format=full restores the pre-change echo of pr_body.
+    let full = crate::facade_memory_ops::wants_full_format(params.format.as_deref());
+    let mut receipt = json!({
         "ok": true,
         "action": "pr_handoff",
         "flow_id": flow_id,
@@ -203,10 +248,26 @@ pub(crate) fn handle_task_pr_handoff(params: &TachiTaskParams) -> Result<String,
         "branch": branch,
         "pr_title": pr_title,
         "pr_handoff_path": path_string,
-        "pr_body": pr_body,
         "verification_overall": verification_overall,
-    }))
-    .map_err(|e| format!("serialize pr_handoff: {e}"))
+        "timing_ms": {
+            "status_read": after_status.as_millis() as u64,
+            "verification_read": after_verification.saturating_sub(after_status).as_millis() as u64,
+            "write_handoff": after_write.saturating_sub(after_verification).as_millis() as u64,
+            "total": started.elapsed().as_millis() as u64,
+        },
+    });
+    if full {
+        receipt
+            .as_object_mut()
+            .expect("receipt object")
+            .insert("pr_body".to_string(), json!(pr_body));
+    } else {
+        receipt.as_object_mut().expect("receipt object").insert(
+            "note".to_string(),
+            json!("receipt: pr_body written to pr_handoff_path; format=full to echo body"),
+        );
+    }
+    serde_json::to_string(&receipt).map_err(|e| format!("serialize pr_handoff: {e}"))
 }
 
 pub(crate) fn guard_issue_flow_dispatch(params: &TachiTaskParams) -> Result<(), String> {
@@ -258,18 +319,57 @@ pub(super) fn issue_has_acceptance_criteria(issue: &IssueSnapshot) -> bool {
     .any(|needle| text.contains(needle))
 }
 
-pub(super) fn issue_high_risk_reasons(
+/// One high-risk classifier hit with cited evidence (#925).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RiskSignal {
+    pub reason: String,
+    pub needle: String,
+    pub source: String,
+    pub confidence: String,
+    pub evidence: String,
+}
+
+impl RiskSignal {
+    fn to_json(&self) -> Value {
+        json!({
+            "reason": self.reason,
+            "needle": self.needle,
+            "source": self.source,
+            "confidence": self.confidence,
+            "evidence": self.evidence,
+        })
+    }
+}
+
+/// Classify issue risk with per-hit evidence. Title/label hits and risk_override
+/// are high confidence (gate dispatch). Body-only keyword hits are low confidence
+/// advisory signals — they do not block dispatch (#925 false-positive fix).
+pub(super) fn issue_risk_signals(
     issue: &IssueSnapshot,
     risk_override: Option<&str>,
-) -> Vec<String> {
-    let text = issue_text_for_gate(issue);
-    let mut reasons = Vec::new();
+) -> Vec<RiskSignal> {
+    let mut signals = Vec::new();
     if matches!(
         risk_override.map(|risk| risk.trim().to_ascii_lowercase()),
         Some(risk) if matches!(risk.as_str(), "high" | "critical" | "security")
     ) {
-        reasons.push("risk_override_high".to_string());
+        signals.push(RiskSignal {
+            reason: "risk_override_high".to_string(),
+            needle: risk_override.unwrap_or("").trim().to_string(),
+            source: "risk_override".to_string(),
+            confidence: "high".to_string(),
+            evidence: format!("caller set risk={}", risk_override.unwrap_or("").trim()),
+        });
     }
+
+    let title = issue.title.to_ascii_lowercase();
+    let body = issue
+        .body
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let labels = issue.labels.join("\n").to_ascii_lowercase();
+
     for (needle, reason) in [
         ("security", "touches_security"),
         ("secret", "touches_secrets"),
@@ -289,12 +389,39 @@ pub(super) fn issue_high_risk_reasons(
         ("safe_merge", "touches_merge_gate"),
         ("merge gate", "touches_merge_gate"),
     ] {
-        if text.contains(needle) {
-            reasons.push(reason.to_string());
+        // Prefer high-confidence sources first so a title+body double hit
+        // records once with high confidence (not two rows).
+        if let Some(snippet) = find_keyword_snippet(&title, needle) {
+            signals.push(RiskSignal {
+                reason: reason.to_string(),
+                needle: needle.to_string(),
+                source: "title".to_string(),
+                confidence: "high".to_string(),
+                evidence: snippet,
+            });
+            continue;
+        }
+        if let Some(snippet) = find_keyword_snippet(&labels, needle) {
+            signals.push(RiskSignal {
+                reason: reason.to_string(),
+                needle: needle.to_string(),
+                source: "labels".to_string(),
+                confidence: "high".to_string(),
+                evidence: snippet,
+            });
+            continue;
+        }
+        if let Some(snippet) = find_keyword_snippet(&body, needle) {
+            signals.push(RiskSignal {
+                reason: reason.to_string(),
+                needle: needle.to_string(),
+                source: "body".to_string(),
+                confidence: "low".to_string(),
+                evidence: snippet,
+            });
         }
     }
-    dedupe_strings(&mut reasons);
-    reasons
+    signals
 }
 
 pub(super) fn issue_text_for_gate(issue: &IssueSnapshot) -> String {
@@ -305,6 +432,42 @@ pub(super) fn issue_text_for_gate(issue: &IssueSnapshot) -> String {
         issue.labels.join("\n")
     )
     .to_ascii_lowercase()
+}
+
+/// Word-boundary keyword search; returns a short evidence snippet on hit.
+fn find_keyword_snippet(haystack: &str, needle: &str) -> Option<String> {
+    let needle = needle.trim().to_ascii_lowercase();
+    if needle.is_empty() || haystack.is_empty() {
+        return None;
+    }
+    let mut offset = 0;
+    while let Some(pos) = haystack[offset..].find(&needle) {
+        let start = offset + pos;
+        let end = start + needle.len();
+        if is_keyword_boundary(haystack[..start].chars().next_back())
+            && is_keyword_boundary(haystack[end..].chars().next())
+        {
+            let snippet_start = haystack[..start]
+                .char_indices()
+                .rev()
+                .nth(24)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            let snippet_end = haystack[end..]
+                .char_indices()
+                .nth(24)
+                .map(|(i, _)| end + i)
+                .unwrap_or_else(|| haystack.len());
+            let snippet = haystack[snippet_start..snippet_end].trim();
+            return Some(snippet.to_string());
+        }
+        offset = end;
+    }
+    None
+}
+
+fn is_keyword_boundary(ch: Option<char>) -> bool {
+    ch.is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
 }
 
 pub(super) fn slug_for_branch(text: &str) -> String {

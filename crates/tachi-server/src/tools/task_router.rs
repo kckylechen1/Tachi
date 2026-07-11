@@ -255,6 +255,7 @@ pub(super) async fn handle_tachi_task_facade(
                 related_issues: params.related_issues.clone(),
                 post_comment: None,
                 flow_id: params.flow_id.clone(),
+                notes: params.notes.clone(),
                 wiki_title: params.wiki_title.clone(),
                 wiki_text: params.wiki_text.clone(),
                 wiki_path: params.wiki_path.clone(),

@@ -633,6 +633,11 @@ pub struct TachiWorkflowParams {
     /// energy to actually close the loop).
     #[serde(default)]
     pub flow_id: Option<String>,
+    /// Optional free-form notes. When wiki_title/wiki_text are omitted and
+    /// result.md is unavailable, close_loop drafts the wiki body from notes
+    /// (#925). Prefer explicit wiki_* fields for durable lessons.
+    #[serde(default)]
+    pub notes: Option<String>,
     #[serde(default)]
     pub wiki_title: Option<String>,
     #[serde(default)]

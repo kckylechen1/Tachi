@@ -130,6 +130,9 @@ pub struct TachiTaskParams {
     #[schemars(schema_with = "crate::coerce::opt_number_from_string_or_number_schema")]
     pub quality_score: Option<f64>,
     /// [action=complete] Completion notes or summary.
+    /// [action=close_loop] When wiki_title/wiki_text are omitted and result.md
+    /// is missing, used as a draft source for the wiki body (#925).
+    /// [action=pr_handoff] Optional PR title override.
     #[serde(default)]
     pub notes: Option<String>,
     /// [action=complete] Execution trajectory. Store compact step objects, not raw transcripts.
