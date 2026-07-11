@@ -713,13 +713,16 @@ pub(crate) fn fetch_and_scan_same_surface_churn(
     ))
 }
 
-/// Fetch `(number, body, updatedAt, most_recent_comment_createdAt)` for open
-/// issues — the activity signal for the churn heuristic.
+/// `(number, body, updated_at, most_recent_comment_created_at)` — the
+/// activity signal for the churn heuristic.
+type OpenIssueActivity = (u64, String, String, Option<String>);
+
+/// Fetch open-issue activity rows for the churn heuristic.
 fn fetch_open_issues_with_activity(
     server: &MemoryServer,
     repo: &str,
     limit: u32,
-) -> Result<Vec<(u64, String, String, Option<String>)>, String> {
+) -> Result<Vec<OpenIssueActivity>, String> {
     let (mut cmd, token) = build_gh_command(server)?;
     cmd.args(["issue", "list"])
         .args(["--repo", repo])
@@ -734,9 +737,7 @@ fn fetch_open_issues_with_activity(
 
 /// Pure parser for `gh issue list --json number,body,updatedAt,comments`
 /// (#1000 codex review finding 8: fixture-testable field-path parsing).
-pub(crate) fn parse_open_issues_with_activity_json(
-    value: &Value,
-) -> Vec<(u64, String, String, Option<String>)> {
+pub(crate) fn parse_open_issues_with_activity_json(value: &Value) -> Vec<OpenIssueActivity> {
     value
         .as_array()
         .map(|rows| {
@@ -758,7 +759,12 @@ pub(crate) fn parse_open_issues_with_activity_json(
                                 .max()
                         })
                         .map(str::to_string);
-                    Some((number, body.to_string(), updated_at.to_string(), last_comment_at))
+                    Some((
+                        number,
+                        body.to_string(),
+                        updated_at.to_string(),
+                        last_comment_at,
+                    ))
                 })
                 .collect()
         })
@@ -868,7 +874,11 @@ pub(crate) fn save_freshness_row(
     let json = serde_json::to_string(row).map_err(|e| format!("serialize freshness row: {e}"))?;
     server.with_global_store(|store| -> Result<(), String> {
         store
-            .set_state(namespace, &freshness_row_key(&row.kind, &row.issue_ref), &json)
+            .set_state(
+                namespace,
+                &freshness_row_key(&row.kind, &row.issue_ref),
+                &json,
+            )
             .map_err(|e| format!("issue_freshness set_state: {e}"))?;
         Ok(())
     })
@@ -1258,7 +1268,11 @@ mod tests {
         )];
         let open_issue_numbers = vec![979];
         let hits = scan_zombies(&merged_prs, &open_issue_numbers);
-        assert_eq!(hits.len(), 1, "expected commit-only Refs to be caught, got: {hits:?}");
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected commit-only Refs to be caught, got: {hits:?}"
+        );
         assert_eq!(hits[0].issue_number, 979);
         assert_eq!(hits[0].pr_number, 42);
     }
@@ -1272,7 +1286,11 @@ mod tests {
             &["same commit message\n\nRefs #100"],
         )];
         let hits = scan_zombies(&merged_prs, &[100]);
-        assert_eq!(hits.len(), 1, "body+commit repeat must dedupe, got: {hits:?}");
+        assert_eq!(
+            hits.len(),
+            1,
+            "body+commit repeat must dedupe, got: {hits:?}"
+        );
     }
 
     fn stale_issue(number: u64, anchors: &[(&str, u64)], gates: &[u64]) -> OpenIssueForStaleCheck {
@@ -1393,8 +1411,7 @@ mod tests {
             file_line_anchors: vec![],
             gate_issue_numbers: extract_gate_issue_numbers("gated on #500 until it lands"),
         };
-        let (out, _) =
-            scan_stale_candidates(&[gated], &std::collections::HashMap::new(), &[500]);
+        let (out, _) = scan_stale_candidates(&[gated], &std::collections::HashMap::new(), &[500]);
         assert_eq!(
             out.len(),
             1,
@@ -1402,7 +1419,11 @@ mod tests {
         );
     }
 
-    fn churn_issue(number: u64, surface_paths: &[&str], has_recent_activity: bool) -> OpenIssueForChurnCheck {
+    fn churn_issue(
+        number: u64,
+        surface_paths: &[&str],
+        has_recent_activity: bool,
+    ) -> OpenIssueForChurnCheck {
         OpenIssueForChurnCheck {
             number,
             surface_paths: surface_paths.iter().map(|s| s.to_string()).collect(),
@@ -1455,10 +1476,16 @@ mod tests {
     #[test]
     fn scan_same_surface_churn_requires_meeting_threshold() {
         let issues = vec![churn_issue(3, &["src/foo.rs"], false)];
-        let recent_prs = vec![pr_surface(10, &["src/foo.rs"]), pr_surface(11, &["src/foo.rs"])];
+        let recent_prs = vec![
+            pr_surface(10, &["src/foo.rs"]),
+            pr_surface(11, &["src/foo.rs"]),
+        ];
         // Only 2 distinct touching PRs, threshold is 3 — must not flag.
         let out = scan_same_surface_churn(&issues, &recent_prs, 3);
-        assert!(out.is_empty(), "below-threshold churn must not flag, got: {out:?}");
+        assert!(
+            out.is_empty(),
+            "below-threshold churn must not flag, got: {out:?}"
+        );
     }
 
     #[test]
@@ -1523,8 +1550,12 @@ mod tests {
     #[test]
     fn save_and_list_freshness_rows_roundtrips_via_state_kv() {
         let server = test_server();
-        save_freshness_row(&server, ZOMBIE_NS, &row("o/r#979", KIND_ZOMBIE, &["o/r#980"]))
-            .expect("save zombie");
+        save_freshness_row(
+            &server,
+            ZOMBIE_NS,
+            &row("o/r#979", KIND_ZOMBIE, &["o/r#980"]),
+        )
+        .expect("save zombie");
         save_freshness_row(
             &server,
             STALE_CANDIDATE_NS,
@@ -1598,10 +1629,18 @@ mod tests {
     #[test]
     fn reap_stale_kind_rows_drops_rows_missing_from_fresh_hit_set() {
         let server = test_server();
-        save_freshness_row(&server, ZOMBIE_NS, &row("o/r#979", KIND_ZOMBIE, &["o/r#980"]))
-            .expect("save");
-        save_freshness_row(&server, ZOMBIE_NS, &row("o/r#947", KIND_ZOMBIE, &["o/r#981"]))
-            .expect("save");
+        save_freshness_row(
+            &server,
+            ZOMBIE_NS,
+            &row("o/r#979", KIND_ZOMBIE, &["o/r#980"]),
+        )
+        .expect("save");
+        save_freshness_row(
+            &server,
+            ZOMBIE_NS,
+            &row("o/r#947", KIND_ZOMBIE, &["o/r#981"]),
+        )
+        .expect("save");
 
         // Briefing sees both before the reap.
         let before = briefing_freshness_queues(&server, 8);
@@ -1609,13 +1648,9 @@ mod tests {
 
         // Next scan only reproduces #947 (the leader closed #979 by hand) —
         // reap must drop #979's row, keep #947's.
-        let reaped = reap_stale_kind_rows(
-            &server,
-            ZOMBIE_NS,
-            KIND_ZOMBIE,
-            &["o/r#947".to_string()],
-        )
-        .expect("reap");
+        let reaped =
+            reap_stale_kind_rows(&server, ZOMBIE_NS, KIND_ZOMBIE, &["o/r#947".to_string()])
+                .expect("reap");
         assert_eq!(reaped, 1, "expected exactly #979's row reaped");
 
         let after = briefing_freshness_queues(&server, 8);
@@ -1649,9 +1684,8 @@ mod tests {
         // A churn-kind scan that no longer sees #1 must reap ONLY the churn
         // row, leaving the unrelated stale_candidate row for the same issue
         // untouched (each scan is authoritative for its own kind only).
-        let reaped =
-            reap_stale_kind_rows(&server, STALE_CANDIDATE_NS, KIND_CHURN_CANDIDATE, &[])
-                .expect("reap");
+        let reaped = reap_stale_kind_rows(&server, STALE_CANDIDATE_NS, KIND_CHURN_CANDIDATE, &[])
+            .expect("reap");
         assert_eq!(reaped, 1);
 
         let remaining = list_freshness_rows(&server, STALE_CANDIDATE_NS).expect("list");
@@ -1662,10 +1696,18 @@ mod tests {
     #[test]
     fn briefing_freshness_queues_splits_by_kind_with_counts() {
         let server = test_server();
-        save_freshness_row(&server, ZOMBIE_NS, &row("o/r#979", KIND_ZOMBIE, &["o/r#980"]))
-            .expect("save");
-        save_freshness_row(&server, ZOMBIE_NS, &row("o/r#947", KIND_ZOMBIE, &["o/r#981"]))
-            .expect("save");
+        save_freshness_row(
+            &server,
+            ZOMBIE_NS,
+            &row("o/r#979", KIND_ZOMBIE, &["o/r#980"]),
+        )
+        .expect("save");
+        save_freshness_row(
+            &server,
+            ZOMBIE_NS,
+            &row("o/r#947", KIND_ZOMBIE, &["o/r#981"]),
+        )
+        .expect("save");
         save_freshness_row(
             &server,
             STALE_CANDIDATE_NS,
@@ -1714,8 +1756,12 @@ mod tests {
     fn briefing_freshness_queues_reports_overflow_never_silently_caps() {
         let server = test_server();
         for n in 0..5 {
-            save_freshness_row(&server, ZOMBIE_NS, &row(&format!("o/r#{n}"), KIND_ZOMBIE, &[]))
-                .expect("save");
+            save_freshness_row(
+                &server,
+                ZOMBIE_NS,
+                &row(&format!("o/r#{n}"), KIND_ZOMBIE, &[]),
+            )
+            .expect("save");
         }
         let out = briefing_freshness_queues(&server, 2);
         assert_eq!(out["zombies"]["count"], 5);

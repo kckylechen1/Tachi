@@ -309,24 +309,23 @@ async fn handle_issue_freshness_scan(
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_default();
     let mut stale_scan_error: Option<String> = None;
-    let stale_candidates = match crate::gh_ops::fetch_and_scan_stale_candidates(
-        server, &repo, &repo_root, limit,
-    ) {
-        Ok((candidates, warnings)) => {
-            if !warnings.is_empty() {
-                stale_scan_error = Some(format!(
-                    "{} anchor(s) could not be verified: {}",
-                    warnings.len(),
-                    warnings.join("; ")
-                ));
+    let stale_candidates =
+        match crate::gh_ops::fetch_and_scan_stale_candidates(server, &repo, &repo_root, limit) {
+            Ok((candidates, warnings)) => {
+                if !warnings.is_empty() {
+                    stale_scan_error = Some(format!(
+                        "{} anchor(s) could not be verified: {}",
+                        warnings.len(),
+                        warnings.join("; ")
+                    ));
+                }
+                candidates
             }
-            candidates
-        }
-        Err(e) => {
-            stale_scan_error = Some(e);
-            Vec::new()
-        }
-    };
+            Err(e) => {
+                stale_scan_error = Some(e);
+                Vec::new()
+            }
+        };
     let mut stale_refs = Vec::with_capacity(stale_candidates.len());
     for candidate in &stale_candidates {
         let issue_ref = format!("{repo}#{}", candidate.issue_number);

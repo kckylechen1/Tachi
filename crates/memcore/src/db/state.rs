@@ -299,7 +299,9 @@ mod tests {
         set_state(&conn, "ns", "k1", r#"{"a":1}"#).expect("seed");
 
         assert!(delete_state(&conn, "ns", "k1").expect("delete existing"));
-        assert!(get_state(&conn, "ns", "k1").expect("get after delete").is_none());
+        assert!(get_state(&conn, "ns", "k1")
+            .expect("get after delete")
+            .is_none());
         assert!(!delete_state(&conn, "ns", "k1").expect("delete missing is a no-op"));
     }
 }
