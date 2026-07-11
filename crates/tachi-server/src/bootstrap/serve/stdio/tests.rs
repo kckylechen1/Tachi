@@ -109,7 +109,14 @@ async fn call_tool_via_stdio_proxy(
         );
     let service = rmcp::service::serve_directly(proxy, transport, None);
 
-    let message = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
+    // Headroom note (issue #987): this is a safety-net deadline on an
+    // in-process oneshot transport, not a real network wait — it normally
+    // resolves in milliseconds. 5s was observed tripping under wide-suite
+    // `cargo test` parallelism (CPU/scheduler contention from hundreds of
+    // concurrently-running unrelated tests), not from any real slowness in
+    // the proxy itself. 30s gives ample headroom without slowing down a
+    // healthy run (the await still returns as soon as the response arrives).
+    let message = tokio::time::timeout(std::time::Duration::from_secs(30), receiver.recv())
         .await
         .expect("proxied tool call timed out")
         .expect("proxied tool call should yield one response");
