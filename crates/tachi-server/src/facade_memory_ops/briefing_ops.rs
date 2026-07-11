@@ -281,9 +281,10 @@ pub(crate) async fn handle_memory_briefing(
     let open_loops = crate::shell_ops::scan_open_loops(8);
 
     // Issue freshness (#1000): zombie (fixed-but-open) + stale-candidate
-    // queues, projected from already-scanned verdict rows (state_kv). This
-    // reads only — population happens via `tachi_gh(action='issue_freshness_scan')`
-    // + verdict save, kept out of the briefing hot path.
+    // queues, projected from already-scanned review-candidate rows
+    // (state_kv). This reads only — population happens via
+    // `tachi_gh(action='issue_freshness_scan')` + candidate save, kept out
+    // of the briefing hot path.
     let issue_freshness = crate::gh_ops::briefing_freshness_queues(server, 5);
 
     // Component governance for the active workspace (#799): registry-only,

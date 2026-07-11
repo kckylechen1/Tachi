@@ -254,10 +254,11 @@ pub(crate) fn format_briefing(
 /// show (both queues empty) so callers can skip the section entirely rather
 /// than emit an empty header.
 ///
-/// Wording (#1000 round-3 codex review finding 7): these rows are
-/// candidates for review, never verdicts — "verdict rows" in the blurb below
-/// used to say the opposite of what the module's own frozen posture is
-/// ("圈候选不判决" — circle the candidate, do not judge it).
+/// Wording (#1000 round-3 codex review finding 7, reworded round-4): these
+/// rows are review candidates, never verdicts — the blurb below used to
+/// describe them as settled judgments, which said the opposite of what the
+/// module's own frozen posture is ("圈候选不判决" — circle the candidate, do
+/// not judge it).
 pub(crate) fn render_issue_freshness_section(issue_freshness: &Value) -> Option<String> {
     let zombie_count = issue_freshness["zombies"]["count"].as_u64().unwrap_or(0);
     let stale_count = issue_freshness["stale_candidates"]["count"]

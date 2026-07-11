@@ -985,7 +985,7 @@ pub(crate) fn parse_merged_pr_surfaces_json(value: &Value) -> Vec<MergedPrSurfac
 // key/shape that would make the caller's fixing-PR field mean two different
 // things depending on kind.
 //
-// #1000 codex review finding 7 (verdict rows never die + kind/issue key
+// #1000 codex review finding 7 (review candidates never die + kind/issue key
 // collision): rows are keyed `{kind}:{issue_ref}` (not just `{issue_ref}`) so
 // a zombie row and a stale-candidate row for the *same* issue cannot
 // overwrite each other. Each scan is authoritative for its own kind: after a
@@ -1052,10 +1052,10 @@ pub(crate) fn list_freshness_rows(
 /// Reap: delete every existing row of `kind` in `namespace` whose issue_ref is
 /// NOT present in `current_issue_refs` (the fresh, authoritative hit set this
 /// scan just produced). Returns the number of rows actually removed.
-/// (#1000 codex review finding 7 — "verdict rows never die": without this,
-/// a zombie that got closed, or a stale candidate whose drift got fixed,
-/// stays in the briefing forever because nothing ever re-scans-and-clears
-/// rows that no longer reproduce.)
+/// (#1000 codex review finding 7 — "review candidates never die": without
+/// this, a zombie that got closed, or a stale candidate whose drift got
+/// fixed, stays in the briefing forever because nothing ever
+/// re-scans-and-clears rows that no longer reproduce.)
 pub(crate) fn reap_stale_kind_rows(
     server: &MemoryServer,
     namespace: &str,
@@ -1952,11 +1952,21 @@ mod tests {
     }
 
     fn test_server() -> MemoryServer {
+        test_server_with_path().0
+    }
+
+    /// Same as `test_server()`, but also hands back the on-disk sqlite path
+    /// so a test can reach in and break the DB out from under the server
+    /// (e.g. `reap_stale_kind_rows_surfaces_a_real_db_failure_as_err` below,
+    /// which needs a REAL `delete_state` I/O failure — not a mocked one — to
+    /// prove the honesty wiring end-to-end).
+    fn test_server_with_path() -> (MemoryServer, std::path::PathBuf) {
         let db = std::env::temp_dir().join(format!(
             "issue-freshness-test-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
-        MemoryServer::new(db, None).expect("test server")
+        let server = MemoryServer::new(db.clone(), None).expect("test server");
+        (server, db)
     }
 
     fn row(issue_ref: &str, kind: &str, evidence: &[&str]) -> FreshnessRow {
@@ -2113,6 +2123,56 @@ mod tests {
         let remaining = list_freshness_rows(&server, STALE_CANDIDATE_NS).expect("list");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].kind, KIND_STALE_CANDIDATE);
+    }
+
+    /// PR #1004 round-4 codex review — the merge-blocker: round-3 finding 3
+    /// added `reap_errors`/`reap_incomplete_kinds` to the response, but the
+    /// implementer never actually wired a test that injects a REAL reap
+    /// failure (a mocked `Err` doesn't prove anything about the real
+    /// `MemoryStore::delete_state` I/O path). This test poisons the store
+    /// handle for real — a second raw connection to the SAME sqlite file
+    /// drops the `hard_state` table the `state_kv` operations depend on out
+    /// from under the already-open `MemoryServer` — and asserts
+    /// `reap_stale_kind_rows` surfaces the resulting I/O error as `Err`,
+    /// matching what `router.rs`'s `handle_issue_freshness_scan` needs to
+    /// correctly populate `reap_errors` / `reap_incomplete_kinds` instead of
+    /// silently reporting "0 reaped, all good" for a kind whose ghost rows
+    /// never actually got cleared.
+    #[test]
+    fn reap_stale_kind_rows_surfaces_a_real_db_failure_as_err() {
+        let (server, db_path) = test_server_with_path();
+        save_freshness_row(
+            &server,
+            ZOMBIE_NS,
+            &row("o/r#979", KIND_ZOMBIE, &["o/r#980"]),
+        )
+        .expect("save");
+
+        // Sanity baseline: the row is really there before we poison the
+        // store — guards against a vacuously-"passing" test where the save
+        // itself silently no-opped.
+        let before = list_freshness_rows(&server, ZOMBIE_NS).expect("list before poison");
+        assert_eq!(before.len(), 1, "row must exist before the poison step");
+
+        // Poison the store handle: a second raw connection to the same
+        // sqlite file drops the table `delete_state`/`list_state` read and
+        // write through. The `MemoryServer`'s own connection stays open and
+        // "healthy" from Rust's point of view — this is a real DB-level
+        // failure (missing table), not a mocked error path.
+        let raw = rusqlite::Connection::open(&db_path).expect("raw connection to same db");
+        raw.execute_batch("DROP TABLE hard_state;")
+            .expect("drop hard_state table out from under the server");
+        drop(raw);
+
+        let result = reap_stale_kind_rows(&server, ZOMBIE_NS, KIND_ZOMBIE, &[]);
+
+        let err = result.expect_err(
+            "reap against a store whose backing table was dropped must surface a real Err, not silently return Ok(0)",
+        );
+        assert!(
+            err.contains("issue_freshness"),
+            "expected reap_stale_kind_rows' own error wrapping (list_state/delete_state), got: {err}"
+        );
     }
 
     #[test]
