@@ -106,7 +106,7 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "skill_evolve",
     "tachi_audit_log",
     "tachi_init_project_db",
-    "tachi_research",
+    // tachi_research is now observe-bundled (#963/#530), no longer admin-only.
     "tachi_task_brief",
     "tachi_wiki_organize",
     "vault_get",
