@@ -137,3 +137,119 @@ clean, 0 warnings
   renaming that worktree/branch — per `他物勿动` that worktree's dirty state
   belongs to whoever is driving it; this PR targets `main` from
   `wizard/1001-presence-claims-baton4` instead.
+
+## Round 2 (codex verdict on PR #1007, all 5 items) — commit ac435923
+
+Codex's review found 1 BUG (claim/release wiring incomplete), 1 CONCERN (no
+DB-level identity constraint), 1 Gap (scope-collision warning structurally
+unreachable), and 2 more BUGs (task-markdown drops presence, unescaped
+interpolation). All five adopted and fixed in this commit.
+
+1. **complete/cancel → release_claim wiring.** New
+   `claims_ops::release_claim_for_dispatch(server, dispatch_id, reason)`
+   (fail-safe: warns, never fails the host action) is called from
+   `complete_ops/handler.rs`'s `if let Some(ref did) = params.dispatch_id`
+   block (reason="complete") and from `task_facade.rs`'s
+   `handle_tachi_task_cancel` (reason="cancel"), the latter BEFORE the
+   already-terminal early-return so a stuck-active claim from a dispatch
+   that reached terminal state through some other path (e.g. the watchdog)
+   still gets cleaned up on a late cancel call.
+2. **DB-unique identity.** New `v12_session_claims_unique_identity`
+   migration (`memcore/src/db/migrations/session_claims_identity.rs`)
+   creates `idx_session_claims_identity_active`, a partial UNIQUE index on
+   `COALESCE(session_client,''), COALESCE(issue_ref,''), COALESCE(flow_id,'')
+   WHERE state='active'`. Verified directly against sqlite3 3.51 before
+   wiring into Rust: (a) duplicate active triple → UNIQUE violation, (b) two
+   active rows both NULL in the same column → still collide (the COALESCE
+   closes the NULL≠NULL trap), (c) a released duplicate does NOT block a
+   fresh active claim for the same identity. `EXPECTED_SCHEMA_VERSION`
+   bumped 11→12; the same DDL is also added directly to
+   `BASE_SCHEMA_SQL` so brand-new DBs get the index without waiting on the
+   migration pass.
+3. **Live scope collision.** `presence_briefing_section` now resolves the
+   calling session's own identity, looks up its own live claim's
+   `declared_file_scope` (preferring one matching the given `issue_ref`),
+   and forwards that as `collision_warnings`' `new_scope` — previously
+   always `&[]`, which made the file-scope-overlap branch of
+   `collision_warnings` dead code from every briefing call site. Also fixed
+   `exclude_session_client` (was hardcoded `None`), closing a
+   self-collision bug the new discrimination test caught incidentally: a
+   session re-reading its own briefing was reporting its own claim as a
+   "double-claim" against itself.
+4. **feature_briefing markdown presence.** New
+   `markdown_presence_section` in `copilot_ops/feature_briefing/markdown.rs`
+   mirrors `agent_markdown::briefing::format_briefing`'s existing presence
+   rendering (same row shape); wired into
+   `format_feature_briefing_markdown`'s output. Empty when both board and
+   warnings are empty (no stray heading).
+5. **Sanitized rendering.** `claims_ops::sanitize_presence_field(raw, cap)`
+   strips Unicode control chars (incl. `\n`/`\r`), collapses to one line,
+   and caps+ellipsizes; routed through both `briefing_claims_board` (board
+   rows) and `collision_warnings` (warning strings — session_client,
+   issue_ref, and the fully-composed warning line are all sanitized) so
+   both markdown renderers inherit it from one source. Caps: 64 chars for
+   identifier-shaped fields, 160 for warning/overlap text.
+
+### Red → green proof (items 1, 3, 5 — mission-required)
+
+Each production fix was temporarily reverted in place (sed/edit, restored
+immediately after) and the new discrimination tests re-run:
+
+- **Item 1**: reverted both `release_claim_for_dispatch(...)` call sites to
+  a no-op comment → `tachi_complete_releases_the_presence_claim_...`,
+  `tachi_task_cancel_releases_the_presence_claim_...`, and
+  `tachi_task_cancel_on_already_terminal_dispatch_still_releases_the_claim`
+  all FAILED (claim still `Active` after complete/cancel). Restored →
+  all green.
+- **Item 3**: reverted `presence_briefing_section` to
+  `collision_warnings(&live, None, issue_ref, &[])` (the pre-fix shape) →
+  `briefing_surfaces_file_scope_collision_using_the_calling_sessions_own_declared_scope`
+  and `briefing_does_not_self_collide_on_its_own_declared_scope` both
+  FAILED. Restored → both green.
+- **Item 5**: reverted `sanitize_presence_field` to a passthrough
+  (`raw.to_string()`, cap ignored) → 5 of the sanitize/collision
+  discrimination tests FAILED
+  (`sanitize_presence_field_strips_newlines_and_collapses_to_one_line`,
+  `..._strips_markdown_instruction_like_injection`,
+  `..._caps_length_with_ellipsis`, `collision_warning_line_is_sanitized_end_to_end`,
+  `briefing_board_row_is_sanitized`). Restored → all 5 green.
+
+### Test evidence (round 2 — actually ran)
+
+```
+cargo test -p memcore --lib   (FULL crate)
+350 passed; 0 failed; 2 ignored   (includes golden_corpus_* — untouched, still green)
+
+cargo test -p tachi-server -p memcore -- claim   (targeted)
+34 passed (memcore) + 29 passed (tachi-server); 0 failed
+
+cargo test -p tachi-server -- presence            → 8 passed; 0 failed
+cargo test -p tachi-server -- briefing             → 33 passed; 0 failed
+cargo test -p tachi-server -- markdown_sections    → 2 passed; 0 failed
+cargo test -p tachi-server -- presence_claim_release → 2 passed; 0 failed
+cargo test -p tachi-server -- task_control          → 6 passed; 0 failed
+
+cargo test -p tachi-server --lib   (FULL crate suite)
+1598 passed; 1 failed; 2 ignored
+  — same pre-existing flake as baton 4's own evidence log above:
+    bootstrap::serve::stdio::tests::stdio_proxy_allows_explicit_cross_project_read
+    (timeout under concurrent multi-agent build load on this shared machine;
+    reproduced IDENTICALLY on the pre-round-2 baseline via `git stash`, and
+    passes cleanly in isolation both before and after this diff — not caused
+    by this round's changes, which never touch bootstrap/stdio).
+
+cargo fmt --check -p memcore -p tachi-server        → clean (exit 0)
+cargo clippy -p memcore -p tachi-server --all-targets -- -D warnings
+                                                     → clean, 0 warnings
+```
+
+Note: this round's local verification ran under
+`CARGO_TARGET_DIR=/private/tmp/.../scratchpad/isolated-target-1001` rather
+than the shared `$HOME/.cache/sigil-shared-target` — the shared target was
+under concurrent write lock from other live agents mid-session
+("Blocking waiting for file lock on artifact directory", plus a transient
+`memcore` symbol-resolution error consistent with a half-written rlib),
+so the build was isolated per the workspace-module contamination protocol
+rather than trusted through the contention.
+
+HEAD after this round: `ac435923`.
