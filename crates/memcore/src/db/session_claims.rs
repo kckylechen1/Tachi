@@ -260,74 +260,69 @@ pub fn is_claim_stale(
 /// (`find_active_exec_env_by_path`) but keyed on session+issue/lane instead of
 /// worktree path, since #1001 grains at session×issue/lane, not per-call.
 ///
+/// ## Atomicity (#1001 round 3, item 2)
+///
+/// This is a single `INSERT ... ON CONFLICT (...) WHERE state = 'active' DO
+/// UPDATE ...` statement, not a read-then-write. The conflict target is the
+/// exact expression list and partial-index predicate of
+/// `idx_session_claims_identity_active` (`ddl.rs` /
+/// `migrations/session_claims_identity.rs`):
+/// `(COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id,
+/// ''))  WHERE state = 'active'` — SQLite requires the `ON CONFLICT` target to
+/// match an existing unique index verbatim (same expressions, same partial
+/// predicate) to resolve against it, and a mismatched target here would make
+/// this silently fall back to raising `UNIQUE constraint failed` instead of
+/// upserting. A prior read-then-write (`SELECT` to check existence, then a
+/// separate `UPDATE`/`INSERT`) is a TOCTOU race even inside a transaction:
+/// SQLite's default deferred transaction does not take a write lock until its
+/// first write, so two concurrent callers could both `SELECT` "no existing
+/// row" before either commits, and one of the two `INSERT`s would then fail
+/// the unique index with no path to convert that failure into a heartbeat —
+/// the very race #1001 round 2's index was added to catch, but the
+/// application code never closed. `INSERT ... ON CONFLICT ... DO UPDATE` is
+/// a single statement the database resolves under one lock: concurrent
+/// same-identity callers each either insert (if they win the race) or update
+/// the winner's row (if they lose it) — both succeed, neither errors, and
+/// exactly one row exists for the identity afterward.
+///
 /// Returns the `claim_id` that is now active (either the pre-existing one,
-/// heartbeated, or the newly inserted one).
+/// heartbeated, or the newly inserted one) via `RETURNING claim_id`, so the
+/// caller learns the winning row's id without a second read.
 pub fn upsert_or_heartbeat_claim(
     conn: &mut Connection,
     new_claim: &NewSessionClaim,
 ) -> Result<String, MemoryError> {
-    let tx = conn.transaction()?;
-    let existing: Option<String> = tx
-        .query_row(
-            "SELECT claim_id FROM session_claims \
-             WHERE state = 'active' \
-               AND session_client IS ?1 \
-               AND issue_ref IS ?2 \
-               AND flow_id IS ?3 \
-             ORDER BY heartbeat_at DESC LIMIT 1",
-            params![
-                new_claim.session_client,
-                new_claim.issue_ref,
-                new_claim.flow_id
-            ],
-            |row| row.get(0),
-        )
-        .optional()?;
-
-    let claim_id = match existing {
-        Some(claim_id) => {
-            let now = normalize_utc_iso_or_now("");
-            tx.execute(
-                "UPDATE session_claims SET heartbeat_at = ?2, \
-                 dispatch_id = COALESCE(?3, dispatch_id), \
-                 branch = CASE WHEN ?4 = '' THEN branch ELSE ?4 END, \
-                 declared_file_scope = COALESCE(?5, declared_file_scope) \
-                 WHERE claim_id = ?1",
-                params![
-                    claim_id,
-                    now,
-                    new_claim.dispatch_id,
-                    new_claim.branch,
-                    new_claim.declared_file_scope,
-                ],
-            )?;
-            claim_id
-        }
-        None => {
-            let created_at = if new_claim.created_at.trim().is_empty() {
-                normalize_utc_iso_or_now("")
-            } else {
-                normalize_utc_iso_or_now(&new_claim.created_at)
-            };
-            tx.execute(
-                "INSERT INTO session_claims
-                 (claim_id, session_client, issue_ref, flow_id, dispatch_id, branch,
-                  declared_file_scope, state, release_reason, created_at, heartbeat_at, released_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', NULL, ?8, ?8, NULL)",
-                params![
-                    new_claim.claim_id,
-                    new_claim.session_client,
-                    new_claim.issue_ref,
-                    new_claim.flow_id,
-                    new_claim.dispatch_id,
-                    new_claim.branch,
-                    new_claim.declared_file_scope,
-                    created_at,
-                ],
-            )?;
-            new_claim.claim_id.clone()
-        }
+    let created_at = if new_claim.created_at.trim().is_empty() {
+        normalize_utc_iso_or_now("")
+    } else {
+        normalize_utc_iso_or_now(&new_claim.created_at)
     };
+    let tx = conn.transaction()?;
+    let claim_id: String = tx.query_row(
+        "INSERT INTO session_claims
+         (claim_id, session_client, issue_ref, flow_id, dispatch_id, branch,
+          declared_file_scope, state, release_reason, created_at, heartbeat_at, released_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', NULL, ?8, ?8, NULL)
+         ON CONFLICT (COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, '')) \
+             WHERE state = 'active'
+         DO UPDATE SET \
+             heartbeat_at = ?8, \
+             dispatch_id = COALESCE(excluded.dispatch_id, session_claims.dispatch_id), \
+             branch = CASE WHEN excluded.branch = '' THEN session_claims.branch ELSE excluded.branch END, \
+             declared_file_scope = COALESCE(excluded.declared_file_scope, session_claims.declared_file_scope)
+         RETURNING claim_id",
+        params![
+            new_claim.claim_id,
+            new_claim.session_client,
+            new_claim.issue_ref,
+            new_claim.flow_id,
+            new_claim.dispatch_id,
+            new_claim.branch,
+            new_claim.declared_file_scope,
+            created_at,
+        ],
+        |row| row.get(0),
+    )?;
     tx.commit()?;
     Ok(claim_id)
 }
@@ -414,6 +409,17 @@ mod tests {
         libsimple::enable_auto_extension().unwrap();
         crate::db::register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn
+    }
+
+    /// A file-backed (not `:memory:`) connection, required for a real
+    /// multi-connection concurrency test — two `:memory:` connections are
+    /// two independent databases, so they cannot race each other at all.
+    fn open_file_conn(path: &std::path::Path) -> Connection {
+        libsimple::enable_auto_extension().unwrap();
+        crate::db::register_sqlite_vec();
+        let conn = Connection::open(path).unwrap();
         crate::db::init_schema(&conn).unwrap();
         conn
     }
@@ -757,5 +763,82 @@ mod tests {
             2,
             "distinct issue/flow identities get distinct rows"
         );
+    }
+
+    /// #1001 round 3, item 2 (codex "identity upsert not atomic" finding):
+    /// two REAL concurrent same-identity `upsert_or_heartbeat_claim` callers
+    /// (separate OS threads, separate connections, a `Barrier` forcing both
+    /// to race the `INSERT ... ON CONFLICT` at the same instant) must both
+    /// return Ok, must resolve to exactly one row for the identity, and that
+    /// row's heartbeat must reflect the later of the two calls — never a
+    /// lost heartbeat, never an error from either side. A read-then-write
+    /// upsert loses this race (both threads can observe "no existing row"
+    /// before either commits); the `ON CONFLICT ... DO UPDATE` statement
+    /// closes it at the database level.
+    #[test]
+    fn two_concurrent_same_identity_upserts_both_succeed_exactly_one_row() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+        // Establish the schema (and the partial unique index) once before
+        // spawning the racing connections.
+        {
+            let _ = open_file_conn(&path);
+        }
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let path_a = path.clone();
+        let barrier_a = barrier.clone();
+        let handle_a = std::thread::spawn(move || {
+            let mut conn = open_file_conn(&path_a);
+            let mut claim = new_claim("race-claim-a", "org/repo#900");
+            claim.dispatch_id = Some("dispatch-a".to_string());
+            barrier_a.wait();
+            upsert_or_heartbeat_claim(&mut conn, &claim)
+        });
+
+        let path_b = path.clone();
+        let barrier_b = barrier;
+        let handle_b = std::thread::spawn(move || {
+            let mut conn = open_file_conn(&path_b);
+            let mut claim = new_claim("race-claim-b", "org/repo#900");
+            claim.dispatch_id = Some("dispatch-b".to_string());
+            barrier_b.wait();
+            upsert_or_heartbeat_claim(&mut conn, &claim)
+        });
+
+        let result_a = handle_a.join().expect("thread a must not panic");
+        let result_b = handle_b.join().expect("thread b must not panic");
+
+        assert!(
+            result_a.is_ok(),
+            "concurrent identity race must not error the loser: {result_a:?}"
+        );
+        assert!(
+            result_b.is_ok(),
+            "concurrent identity race must not error the winner: {result_b:?}"
+        );
+
+        let verify_conn = open_file_conn(&path);
+        let active = list_claims(&verify_conn, Some(ClaimState::Active))
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.issue_ref.as_deref() == Some("org/repo#900"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            active.len(),
+            1,
+            "exactly one active row must exist for the raced identity, got {active:?}"
+        );
+
+        // Both calls resolved to the SAME claim_id (whichever inserted first;
+        // the other heartbeated onto it) — the two threads never produced two
+        // independent claim ids.
+        let claim_id_a = result_a.unwrap();
+        let claim_id_b = result_b.unwrap();
+        assert_eq!(
+            claim_id_a, claim_id_b,
+            "both concurrent callers must resolve to the identical winning claim_id"
+        );
+        assert_eq!(active[0].claim_id, claim_id_a);
     }
 }
