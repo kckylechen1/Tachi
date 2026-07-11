@@ -12,7 +12,7 @@ mod wiki;
 use shared::{format_section_rows, md_escape};
 
 pub(crate) use alerts::format_alerts;
-pub(crate) use briefing::format_briefing;
+pub(crate) use briefing::{format_briefing, render_issue_freshness_section};
 pub(crate) use search::format_search_sections;
 pub(crate) use wiki::{
     format_wiki_browse_category, format_wiki_browse_stats, format_wiki_read, format_wiki_search,

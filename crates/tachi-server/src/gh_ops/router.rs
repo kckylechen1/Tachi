@@ -260,6 +260,14 @@ pub(crate) async fn handle_tachi_gh(
 /// `stale_scan_error`/`churn_scan_error` fields on the response, never
 /// silently swallowed into an empty vec the caller can't distinguish from
 /// "scanned, found nothing".
+///
+/// Reap honesty (round-3 codex review finding 3): a DB error while reaping a
+/// kind's stale rows used to be swallowed by `.unwrap_or(0)` — indistinguish-
+/// able from "nothing needed reaping" even though a closed zombie or fixed
+/// stale/churn candidate's ghost row is still sitting in the briefing. Every
+/// reap call now surfaces its error into `reap_errors` and marks the kind in
+/// `reap_incomplete_kinds`, so a caller can tell "reaped 0 because clean" from
+/// "reaped 0 because the DB call itself failed".
 async fn handle_issue_freshness_scan(
     server: &MemoryServer,
     params: &TachiGhParams,
@@ -267,11 +275,22 @@ async fn handle_issue_freshness_scan(
     let repo = required_repo(params, "issue_freshness_scan")?;
     let limit = params.scan_limit.unwrap_or(100);
 
+    // Resolved once, up front, so both the zombie arm's merge-commit-message
+    // lookup (round-3 finding 1) and the stale arm's file-anchor probes share
+    // the same local-checkout notion of "repo root".
+    let repo_root = params
+        .cwd
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+
     // Zombie arm: hard-fails the whole action on a `gh` error — this is the
     // scan's primary signal, not a best-effort extra (finding 6).
-    let zombies = crate::gh_ops::fetch_and_scan_zombies(server, &repo, limit)?;
+    let zombies = crate::gh_ops::fetch_and_scan_zombies(server, &repo, limit, Some(&repo_root))?;
 
     let mut save_errors = Vec::new();
+    let mut reap_errors = Vec::new();
     let mut zombie_refs = Vec::with_capacity(zombies.len());
     for hit in &zombies {
         let issue_ref = format!("{repo}#{}", hit.issue_number);
@@ -291,23 +310,30 @@ async fn handle_issue_freshness_scan(
     // previously-saved zombie row not reproduced by THIS scan (the leader
     // closed it, or it otherwise stopped being a zombie) is reaped so it
     // does not live forever as a ghost row in the briefing.
-    let zombie_reaped = crate::gh_ops::reap_stale_kind_rows(
+    //
+    // Round-3 finding 3: a reap failure (DB list/delete error) used to be
+    // swallowed by `.unwrap_or(0)` — a closed zombie whose row failed to
+    // delete would silently stay `zombie_reaped == 0`, indistinguishable
+    // from "nothing needed reaping", while the ghost row keeps surfacing in
+    // the briefing with no error anywhere in the response. The error now
+    // surfaces in `reap_errors` and the kind is marked unreaped-this-round
+    // via `reap_incomplete_kinds` instead of pretending the reap succeeded.
+    let zombie_reaped = match crate::gh_ops::reap_stale_kind_rows(
         server,
         crate::gh_ops::ZOMBIE_NS,
         crate::gh_ops::KIND_ZOMBIE,
         &zombie_refs,
-    )
-    .unwrap_or(0);
+    ) {
+        Ok(n) => n,
+        Err(e) => {
+            reap_errors.push(format!("zombie: {e}"));
+            0
+        }
+    };
 
     // Stale gate+anchor arm: best-effort, degrades LOUDLY on failure (finding
     // 6) — a missing/invalid repo root or `gh` error is captured in
     // `stale_scan_error`, never silently collapsed into an empty vec.
-    let repo_root = params
-        .cwd
-        .as_deref()
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_default();
     // `stale_scan_hard_error` distinguishes "the scan itself failed" (no
     // fresh authoritative hit set — must NOT reap) from
     // `stale_scan_warning` ("the scan ran, but some anchors couldn't be
@@ -352,14 +378,24 @@ async fn handle_issue_freshness_scan(
     // fresh, authoritative hit set — a hard scan failure means `stale_refs`
     // is empty for the WRONG reason (I/O error, not "nothing stale found"),
     // and reaping on it would wrongly delete every real row.
+    //
+    // Round-3 finding 3: a reap DB error is no longer swallowed into 0 — it
+    // surfaces in `reap_errors` and marks this kind unreaped-this-round.
+    let mut reap_incomplete_kinds: Vec<&'static str> = Vec::new();
     let stale_reaped = if stale_scan_hard_error.is_none() {
-        crate::gh_ops::reap_stale_kind_rows(
+        match crate::gh_ops::reap_stale_kind_rows(
             server,
             crate::gh_ops::STALE_CANDIDATE_NS,
             crate::gh_ops::KIND_STALE_CANDIDATE,
             &stale_refs,
-        )
-        .unwrap_or(0)
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                reap_errors.push(format!("stale_candidate: {e}"));
+                reap_incomplete_kinds.push(crate::gh_ops::KIND_STALE_CANDIDATE);
+                0
+            }
+        }
     } else {
         0
     };
@@ -367,7 +403,20 @@ async fn handle_issue_freshness_scan(
     // Same-surface-churn arm (Scope item 2's third heuristic, codex review
     // finding 2) — best-effort, same loud-degrade posture as the stale arm.
     // Default policy: 30-day activity window, 3+ distinct touching PRs.
-    let churn_threshold = params.churn_threshold.unwrap_or(3) as usize;
+    //
+    // Round-3 finding 6: `churn_threshold=0` used to mean "every inactive
+    // issue with a non-empty file-surface flags as churn regardless of how
+    // many PRs touched it" — `touching_pr_numbers.len() >= 0` is trivially
+    // true even with ZERO touching PRs (`churn_threshold` is `u32`, so a
+    // negative value is already rejected at param deserialization —only 0
+    // is reachable here). Clamp to a minimum of 1 (the heuristic's whole
+    // premise is "N *distinct touching* PRs" — 0 touching PRs is not
+    // evidence of anything) and note the clamp in the response so a caller
+    // who actually passed 0 sees why they got 1's behavior instead of a
+    // silent surprise.
+    let requested_churn_threshold = params.churn_threshold.unwrap_or(3);
+    let churn_threshold_clamped = requested_churn_threshold < 1;
+    let churn_threshold = requested_churn_threshold.max(1) as usize;
     let activity_since = params
         .churn_activity_since
         .clone()
@@ -408,13 +457,19 @@ async fn handle_issue_freshness_scan(
         }
     }
     let churn_reaped = if churn_scan_error.is_none() {
-        crate::gh_ops::reap_stale_kind_rows(
+        match crate::gh_ops::reap_stale_kind_rows(
             server,
             crate::gh_ops::STALE_CANDIDATE_NS,
             crate::gh_ops::KIND_CHURN_CANDIDATE,
             &churn_refs,
-        )
-        .unwrap_or(0)
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                reap_errors.push(format!("churn_candidate: {e}"));
+                reap_incomplete_kinds.push(crate::gh_ops::KIND_CHURN_CANDIDATE);
+                0
+            }
+        }
     } else {
         0
     };
@@ -456,6 +511,17 @@ async fn handle_issue_freshness_scan(
         "stale_scan_error": stale_scan_hard_error,
         "stale_scan_warning": stale_scan_warning,
         "churn_scan_error": churn_scan_error,
+        // Round-3 finding 3: reap DB errors are surfaced here instead of
+        // being swallowed into a misleadingly-clean `rows_reaped` count. A
+        // non-empty `reap_errors`/`reap_incomplete_kinds` means at least one
+        // kind's ghost rows (closed zombies, fixed stale/churn candidates)
+        // were NOT cleared this round and may still be showing in the
+        // briefing even though they no longer reproduce.
+        "reap_errors": reap_errors,
+        "reap_incomplete_kinds": reap_incomplete_kinds,
+        "churn_threshold_requested": requested_churn_threshold,
+        "churn_threshold_effective": churn_threshold,
+        "churn_threshold_clamped": churn_threshold_clamped,
     }))
     .map_err(|e| format!("serialize: {e}"))
 }

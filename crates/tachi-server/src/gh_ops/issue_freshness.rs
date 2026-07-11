@@ -56,6 +56,17 @@ pub(crate) struct MergedPr {
     /// visible here; scanning title+body alone misses them (#1000 codex
     /// review finding 1).
     pub commit_messages: Vec<String>,
+    /// The merge commit's own message, read from the local checkout (`git
+    /// log -1 --format=%B <mergeCommit.oid>`) — never from `gh` itself,
+    /// which only returns `mergeCommit.oid` (no message text). A TRUE merge
+    /// commit (2 parents, "Create a merge commit" strategy) is a distinct
+    /// commit from every commit in `commit_messages` — its own `Refs #N` is
+    /// otherwise invisible to the scan (#1000 round-3 codex review finding
+    /// 1). Empty when the SHA is absent, unresolvable, or the local checkout
+    /// doesn't have it (e.g. shallow clone, or scanning a fork) — a resolve
+    /// failure here degrades to "this one PR's merge-commit message wasn't
+    /// checked", never a hard scan failure.
+    pub merge_commit_message: String,
 }
 
 /// Extract issue numbers referenced via `Refs #N`, `Ref #N`, `Refs #N, #M`,
@@ -143,12 +154,15 @@ pub(crate) fn extract_referenced_issue_numbers(text: &str) -> Vec<u64> {
 }
 
 /// Cross-check merged PRs against the open-issue set: any issue number
-/// referenced by a merged PR — its title, body, **or any of its commit
-/// messages** (a commit-only `Refs #N` that never made it into the PR
-/// title/body is otherwise invisible, #1000 codex review finding 1) — that
-/// is still in `open_issue_numbers` is a zombie (fixed, never closed). Pure
-/// function — no I/O — so it is directly fixture-testable against the
-/// #979/#947 acceptance anchor without hitting live GitHub.
+/// referenced by a merged PR — its title, body, any of its commit messages
+/// (a commit-only `Refs #N` that never made it into the PR title/body is
+/// otherwise invisible, #1000 codex review finding 1), **or its merge
+/// commit's own message** (a TRUE merge commit is a distinct commit from
+/// every PR commit — its `Refs #N` is invisible to `commit_messages` alone,
+/// #1000 round-3 codex review finding 1) — that is still in
+/// `open_issue_numbers` is a zombie (fixed, never closed). Pure function —
+/// no I/O — so it is directly fixture-testable against the #979/#947
+/// acceptance anchor without hitting live GitHub.
 pub(crate) fn scan_zombies(merged_prs: &[MergedPr], open_issue_numbers: &[u64]) -> Vec<ZombieHit> {
     let mut hits = Vec::new();
     for pr in merged_prs {
@@ -156,6 +170,10 @@ pub(crate) fn scan_zombies(merged_prs: &[MergedPr], open_issue_numbers: &[u64]) 
         for commit_message in &pr.commit_messages {
             text.push('\n');
             text.push_str(commit_message);
+        }
+        if !pr.merge_commit_message.is_empty() {
+            text.push('\n');
+            text.push_str(&pr.merge_commit_message);
         }
         for issue_number in extract_referenced_issue_numbers(&text) {
             if open_issue_numbers.contains(&issue_number) {
@@ -283,15 +301,28 @@ pub(crate) fn scan_stale_candidates(
     (out, warnings)
 }
 
-/// Extract every literal `#N` occurrence within `span` (no keyword
-/// requirement — used once the caller has already confirmed the span is a
-/// gate-marked sentence, e.g. "gated on #894" has no "Refs" keyword at all).
-fn extract_hash_numbers(span: &str) -> Vec<u64> {
+/// Extract the run of `#N` references that sit **immediately after** a gate
+/// phrase in `span` — i.e. only separator characters (space/colon/comma) are
+/// allowed between the phrase and the `#N` tokens; as soon as anything else
+/// is hit, the run stops. This is what makes gate attribution precise rather
+/// than sentence-wide: `phrase_end` is the byte offset right after the
+/// matched gate phrase, and only `#N`s starting there (modulo separators)
+/// belong to it (#1000 round-3 codex review finding 2 — "gate 短语连坐": a
+/// sentence-wide scan like `extract_hash_numbers(whole_sentence)` used to
+/// also catch an unrelated `#M` mentioned later in the same sentence, e.g.
+/// "gated on #1 (Refs #2)" wrongly attributed #2 as a gate too).
+fn extract_hash_numbers_immediately_after(span: &str, phrase_end: usize) -> Vec<u64> {
     let mut out = Vec::new();
     let bytes = span.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'#' {
+    let mut i = phrase_end;
+    loop {
+        while bytes
+            .get(i)
+            .is_some_and(|b| matches!(b, b' ' | b':' | b',' | b'\t' | b'(' | b')'))
+        {
+            i += 1;
+        }
+        if bytes.get(i) == Some(&b'#') {
             let start = i + 1;
             let mut end = start;
             while bytes.get(end).is_some_and(u8::is_ascii_digit) {
@@ -305,20 +336,26 @@ fn extract_hash_numbers(span: &str) -> Vec<u64> {
                 continue;
             }
         }
-        i += 1;
+        break;
     }
     out
 }
 
 /// Extract issue numbers this text marks as **gates** — i.e. the `#N`
-/// reference sits in the same sentence as "gated on" / "blocked by" /
-/// "depends on" (case-insensitive). A plain `Refs #N` elsewhere in the text
-/// does NOT count: ordinary references are related, not gate dependencies
-/// (#1000 codex review finding 3). "Sentence" is approximated as a
-/// newline-or-period-delimited span, matching how issue bodies actually
-/// write these clauses (e.g. "gated on #894"). Byte offsets are tracked by
-/// walking the split iterator directly (not `str::find`) so duplicate
-/// sentence text within the same body cannot collide on the wrong span.
+/// reference immediately follows "gated on" / "blocked by" / "depends on"
+/// (case-insensitive), with only whitespace/punctuation separators allowed in
+/// between. A plain `Refs #N` elsewhere in the text does NOT count: ordinary
+/// references are related, not gate dependencies (#1000 codex review finding
+/// 3). Attribution is precise to the phrase, not sentence-wide (#1000
+/// round-3 codex review finding 2): `gated on #1 (Refs #2)` must flag ONLY
+/// #1 as a gate — #2 is a plain Refs mention that happens to share the
+/// sentence, not itself gate-marked. "Sentence" is approximated as a
+/// newline-or-period-delimited span (matching how issue bodies actually
+/// write these clauses) purely to find the phrase's search window; the
+/// actual attribution walks forward from the phrase match itself. Byte
+/// offsets are tracked by walking the split iterator directly (not
+/// `str::find`) so duplicate sentence text within the same body cannot
+/// collide on the wrong span.
 pub(crate) fn extract_gate_issue_numbers(text: &str) -> Vec<u64> {
     const GATE_PHRASES: [&str; 3] = ["gated on", "blocked by", "depends on"];
     let lower = text.to_ascii_lowercase();
@@ -328,10 +365,23 @@ pub(crate) fn extract_gate_issue_numbers(text: &str) -> Vec<u64> {
         let start = offset;
         let end = (start + sentence.len()).min(text.len());
         offset = end + 1; // skip the one-byte delimiter consumed by split
-        if GATE_PHRASES.iter().any(|p| sentence.contains(p)) {
+                          // A sentence can contain more than one gate phrase (rare, but cheap
+                          // to support correctly) — walk all matches, not just the first.
+        let mut search_from = 0usize;
+        while let Some(rel_match) = GATE_PHRASES
+            .iter()
+            .filter_map(|p| sentence[search_from..].find(p).map(|pos| (pos, p.len())))
+            .min_by_key(|(pos, _)| *pos)
+        {
+            let (rel_pos, phrase_len) = rel_match;
+            let phrase_end_in_sentence = search_from + rel_pos + phrase_len;
             if let Some(original_span) = text.get(start..end) {
-                out.extend(extract_hash_numbers(original_span));
+                out.extend(extract_hash_numbers_immediately_after(
+                    original_span,
+                    phrase_end_in_sentence,
+                ));
             }
+            search_from = phrase_end_in_sentence;
         }
     }
     out.sort_unstable();
@@ -366,6 +416,14 @@ pub(crate) struct OpenIssueForChurnCheck {
 pub(crate) struct MergedPrSurface {
     pub pr_number: u64,
     pub touched_paths: Vec<String>,
+    /// RFC3339 merge timestamp (`gh pr list --json mergedAt`). Used to
+    /// window "recently merged" to the SAME `activity_since` cutoff the
+    /// issue-activity side already uses — without this, `limit` (a PR
+    /// *count*) was the only bound on "recent", so a repo with high merge
+    /// volume could pull in PRs merged months/years ago as "churn" evidence
+    /// while `--limit` was still under the count (#1000 round-3 codex
+    /// review finding 6).
+    pub merged_at: String,
 }
 
 /// Third stale-candidate heuristic (#1000 Scope item 2): an issue whose
@@ -380,6 +438,15 @@ pub(crate) fn scan_same_surface_churn(
     recent_prs: &[MergedPrSurface],
     churn_threshold: usize,
 ) -> Vec<ChurnCandidate> {
+    // #1000 round-3 codex review finding 6: `churn_threshold == 0` makes
+    // `touching_pr_numbers.len() >= churn_threshold` trivially true even for
+    // an issue with ZERO touching PRs — every inactive issue with a
+    // non-empty file-surface would flag regardless of actual churn
+    // evidence. The heuristic's premise is "N *distinct touching* PRs";
+    // clamp the effective threshold to 1 here too (defense in depth — the
+    // caller in `router.rs` also clamps before calling, but the invariant
+    // belongs to the function that owns the "what counts as churn" logic).
+    let churn_threshold = churn_threshold.max(1);
     let mut out = Vec::new();
     for issue in issues {
         if issue.has_recent_activity || issue.surface_paths.is_empty() {
@@ -411,18 +478,24 @@ pub(crate) fn scan_same_surface_churn(
 /// Fetch merged PRs for `repo` via `gh pr list --state merged` and run the
 /// zombie scan against the currently-open issue numbers. `limit` bounds how
 /// many merged PRs are fetched (most-recently-merged first, per `gh`'s
-/// default ordering). Live-GitHub I/O boundary — kept thin so the scan logic
-/// above stays independently fixture-tested.
+/// default ordering). `repo_root` is the local checkout used to resolve each
+/// merge commit's own message via `git log` (#1000 round-3 codex review
+/// finding 1) — `None` (or a checkout that doesn't have the commit, e.g.
+/// shallow clone) just means merge-commit-only references degrade silently
+/// to invisible for that one PR, never a hard scan failure. Live-GitHub I/O
+/// boundary — kept thin so the scan logic above stays independently
+/// fixture-tested.
 pub(crate) fn fetch_and_scan_zombies(
     server: &MemoryServer,
     repo: &str,
     limit: u32,
+    repo_root: Option<&std::path::Path>,
 ) -> Result<Vec<ZombieHit>, String> {
     let open_issue_numbers = fetch_open_issue_numbers(server, repo)?;
     if open_issue_numbers.is_empty() {
         return Ok(Vec::new());
     }
-    let merged_prs = fetch_merged_prs(server, repo, limit)?;
+    let merged_prs = fetch_merged_prs(server, repo, limit, repo_root)?;
     Ok(scan_zombies(&merged_prs, &open_issue_numbers))
 }
 
@@ -436,29 +509,43 @@ fn fetch_open_issue_numbers(server: &MemoryServer, repo: &str) -> Result<Vec<u64
     let output = run_gh_json(cmd, &token)?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse issue list json: {e}"))?;
-    let numbers = value
+    Ok(parse_issue_numbers_json(&value))
+}
+
+/// Pure parser for `gh issue list --json number` output (#1000 round-3 codex
+/// review finding 4: this field-path parsing was still inline/untested,
+/// unlike its sibling parsers `parse_merged_prs_json` /
+/// `parse_open_issues_with_activity_json` / `parse_merged_pr_surfaces_json`,
+/// which were already extracted under finding 8). Shared by both the
+/// open-issue-number fetch (zombie arm) and the closed-issue-number fetch
+/// (stale arm) — both requests only ever project the single `number` field.
+pub(crate) fn parse_issue_numbers_json(value: &Value) -> Vec<u64> {
+    value
         .as_array()
         .map(|rows| {
             rows.iter()
                 .filter_map(|r| r.get("number").and_then(Value::as_u64))
                 .collect()
         })
-        .unwrap_or_default();
-    Ok(numbers)
+        .unwrap_or_default()
 }
 
 fn fetch_merged_prs(
     server: &MemoryServer,
     repo: &str,
     limit: u32,
+    repo_root: Option<&std::path::Path>,
 ) -> Result<Vec<MergedPr>, String> {
     let (mut cmd, token) = build_gh_command(server)?;
     // `commits` (not part of the original #1000 shipped fields) carries every
-    // commit's messageHeadline/messageBody per PR, including the merge/squash
-    // commit — this is how commit-only `Refs #N` references (never repeated
-    // in the PR title/body) become visible to the scan (codex review finding
-    // 1). `gh pr list --json mergeCommit` itself only returns `{oid}`, no
-    // message text, so `commits` is the only field that carries it.
+    // commit's messageHeadline/messageBody per PR, including squash commits
+    // but NOT a true (2-parent) merge commit, which is its own distinct
+    // commit created at merge time — this is how commit-only `Refs #N`
+    // references (never repeated in the PR title/body) become visible to
+    // the scan (codex review finding 1). `gh pr list --json mergeCommit`
+    // itself only returns `{oid}`, no message text, so a true merge
+    // commit's own `Refs #N` is resolved separately below via local `git
+    // log` (round-3 codex review finding 1).
     cmd.args(["pr", "list"])
         .args(["--repo", repo])
         .args(["--state", "merged"])
@@ -467,7 +554,36 @@ fn fetch_merged_prs(
     let output = run_gh_json(cmd, &token)?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse pr list json: {e}"))?;
-    Ok(parse_merged_prs_json(&value))
+    let mut merged_prs = parse_merged_prs_json(&value);
+    if let Some(repo_root) = repo_root {
+        for merged_pr in &mut merged_prs {
+            if let Some(sha) = merged_pr.merge_commit_sha.as_deref() {
+                merged_pr.merge_commit_message = resolve_merge_commit_message(repo_root, sha);
+            }
+        }
+    }
+    Ok(merged_prs)
+}
+
+/// Read a merge commit's own message from the local checkout: `git -C
+/// repo_root log -1 --format=%B <sha>`. Best-effort — a resolve failure
+/// (commit not present locally, e.g. shallow clone or not yet fetched; `git`
+/// not on PATH; not a git repo) degrades silently to an empty string, never
+/// a hard error. This is enrichment on top of `gh`'s primary PR data, not
+/// the scan's I/O boundary of record (#1000 round-3 codex review finding 1).
+fn resolve_merge_commit_message(repo_root: &std::path::Path, sha: &str) -> String {
+    if sha.is_empty() {
+        return String::new();
+    }
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["log", "-1", "--format=%B", sha])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 /// Pure parser for `gh pr list --json number,title,body,mergeCommit,commits`
@@ -518,6 +634,10 @@ pub(crate) fn parse_merged_prs_json(value: &Value) -> Vec<MergedPr> {
                             .and_then(Value::as_str)
                             .map(str::to_string),
                         commit_messages,
+                        // Populated separately (best-effort, local `git log`)
+                        // by `fetch_merged_prs` after this pure parse — `gh`
+                        // itself never returns a merge commit's message text.
+                        merge_commit_message: String::new(),
                     })
                 })
                 .collect()
@@ -636,7 +756,13 @@ fn fetch_open_issues_with_body(
     let output = run_gh_json(cmd, &token)?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse issue list json: {e}"))?;
-    Ok(value
+    Ok(parse_issue_numbers_with_body_json(&value))
+}
+
+/// Pure parser for `gh issue list --json number,body` output (#1000 round-3
+/// codex review finding 4).
+pub(crate) fn parse_issue_numbers_with_body_json(value: &Value) -> Vec<(u64, String)> {
+    value
         .as_array()
         .map(|rows| {
             rows.iter()
@@ -647,7 +773,7 @@ fn fetch_open_issues_with_body(
                 })
                 .collect()
         })
-        .unwrap_or_default())
+        .unwrap_or_default()
 }
 
 fn fetch_closed_issue_numbers(server: &MemoryServer, repo: &str) -> Result<Vec<u64>, String> {
@@ -660,14 +786,28 @@ fn fetch_closed_issue_numbers(server: &MemoryServer, repo: &str) -> Result<Vec<u
     let output = run_gh_json(cmd, &token)?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse issue list json: {e}"))?;
-    Ok(value
-        .as_array()
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|r| r.get("number").and_then(Value::as_u64))
-                .collect()
-        })
-        .unwrap_or_default())
+    Ok(parse_issue_numbers_json(&value))
+}
+
+/// Window `merged_prs` down to only those merged at/after `activity_since`
+/// (#1000 round-3 codex review finding 6): before this, the churn
+/// heuristic's "recently merged" set was bounded ONLY by `limit` (a PR
+/// *count*), not by the SAME activity window the issue side uses — a repo
+/// with high merge volume could pull in PRs merged months/years ago as
+/// "churn" evidence while still under the count. A PR with no `mergedAt`
+/// (shouldn't happen for `--state merged`, but never trust an external
+/// field silently) is treated as NOT recent rather than always-included —
+/// an empty string sorts before any real RFC3339 timestamp, so it correctly
+/// fails the `>= activity_since` test. Pure function — fixture-testable
+/// without live `gh`.
+pub(crate) fn filter_merged_prs_since(
+    merged_prs: Vec<MergedPrSurface>,
+    activity_since: &str,
+) -> Vec<MergedPrSurface> {
+    merged_prs
+        .into_iter()
+        .filter(|pr| pr.merged_at.as_str() >= activity_since)
+        .collect()
 }
 
 /// Live entry point for the third stale heuristic (#1000 Scope item 2,
@@ -677,7 +817,9 @@ fn fetch_closed_issue_numbers(server: &MemoryServer, repo: &str) -> Result<Vec<u
 /// issues with `updatedAt` at/after the cutoff, or a comment at/after it,
 /// count as active and are excluded. `churn_threshold` is the minimum number
 /// of distinct touching PRs required to flag (default policy: 3, chosen by
-/// the caller).
+/// the caller). Merged PRs are windowed to the same `activity_since` cutoff
+/// via `filter_merged_prs_since` (round-3 finding 6) before being handed to
+/// the pure `scan_same_surface_churn`.
 pub(crate) fn fetch_and_scan_same_surface_churn(
     server: &MemoryServer,
     repo: &str,
@@ -686,7 +828,8 @@ pub(crate) fn fetch_and_scan_same_surface_churn(
     churn_threshold: usize,
 ) -> Result<Vec<ChurnCandidate>, String> {
     let open = fetch_open_issues_with_activity(server, repo, limit)?;
-    let recent_prs = fetch_merged_pr_surfaces(server, repo, limit)?;
+    let all_merged_prs = fetch_merged_pr_surfaces(server, repo, limit)?;
+    let recent_prs = filter_merged_prs_since(all_merged_prs, activity_since);
 
     let issues: Vec<OpenIssueForChurnCheck> = open
         .into_iter()
@@ -784,7 +927,7 @@ fn fetch_merged_pr_surfaces(
         .args(["--repo", repo])
         .args(["--state", "merged"])
         .args(["--limit", &limit.to_string()])
-        .args(["--json", "number,files"]);
+        .args(["--json", "number,files,mergedAt"]);
     let output = run_gh_json(cmd, &token)?;
     let value: Value =
         serde_json::from_str(&output).map_err(|e| format!("parse pr list json: {e}"))?;
@@ -810,9 +953,15 @@ pub(crate) fn parse_merged_pr_surfaces_json(value: &Value) -> Vec<MergedPrSurfac
                                 .collect()
                         })
                         .unwrap_or_default();
+                    let merged_at = r
+                        .get("mergedAt")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
                     Some(MergedPrSurface {
                         pr_number,
                         touched_paths,
+                        merged_at,
                     })
                 })
                 .collect()
@@ -1007,12 +1156,30 @@ mod tests {
             body: body.to_string(),
             merge_commit_sha: Some(format!("sha-{number}")),
             commit_messages: Vec::new(),
+            merge_commit_message: String::new(),
         }
     }
 
     fn pr_with_commits(number: u64, title: &str, body: &str, commit_messages: &[&str]) -> MergedPr {
         MergedPr {
             commit_messages: commit_messages.iter().map(|s| s.to_string()).collect(),
+            ..pr(number, title, body)
+        }
+    }
+
+    /// #1000 round-3 codex review finding 1: a TRUE merge commit is a
+    /// distinct commit from every commit `gh` reports in `commits[]` — its
+    /// own message (e.g. GitHub's default "Merge pull request #N from
+    /// branch" plus a body carrying "Refs #M") is otherwise invisible to the
+    /// scan.
+    fn pr_with_merge_commit_message(
+        number: u64,
+        title: &str,
+        body: &str,
+        merge_commit_message: &str,
+    ) -> MergedPr {
+        MergedPr {
+            merge_commit_message: merge_commit_message.to_string(),
             ..pr(number, title, body)
         }
     }
@@ -1110,6 +1277,56 @@ mod tests {
         assert_eq!(rows[0].3, None);
     }
 
+    /// #1000 round-3 codex review finding 4: `gh issue list --json number`
+    /// shape (shared by the open-issue-number fetch and the closed-issue-
+    /// number fetch — both were still inline/untested, unlike their sibling
+    /// parsers extracted under finding 8).
+    #[test]
+    fn parse_issue_numbers_json_extracts_numbers() {
+        let value = serde_json::json!([{ "number": 979 }, { "number": 947 }]);
+        assert_eq!(parse_issue_numbers_json(&value), vec![979, 947]);
+    }
+
+    #[test]
+    fn parse_issue_numbers_json_skips_rows_missing_number() {
+        let value = serde_json::json!([{ "number": 1 }, { "title": "no number field" }]);
+        assert_eq!(parse_issue_numbers_json(&value), vec![1]);
+    }
+
+    #[test]
+    fn parse_issue_numbers_json_empty_array_yields_empty() {
+        let value = serde_json::json!([]);
+        assert_eq!(parse_issue_numbers_json(&value), Vec::<u64>::new());
+    }
+
+    /// #1000 round-3 codex review finding 4: `gh issue list --json
+    /// number,body` shape.
+    #[test]
+    fn parse_issue_numbers_with_body_json_extracts_number_and_body() {
+        let value = serde_json::json!([
+            { "number": 1000, "body": "gated on #894" },
+            { "number": 1001, "body": "" }
+        ]);
+        let rows = parse_issue_numbers_with_body_json(&value);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], (1000, "gated on #894".to_string()));
+        assert_eq!(rows[1], (1001, String::new()));
+    }
+
+    #[test]
+    fn parse_issue_numbers_with_body_json_defaults_missing_body_to_empty() {
+        let value = serde_json::json!([{ "number": 1 }]);
+        let rows = parse_issue_numbers_with_body_json(&value);
+        assert_eq!(rows, vec![(1, String::new())]);
+    }
+
+    #[test]
+    fn parse_issue_numbers_with_body_json_skips_rows_missing_number() {
+        let value = serde_json::json!([{ "body": "no number here" }, { "number": 2, "body": "b" }]);
+        let rows = parse_issue_numbers_with_body_json(&value);
+        assert_eq!(rows, vec![(2, "b".to_string())]);
+    }
+
     /// #1000 codex review finding 8: `gh pr list --json number,files` shape.
     #[test]
     fn parse_merged_pr_surfaces_json_extracts_touched_paths() {
@@ -1119,7 +1336,8 @@ mod tests {
                 "files": [
                     { "path": "crates/foo/src/bar.rs", "additions": 3, "deletions": 1 },
                     { "path": "crates/foo/src/baz.rs", "additions": 10, "deletions": 0 }
-                ]
+                ],
+                "mergedAt": "2026-07-01T00:00:00Z"
             }
         ]);
         let surfaces = parse_merged_pr_surfaces_json(&value);
@@ -1132,6 +1350,7 @@ mod tests {
                 "crates/foo/src/baz.rs".to_string()
             ]
         );
+        assert_eq!(surfaces[0].merged_at, "2026-07-01T00:00:00Z");
     }
 
     #[test]
@@ -1140,6 +1359,17 @@ mod tests {
         let surfaces = parse_merged_pr_surfaces_json(&value);
         assert_eq!(surfaces.len(), 1);
         assert!(surfaces[0].touched_paths.is_empty());
+    }
+
+    /// #1000 round-3 codex review finding 6: `mergedAt` absent/null must not
+    /// panic — it degrades to an empty string, which correctly sorts before
+    /// any real RFC3339 timestamp so the PR is treated as NOT recent by the
+    /// churn window filter rather than always-included.
+    #[test]
+    fn parse_merged_pr_surfaces_json_missing_merged_at_defaults_empty() {
+        let value = serde_json::json!([{ "number": 1, "files": [] }]);
+        let surfaces = parse_merged_pr_surfaces_json(&value);
+        assert_eq!(surfaces[0].merged_at, "");
     }
 
     #[test]
@@ -1294,6 +1524,46 @@ mod tests {
         );
     }
 
+    /// #1000 round-3 codex review finding 1: a `Refs #N` that appears ONLY in
+    /// the merge commit's own message (not the PR title, body, or any commit
+    /// in `commits[]`) must still be caught. This is the exact gap codex
+    /// flagged: `gh pr list --json mergeCommit` only returns `{oid}`, no
+    /// message text — the scan used to have no way to see a merge-commit-only
+    /// reference at all.
+    #[test]
+    fn scan_zombies_catches_merge_commit_only_reference() {
+        let merged_prs = vec![pr_with_merge_commit_message(
+            55,
+            "release: batch of fixes",
+            "no issue reference in the PR title or body",
+            "Merge pull request #55 from feature-branch\n\nRefs #1000",
+        )];
+        let hits = scan_zombies(&merged_prs, &[1000]);
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected merge-commit-only Refs to be caught, got: {hits:?}"
+        );
+        assert_eq!(hits[0].issue_number, 1000);
+        assert_eq!(hits[0].pr_number, 55);
+    }
+
+    #[test]
+    fn scan_zombies_dedupes_when_same_ref_in_body_and_merge_commit() {
+        let merged_prs = vec![pr_with_merge_commit_message(
+            1,
+            "fix",
+            "Refs #100",
+            "Merge pull request #1\n\nRefs #100",
+        )];
+        let hits = scan_zombies(&merged_prs, &[100]);
+        assert_eq!(
+            hits.len(),
+            1,
+            "body+merge-commit repeat must dedupe, got: {hits:?}"
+        );
+    }
+
     fn stale_issue(number: u64, anchors: &[(&str, u64)], gates: &[u64]) -> OpenIssueForStaleCheck {
         OpenIssueForStaleCheck {
             number,
@@ -1388,6 +1658,33 @@ mod tests {
         );
     }
 
+    /// #1000 round-3 codex review finding 2 ("gate 短语连坐" — gate-phrase
+    /// guilt-by-association): the codex-reported regression case — a plain
+    /// `Refs #N` sharing the same sentence as a gate phrase must NOT be
+    /// swept in as a gate too. Before the fix, `extract_hash_numbers` scanned
+    /// the WHOLE gate-marked sentence, so "gated on #1 (Refs #2)" wrongly
+    /// attributed #2 as a gate dependency alongside #1.
+    #[test]
+    fn extract_gate_issue_numbers_does_not_attribute_trailing_refs_in_same_sentence() {
+        assert_eq!(
+            extract_gate_issue_numbers("gated on #1 (Refs #2)"),
+            vec![1],
+            "only #1 (immediately after the gate phrase) is a gate; #2 is a plain Refs mention"
+        );
+    }
+
+    /// Positive control paired with the regression test above: a genuine
+    /// second gate phrase in the same sentence must still attribute its own
+    /// `#N` correctly (not conflated with the first phrase's target).
+    #[test]
+    fn extract_gate_issue_numbers_attributes_multiple_gate_phrases_in_one_sentence() {
+        assert_eq!(
+            extract_gate_issue_numbers("gated on #1, blocked by #2"),
+            vec![1, 2],
+            "two distinct gate phrases in the same sentence each attribute their own target"
+        );
+    }
+
     /// Direction 2 (both directions per the finding's test requirement):
     /// closing a merely-*related* issue (plain Refs) must not falsely mark
     /// this issue stale, but closing an explicit *gate* issue must.
@@ -1420,6 +1717,36 @@ mod tests {
         );
     }
 
+    /// #1000 round-3 codex review finding 2, end-to-end through
+    /// `scan_stale_candidates`: an issue body reading "gated on #1 (Refs #2)"
+    /// must only go stale when the GATE (#1) closes — #2 closing alone (the
+    /// plain Refs mention riding along in the same sentence) must not flag
+    /// the issue, because #2 was never actually a gate dependency.
+    #[test]
+    fn stale_candidate_gate_attribution_ignores_trailing_ref_in_gate_sentence() {
+        let issue = OpenIssueForStaleCheck {
+            number: 20,
+            file_line_anchors: vec![],
+            gate_issue_numbers: extract_gate_issue_numbers("gated on #1 (Refs #2)"),
+        };
+        // Only #2 (the trailing plain-Refs mention) is closed — #1 (the real
+        // gate) stays open. Must NOT flag: #2 was never a gate dependency.
+        let (out, _) =
+            scan_stale_candidates(&[issue.clone()], &std::collections::HashMap::new(), &[2]);
+        assert!(
+            out.is_empty(),
+            "closing #2 (a plain Refs mention, not the gate) must not flag issue #20, got: {out:?}"
+        );
+
+        // Now the real gate (#1) closes — must flag.
+        let (out, _) = scan_stale_candidates(&[issue], &std::collections::HashMap::new(), &[1]);
+        assert_eq!(
+            out.len(),
+            1,
+            "closing #1 (the actual gate) must flag issue #20"
+        );
+    }
+
     fn churn_issue(
         number: u64,
         surface_paths: &[&str],
@@ -1436,6 +1763,7 @@ mod tests {
         MergedPrSurface {
             pr_number,
             touched_paths: touched_paths.iter().map(|s| s.to_string()).collect(),
+            merged_at: String::new(),
         }
     }
 
@@ -1513,6 +1841,99 @@ mod tests {
         let out = scan_same_surface_churn(&issues, &recent_prs, 1);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].touching_pr_count, 1);
+    }
+
+    /// #1000 round-3 codex review finding 6: `churn_threshold == 0` must NOT
+    /// flag an issue with ZERO touching PRs. Before the clamp,
+    /// `touching_pr_numbers.len() >= 0` (always true) meant every inactive
+    /// issue with a non-empty file-surface flagged regardless of actual
+    /// churn evidence — a false-positive storm on any repo with idle specs.
+    #[test]
+    fn scan_same_surface_churn_threshold_zero_does_not_flag_untouched_surface() {
+        let issues = vec![churn_issue(6, &["src/untouched.rs"], false)];
+        let recent_prs: Vec<MergedPrSurface> = Vec::new(); // zero touching PRs
+        let out = scan_same_surface_churn(&issues, &recent_prs, 0);
+        assert!(
+            out.is_empty(),
+            "threshold=0 with zero touching PRs must not flag, got: {out:?}"
+        );
+    }
+
+    /// Positive control paired with the threshold=0 regression test: with the
+    /// clamp in place (effective threshold 1), an issue that DOES have at
+    /// least one genuinely touching PR must still flag at threshold=0 — the
+    /// clamp changes the floor, not whether real churn evidence counts.
+    #[test]
+    fn scan_same_surface_churn_threshold_zero_still_flags_when_actually_touched() {
+        let issues = vec![churn_issue(7, &["src/touched.rs"], false)];
+        let recent_prs = vec![pr_surface(20, &["src/touched.rs"])];
+        let out = scan_same_surface_churn(&issues, &recent_prs, 0);
+        assert_eq!(
+            out.len(),
+            1,
+            "threshold=0 clamped to 1 must still flag a genuinely touched issue"
+        );
+    }
+
+    fn pr_surface_at(pr_number: u64, touched_paths: &[&str], merged_at: &str) -> MergedPrSurface {
+        MergedPrSurface {
+            pr_number,
+            touched_paths: touched_paths.iter().map(|s| s.to_string()).collect(),
+            merged_at: merged_at.to_string(),
+        }
+    }
+
+    /// #1000 round-3 codex review finding 6: a PR merged well BEFORE the
+    /// activity window must not count as churn evidence, even though
+    /// `--limit` (a PR count) alone would have let it through.
+    #[test]
+    fn filter_merged_prs_since_excludes_prs_merged_before_cutoff() {
+        let merged_prs = vec![
+            pr_surface_at(1, &["src/foo.rs"], "2024-01-01T00:00:00Z"), // old
+            pr_surface_at(2, &["src/foo.rs"], "2026-07-05T00:00:00Z"), // recent
+        ];
+        let filtered = filter_merged_prs_since(merged_prs, "2026-06-01T00:00:00Z");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].pr_number, 2);
+    }
+
+    #[test]
+    fn filter_merged_prs_since_includes_pr_merged_exactly_at_cutoff() {
+        let merged_prs = vec![pr_surface_at(1, &["src/foo.rs"], "2026-06-01T00:00:00Z")];
+        let filtered = filter_merged_prs_since(merged_prs, "2026-06-01T00:00:00Z");
+        assert_eq!(filtered.len(), 1, "cutoff itself is inclusive (>=)");
+    }
+
+    #[test]
+    fn filter_merged_prs_since_excludes_pr_with_missing_merged_at() {
+        // An empty merged_at (missing/null `mergedAt` field) must be treated
+        // as NOT recent, never always-included.
+        let merged_prs = vec![pr_surface_at(1, &["src/foo.rs"], "")];
+        let filtered = filter_merged_prs_since(merged_prs, "2026-01-01T00:00:00Z");
+        assert!(
+            filtered.is_empty(),
+            "missing mergedAt must not be treated as recent"
+        );
+    }
+
+    /// End-to-end through the pure scan: a PR merged outside the window must
+    /// not count toward the churn threshold, even if it touches the exact
+    /// same surface as PRs that DO fall in the window.
+    #[test]
+    fn scan_same_surface_churn_windowed_prs_below_threshold_does_not_flag() {
+        let issues = vec![churn_issue(8, &["src/foo.rs"], false)];
+        let all_prs = vec![
+            pr_surface_at(10, &["src/foo.rs"], "2026-07-05T00:00:00Z"), // in window
+            pr_surface_at(11, &["src/foo.rs"], "2024-01-01T00:00:00Z"), // stale, filtered out
+            pr_surface_at(12, &["src/foo.rs"], "2023-01-01T00:00:00Z"), // stale, filtered out
+        ];
+        let windowed = filter_merged_prs_since(all_prs, "2026-06-01T00:00:00Z");
+        // Only 1 PR survives the window — below threshold 3.
+        let out = scan_same_surface_churn(&issues, &windowed, 3);
+        assert!(
+            out.is_empty(),
+            "PRs merged outside the activity window must not count toward churn threshold, got: {out:?}"
+        );
     }
 
     #[test]
