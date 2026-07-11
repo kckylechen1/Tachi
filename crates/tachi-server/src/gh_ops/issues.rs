@@ -1,6 +1,6 @@
 use super::*;
 
-pub(in crate::gh_ops) async fn handle_gh_issue_read(
+pub(crate) async fn handle_gh_issue_read(
     server: &MemoryServer,
     params: GhIssueReadParams,
 ) -> Result<String, String> {

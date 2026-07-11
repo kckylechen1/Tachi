@@ -7,22 +7,29 @@
 //! the already-tested `verdict` module. This keeps `run_curator_batch` fully
 //! testable against a fake runner (#1002 scout recommendation).
 
-use super::runner::LaneRunner;
-use super::verdict::{save_curator_verdict, CuratorVerdict, CuratorVerdictKind};
+use super::runner::{LaneRunner, ReverifyOutcome};
+use super::verdict::{persist_curator_verdict, CuratorVerdictKind};
 use crate::server_state::MemoryServer;
-use chrono::Utc;
 use serde::Serialize;
 
-/// One candidate issue to re-verify. `evidence_on_file` is whatever the
-/// #1000 freshness layer (or an explicit caller) already knows about it —
-/// e.g. a zombie hit's `Refs #N` PR, or a stale-candidate's vanished
-/// file:line anchor — so the packet handed to the lane is bounded, not the
-/// full issue body re-fetched from scratch.
-#[derive(Debug, Clone)]
+/// One candidate issue to re-verify. `issue_body` + `file_line_anchors` are
+/// the full issue text and its extracted `path:line` references (codex
+/// review Finding #2: the prior packet only carried a synthetic summary +
+/// saved references, never the issue's actual body/anchors) — see
+/// `entry.rs`'s packet-building callers for how these get fetched.
+/// `evidence_on_file` is whatever the #1000 freshness layer (or an explicit
+/// caller) already knows about it — e.g. a zombie hit's `Refs #N` PR, or a
+/// stale-candidate's vanished file:line anchor — bounding the packet without
+/// re-deriving that part from scratch.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct CuratorCandidate {
     pub issue_ref: String,
     pub issue_summary: String,
     pub evidence_on_file: Vec<String>,
+    /// Full issue body text (+ comments, concatenated) — Finding #2 fix.
+    pub issue_body: String,
+    /// `path:line` anchors extracted from the issue body — Finding #2 fix.
+    pub file_line_anchors: Vec<(String, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,16 +63,41 @@ pub(crate) struct CuratorBatchReport {
     pub budget_tokens: Option<u64>,
 }
 
+/// Builds the lane packet. Codex review Finding #2 (BUG): the prior version
+/// carried only a synthetic `issue_summary` + `evidence_on_file` — never the
+/// issue's actual body or its complete file:line anchors, so explicit
+/// `curator_issue_refs` candidates got an EMPTY evidence list and even
+/// freshness-sourced candidates never saw the real issue text. This version
+/// requires the caller (`entry.rs`) to have already fetched `issue_body` +
+/// `file_line_anchors` (fixture-testable, no live `gh` call inside this pure
+/// fn) and includes both in the packet.
 fn build_packet(candidate: &CuratorCandidate, head_sha: &str) -> String {
     let evidence = if candidate.evidence_on_file.is_empty() {
         "(none on file)".to_string()
     } else {
         candidate.evidence_on_file.join("\n- ")
     };
+    let body = if candidate.issue_body.trim().is_empty() {
+        "(issue body unavailable — re-verify from summary/anchors only)".to_string()
+    } else {
+        candidate.issue_body.clone()
+    };
+    let anchors = if candidate.file_line_anchors.is_empty() {
+        "(none extracted)".to_string()
+    } else {
+        candidate
+            .file_line_anchors
+            .iter()
+            .map(|(path, line)| format!("{path}:{line}"))
+            .collect::<Vec<_>>()
+            .join("\n- ")
+    };
     format!(
         "Re-verify this GitHub issue's claim against HEAD ({head_sha}).\n\n\
          Issue: {issue_ref}\n\
          Summary: {summary}\n\n\
+         Full issue text (body + comments):\n{body}\n\n\
+         Anchors extracted from the issue text:\n- {anchors}\n\n\
          Evidence already on file:\n- {evidence}\n\n\
          Produce a file:line-anchored verdict: does the claim still hold \
          (\"still_valid\"), is it already fixed on a merged PR/commit \
@@ -75,6 +107,9 @@ fn build_packet(candidate: &CuratorCandidate, head_sha: &str) -> String {
         head_sha = head_sha,
         issue_ref = candidate.issue_ref,
         summary = candidate.issue_summary,
+        body = body,
+        anchors = anchors,
+        evidence = evidence,
     )
 }
 
@@ -83,7 +118,8 @@ fn build_packet(candidate: &CuratorCandidate, head_sha: &str) -> String {
 /// path can substitute a structured lane response later — #1002 v1 keeps
 /// this minimal per its own "orchestration shell, not a new inference
 /// engine" scope). Defaults to `StillValid` (never silently claims a fix)
-/// when no explicit signal is found.
+/// when no explicit signal is found. ONLY called once non-empty terminal
+/// evidence exists (Finding #1) — never on a placeholder.
 fn classify_evidence(evidence_text: &str) -> CuratorVerdictKind {
     let lower = evidence_text.to_ascii_lowercase();
     if lower.contains("stale_spec") || lower.contains("stale-spec") {
@@ -95,27 +131,21 @@ fn classify_evidence(evidence_text: &str) -> CuratorVerdictKind {
     }
 }
 
-fn draft_comment(issue_ref: &str, verdict: CuratorVerdictKind, evidence_text: &str) -> String {
-    match verdict {
-        CuratorVerdictKind::StillValid => format!(
-            "Curator re-verification ({issue_ref}): claim still holds against HEAD.\n\n{evidence_text}"
-        ),
-        CuratorVerdictKind::FixedPendingClosure => format!(
-            "Curator re-verification ({issue_ref}): appears already fixed. \
-             Evidence below — closing is a leader/owner action, not automatic.\n\n{evidence_text}"
-        ),
-        CuratorVerdictKind::StaleSpec => format!(
-            "Curator re-verification ({issue_ref}): proposed fix is stale relative to HEAD. \
-             A draft of what superseded it is below — spec rewrite is a leader/owner action.\n\n{evidence_text}"
-        ),
-    }
-}
-
 /// Run one bounded batch: for each candidate, in order, check
 /// budget/idempotency, call the lane, classify + store a verdict row.
 /// Stops dispatching new candidates once the budget is exhausted but always
 /// finishes the report — every remaining candidate lands in `skipped` with
 /// a reason (never a silent truncation).
+///
+/// Codex review Finding #1 fix: a candidate's `ReverifyOutcome` is one of
+/// three shapes — `Evidence` (real, classifiable, persisted as one of the
+/// three real verdicts), `Timeout`/`LaneFailed` (no usable evidence,
+/// persisted ONLY as `pending_evidence`/`lane_failed` via
+/// `persist_curator_verdict`'s structural gate — never coerced into
+/// `still_valid`). All three land in `report.verified` (they ARE a stored,
+/// auditable row — just not an actionable real verdict) so a caller can see
+/// exactly what happened to every dispatched candidate, not just the ones
+/// that got real verdicts.
 pub(crate) async fn run_curator_batch(
     server: &MemoryServer,
     runner: &dyn LaneRunner,
@@ -164,26 +194,39 @@ pub(crate) async fn run_curator_batch(
             }
         };
 
-        let verdict_kind = classify_evidence(&outcome.evidence_text);
-        let comment = draft_comment(&candidate.issue_ref, verdict_kind, &outcome.evidence_text);
-
-        let row = CuratorVerdict {
-            issue_ref: candidate.issue_ref.clone(),
-            verified_at_sha: params.head_sha.clone(),
-            verdict: verdict_kind,
-            evidence_refs: vec![outcome.evidence_text.clone()],
-            draft_comment: comment,
-            lane: outcome.lane_id.clone(),
-            checked_at: Utc::now().to_rfc3339(),
+        let (verdict_kind, evidence_text, lane_id, cost_tokens) = match outcome {
+            ReverifyOutcome::Evidence(lane_outcome) => (
+                classify_evidence(&lane_outcome.evidence_text),
+                lane_outcome.evidence_text,
+                lane_outcome.lane_id,
+                lane_outcome.cost_tokens,
+            ),
+            ReverifyOutcome::Timeout { lane_id } => (
+                CuratorVerdictKind::PendingEvidence,
+                String::new(),
+                lane_id,
+                0,
+            ),
+            ReverifyOutcome::LaneFailed { lane_id, reason } => {
+                (CuratorVerdictKind::LaneFailed, reason, lane_id, 0)
+            }
         };
-        save_curator_verdict(server, &row)?;
 
-        total_cost_tokens = total_cost_tokens.saturating_add(outcome.cost_tokens);
+        persist_curator_verdict(
+            server,
+            &candidate.issue_ref,
+            &params.head_sha,
+            verdict_kind,
+            &evidence_text,
+            &lane_id,
+        )?;
+
+        total_cost_tokens = total_cost_tokens.saturating_add(cost_tokens);
         verified.push(CuratorBatchResultRow {
             issue_ref: candidate.issue_ref.clone(),
             verdict: verdict_kind,
-            lane: outcome.lane_id,
-            cost_tokens: outcome.cost_tokens,
+            lane: lane_id,
+            cost_tokens,
         });
 
         if let Some(budget) = params.budget_tokens {
@@ -204,7 +247,7 @@ pub(crate) async fn run_curator_batch(
 #[cfg(test)]
 mod tests {
     use super::super::runner::fake::FakeLaneRunner;
-    use super::super::runner::LaneOutcome;
+    use super::super::runner::{LaneOutcome, ReverifyOutcome};
     use super::*;
 
     fn test_server() -> MemoryServer {
@@ -220,6 +263,8 @@ mod tests {
             issue_ref: issue_ref.to_string(),
             issue_summary: format!("summary for {issue_ref}"),
             evidence_on_file: vec!["Refs #980".to_string()],
+            issue_body: format!("full issue body for {issue_ref}"),
+            file_line_anchors: vec![("src/x.rs".to_string(), 12)],
         }
     }
 
@@ -440,8 +485,152 @@ mod tests {
 
     #[test]
     fn draft_comment_never_claims_auto_close() {
-        let c = draft_comment("o/r#1", CuratorVerdictKind::FixedPendingClosure, "evidence");
+        let c = super::super::verdict::draft_comment(
+            "o/r#1",
+            CuratorVerdictKind::FixedPendingClosure,
+            "evidence",
+        );
         assert!(c.contains("leader/owner"));
         assert!(!c.to_ascii_lowercase().contains("closed this issue"));
+    }
+
+    #[test]
+    fn build_packet_carries_issue_body_and_anchors() {
+        // Finding #2 (BUG): the packet handed to the lane must include the
+        // full issue body + extracted file:line anchors, not just a
+        // synthetic summary.
+        let mut c = candidate("o/r#42");
+        c.issue_body = "The bug is in the retry loop, see anchor below.".to_string();
+        c.file_line_anchors = vec![("src/retry.rs".to_string(), 88)];
+        let packet = build_packet(&c, "sha1");
+        assert!(
+            packet.contains("The bug is in the retry loop"),
+            "packet must contain full issue body: {packet}"
+        );
+        assert!(
+            packet.contains("src/retry.rs:88"),
+            "packet must contain extracted file:line anchors: {packet}"
+        );
+    }
+
+    #[test]
+    fn build_packet_handles_missing_body_and_anchors_explicitly() {
+        let mut c = candidate("o/r#42");
+        c.issue_body = String::new();
+        c.file_line_anchors = Vec::new();
+        let packet = build_packet(&c, "sha1");
+        assert!(packet.contains("issue body unavailable"));
+        assert!(packet.contains("none extracted"));
+    }
+
+    // ─── Finding #1's invariant: empty evidence can never persist a real
+    // verdict. Red/green pair over `run_curator_batch`'s outcome-routing. ───
+
+    #[tokio::test]
+    async fn timeout_persists_pending_evidence_never_still_valid() {
+        let server = test_server();
+        let runner = FakeLaneRunner::new_outcomes(vec![(
+            "o/r#100",
+            ReverifyOutcome::Timeout {
+                lane_id: "codex_55_review".to_string(),
+            },
+        )]);
+
+        let params = CuratorBatchParams {
+            candidates: vec![candidate("o/r#100")],
+            head_sha: "abc123".into(),
+            budget_tokens: None,
+            skip_if_fresh: false,
+        };
+
+        let report = run_curator_batch(&server, &runner, params)
+            .await
+            .expect("batch run");
+
+        // The candidate is reported (not silently dropped)...
+        assert_eq!(report.verified.len(), 1);
+        assert_eq!(
+            report.verified[0].verdict,
+            CuratorVerdictKind::PendingEvidence
+        );
+
+        // ...and the ONLY thing persisted is pending_evidence — never a real
+        // verdict, and specifically never still_valid (the exact disease
+        // Finding #1 named).
+        let stored = super::super::verdict::get_curator_verdict(&server, "o/r#100")
+            .expect("get")
+            .expect("row persisted");
+        assert_eq!(stored.verdict, CuratorVerdictKind::PendingEvidence);
+        assert_ne!(stored.verdict, CuratorVerdictKind::StillValid);
+        assert!(!stored.verdict.is_real_verdict());
+    }
+
+    #[tokio::test]
+    async fn lane_failed_persists_lane_failed_never_a_real_verdict() {
+        let server = test_server();
+        let runner = FakeLaneRunner::new_outcomes(vec![(
+            "o/r#101",
+            ReverifyOutcome::LaneFailed {
+                lane_id: "codex_55_review".to_string(),
+                reason: "dispatch terminal state TASK_STATE_FAILED, no result.md".to_string(),
+            },
+        )]);
+
+        let params = CuratorBatchParams {
+            candidates: vec![candidate("o/r#101")],
+            head_sha: "abc123".into(),
+            budget_tokens: None,
+            skip_if_fresh: false,
+        };
+
+        let report = run_curator_batch(&server, &runner, params)
+            .await
+            .expect("batch run");
+
+        assert_eq!(report.verified.len(), 1);
+        assert_eq!(report.verified[0].verdict, CuratorVerdictKind::LaneFailed);
+
+        let stored = super::super::verdict::get_curator_verdict(&server, "o/r#101")
+            .expect("get")
+            .expect("row persisted");
+        assert_eq!(stored.verdict, CuratorVerdictKind::LaneFailed);
+        assert!(!stored.verdict.is_real_verdict());
+        assert!(stored.evidence_refs[0].contains("TASK_STATE_FAILED"));
+    }
+
+    #[tokio::test]
+    async fn real_evidence_still_persists_real_verdicts_after_the_fix() {
+        // Non-regression: the happy path (real terminal evidence) must still
+        // classify + persist a real verdict, exactly as before Finding #1's
+        // fix — the gate must not make legitimate verdicts unreachable.
+        let server = test_server();
+        let runner = FakeLaneRunner::new(vec![(
+            "o/r#979",
+            LaneOutcome {
+                evidence_text: "already fixed on PR #980, file:line src/x.rs:12".into(),
+                cost_tokens: 100,
+                lane_id: "codex_55_review".into(),
+            },
+        )]);
+
+        let params = CuratorBatchParams {
+            candidates: vec![candidate("o/r#979")],
+            head_sha: "abc123".into(),
+            budget_tokens: None,
+            skip_if_fresh: false,
+        };
+
+        let report = run_curator_batch(&server, &runner, params)
+            .await
+            .expect("batch run");
+        assert_eq!(
+            report.verified[0].verdict,
+            CuratorVerdictKind::FixedPendingClosure
+        );
+        let stored = super::super::verdict::get_curator_verdict(&server, "o/r#979")
+            .expect("get")
+            .expect("row persisted");
+        assert!(stored.verdict.is_real_verdict());
+        assert!(!stored.evidence_refs.is_empty());
     }
 }

@@ -10,30 +10,62 @@
 //! precedent (`save_freshness_verdict`) exactly.
 
 use crate::server_state::MemoryServer;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub(crate) const CURATOR_VERDICT_NS: &str = "issue_curator";
 
-/// Three-tier judgment per #1002's frozen spec (仍成立 / 已修待收口 / 方案过时).
+/// Three-tier judgment per #1002's frozen spec (仍成立 / 已修待收口 / 方案过时),
+/// plus two non-verdict placeholder states that a caller may persist when no
+/// lane evidence exists yet. Codex review finding #1 (BROKEN, severity-max):
+/// a curator that writes `still_valid` (or either other real verdict) with no
+/// evidence is the exact disease (#1002) it exists to cure. `PendingEvidence`
+/// and `LaneFailed` exist so "the lane hasn't reported back yet" / "the lane
+/// errored" are representable WITHOUT smuggling a fabricated real verdict —
+/// see `persist_curator_verdict`'s non-empty-evidence gate below, which is
+/// the structural enforcement (not just a convention).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CuratorVerdictKind {
-    /// 仍成立 — claim still holds against HEAD.
+    /// 仍成立 — claim still holds against HEAD. Requires non-empty evidence.
     StillValid,
     /// 已修待收口 — a merged PR/commit already covers this; advisory only,
-    /// the curator never closes the issue itself.
+    /// the curator never closes the issue itself. Requires non-empty evidence.
     FixedPendingClosure,
     /// 方案过时 — the issue's proposed fix no longer matches HEAD/doctrine.
+    /// Requires non-empty evidence.
     StaleSpec,
+    /// No terminal lane evidence exists yet (dispatch still running when the
+    /// batch's wait window elapsed). NOT a real verdict — briefing/writeback
+    /// code must treat this as "nothing to say yet," never as `still_valid`.
+    PendingEvidence,
+    /// The lane errored or returned a terminal-but-failed state (no usable
+    /// evidence text). NOT a real verdict — same non-actionable posture as
+    /// `PendingEvidence`.
+    LaneFailed,
 }
 
 impl CuratorVerdictKind {
+    /// Real three-tier verdicts require non-empty lane evidence to persist
+    /// (Finding #1's structural gate). `PendingEvidence`/`LaneFailed` are the
+    /// only kinds a caller may persist without one.
+    pub(crate) fn is_real_verdict(self) -> bool {
+        matches!(
+            self,
+            CuratorVerdictKind::StillValid
+                | CuratorVerdictKind::FixedPendingClosure
+                | CuratorVerdictKind::StaleSpec
+        )
+    }
+
     pub(crate) fn as_label(self) -> &'static str {
         match self {
             CuratorVerdictKind::StillValid => "reverified",
             CuratorVerdictKind::FixedPendingClosure => "verified-fixed",
             CuratorVerdictKind::StaleSpec => "stale-spec",
+            CuratorVerdictKind::PendingEvidence => "pending-evidence",
+            CuratorVerdictKind::LaneFailed => "lane-failed",
         }
     }
 }
@@ -68,6 +100,85 @@ pub(crate) fn save_curator_verdict(
             .map_err(|e| format!("issue_curator set_state: {e}"))?;
         Ok(())
     })
+}
+
+/// Structural gate for Finding #1 (codex review, severity-max): the ONLY way
+/// into `state_kv` for a curator verdict row now goes through this function,
+/// and it REFUSES to persist a real verdict (`still_valid` /
+/// `fixed_pending_closure` / `stale_spec`) unless `evidence_text` is
+/// non-empty. `pending_evidence` / `lane_failed` are the only kinds allowed
+/// through with empty evidence — this is what makes "no terminal lane result
+/// yet" representable without ever fabricating a real verdict.
+///
+/// `batch.rs` is the only caller; it is intentionally the single choke point
+/// so this invariant cannot be bypassed by a future call site that forgets
+/// to check.
+pub(crate) fn persist_curator_verdict(
+    server: &MemoryServer,
+    issue_ref: &str,
+    verified_at_sha: &str,
+    kind: CuratorVerdictKind,
+    evidence_text: &str,
+    lane: &str,
+) -> Result<CuratorVerdict, String> {
+    if kind.is_real_verdict() && evidence_text.trim().is_empty() {
+        return Err(format!(
+            "refusing to persist real verdict {:?} for {issue_ref} with empty evidence \
+             (Finding #1 structural gate — use pending_evidence/lane_failed instead)",
+            kind
+        ));
+    }
+    let evidence_refs = if evidence_text.trim().is_empty() {
+        Vec::new()
+    } else {
+        vec![evidence_text.to_string()]
+    };
+    let draft_comment = draft_comment(issue_ref, kind, evidence_text);
+    let row = CuratorVerdict {
+        issue_ref: issue_ref.to_string(),
+        verified_at_sha: verified_at_sha.to_string(),
+        verdict: kind,
+        evidence_refs,
+        draft_comment,
+        lane: lane.to_string(),
+        checked_at: Utc::now().to_rfc3339(),
+    };
+    save_curator_verdict(server, &row)?;
+    Ok(row)
+}
+
+/// Drafted writeback text per verdict kind. `pending_evidence`/`lane_failed`
+/// draft comments are informational only — `entry.rs`'s writeback path only
+/// ever posts for real verdicts (see its `report.verified` iteration), so
+/// these never reach GitHub, but a non-empty draft is still useful in the
+/// stored row for a human reading `list_curator_verdicts` / the briefing
+/// queue directly.
+pub(crate) fn draft_comment(
+    issue_ref: &str,
+    verdict: CuratorVerdictKind,
+    evidence_text: &str,
+) -> String {
+    match verdict {
+        CuratorVerdictKind::StillValid => format!(
+            "Curator re-verification ({issue_ref}): claim still holds against HEAD.\n\n{evidence_text}"
+        ),
+        CuratorVerdictKind::FixedPendingClosure => format!(
+            "Curator re-verification ({issue_ref}): appears already fixed. \
+             Evidence below — closing is a leader/owner action, not automatic.\n\n{evidence_text}"
+        ),
+        CuratorVerdictKind::StaleSpec => format!(
+            "Curator re-verification ({issue_ref}): proposed fix is stale relative to HEAD. \
+             A draft of what superseded it is below — spec rewrite is a leader/owner action.\n\n{evidence_text}"
+        ),
+        CuratorVerdictKind::PendingEvidence => format!(
+            "Curator re-verification ({issue_ref}): no terminal lane result yet — \
+             re-run later, this is not a verdict."
+        ),
+        CuratorVerdictKind::LaneFailed => format!(
+            "Curator re-verification ({issue_ref}): lane errored, no evidence collected — \
+             this is not a verdict."
+        ),
+    }
 }
 
 pub(crate) fn list_curator_verdicts(server: &MemoryServer) -> Result<Vec<CuratorVerdict>, String> {
@@ -326,6 +437,121 @@ mod tests {
     #[test]
     fn briefing_queue_empty_when_no_verdicts_saved() {
         let server = test_server();
+        let out = briefing_curator_queue(&server, 8);
+        assert_eq!(out["pending_closure"]["count"], 0);
+        assert_eq!(out["pending_respec"]["count"], 0);
+    }
+
+    // ─── Finding #1's structural gate, at the `persist_curator_verdict`
+    // level (unit-level red/green — `batch.rs` has the integration-level
+    // pair over the whole `run_curator_batch` path). ───
+
+    #[test]
+    fn persist_refuses_real_verdict_with_empty_evidence() {
+        let server = test_server();
+        let err = persist_curator_verdict(
+            &server,
+            "o/r#1",
+            "sha1",
+            CuratorVerdictKind::StillValid,
+            "",
+            "fake",
+        )
+        .expect_err("must refuse a real verdict with empty evidence");
+        assert!(err.contains("refusing to persist"));
+        // Nothing should have been written.
+        assert!(get_curator_verdict(&server, "o/r#1").unwrap().is_none());
+    }
+
+    #[test]
+    fn persist_refuses_fixed_pending_closure_with_whitespace_only_evidence() {
+        let server = test_server();
+        let err = persist_curator_verdict(
+            &server,
+            "o/r#2",
+            "sha1",
+            CuratorVerdictKind::FixedPendingClosure,
+            "   \n\t  ",
+            "fake",
+        )
+        .expect_err("whitespace-only evidence must not count as real evidence");
+        assert!(err.contains("refusing to persist"));
+    }
+
+    #[test]
+    fn persist_allows_pending_evidence_with_empty_evidence() {
+        let server = test_server();
+        let row = persist_curator_verdict(
+            &server,
+            "o/r#3",
+            "sha1",
+            CuratorVerdictKind::PendingEvidence,
+            "",
+            "fake",
+        )
+        .expect("pending_evidence must be persistable without evidence");
+        assert_eq!(row.verdict, CuratorVerdictKind::PendingEvidence);
+        assert!(!row.verdict.is_real_verdict());
+        let stored = get_curator_verdict(&server, "o/r#3")
+            .unwrap()
+            .expect("row persisted");
+        assert_eq!(stored.verdict, CuratorVerdictKind::PendingEvidence);
+    }
+
+    #[test]
+    fn persist_allows_lane_failed_with_empty_evidence() {
+        let server = test_server();
+        let row = persist_curator_verdict(
+            &server,
+            "o/r#4",
+            "sha1",
+            CuratorVerdictKind::LaneFailed,
+            "",
+            "fake",
+        )
+        .expect("lane_failed must be persistable without evidence");
+        assert_eq!(row.verdict, CuratorVerdictKind::LaneFailed);
+        assert!(!row.verdict.is_real_verdict());
+    }
+
+    #[test]
+    fn persist_accepts_real_verdict_with_non_empty_evidence() {
+        let server = test_server();
+        let row = persist_curator_verdict(
+            &server,
+            "o/r#5",
+            "sha1",
+            CuratorVerdictKind::StaleSpec,
+            "src/x.rs:1 supersedes the proposed fix",
+            "fake",
+        )
+        .expect("real verdict with real evidence must persist");
+        assert_eq!(row.verdict, CuratorVerdictKind::StaleSpec);
+        assert!(row.verdict.is_real_verdict());
+        assert_eq!(row.evidence_refs.len(), 1);
+    }
+
+    #[test]
+    fn pending_evidence_and_lane_failed_never_enter_actionable_briefing_queues() {
+        let server = test_server();
+        persist_curator_verdict(
+            &server,
+            "o/r#6",
+            "sha1",
+            CuratorVerdictKind::PendingEvidence,
+            "",
+            "fake",
+        )
+        .expect("save");
+        persist_curator_verdict(
+            &server,
+            "o/r#7",
+            "sha1",
+            CuratorVerdictKind::LaneFailed,
+            "",
+            "fake",
+        )
+        .expect("save");
         let out = briefing_curator_queue(&server, 8);
         assert_eq!(out["pending_closure"]["count"], 0);
         assert_eq!(out["pending_respec"]["count"], 0);

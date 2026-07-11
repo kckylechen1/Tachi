@@ -7,6 +7,18 @@
 //! curator re-verifies exactly what the mechanical scan already flagged as
 //! worth a second look — no re-scanning GitHub from scratch.
 //!
+//! Packet enrichment (codex review Finding #2, BUG): every candidate — both
+//! explicit `curator_issue_refs` and freshness-sourced ones — gets its full
+//! issue body + comments fetched via the SAME `gh issue view --json
+//! body,comments` idiom `gh_ops::issues::handle_gh_issue_read` already uses
+//! (reused verbatim, not reinvented here), plus `path:line` anchors
+//! extracted from that text via the existing `gh_ops::issue_freshness`
+//! extractors. `enrich_candidate` is the pure half (fixture-tested, no live
+//! `gh` call); `fetch_issue_body_and_anchors` is the thin async wrapper that
+//! does the actual `gh` call and is NOT exercised by this crate's test
+//! suite (matching the #1002 "no live GitHub call off this crate's tests"
+//! contract already established for `DispatchLaneRunner`).
+//!
 //! Writeback (comment + label) is gated behind `curator_post_writeback`,
 //! default `false` (#1002 non-goal: curator never auto-writes without an
 //! explicit per-run opt-in), and reuses the *existing* `issue_comment` /
@@ -43,8 +55,83 @@ fn default_candidates(server: &MemoryServer, repo: &str) -> Vec<CuratorCandidate
             issue_ref: v.issue_ref,
             issue_summary: format!("freshness scan verdict: {}", v.verdict),
             evidence_on_file: v.evidence_refs,
+            issue_body: String::new(),
+            file_line_anchors: Vec::new(),
         })
         .collect()
+}
+
+/// Extracts the issue number out of an `issue_ref` of the form
+/// `owner/repo#123` (or a bare URL ending in `#123`) — same convention
+/// `entry.rs`'s writeback path already uses (`rsplit('#')`).
+fn parse_issue_number(issue_ref: &str) -> Option<u64> {
+    issue_ref.rsplit('#').next()?.parse::<u64>().ok()
+}
+
+/// Pure half of Finding #2's fix: given the already-fetched `gh issue view
+/// --json body,comments` response (as `handle_gh_issue_read` returns it —
+/// `{"result": {"body": ..., "comments": [{"body": ...}, ...]}}`),
+/// concatenates body + comment text and extracts `path:line` anchors from
+/// the combined text. Fixture-testable with a hand-built `serde_json::Value`
+/// — no live `gh` call needed to exercise this.
+fn enrich_candidate_from_issue_json(
+    candidate: &mut CuratorCandidate,
+    issue_json: &serde_json::Value,
+) {
+    let result = issue_json.get("result").unwrap_or(issue_json);
+    let body = result.get("body").and_then(|b| b.as_str()).unwrap_or("");
+    let comments_text: String = result
+        .get("comments")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| c.get("body").and_then(|b| b.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+        .unwrap_or_default();
+
+    let full_text = if comments_text.is_empty() {
+        body.to_string()
+    } else {
+        format!("{body}\n\n---comments---\n{comments_text}")
+    };
+
+    candidate.file_line_anchors = crate::gh_ops::extract_file_line_anchors(&full_text);
+    candidate.issue_body = full_text;
+}
+
+/// Thin async wrapper: fetches one issue's full body + comments via the
+/// existing `gh_ops::handle_gh_issue_read` handler (same `gh` idiom the
+/// #1000 freshness layer/parent branch already uses) and enriches the
+/// candidate in place. Best-effort — a fetch failure (e.g. no network, no
+/// `gh` auth) leaves `issue_body`/`file_line_anchors` empty rather than
+/// failing the whole batch; `build_packet` already renders that case
+/// explicitly ("(issue body unavailable...)"), so the lane still knows
+/// evidence was missing rather than silently getting a truncated packet.
+async fn fetch_issue_body_and_anchors(
+    server: &MemoryServer,
+    repo: &str,
+    candidate: &mut CuratorCandidate,
+) {
+    let Some(issue_number) = parse_issue_number(&candidate.issue_ref) else {
+        return;
+    };
+    let raw = crate::gh_ops::handle_gh_issue_read(
+        server,
+        tachi_params::GhIssueReadParams {
+            repo: repo.to_string(),
+            issue_number,
+        },
+    )
+    .await;
+    let Ok(raw) = raw else {
+        return;
+    };
+    let Ok(issue_json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    enrich_candidate_from_issue_json(candidate, &issue_json);
 }
 
 pub(crate) async fn handle_issue_curator_batch(
@@ -56,7 +143,7 @@ pub(crate) async fn handle_issue_curator_batch(
         .clone()
         .ok_or_else(|| "issue_curator_batch requires 'repo' parameter".to_string())?;
 
-    let candidates = if !params.curator_issue_refs.is_empty() {
+    let mut candidates: Vec<CuratorCandidate> = if !params.curator_issue_refs.is_empty() {
         params
             .curator_issue_refs
             .iter()
@@ -64,11 +151,21 @@ pub(crate) async fn handle_issue_curator_batch(
                 issue_ref: issue_ref.clone(),
                 issue_summary: "explicit caller-supplied candidate".to_string(),
                 evidence_on_file: Vec::new(),
+                issue_body: String::new(),
+                file_line_anchors: Vec::new(),
             })
             .collect()
     } else {
         default_candidates(server, &repo)
     };
+
+    // Finding #2 fix: every candidate — explicit AND freshness-sourced —
+    // gets its full issue body + comments fetched before the packet is
+    // built, so the lane sees the actual issue text and complete anchors,
+    // not just a synthetic summary.
+    for candidate in &mut candidates {
+        fetch_issue_body_and_anchors(server, &repo, candidate).await;
+    }
 
     if candidates.is_empty() {
         return serde_json::to_string(&json!({
@@ -100,10 +197,17 @@ pub(crate) async fn handle_issue_curator_batch(
 
     // Writeback: gated, best-effort, reuses the existing issue_comment /
     // issue_label handlers verbatim (#1002: no new GitHub write primitive
-    // for the curator itself — only the orchestration is new).
+    // for the curator itself — only the orchestration is new). Finding #1's
+    // gate extends here too: `pending_evidence`/`lane_failed` rows are NOT
+    // real verdicts and must never be posted to GitHub as one — only rows
+    // whose verdict is a real, evidence-backed tier get written back.
     let mut writeback_results = Vec::new();
     if params.curator_post_writeback {
-        for row in &report.verified {
+        for row in report
+            .verified
+            .iter()
+            .filter(|r| r.verdict.is_real_verdict())
+        {
             let Ok(Some(stored)) = super::verdict::get_curator_verdict(server, &row.issue_ref)
             else {
                 continue;
@@ -180,5 +284,102 @@ fn verdict_label(kind: CuratorVerdictKind) -> &'static str {
         CuratorVerdictKind::StillValid => "still_valid",
         CuratorVerdictKind::FixedPendingClosure => "fixed_pending_closure",
         CuratorVerdictKind::StaleSpec => "stale_spec",
+        CuratorVerdictKind::PendingEvidence => "pending_evidence",
+        CuratorVerdictKind::LaneFailed => "lane_failed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_issue_number_handles_owner_repo_hash_number() {
+        assert_eq!(parse_issue_number("kckylechen1/tachi#1002"), Some(1002));
+    }
+
+    #[test]
+    fn parse_issue_number_returns_none_for_malformed_ref() {
+        assert_eq!(parse_issue_number("not-a-ref"), None);
+    }
+
+    #[test]
+    fn enrich_candidate_extracts_body_and_comments_and_anchors() {
+        // Finding #2 (BUG): the packet builder must fetch the full issue
+        // body + comments and extract file:line anchors from that text —
+        // fixture-tested here against a hand-built `gh issue view --json
+        // body,comments` response shape (no live `gh` call).
+        let issue_json = json!({
+            "tool": "tachi_gh_issue_read",
+            "repo": "o/r",
+            "issue_number": 42,
+            "result": {
+                "body": "The bug is at curator_ops/runner.rs:107 in the reverify fn.",
+                "comments": [
+                    {"body": "Confirmed, also see curator_ops/batch.rs:87 for the classifier."},
+                ],
+            },
+        });
+        let mut candidate = CuratorCandidate {
+            issue_ref: "o/r#42".to_string(),
+            issue_summary: "synthetic".to_string(),
+            evidence_on_file: Vec::new(),
+            issue_body: String::new(),
+            file_line_anchors: Vec::new(),
+        };
+
+        enrich_candidate_from_issue_json(&mut candidate, &issue_json);
+
+        assert!(candidate
+            .issue_body
+            .contains("The bug is at curator_ops/runner.rs:107"));
+        assert!(candidate
+            .issue_body
+            .contains("Confirmed, also see curator_ops/batch.rs:87"));
+        assert!(candidate
+            .file_line_anchors
+            .iter()
+            .any(|(path, line)| path == "curator_ops/runner.rs" && *line == 107));
+        assert!(candidate
+            .file_line_anchors
+            .iter()
+            .any(|(path, line)| path == "curator_ops/batch.rs" && *line == 87));
+    }
+
+    #[test]
+    fn enrich_candidate_handles_missing_comments_field() {
+        let issue_json = json!({
+            "result": {
+                "body": "no anchors here",
+            },
+        });
+        let mut candidate = CuratorCandidate {
+            issue_ref: "o/r#43".to_string(),
+            issue_summary: "synthetic".to_string(),
+            evidence_on_file: Vec::new(),
+            issue_body: String::new(),
+            file_line_anchors: Vec::new(),
+        };
+
+        enrich_candidate_from_issue_json(&mut candidate, &issue_json);
+
+        assert_eq!(candidate.issue_body, "no anchors here");
+        assert!(candidate.file_line_anchors.is_empty());
+    }
+
+    #[test]
+    fn verdict_label_covers_all_five_kinds() {
+        assert_eq!(verdict_label(CuratorVerdictKind::StillValid), "still_valid");
+        assert_eq!(
+            verdict_label(CuratorVerdictKind::FixedPendingClosure),
+            "fixed_pending_closure"
+        );
+        assert_eq!(verdict_label(CuratorVerdictKind::StaleSpec), "stale_spec");
+        assert_eq!(
+            verdict_label(CuratorVerdictKind::PendingEvidence),
+            "pending_evidence"
+        );
+        assert_eq!(verdict_label(CuratorVerdictKind::LaneFailed), "lane_failed");
     }
 }
