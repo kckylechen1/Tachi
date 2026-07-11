@@ -16,19 +16,33 @@ use crate::error::MemoryError;
 ///
 /// Returns the number of tables actually dropped (0 or 1).
 pub(super) fn migrate_v11_drop_domains_table(conn: &Connection) -> Result<usize, MemoryError> {
-    // Propagate existence-check errors (lock/I/O/authorizer) instead of
-    // collapsing them to "table absent" — a swallowed error here would let
-    // `run_data_migrations` mark this migration's sentinel as run even
-    // though the DROP never ran, permanently skipping the retry (#978).
-    fn exists(conn: &Connection, name: &str) -> Result<bool, MemoryError> {
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
-            rusqlite::params![name],
-            |row| row.get(0),
-        )?;
-        Ok(n > 0)
-    }
+    migrate_v11_inner(conn, exists)
+}
 
+/// Real existence-check: does a table named `name` exist in `conn`?
+fn exists(conn: &Connection, name: &str) -> Result<bool, MemoryError> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+        rusqlite::params![name],
+        |row| row.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Body of [`migrate_v11_drop_domains_table`], parameterized over the
+/// existence-check so tests can inject a deterministic failure without
+/// inducing a real SQLite lock/corruption condition (#978). Production
+/// behavior and the public signature above are unchanged; this is purely an
+/// internal DI seam.
+///
+/// Propagates existence-check errors (lock/I/O/authorizer) instead of
+/// collapsing them to "table absent" — a swallowed error here would let
+/// `run_data_migrations` mark this migration's sentinel as run even though
+/// the DROP never ran, permanently skipping the retry.
+pub(super) fn migrate_v11_inner(
+    conn: &Connection,
+    exists: impl Fn(&Connection, &str) -> Result<bool, MemoryError>,
+) -> Result<usize, MemoryError> {
     if exists(conn, "domains")? {
         conn.execute_batch("DROP TABLE domains")?;
         return Ok(1);

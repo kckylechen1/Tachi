@@ -629,98 +629,80 @@ mod tests {
         assert!(!table_present(&conn, "domains"));
     }
 
-    /// Corrupt `db_path`'s on-disk bytes in place, requiring the caller to
-    /// hold no open connection to it (SQLite file access is otherwise
-    /// undefined while corrupting it live). Returns the pre-corruption
-    /// bytes so the caller can restore the file afterward and prove the
-    /// sentinel was never written on the exact DB that saw the failure.
+    /// A deterministic stand-in for the transient lock/I/O/authorizer
+    /// failure #978 describes: the existence-check itself errors, rather
+    /// than legitimately finding the table absent.
     ///
-    /// This stands in for the transient lock/I/O/authorizer failure #978
-    /// describes (the existence-check itself errors, rather than
-    /// legitimately finding the table absent).
+    /// Two earlier mechanisms were tried and abandoned as non-deterministic
+    /// or infeasible on this codebase:
+    /// - Racing a real `BEGIN EXCLUSIVE` held on a second thread against a
+    ///   `busy_timeout(0)` reader: `SQLITE_BUSY` was not reliably
+    ///   reproducible against the specific `sqlite_master` read the
+    ///   migration performs, and the lock-holder thread's own `.expect()`
+    ///   calls could panic before the test body ran its assertion.
+    /// - Corrupting the DB file's on-disk header bytes and reopening: this
+    ///   codebase's `Connection::open` path auto-loads a SQLite extension
+    ///   that reads the header eagerly, so `Connection::open` itself fails
+    ///   immediately on a corrupted file — there is no window in which a
+    ///   corrupt-but-openable connection exists to call the migration fn on.
     ///
-    /// Earlier revisions of this test tried to reproduce that failure by
-    /// racing a real `BEGIN EXCLUSIVE` held on a second thread against a
-    /// `busy_timeout(0)` reader. That is exactly the kind of real-lock race
-    /// the #978 contract warns against: `init_schema` leaves the DB file in
-    /// WAL mode, and WAL-vs-rollback-journal locking semantics don't
-    /// reliably reproduce `SQLITE_BUSY` on the specific `sqlite_master`
-    /// read the migration performs, so the test failed nondeterministically
-    /// (and, worse, its own lock-holder-thread `.expect()` calls could
-    /// panic with a bare `SqliteFailure(DatabaseBusy)` before the test body
-    /// even reached its `expect_err` assertion).
-    ///
-    /// This version is hermetic instead: overwrite the file's header bytes
-    /// with garbage. SQLite validates the file header (`SQLite format 3\0`
-    /// magic + page size) on first access to a table, so any query against
-    /// the corrupted file — including the `SELECT COUNT(*) FROM
-    /// sqlite_master` `exists()` runs — deterministically fails with
-    /// `SQLITE_NOTADB`/`SQLITE_CORRUPT`. No threads, no locks, no
-    /// filesystem permission bits (which root/sandboxed CI can ignore
-    /// anyway), no timing dependency.
-    fn corrupt_db_file_in_place(db_path: &std::path::Path) -> Vec<u8> {
-        let original_bytes = std::fs::read(db_path).expect("read original db bytes");
-        std::fs::write(
-            db_path,
-            b"not a sqlite database, deliberately corrupted for #978",
+    /// This version injects the failure directly: `migrate_v10_inner` /
+    /// `migrate_v11_inner` take the existence-check as a parameter (see
+    /// `pack_retire.rs` / `domain_retire.rs`), so a test can hand it a
+    /// closure that always errors, on an otherwise normal, healthy test DB.
+    /// Zero threads, zero locks, zero file corruption — the failure is
+    /// injected, not induced.
+    fn injected_existence_check_failure(
+        _conn: &Connection,
+        _name: &str,
+    ) -> Result<bool, MemoryError> {
+        Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("simulated existence-check failure (#978)".to_string()),
         )
-        .expect("corrupt the db file");
-        original_bytes
+        .into())
     }
 
     #[test]
     fn v10_propagates_existence_check_error_and_does_not_mark_sentinel() {
-        let (conn, tmp) = open_test_db();
+        let (conn, _tmp) = open_test_db();
         assert!(!was_run(&conn, "v10_drop_pack_tables").unwrap());
-        drop(conn); // no open connection while we corrupt the file on disk
 
-        let original_bytes = corrupt_db_file_in_place(tmp.path());
-
-        // `Connection::open` itself succeeds (SQLite validates the header
-        // lazily, on first query against a real table).
-        let corrupt_conn = Connection::open(tmp.path()).expect("open corrupted file");
-        let err = migrate_v10_drop_pack_tables(&corrupt_conn)
+        let err = migrate_v10_inner(&conn, injected_existence_check_failure)
             .expect_err("existence-check error must propagate, not collapse to absent");
         assert!(
             matches!(err, MemoryError::Sqlite(_)),
             "unexpected error shape: {err}"
         );
-        drop(corrupt_conn);
 
-        // Restore the exact DB that saw the failed existence-check and
-        // prove, on a fresh connection to it, that the sentinel was never
-        // written — the failed existence-check must not have let
-        // `run_data_migrations`-style callers reach `mark_run`.
-        std::fs::write(tmp.path(), &original_bytes).expect("restore original db bytes");
-        let healthy = Connection::open(tmp.path()).expect("reopen restored db");
         assert!(
-            !was_run(&healthy, "v10_drop_pack_tables").unwrap(),
+            !was_run(&conn, "v10_drop_pack_tables").unwrap(),
             "sentinel must stay unset after a failed existence-check so the migration retries"
         );
     }
 
     #[test]
     fn v11_propagates_existence_check_error_and_does_not_mark_sentinel() {
-        let (conn, tmp) = open_test_db();
+        let (conn, _tmp) = open_test_db();
         assert!(!was_run(&conn, "v11_drop_domains_table").unwrap());
-        drop(conn);
 
-        let original_bytes = corrupt_db_file_in_place(tmp.path());
-
-        let corrupt_conn = Connection::open(tmp.path()).expect("open corrupted file");
-        let err = migrate_v11_drop_domains_table(&corrupt_conn)
+        let err = migrate_v11_inner(&conn, injected_existence_check_failure)
             .expect_err("existence-check error must propagate, not collapse to absent");
         assert!(
             matches!(err, MemoryError::Sqlite(_)),
             "unexpected error shape: {err}"
         );
-        drop(corrupt_conn);
 
-        std::fs::write(tmp.path(), &original_bytes).expect("restore original db bytes");
-        let healthy = Connection::open(tmp.path()).expect("reopen restored db");
         assert!(
-            !was_run(&healthy, "v11_drop_domains_table").unwrap(),
+            !was_run(&conn, "v11_drop_domains_table").unwrap(),
             "sentinel must stay unset after a failed existence-check so the migration retries"
         );
     }
+
+    // The real-path (healthy DB, existence-check succeeds) behavior for
+    // both migrations — success return value, tables actually dropped, and
+    // sentinel written so a second run is a no-op — is already covered by
+    // `v10_drops_legacy_pack_tables` and `v11_drops_legacy_domains_table`
+    // above via the public `run_data_migrations` entry point; not
+    // duplicated here.
 }
