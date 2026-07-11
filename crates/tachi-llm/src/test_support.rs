@@ -46,9 +46,7 @@ impl GlobalTestLock {
             if depth.get() == 0 {
                 let guard = mutex().lock().unwrap_or_else(|e| e.into_inner());
                 depth.set(1);
-                TestLockGuard {
-                    owned: Some(guard),
-                }
+                TestLockGuard { owned: Some(guard) }
             } else {
                 depth.set(depth.get() + 1);
                 TestLockGuard { owned: None }

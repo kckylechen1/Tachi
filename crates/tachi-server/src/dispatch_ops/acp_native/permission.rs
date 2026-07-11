@@ -122,13 +122,12 @@ pub(super) fn classify_acp_request_kind(params: &Value) -> (AcpRequestKind, Stri
             // if any fallback field disagrees with it — a crafted request that
             // sets a benign toolCall.kind while carrying a conflicting
             // tool_kind/kind must not sail through as an allow.
-            let variant = if variant == AcpRequestKind::ReadOp
-                && fallbacks.iter().any(|fb| fb != &kind)
-            {
-                AcpRequestKind::Unknown
-            } else {
-                variant
-            };
+            let variant =
+                if variant == AcpRequestKind::ReadOp && fallbacks.iter().any(|fb| fb != &kind) {
+                    AcpRequestKind::Unknown
+                } else {
+                    variant
+                };
             (variant, kind)
         }
         None => (AcpRequestKind::Unknown, "<missing>".to_string()),
@@ -163,7 +162,9 @@ fn outcome_for(params: &Value, allowed: bool) -> Value {
     } else {
         select_deny_option(params)
     };
-    selected.map(selected_outcome).unwrap_or_else(cancelled_outcome)
+    selected
+        .map(selected_outcome)
+        .unwrap_or_else(cancelled_outcome)
 }
 
 fn selected_outcome(option_id: String) -> Value {

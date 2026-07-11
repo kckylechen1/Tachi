@@ -366,10 +366,7 @@ pub fn fact_to_entry_with_reason(
     let importance = fact["importance"].as_f64().unwrap_or(0.7).clamp(0.0, 1.0);
     let keywords = string_list(&fact["keywords"]);
     let mut entities = string_list(&fact["entities"]);
-    memcore::types::fold_person_names_into_entities(
-        &mut entities,
-        string_list(&fact["persons"]),
-    );
+    memcore::types::fold_person_names_into_entities(&mut entities, string_list(&fact["persons"]));
     let scope_raw = fact["scope"].as_str().unwrap_or("general");
     let scope = match scope_raw {
         "user" | "project" | "general" => scope_raw.to_string(),

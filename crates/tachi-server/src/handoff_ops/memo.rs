@@ -41,8 +41,7 @@ pub(super) fn memo_to_memory_entry(server: &MemoryServer, memo: &HandoffMemo) ->
         );
     }
 
-    let routed_path =
-        memcore::path_router::standardize_handoff_path(memo.target_agent.as_deref());
+    let routed_path = memcore::path_router::standardize_handoff_path(memo.target_agent.as_deref());
 
     MemoryEntry {
         id: format!("handoff:{}", memo_id),

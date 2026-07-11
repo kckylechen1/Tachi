@@ -16,8 +16,8 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tachi_clean::sweep::{self, SweepOptions};
 use tachi_clean::registry;
+use tachi_clean::sweep::{self, SweepOptions};
 use tachi_clean::wt_clean::{self, OutputFormat, WtRemoveOptions};
 use tachi_clean::wt_open::{self, OpenOptions};
 
@@ -31,11 +31,7 @@ fn unique_temp(prefix: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let path = std::env::temp_dir().join(format!(
-        "{prefix}-{}-{}",
-        std::process::id(),
-        nanos
-    ));
+    let path = std::env::temp_dir().join(format!("{prefix}-{}-{}", std::process::id(), nanos));
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).unwrap();
     path
@@ -158,7 +154,9 @@ fn open_close_list_round_trip() {
     assert!(!path.exists(), "worktree path should be gone after close");
     let listed_after = registry::list_registered_worktrees().expect("list should succeed");
     assert!(
-        !listed_after.iter().any(|item| paths_match(&item.path, &path)),
+        !listed_after
+            .iter()
+            .any(|item| paths_match(&item.path, &path)),
         "wt-list should no longer include the closed worktree: {listed_after:?}"
     );
 
@@ -378,7 +376,10 @@ fn open_rejects_path_traversal() {
 
     assert!(!report.opened, "must not open a traversal path");
     assert!(
-        report.errors.iter().any(|e| e.contains("traversal") || e.contains("..")),
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("traversal") || e.contains("..")),
         "expected a traversal refusal, got: {:?}",
         report.errors
     );

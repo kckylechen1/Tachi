@@ -316,5 +316,3 @@ fn reject_delegate_task_action(server: &MemoryServer, action: &str) -> Result<()
     }
     Ok(())
 }
-
-

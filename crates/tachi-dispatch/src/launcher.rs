@@ -719,7 +719,10 @@ mod tests {
             err.contains("workspace-write"),
             "receipt must name requested level: {err}"
         );
-        assert!(err.contains("fail-closed"), "must be a fail-closed receipt: {err}");
+        assert!(
+            err.contains("fail-closed"),
+            "must be a fail-closed receipt: {err}"
+        );
     }
 
     #[test]
@@ -775,7 +778,11 @@ mod tests {
         // Default profile with no sandbox still builds cleanly.
         {
             let mut p = params();
-            p.command = vec!["python3".to_string(), "-m".to_string(), "worker".to_string()];
+            p.command = vec![
+                "python3".to_string(),
+                "-m".to_string(),
+                "worker".to_string(),
+            ];
             assert!(build_custom_launch(&p, "hello").is_ok());
         }
     }

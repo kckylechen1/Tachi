@@ -195,7 +195,10 @@ mod tests {
         );
         assert!(status.worktrees_root.warning.is_none());
         assert!(status.shared_target_dir.warning.is_none());
-        assert_eq!(status.worktrees_root.free_bytes, Some(100 * 1024 * 1024 * 1024));
+        assert_eq!(
+            status.worktrees_root.free_bytes,
+            Some(100 * 1024 * 1024 * 1024)
+        );
         assert!((status.worktrees_root.free_percent.unwrap() - 20.0).abs() < 0.01);
     }
 
@@ -265,7 +268,10 @@ mod tests {
         // bytes without panicking.
         let (free, total) = real_disk_usage(&std::env::temp_dir()).expect("statvfs should work");
         assert!(total > 0, "total_bytes should be nonzero: {total}");
-        assert!(free <= total, "free ({free}) should not exceed total ({total})");
+        assert!(
+            free <= total,
+            "free ({free}) should not exceed total ({total})"
+        );
     }
 
     #[test]

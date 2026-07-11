@@ -48,10 +48,7 @@ pub(crate) async fn handle_tachi_verify(
         }
     };
 
-    if matches!(
-        action,
-        TachiVerifyAction::Start | TachiVerifyAction::Record
-    ) {
+    if matches!(action, TachiVerifyAction::Start | TachiVerifyAction::Record) {
         let recorded_ids = recorded_check_ids(&params);
         let shaped = shape_record_response(&raw, &params, &recorded_ids);
         if params

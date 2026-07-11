@@ -75,7 +75,8 @@ impl RerankConfig {
     /// Call this at provider construction / startup — never treat these as
     /// mid-search runtime errors that fall open to hybrid ranking.
     pub fn from_env() -> Result<Self, String> {
-        let provider = RerankProviderKind::parse(std::env::var(RERANK_PROVIDER_ENV).ok().as_deref())?;
+        let provider =
+            RerankProviderKind::parse(std::env::var(RERANK_PROVIDER_ENV).ok().as_deref())?;
         let local_endpoint = std::env::var(RERANK_LOCAL_ENDPOINT_ENV)
             .ok()
             .map(|v| v.trim().to_string())
@@ -162,10 +163,7 @@ pub(super) fn parse_rerank_response_items(json: &Value) -> Result<Vec<(usize, f6
     Ok(out)
 }
 
-fn remap_filtered_indices(
-    pairs: Vec<(usize, f64)>,
-    index_map: &[usize],
-) -> Vec<(usize, f64)> {
+fn remap_filtered_indices(pairs: Vec<(usize, f64)>, index_map: &[usize]) -> Vec<(usize, f64)> {
     pairs
         .into_iter()
         .map(|(filtered_index, relevance)| {

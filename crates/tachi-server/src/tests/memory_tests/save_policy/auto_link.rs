@@ -173,11 +173,7 @@ async fn save_memory_auto_link_does_not_bump_target_access_count() {
             .with_global_store_read(|store| {
                 store
                     .get_edges(&saved_id, "outgoing", None)
-                    .map(|edges| {
-                        edges
-                            .into_iter()
-                            .find(|edge| edge.target_id == seeded_id)
-                    })
+                    .map(|edges| edges.into_iter().find(|edge| edge.target_id == seeded_id))
                     .map_err(|e| format!("edges: {e}"))
             })
             .expect("read auto-link edges");

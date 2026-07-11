@@ -132,9 +132,7 @@ fn parse_derived_metadata(row: &serde_json::Value) -> serde_json::Value {
         .unwrap_or_else(|| json!({}))
 }
 
-fn parse_derived_synthesis(
-    row: &serde_json::Value,
-) -> Option<memcore::AgentEvolutionSynthesis> {
+fn parse_derived_synthesis(row: &serde_json::Value) -> Option<memcore::AgentEvolutionSynthesis> {
     row.get("text")
         .and_then(|value| value.as_str())
         .and_then(|raw| serde_json::from_str(raw).ok())

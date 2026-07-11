@@ -230,7 +230,10 @@ pub(crate) async fn handle_tachi_gh(
 /// actions"). GitHub primitive actions (issue_list, pr_read, …) return their
 /// own JSON shape untouched, same as before this fix.
 fn is_lifecycle_action(action: &str) -> bool {
-    matches!(action, "link_pr" | "pr_status" | "pr_handoff" | "release_note")
+    matches!(
+        action,
+        "link_pr" | "pr_status" | "pr_handoff" | "release_note"
+    )
 }
 
 /// True iff a safe_merge response envelope reports that it genuinely reclaimed
@@ -346,7 +349,10 @@ fn normalize_gh_response(action: &str, raw: &str, format: Option<&str>) -> Resul
 /// `format`. Field list matches what each lifecycle handler actually emits
 /// (see `task_lifecycle::issue_flow`/`release_ux::release_note`).
 fn render_lifecycle_markdown(action: &str, value: &Value) -> String {
-    let mut lines = vec![format!("## Tachi GH {action}"), format!("action: `{action}`")];
+    let mut lines = vec![
+        format!("## Tachi GH {action}"),
+        format!("action: `{action}`"),
+    ];
     for field in [
         "flow_id",
         "issue_ref",

@@ -193,7 +193,10 @@ fn render_body(n: &NormalizedRuling, params: &TachiCompleteParams) -> String {
     }
     lines.push(format!("Ruling: {}", n.ruling));
     if !n.principles_cited.is_empty() {
-        lines.push(format!("Principles cited: {}", n.principles_cited.join(", ")));
+        lines.push(format!(
+            "Principles cited: {}",
+            n.principles_cited.join(", ")
+        ));
     }
     lines.push(format!("Outcome: {}", n.outcome));
     if let Some(overturned_by) = &n.overturned_by {
@@ -268,7 +271,11 @@ fn build_metadata(n: &NormalizedRuling, params: &TachiCompleteParams, redactions
 /// legitimate exact-duplicate response also carries a real `id` (the existing
 /// row's), so this correctly counts that as recorded rather than skipped.
 fn extract_persisted_id(saved: &Value) -> Result<String, String> {
-    match saved.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+    match saved
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
         Some(id) => Ok(id.to_string()),
         None => {
             if let Some(reason) = saved.get("reason").and_then(Value::as_str) {
@@ -280,8 +287,10 @@ fn extract_persisted_id(saved: &Value) -> Result<String, String> {
                     .unwrap_or_default();
                 Err(format!("rejected_by={rejected_by} violations={violations}"))
             } else {
-                Err("save response carried no id (rejected by capture gate or noise filter)"
-                    .to_string())
+                Err(
+                    "save response carried no id (rejected by capture gate or noise filter)"
+                        .to_string(),
+                )
             }
         }
     }

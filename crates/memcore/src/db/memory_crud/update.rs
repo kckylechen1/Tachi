@@ -256,9 +256,7 @@ pub fn update_enrichment_fields(
         Some("summary") => new_summary.is_some(),
         // Both metadata extraction and write-side keyword enrichment land in
         // the keywords/entities columns.
-        Some("metadata") | Some("keywords") => {
-            new_keywords.is_some() || new_entities.is_some()
-        }
+        Some("metadata") | Some("keywords") => new_keywords.is_some() || new_entities.is_some(),
         // Unknown / db_update: do not claim resolution from a field write.
         Some(_) => false,
     };

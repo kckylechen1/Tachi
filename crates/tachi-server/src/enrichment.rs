@@ -1325,7 +1325,10 @@ mod tests {
             .expect("load");
 
         assert!(
-            loaded.keywords.iter().all(|k| k.chars().count() <= MAX_KEYWORD_LEN),
+            loaded
+                .keywords
+                .iter()
+                .all(|k| k.chars().count() <= MAX_KEYWORD_LEN),
             "no keyword may exceed max len: {:?}",
             loaded.keywords
         );

@@ -244,7 +244,8 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
         .expect("dispatch id from run dir name")
         .to_string();
 
-    let early_status = read_status_json(&run_dir).expect("status.json written before plan completes");
+    let early_status =
+        read_status_json(&run_dir).expect("status.json written before plan completes");
     assert_eq!(early_status["v2"], json!(true), "{early_status:#}");
     assert!(
         early_status["plan_generated_at"].is_null(),
@@ -272,8 +273,7 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
 
     // dispatch_received must be the (or one of the) earliest trajectory
     // events, written before plan_generated.
-    let trajectory = std::fs::read_to_string(run_dir.join("trajectory.jsonl"))
-        .unwrap_or_default();
+    let trajectory = std::fs::read_to_string(run_dir.join("trajectory.jsonl")).unwrap_or_default();
     assert!(
         trajectory.contains("\"event\":\"dispatch_received\""),
         "receipt-first trajectory event missing: {trajectory}"
@@ -351,7 +351,11 @@ async fn plan_review_pending_response_projects_input_required_kanban_state() {
         json!("TASK_STATE_INPUT_REQUIRED"),
         "early response must not report the retired TASK_STATE_PENDING_REVIEW vocabulary: {response:#}"
     );
-    assert_eq!(response["plan_review_status"], json!("pending_review"), "{response:#}");
+    assert_eq!(
+        response["plan_review_status"],
+        json!("pending_review"),
+        "{response:#}"
+    );
 
     let run_dir = wait_for_single_run_dir(&run_root).await;
     let dispatch_id = run_dir
@@ -375,7 +379,11 @@ async fn plan_review_pending_response_projects_input_required_kanban_state() {
     // is the same vocabulary as the kanban row asserted above, not a
     // separately-drifting one.
     let status = read_status_json(&run_dir).expect("status.json written");
-    assert_eq!(status["plan_review_status"], json!("pending_review"), "{status:#}");
+    assert_eq!(
+        status["plan_review_status"],
+        json!("pending_review"),
+        "{status:#}"
+    );
 }
 
 /// (5c) V1 (non-V2) dispatch is unaffected by the RECEIPT-FIRST /
@@ -397,7 +405,11 @@ async fn v1_dispatch_status_and_kanban_unaffected_by_reorder() {
     let server = make_server();
 
     let mut params = dispatch_params(Some("custom"), "v1 dispatch unaffected by reorder");
-    params.command = vec!["python3".to_string(), "-c".to_string(), "print('ok')".to_string()];
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "print('ok')".to_string(),
+    ];
     // No `stage`, no DISPATCH_V2_ENABLED — V1 path.
 
     let raw = crate::dispatch_ops::handle_tachi_dispatch(&server, params)

@@ -71,10 +71,7 @@ impl super::super::LlmClient {
     /// lock before `.await` keeps a rebuild from being blocked by in-flight
     /// requests.
     pub(in crate::llm) fn http_client(&self) -> reqwest::Client {
-        self.http
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.http.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Per-request deadline for embed & rerank, honouring the same env-override

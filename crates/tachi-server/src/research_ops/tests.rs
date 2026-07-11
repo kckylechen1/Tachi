@@ -137,7 +137,13 @@ async fn feed_mode_produces_digest_and_proposal_artifacts() {
 
     // proposals.json + digest.json + status.json all landed.
     let run_dir = response["run_dir"].as_str().unwrap();
-    for artifact in ["report.md", "wiki_draft.md", "digest.json", "proposals.json", "status.json"] {
+    for artifact in [
+        "report.md",
+        "wiki_draft.md",
+        "digest.json",
+        "proposals.json",
+        "status.json",
+    ] {
         assert!(
             std::path::Path::new(run_dir).join(artifact).exists(),
             "artifact {artifact} exists"
@@ -442,7 +448,10 @@ async fn feed_mode_rejects_non_http_scheme() {
     let err = run_feed_pipeline(None, &params, tmp.path())
         .await
         .expect_err("file:// is rejected");
-    assert!(err.contains("http"), "err mentions scheme restriction: {err}");
+    assert!(
+        err.contains("http"),
+        "err mentions scheme restriction: {err}"
+    );
     assert!(
         std::fs::read_dir(tmp.path()).unwrap().next().is_none(),
         "rejected scheme wrote nothing"
@@ -481,7 +490,8 @@ async fn dns_timeout_fires_on_a_hung_resolution() {
 
 #[tokio::test]
 async fn dns_timeout_passes_through_a_fast_resolution() {
-    let fast = async { Ok::<_, std::io::Error>(vec!["93.184.216.34:443".parse::<SocketAddr>().unwrap()]) };
+    let fast =
+        async { Ok::<_, std::io::Error>(vec!["93.184.216.34:443".parse::<SocketAddr>().unwrap()]) };
     let result = with_dns_timeout(fast).await.expect("fast lookup succeeds");
     assert_eq!(result.len(), 1);
 }
@@ -489,7 +499,10 @@ async fn dns_timeout_passes_through_a_fast_resolution() {
 #[tokio::test]
 async fn dns_timeout_passes_through_a_resolution_error() {
     let failing = async {
-        Err::<Vec<SocketAddr>, _>(std::io::Error::new(std::io::ErrorKind::NotFound, "nxdomain"))
+        Err::<Vec<SocketAddr>, _>(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "nxdomain",
+        ))
     };
     let err = with_dns_timeout(failing)
         .await

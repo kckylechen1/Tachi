@@ -112,10 +112,7 @@ pub(super) fn foundry_job_is_active(state: &serde_json::Value) -> bool {
     }
 }
 
-pub(super) fn try_claim_foundry_job(
-    server: &MemoryServer,
-    job: &memcore::FoundryJobSpec,
-) -> bool {
+pub(super) fn try_claim_foundry_job(server: &MemoryServer, job: &memcore::FoundryJobSpec) -> bool {
     let claim = server.with_global_store(|store| {
         let value_json = foundry_job_state_json(job, "running", json!({}))?;
         match store

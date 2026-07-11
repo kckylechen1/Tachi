@@ -54,9 +54,7 @@ where
             match &value {
                 serde_json::Value::Null => Ok(None),
                 serde_json::Value::String(s) if s.is_empty() => Ok(None),
-                serde_json::Value::Number(_) => {
-                    Err(de::Error::custom("expected unsigned integer"))
-                }
+                serde_json::Value::Number(_) => Err(de::Error::custom("expected unsigned integer")),
                 serde_json::Value::String(s) => match s.parse::<u64>() {
                     Err(e) => Err(de::Error::custom(format!("invalid number: {e}"))),
                     Ok(_) => unreachable!("parse succeeded but helper returned None"),

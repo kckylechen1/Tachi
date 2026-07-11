@@ -17,13 +17,13 @@ pub(crate) use contradiction::apply_auto_contradiction_detection;
 pub(crate) use library_binding::{
     format_binding_markdown, library_binding_receipt, scope_downgrade_warning,
 };
-pub(crate) use rerank::{
-    apply_search_rerank_policy, expand_search_params_for_rerank, rerank_rows_with_outcome,
-    RerankOutcome, SearchRerankPolicy,
-};
 pub(crate) use recall_degradation::{
     attach_lexical_only_marker, attach_rerank_fallback_degraded, merge_lexical_only_marker,
     short_reason as recall_short_reason,
+};
+pub(crate) use rerank::{
+    apply_search_rerank_policy, expand_search_params_for_rerank, rerank_rows_with_outcome,
+    RerankOutcome, SearchRerankPolicy,
 };
 pub(crate) use save_memory::handle_remember;
 pub(crate) use save_memory::handle_save_memory;

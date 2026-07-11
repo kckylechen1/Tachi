@@ -72,10 +72,10 @@ use basic::*;
 use cross_db::*;
 use domain_retire::*;
 use legacy_columns::*;
-use pack_retire::*;
 pub use legacy_columns::{
     fold_and_drop_legacy_persons_column, migrate_v9_relocate_and_drop_location,
 };
+use pack_retire::*;
 use sentinel::*;
 
 const MIGRATION_NS: &str = "migrations";
@@ -994,7 +994,10 @@ mod tests {
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .unwrap();
             let report = run_data_migrations_in_tx(&tx, "global", tmp.path()).unwrap();
-            assert_eq!(report.pack_tables_dropped, 1, "v10 should have real work here");
+            assert_eq!(
+                report.pack_tables_dropped, 1,
+                "v10 should have real work here"
+            );
             write_schema_version(&tx, EXPECTED_SCHEMA_VERSION).unwrap();
             // Do NOT commit — roll back instead, simulating the crash.
             tx.rollback().unwrap();
@@ -1175,11 +1178,13 @@ mod tests {
         assert!(!was_run(&conn, key).unwrap());
 
         let err = apply_versioned_migration(&conn, key, |_conn| {
-            Err::<(), MemoryError>(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-                Some("simulated migration failure (#978)".to_string()),
+            Err::<(), MemoryError>(
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                    Some("simulated migration failure (#978)".to_string()),
+                )
+                .into(),
             )
-            .into())
         })
         .expect_err("failing migrate closure must propagate through apply_versioned_migration");
         assert!(
@@ -1202,10 +1207,11 @@ mod tests {
         // Idempotent: a second call with a closure that would panic if
         // invoked proves the sentinel-already-set path skips `migrate`
         // entirely.
-        let skipped = apply_versioned_migration(&conn, key, |_conn| -> Result<usize, MemoryError> {
-            panic!("migrate must not be invoked once the sentinel is already set")
-        })
-        .expect("already-run migration must short-circuit to Ok(None), not invoke migrate");
+        let skipped =
+            apply_versioned_migration(&conn, key, |_conn| -> Result<usize, MemoryError> {
+                panic!("migrate must not be invoked once the sentinel is already set")
+            })
+            .expect("already-run migration must short-circuit to Ok(None), not invoke migrate");
         assert_eq!(skipped, None);
     }
 }

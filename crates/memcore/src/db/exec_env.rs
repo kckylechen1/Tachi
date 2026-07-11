@@ -119,7 +119,10 @@ fn row_to_lease(row: &rusqlite::Row<'_>) -> Result<ExecEnvLease, rusqlite::Error
         rusqlite::Error::FromSqlConversionFailure(
             7,
             rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())),
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                e.to_string(),
+            )),
         )
     })?;
     Ok(ExecEnvLease {
@@ -186,7 +189,9 @@ pub fn find_active_exec_env_by_path(
          WHERE path = ?1 AND state = 'active' \
          ORDER BY created_at DESC LIMIT 1"
     );
-    let lease = conn.query_row(&sql, params![path], row_to_lease).optional()?;
+    let lease = conn
+        .query_row(&sql, params![path], row_to_lease)
+        .optional()?;
     Ok(lease)
 }
 
@@ -298,7 +303,9 @@ mod tests {
     fn insert_and_get_roundtrip_defaults_to_active() {
         let conn = open_conn();
         insert_exec_env(&conn, &new_lease("env-1", "/wt/1")).unwrap();
-        let got = get_exec_env(&conn, "env-1").unwrap().expect("lease present");
+        let got = get_exec_env(&conn, "env-1")
+            .unwrap()
+            .expect("lease present");
         assert_eq!(got.env_id, "env-1");
         assert_eq!(got.state, ExecEnvState::Active);
         assert_eq!(got.path, "/wt/1");
@@ -330,7 +337,12 @@ mod tests {
             Some("safe_merge"),
         )
         .unwrap();
-        assert_eq!(outcome, ReclaimOutcome::Reclaimed { env_id: "env-2".to_string() });
+        assert_eq!(
+            outcome,
+            ReclaimOutcome::Reclaimed {
+                env_id: "env-2".to_string()
+            }
+        );
         let got = get_exec_env(&conn, "env-2").unwrap().unwrap();
         assert_eq!(got.state, ExecEnvState::Reclaimed);
         assert_eq!(got.reclaim_reason.as_deref(), Some("safe_merge"));
@@ -341,9 +353,18 @@ mod tests {
     fn reclaim_is_idempotent_no_second_write() {
         let mut conn = open_conn();
         insert_exec_env(&conn, &new_lease("env-3", "/wt/3")).unwrap();
-        let first =
-            reclaim_exec_env(&mut conn, &ExecEnvSelector::EnvId("env-3".to_string()), None).unwrap();
-        assert_eq!(first, ReclaimOutcome::Reclaimed { env_id: "env-3".to_string() });
+        let first = reclaim_exec_env(
+            &mut conn,
+            &ExecEnvSelector::EnvId("env-3".to_string()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            ReclaimOutcome::Reclaimed {
+                env_id: "env-3".to_string()
+            }
+        );
         let stamp_after_first = get_exec_env(&conn, "env-3").unwrap().unwrap().reclaimed_at;
 
         let second = reclaim_exec_env(
@@ -352,10 +373,18 @@ mod tests {
             Some("second-reason"),
         )
         .unwrap();
-        assert_eq!(second, ReclaimOutcome::AlreadyReclaimed { env_id: "env-3".to_string() });
+        assert_eq!(
+            second,
+            ReclaimOutcome::AlreadyReclaimed {
+                env_id: "env-3".to_string()
+            }
+        );
         // The idempotent no-op must NOT overwrite the original stamp/reason.
         let after = get_exec_env(&conn, "env-3").unwrap().unwrap();
-        assert_eq!(after.reclaimed_at, stamp_after_first, "stamp unchanged on no-op");
+        assert_eq!(
+            after.reclaimed_at, stamp_after_first,
+            "stamp unchanged on no-op"
+        );
         assert!(
             after.reclaim_reason.as_deref() != Some("second-reason"),
             "reason must not be overwritten by an idempotent reclaim"
@@ -365,12 +394,8 @@ mod tests {
     #[test]
     fn reclaim_missing_lease_reports_not_found() {
         let mut conn = open_conn();
-        let outcome = reclaim_exec_env(
-            &mut conn,
-            &ExecEnvSelector::EnvId("nope".to_string()),
-            None,
-        )
-        .unwrap();
+        let outcome =
+            reclaim_exec_env(&mut conn, &ExecEnvSelector::EnvId("nope".to_string()), None).unwrap();
         assert_eq!(outcome, ReclaimOutcome::NotFound);
     }
 
@@ -378,12 +403,21 @@ mod tests {
     fn find_active_by_path_ignores_reclaimed_rows() {
         let mut conn = open_conn();
         insert_exec_env(&conn, &new_lease("env-4", "/wt/shared")).unwrap();
-        reclaim_exec_env(&mut conn, &ExecEnvSelector::EnvId("env-4".to_string()), None).unwrap();
+        reclaim_exec_env(
+            &mut conn,
+            &ExecEnvSelector::EnvId("env-4".to_string()),
+            None,
+        )
+        .unwrap();
         // No active lease for that path now.
-        assert!(find_active_exec_env_by_path(&conn, "/wt/shared").unwrap().is_none());
+        assert!(find_active_exec_env_by_path(&conn, "/wt/shared")
+            .unwrap()
+            .is_none());
         // Re-provisioning the same path resolves to the fresh active lease.
         insert_exec_env(&conn, &new_lease("env-5", "/wt/shared")).unwrap();
-        let active = find_active_exec_env_by_path(&conn, "/wt/shared").unwrap().unwrap();
+        let active = find_active_exec_env_by_path(&conn, "/wt/shared")
+            .unwrap()
+            .unwrap();
         assert_eq!(active.env_id, "env-5");
     }
 
@@ -392,7 +426,12 @@ mod tests {
         let mut conn = open_conn();
         // A stale reclaimed row plus a live active row for the same path.
         insert_exec_env(&conn, &new_lease("env-old", "/wt/dup")).unwrap();
-        reclaim_exec_env(&mut conn, &ExecEnvSelector::EnvId("env-old".to_string()), None).unwrap();
+        reclaim_exec_env(
+            &mut conn,
+            &ExecEnvSelector::EnvId("env-old".to_string()),
+            None,
+        )
+        .unwrap();
         insert_exec_env(&conn, &new_lease("env-new", "/wt/dup")).unwrap();
 
         let outcome = reclaim_exec_env(
@@ -401,7 +440,12 @@ mod tests {
             Some("cancel"),
         )
         .unwrap();
-        assert_eq!(outcome, ReclaimOutcome::Reclaimed { env_id: "env-new".to_string() });
+        assert_eq!(
+            outcome,
+            ReclaimOutcome::Reclaimed {
+                env_id: "env-new".to_string()
+            }
+        );
     }
 
     #[test]
@@ -409,7 +453,12 @@ mod tests {
         let mut conn = open_conn();
         insert_exec_env(&conn, &new_lease("env-a", "/wt/a")).unwrap();
         insert_exec_env(&conn, &new_lease("env-b", "/wt/b")).unwrap();
-        reclaim_exec_env(&mut conn, &ExecEnvSelector::EnvId("env-b".to_string()), None).unwrap();
+        reclaim_exec_env(
+            &mut conn,
+            &ExecEnvSelector::EnvId("env-b".to_string()),
+            None,
+        )
+        .unwrap();
 
         let active = list_exec_envs(&conn, Some(ExecEnvState::Active)).unwrap();
         assert_eq!(active.len(), 1);
@@ -427,6 +476,9 @@ mod tests {
     fn state_parse_rejects_unknown() {
         assert!(ExecEnvState::parse("provisioned").is_err());
         assert_eq!(ExecEnvState::parse("active").unwrap(), ExecEnvState::Active);
-        assert_eq!(ExecEnvState::parse("reclaimed").unwrap(), ExecEnvState::Reclaimed);
+        assert_eq!(
+            ExecEnvState::parse("reclaimed").unwrap(),
+            ExecEnvState::Reclaimed
+        );
     }
 }

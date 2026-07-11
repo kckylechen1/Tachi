@@ -6,9 +6,7 @@ use serde_json::{json, Value};
 use super::paths::read_foundry_input_text;
 use super::proposals::persist_agent_evolution_proposal;
 
-pub(super) fn parse_document_kind(
-    raw: &str,
-) -> Result<memcore::AgentProfileDocumentKind, String> {
+pub(super) fn parse_document_kind(raw: &str) -> Result<memcore::AgentProfileDocumentKind, String> {
     memcore::AgentProfileDocumentKind::parse(raw).ok_or_else(|| {
         format!(
             "Unknown document kind '{}'. Expected identity|agents|latest_truths|routing_policy|tool_policy|memory_policy|other",

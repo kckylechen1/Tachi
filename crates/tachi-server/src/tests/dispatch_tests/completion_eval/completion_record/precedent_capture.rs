@@ -80,7 +80,11 @@ async fn complete_with_rulings_persists_retrievable_precedent_rows() {
     let recorded = recording["recorded"]
         .as_array()
         .expect("recorded array present");
-    assert_eq!(recorded.len(), 1, "one ruling should persist: {recording:#}");
+    assert_eq!(
+        recorded.len(),
+        1,
+        "one ruling should persist: {recording:#}"
+    );
     assert!(
         recording["skipped"]
             .as_array()
@@ -214,11 +218,22 @@ async fn malformed_ruling_skipped_but_complete_succeeds() {
     let recording = &bundle["pipeline"]["precedent_recording"];
     let recorded = recording["recorded"].as_array().expect("recorded array");
     let skipped = recording["skipped"].as_array().expect("skipped array");
-    assert_eq!(recorded.len(), 1, "the one valid ruling lands: {recording:#}");
-    assert_eq!(skipped.len(), 2, "both malformed rulings skipped: {recording:#}");
+    assert_eq!(
+        recorded.len(),
+        1,
+        "the one valid ruling lands: {recording:#}"
+    );
+    assert_eq!(
+        skipped.len(),
+        2,
+        "both malformed rulings skipped: {recording:#}"
+    );
     assert_eq!(recorded[0]["outcome"], json!("pending"));
     // Completion recording itself is unaffected.
-    assert!(bundle.get("eval_entry").is_some(), "completion still recorded");
+    assert!(
+        bundle.get("eval_entry").is_some(),
+        "completion still recorded"
+    );
 }
 
 /// #962 fix 3: the compact/default `complete` receipt used to reduce
@@ -317,8 +332,7 @@ async fn enforce_mode_persists_valid_ruling_and_skips_gate_rejected_one() {
                    during the #950 precedent-capture review of the completion pipeline"
                 .to_string(),
             options_considered: Some(
-                "keep the flag behind cfg(test) / delete it outright / gate on a const"
-                    .to_string(),
+                "keep the flag behind cfg(test) / delete it outright / gate on a const".to_string(),
             ),
             ruling: "env-flippable security switches are standing bypasses — delete them, \
                       do not gate them behind another toggle"
@@ -375,5 +389,8 @@ async fn enforce_mode_persists_valid_ruling_and_skips_gate_rejected_one() {
 
     // Completion recording itself is unaffected by the precedent-capture
     // rejection (the fail-safe boundary from the module docs).
-    assert!(bundle.get("eval_entry").is_some(), "completion still recorded");
+    assert!(
+        bundle.get("eval_entry").is_some(),
+        "completion still recorded"
+    );
 }

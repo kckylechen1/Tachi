@@ -242,7 +242,8 @@ mod tests {
         let mut params = bare_params();
         params.path_prefix = Some("/wiki".to_string());
         assert!(!apply_cross_library_project_preference(
-            &mut results, &params
+            &mut results,
+            &params
         ));
         // Unchanged order: global still first
         assert_eq!(results[0].0.entry.id, "global-wiki");
@@ -259,7 +260,8 @@ mod tests {
         let mut params = bare_params();
         params.path_prefix = Some("  /wiki/  ".to_string());
         assert!(!apply_cross_library_project_preference(
-            &mut results, &params
+            &mut results,
+            &params
         ));
         assert_eq!(results[0].0.entry.id, "global-wiki");
     }

@@ -67,8 +67,8 @@ mod tests {
     fn doctor_vector_count_uses_memories_vec_table() {
         let dir = tempfile::tempdir().expect("temp db dir");
         let db = dir.path().join("memory.db");
-        let store = memcore::MemoryStore::open(db.to_str().expect("db path"))
-            .expect("open memory store");
+        let store =
+            memcore::MemoryStore::open(db.to_str().expect("db path")).expect("open memory store");
         let now = Utc::now().to_rfc3339();
 
         store
@@ -90,8 +90,8 @@ mod tests {
     fn doctor_vector_count_ignores_recall_cache_rows() {
         let dir = tempfile::tempdir().expect("temp db dir");
         let db = dir.path().join("memory.db");
-        let store = memcore::MemoryStore::open(db.to_str().expect("db path"))
-            .expect("open memory store");
+        let store =
+            memcore::MemoryStore::open(db.to_str().expect("db path")).expect("open memory store");
         let now = Utc::now().to_rfc3339();
 
         store

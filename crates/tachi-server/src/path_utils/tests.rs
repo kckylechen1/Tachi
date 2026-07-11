@@ -200,14 +200,12 @@ fn plan_c_regular_alias_file_reports_split_brain() {
         let repo = tmp.path().join("Split Brain Repo");
         let local_db = repo.join(".tachi/memory.db");
         std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
-        memcore::MemoryStore::open(local_db.to_str().expect("local db"))
-            .expect("create local db");
+        memcore::MemoryStore::open(local_db.to_str().expect("local db")).expect("create local db");
         crate::test_support::assert_repo_local_db_fixture_not_skipped(&local_db);
 
         let alias_db = plan_c_global_db_path("Split_Brain_Repo");
         std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
-        memcore::MemoryStore::open(alias_db.to_str().expect("alias db"))
-            .expect("create alias db");
+        memcore::MemoryStore::open(alias_db.to_str().expect("alias db")).expect("create alias db");
 
         let outcome = ensure_plan_c_symlink(&local_db, &repo);
         let PlanCLinkOutcome::SplitBrain(issue) = outcome else {

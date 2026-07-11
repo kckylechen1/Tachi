@@ -380,7 +380,11 @@ fn run_wt_list(args: Vec<String>) -> Result<(), String> {
     } else {
         println!("tachi-clean wt-list ({} entries)", listed.len());
         for item in listed {
-            let exists = if item.path_exists { "exists" } else { "missing" };
+            let exists = if item.path_exists {
+                "exists"
+            } else {
+                "missing"
+            };
             println!(
                 "  [{exists}] {}  branch={}  repo={}",
                 item.path, item.branch, item.repo_root

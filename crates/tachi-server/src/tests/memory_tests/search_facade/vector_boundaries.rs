@@ -1,10 +1,6 @@
 use super::*;
 
-fn assert_access_metadata_untouched(
-    entry: &memcore::MemoryEntry,
-    history_count: i64,
-    label: &str,
-) {
+fn assert_access_metadata_untouched(entry: &memcore::MemoryEntry, history_count: i64, label: &str) {
     assert_eq!(
         entry.access_count, 0,
         "{label} should not bump access_count"
@@ -20,10 +16,7 @@ fn assert_access_metadata_untouched(
     assert_eq!(history_count, 0, "{label} should not append access_history");
 }
 
-fn read_access_snapshot(
-    store: &memcore::MemoryStore,
-    id: &str,
-) -> (memcore::MemoryEntry, i64) {
+fn read_access_snapshot(store: &memcore::MemoryStore, id: &str) -> (memcore::MemoryEntry, i64) {
     let entry = store
         .get(id)
         .expect("read entry")
