@@ -60,11 +60,26 @@ impl MemoryStore {
     /// This intentionally skips schema initialization because init paths can
     /// write. Use it for CLI search/stats and other diagnostics that must work
     /// even when the DB file is not writable.
+    ///
+    /// Still enforces the #984 schema-version hard-fail gate (F2): a DB
+    /// stamped newer than this kernel's `EXPECTED_SCHEMA_VERSION` is rejected
+    /// immediately after opening, before any read touches it — read-only
+    /// callers (CLI diagnostics, the server's read pool) must not be able to
+    /// silently read columns/rows a newer kernel wrote and this kernel
+    /// doesn't understand. An *older*-stamped DB is fine here: read-only opens
+    /// never run migrations, so there's nothing to bring forward, and old
+    /// data must stay readable by newer kernels.
+    ///
+    /// This does not affect `crate::db::doctor_probe`, which never routes
+    /// through `MemoryStore` — it opens raw `rusqlite::Connection`s directly
+    /// for legacy/foreign/possibly-corrupt files, by design (see that
+    /// module's doc comment).
     pub fn open_read_only(db_path: &str) -> Result<Self, MemoryError> {
         libsimple::enable_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
         let conn = db::open_read_only(db_path)?;
+        db::migrations::check_schema_version_gate(&conn)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,

@@ -4,6 +4,12 @@ use serde_json::json;
 use crate::error::MemoryError;
 use crate::types::apply_location_relocation;
 
+/// Called both from inside `run_data_migrations`'s outer transaction (#984
+/// F1) and standalone from `init_schema_inner`'s pre-migration bridge (no
+/// outer transaction there) — so this uses a `SAVEPOINT` rather than a raw
+/// `BEGIN`, which nests cleanly in either context (SQLite forbids nested
+/// top-level `BEGIN` but savepoints nest, and a savepoint with no enclosing
+/// transaction behaves like one).
 pub(super) fn migrate_v6_fold_persons_into_entities(
     conn: &Connection,
 ) -> Result<usize, MemoryError> {
@@ -37,7 +43,7 @@ pub(super) fn migrate_v6_fold_persons_into_entities(
         return Ok(0);
     }
 
-    conn.execute_batch("BEGIN IMMEDIATE")?;
+    conn.execute_batch("SAVEPOINT migrate_v6_fold_persons")?;
     let result = (|| -> Result<(), MemoryError> {
         for (id, entities_json) in &updates {
             conn.execute(
@@ -49,11 +55,12 @@ pub(super) fn migrate_v6_fold_persons_into_entities(
     })();
     match result {
         Ok(()) => {
-            conn.execute_batch("COMMIT")?;
+            conn.execute_batch("RELEASE migrate_v6_fold_persons")?;
             Ok(updates.len())
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
+            let _ = conn.execute_batch("ROLLBACK TO migrate_v6_fold_persons");
+            let _ = conn.execute_batch("RELEASE migrate_v6_fold_persons");
             Err(e)
         }
     }
@@ -125,17 +132,35 @@ pub fn fold_and_drop_legacy_persons_column(conn: &Connection) -> Result<usize, M
 }
 
 /// Relocate legacy `location` values, then drop the physical column.
+///
+/// Called both from inside `run_data_migrations`'s outer transaction (#984
+/// F1) and standalone from `init_schema_inner`'s pre-migration bridge (no
+/// outer transaction there) — so this uses a `SAVEPOINT` (via raw SQL, since
+/// it only holds `&Connection`) rather than `Transaction::new_unchecked`'s
+/// raw `BEGIN`, which would fail to nest inside the outer transaction.
 pub fn migrate_v9_relocate_and_drop_location(
     conn: &Connection,
 ) -> Result<(usize, usize), MemoryError> {
     if !table_has_column(conn, "memories", "location")? {
         return Ok((0, 0));
     }
-    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-    let relocated = relocate_location_rows(&tx)?;
-    tx.execute("ALTER TABLE memories DROP COLUMN location", [])?;
-    tx.commit()?;
-    Ok((relocated, 1))
+    conn.execute_batch("SAVEPOINT migrate_v9_relocate_location")?;
+    let result = (|| -> Result<usize, MemoryError> {
+        let relocated = relocate_location_rows(conn)?;
+        conn.execute("ALTER TABLE memories DROP COLUMN location", [])?;
+        Ok(relocated)
+    })();
+    match result {
+        Ok(relocated) => {
+            conn.execute_batch("RELEASE migrate_v9_relocate_location")?;
+            Ok((relocated, 1))
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO migrate_v9_relocate_location");
+            let _ = conn.execute_batch("RELEASE migrate_v9_relocate_location");
+            Err(e)
+        }
+    }
 }
 
 pub(super) fn relocate_location_rows(conn: &Connection) -> Result<usize, MemoryError> {
