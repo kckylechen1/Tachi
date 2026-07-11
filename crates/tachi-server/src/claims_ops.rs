@@ -103,7 +103,7 @@ pub(crate) fn auto_register_or_heartbeat_claim(server: &MemoryServer, input: &Cl
             .map(|scope| serde_json::to_string(scope).unwrap_or_default()),
         created_at: String::new(),
     };
-    let result = server.with_global_store(|store| {
+    let result: Result<String, String> = server.with_global_store(|store| {
         memcore::upsert_or_heartbeat_claim(store.connection_mut(), &new_claim)
             .map_err(|e| e.to_string())
     });
@@ -121,7 +121,7 @@ pub(crate) fn auto_register_or_heartbeat_claim(server: &MemoryServer, input: &Cl
 pub(crate) fn list_live_claims_for_briefing(server: &MemoryServer) -> Vec<SessionClaim> {
     let now_iso = chrono::Utc::now().to_rfc3339();
     server
-        .with_global_store_read(|store| {
+        .with_global_store_read(|store| -> Result<Vec<SessionClaim>, String> {
             memcore::list_active_claims(store.connection(), &now_iso, CLAIM_TTL_SECONDS)
                 .map_err(|e| e.to_string())
         })
@@ -164,7 +164,7 @@ pub(crate) fn collision_warnings(
             {
                 let overlap: Vec<&String> = new_scope
                     .iter()
-                    .filter(|path| existing_scope.contains(path))
+                    .filter(|path: &&String| existing_scope.contains(path))
                     .collect();
                 if !overlap.is_empty() {
                     warnings.push(format!(
@@ -223,7 +223,7 @@ pub(crate) fn handle_manual_claim(
             .map(|scope| serde_json::to_string(scope).unwrap_or_default()),
         created_at: String::new(),
     };
-    let claim_id = server.with_global_store(|store| {
+    let claim_id: String = server.with_global_store(|store| {
         memcore::upsert_or_heartbeat_claim(store.connection_mut(), &new_claim)
             .map_err(|e| e.to_string())
     })?;
@@ -260,7 +260,7 @@ pub(crate) fn handle_manual_release(
             )
         }
     };
-    let outcome = server.with_global_store(|store| {
+    let outcome: ReleaseOutcome = server.with_global_store(|store| {
         memcore::release_claim(store.connection_mut(), &selector, reason.as_deref())
             .map_err(|e| e.to_string())
     })?;
@@ -296,6 +296,30 @@ pub(crate) fn briefing_claims_board(server: &MemoryServer) -> serde_json::Value 
     serde_json::json!({
         "count": rows.len(),
         "items": rows,
+    })
+}
+
+/// THE single entry point (#1001 Scope item 3) both briefing surfaces
+/// (`tachi_memory(action='briefing')` and `tachi_task` feature briefing) call
+/// to get the presence 工位表 section: one read of live claims, the board
+/// projection, and advisory collision warnings scoped to `issue_ref` (if the
+/// caller has one). Consolidating this here — rather than each briefing
+/// surface re-deriving board+warnings from `list_live_claims_for_briefing`
+/// inline — keeps future briefing-assembly changes (#964, #1000) from having
+/// to touch presence wiring in two places to stay in sync.
+///
+/// Read-failure-safe: every step degrades to empty on storage error, so this
+/// never fails the briefing call that invokes it.
+pub(crate) fn presence_briefing_section(
+    server: &MemoryServer,
+    issue_ref: Option<&str>,
+) -> serde_json::Value {
+    let live = list_live_claims_for_briefing(server);
+    let board = briefing_claims_board(server);
+    let warnings = collision_warnings(&live, None, issue_ref, &[]);
+    serde_json::json!({
+        "board": board,
+        "warnings": warnings,
     })
 }
 

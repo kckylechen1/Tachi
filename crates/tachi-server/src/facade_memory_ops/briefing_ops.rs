@@ -283,14 +283,18 @@ pub(crate) async fn handle_memory_briefing(
     // Presence 工位表 (#1001): read-only, failure-safe projection of live
     // session claims + advisory collision warnings against any explicit
     // issue_ref this briefing call was scoped to. Never fails briefing.
-    let presence_claims = crate::claims_ops::list_live_claims_for_briefing(server);
-    let presence_board = crate::claims_ops::briefing_claims_board(server);
-    let presence_warnings = crate::claims_ops::collision_warnings(
-        &presence_claims,
-        None,
-        params.issue_ref.as_deref(),
-        &[],
-    );
+    // Single call point (Scope item 3) — see `claims_ops::presence_briefing_section`.
+    let presence_section =
+        crate::claims_ops::presence_briefing_section(server, params.issue_ref.as_deref());
+    let presence_board = presence_section["board"].clone();
+    let presence_warnings: Vec<String> = presence_section["warnings"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Component governance for the active workspace (#799): registry-only,
     // never presented as memory-derived current truth.

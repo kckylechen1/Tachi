@@ -280,14 +280,11 @@ pub(crate) async fn handle_tachi_feature_briefing(
     let open_loops = crate::shell_ops::scan_open_loops(8);
     // #1001: presence 工位表 + advisory collision warnings. Read-only,
     // failure-safe (empty board on any storage error) — never fails briefing.
-    let presence_claims = crate::claims_ops::list_live_claims_for_briefing(server);
-    let presence_board = crate::claims_ops::briefing_claims_board(server);
-    let presence_warnings = crate::claims_ops::collision_warnings(
-        &presence_claims,
-        None,
-        params.issue_ref.as_deref(),
-        &[],
-    );
+    // Single call point (Scope item 3) — see `claims_ops::presence_briefing_section`.
+    let presence_section =
+        crate::claims_ops::presence_briefing_section(server, params.issue_ref.as_deref());
+    let presence_board = presence_section["board"].clone();
+    let presence_warnings = presence_section["warnings"].clone();
     let wiki_hits = compact_layer_rows(wiki_rows, top_k, Some("wiki"), Some("advisory"));
     let memory_fragments = compact_layer_rows(memory_rows, top_k, Some("memory"), Some("context"));
     let eval_evidence = compact_layer_rows(eval_rows, top_k.min(5), Some("eval"), Some("evidence"));

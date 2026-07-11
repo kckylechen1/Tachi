@@ -121,6 +121,12 @@ impl MemoryServer {
             turn_id: None,
             event_type: None,
             messages: Vec::new(),
+            issue_ref: None,
+            branch: None,
+            declared_file_scope: Vec::new(),
+            claim_id: None,
+            dispatch_id: None,
+            release_reason: None,
         };
         crate::facade_memory_ops::handle_tachi_memory(self, params).await
     }

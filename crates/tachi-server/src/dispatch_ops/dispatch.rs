@@ -287,7 +287,12 @@ pub(crate) async fn handle_tachi_dispatch(
             issue_ref: params.issue_ref.clone(),
             flow_id: params.flow_id.clone(),
             dispatch_id: Some(dispatch_id.clone()),
-            branch: params.branch.clone(),
+            // TachiDispatchParams has no bare `branch` field (branch naming is
+            // an internal detail of workspace/env provisioning, not a
+            // dispatch param); env_resolution's cwd is the closest available
+            // identity and is not branch-shaped, so this hook leaves branch
+            // unset rather than guessing.
+            branch: None,
             declared_file_scope: None,
         },
     );
