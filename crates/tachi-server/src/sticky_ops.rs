@@ -68,19 +68,31 @@
 //! worker's own seat identity (`agent_id` param or `TACHI_AGENT_SEAT`) can.
 //! There is no leader-sees-all override today (that would be an
 //! information-flow change, out of scope for this fix — noted as a possible
-//! follow-up, not built here). The archive is also bounded: `all_sticky_entries`
-//! caps the underlying scan to the newest `STICKY_DB_LIMIT` (500) rows, and
-//! `list_or_claim_stickies`'s `include_read` branch caps its own returned
-//! page to at most 50 rows with no pagination — a sticky older than either
-//! cutoff (from the *querying identity's own visible slice*, not the whole
-//! table) is not recoverable via this path. Within those bounds, and for the
+//! follow-up, not built here). The archive is also bounded, and the two caps
+//! sit on opposite sides of the visibility filter (round-4 correction, codex
+//! review of #964/PR #1003 — the round-3 note above wrongly claimed both
+//! derive from the querying identity's visible slice): `all_sticky_entries`
+//! caps the underlying store scan to the newest `STICKY_DB_LIMIT` (500) rows
+//! table-wide, BEFORE `sticky_visible_to` filtering runs (see
+//! `pending.rs`'s `list_or_claim_stickies`, which calls `all_sticky_entries`
+//! first and filters per-row after) — a sticky older than the newest 500
+//! rows in the *entire* `/sticky` bucket (any recipient) is dropped before
+//! visibility is even considered. Only the second cap, `include_read`'s own
+//! returned page (at most 50 rows, no pagination), is a cap on the
+//! post-filter, identity-visible slice. Within those bounds, and for the
 //! identity a sticky is actually visible to, an operator/agent can read the
-//! original text back out of the archive and hand-deliver / re-`sticky_leave`
-//! it. There is no automatic re-delivery; this module does not (and, per
-//! this adjudication, will not) add write-ahead journaling or a cross-store
-//! transaction to close the crash window — the residual is documented, not
-//! eliminated, and the visibility-scoped, capped archive above is the
-//! intended manual recovery path.
+//! sticky's text back out of the archive and hand-deliver / re-`sticky_leave`
+//! it — but that recovered text is the SCRUBBED form (`scrub_sticky_text_for_read`
+//! masks secrets and strips think-tags at the same row-load choke point
+//! delivery uses; see `pending.rs`), not the original raw text that was
+//! passed to `sticky_leave` (which is itself already write-time scrubbed, so
+//! in practice the two usually coincide, but the archive path does not
+//! promise or return unredacted original content). There is no automatic
+//! re-delivery; this module does not (and, per this adjudication, will not)
+//! add write-ahead journaling or a cross-store transaction to close the
+//! crash window — the residual is documented, not eliminated, and the
+//! visibility-scoped, capped, scrubbed archive above is the intended manual
+//! recovery path.
 
 mod claim;
 mod gc;

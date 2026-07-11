@@ -170,9 +170,9 @@ async fn generate_mcp_config_sets_owner_only_permissions() {
     }
 }
 
-// ─── CP3 (round-3): dispatch-id seat, not profile-derived seat ────────────
+// ─── CP2 (round-3): dispatch-id seat, not profile-derived seat ────────────
 //
-// CP3 (codex final review of #964/PR #1003): `agent_seat` used to be derived
+// CP2 (codex final review of #964/PR #1003): `agent_seat` used to be derived
 // from `params.profile` (falling back to `agent_norm`) — but `params.profile`
 // is a `DispatchProfile` (e.g. "codex_55_review"), a capability-surface
 // selector shared by every worker dispatched on that profile, NOT a seat.
@@ -184,7 +184,7 @@ async fn generate_mcp_config_sets_owner_only_permissions() {
 // concurrent dispatches share.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn cp3_two_dispatches_on_same_profile_get_distinct_agent_seats() {
+async fn cp2_two_dispatches_on_same_profile_get_distinct_agent_seats() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -197,7 +197,7 @@ async fn cp3_two_dispatches_on_same_profile_get_distinct_agent_seats() {
     let server = crate::tests::make_server();
 
     // Simulate two workers dispatched on the identical `profile` name
-    // ("codex_55_review") — the exact scenario codex's CP3 finding named.
+    // ("codex_55_review") — the exact scenario codex's CP2 finding named.
     // In the real handler, `agent_seat` is `Some(dispatch_id.as_str())`
     // (dispatch.rs); each dispatch call gets its own freshly generated
     // `dispatch_id` (new_dispatch_id embeds a uuid suffix), never the shared
@@ -255,7 +255,7 @@ async fn cp3_two_dispatches_on_same_profile_get_distinct_agent_seats() {
     );
     assert_ne!(
         seat_a, seat_b,
-        "two workers on the SAME profile must get DISTINCT seats — this is the CP3 regression"
+        "two workers on the SAME profile must get DISTINCT seats — this is the CP2 regression"
     );
     assert_ne!(
         seat_a, "codex_55_review",
