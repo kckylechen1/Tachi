@@ -22,6 +22,8 @@ mod open;
 mod recall_cache;
 mod sandbox;
 mod schema;
+#[cfg(feature = "admin")]
+pub mod session_claims;
 mod sqlite_vec;
 mod state;
 mod stats_gc;
@@ -95,8 +97,8 @@ pub use sandbox::{
 pub use schema::{init_schema, init_schema_with_label_mut};
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
 pub use state::{
-    get_state, insert_state_if_absent, list_derived_by_source, list_state, save_derived,
-    save_derived_with_id, set_state, set_state_if_version, StateRow,
+    delete_state, get_state, insert_state_if_absent, list_derived_by_source, list_state,
+    save_derived, save_derived_with_id, set_state, set_state_if_version, StateRow,
 };
 pub use stats_gc::{archive_stale_memories, gc_tables, stats};
 #[cfg(feature = "admin")]

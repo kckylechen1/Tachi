@@ -303,6 +303,29 @@ pub(crate) async fn handle_memory_briefing(
     // feature briefing (which only sees the flow already in scope).
     let open_loops = crate::shell_ops::scan_open_loops(8);
 
+    // Issue freshness (#1000): zombie (fixed-but-open) + stale-candidate
+    // queues, projected from already-scanned review-candidate rows
+    // (state_kv). This reads only — population happens via
+    // `tachi_gh(action='issue_freshness_scan')` + candidate save, kept out
+    // of the briefing hot path.
+    let issue_freshness = crate::gh_ops::briefing_freshness_queues(server, 5);
+
+    // Presence 工位表 (#1001): read-only, failure-safe projection of live
+    // session claims + advisory collision warnings against any explicit
+    // issue_ref this briefing call was scoped to. Never fails briefing.
+    // Single call point (Scope item 3) — see `claims_ops::presence_briefing_section`.
+    let presence_section =
+        crate::claims_ops::presence_briefing_section(server, params.issue_ref.as_deref());
+    let presence_board = presence_section["board"].clone();
+    let presence_warnings: Vec<String> = presence_section["warnings"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Component governance for the active workspace (#799): registry-only,
     // never presented as memory-derived current truth.
     let component_governance = crate::component_governance_ops::component_governance_context(
@@ -376,6 +399,20 @@ pub(crate) async fn handle_memory_briefing(
             insert_non_empty_compact_section(&mut response, "verification", json!(verification));
             insert_non_empty_compact_section(&mut response, "kanban", board);
             insert_non_empty_compact_section(&mut response, "open_loops", json!(open_loops));
+            if issue_freshness["zombies"]["count"].as_u64().unwrap_or(0) > 0
+                || issue_freshness["stale_candidates"]["count"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    > 0
+            {
+                response.insert("issue_freshness".to_string(), issue_freshness.clone());
+            }
+            if presence_board["count"].as_u64().unwrap_or(0) > 0 || !presence_warnings.is_empty() {
+                response.insert(
+                    "presence".to_string(),
+                    json!({ "board": presence_board.clone(), "warnings": presence_warnings.clone() }),
+                );
+            }
             insert_non_empty_compact_section(&mut response, "recent_checkpoints", checkpoints);
             if component_governance
                 .get("matches")
@@ -401,6 +438,11 @@ pub(crate) async fn handle_memory_briefing(
             "verification": verification,
             "kanban": board,
             "open_loops": open_loops,
+            "issue_freshness": issue_freshness,
+            "presence": {
+                "board": presence_board,
+                "warnings": presence_warnings,
+            },
             "recent_checkpoints": checkpoints,
             "component_governance": component_governance,
             "layer_authority": {
@@ -424,6 +466,10 @@ pub(crate) async fn handle_memory_briefing(
         }));
     }
 
+    let presence_for_markdown = json!({
+        "board": presence_board,
+        "warnings": presence_warnings,
+    });
     let mut markdown = agent_markdown::format_briefing(
         &query,
         named_project.as_deref(),
@@ -437,6 +483,8 @@ pub(crate) async fn handle_memory_briefing(
         &checkpoints,
         &open_loops,
         &component_governance,
+        &issue_freshness,
+        &presence_for_markdown,
         compact,
     );
     // Insert binding receipt after the project-focus line so unscoped sessions are obvious.

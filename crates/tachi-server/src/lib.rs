@@ -80,6 +80,7 @@ mod bootstrap;
 pub mod build_info;
 mod builtins;
 mod capability_ops;
+mod claims_ops;
 mod cli_client;
 mod complete_ops;
 mod component_governance_ops;

@@ -44,6 +44,8 @@ pub const TACHI_GH_ACTIONS: &[&str] = &[
     "issue_read",
     "issue_create",
     "issue_comment",
+    "issue_label",
+    "issue_freshness_scan",
     "pr_list",
     "pr_read",
     "pr_comments",
@@ -81,6 +83,9 @@ pub const TACHI_MEMORY_ACTIONS: &[&str] = &[
     "doctor_scan",
     "ingest",
     "ingest_source",
+    // #1001: manual presence-claim backstop.
+    "claim",
+    "release",
     // #964: read-once agent-to-agent ephemeral notes.
     "sticky_leave",
     "sticky_check",
@@ -118,13 +123,19 @@ mod tests {
                 "tachi_gh must own lifecycle action {action}"
             );
         }
-        assert_eq!(TACHI_GH_ACTIONS.len(), 16);
+        assert_eq!(TACHI_GH_ACTIONS.len(), 18);
         assert!(TACHI_GH_ACTIONS.len() <= TACHI_GH_ACTION_SOFT_MAX);
     }
 
     #[test]
     fn f0_memory_and_verify_counts() {
-        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 23);
+        // Merge of #1001 (claim, release) and #964 (sticky_leave,
+        // sticky_check) landing together bumps this from 23 -> 25, which
+        // lands exactly AT TACHI_MEMORY_ACTION_SOFT_MAX — the soft-ceiling
+        // assertion below still passes (`<=`), but the next legitimate
+        // addition needs an explicit look at whether the ceiling itself
+        // should move, not just this exact-count tripwire.
+        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 25);
         assert!(TACHI_MEMORY_ACTIONS.len() <= TACHI_MEMORY_ACTION_SOFT_MAX);
         assert_eq!(TACHI_VERIFY_ACTIONS.len(), 4);
     }
