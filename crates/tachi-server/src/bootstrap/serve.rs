@@ -421,7 +421,7 @@ async fn run_startup_hygiene(
 
     if let Commands::Distill { action } = &ctx.command {
         use tachi_bootstrap::cli::DistillAction;
-        let DistillAction::Run { db } = action;
+        let DistillAction::Run { db, no_consolidate } = action;
         let target_project = db
             .clone()
             .map(|p| expand_user_path(p.to_string_lossy().as_ref(), &ctx.home))
@@ -434,7 +434,11 @@ async fn run_startup_hygiene(
             return Err(format!("project DB not found: {}", target_project.display()).into());
         }
         let server = MemoryServer::new(global_db_path.to_path_buf(), Some(target_project.clone()))?;
-        let report = crate::foundry_runtime_ops::run_daily_batch_distill(&server).await?;
+        let report = crate::foundry_runtime_ops::run_daily_batch_distill_with_options(
+            &server,
+            !no_consolidate,
+        )
+        .await?;
         print_pretty_json(&serde_json::to_value(report)?)?;
         return Ok(None);
     }

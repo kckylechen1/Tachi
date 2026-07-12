@@ -9,6 +9,7 @@ use tachi_llm::LlmClient;
 
 use super::candidates::collect_candidate_groups;
 use super::config::{resolve_batch_size, resolve_distill_backend, DistillBackend};
+use super::consolidate_prepass::consolidate_duplicate_candidates;
 use super::parser::parse_distill_response;
 use super::persist::persist_distill_memory;
 use super::prompt::{
@@ -22,7 +23,22 @@ use super::types::{CandidateGroup, DistillBatchReport, GroupPayload, SourceManif
 /// in the manifest, so their `derived_items` populate too — previously only the
 /// single bound project was ever scanned, leaving named-project/agent DBs with
 /// permanently-empty derived items.
+///
+/// Runs the #1043 D3 consolidate pre-pass (byte-identical duplicate collapse
+/// within each candidate bucket) before selection by default. Callers that
+/// need the pre-#1043 behavior (e.g. a `--no-consolidate` escape hatch) use
+/// [`run_daily_batch_distill_with_options`].
 pub async fn run_daily_batch_distill(server: &MemoryServer) -> Result<DistillBatchReport, String> {
+    run_daily_batch_distill_with_options(server, true).await
+}
+
+/// Same as [`run_daily_batch_distill`], with the consolidate pre-pass
+/// toggleable — `run_consolidate=false` reproduces the pre-#1043 behavior
+/// (selection sees the raw, undeduplicated candidate pool).
+pub async fn run_daily_batch_distill_with_options(
+    server: &MemoryServer,
+    run_consolidate: bool,
+) -> Result<DistillBatchReport, String> {
     let mut report = DistillBatchReport::default();
 
     let bound_name = server
@@ -32,7 +48,14 @@ pub async fn run_daily_batch_distill(server: &MemoryServer) -> Result<DistillBat
     // 1. The daemon's bound project DB (existing behavior).
     if server.has_project_db() {
         report.projects_scanned += 1;
-        distill_one_project(server, None, derive_project_label(server), &mut report).await;
+        distill_one_project(
+            server,
+            None,
+            derive_project_label(server),
+            run_consolidate,
+            &mut report,
+        )
+        .await;
     }
 
     // 2. Every other named-project DB in the manifest.
@@ -48,7 +71,7 @@ pub async fn run_daily_batch_distill(server: &MemoryServer) -> Result<DistillBat
         }
         report.projects_scanned += 1;
         // Best-effort per project: a failure on one must not abort the rest.
-        distill_one_project(server, Some(&name), name.clone(), &mut report).await;
+        distill_one_project(server, Some(&name), name.clone(), run_consolidate, &mut report).await;
     }
 
     // Opportunistically prune stale foundry-runs subdirs once per run.
@@ -64,9 +87,10 @@ async fn distill_one_project(
     server: &MemoryServer,
     project: Option<&str>,
     project_label: String,
+    run_consolidate: bool,
     report: &mut DistillBatchReport,
 ) {
-    let candidates = match collect_candidate_groups(server, project) {
+    let mut candidates = match collect_candidate_groups(server, project) {
         Ok(candidates) => candidates,
         Err(err) => {
             report
@@ -77,6 +101,11 @@ async fn distill_one_project(
     };
     if candidates.is_empty() {
         return;
+    }
+
+    if run_consolidate {
+        report.consolidated +=
+            consolidate_duplicate_candidates(server, project, &mut candidates);
     }
 
     let batch_run_id = format!(

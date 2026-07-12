@@ -234,6 +234,110 @@ fn handle_apply(server: &MemoryServer, params: &TachiMemoryParams) -> Result<Str
     ))
 }
 
+/// #1043 D3 (terminal-review narrowed): direct-call entry point for
+/// automated (non-human-reviewed) callers that need the SAME `merge_into`
+/// lifecycle mutation `tachi_memory(action='consolidate')` applies after
+/// human approval — used by the distill batch's pre-selection
+/// duplicate-collapse pass for byte-identical rows.
+///
+/// Deliberately hard-codes `action="merge_into"` rather than accepting an
+/// `action: &str` parameter: this is the ONLY lifecycle mutation any
+/// automated caller may reach without going through the human-reviewed
+/// propose/review/apply loop. A generic `action` parameter here would open
+/// every lifecycle action (`supersede`/`archive`/`promote_distilled`) to
+/// bypassing human review, which the module doc above says is exactly what
+/// this proposal/review/apply loop exists to prevent.
+pub(crate) fn merge_into_for_project(
+    server: &MemoryServer,
+    project: Option<&str>,
+    source_id: &str,
+    target_id: &str,
+) -> Result<Value, String> {
+    apply_lifecycle_action(
+        server,
+        &minimal_params_for_project(project),
+        "merge_into",
+        source_id,
+        Some(target_id),
+    )
+}
+
+/// Bare `TachiMemoryParams` carrying only `action`/`project`, for callers
+/// (see `merge_into_for_project`) that need to drive the store-resolution
+/// helpers below without a real facade call's full param set. Field list
+/// mirrors `tests::facade_tests::tachi_memory_params`.
+fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
+    TachiMemoryParams {
+        action: "consolidate".to_string(),
+        format: None,
+        query: None,
+        scope: None,
+        top_k: 6,
+        path_prefix: None,
+        file_context: None,
+        error_context: None,
+        category: None,
+        include_archived: false,
+        include_training: false,
+        enable_rerank: false,
+        as_of: None,
+        synthesize: false,
+        model: None,
+        agent_role: None,
+        text: None,
+        title: None,
+        summary: None,
+        topic: None,
+        keywords: Vec::new(),
+        entities: Vec::new(),
+        importance: None,
+        retention_policy: None,
+        kind: None,
+        path: None,
+        id: None,
+        force: false,
+        source: None,
+        valid_from: None,
+        valid_until: None,
+        metadata: None,
+        emit_continuity: false,
+        files: Vec::new(),
+        flow_id: None,
+        event: None,
+        state: None,
+        project: project.map(str::to_string),
+        domain: None,
+        compact: false,
+        proposal_id: None,
+        review_status: None,
+        notes: None,
+        confirm: false,
+        state_filter: None,
+        content: None,
+        ingest_type: "source".to_string(),
+        source_url: None,
+        auto_chunk: true,
+        auto_summarize: true,
+        auto_link: true,
+        chunk_size_chars: 1200,
+        chunk_overlap_chars: 120,
+        conversation_id: None,
+        turn_id: None,
+        event_type: None,
+        messages: Vec::new(),
+        issue_ref: None,
+        branch: None,
+        declared_file_scope: Vec::new(),
+        claim_id: None,
+        dispatch_id: None,
+        release_reason: None,
+        to: None,
+        ttl_days: None,
+        include_read: false,
+        agent_id: None,
+    }
+}
+
 fn apply_lifecycle_action(
     server: &MemoryServer,
     params: &TachiMemoryParams,

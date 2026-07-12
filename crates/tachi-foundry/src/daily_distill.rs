@@ -63,6 +63,11 @@ pub struct DistillBatchReport {
     pub groups_distilled: usize,
     pub groups_skipped: usize,
     pub fallback_used: usize,
+    /// #1043 D3: rows collapsed by the pre-selection consolidate pass
+    /// (byte-identical duplicates within a candidate bucket, merged into one
+    /// survivor before distillation selects/sends the group). Zero when the
+    /// pre-pass is disabled via `--no-consolidate` or finds no duplicates.
+    pub consolidated: usize,
     pub errors: Vec<String>,
 }
 

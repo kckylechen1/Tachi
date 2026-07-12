@@ -315,3 +315,87 @@ async fn consolidate_refuses_to_propose_archive_for_protected_wiki() {
         "wiki rows must not appear as archive/supersede sources: {parsed}"
     );
 }
+
+/// #1043 D3 terminal-review judgement test: the automated (non-human-review)
+/// direct-call entry point used by the distill pre-pass is
+/// `merge_into_for_project`, which has no `action` parameter at all — it can
+/// only ever perform a `merge_into`. This asserts the *behavior* that
+/// guarantee produces (the compiler already guarantees the shape): calling
+/// it always returns `lifecycle_action: "merge_into"` and applies exactly
+/// that mutation (source archived+superseded into target), never
+/// `supersede`/`archive`/`promote_distilled`.
+#[tokio::test]
+async fn merge_into_for_project_cannot_reach_other_lifecycle_actions() {
+    let server = make_server();
+    let mut source = make_entry("wrapper-source-1");
+    source.keywords = vec!["source-kw".to_string()];
+    let mut target = make_entry("wrapper-target-1");
+    target.keywords = vec!["target-kw".to_string()];
+    server
+        .with_global_store(|store| {
+            store.upsert(&source).map_err(|e| e.to_string())?;
+            store.upsert(&target).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed wrapper source/target");
+
+    let result = crate::facade_memory_ops::consolidate_ops::merge_into_for_project(
+        &server,
+        None,
+        "wrapper-source-1",
+        "wrapper-target-1",
+    )
+    .expect("merge_into_for_project");
+
+    // The wrapper always reports merge_into — there is no code path to any
+    // other lifecycle_action from this entry point.
+    assert_eq!(result["lifecycle_action"], json!("merge_into"));
+    assert_eq!(result["source_id"], json!("wrapper-source-1"));
+    assert_eq!(result["target_id"], json!("wrapper-target-1"));
+    assert_eq!(result["superseded"], json!(true));
+    assert_eq!(result["archived"], json!(true));
+
+    // Archived rows are hidden from default `get` (fetch_by_ids filters
+    // `archived = 0` — see memcore/src/db/memory_crud/read.rs); the plain-get
+    // path exercised by consolidate_lifecycle's reviewed-apply test (above,
+    // "Archived rows are hidden from default get") applies here too, so
+    // assert both halves: default `get` returns None, and
+    // `get_with_options(.., true)` proves the row is archived, not deleted.
+    let source_hidden_from_default_get = server
+        .with_global_store_read(|store| {
+            store
+                .get("wrapper-source-1")
+                .map_err(|e| e.to_string())
+        })
+        .expect("read source via default get");
+    assert!(
+        source_hidden_from_default_get.is_none(),
+        "archived source must be hidden from default get, same visibility rule as the reviewed apply path"
+    );
+
+    let source_after = server
+        .with_global_store_read(|store| {
+            store
+                .get_with_options("wrapper-source-1", true)
+                .map_err(|e| e.to_string())
+                .map(|e| e.expect("source still present (soft-deleted, not hard-deleted)"))
+        })
+        .expect("read source with include_archived");
+    assert!(
+        source_after.archived,
+        "merge_into must archive the source row, same as the reviewed apply path"
+    );
+
+    let target_after = server
+        .with_global_store_read(|store| {
+            store
+                .get("wrapper-target-1")
+                .map_err(|e| e.to_string())
+                .map(|e| e.expect("target still present"))
+        })
+        .expect("read target");
+    assert!(
+        target_after.keywords.contains(&"source-kw".to_string()),
+        "merge_into folds source keywords into the survivor"
+    );
+}
