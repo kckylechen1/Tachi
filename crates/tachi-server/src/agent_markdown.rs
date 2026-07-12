@@ -264,6 +264,7 @@ mod tests {
             &empty,
             &[],
             &serde_json::json!({"matches": []}),
+            &serde_json::json!({}), // presence (empty for this sticky-scrub test)
             false,
         );
 
