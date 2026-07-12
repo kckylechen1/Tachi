@@ -614,7 +614,7 @@ pub struct TachiMemoryParams {
     pub to: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=sticky_leave] Days until an unread sticky auto-archives (default 7)."
+        description = "[action=sticky_leave] Days until an unread sticky auto-archives (1-30, default 7; clamped to this range)."
     )]
     pub ttl_days: Option<u32>,
     #[serde(default)]

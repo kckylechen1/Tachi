@@ -968,6 +968,66 @@ async fn cp2_round3_sticky_leave_from_agent_uses_seat_not_profile() {
     }
 }
 
+// R5 CONCERN (codex review of #964/PR #1003): ttl_days only had a `.max(1)`
+// floor — a caller passing u32::MAX got a sticky that, for all practical
+// purposes, never expires. Assert the ceiling is enforced both in the
+// `sticky_leave` response and in what actually lands in storage (via
+// `sticky_ttl_expired`, the same predicate the GC sweep and unread-listing
+// paths use).
+#[tokio::test]
+async fn sticky_leave_clamps_ttl_days_to_thirty_day_ceiling() {
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-ttl-clamp-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
+    let result = handle_sticky_leave(
+        &server,
+        StickyLeaveInput {
+            text: "practically-forever note".to_string(),
+            to: None,
+            ttl_days: Some(9999),
+        },
+    )
+    .await
+    .expect("sticky_leave");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("parse sticky_leave result");
+    assert_eq!(
+        parsed["ttl_days"], 30,
+        "response must report the clamped ttl_days, not the caller-supplied value"
+    );
+
+    let stored_memo = server
+        .with_global_store_read(|store| {
+            let entries = all_sticky_entries(store)?;
+            entries
+                .iter()
+                .find_map(sticky_from_entry)
+                .ok_or_else(|| "expected exactly one persisted sticky".to_string())
+        })
+        .expect("read back persisted sticky");
+    assert_eq!(
+        stored_memo.ttl_days, 30,
+        "persisted row must store the clamped ttl_days"
+    );
+
+    let now = chrono::DateTime::parse_from_rfc3339(&stored_memo.created_at)
+        .expect("created_at is rfc3339")
+        .with_timezone(&chrono::Utc);
+    assert!(
+        !sticky_ttl_expired(&stored_memo, now + chrono::Duration::days(29)),
+        "29 days after creation: still within the clamped 30-day window"
+    );
+    assert!(
+        sticky_ttl_expired(&stored_memo, now + chrono::Duration::days(31)),
+        "31 days after creation: expired under the clamped 30-day ceiling, not u32::MAX"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
 // ─── CP4 round-3: JSON routes must inherit the scrub, not just markdown ───
 //
 // CP4 round-3 (codex final review of #964/PR #1003): the existing CP4 test

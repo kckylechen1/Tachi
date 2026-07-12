@@ -9,6 +9,7 @@ use super::memo::{sticky_to_memory_entry, StickyMemo};
 use super::pending::list_or_claim_stickies;
 
 const DEFAULT_TTL_DAYS: u32 = 7;
+const MAX_TTL_DAYS: u32 = 30;
 
 pub(crate) struct StickyLeaveInput {
     pub(crate) text: String,
@@ -24,7 +25,11 @@ pub(crate) async fn handle_sticky_leave(
         return Err("text is required and must be non-empty when action='sticky_leave'".into());
     }
     let from_agent = resolve_from_agent(server);
-    let ttl_days = input.ttl_days.unwrap_or(DEFAULT_TTL_DAYS).max(1);
+    // Round-5 CONCERN (codex review of #1003): unbounded ttl_days let a caller
+    // pass u32::MAX and get a sticky that never expires. Clamp to a sane
+    // window (1-30 days) — the archive TTL is meant to bound unread-note
+    // lifetime, not opt out of it.
+    let ttl_days = input.ttl_days.unwrap_or(DEFAULT_TTL_DAYS).clamp(1, MAX_TTL_DAYS);
 
     // CP4 (security): scrub before persisting — sticky bodies are stored
     // verbatim in the global DB and rendered verbatim into the leader
