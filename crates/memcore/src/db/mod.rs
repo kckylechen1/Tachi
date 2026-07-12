@@ -1,4 +1,5 @@
 mod agent_state;
+pub mod anchor;
 mod audit;
 mod common;
 mod daily_pipeline;
@@ -33,6 +34,7 @@ mod vault_db;
 mod virtual_capability;
 
 pub use agent_state::{get_agent_known_revisions, update_agent_known_state};
+pub use anchor::{anchor_id, anchor_path, ensure_anchor, AnchorKind};
 pub use audit::{audit_log_insert, audit_log_list};
 pub(crate) use common::normalize_utc_iso;
 pub use common::{normalize_utc_iso_or_now, row_to_entry};
@@ -58,8 +60,9 @@ pub use gc_candidates::{
     CategoryPathPrefixMemoryRow, PathPrefixMemoryRow,
 };
 pub use graph::{
-    add_edge, avg_importance, count_same_topic, get_contradiction_count, get_edges,
-    get_superseded_ids, graph_expand, remove_edge,
+    add_component_governance_edge, add_edge, avg_importance, close_related_to_fog,
+    count_same_topic, get_contradiction_count, get_edges, get_superseded_ids, graph_expand,
+    remove_edge,
 };
 #[cfg(feature = "admin")]
 pub use hub_db::{

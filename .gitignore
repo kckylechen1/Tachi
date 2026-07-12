@@ -94,3 +94,4 @@ integrations/openclaw/*.d.ts
 integrations/openclaw/*.d.ts.map
 # openclaw-plugin-sdk.d.ts is hand-authored (not generated), keep tracked
 !integrations/openclaw/openclaw-plugin-sdk.d.ts
+isolated-target/

@@ -29,6 +29,7 @@ pub mod namespace;
 pub mod noise;
 pub mod path_router;
 pub mod recall_config;
+pub mod relation_ontology;
 pub mod scorer;
 pub mod search;
 pub mod store;
@@ -61,6 +62,7 @@ pub use db::foundry_jobs::{
     JobStatusHistogram, PersistedFoundryJob, RequeueOutcome,
 };
 pub use db::row_to_entry;
+pub use db::{anchor_id, anchor_path, AnchorKind};
 #[cfg(feature = "admin")]
 pub use db::session_claims::{
     get_claim, heartbeat_claim, insert_claim, is_claim_stale, list_active_claims, list_claims,
@@ -79,13 +81,14 @@ pub use foundry::{
 #[cfg(feature = "admin")]
 pub use hub::{HubCapability, VirtualCapabilityBinding};
 pub use namespace::{
-    is_eval_entry, is_handoff_entry, is_kanban_entry, is_namespace_search_noise,
+    is_anchor_entry, is_eval_entry, is_handoff_entry, is_kanban_entry, is_namespace_search_noise,
     is_recall_cache_entry, is_wiki_entry, path_contains_recall_cache, path_in_namespace,
     path_prefix_opts_into_recall_cache, FOUNDRY_RECALL_CACHE_SOURCE, RECALL_CACHE_SQL_WHERE,
     RECALL_CACHE_SQL_WHERE_M,
 };
 pub use noise::{is_noise_text, should_skip_query};
 pub use recall_config::RecallConfig;
+pub use relation_ontology::ComponentGovernanceRelation;
 pub use scorer::{
     generic_precision_multiplier, surprise_score, DecayPolicy, DecayPolicyContext,
     DefaultDecayPolicy, HybridWeights, PrecisionMatcher, DEFAULT_DECAY_POLICY,

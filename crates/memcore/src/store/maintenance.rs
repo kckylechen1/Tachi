@@ -59,13 +59,16 @@ impl MemoryStore {
     }
 
     /// Load active non-raw entries that still lack an embedding vector,
-    /// highest importance first.
+    /// highest importance first. Excludes `anchor:`-prefixed rows (tachi#773
+    /// item 4: anchors are plumbing rows for the memory graph, never
+    /// content that should burn embedding budget or surface as recall).
     pub fn entries_missing_vectors(&self, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError> {
         let mut stmt = self.conn.prepare(
             "SELECT m.id FROM memories m
              LEFT JOIN memories_vec v ON m.id = v.id
              WHERE m.archived = 0
                AND m.tier != 'raw'
+               AND m.id NOT LIKE 'anchor:%'
                AND v.id IS NULL
              ORDER BY m.importance DESC
              LIMIT ?1",

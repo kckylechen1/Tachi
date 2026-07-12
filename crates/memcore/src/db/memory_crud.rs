@@ -145,6 +145,18 @@ pub fn upsert(
             "entry.id must be provided by caller".to_string(),
         ));
     }
+    // tachi#773 item 4 guard (c): the `anchor:` id namespace is reserved for
+    // `ensure_anchor` (memcore::db::anchor). Ordinary upserts must never
+    // create or silently overwrite an anchor row — `ensure_anchor` uses its
+    // own dedicated INSERT OR IGNORE, not this function, so any caller
+    // reaching here with an `anchor:`-prefixed id is a bug (or a hostile
+    // write), not a legitimate anchor creation.
+    if entry.id.starts_with("anchor:") {
+        return Err(MemoryError::InvalidArg(format!(
+            "id '{}' is in the reserved 'anchor:' namespace; use ensure_anchor, not upsert",
+            entry.id
+        )));
+    }
 
     // Normalize only the fields enforced by CHECK constraints; avoid cloning
     // the full entry/vector on the hot write path.

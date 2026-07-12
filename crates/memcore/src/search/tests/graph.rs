@@ -26,7 +26,11 @@ fn graph_expansion_orders_neighbors_by_spreading_activation() {
         &MemoryEdge {
             source_id: "seed".to_string(),
             target_id: "related".to_string(),
-            relation: "related_to".to_string(),
+            // similar_to shares related_to's 0.55 weight class (tachi#773 S1:
+            // related_to is legal-but-deprecated for new writes; this test
+            // only cares about the weak-vs-strong edge ranking, not the
+            // specific deprecated relation name).
+            relation: "similar_to".to_string(),
             weight: 1.0,
             metadata: json!({}),
             created_at: String::new(),

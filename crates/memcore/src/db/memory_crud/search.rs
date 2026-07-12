@@ -35,6 +35,7 @@ pub fn search_vec(
                AND (?4 = 1 OR m.superseded_by IS NULL)
                AND (?5 IS NULL OR m.path LIKE ?5)
                AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
+               AND m.id NOT LIKE 'anchor:%'
              ORDER BY v.distance"#,
     )?;
 
@@ -147,6 +148,7 @@ fn search_fts_match(
               AND (?4 = 1 OR m.superseded_by IS NULL)
               AND (?5 IS NULL OR m.path LIKE ?5)
               AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
+              AND m.id NOT LIKE 'anchor:%'
              ORDER BY bm25(memories_fts)
             LIMIT ?3"#,
     ))?;
@@ -227,7 +229,8 @@ pub fn search_symbolic_candidates(
          WHERE (?1 = 1 OR archived = 0)
            AND (?2 = 1 OR superseded_by IS NULL)
            AND (?3 IS NULL OR path LIKE ?3)
-           AND (?4 IS NULL OR (COALESCE(NULLIF(valid_from, ''), timestamp) <= ?4 AND (valid_until IS NULL OR valid_until > ?4)))"
+           AND (?4 IS NULL OR (COALESCE(NULLIF(valid_from, ''), timestamp) <= ?4 AND (valid_until IS NULL OR valid_until > ?4)))
+           AND id NOT LIKE 'anchor:%'"
     );
 
     let mut params: Vec<Value> = vec![
