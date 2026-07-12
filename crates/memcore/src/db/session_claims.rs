@@ -788,24 +788,28 @@ mod tests {
         }
 
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let path_a = path.clone();
+        // Open both connections serially BEFORE spawning: concurrent
+        // `Connection::open` on the same fresh WAL file can fail with
+        // SQLITE_BUSY_RECOVERY during auto-extension load (busy_timeout
+        // cannot exist before open returns), and a pre-barrier panic strands
+        // the sibling thread on the barrier forever, hanging the whole test
+        // binary. The race under test is the upsert, not the open. (#1045)
+        let mut conn_a = open_file_conn(&path);
+        let mut conn_b = open_file_conn(&path);
         let barrier_a = barrier.clone();
         let handle_a = std::thread::spawn(move || {
-            let mut conn = open_file_conn(&path_a);
             let mut claim = new_claim("race-claim-a", "org/repo#900");
             claim.dispatch_id = Some("dispatch-a".to_string());
             barrier_a.wait();
-            upsert_or_heartbeat_claim(&mut conn, &claim)
+            upsert_or_heartbeat_claim(&mut conn_a, &claim)
         });
 
-        let path_b = path.clone();
         let barrier_b = barrier;
         let handle_b = std::thread::spawn(move || {
-            let mut conn = open_file_conn(&path_b);
             let mut claim = new_claim("race-claim-b", "org/repo#900");
             claim.dispatch_id = Some("dispatch-b".to_string());
             barrier_b.wait();
-            upsert_or_heartbeat_claim(&mut conn, &claim)
+            upsert_or_heartbeat_claim(&mut conn_b, &claim)
         });
 
         let result_a = handle_a.join().expect("thread a must not panic");
