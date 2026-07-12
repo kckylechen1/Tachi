@@ -16,11 +16,11 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 use serde_json::json;
 
-use portable_kernel::{DecayPolicy, MemoryEntry, MemoryStore, SearchOptions};
+use portable_kernel::{DecayPolicy, HybridWeights, MemoryEntry, MemoryStore, SearchOptions};
 
 /// Params for the `save` tool. Only `text` is required; everything else mirrors
 /// the kernel's `MemoryEntry` defaults so a caller can write a bare note.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct SaveParams {
     /// Full text content of the memory (required).
     pub text: String,
@@ -51,6 +51,13 @@ pub struct SaveParams {
     /// Keyword tags for recall/FTS.
     #[serde(default)]
     pub keywords: Vec<String>,
+    /// Entity names mentioned by the memory. Downstream adapters use this for
+    /// durable retrieval anchors; portable keeps it domain-neutral.
+    #[serde(default)]
+    pub entities: Vec<String>,
+    /// Arbitrary caller metadata, preserved verbatim in the kernel entry.
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 /// Default `top_k` when the caller omits it, mirroring `SearchOptions::default()`.
@@ -74,7 +81,7 @@ fn normalized_top_k(requested: Option<usize>) -> usize {
 }
 
 /// Params for the `search` tool.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct SearchParams {
     /// Query string (hybrid text + FTS + optional vector).
     pub query: String,
@@ -84,6 +91,87 @@ pub struct SearchParams {
     /// Optional path-prefix filter, e.g. "/trading".
     #[serde(default)]
     pub path: Option<String>,
+    /// Quant/full-Tachi spelling for `path`; takes precedence when both are
+    /// supplied so a caller can migrate without rewriting its request shape.
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    #[serde(default)]
+    pub domain: Option<String>,
+    #[serde(default)]
+    pub include_archived: bool,
+    #[serde(default)]
+    pub candidates_per_channel: Option<usize>,
+    #[serde(default)]
+    pub mmr_threshold: Option<f64>,
+    #[serde(default)]
+    pub graph_expand_hops: Option<u32>,
+    #[serde(default)]
+    pub graph_relation_filter: Option<String>,
+    #[serde(default)]
+    pub weights: Option<HybridWeightsParams>,
+    #[serde(default)]
+    pub context_symbols: Vec<String>,
+    #[serde(default)]
+    pub query_vec: Option<Vec<f32>>,
+    #[serde(default)]
+    pub as_of: Option<String>,
+}
+
+/// Sparse caller override for the kernel's hybrid scorer. Omitted fields keep
+/// the portable kernel defaults rather than becoming accidental zero weights.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct HybridWeightsParams {
+    #[serde(default)]
+    pub semantic: Option<f64>,
+    #[serde(default)]
+    pub fts: Option<f64>,
+    #[serde(default)]
+    pub symbolic: Option<f64>,
+    #[serde(default)]
+    pub decay: Option<f64>,
+    #[serde(default)]
+    pub use_rrf: Option<bool>,
+}
+
+impl HybridWeightsParams {
+    fn apply_to(self, mut weights: HybridWeights) -> HybridWeights {
+        if let Some(value) = self.semantic {
+            weights.semantic = value;
+        }
+        if let Some(value) = self.fts {
+            weights.fts = value;
+        }
+        if let Some(value) = self.symbolic {
+            weights.symbolic = value;
+        }
+        if let Some(value) = self.decay {
+            weights.decay = value;
+        }
+        if let Some(value) = self.use_rrf {
+            weights.use_rrf = value;
+        }
+        weights
+    }
+}
+
+impl SearchParams {
+    fn resolved_path_prefix(&self) -> Option<String> {
+        self.path_prefix.clone().or_else(|| self.path.clone())
+    }
+
+    fn query_with_context_symbols(&self) -> String {
+        let symbols = self
+            .context_symbols
+            .iter()
+            .map(|symbol| symbol.trim())
+            .filter(|symbol| !symbol.is_empty())
+            .collect::<Vec<_>>();
+        if symbols.is_empty() {
+            self.query.clone()
+        } else {
+            format!("{} {}", self.query, symbols.join(" "))
+        }
+    }
 }
 
 /// Params for the `get` tool.
@@ -99,7 +187,7 @@ pub struct StatusParams {}
 
 /// Params for the downstream `hapi_memory` / `tachi_memory` aliases. The
 /// portable profile deliberately supports only save and search actions.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct MemoryActionParams {
     pub action: String,
     #[serde(default)]
@@ -123,9 +211,33 @@ pub struct MemoryActionParams {
     #[serde(default)]
     pub keywords: Vec<String>,
     #[serde(default)]
+    pub entities: Vec<String>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    #[serde(default)]
     pub query: Option<String>,
     #[serde(default)]
     pub top_k: Option<usize>,
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    #[serde(default)]
+    pub include_archived: bool,
+    #[serde(default)]
+    pub candidates_per_channel: Option<usize>,
+    #[serde(default)]
+    pub mmr_threshold: Option<f64>,
+    #[serde(default)]
+    pub graph_expand_hops: Option<u32>,
+    #[serde(default)]
+    pub graph_relation_filter: Option<String>,
+    #[serde(default)]
+    pub weights: Option<HybridWeightsParams>,
+    #[serde(default)]
+    pub context_symbols: Vec<String>,
+    #[serde(default)]
+    pub query_vec: Option<Vec<f32>>,
+    #[serde(default)]
+    pub as_of: Option<String>,
 }
 
 impl MemoryActionParams {
@@ -145,6 +257,8 @@ impl MemoryActionParams {
             retention_policy: self.retention_policy,
             importance: self.importance,
             keywords: self.keywords,
+            entities: self.entities,
+            metadata: self.metadata,
         })
     }
 
@@ -157,6 +271,17 @@ impl MemoryActionParams {
             query,
             top_k: self.top_k,
             path: self.path,
+            path_prefix: self.path_prefix,
+            domain: self.domain,
+            include_archived: self.include_archived,
+            candidates_per_channel: self.candidates_per_channel,
+            mmr_threshold: self.mmr_threshold,
+            graph_expand_hops: self.graph_expand_hops,
+            graph_relation_filter: self.graph_relation_filter,
+            weights: self.weights,
+            context_symbols: self.context_symbols,
+            query_vec: self.query_vec,
+            as_of: self.as_of,
         })
     }
 }
@@ -298,7 +423,7 @@ impl PortableServer {
             topic: String::new(),
             keywords: params.keywords,
             persons: Vec::new(),
-            entities: Vec::new(),
+            entities: params.entities,
             location: String::new(),
             source: "portable-server".to_string(),
             scope,
@@ -309,7 +434,7 @@ impl PortableServer {
             vector: None,
             retention_policy: params.retention_policy,
             domain: params.domain,
-            metadata: serde_json::Value::Object(Default::default()),
+            metadata: params.metadata,
             recall_count: 0,
             query_diversity: 0,
             tier: "raw".to_string(),
@@ -320,8 +445,17 @@ impl PortableServer {
             .store
             .lock()
             .map_err(|_| "store lock poisoned".to_string())?;
+        let existed = store.get(&id).map_err(|e| e.to_string())?.is_some();
         store.upsert(&entry).map_err(|e| e.to_string())?;
-        Ok(json!({ "id": id, "saved": true }).to_string())
+        Ok(json!({
+            "id": id,
+            "path": entry.path,
+            "saved": true,
+            "persisted": true,
+            "operation": if existed { "updated" } else { "created" },
+            "idempotency_key": entry.metadata.get("idempotency_key").cloned().unwrap_or(serde_json::Value::Null),
+        })
+        .to_string())
     }
 
     #[tool(
@@ -333,19 +467,49 @@ impl PortableServer {
     ) -> Result<String, String> {
         let top_k = normalized_top_k(params.top_k);
         let mut results = Vec::new();
+        let path_prefix = params.resolved_path_prefix();
+        let query = params.query_with_context_symbols();
+        let mut options = SearchOptions {
+            top_k,
+            path_prefix,
+            domain: params.domain,
+            query_vec: params.query_vec,
+            include_archived: params.include_archived,
+            candidates_per_channel: params.candidates_per_channel.unwrap_or(20).clamp(1, 1_000),
+            mmr_threshold: params.mmr_threshold.or(Some(0.85)),
+            graph_expand_hops: params.graph_expand_hops.unwrap_or(0).min(2),
+            graph_relation_filter: params.graph_relation_filter,
+            as_of: params.as_of,
+            decay_policy: self.decay_policy.clone(),
+            ..Default::default()
+        };
+        if let Some(weights) = params.weights {
+            options.weights = weights.apply_to(options.weights);
+        }
         for handle in self.stores.all() {
-            let opts = SearchOptions {
-                top_k,
-                path_prefix: params.path.clone(),
-                decay_policy: self.decay_policy.clone(),
-                ..Default::default()
-            };
             let store = handle
                 .store
                 .lock()
                 .map_err(|_| "store lock poisoned".to_string())?;
             let mut store_results = store
-                .search(&params.query, Some(opts))
+                .search(
+                    &query,
+                    Some(SearchOptions {
+                        weights: options.weights.clone(),
+                        top_k: options.top_k,
+                        path_prefix: options.path_prefix.clone(),
+                        domain: options.domain.clone(),
+                        query_vec: options.query_vec.clone(),
+                        include_archived: options.include_archived,
+                        candidates_per_channel: options.candidates_per_channel,
+                        mmr_threshold: options.mmr_threshold,
+                        graph_expand_hops: options.graph_expand_hops,
+                        graph_relation_filter: options.graph_relation_filter.clone(),
+                        as_of: options.as_of.clone(),
+                        decay_policy: options.decay_policy.clone(),
+                        ..Default::default()
+                    }),
+                )
                 .map_err(|e| e.to_string())?;
             results.append(&mut store_results);
         }
@@ -443,7 +607,7 @@ impl PortableServer {
     }
 
     #[tool(
-        description = "Quant-compatible memory facade. Supports action=save and action=search in the portable profile."
+        description = "Quant-compatible memory facade. Supports action=save, action=search, and action=recall_context in the portable profile."
     )]
     pub async fn hapi_memory(
         &self,
@@ -451,7 +615,7 @@ impl PortableServer {
     ) -> Result<String, String> {
         match params.action.trim().to_ascii_lowercase().as_str() {
             "save" => self.save(Parameters(params.save_params()?)).await,
-            "search" => self.search(Parameters(params.search_params()?)).await,
+            "search" | "recall_context" => self.search(Parameters(params.search_params()?)).await,
             action => Err(format!(
                 "action '{action}' is not available in this profile"
             )),
@@ -537,6 +701,7 @@ mod tests {
             retention_policy: None,
             importance: Some(0.7),
             keywords: vec!["portable".to_string()],
+            ..Default::default()
         }
     }
 
@@ -564,6 +729,7 @@ mod tests {
                 query: "trading decay fact".to_string(),
                 top_k: Some(5),
                 path: None,
+                ..Default::default()
             }))
             .await
             .expect("search");
@@ -631,6 +797,7 @@ mod tests {
             keywords: Vec::new(),
             query: None,
             top_k: None,
+            ..Default::default()
         };
         server
             .hapi_memory(Parameters(action))
@@ -642,6 +809,7 @@ mod tests {
                 query: "alias contract".to_string(),
                 top_k: Some(3),
                 path: None,
+                ..Default::default()
             }))
             .await
             .expect("legacy search");
@@ -671,10 +839,99 @@ mod tests {
                 keywords: Vec::new(),
                 query: None,
                 top_k: None,
+                ..Default::default()
             }))
             .await
             .expect_err("unsupported action must fail clearly");
         assert!(unsupported.contains("not available in this profile"));
+    }
+
+    /// Quant sends these fields through its HAPI fallback path today. This
+    /// fixture keeps the portable contract lossless and domain-neutral so the
+    /// downstream adapter can cherry-pick it without carrying full Tachi.
+    #[tokio::test]
+    async fn quant_style_hapi_payload_preserves_write_receipt_and_search_controls() {
+        let server = boot(None, "default");
+        let id = "quant-compat-stable-id";
+        let created = server
+            .hapi_memory(Parameters(MemoryActionParams {
+                action: "save".to_string(),
+                text: Some("300502.SZ trade postmortem lesson".to_string()),
+                id: Some(id.to_string()),
+                path: Some("/trading/equity/postmortem/300502.SZ".to_string()),
+                domain: Some("equity_trading".to_string()),
+                entities: vec!["300502.SZ".to_string(), "新易盛".to_string()],
+                metadata: json!({ "idempotency_key": "trade-20260712-300502", "symbol": "300502.SZ" }),
+                ..Default::default()
+            }))
+            .await
+            .expect("Quant-style hapi save");
+        let created: serde_json::Value = serde_json::from_str(&created).expect("receipt json");
+        assert_eq!(created["id"], json!(id));
+        assert_eq!(
+            created["path"],
+            json!("/trading/equity/postmortem/300502.SZ")
+        );
+        assert_eq!(created["persisted"], json!(true));
+        assert_eq!(created["operation"], json!("created"));
+        assert_eq!(created["idempotency_key"], json!("trade-20260712-300502"));
+
+        let updated = server
+            .hapi_save(Parameters(SaveParams {
+                text: "300502.SZ trade postmortem lesson updated".to_string(),
+                id: Some(id.to_string()),
+                path: Some("/trading/equity/postmortem/300502.SZ".to_string()),
+                domain: Some("equity_trading".to_string()),
+                entities: vec!["300502.SZ".to_string(), "新易盛".to_string()],
+                metadata: json!({ "idempotency_key": "trade-20260712-300502", "symbol": "300502.SZ" }),
+                ..Default::default()
+            }))
+            .await
+            .expect("stable-id update");
+        let updated: serde_json::Value = serde_json::from_str(&updated).expect("update receipt");
+        assert_eq!(updated["operation"], json!("updated"));
+
+        server
+            .save(Parameters(save_params(
+                "300502.SZ unrelated general note",
+                "/notes/general",
+            )))
+            .await
+            .expect("distractor save");
+
+        let hits = server
+            .hapi_search(Parameters(SearchParams {
+                query: "postmortem lesson".to_string(),
+                path_prefix: Some("/trading/equity/postmortem/300502.SZ".to_string()),
+                domain: Some("equity_trading".to_string()),
+                context_symbols: vec!["300502.SZ".to_string()],
+                graph_expand_hops: Some(0),
+                weights: Some(HybridWeightsParams {
+                    symbolic: Some(0.4),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }))
+            .await
+            .expect("Quant-style hapi search");
+        let hits: Vec<serde_json::Value> = serde_json::from_str(&hits).expect("hits json");
+        assert_eq!(hits.len(), 1, "path/domain filter must exclude distractor");
+        assert_eq!(hits[0]["entry"]["id"], json!(id));
+        assert_eq!(hits[0]["entry"]["entities"], json!(["300502.SZ", "新易盛"]));
+        assert_eq!(hits[0]["entry"]["metadata"]["symbol"], json!("300502.SZ"));
+
+        let recalled = server
+            .hapi_memory(Parameters(MemoryActionParams {
+                action: "recall_context".to_string(),
+                query: Some("postmortem".to_string()),
+                path_prefix: Some("/trading/equity/postmortem/300502.SZ".to_string()),
+                ..Default::default()
+            }))
+            .await
+            .expect("recall_context alias");
+        assert!(!serde_json::from_str::<Vec<serde_json::Value>>(&recalled)
+            .expect("recall json")
+            .is_empty());
     }
 
     #[tokio::test]
@@ -710,6 +967,7 @@ mod tests {
                 query: "store fact".to_string(),
                 top_k: Some(10),
                 path: None,
+                ..Default::default()
             }))
             .await
             .expect("merged search");
@@ -814,6 +1072,7 @@ mod tests {
                 query: "flat policy fact".to_string(),
                 top_k: Some(3),
                 path: None,
+                ..Default::default()
             }))
             .await
             .expect("search");
@@ -859,6 +1118,7 @@ mod tests {
                 query: "uncapped top_k dos regression fact".to_string(),
                 top_k: Some(999_999),
                 path: None,
+                ..Default::default()
             }))
             .await
             .expect("search must not error on an oversized top_k");
