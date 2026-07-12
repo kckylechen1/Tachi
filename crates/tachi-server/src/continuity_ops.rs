@@ -129,7 +129,6 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let db = dir.path().join("memory.db");
         let server = MemoryServer::new(db, None).expect("test server");
-        let target = ContinuityEventTarget::new(DbScope::Global, None, None);
 
         // Two ordinary memories so both edge endpoints exist.
         server
