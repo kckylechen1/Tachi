@@ -22,36 +22,31 @@ fn current_agent_id(server: &MemoryServer) -> Option<String> {
         .filter(|agent_id| !agent_id.is_empty())
 }
 
-/// Round-3 fix (codex final review of #964/PR #1003, BUG CP2, sender half):
-/// this used to fall back to `TACHI_PROFILE` — the configured *tool profile*
-/// (`worker`/`delegate`/`standard`/`codex`), a capability-surface selector,
-/// not a seat identity (same defect as the delivery-path bug fixed in
-/// `resolve_caller_agent_id` below). A tool launched with `TACHI_PROFILE` set
-/// could still resolve its OWN `from_agent` (the sender identity stamped on
-/// a `sticky_leave`) to that shared profile string, so two workers on the
-/// same tool profile would author stickies under the same `from_agent`. The
-/// sender path shares the exact same chain the delivery path
-/// (`resolve_caller_agent_id`) already trusts: `server-side agent_profile`
-/// -> `TACHI_AGENT_SEAT` -> `None` -> `"unknown-agent"`.
-pub(super) fn fallback_agent_id(registered_agent: Option<String>) -> String {
-    registered_agent
-        .or_else(|| non_empty_env("TACHI_AGENT_SEAT"))
-        .unwrap_or_else(|| "unknown-agent".to_string())
-}
-
-/// Server-side identity resolution for the sticky DELIVERY path (briefing
-/// inclusion + `sticky_check`), mirroring the same three-step chain the
-/// SEND path (`sticky_leave`, via `fallback_agent_id` above) already trusts
-/// (CP2, opus xhigh review of #964/PR #1003).
+/// Server-side identity resolution shared by BOTH the sticky SEND path
+/// (`sticky_leave`, via `handle_sticky_leave`'s
+/// `.unwrap_or_else(|| "unknown-agent".to_string())`) and the DELIVERY path
+/// (briefing inclusion + `sticky_check`) (CP2, opus xhigh review of
+/// #964/PR #1003).
 ///
-/// `sticky_leave` used to resolve `from_agent` server-side only (no
-/// caller-supplied override); the delivery path used to trust ONLY the
-/// caller-supplied `params.agent_id`, with no fallback — so a worker
-/// briefing call with no `agent_id` param was silently treated as the
-/// leader and consumed broadcast (`to`-absent) stickies meant for the real
-/// leader. `sticky_leave` now also accepts an explicit `agent_id` override
-/// via this same function (one-shot stdio channels have no persistent
-/// `agent_profile`/env identity to fall back on — see `handle_sticky_leave`).
+/// A prior round (codex final review of #964/PR #1003, BUG CP2, sender
+/// half) gave the send path its own `fallback_agent_id(Option<String>)`
+/// wrapper around this exact chain, needed at the time because
+/// `sticky_leave` had no caller-supplied `agent_id` param to plumb through.
+/// `sticky_leave` now also accepts an explicit `agent_id` override via THIS
+/// function (one-shot stdio channels have no persistent `agent_profile`/env
+/// identity to fall back on — see `handle_sticky_leave`), which made
+/// `fallback_agent_id(current_agent_id(server))` and
+/// `resolve_caller_agent_id(server, None)` walk the byte-identical chain —
+/// the wrapper was retired as dead weight once the caller moved onto this
+/// function directly (see git history at
+/// `sticky_ops/identity.rs`/`sticky_ops/handlers.rs` for the two-step
+/// retirement: `resolve_from_agent` dropped first, `fallback_agent_id`
+/// itself orphaned and removed here). `sticky_leave` used to resolve
+/// `from_agent` server-side only (no caller-supplied override); the
+/// delivery path used to trust ONLY the caller-supplied `params.agent_id`,
+/// with no fallback — so a worker briefing call with no `agent_id` param
+/// was silently treated as the leader and consumed broadcast (`to`-absent)
+/// stickies meant for the real leader.
 ///
 /// Chain: `params.agent_id` -> server-side `agent_profile.agent_id` ->
 /// `TACHI_AGENT_SEAT` env var -> `None` (leader).

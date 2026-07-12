@@ -850,21 +850,28 @@ fn cp2_tachi_profile_env_alone_no_longer_resolves_a_seat() {
     }
 }
 
-// ─── CP2 round-3: sender-side identity (`fallback_agent_id`) must not
-// resolve a tool-profile string either ─────────────────────────────────────
+// ─── CP2 round-3: sender-side identity must not resolve a tool-profile
+// string either ──────────────────────────────────────────────────────────
 //
 // Round-2 only fixed the DELIVERY path (`resolve_caller_agent_id`)'s env
-// fallback. `fallback_agent_id` (used by `sticky_leave` to stamp
-// `from_agent`) still read `TACHI_PROFILE` as its fallback — so a caller
-// launched with `TACHI_PROFILE=standard` set (a tool-profile selector, not a
-// seat) but no `agent_profile` registered would author a sticky's
-// `from_agent` as `"standard"`, not its actual seat. Two tools sharing a
-// `TACHI_PROFILE` value would author stickies under the identical
-// `from_agent`, indistinguishable from each other. The sender path now
-// shares the exact `TACHI_AGENT_SEAT` fallback the delivery path already
-// uses.
-#[test]
-fn cp2_round3_sender_identity_never_resolves_to_tool_profile_string() {
+// fallback. The SEND path (`sticky_leave`, stamping `from_agent`) used to
+// read `TACHI_PROFILE` as its own separate fallback — so a caller launched
+// with `TACHI_PROFILE=standard` set (a tool-profile selector, not a seat)
+// but no `agent_profile` registered would author a sticky's `from_agent` as
+// `"standard"`, not its actual seat. Two tools sharing a `TACHI_PROFILE`
+// value would author stickies under the identical `from_agent`,
+// indistinguishable from each other.
+//
+// The send path now shares `resolve_caller_agent_id` directly (see
+// `identity.rs` — the round-3-era `fallback_agent_id` wrapper this test
+// used to poke directly was retired as dead weight once `handle_sticky_leave`
+// switched to calling `resolve_caller_agent_id` itself; verified by grep +
+// git archaeology, see identity.rs doc comment), so this asserts the
+// behavior end-to-end through the real production entry point instead of a
+// since-removed internal helper.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cp2_round3_sticky_leave_from_agent_never_resolves_to_tool_profile_string() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -873,17 +880,36 @@ fn cp2_round3_sender_identity_never_resolves_to_tool_profile_string() {
     std::env::set_var("TACHI_PROFILE", "standard");
     std::env::remove_var("TACHI_AGENT_SEAT");
 
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-cp2-round3-leave-no-seat-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
     // No agent_profile registered (the expected post-#973 runtime state) and
     // no TACHI_AGENT_SEAT — TACHI_PROFILE must NOT leak through as the
     // resolved sender identity.
-    let resolved = super::identity::fallback_agent_id(None);
+    let result = super::handlers::handle_sticky_leave(
+        &server,
+        super::handlers::StickyLeaveInput {
+            text: "note with no resolvable seat".to_string(),
+            to: None,
+            ttl_days: None,
+            agent_id: None,
+        },
+    )
+    .await
+    .expect("sticky_leave");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("parse sticky_leave result");
     assert_eq!(
-        resolved, "unknown-agent",
+        parsed["from_agent"], "unknown-agent",
         "sender identity must never resolve to a tool-profile string like \
          'standard' even with TACHI_PROFILE set"
     );
-    assert_ne!(resolved, "standard");
+    assert_ne!(parsed["from_agent"], "standard");
 
+    let _ = std::fs::remove_file(&db_path);
     match original_profile {
         Some(v) => std::env::set_var("TACHI_PROFILE", v),
         None => std::env::remove_var("TACHI_PROFILE"),
@@ -894,31 +920,12 @@ fn cp2_round3_sender_identity_never_resolves_to_tool_profile_string() {
     }
 }
 
-#[test]
-fn cp2_round3_sender_identity_uses_tachi_agent_seat_not_tachi_profile() {
-    let _guard = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let original_profile = std::env::var_os("TACHI_PROFILE");
-    let original_seat = std::env::var_os("TACHI_AGENT_SEAT");
-    std::env::set_var("TACHI_PROFILE", "standard");
-    std::env::set_var("TACHI_AGENT_SEAT", "wizard-worker-3");
-
-    let resolved = super::identity::fallback_agent_id(None);
-    assert_eq!(
-        resolved, "wizard-worker-3",
-        "sender identity must resolve via TACHI_AGENT_SEAT, ignoring TACHI_PROFILE entirely"
-    );
-
-    match original_profile {
-        Some(v) => std::env::set_var("TACHI_PROFILE", v),
-        None => std::env::remove_var("TACHI_PROFILE"),
-    }
-    match original_seat {
-        Some(v) => std::env::set_var("TACHI_AGENT_SEAT", v),
-        None => std::env::remove_var("TACHI_AGENT_SEAT"),
-    }
-}
+// `cp2_round3_sender_identity_uses_tachi_agent_seat_not_tachi_profile`
+// (the TACHI_PROFILE-and-TACHI_AGENT_SEAT-both-set scenario) used to be a
+// direct unit test against the now-removed `fallback_agent_id` helper; it
+// is redundant with `cp2_round3_sticky_leave_from_agent_uses_seat_not_profile`
+// below, which already exercises the identical scenario end-to-end through
+// `handle_sticky_leave` — removed rather than duplicated.
 
 // End-to-end variant through `handle_sticky_leave`: two dispatched workers
 // sharing a `TACHI_PROFILE` (tool-profile) but distinct `TACHI_AGENT_SEAT`
