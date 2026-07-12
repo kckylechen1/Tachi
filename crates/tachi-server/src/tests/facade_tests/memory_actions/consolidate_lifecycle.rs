@@ -355,14 +355,32 @@ async fn merge_into_for_project_cannot_reach_other_lifecycle_actions() {
     assert_eq!(result["superseded"], json!(true));
     assert_eq!(result["archived"], json!(true));
 
-    let source_after = server
+    // Archived rows are hidden from default `get` (fetch_by_ids filters
+    // `archived = 0` — see memcore/src/db/memory_crud/read.rs); the plain-get
+    // path exercised by consolidate_lifecycle's reviewed-apply test (above,
+    // "Archived rows are hidden from default get") applies here too, so
+    // assert both halves: default `get` returns None, and
+    // `get_with_options(.., true)` proves the row is archived, not deleted.
+    let source_hidden_from_default_get = server
         .with_global_store_read(|store| {
             store
                 .get("wrapper-source-1")
                 .map_err(|e| e.to_string())
-                .map(|e| e.expect("source still present"))
         })
-        .expect("read source");
+        .expect("read source via default get");
+    assert!(
+        source_hidden_from_default_get.is_none(),
+        "archived source must be hidden from default get, same visibility rule as the reviewed apply path"
+    );
+
+    let source_after = server
+        .with_global_store_read(|store| {
+            store
+                .get_with_options("wrapper-source-1", true)
+                .map_err(|e| e.to_string())
+                .map(|e| e.expect("source still present (soft-deleted, not hard-deleted)"))
+        })
+        .expect("read source with include_archived");
     assert!(
         source_after.archived,
         "merge_into must archive the source row, same as the reviewed apply path"
