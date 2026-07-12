@@ -173,6 +173,61 @@ pub fn derive_idempotency_key(dispatch_id: &str, task_type: Option<&str>) -> Str
     format!("{dispatch_id}::{task_type_norm}")
 }
 
+/// Update the mutable fields of an existing row in place, targeting it by
+/// `outcome_id` directly (bypassing idempotency-key derivation/lookup).
+/// Factored out of [`upsert_outcome`]'s UPDATE branch so
+/// [`upsert_outcome_reconciling_terminal_placeholder`] can retarget a write
+/// onto a row its caller has already resolved by a DIFFERENT means (dispatch
+/// id, not idempotency key) — see that function's docs for why that's
+/// needed.
+fn update_outcome_row(
+    conn: &Connection,
+    outcome_id: &str,
+    new: &NewDispatchOutcome,
+) -> Result<DispatchOutcomeRow, MemoryError> {
+    let now = normalize_utc_iso_or_now("");
+    let evidence_refs_json =
+        serde_json::to_string(&new.evidence_refs).unwrap_or_else(|_| "[]".to_string());
+    let retry_count = new.retry_count as i64;
+    let cost_tokens = new.cost_tokens.map(|v| v as i64);
+    conn.execute(
+        "UPDATE dispatch_outcomes SET
+            eval_memory_id = ?2, model = ?3, vendor = ?4, role = ?5, seat = ?6,
+            task_type = ?7, execution_outcome = ?8, reported_outcome = ?9,
+            retry_count = ?10, error_class = ?11, issue_ref = ?12, pr_ref = ?13,
+            flow_id = ?14, cost_tokens = ?15, cost_usd = ?16, verification_present = ?17,
+            diff_present = ?18, evidence_refs = ?19, updated_at = ?20
+         WHERE outcome_id = ?1",
+        params![
+            outcome_id,
+            new.eval_memory_id,
+            new.model,
+            new.vendor,
+            new.role,
+            new.seat,
+            new.task_type,
+            new.execution_outcome,
+            new.reported_outcome,
+            retry_count,
+            new.error_class,
+            new.issue_ref,
+            new.pr_ref,
+            new.flow_id,
+            cost_tokens,
+            new.cost_usd,
+            new.verification_present as i64,
+            new.diff_present as i64,
+            evidence_refs_json,
+            now,
+        ],
+    )?;
+    get_outcome(conn, outcome_id)?.ok_or_else(|| {
+        MemoryError::InvalidArg(format!(
+            "dispatch_outcomes row {outcome_id} vanished immediately after update"
+        ))
+    })
+}
+
 /// Insert-or-update one outcome row keyed by `idempotency_key`
 /// (`derive_idempotency_key(dispatch_id, task_type)`). Re-running `complete`
 /// for the same dispatch_id+task_type updates the existing row in place
@@ -184,11 +239,6 @@ pub fn upsert_outcome(
     new: &NewDispatchOutcome,
 ) -> Result<DispatchOutcomeRow, MemoryError> {
     let idempotency_key = derive_idempotency_key(&new.dispatch_id, new.task_type.as_deref());
-    let now = normalize_utc_iso_or_now("");
-    let evidence_refs_json =
-        serde_json::to_string(&new.evidence_refs).unwrap_or_else(|_| "[]".to_string());
-    let retry_count = new.retry_count as i64;
-    let cost_tokens = new.cost_tokens.map(|v| v as i64);
 
     let existing_id: Option<String> = conn
         .query_row(
@@ -199,45 +249,13 @@ pub fn upsert_outcome(
         .optional()?;
 
     match existing_id {
-        Some(outcome_id) => {
-            conn.execute(
-                "UPDATE dispatch_outcomes SET
-                    eval_memory_id = ?2, model = ?3, vendor = ?4, role = ?5, seat = ?6,
-                    task_type = ?7, execution_outcome = ?8, reported_outcome = ?9,
-                    retry_count = ?10, error_class = ?11, issue_ref = ?12, pr_ref = ?13,
-                    flow_id = ?14, cost_tokens = ?15, cost_usd = ?16, verification_present = ?17,
-                    diff_present = ?18, evidence_refs = ?19, updated_at = ?20
-                 WHERE outcome_id = ?1",
-                params![
-                    outcome_id,
-                    new.eval_memory_id,
-                    new.model,
-                    new.vendor,
-                    new.role,
-                    new.seat,
-                    new.task_type,
-                    new.execution_outcome,
-                    new.reported_outcome,
-                    retry_count,
-                    new.error_class,
-                    new.issue_ref,
-                    new.pr_ref,
-                    new.flow_id,
-                    cost_tokens,
-                    new.cost_usd,
-                    new.verification_present as i64,
-                    new.diff_present as i64,
-                    evidence_refs_json,
-                    now,
-                ],
-            )?;
-            get_outcome(conn, &outcome_id)?.ok_or_else(|| {
-                MemoryError::InvalidArg(format!(
-                    "dispatch_outcomes row {outcome_id} vanished immediately after update"
-                ))
-            })
-        }
+        Some(outcome_id) => update_outcome_row(conn, &outcome_id, new),
         None => {
+            let now = normalize_utc_iso_or_now("");
+            let evidence_refs_json =
+                serde_json::to_string(&new.evidence_refs).unwrap_or_else(|_| "[]".to_string());
+            let retry_count = new.retry_count as i64;
+            let cost_tokens = new.cost_tokens.map(|v| v as i64);
             conn.execute(
                 "INSERT INTO dispatch_outcomes
                  (outcome_id, dispatch_id, eval_memory_id, model, vendor, role, seat,
@@ -313,6 +331,61 @@ pub fn get_outcome(
     Ok(conn
         .query_row(&sql, params![outcome_id], row_to_outcome)
         .optional()?)
+}
+
+/// Fetch the outcome row for a `dispatch_id`, regardless of `task_type`/
+/// `idempotency_key`. Companion to [`outcome_exists_for_dispatch`] (bool
+/// only) for callers that need the row itself to reconcile against — see
+/// [`upsert_outcome_reconciling_terminal_placeholder`]. `LIMIT 1` with no
+/// explicit ordering is intentional: in the one case this function's caller
+/// cares about (a lone terminal-placeholder row with `reported_outcome IS
+/// NULL`), first-writer-wins on the terminal side already guarantees at
+/// most one such row ever exists per `dispatch_id`; when multiple genuine
+/// (`reported_outcome` present) rows exist for one `dispatch_id` — the
+/// legitimate distinct-`task_type` case `different_task_type_is_a_distinct_row`
+/// covers — which one is returned doesn't matter to that caller, since it
+/// only acts when the returned row has `reported_outcome IS NULL`.
+pub fn find_outcome_by_dispatch_id(
+    conn: &Connection,
+    dispatch_id: &str,
+) -> Result<Option<DispatchOutcomeRow>, MemoryError> {
+    let sql =
+        format!("SELECT {SELECT_COLUMNS} FROM dispatch_outcomes WHERE dispatch_id = ?1 LIMIT 1");
+    Ok(conn
+        .query_row(&sql, params![dispatch_id], row_to_outcome)
+        .optional()?)
+}
+
+/// Insert-or-update the canonical outcome row for `new.dispatch_id`,
+/// reconciling with any existing TERMINAL-PLACEHOLDER row for the same
+/// `dispatch_id` first (#774 idempotency-key parity).
+///
+/// `record_terminal_failure_outcome` (`tachi-server::complete_ops`) never
+/// carries a `task_type` — it always derives the `_untyped` sentinel
+/// `idempotency_key` via [`derive_idempotency_key`] — so if a real
+/// `tachi_complete` for the SAME dispatch later carries a real `task_type`,
+/// a plain [`upsert_outcome`] (keyed on `(dispatch_id, task_type)`) computes
+/// a DIFFERENT key than the placeholder's and inserts a SIBLING row instead
+/// of completing it: the two writers disagree about which row is "the"
+/// canonical row for this dispatch even though both describe it. A
+/// placeholder is identified by `reported_outcome IS NULL` (no writer other
+/// than the terminal-failure path ever leaves that null) with a `task_type`
+/// that differs from this write's; when found, the write targets that row's
+/// `outcome_id` directly via [`update_outcome_row`], superseding the
+/// placeholder rather than deriving a fresh key. This makes
+/// terminal-then-complete land the same one row that complete-then-terminal
+/// already did (the terminal path's own `outcome_exists_for_dispatch`
+/// first-writer-wins check already covered that order).
+pub fn upsert_outcome_reconciling_terminal_placeholder(
+    conn: &Connection,
+    new: &NewDispatchOutcome,
+) -> Result<DispatchOutcomeRow, MemoryError> {
+    if let Some(existing) = find_outcome_by_dispatch_id(conn, &new.dispatch_id)? {
+        if existing.reported_outcome.is_none() && existing.task_type != new.task_type {
+            return update_outcome_row(conn, &existing.outcome_id, new);
+        }
+    }
+    upsert_outcome(conn, new)
 }
 
 /// Read surface 1: outcomes for a vendor within a `created_at` window

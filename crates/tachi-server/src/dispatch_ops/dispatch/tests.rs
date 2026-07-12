@@ -727,7 +727,6 @@ async fn named_project_dispatch_receipt_carries_project_field() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp home");
     let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
-    let run_root = dispatch_runs_root();
     let server = crate::tests::make_server();
 
     // The dispatch's own background completion also resolves `project` —
@@ -746,11 +745,24 @@ async fn named_project_dispatch_receipt_carries_project_field() {
     params.project = Some("hyperion".to_string());
     params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
 
-    handle_tachi_dispatch(&server, params)
+    let dispatch_response = handle_tachi_dispatch(&server, params)
         .await
         .expect("dispatch should start");
 
-    let run_dir = single_run_dir(&run_root);
+    // Resolve this dispatch's OWN run dir precisely from the response's
+    // `run_dir` field rather than scanning `run_root` and asserting exactly
+    // one entry (`single_run_dir`): that scan is environment-dependent — a
+    // concurrent/leftover run dir under the same `TACHI_HOME` (e.g. from a
+    // parallel test thread racing this one, since `TACHI_HOME` is a
+    // process-global env var) makes the count wrong without this dispatch's
+    // own receipt being at fault. Reading `run_dir` straight off the
+    // dispatch's own response is exact and environment-independent.
+    let response: Value = serde_json::from_str(&dispatch_response).expect("response JSON");
+    let run_dir = std::path::PathBuf::from(
+        response["run_dir"]
+            .as_str()
+            .expect("response carries run_dir"),
+    );
     let status: Value =
         serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
             .expect("status JSON");

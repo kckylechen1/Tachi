@@ -112,13 +112,28 @@ pub(crate) fn record_complete_outcome(
     };
 
     let (scope, _) = server.resolve_write_scope(params.scope.as_deref().unwrap_or(""));
+    // #774 idempotency-key parity: `record_terminal_failure_outcome` never
+    // carries a `task_type`, so a plain `upsert_outcome` here (keyed on
+    // `(dispatch_id, task_type)`) would derive a DIFFERENT key than a
+    // terminal-placeholder row already written for this dispatch_id and
+    // insert a sibling row instead of completing it — see
+    // `memcore::upsert_outcome_reconciling_terminal_placeholder`'s docs for
+    // the full mechanism.
     let write_result = if let Some(project) = params.project.as_deref().filter(|s| !s.is_empty()) {
         server.with_named_project_store(project, |store| {
-            memcore::upsert_outcome(store.connection(), &new_outcome).map_err(|e| e.to_string())
+            memcore::upsert_outcome_reconciling_terminal_placeholder(
+                store.connection(),
+                &new_outcome,
+            )
+            .map_err(|e| e.to_string())
         })
     } else {
         server.with_store_for_scope(scope, |store| {
-            memcore::upsert_outcome(store.connection(), &new_outcome).map_err(|e| e.to_string())
+            memcore::upsert_outcome_reconciling_terminal_placeholder(
+                store.connection(),
+                &new_outcome,
+            )
+            .map_err(|e| e.to_string())
         })
     };
 
