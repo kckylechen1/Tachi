@@ -42,7 +42,7 @@ pub use daily_pipeline::{
 };
 #[cfg(feature = "admin")]
 pub use dispatch_outcomes::{
-    derive_idempotency_key, get_outcome, list_outcomes_by_issue_ref, list_outcomes_by_signature,
+    derive_idempotency_key, get_outcome, list_outcomes_by_issue_ref,
     list_outcomes_by_vendor_window, upsert_outcome, DispatchOutcomeRow, NewDispatchOutcome,
 };
 pub use doctor_probe::{

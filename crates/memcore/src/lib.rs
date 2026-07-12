@@ -43,7 +43,7 @@ pub use agent_profile::{
 };
 #[cfg(feature = "admin")]
 pub use db::dispatch_outcomes::{
-    derive_idempotency_key, get_outcome, list_outcomes_by_issue_ref, list_outcomes_by_signature,
+    derive_idempotency_key, get_outcome, list_outcomes_by_issue_ref,
     list_outcomes_by_vendor_window, upsert_outcome, DispatchOutcomeRow, NewDispatchOutcome,
 };
 #[cfg(feature = "admin")]

@@ -67,11 +67,8 @@ pub(crate) fn record_complete_outcome(
             .filter(|s| !s.is_empty())
             .map(str::to_string),
         execution_outcome: outcome_norm.to_string(),
-        adjudicated_verdict: None,
-        adjudicator: None,
         retry_count: 0,
         error_class: None,
-        error_signature: None,
         issue_ref: params
             .issue_ref
             .as_deref()

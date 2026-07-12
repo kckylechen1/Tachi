@@ -3,18 +3,22 @@
 //! One append-only row per dispatch completion, written FIRST by the
 //! `tachi_complete` seam (`tachi-server::complete_ops`) before any derived
 //! row (eval memory, signature evidence, precedent). This is the future
-//! router's real read surface: `vendor` + `created_at` window queries,
-//! `error_signature` lookups, and `issue_ref` lookups are the three shapes
-//! the design doc calls out — see [`list_outcomes_by_vendor_window`],
-//! [`list_outcomes_by_signature`], and [`list_outcomes_by_issue_ref`].
+//! router's real read surface: `vendor` + `created_at` window queries and
+//! `issue_ref` lookups are the two shapes the design doc calls out — see
+//! [`list_outcomes_by_vendor_window`] and [`list_outcomes_by_issue_ref`].
+//!
+//! This table holds mutable execution facts only. Adjudication evidence
+//! (verdict, adjudicator, error signature) lives in the append-only
+//! `dispatch_adjudications` table (#1035) — S2, not built here; a replayed
+//! `complete` may rewrite any column on this row.
 //!
 //! No facade action is exposed yet (kept intentionally small per #757
 //! economics — internal fns are the deliverable, not a new tool surface).
 //! Graph-edge projection (seat->performed->dispatch, dispatch->produced->
 //! outcome, etc.) is the S4 seat's job, stacked after this one; every ref a
-//! row carries (issue_ref/pr_ref/flow_id/dispatch_id/eval_memory_id/
-//! error_signature) is present on the row so those edges can be derived
-//! later without a re-migration.
+//! row carries (issue_ref/pr_ref/flow_id/dispatch_id/eval_memory_id) is
+//! present on the row so those edges can be derived later without a
+//! re-migration.
 //!
 //! ## Idempotency
 //!
@@ -46,11 +50,8 @@ pub struct NewDispatchOutcome {
     pub seat: Option<String>,
     pub task_type: Option<String>,
     pub execution_outcome: String,
-    pub adjudicated_verdict: Option<String>,
-    pub adjudicator: Option<String>,
     pub retry_count: u32,
     pub error_class: Option<String>,
-    pub error_signature: Option<String>,
     pub issue_ref: Option<String>,
     pub pr_ref: Option<String>,
     pub flow_id: Option<String>,
@@ -74,11 +75,8 @@ pub struct DispatchOutcomeRow {
     pub seat: Option<String>,
     pub task_type: Option<String>,
     pub execution_outcome: String,
-    pub adjudicated_verdict: Option<String>,
-    pub adjudicator: Option<String>,
     pub retry_count: u32,
     pub error_class: Option<String>,
-    pub error_signature: Option<String>,
     pub issue_ref: Option<String>,
     pub pr_ref: Option<String>,
     pub flow_id: Option<String>,
@@ -93,16 +91,16 @@ pub struct DispatchOutcomeRow {
 }
 
 const SELECT_COLUMNS: &str = "outcome_id, dispatch_id, eval_memory_id, model, vendor, role, seat, \
-     task_type, execution_outcome, adjudicated_verdict, adjudicator, retry_count, \
-     error_class, error_signature, issue_ref, pr_ref, flow_id, cost_tokens, cost_usd, \
+     task_type, execution_outcome, retry_count, \
+     error_class, issue_ref, pr_ref, flow_id, cost_tokens, cost_usd, \
      verification_present, diff_present, evidence_refs, idempotency_key, created_at, updated_at";
 
 fn row_to_outcome(row: &rusqlite::Row<'_>) -> Result<DispatchOutcomeRow, rusqlite::Error> {
-    let evidence_refs_raw: String = row.get(21)?;
+    let evidence_refs_raw: String = row.get(18)?;
     let evidence_refs =
         serde_json::from_str(&evidence_refs_raw).unwrap_or_else(|_| Value::Array(Vec::new()));
-    let retry_count: i64 = row.get(11)?;
-    let cost_tokens: Option<i64> = row.get(17)?;
+    let retry_count: i64 = row.get(9)?;
+    let cost_tokens: Option<i64> = row.get(14)?;
     Ok(DispatchOutcomeRow {
         outcome_id: row.get(0)?,
         dispatch_id: row.get(1)?,
@@ -113,22 +111,19 @@ fn row_to_outcome(row: &rusqlite::Row<'_>) -> Result<DispatchOutcomeRow, rusqlit
         seat: row.get(6)?,
         task_type: row.get(7)?,
         execution_outcome: row.get(8)?,
-        adjudicated_verdict: row.get(9)?,
-        adjudicator: row.get(10)?,
         retry_count: retry_count.max(0) as u32,
-        error_class: row.get(12)?,
-        error_signature: row.get(13)?,
-        issue_ref: row.get(14)?,
-        pr_ref: row.get(15)?,
-        flow_id: row.get(16)?,
+        error_class: row.get(10)?,
+        issue_ref: row.get(11)?,
+        pr_ref: row.get(12)?,
+        flow_id: row.get(13)?,
         cost_tokens: cost_tokens.map(|v| v.max(0) as u64),
-        cost_usd: row.get(18)?,
-        verification_present: row.get::<_, i64>(19)? != 0,
-        diff_present: row.get::<_, i64>(20)? != 0,
+        cost_usd: row.get(15)?,
+        verification_present: row.get::<_, i64>(16)? != 0,
+        diff_present: row.get::<_, i64>(17)? != 0,
         evidence_refs,
-        idempotency_key: row.get(22)?,
-        created_at: row.get(23)?,
-        updated_at: row.get(24)?,
+        idempotency_key: row.get(19)?,
+        created_at: row.get(20)?,
+        updated_at: row.get(21)?,
     })
 }
 
@@ -174,11 +169,10 @@ pub fn upsert_outcome(
             conn.execute(
                 "UPDATE dispatch_outcomes SET
                     eval_memory_id = ?2, model = ?3, vendor = ?4, role = ?5, seat = ?6,
-                    task_type = ?7, execution_outcome = ?8, adjudicated_verdict = ?9,
-                    adjudicator = ?10, retry_count = ?11, error_class = ?12,
-                    error_signature = ?13, issue_ref = ?14, pr_ref = ?15, flow_id = ?16,
-                    cost_tokens = ?17, cost_usd = ?18, verification_present = ?19,
-                    diff_present = ?20, evidence_refs = ?21, updated_at = ?22
+                    task_type = ?7, execution_outcome = ?8, retry_count = ?9,
+                    error_class = ?10, issue_ref = ?11, pr_ref = ?12, flow_id = ?13,
+                    cost_tokens = ?14, cost_usd = ?15, verification_present = ?16,
+                    diff_present = ?17, evidence_refs = ?18, updated_at = ?19
                  WHERE outcome_id = ?1",
                 params![
                     outcome_id,
@@ -189,11 +183,8 @@ pub fn upsert_outcome(
                     new.seat,
                     new.task_type,
                     new.execution_outcome,
-                    new.adjudicated_verdict,
-                    new.adjudicator,
                     retry_count,
                     new.error_class,
-                    new.error_signature,
                     new.issue_ref,
                     new.pr_ref,
                     new.flow_id,
@@ -215,12 +206,11 @@ pub fn upsert_outcome(
             conn.execute(
                 "INSERT INTO dispatch_outcomes
                  (outcome_id, dispatch_id, eval_memory_id, model, vendor, role, seat,
-                  task_type, execution_outcome, adjudicated_verdict, adjudicator,
-                  retry_count, error_class, error_signature, issue_ref, pr_ref, flow_id,
-                  cost_tokens, cost_usd, verification_present, diff_present,
-                  evidence_refs, idempotency_key, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                         ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?24)",
+                  task_type, execution_outcome, retry_count, error_class, issue_ref,
+                  pr_ref, flow_id, cost_tokens, cost_usd, verification_present,
+                  diff_present, evidence_refs, idempotency_key, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?21)",
                 params![
                     new.outcome_id,
                     new.dispatch_id,
@@ -231,11 +221,8 @@ pub fn upsert_outcome(
                     new.seat,
                     new.task_type,
                     new.execution_outcome,
-                    new.adjudicated_verdict,
-                    new.adjudicator,
                     retry_count,
                     new.error_class,
-                    new.error_signature,
                     new.issue_ref,
                     new.pr_ref,
                     new.flow_id,
@@ -292,26 +279,7 @@ pub fn list_outcomes_by_vendor_window(
     Ok(out)
 }
 
-/// Read surface 2: outcomes carrying a given `error_signature`. Newest
-/// first.
-pub fn list_outcomes_by_signature(
-    conn: &Connection,
-    signature: &str,
-) -> Result<Vec<DispatchOutcomeRow>, MemoryError> {
-    let sql = format!(
-        "SELECT {SELECT_COLUMNS} FROM dispatch_outcomes \
-         WHERE error_signature = ?1 ORDER BY created_at DESC"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![signature], row_to_outcome)?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
-}
-
-/// Read surface 3: outcomes linked to a given `issue_ref`. Newest first.
+/// Read surface 2: outcomes linked to a given `issue_ref`. Newest first.
 pub fn list_outcomes_by_issue_ref(
     conn: &Connection,
     issue_ref: &str,
@@ -352,11 +320,8 @@ mod tests {
             seat: Some("wizard".to_string()),
             task_type: Some("fix_request".to_string()),
             execution_outcome: "success".to_string(),
-            adjudicated_verdict: Some("validated".to_string()),
-            adjudicator: Some("leader".to_string()),
             retry_count: 0,
             error_class: None,
-            error_signature: None,
             issue_ref: Some("kckylechen1/tachi#773".to_string()),
             pr_ref: Some("kckylechen1/tachi#1020".to_string()),
             flow_id: Some("flow-1".to_string()),
@@ -467,21 +432,6 @@ mod tests {
         .unwrap();
         assert_eq!(bounded.len(), 1, "upper bound excludes o-b");
         assert_eq!(bounded[0].outcome_id, "o-a");
-    }
-
-    #[test]
-    fn list_by_signature_filters_correctly() {
-        let conn = open_conn();
-        let mut a = new_outcome("o-1", "d-1");
-        a.error_signature = Some("fake_security_fix".to_string());
-        upsert_outcome(&conn, &a).unwrap();
-        let mut b = new_outcome("o-2", "d-2");
-        b.error_signature = Some("assertion_weakening".to_string());
-        upsert_outcome(&conn, &b).unwrap();
-
-        let rows = list_outcomes_by_signature(&conn, "fake_security_fix").unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].outcome_id, "o-1");
     }
 
     #[test]

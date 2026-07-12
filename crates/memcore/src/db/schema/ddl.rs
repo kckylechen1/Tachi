@@ -447,11 +447,13 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- future router's real read surface; `/eval` stays the searchable
         -- narrative projection and cards remain a reviewed projection on
         -- top. Graph edges (seat->performed->dispatch, dispatch->produced->
-        -- outcome, outcome->judged_by->adjudicator, outcome->classified_as->
-        -- signature, outcome->about->issue/PR) are deferred to the S4 seat;
-        -- every ref this row carries (issue_ref/pr_ref/flow_id/dispatch_id/
-        -- eval_memory_id/signature) is present so those edges can be derived
-        -- later without a re-migration.
+        -- outcome, outcome->classified_as->signature, outcome->about->
+        -- issue/PR) are deferred to the S4 seat; every ref this row carries
+        -- (issue_ref/pr_ref/flow_id/dispatch_id/eval_memory_id) is present
+        -- so those edges can be derived later without a re-migration.
+        -- Adjudication evidence lives in the append-only dispatch_adjudications
+        -- table (#1035); this table holds mutable execution facts only — a
+        -- replayed complete may rewrite any column here.
         CREATE TABLE IF NOT EXISTS dispatch_outcomes (
             outcome_id       TEXT PRIMARY KEY,
             dispatch_id      TEXT NOT NULL DEFAULT '',
@@ -462,11 +464,8 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             seat             TEXT,
             task_type        TEXT,
             execution_outcome    TEXT NOT NULL,
-            adjudicated_verdict  TEXT,
-            adjudicator          TEXT,
             retry_count      INTEGER NOT NULL DEFAULT 0,
             error_class      TEXT,
-            error_signature  TEXT,
             issue_ref        TEXT,
             pr_ref           TEXT,
             flow_id          TEXT,
@@ -482,8 +481,6 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         );
         CREATE INDEX IF NOT EXISTS idx_dispatch_outcomes_vendor_ts
             ON dispatch_outcomes(vendor, created_at);
-        CREATE INDEX IF NOT EXISTS idx_dispatch_outcomes_signature
-            ON dispatch_outcomes(error_signature);
         CREATE INDEX IF NOT EXISTS idx_dispatch_outcomes_issue_ref
             ON dispatch_outcomes(issue_ref);
         CREATE INDEX IF NOT EXISTS idx_dispatch_outcomes_dispatch_id
