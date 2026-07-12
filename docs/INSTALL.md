@@ -653,7 +653,7 @@ Tachi does not need to expose the full tool catalog to every host. Use `--profil
 | `standard` | Daily facade surface: `tachi_save`, `tachi_memory`, `tachi_task`, `tachi_arena`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `vault_status`, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. | IDE agents (Claude, Cursor, Codex, Windsurf, Trae, Antigravity). |
 | `coordinate` | `remember` + `coordinate` bundles: adds `handoff_*`, `post_card`, `check_inbox`, `update_card`, `approve_merge`, `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`; dispatch runs through `tachi_task(action='dispatch')`. | Leader/orchestrator agents. |
 | `operate` | `remember` + `operate` bundles: adds Foundry lifecycle, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters and OpenClaw. |
-| `delegate` | Curated 7-tool surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_complete`, `run_skill`. | Worker subagents spawned by `tachi_task(action='dispatch')`. |
+| `delegate` | Curated 10-tool surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_event`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_task`, `tachi_complete`, `tachi_skill(action='discover'|'run'|'bundle')`. Standalone `run_skill` is a legacy compatibility route outside the default delegate profile. | Worker subagents spawned by `tachi_task(action='dispatch')`. |
 | `admin` | Full catalog. | Maintenance and development. |
 
 Host aliases:

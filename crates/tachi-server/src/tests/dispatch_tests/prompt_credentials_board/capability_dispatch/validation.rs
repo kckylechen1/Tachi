@@ -29,6 +29,7 @@ async fn dispatch_rejects_unknown_agent_with_fleet_hint() {
             agent: Some("gemini".to_string()),
             profile: None,
             task: "noop".to_string(),
+            execution_level: None,
             cwd: None,
             env_id: None,
             unmanaged_cwd: None,

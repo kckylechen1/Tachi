@@ -1,4 +1,5 @@
 use super::make_server;
+use crate::orchestrator_ops::set_todo_update_snapshot_hook;
 use crate::tool_params::TachiOrchestratorParams;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
@@ -259,4 +260,70 @@ async fn todo_update_preserves_status_and_clears_stale_state() {
     assert_eq!(todo["status"], json!("in_progress"));
     assert!(todo["completed_at"].is_null());
     assert!(todo["blocked_reason"].is_null());
+}
+
+#[tokio::test]
+async fn todo_update_retries_after_a_competing_first_insert() {
+    let server = make_server();
+    let task_id = "dispatch-test-cas-first-insert";
+    let key = format!("todos:{task_id}");
+    set_todo_update_snapshot_hook(key.clone(), move |server, key| {
+        let competing_list = json!({
+            "task_id": task_id,
+            "todos": [{
+                "id": "competing",
+                "issue_ref": null,
+                "parent_id": null,
+                "agent": "other-session",
+                "status": "in_progress",
+                "content": "Keep this independent update",
+                "blocked_reason": null,
+                "verification": null,
+                "references": [],
+                "created_at": "2026-07-11T00:00:00Z",
+                "updated_at": "2026-07-11T00:00:00Z",
+                "completed_at": null,
+            }],
+            "updated_at": "2026-07-11T00:00:00Z",
+        });
+        server
+            .with_global_store(|store| {
+                store
+                    .set_state("orchestrator", key, &competing_list.to_string())
+                    .map(|_| ())
+                    .map_err(|error| format!("seed competing todo update: {error}"))
+            })
+            .expect("seed competing todo update");
+    });
+
+    let mut update = orchestrator_params("todo_update", task_id);
+    update.todo_id = Some("ours".to_string());
+    update.todo_content = Some("Keep this update too".to_string());
+    update.todo_status = Some("in_progress".to_string());
+    let raw = server
+        .tachi_orchestrator(Parameters(update))
+        .await
+        .expect("todo update retries after competing insert");
+    let receipt: Value = serde_json::from_str(&raw).expect("receipt JSON");
+    assert_eq!(receipt["todo_count"], json!(2));
+
+    let raw = server
+        .tachi_orchestrator(Parameters(orchestrator_params("todo_list", task_id)))
+        .await
+        .expect("todo list");
+    let list: Value = serde_json::from_str(&raw).expect("todo list JSON");
+    let ids = list["todos"]
+        .as_array()
+        .expect("todos array")
+        .iter()
+        .filter_map(|todo| todo["id"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        ids.contains(&"competing"),
+        "competing update was lost: {list}"
+    );
+    assert!(
+        ids.contains(&"ours"),
+        "caller update was not persisted: {list}"
+    );
 }

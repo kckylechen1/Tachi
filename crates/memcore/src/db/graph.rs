@@ -19,15 +19,13 @@ pub fn add_edge(conn: &Connection, edge: &MemoryEdge) -> Result<(), MemoryError>
     } else {
         normalize_utc_iso_or_now(&edge.valid_from)
     };
-    // Freeze normalized UTC half-open interval [valid_from, valid_to) semantics
-    // (tachi#773 Sol correction 4 / PR #1013 convention, ported here since it
-    // hadn't merged yet when this branch needed it): valid_to must be
-    // normalized to the same RFC3339-with-millis format as
+    // Freeze normalized UTC half-open interval [valid_from, valid_to) semantics:
+    // valid_to must be normalized to the same RFC3339-with-millis format as
     // valid_from/created_at so it stays comparable with the read-side's
     // format-agnostic datetime() comparison (see get_edges / get_edges_batch /
     // get_contradiction_count). Storing it raw let same-day RFC3339 values
     // remain lexically "active" forever against SQLite's differently
-    // formatted datetime('now') text.
+    // formatted datetime('now') text (#773 Sol correction 4).
     let valid_to = edge
         .valid_to
         .as_deref()

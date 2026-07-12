@@ -91,7 +91,7 @@ pub(crate) fn format_briefing(
                 "\n### Cross-project (global handoffs) [AUTHORITY: WORKFLOW STATE]".to_string(),
             );
             out.push(
-                "_Pending memos from other repos/agents. Ack with `tachi_handoff(action='check')` or leave via `tachi_handoff(action='leave')`._".to_string(),
+                "_Pending memos from other repos/agents. Ack with `tachi_handoff(action='check')` or leave via `tachi_handoff(action='leave')` (deprecated, #1016 — prefer `tachi_memory(action='sticky_leave'|'sticky_check')` for new notes)._".to_string(),
             );
             for row in handoffs.iter().take(cross_cap) {
                 let from = row.get("from_agent").and_then(Value::as_str).unwrap_or("?");

@@ -127,6 +127,9 @@ pub(super) async fn run_cli_command(
         Commands::Harness { .. } => {
             unreachable!("Harness is handled in async context before generic CLI dispatch")
         }
+        Commands::Host { .. } => {
+            unreachable!("Host is handled in async context before generic CLI dispatch")
+        }
         Commands::SkillSurface { .. } => {
             unreachable!("SkillSurface is handled in async context before generic CLI dispatch")
         }

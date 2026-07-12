@@ -108,6 +108,7 @@ mod foundry_scheduler;
 mod gh_ops;
 mod gh_safe_merge;
 mod handoff_ops;
+mod host_profile;
 mod hub_ops;
 mod kanban;
 mod manifest;
