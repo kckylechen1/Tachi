@@ -91,6 +91,9 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
             | "tachi_component"
             | "tachi_web_search"
             | "vault_status"
+            // peer_query is structurally read-only (PeerPublicationRead,
+            // query_only connection — #1016 S1); the hint must say so.
+            | "peer_query"
     );
     let destructive = matches!(
         name,
@@ -656,6 +659,22 @@ impl ServerHandler for MemoryServer {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn peer_query_is_annotated_read_only() {
+        // #1016 S1: peer_query answers through a structurally read-only
+        // connection; the MCP read_only_hint must advertise that (terminal
+        // review caught the allowlist omission).
+        let mut tool = rmcp::model::Tool::new(
+            std::borrow::Cow::Borrowed("peer_query"),
+            std::borrow::Cow::Borrowed("peer publication read"),
+            std::sync::Arc::new(serde_json::Map::new()),
+        );
+        annotate_tool(&mut tool);
+        let ann = tool.annotations.expect("annotations set");
+        assert_eq!(ann.read_only_hint, Some(true));
+        assert_eq!(ann.destructive_hint, Some(false));
+    }
 
     #[test]
     fn tool_error_results_are_not_cacheable() {
