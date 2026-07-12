@@ -3,7 +3,7 @@
 //! Leader adjudications (BLOCK/FIX-FIRST verdicts, scope rulings, principle
 //! rulings) evaporate into transcripts today. This slice persists
 //! *already-structured* rulings supplied on a `tachi_complete` / `tachi_task
-//! action=complete` call as `/precedents/<project>/<date>-<shortid>` memory
+//! action=complete` call as `/precedents/<project>/<shortid>` memory
 //! rows, so a later slice can decompose, recall, and harden them. Two hard
 //! boundaries per the issue's frozen design:
 //!
@@ -13,6 +13,25 @@
 //! 2. **Fail-safe.** A malformed ruling is skipped with a warning and never
 //!    fails the enclosing `complete` call — completion recording is the primary
 //!    contract; precedent capture is best-effort alongside it.
+//! 3. **Idempotent capture, keyed on ruling content, not capture provenance.**
+//!    `shortid` is *not* random — it's a deterministic `Uuid::new_v5` hash,
+//!    truncated to 16 hex chars, of the project + `issue_ref` + every
+//!    normalized, scrubbed ruling field, each individually length-prefix
+//!    framed (`precedent_short_id` / `frame_field`) before concatenation so
+//!    no field's content can bleed into an adjacent one (a bare fixed
+//!    separator doesn't disambiguate a field that itself contains that
+//!    separator). A precedent's identity is the *ruling itself* — which
+//!    dispatch/flow/PR happened to capture it is not part of that identity,
+//!    which is why `render_body`'s `text` deliberately excludes provenance
+//!    (see that function's doc). The same ruling content always derives the
+//!    same path with the same rendered body, so a retried `complete` call
+//!    (same rulings, same completion, *or a different dispatch entirely*)
+//!    lands on the same `/precedents/<project>/<shortid>` path with the same
+//!    text, and `save_memory`'s exact-path+exact-text dedup gate
+//!    (`find_exact_path_text_duplicate`) actually fires and returns the
+//!    existing row's id instead of writing a second one. A random per-call id
+//!    (the pre-#1027 behavior) defeated that dedup gate structurally — path
+//!    never matched twice, so every retry duplicated the row.
 //!
 //! Rows go through the standard `save_eval_memory` pipeline, and the pipeline
 //! itself only scrubs `text`/`summary` for secrets — `metadata` is opaque to
@@ -21,7 +40,9 @@
 //! *before* it goes into the body, the summary, and the metadata payload
 //! (mirroring the `complete_ops::scrub` convention `tachi_complete` itself
 //! uses for the eval record). Provenance (`dispatch_id` / `flow_id` /
-//! `issue_ref` / `pr_ref`) carried on the completion is linked into both.
+//! `issue_ref` / `pr_ref`) carried on the completion is linked into
+//! `metadata` and `keywords` — never into `text`, since `text` is what the
+//! dedup gate compares (see point 3 above).
 //!
 //! The capture gate (`memory-server-capture-gate`) can hard-reject a save
 //! under `TACHI_CAPTURE_GATE=enforce` (path bucket, domain, min-chars,
@@ -186,7 +207,19 @@ fn summary_line(case: &str, max: usize) -> String {
 }
 
 /// Build the human-readable body rendered into the memory text field.
-fn render_body(n: &NormalizedRuling, params: &TachiCompleteParams) -> String {
+///
+/// Deliberately excludes provenance (`dispatch_id`/`flow_id`/`issue_ref`/
+/// `pr_ref`): a precedent's identity is the *ruling content*, not which
+/// dispatch happened to capture it. Provenance still lives on the row — in
+/// `build_metadata` and in the row's `keywords` (see
+/// `record_complete_rulings`) — but never in `text`, because `text` feeds
+/// `precedent_short_id`'s seed indirectly (the same normalized fields drive
+/// both) and directly gates `save_memory`'s exact-path+exact-text dedup
+/// (`find_exact_path_text_duplicate`, persist.rs). If provenance were
+/// rendered here, re-capturing the *same ruling* from a different dispatch
+/// would produce the same path but different text, and the dedup gate
+/// (which requires both to match) would never fire — see #1027 follow-up.
+fn render_body(n: &NormalizedRuling) -> String {
     let mut lines = vec![format!("Precedent: {}", n.case)];
     if let Some(options) = &n.options_considered {
         lines.push(format!("Options considered: {options}"));
@@ -201,22 +234,6 @@ fn render_body(n: &NormalizedRuling, params: &TachiCompleteParams) -> String {
     lines.push(format!("Outcome: {}", n.outcome));
     if let Some(overturned_by) = &n.overturned_by {
         lines.push(format!("Overturned by: {overturned_by}"));
-    }
-    let mut provenance: Vec<String> = Vec::new();
-    if let Some(did) = params.dispatch_id.as_deref().filter(|s| !s.is_empty()) {
-        provenance.push(format!("dispatch {did}"));
-    }
-    if let Some(fid) = params.flow_id.as_deref().filter(|s| !s.is_empty()) {
-        provenance.push(format!("flow {fid}"));
-    }
-    if let Some(iref) = params.issue_ref.as_deref().filter(|s| !s.is_empty()) {
-        provenance.push(format!("issue {iref}"));
-    }
-    if let Some(pref) = params.pr_ref.as_deref().filter(|s| !s.is_empty()) {
-        provenance.push(format!("pr {pref}"));
-    }
-    if !provenance.is_empty() {
-        lines.push(format!("Provenance: {}", provenance.join(" / ")));
     }
     lines.join("\n")
 }
@@ -240,7 +257,10 @@ fn build_metadata(n: &NormalizedRuling, params: &TachiCompleteParams, redactions
     if let Some(overturned_by) = &n.overturned_by {
         map.insert("overturned_by".into(), json!(overturned_by));
     }
-    // Provenance links back to the completion that carried this ruling.
+    // Provenance links back to the completion that carried this ruling. On a
+    // dedup hit (same identity re-captured) the FIRST capture's row — and thus
+    // its provenance keywords/metadata — is kept; a later capture's provenance
+    // is intentionally not merged in (identity is content, provenance is not).
     if let Some(did) = params.dispatch_id.as_deref().filter(|s| !s.is_empty()) {
         map.insert("dispatch_id".into(), json!(did));
     }
@@ -263,13 +283,60 @@ fn build_metadata(n: &NormalizedRuling, params: &TachiCompleteParams, redactions
     Value::Object(map)
 }
 
+/// Frame a single field with an explicit byte-length prefix (`{len}:{value}`)
+/// so it can never be misread as adjoining seed content, no matter what
+/// bytes the field itself contains (including NUL). A bare fixed separator
+/// (the pre-#1027-followup NUL join) doesn't disambiguate a field that
+/// itself embeds that separator: `case="a\0b", options=None` and
+/// `case="a", options=Some("b\0")` NUL-join to the identical seed
+/// `"a\0b\0"`. Length-prefixing makes the concatenation of framed fields
+/// provably injective — the byte stream can always be re-parsed
+/// deterministically (read ASCII digits up to `:` for the length, then
+/// consume exactly that many bytes as the field, then repeat), so two
+/// different field tuples can never collide onto the same seed bytes.
+fn frame_field(value: &str) -> String {
+    format!("{}:{}", value.len(), value)
+}
+
+/// Derive the deterministic path short id for a normalized (and
+/// already-scrubbed) ruling. Hashes a stable seed — project + `issue_ref` +
+/// every content field of the normalized ruling, each individually framed
+/// via `frame_field` and concatenated (see that function's doc for why
+/// framing, not a separator, is what makes this collision-safe) — through
+/// `Uuid::new_v5` (SHA1-based, deterministic; same pattern as
+/// `foundry_runtime_ops::helpers::build_stable_foundry_memory_id`), then
+/// truncates to 16 hex chars (64 bits) of the 128-bit hash. Same ruling in,
+/// same short id out, every time — that determinism is what makes a
+/// retried capture land on the same `/precedents` path as the original (see
+/// module docs point 3) instead of a fresh `Uuid::new_v4()` random id that
+/// never matches path-wise on a second attempt.
+fn precedent_short_id(project: &str, issue_ref: Option<&str>, n: &NormalizedRuling) -> String {
+    let principles_framed: String = n.principles_cited.iter().map(|p| frame_field(p)).collect();
+
+    let mut seed = String::new();
+    seed.push_str(&frame_field(project));
+    seed.push_str(&frame_field(issue_ref.unwrap_or("")));
+    seed.push_str(&frame_field(&n.case));
+    seed.push_str(&frame_field(n.options_considered.as_deref().unwrap_or("")));
+    seed.push_str(&frame_field(&n.ruling));
+    seed.push_str(&frame_field(&principles_framed));
+    seed.push_str(&frame_field(&n.outcome));
+    seed.push_str(&frame_field(n.overturned_by.as_deref().unwrap_or("")));
+
+    let hashed = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, seed.as_bytes());
+    hashed.simple().to_string()[..16].to_string()
+}
+
 /// Detect whether a `save_eval_memory` response actually persisted a row.
 /// The capture gate (and the noise filter) can hard-reject a save under
 /// `TACHI_CAPTURE_GATE=enforce`; the rejection response is still `Ok(..)` at
 /// the `save_eval_memory` layer (it's a structured "not saved" JSON body, not
 /// an `Err`), so the only reliable signal is a present, non-empty `id`. A
 /// legitimate exact-duplicate response also carries a real `id` (the existing
-/// row's), so this correctly counts that as recorded rather than skipped.
+/// row's), so this correctly counts that as recorded rather than skipped —
+/// and per module docs point 3, a retried capture of the same ruling now
+/// reliably lands here (deterministic path + identical rendered body) instead
+/// of silently duplicating the row.
 fn extract_persisted_id(saved: &Value) -> Result<String, String> {
     match saved
         .get("id")
@@ -302,7 +369,6 @@ fn extract_persisted_id(saved: &Value) -> Result<String, String> {
 pub(crate) async fn record_complete_rulings(
     server: &MemoryServer,
     params: &TachiCompleteParams,
-    date: &str,
 ) -> Value {
     if params.rulings.is_empty() {
         return json!("skipped (no rulings)");
@@ -327,17 +393,32 @@ pub(crate) async fn record_complete_rulings(
         let redactions = scrub_ruling(&mut normalized);
         let normalized = normalized;
 
-        let short_id = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
-        let path = format!("/precedents/{project}/{date}-{short_id}");
+        let issue_ref = params.issue_ref.as_deref().filter(|s| !s.is_empty());
+        let short_id = precedent_short_id(&project, issue_ref, &normalized);
+        let path = format!("/precedents/{project}/{short_id}");
 
         let mut keywords = vec!["precedent".to_string(), normalized.outcome.clone()];
         keywords.extend(normalized.principles_cited.iter().cloned());
-        if let Some(iref) = params.issue_ref.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(iref) = issue_ref {
             keywords.push(iref.to_string());
+        }
+        // Provenance rides along in `keywords` (searchable, alongside the
+        // existing `issue_ref` entry above) rather than in `text` — see
+        // `render_body`'s doc comment for why it can't be in the
+        // dedup-gated text without defeating the dedup gate across retries
+        // from different dispatches.
+        if let Some(did) = params.dispatch_id.as_deref().filter(|s| !s.is_empty()) {
+            keywords.push(did.to_string());
+        }
+        if let Some(fid) = params.flow_id.as_deref().filter(|s| !s.is_empty()) {
+            keywords.push(fid.to_string());
+        }
+        if let Some(pref) = params.pr_ref.as_deref().filter(|s| !s.is_empty()) {
+            keywords.push(pref.to_string());
         }
 
         let mem_params = SaveMemoryParams {
-            text: render_body(&normalized, params),
+            text: render_body(&normalized),
             summary: summary_line(&normalized.case, 80),
             path: path.clone(),
             importance: match normalized.outcome.as_str() {

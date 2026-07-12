@@ -563,7 +563,12 @@ pub struct TachiCompleteParams {
 }
 
 /// One caller-supplied leader adjudication captured at `complete` (#950). Stored
-/// faithfully under `/precedents/<project>/<date>-<shortid>` with structured
+/// faithfully under `/precedents/<project>/<shortid>`, where `shortid` is a
+/// deterministic hash of the ruling's case identity and content — project,
+/// `issue_ref`, and every normalized ruling field; never the capture date,
+/// capture provenance (dispatch/flow/pr), or randomness — see
+/// `precedent_ops::precedent_short_id`. Re-capturing the same ruling dedupes
+/// to the first row (which keeps the first capture's provenance), with structured
 /// fields in metadata and a human-readable rendering in the body. `case` and
 /// `ruling` are the two required fields; a ruling missing either is skipped with
 /// a warning and never fails the enclosing `complete` call.
