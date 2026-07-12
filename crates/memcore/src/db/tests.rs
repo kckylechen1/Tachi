@@ -1,6 +1,7 @@
 use super::{
-    add_component_governance_edge, add_edge, anchor_id, archive_memory, checkpoint_wal_truncate,
-    close_related_to_fog,
+    add_component_governance_edge, add_edge, add_edge_with_provenance, anchor_id, archive_memory,
+    checkpoint_wal_truncate, close_related_to_fog, count_active_observations, invalidate_observation,
+    list_observations_for_edge, EdgeProvenance,
     collect_daily_health_snapshot, count_chunks_rows, count_distinct_access_days,
     count_memories_missing_domain, count_memories_rows, count_memories_vec_rows, delete,
     ensure_anchor, fetch_by_ids, foundry_job_status_counts, gc_tables, get_all, get_edges,

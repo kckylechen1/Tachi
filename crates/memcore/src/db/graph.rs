@@ -8,15 +8,67 @@ use crate::types::{GraphExpandResult, MemoryEdge};
 use super::common::{normalize_utc_iso_or_now, now_utc_iso};
 use super::memory_crud::fetch_by_ids;
 
+/// Append-only provenance context recorded alongside every edge write (#774).
+///
+/// `memory_edges` is a last-write-wins working projection; the immutable
+/// `edge_observations` ledger keeps one row per observation so Layer-2
+/// induction can count evidence instead of reading the single collapsed graph
+/// row. Every field is best-effort — a caller with no context uses
+/// [`EdgeProvenance::default`], which records a well-formed but anonymous
+/// observation (`kind`/`actor` normalized to `"unknown"`, empty id/reason, no
+/// evidence hash).
+#[derive(Debug, Clone, Default)]
+pub struct EdgeProvenance {
+    /// What kind of capture event produced this observation (an event type /
+    /// projector name). Empty is normalized to `"unknown"` on write.
+    pub capture_event_kind: String,
+    /// Id of the concrete capture event, when one exists (empty otherwise).
+    pub capture_event_id: String,
+    /// Who/what recorded the observation. Empty is normalized to `"unknown"`.
+    pub actor: String,
+    /// Why the edge was written (a short machine code); empty otherwise.
+    pub reason_code: String,
+    /// Optional content hash of the evidence backing this observation.
+    pub evidence_hash: Option<String>,
+}
+
+/// A row in the append-only `edge_observations` ledger (#774).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeObservation {
+    pub observation_id: String,
+    pub source_id: String,
+    pub target_id: String,
+    pub relation: String,
+    pub capture_event_kind: String,
+    pub capture_event_id: String,
+    pub actor: String,
+    pub reason_code: String,
+    pub observed_at: String,
+    pub evidence_hash: Option<String>,
+    pub invalidated_at: Option<String>,
+}
+
 /// Generic edge write. The relation must be admissible on the **generic**
 /// ontology-v1 path — this is the single choke point every dynamic string
 /// caller (continuity projection, the NAPI `add_edge` surface, tools) funnels
 /// through, so the #772 grandfathered relations are rejected here. Callers
 /// that legitimately seed a grandfathered relation must use
 /// [`add_component_governance_edge`].
+///
+/// Records an anonymous ([`EdgeProvenance::default`]) observation; callers with
+/// provenance context should use [`add_edge_with_provenance`].
 pub fn add_edge(conn: &Connection, edge: &MemoryEdge) -> Result<(), MemoryError> {
+    add_edge_with_provenance(conn, edge, &EdgeProvenance::default())
+}
+
+/// [`add_edge`] plus explicit provenance for the appended observation.
+pub fn add_edge_with_provenance(
+    conn: &Connection,
+    edge: &MemoryEdge,
+    provenance: &EdgeProvenance,
+) -> Result<(), MemoryError> {
     crate::relation_ontology::validate_relation_for_write(&edge.relation)?;
-    write_edge_row(conn, edge, &edge.relation)
+    write_edge_row(conn, edge, &edge.relation, provenance)
 }
 
 /// Typed, caller-scoped write door for the #772 component-governance
@@ -27,21 +79,48 @@ pub fn add_edge(conn: &Connection, edge: &MemoryEdge) -> Result<(), MemoryError>
 /// rejects them. The enum is authoritative for the stored `relation` column;
 /// `edge.relation` is ignored. Bypassing the generic ontology check here is
 /// deliberate: the enum type *is* the validation.
+///
+/// Records an anonymous ([`EdgeProvenance::default`]) observation; callers with
+/// provenance context should use [`add_component_governance_edge_with_provenance`].
 pub fn add_component_governance_edge(
     conn: &Connection,
     edge: &MemoryEdge,
     relation: ComponentGovernanceRelation,
 ) -> Result<(), MemoryError> {
-    write_edge_row(conn, edge, relation.as_str())
+    add_component_governance_edge_with_provenance(
+        conn,
+        edge,
+        relation,
+        &EdgeProvenance::default(),
+    )
 }
 
-/// Shared INSERT/UPSERT for [`add_edge`] and [`add_component_governance_edge`].
-/// `relation` is the (already-validated) relation string to persist; all
-/// timestamp normalization is identical across both entry points.
+/// [`add_component_governance_edge`] plus explicit provenance for the appended
+/// observation.
+pub fn add_component_governance_edge_with_provenance(
+    conn: &Connection,
+    edge: &MemoryEdge,
+    relation: ComponentGovernanceRelation,
+    provenance: &EdgeProvenance,
+) -> Result<(), MemoryError> {
+    write_edge_row(conn, edge, relation.as_str(), provenance)
+}
+
+/// Shared INSERT/UPSERT for the edge write doors above. `relation` is the
+/// (already-validated) relation string to persist; all timestamp normalization
+/// is identical across every entry point.
+///
+/// Invariant (#774): the `memory_edges` upsert (mutable working projection) and
+/// the append-only `edge_observations` row land together — either both persist
+/// or neither. A `SAVEPOINT` nests cleanly whether or not the caller already
+/// holds a transaction (see `migrate_v9_relocate_and_drop_location`), unlike a
+/// raw `BEGIN`; when there is no enclosing transaction the savepoint starts one
+/// and `RELEASE` commits it, so the two writes are always atomic.
 fn write_edge_row(
     conn: &Connection,
     edge: &MemoryEdge,
     relation: &str,
+    provenance: &EdgeProvenance,
 ) -> Result<(), MemoryError> {
     let created = if edge.created_at.is_empty() {
         now_utc_iso()
@@ -67,14 +146,151 @@ fn write_edge_row(
         .map(normalize_utc_iso_or_now);
     let meta_str = serde_json::to_string(&edge.metadata).unwrap_or_else(|_| "{}".to_string());
 
+    conn.execute_batch("SAVEPOINT write_edge_row")?;
+    let result = (|| -> Result<(), MemoryError> {
+        conn.execute(
+            r#"INSERT INTO memory_edges (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+               ON CONFLICT(source_id, target_id, relation)
+               DO UPDATE SET weight = ?4, metadata = ?5, created_at = ?6, valid_from = ?7, valid_to = ?8"#,
+            params![edge.source_id, edge.target_id, relation, edge.weight, meta_str, created, valid_from, valid_to],
+        )?;
+        append_edge_observation(conn, edge, relation, provenance)?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            conn.execute_batch("RELEASE write_edge_row")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK TO write_edge_row");
+            let _ = conn.execute_batch("RELEASE write_edge_row");
+            Err(e)
+        }
+    }
+}
+
+/// Normalize an empty/blank provenance text field to `"unknown"` so the ledger
+/// never stores a blank in a slot the DDL defaults to `"unknown"`.
+fn or_unknown(value: &str) -> &str {
+    if value.trim().is_empty() {
+        "unknown"
+    } else {
+        value
+    }
+}
+
+/// Append exactly one immutable observation row for an edge write (#774).
+/// Called only from inside `write_edge_row`'s savepoint, so it shares the edge
+/// upsert's atomicity.
+fn append_edge_observation(
+    conn: &Connection,
+    edge: &MemoryEdge,
+    relation: &str,
+    provenance: &EdgeProvenance,
+) -> Result<(), MemoryError> {
+    let observation_id = uuid::Uuid::new_v4().to_string();
+    let observed_at = now_utc_iso();
     conn.execute(
-        r#"INSERT INTO memory_edges (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-           ON CONFLICT(source_id, target_id, relation)
-           DO UPDATE SET weight = ?4, metadata = ?5, created_at = ?6, valid_from = ?7, valid_to = ?8"#,
-        params![edge.source_id, edge.target_id, relation, edge.weight, meta_str, created, valid_from, valid_to],
+        r#"INSERT INTO edge_observations
+           (observation_id, source_id, target_id, relation, capture_event_kind,
+            capture_event_id, actor, reason_code, observed_at, evidence_hash, invalidated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)"#,
+        params![
+            observation_id,
+            edge.source_id,
+            edge.target_id,
+            relation,
+            or_unknown(&provenance.capture_event_kind),
+            provenance.capture_event_id,
+            or_unknown(&provenance.actor),
+            provenance.reason_code,
+            observed_at,
+            provenance.evidence_hash,
+        ],
     )?;
     Ok(())
+}
+
+/// Map a full `edge_observations` row to [`EdgeObservation`].
+fn row_to_observation(row: &rusqlite::Row) -> rusqlite::Result<EdgeObservation> {
+    Ok(EdgeObservation {
+        observation_id: row.get(0)?,
+        source_id: row.get(1)?,
+        target_id: row.get(2)?,
+        relation: row.get(3)?,
+        capture_event_kind: row.get(4)?,
+        capture_event_id: row.get(5)?,
+        actor: row.get(6)?,
+        reason_code: row.get(7)?,
+        observed_at: row.get(8)?,
+        evidence_hash: row.get(9)?,
+        invalidated_at: row.get(10)?,
+    })
+}
+
+/// All observations for one `(source, target, relation)` edge, oldest first
+/// (`observed_at` ascending, `observation_id` as a stable tie-break). Includes
+/// invalidated rows — history is never removed from this read.
+pub fn list_observations_for_edge(
+    conn: &Connection,
+    source_id: &str,
+    target_id: &str,
+    relation: &str,
+) -> Result<Vec<EdgeObservation>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT observation_id, source_id, target_id, relation, capture_event_kind, \
+         capture_event_id, actor, reason_code, observed_at, evidence_hash, invalidated_at \
+         FROM edge_observations \
+         WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3 \
+         ORDER BY observed_at ASC, observation_id ASC",
+    )?;
+    let rows = stmt.query_map(params![source_id, target_id, relation], row_to_observation)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Count the still-active (not invalidated) observations for one edge — this is
+/// the evidence count Layer-2 induction reads instead of the single collapsed
+/// `memory_edges` row (#774).
+pub fn count_active_observations(
+    conn: &Connection,
+    source_id: &str,
+    target_id: &str,
+    relation: &str,
+) -> Result<u32, MemoryError> {
+    let count: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM edge_observations \
+         WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3 AND invalidated_at IS NULL",
+        params![source_id, target_id, relation],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
+/// THE single write path that invalidates an observation (#774): soft-stamp
+/// `invalidated_at` on a still-active row. History is never deleted — the row
+/// stays in the ledger and in [`list_observations_for_edge`], it just stops
+/// counting toward [`count_active_observations`]. Idempotent: an already-
+/// invalidated (or missing) observation is left untouched. Returns whether a
+/// row transitioned active -> invalidated on this call. Mirrors the
+/// single-writer discipline of `reclaim_exec_env`.
+pub fn invalidate_observation(
+    conn: &Connection,
+    observation_id: &str,
+    at: &str,
+) -> Result<bool, MemoryError> {
+    let stamped = normalize_utc_iso_or_now(at);
+    let changed = conn.execute(
+        "UPDATE edge_observations SET invalidated_at = ?2 \
+         WHERE observation_id = ?1 AND invalidated_at IS NULL",
+        params![observation_id, stamped],
+    )?;
+    Ok(changed > 0)
 }
 
 /// Close `valid_to` on every still-open `related_to` edge (tachi#773 item 3:
