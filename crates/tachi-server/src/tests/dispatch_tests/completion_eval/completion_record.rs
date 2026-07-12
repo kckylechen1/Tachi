@@ -1,5 +1,6 @@
 use super::*;
 
+mod dual_truth_outcome;
 mod feedback_rules;
 mod lesson_hooks;
 mod precedent_capture;

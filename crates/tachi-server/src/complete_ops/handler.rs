@@ -11,6 +11,20 @@ use super::eval_record::{build_complete_eval_record, CompleteEvalRecord};
 use super::kanban::read_kanban_snapshot;
 use super::lessons::run_lesson_post_complete_hook;
 
+/// The #878-A completion-predicate verdict, resolved ONCE per completion so the
+/// canonical outcome row and the kanban row agree on the same machine verdict
+/// (#773 Layer-2 ②). `verdict_tag` is the short predicate tag
+/// (`pass`/`fail`/`unverified`); `new_state`/`reviewed_flag` are the resolved
+/// kanban terminal state; `override_reason` is `Some` only when the predicate
+/// intercepted a false self-reported success.
+struct CompletionVerdict {
+    declared: bool,
+    verdict_tag: &'static str,
+    new_state: &'static str,
+    reviewed_flag: bool,
+    override_reason: Option<String>,
+}
+
 pub(crate) async fn handle_tachi_complete(
     server: &MemoryServer,
     mut params: TachiCompleteParams,
@@ -75,16 +89,72 @@ pub(crate) async fn handle_tachi_complete(
         .unwrap_or(&task_id)
         .to_string();
 
+    // #773 Layer-2 ②: resolve the #878-A completion predicate BEFORE writing
+    // the canonical outcome row, so `execution_outcome` records the MACHINE
+    // verdict (a false self-reported success intercepted to `failed`), not the
+    // raw self-report. The kanban block below reuses this exact verdict rather
+    // than recomputing it. `None` when there is no dispatch_id (no predicate to
+    // apply; the outcome write is skipped anyway).
+    let completion_verdict = params
+        .dispatch_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .map(|did| {
+            let (predicate_run_dir, declared_predicate, predicate_cwd) =
+                crate::dispatch_ops::resolve_completion_predicate_context(did);
+            let predicate_output = predicate_run_dir
+                .as_deref()
+                .and_then(|dir| std::fs::read_to_string(dir.join("result.md")).ok())
+                .unwrap_or_default();
+            let empty_run_dir = std::path::PathBuf::new();
+            let verdict = crate::dispatch_ops::evaluate_completion_predicate(
+                declared_predicate.as_ref(),
+                predicate_run_dir.as_deref().unwrap_or(&empty_run_dir),
+                predicate_cwd.as_deref(),
+                &predicate_output,
+            );
+            let (new_state, reviewed_flag, override_reason) =
+                crate::dispatch_ops::resolve_completion_state(params.outcome.as_str(), &verdict);
+            CompletionVerdict {
+                declared: declared_predicate.is_some(),
+                verdict_tag: verdict.tag(),
+                new_state,
+                reviewed_flag,
+                override_reason,
+            }
+        });
+
+    // Machine-resolved execution outcome + interception class for the outcome
+    // row: the value AFTER the predicate has had its chance to intercept.
+    let (machine_execution_outcome, outcome_error_class) = match &completion_verdict {
+        Some(cv) => (
+            crate::dispatch_ops::execution_outcome_for_kanban_state(cv.new_state).to_string(),
+            cv.override_reason.as_ref().map(|_| "false_success"),
+        ),
+        None => (outcome_norm.clone(), None),
+    };
+
     // #773 v4 (sol carve): write the ONE canonical dispatch_outcomes row
     // FIRST — before any other derive (kanban, signatures, precedents,
     // lesson hooks) touches state. A derivation failure downstream must
     // never lose this row; this call itself is fail-safe (see module docs)
-    // and never fails the completion.
+    // and never fails the completion. `reported_outcome` keeps the raw
+    // self-report; `execution_outcome` is the machine verdict computed above.
+    //
+    // #774 round 2: `reported_outcome` must be the agent's VERBATIM claim
+    // (trim only, no case-folding) — `outcome_norm` is `params.outcome`
+    // lowercased for the machine-side bucketing logic above/in
+    // `build_complete_eval_record`, not the self-report itself. Passing
+    // `outcome_norm` here silently rewrote "Complete " -> "complete" in the
+    // row the module doc promises is verbatim.
+    let reported_outcome_verbatim = params.outcome.trim();
     let dispatch_outcome_status = super::dispatch_outcome::record_complete_outcome(
         server,
         &params,
         &eval_memory_id,
-        &outcome_norm,
+        reported_outcome_verbatim,
+        &machine_execution_outcome,
+        outcome_error_class,
         verification_present,
         diff_present,
         &safe_evidence_refs,
@@ -218,25 +288,22 @@ pub(crate) async fn handle_tachi_complete(
         // success could not be machine-verified, matching the watchdog's
         // conservative posture. failure/partial/aborted keep their mapping and
         // stay reviewed (an explicit tachi_complete is a deliberate close).
-        let (predicate_run_dir, declared_predicate, predicate_cwd) =
-            crate::dispatch_ops::resolve_completion_predicate_context(did);
-        let predicate_output = predicate_run_dir
-            .as_deref()
-            .and_then(|dir| std::fs::read_to_string(dir.join("result.md")).ok())
-            .unwrap_or_default();
-        let empty_run_dir = std::path::PathBuf::new();
-        let verdict = crate::dispatch_ops::evaluate_completion_predicate(
-            declared_predicate.as_ref(),
-            predicate_run_dir.as_deref().unwrap_or(&empty_run_dir),
-            predicate_cwd.as_deref(),
-            &predicate_output,
-        );
-        let (new_state, reviewed_flag, predicate_override_reason) =
-            crate::dispatch_ops::resolve_completion_state(params.outcome.as_str(), &verdict);
+        //
+        // Reuse the verdict computed above (#773 ②) — the outcome row and the
+        // kanban row MUST agree on the same machine verdict, so it is resolved
+        // once. `completion_verdict` is always Some inside this dispatch_id arm.
+        let CompletionVerdict {
+            declared,
+            verdict_tag,
+            new_state,
+            reviewed_flag,
+            override_reason: predicate_override_reason,
+        } = completion_verdict
+            .expect("completion_verdict is Some when dispatch_id is present");
 
         pipeline_status["completion_predicate"] = json!({
-            "declared": declared_predicate.is_some(),
-            "verdict": verdict.tag(),
+            "declared": declared,
+            "verdict": verdict_tag,
             "outcome_reported": params.outcome.clone(),
             "resolved_state": new_state,
             "reviewed": reviewed_flag,

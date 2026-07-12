@@ -223,7 +223,29 @@ pub(crate) async fn close_kanban_row_on_early_exit(
     server: &MemoryServer,
     dispatch_id: &str,
     context: &str,
+    project: Option<&str>,
 ) {
+    // #773 Layer-2 ② (hole b): every post-init early exit is a terminal
+    // dispatch state the agent never `tachi_complete`s. Record a canonical
+    // outcome row here as the GENERIC catch (covers credential/slot/plan-stage
+    // failures that have no more-specific writer). FIRST-WRITER-WINS on
+    // dispatch_id means the specific classifiers upstream (backend/preflight,
+    // which run before this closer) keep their precise class — this coarse
+    // 'dispatch' class only lands when nothing else already recorded the row.
+    // Written even when the kanban row is already terminal (plan-stage closed
+    // it), since that path still produced no outcome row of its own.
+    // `project` (#774 round 2): the dispatch's `TachiDispatchParams::project`,
+    // so this coarse catch-all lands in the same DB the upstream classifiers
+    // (and any later `tachi_complete`) would resolve to — see
+    // `record_terminal_failure_outcome`'s scope-symmetry doc.
+    crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+        server,
+        dispatch_id,
+        "dispatch",
+        None,
+        project,
+    );
+
     let is_terminal = matches!(
         get_kanban_state(server, dispatch_id).await.as_deref(),
         Some(

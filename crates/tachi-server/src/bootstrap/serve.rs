@@ -604,7 +604,7 @@ fn build_server_state(
             "[components] governance record seed failed (edges dropped, will re-seed next boot; boot continues): {err}"
         ),
     }
-    let recovered = crate::dispatch_ops::recover_orphaned_dispatch_runs();
+    let recovered = crate::dispatch_ops::recover_orphaned_dispatch_runs(&server);
     if !recovered.is_empty() {
         eprintln!(
             "[dispatch] recovered {} orphaned run(s): {}",
