@@ -113,7 +113,7 @@ impl PeerPublicationRead {
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
         let now_iso = now_query.to_rfc3339();
         let mut candidates =
-            memcore::list_active_claims(&*tx, &now_iso, ttl_seconds).map_err(|e| e.to_string())?;
+            memcore::list_active_claims(&tx, &now_iso, ttl_seconds).map_err(|e| e.to_string())?;
         drop(tx);
 
         if let Some(target) = target {

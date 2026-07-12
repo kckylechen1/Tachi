@@ -1,8 +1,8 @@
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
-use crate::tool_params::PeerQueryParams;
 use crate::MemoryServer;
+use tachi_params::PeerQueryParams;
 
 #[tool_router(router = peer_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
