@@ -234,35 +234,38 @@ fn handle_apply(server: &MemoryServer, params: &TachiMemoryParams) -> Result<Str
     ))
 }
 
-/// #1043 D3: direct-call entry point for automated (non-human-reviewed)
-/// callers that need the SAME lifecycle mutation `tachi_memory(action=
-/// 'consolidate')` applies after human approval — e.g. the distill batch's
-/// pre-selection duplicate-collapse pass, which only ever calls this with
-/// `action="merge_into"` for byte-identical rows. Reuses
-/// `apply_lifecycle_action` verbatim (no logic change); this wrapper only
-/// widens the calling convention from "needs a full `TachiMemoryParams`"
-/// to "needs a project name", since the callee only ever reads
-/// `params.project` for store routing.
-pub(crate) fn apply_lifecycle_action_for_project(
+/// #1043 D3 (terminal-review narrowed): direct-call entry point for
+/// automated (non-human-reviewed) callers that need the SAME `merge_into`
+/// lifecycle mutation `tachi_memory(action='consolidate')` applies after
+/// human approval — used by the distill batch's pre-selection
+/// duplicate-collapse pass for byte-identical rows.
+///
+/// Deliberately hard-codes `action="merge_into"` rather than accepting an
+/// `action: &str` parameter: this is the ONLY lifecycle mutation any
+/// automated caller may reach without going through the human-reviewed
+/// propose/review/apply loop. A generic `action` parameter here would open
+/// every lifecycle action (`supersede`/`archive`/`promote_distilled`) to
+/// bypassing human review, which the module doc above says is exactly what
+/// this proposal/review/apply loop exists to prevent.
+pub(crate) fn merge_into_for_project(
     server: &MemoryServer,
     project: Option<&str>,
-    action: &str,
     source_id: &str,
-    target_id: Option<&str>,
+    target_id: &str,
 ) -> Result<Value, String> {
     apply_lifecycle_action(
         server,
         &minimal_params_for_project(project),
-        action,
+        "merge_into",
         source_id,
-        target_id,
+        Some(target_id),
     )
 }
 
 /// Bare `TachiMemoryParams` carrying only `action`/`project`, for callers
-/// (see `apply_lifecycle_action_for_project`) that need to drive the
-/// store-resolution helpers below without a real facade call's full param
-/// set. Field list mirrors `tests::facade_tests::tachi_memory_params`.
+/// (see `merge_into_for_project`) that need to drive the store-resolution
+/// helpers below without a real facade call's full param set. Field list
+/// mirrors `tests::facade_tests::tachi_memory_params`.
 fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
     TachiMemoryParams {
         action: "consolidate".to_string(),

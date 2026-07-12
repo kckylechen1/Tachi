@@ -22,8 +22,11 @@
 //! loop — this pre-pass does not touch that decision logic, it only reuses
 //! the same `merge_into` *mutation* (fold keywords/entities into the
 //! survivor, supersede + archive the rest) via
-//! [`crate::facade_memory_ops::consolidate_ops::apply_lifecycle_action_for_project`],
-//! called directly instead of through the proposal-store round trip.
+//! [`crate::facade_memory_ops::consolidate_ops::merge_into_for_project`],
+//! called directly instead of through the proposal-store round trip. That
+//! entry point hard-codes `action="merge_into"` — it cannot reach any other
+//! lifecycle action, so this pre-pass has no way to bypass human review for
+//! `supersede`/`archive`/`promote_distilled`.
 
 use std::collections::HashMap;
 
@@ -51,11 +54,16 @@ fn consolidate_one_group(
     project: Option<&str>,
     group: &mut CandidateGroup,
 ) -> usize {
-    // Bucket entry indices by (path, normalized text). Anything sharing a
-    // bucket with >1 member is a byte-identical duplicate cluster.
+    // Bucket entry indices by (path, exact text). This must stay byte-exact
+    // — no `.trim()` or other normalization — because the spec and tests
+    // promise byte-identical dedup only; two rows differing solely in
+    // leading/trailing whitespace are distinct evidence, not duplicates.
+    // Sharing a bucket with >1 member is a true byte-identical duplicate
+    // cluster; better to leave a near-duplicate un-merged than to silently
+    // fold two non-identical rows together (#1043 D3 terminal review).
     let mut buckets: HashMap<(String, String), Vec<usize>> = HashMap::new();
     for (idx, entry) in group.entries.iter().enumerate() {
-        let key = (entry.path.clone(), entry.text.trim().to_string());
+        let key = (entry.path.clone(), entry.text.clone());
         buckets.entry(key).or_default().push(idx);
     }
 
@@ -76,12 +84,11 @@ fn consolidate_one_group(
         let survivor_id = group.entries[indices[0]].id.clone();
         for &dup_idx in &indices[1..] {
             let source_id = group.entries[dup_idx].id.clone();
-            match crate::facade_memory_ops::consolidate_ops::apply_lifecycle_action_for_project(
+            match crate::facade_memory_ops::consolidate_ops::merge_into_for_project(
                 server,
                 project,
-                "merge_into",
                 &source_id,
-                Some(&survivor_id),
+                &survivor_id,
             ) {
                 Ok(_) => drop_indices.push(dup_idx),
                 Err(err) => {
@@ -227,6 +234,48 @@ mod tests {
 
         let consolidated = consolidate_duplicate_candidates(&server, None, &mut groups);
         assert_eq!(consolidated, 0);
+        assert_eq!(groups[0].entries.len(), 2);
+    }
+
+    /// #1043 D3 terminal-review judgement test: the dedup key is byte-exact.
+    /// `"x"` and `"x "` differ only in trailing whitespace and must NOT be
+    /// treated as duplicates — trimming would silently merge two rows the
+    /// spec promises are compared byte-for-byte.
+    #[test]
+    fn whitespace_only_difference_is_never_merged() {
+        let temp = tempfile::tempdir().expect("temp consolidate pre-pass db");
+        let server = crate::MemoryServer::new(
+            temp.path().join("global.db"),
+            Some(temp.path().join("project.db")),
+        )
+        .expect("server");
+
+        let mut e0 = dup_entry("ws-0", "2026-01-01T00:00:00Z");
+        e0.text = "x".to_string();
+        let mut e1 = dup_entry("ws-1", "2026-01-01T00:00:01Z");
+        e1.text = "x ".to_string();
+        let entries = vec![e0, e1];
+        server
+            .with_project_store(|store| {
+                for entry in &entries {
+                    store.upsert(entry).map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            })
+            .expect("seed whitespace-variant rows");
+
+        let mut groups = vec![CandidateGroup {
+            group_id: "bounded|ws".to_string(),
+            path_prefix: "/project/bounded".to_string(),
+            coherence_key: "ws".to_string(),
+            entries,
+        }];
+
+        let consolidated = consolidate_duplicate_candidates(&server, None, &mut groups);
+        assert_eq!(
+            consolidated, 0,
+            "\"x\" and \"x \" must not be treated as byte-identical duplicates"
+        );
         assert_eq!(groups[0].entries.len(), 2);
     }
 }

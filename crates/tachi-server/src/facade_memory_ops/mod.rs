@@ -409,6 +409,16 @@ fn extract_facts_params_from_facade(
         .ok_or_else(|| "text is required when action='extract_facts'".to_string())?;
     Ok(ExtractFactsParams {
         text,
+        // #1043 terminal review (adjudicated): omitted source defaults to
+        // "extraction", matching `default_extraction_source()` in
+        // tachi-params/src/memory/ingest.rs — not the older "tachi_save"
+        // routing label this facade branch used to inherit by going through
+        // `handle_tachi_save`'s generic dispatch. Grep-verified repo-wide:
+        // no production code or test branches on source=="tachi_save" as a
+        // memory-entry value (every remaining "tachi_save" literal in the
+        // repo names the MCP *tool*, not this field), so keeping the new
+        // "extraction" default is a straight fix, not a behavior change any
+        // caller depends on.
         source: params
             .source
             .clone()
@@ -515,6 +525,28 @@ mod tests {
             serde_json::to_value(&via_facade_with_opts).unwrap(),
             "facade and standalone extract_facts must honor an explicit \
              source/project override identically"
+        );
+    }
+
+    /// #1043 D1 terminal-review adjudication test: omitting `source` on the
+    /// facade `extract_facts` call must resolve to the literal label
+    /// `"extraction"` — the atomized-pipeline's own tag, not the older
+    /// `"tachi_save"` label this branch used to inherit before #1043 routed
+    /// it directly to `pipeline_ops::handle_extract_facts`.
+    #[test]
+    fn extract_facts_facade_omitted_source_resolves_to_extraction_label() {
+        let facade_params: TachiMemoryParams = serde_json::from_value(serde_json::json!({
+            "action": "extract_facts",
+            "text": "Omitted source must resolve to the extraction label.",
+        }))
+        .expect("facade params deserialize");
+        let via_facade = extract_facts_params_from_facade(&facade_params)
+            .expect("facade extract_facts params build");
+        assert_eq!(
+            via_facade.source, "extraction",
+            "facade-omitted source must resolve to \"extraction\", matching \
+             the standalone extract_facts tool's serde default — not the \
+             older \"tachi_save\" label"
         );
     }
 
