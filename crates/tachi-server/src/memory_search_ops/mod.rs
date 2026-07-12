@@ -42,4 +42,4 @@ pub(crate) use search_memory::handle_search_memory_with_access;
 pub(crate) use search_memory::search_memory_rows;
 pub(crate) use search_memory::search_memory_rows_with_access;
 pub(crate) use search_memory::search_memory_rows_with_recall_config;
-pub(crate) use text_scrub::scrub_secrets;
+pub(crate) use text_scrub::{scrub_secrets, scrub_think_tags};

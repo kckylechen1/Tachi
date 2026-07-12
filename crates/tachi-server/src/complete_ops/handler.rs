@@ -416,7 +416,7 @@ pub(crate) async fn handle_tachi_complete(
     // leader rulings as /precedents rows. Best-effort — a malformed ruling is
     // skipped + warned and never fails completion (the primary contract).
     pipeline_status["precedent_recording"] =
-        crate::precedent_ops::record_complete_rulings(server, &params, &date).await;
+        crate::precedent_ops::record_complete_rulings(server, &params).await;
 
     pipeline_status["post_complete_hooks"] = run_lesson_post_complete_hook(
         server,

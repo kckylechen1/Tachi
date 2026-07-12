@@ -247,6 +247,11 @@ pub(crate) async fn handle_tachi_dispatch(
     server: &MemoryServer,
     mut params: TachiDispatchParams,
 ) -> Result<String, String> {
+    // Fail before ANY run directory, workspace, prompt, or child process is
+    // created. This is the machine boundary; confirmation for a permitted L3
+    // action remains the responsibility of that action's existing gate.
+    let (host_profile, execution_level) =
+        crate::host_profile::authorize_dispatch(params.execution_level)?;
     let now = Utc::now();
     let DispatchStart {
         dispatch_id,
@@ -283,6 +288,34 @@ pub(crate) async fn handle_tachi_dispatch(
     validate_dispatch_sandbox_at_entry(&agent_norm, &harness_transport, params.sandbox.as_deref())?;
 
     // 1. Create isolated workspace directory + MCP config
+    //
+    // `agent_seat` (round-3 fix, codex final review of #964/PR #1003, BUG
+    // CP2): the seat identity written to `TACHI_AGENT_SEAT` for the spawned
+    // worker, distinct from `params.tool_profile` (the capability/tool
+    // surface). Round-2 derived this from `params.profile` (falling back to
+    // `agent_norm`), but `params.profile` is a `DispatchProfile` — a
+    // capability-surface selector like `codex_55_review`, not a seat — so
+    // two concurrently dispatched workers on the same profile collided as
+    // one seat (both write/consume the same `TACHI_AGENT_SEAT`, silently
+    // cross-consuming each other's stickies). The dispatch `dispatch_id`
+    // (already unique per lane — timestamp + sanitized agent + uuid suffix,
+    // see `new_dispatch_id`) is available at this point precisely because
+    // every dispatched worker gets one; using it as the seat makes collision
+    // structurally impossible. A `to:`-addressed sticky can target a
+    // dispatch id directly if ever needed.
+    //
+    // Collision-window caveat (round-4, codex review of #964/PR #1003 —
+    // NOT a #964 regression, leader-adjudicated as out of scope here):
+    // `new_dispatch_id` mints an 8-hex-char (32-bit) uuid suffix alongside a
+    // same-second timestamp and the agent name, so two same-agent dispatches
+    // landing in the same second could in theory mint the same `dispatch_id`
+    // and therefore the same seat. `dispatch_id` already keys run
+    // directories system-wide, so a collision here would break far more
+    // than sticky delivery — this is a pre-existing property of
+    // `new_dispatch_id`, not introduced by this fix, and widening its
+    // entropy is a dispatch-system-wide change tracked as a follow-up, not
+    // done in this PR.
+    let agent_seat = Some(dispatch_id.as_str());
     let mcp_config_path = prepare_workspace_and_mcp(
         server,
         &workspace_dir,
@@ -290,6 +323,7 @@ pub(crate) async fn handle_tachi_dispatch(
         inject_tachi,
         inject_hub,
         params.tool_profile.as_deref(),
+        agent_seat,
         &params.allowed_mcp_servers,
     )
     .await?;
@@ -332,6 +366,8 @@ pub(crate) async fn handle_tachi_dispatch(
             "harness_transport": harness_transport.clone(),
             "harness_server_url": harness_server_url.clone(),
             "host_adapter": host_adapter.clone(),
+            "host_profile": host_profile.name(),
+            "execution_level": execution_level.as_str(),
             "capability_bundle": Value::Null,
             "feedback_rules": Value::Null,
             "timeout_secs": timeout_secs_for_status,
@@ -408,6 +444,8 @@ pub(crate) async fn handle_tachi_dispatch(
             "harness_transport": harness_transport.clone(),
             "harness_server_url": harness_server_url.clone(),
             "host_adapter": host_adapter.clone(),
+            "host_profile": host_profile.name(),
+            "execution_level": execution_level.as_str(),
             "capability_bundle": capability_bundle_card.clone(),
             "feedback_rules": feedback_rules_trace.clone(),
             "timeout_secs": timeout_secs_for_status,

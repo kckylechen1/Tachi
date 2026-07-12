@@ -94,6 +94,7 @@ mod tests {
             agent: Some(agent.to_string()),
             profile: None,
             task: "noop".to_string(),
+            execution_level: None,
             cwd: None,
             env_id: None,
             unmanaged_cwd: None,

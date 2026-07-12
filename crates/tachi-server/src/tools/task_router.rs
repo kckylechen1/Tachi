@@ -46,6 +46,7 @@ pub(super) async fn handle_tachi_task_facade(
                 agent: params.agent.clone(),
                 profile: params.profile.clone(),
                 task,
+                execution_level: params.execution_level,
                 cwd: params.cwd.clone(),
                 env_id: params.env_id.clone(),
                 unmanaged_cwd: params.unmanaged_cwd,

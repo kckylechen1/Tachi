@@ -1260,6 +1260,7 @@ mod tests {
             agent: None,
             profile: Some(profile.to_string()),
             task: "dispatch test".to_string(),
+            execution_level: None,
             cwd: None,
             env_id: None,
             unmanaged_cwd: None,
