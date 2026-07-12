@@ -24,10 +24,61 @@ pub(crate) async fn collect_agent_warning_lines(server: &crate::MemoryServer) ->
             DaemonStatus::StalePid { .. } => json!({ "running": false, "stale": true }),
             DaemonStatus::None => json!({ "running": false }),
         };
-        build_status_warnings(&snapshot, &daemon_state)
+        let mut warnings = build_status_warnings(&snapshot, &daemon_state);
+        push_unregistered_project_db_warning(&mut warnings, &app_home);
+        warnings
     })
     .await
     .unwrap_or_default()
+}
+
+/// #1040 tripwire: append an informational warning line if `<app_home>/projects/`
+/// contains project directories with a `memory.db` the manifest never
+/// registered. Read-only, does NOT touch the health score — `push_deduction`
+/// / `calculate_health_deductions` (`status_health/scoring.rs`) never read
+/// warning lines; the score is computed independently from `DbStatus`,
+/// daemon, distill-marker, and API-key inputs, so this stays purely
+/// advisory.
+pub(crate) fn push_unregistered_project_db_warning(
+    warnings: &mut Vec<String>,
+    app_home: &std::path::Path,
+) {
+    let manifest = crate::manifest::Manifest::load_or_empty(&app_home.join("manifest.json"));
+    let count = count_unregistered_project_dbs(&app_home.join("projects"), &manifest);
+    if count > 0 {
+        warnings.push(format!("unregistered project DBs: {count} (see #1040)"));
+    }
+}
+
+/// How many `<projects_dir>/<name>/memory.db` files exist on disk but have no
+/// matching entry (by canonicalized path) in `manifest`. A project directory
+/// is expected to be registered via `tachi manifest refresh` / the
+/// create-on-first-use bootstrap path; one that exists on disk but never made
+/// it into the manifest is a silent split from the single source of truth the
+/// rest of `status`/`doctor` assumes (#1040). A directory with no `memory.db`
+/// yet (freshly `mkdir`'d, nothing written) is not counted — there is nothing
+/// to register yet.
+pub(crate) fn count_unregistered_project_dbs(
+    projects_dir: &std::path::Path,
+    manifest: &crate::manifest::Manifest,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(projects_dir) else {
+        return 0;
+    };
+    let registered: std::collections::HashSet<std::path::PathBuf> = manifest
+        .dbs
+        .iter()
+        .map(|db| crate::manifest::canonicalize_db_path(std::path::Path::new(&db.path)))
+        .collect();
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .filter(|entry| {
+            let db_path = entry.path().join("memory.db");
+            db_path.is_file()
+                && !registered.contains(&crate::manifest::canonicalize_db_path(&db_path))
+        })
+        .count()
 }
 
 pub(crate) fn build_status_warnings(
