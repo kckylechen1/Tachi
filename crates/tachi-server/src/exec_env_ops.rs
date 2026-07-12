@@ -8,7 +8,6 @@
 //! reclaim flows through the one reclaim function in `memcore::db::exec_env`.
 
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use memcore::{ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, ReclaimOutcome};
 use tachi_clean::wt_clean::OutputFormat;
@@ -147,16 +146,14 @@ pub(crate) fn resolve_env_binding(
     Ok(EnvResolution::Default)
 }
 
-/// Generate a unique lease id. Timestamp-nanos XOR pid keeps it collision-free
-/// across concurrent provisions on one host; a genuine collision surfaces as an
-/// insert error rather than a silent overwrite.
+/// Generate a unique lease id. A uuid v4 is used precisely because it carries
+/// no timing dependence: an earlier timestamp-nanos XOR pid scheme collided
+/// when two calls landed inside the same clock tick of the same process (see
+/// `generated_env_ids_are_unique_and_prefixed`, #1026). A genuine uuid
+/// collision would still surface as a DB insert error rather than a silent
+/// overwrite — that backstop is unchanged.
 fn generate_env_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let mixed = nanos ^ ((std::process::id() as u128) << 64);
-    format!("env-{mixed:032x}")
+    format!("env-{}", uuid::Uuid::new_v4().simple())
 }
 
 /// Single provisioning entrypoint (#894 S1): open a managed worktree via the
