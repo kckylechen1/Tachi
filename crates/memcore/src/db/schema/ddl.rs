@@ -438,6 +438,93 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_exec_envs_state ON exec_envs(state);
         CREATE INDEX IF NOT EXISTS idx_exec_envs_path ON exec_envs(path);
         CREATE INDEX IF NOT EXISTS idx_exec_envs_dispatch ON exec_envs(dispatch_id);
+
+        -- Canonical dispatch outcome ledger (#773 v4 sol carve). Append-only:
+        -- one row per (dispatch_id, task_type) completion, written FIRST by
+        -- the `tachi_complete` seam before any derived row (eval memory,
+        -- signature evidence, precedent) — a derivation failure must never
+        -- lose this row (see `complete_ops::dispatch_outcome`). This is the
+        -- future router's real read surface; `/eval` stays the searchable
+        -- narrative projection and cards remain a reviewed projection on
+        -- top. Graph edges (seat->performed->dispatch, dispatch->produced->
+        -- outcome, outcome->classified_as->signature, outcome->about->
+        -- issue/PR) are deferred to the S4 seat; every ref this row carries
+        -- (issue_ref/pr_ref/flow_id/dispatch_id/eval_memory_id) is present
+        -- so those edges can be derived later without a re-migration.
+        -- Adjudication evidence lives in the append-only dispatch_adjudications
+        -- table (#1035); this table holds mutable execution facts only — a
+        -- replayed complete may rewrite any column here.
+        CREATE TABLE IF NOT EXISTS dispatch_outcomes (
+            outcome_id       TEXT PRIMARY KEY,
+            dispatch_id      TEXT NOT NULL DEFAULT '',
+            eval_memory_id   TEXT,
+            model            TEXT,
+            vendor           TEXT NOT NULL DEFAULT 'unknown',
+            role             TEXT,
+            seat             TEXT,
+            task_type        TEXT,
+            execution_outcome    TEXT NOT NULL,
+            retry_count      INTEGER NOT NULL DEFAULT 0,
+            error_class      TEXT,
+            issue_ref        TEXT,
+            pr_ref           TEXT,
+            flow_id          TEXT,
+            cost_tokens      INTEGER,
+            cost_usd         REAL,
+            verification_present INTEGER NOT NULL DEFAULT 0,
+            diff_present         INTEGER NOT NULL DEFAULT 0,
+            evidence_refs    TEXT NOT NULL DEFAULT '[]',
+            idempotency_key  TEXT NOT NULL,
+            created_at       TEXT NOT NULL DEFAULT '',
+            updated_at       TEXT NOT NULL DEFAULT '',
+            UNIQUE (idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_dispatch_outcomes_vendor_ts
+            ON dispatch_outcomes(vendor, created_at);
+        CREATE INDEX IF NOT EXISTS idx_dispatch_outcomes_issue_ref
+            ON dispatch_outcomes(issue_ref);
+        CREATE INDEX IF NOT EXISTS idx_dispatch_outcomes_dispatch_id
+            ON dispatch_outcomes(dispatch_id);
+        -- Cross-session presence claims (#1001). Advisory "who's working on
+        -- what" lease rows — NOT a mutual-exclusion lock. A session/dispatch
+        -- registers a claim on an issue/lane when it starts touching it and
+        -- heartbeats it on every briefing read; a claim with a stale
+        -- `heartbeat_at` (older than the TTL) is treated as expired by
+        -- readers without a separate reaper process (lazy expiry, same spirit
+        -- as `find_active_exec_env_by_path` filtering by state). `state` is
+        -- the two-state lifecycle (`active` -> `released`), mirroring
+        -- `exec_envs`; the release transition goes through exactly one
+        -- function (`release_claim`), same discipline as
+        -- `reclaim_exec_env`.
+        CREATE TABLE IF NOT EXISTS session_claims (
+            claim_id             TEXT PRIMARY KEY,
+            session_client       TEXT,
+            issue_ref            TEXT,
+            flow_id              TEXT,
+            dispatch_id          TEXT,
+            branch               TEXT NOT NULL DEFAULT '',
+            declared_file_scope  TEXT,
+            state                TEXT NOT NULL DEFAULT 'active',
+            release_reason       TEXT,
+            created_at           TEXT NOT NULL DEFAULT '',
+            heartbeat_at         TEXT NOT NULL DEFAULT '',
+            released_at          TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_claims_state ON session_claims(state);
+        CREATE INDEX IF NOT EXISTS idx_session_claims_issue ON session_claims(issue_ref);
+        CREATE INDEX IF NOT EXISTS idx_session_claims_flow ON session_claims(flow_id);
+        -- #1001 round 2 item 2: DB-level uniqueness for the identity triple
+        -- upsert_or_heartbeat_claim's read-then-write relies on at the
+        -- application level. Partial (WHERE state='active') so a released
+        -- historical row never blocks a fresh active claim for the same
+        -- identity; COALESCE(..., '') on each nullable column so two active
+        -- rows that are both NULL in the same slot collide the same way the
+        -- upsert's `IS ?` lookup already treats them as one identity (see
+        -- `migrations/session_claims_identity.rs` for the full rationale and
+        -- the migration that retrofits this onto pre-existing DBs).
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_session_claims_identity_active
+            ON session_claims(COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, ''))
+            WHERE state = 'active';
 "#;
 
 pub(super) const MIGRATED_INDEXES_SQL: &str = r#"

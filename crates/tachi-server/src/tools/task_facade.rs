@@ -178,6 +178,15 @@ pub(super) async fn handle_tachi_task_cancel(
         .get("state")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
+
+    // #1001 round 2 item 1: release the presence claim this dispatch
+    // registered (auto_register_or_heartbeat_claim keys it on dispatch_id).
+    // Fires unconditionally — including the already-terminal early-return
+    // branch below — so a claim never stays `active` for a dispatch that is
+    // being cancelled (or was already terminal but never released). Fail-safe
+    // — degrades to a warn, never fails cancel.
+    crate::claims_ops::release_claim_for_dispatch(server, &dispatch_id, "cancel");
+
     if is_terminal_task_state(state) {
         return serde_json::to_string(&json!({
             "status": "already_terminal",

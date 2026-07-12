@@ -2,15 +2,31 @@
 
 use crate::{
     db,
+    db::AnchorKind,
     error::MemoryError,
+    relation_ontology::ComponentGovernanceRelation,
     types::{GraphExpandResult, MemoryEdge},
     MemoryStore,
 };
 
 impl MemoryStore {
-    /// Add or update an edge in the memory graph.
+    /// Add or update an edge in the memory graph. Generic path: the relation
+    /// must be admissible on ontology-v1 (the #772 grandfathered relations are
+    /// rejected here — use [`MemoryStore::add_component_governance_edge`]).
     pub fn add_edge(&self, edge: &MemoryEdge) -> Result<(), MemoryError> {
         db::add_edge(&self.conn, edge)
+    }
+
+    /// Typed, caller-scoped write door for the #772 component-governance
+    /// grandfathered relations. Only `component_governance_ops` seeding should
+    /// call this; the closed [`ComponentGovernanceRelation`] enum is the
+    /// authoritative relation (and the caller-scoping mechanism).
+    pub fn add_component_governance_edge(
+        &self,
+        edge: &MemoryEdge,
+        relation: ComponentGovernanceRelation,
+    ) -> Result<(), MemoryError> {
+        db::add_component_governance_edge(&self.conn, edge, relation)
     }
 
     /// Remove a specific edge.
@@ -56,5 +72,20 @@ impl MemoryStore {
     /// Average importance across non-archived memories.
     pub fn avg_importance(&self) -> Result<f64, MemoryError> {
         db::avg_importance(&self.conn)
+    }
+
+    /// Close `valid_to` on every still-open `related_to` edge (tachi#773
+    /// item 3: legacy fog retirement). Idempotent — safe to call repeatedly
+    /// from a maintenance sweep. Returns the number of rows closed.
+    pub fn close_related_to_fog(&self) -> Result<usize, MemoryError> {
+        db::close_related_to_fog(&self.conn)
+    }
+
+    /// Ensure a deterministic anchor row exists for `(kind, key)` (tachi#773
+    /// item 4). `INSERT OR IGNORE` semantics — idempotent, fails closed on a
+    /// kind/key mismatch at an existing id. Returns the anchor's
+    /// deterministic id.
+    pub fn ensure_anchor(&self, kind: AnchorKind, key: &str) -> Result<String, MemoryError> {
+        db::ensure_anchor(&self.conn, kind, key)
     }
 }

@@ -16,12 +16,10 @@
 //! - v9: relocate non-empty `location` into `path` / metadata, then drop `location`
 //! - v10: drop retired skill-pack tables (`packs`, `agent_projections`)
 //! - v11: drop retired `domains` registry table (#757)
+//! - v12: `session_claims` identity-triple UNIQUE index (#1001 round 2)
 //! - v13: add `idx_hard_state_ns_updated` on `hard_state(namespace, updated_at
-//!   DESC)` — collapses `list_state`'s full temp-B-tree sort (perf pack).
-//!   Renumbered from v12 to v13 (#1017 fixup): v12 is owned by #1007's
-//!   `session_claims` presence migration, which merges to `main` separately.
-//!   This branch does not itself define a v12 migration — its sentinel list
-//!   is only self-consistent against a `main` that already carries #1007.
+//!   DESC)` — collapses `list_state`'s full temp-B-tree sort (perf pack;
+//!   numbered after #1007's v12, see #1017)
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -34,10 +32,9 @@
 //! against data/columns it doesn't understand yet.
 //!
 //! [`EXPECTED_SCHEMA_VERSION`] counts the migration sequence above: 13
-//! sentinel migrations (v1..v13, with v12 owned by #1007 and merged
-//! separately) plus the pre-sentinel baseline schema (v0), so the current
-//! stamp is 13. Bump this const (and add a `vN` doc line above) whenever a
-//! new migration is appended to [`run_data_migrations`].
+//! sentinel migrations (v1..v13) plus the pre-sentinel baseline schema (v0),
+//! so the current stamp is 13. Bump this const (and add a `vN` doc line
+//! above) whenever a new migration is appended to [`run_data_migrations`].
 //!
 //! ### Compatibility transaction widened to cover `init_schema_inner` (#984 F1 round 3)
 //!
@@ -75,6 +72,7 @@ mod hard_state_index;
 mod legacy_columns;
 mod pack_retire;
 mod sentinel;
+mod session_claims_identity;
 
 use basic::*;
 use cross_db::*;
@@ -86,6 +84,7 @@ pub use legacy_columns::{
 };
 use pack_retire::*;
 use sentinel::*;
+use session_claims_identity::*;
 
 const MIGRATION_NS: &str = "migrations";
 const SANITY_QUARANTINE_FRACTION: f64 = 0.5;
@@ -105,6 +104,7 @@ pub struct MigrationReport {
     pub location_columns_dropped: usize,
     pub pack_tables_dropped: usize,
     pub domains_table_dropped: usize,
+    pub session_claims_duplicates_deduped: usize,
     pub hard_state_index_added: usize,
 }
 
@@ -289,9 +289,13 @@ pub(crate) fn run_data_migrations_in_tx(
     )?
     .unwrap_or(0);
 
-    // v12 = session_claims (#1007's presence migration; merges via #1007,
-    // not defined in this branch). This branch owns v13 only — see the
-    // module doc comment above for the renumbering rationale.
+    report.session_claims_duplicates_deduped = apply_versioned_migration(
+        conn,
+        "v12_session_claims_unique_identity",
+        migrate_v12_session_claims_unique_identity,
+    )?
+    .unwrap_or(0);
+
     report.hard_state_index_added = apply_versioned_migration(
         conn,
         "v13_hard_state_ns_updated_index",
@@ -951,6 +955,7 @@ mod tests {
         assert_eq!(report.location_columns_dropped, 0);
         assert_eq!(report.pack_tables_dropped, 0);
         assert_eq!(report.domains_table_dropped, 0);
+        assert_eq!(report.session_claims_duplicates_deduped, 0);
 
         // Sentinels skipped the data work, but the version stamp — which is
         // independent of the sentinel mechanism — still advances.
@@ -1127,8 +1132,7 @@ mod tests {
         "v9_relocate_and_drop_location",
         "v10_drop_pack_tables",
         "v11_drop_domains_table",
-        // v12 (session_claims, #1007) is not defined on this branch — see
-        // the module doc comment's v12/v13 renumbering note.
+        "v12_session_claims_unique_identity",
         "v13_hard_state_ns_updated_index",
     ];
 
@@ -1145,15 +1149,6 @@ mod tests {
     /// `ALL_MIGRATION_SENTINEL_KEYS` above is a separate, hand-maintained
     /// list used only to seed the "genuine existing sentinels" fixture; this
     /// test intentionally does not depend on it being complete or in sync.
-    ///
-    /// NOTE (#1017 fixup): on this branch in isolation this test is
-    /// expected to FAIL — `run_data_migrations` marks 12 sentinels here
-    /// (v1..v11, v13; v12 is owned by #1007 and not present on this
-    /// branch) while `EXPECTED_SCHEMA_VERSION` is 13, anticipating v12
-    /// landing from `main` via #1007. This only becomes self-consistent
-    /// once this branch is merged on top of a `main` that already carries
-    /// #1007 — a merge-order concern left to the leader, not something to
-    /// paper over here with a branch-local v12 stub.
     #[test]
     fn expected_schema_version_matches_migration_count() {
         let (mut conn, tmp) = open_test_db();

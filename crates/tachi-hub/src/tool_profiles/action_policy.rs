@@ -151,6 +151,8 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "ask"
                 | "progress"
                 | "readiness"
+                | "claim"
+                | "release"
                 | "sticky_leave"
                 | "sticky_check"
         ),
@@ -194,7 +196,12 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             // do not narrow a read-only action past its prior visibility.
             "search" | "get" | "briefing" | "alerts" | "ask" | "progress" | "readiness"
             | "doctor_scan" | "sticky_check" => Some(ToolBundle::Observe),
-            "save" | "extract_facts" | "checkpoint" | "sticky_leave" => Some(ToolBundle::Remember),
+            // #1001: claim/release are advisory presence bookkeeping, same
+            // worker-writable tier as save/checkpoint — a dispatched lane
+            // must be able to register/release its own presence claim.
+            "save" | "extract_facts" | "checkpoint" | "claim" | "release" | "sticky_leave" => {
+                Some(ToolBundle::Remember)
+            }
             "consolidate"
             | "recall_simulate"
             | "recall_proposals"
@@ -236,10 +243,17 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             _ => None,
         },
         "tachi_gh" => match action.as_str() {
-            "repo_view" | "issue_list" | "issue_read" | "pr_list" | "pr_read" | "pr_comments"
-            | "pr_review_digest" | "pr_status" => Some(ToolBundle::Observe),
-            "issue_create" | "issue_comment" | "pr_comment" | "safe_merge" | "ship" | "link_pr"
-            | "pr_handoff" | "release_note" => Some(ToolBundle::Coordinate),
+            "repo_view"
+            | "issue_list"
+            | "issue_read"
+            | "issue_freshness_scan"
+            | "pr_list"
+            | "pr_read"
+            | "pr_comments"
+            | "pr_review_digest"
+            | "pr_status" => Some(ToolBundle::Observe),
+            "issue_create" | "issue_comment" | "issue_label" | "pr_comment" | "safe_merge"
+            | "ship" | "link_pr" | "pr_handoff" | "release_note" => Some(ToolBundle::Coordinate),
             _ => None,
         },
         "tachi_event" => match action.as_str() {
