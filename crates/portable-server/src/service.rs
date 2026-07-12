@@ -70,6 +70,12 @@ const DEFAULT_SEARCH_TOP_K: usize = 6;
 /// as a plain constant instead of imported.
 const MAX_SEARCH_TOP_K: usize = 100;
 
+/// Portable mirror of `tachi-params::MAX_SEARCH_CANDIDATES_PER_CHANNEL`. Keep
+/// the candidate pool bounded, but never below the requested result count: the
+/// latter would silently make a valid `top_k` unattainable.
+const DEFAULT_SEARCH_CANDIDATES_PER_CHANNEL: usize = 20;
+const MAX_SEARCH_CANDIDATES_PER_CHANNEL: usize = 500;
+
 /// Clamp a caller-supplied `top_k` into `[1, MAX_SEARCH_TOP_K]`, defaulting to
 /// `DEFAULT_SEARCH_TOP_K` when absent. An unbounded `top_k` would let a caller
 /// force `hybrid_search` to rank/return an unbounded result set — a cheap DoS
@@ -78,6 +84,21 @@ fn normalized_top_k(requested: Option<usize>) -> usize {
     requested
         .unwrap_or(DEFAULT_SEARCH_TOP_K)
         .clamp(1, MAX_SEARCH_TOP_K)
+}
+
+fn normalized_candidates_per_channel(requested: Option<usize>, top_k: usize) -> usize {
+    requested
+        .unwrap_or(DEFAULT_SEARCH_CANDIDATES_PER_CHANNEL)
+        .max(top_k)
+        .min(MAX_SEARCH_CANDIDATES_PER_CHANNEL)
+}
+
+fn default_mmr_threshold() -> Option<f64> {
+    Some(0.85)
+}
+
+fn default_graph_expand_hops() -> Option<u32> {
+    Some(1)
 }
 
 /// Params for the `search` tool.
@@ -101,9 +122,12 @@ pub struct SearchParams {
     pub include_archived: bool,
     #[serde(default)]
     pub candidates_per_channel: Option<usize>,
-    #[serde(default)]
+    /// MMR diversity threshold. Omission keeps Quant's 0.85 default; explicit
+    /// null disables MMR, matching the downstream wire contract.
+    #[serde(default = "default_mmr_threshold")]
     pub mmr_threshold: Option<f64>,
-    #[serde(default)]
+    /// Graph expansion defaults to one hop in the Quant/full-Tachi contract.
+    #[serde(default = "default_graph_expand_hops")]
     pub graph_expand_hops: Option<u32>,
     #[serde(default)]
     pub graph_relation_filter: Option<String>,
@@ -224,9 +248,9 @@ pub struct MemoryActionParams {
     pub include_archived: bool,
     #[serde(default)]
     pub candidates_per_channel: Option<usize>,
-    #[serde(default)]
+    #[serde(default = "default_mmr_threshold")]
     pub mmr_threshold: Option<f64>,
-    #[serde(default)]
+    #[serde(default = "default_graph_expand_hops")]
     pub graph_expand_hops: Option<u32>,
     #[serde(default)]
     pub graph_relation_filter: Option<String>,
@@ -475,8 +499,11 @@ impl PortableServer {
             domain: params.domain,
             query_vec: params.query_vec,
             include_archived: params.include_archived,
-            candidates_per_channel: params.candidates_per_channel.unwrap_or(20).clamp(1, 1_000),
-            mmr_threshold: params.mmr_threshold.or(Some(0.85)),
+            candidates_per_channel: normalized_candidates_per_channel(
+                params.candidates_per_channel,
+                top_k,
+            ),
+            mmr_threshold: params.mmr_threshold,
             graph_expand_hops: params.graph_expand_hops.unwrap_or(0).min(2),
             graph_relation_filter: params.graph_relation_filter,
             as_of: params.as_of,
@@ -1096,6 +1123,37 @@ mod tests {
         assert_eq!(normalized_top_k(Some(0)), 1);
         assert_eq!(normalized_top_k(Some(999_999)), MAX_SEARCH_TOP_K);
         assert_eq!(normalized_top_k(Some(MAX_SEARCH_TOP_K)), MAX_SEARCH_TOP_K);
+    }
+
+    // The portable HAPI facade must preserve the downstream JSON contract:
+    // omitted fields select Quant defaults, while an explicit JSON null still
+    // carries the caller's request to disable MMR.
+    #[test]
+    fn quant_search_controls_keep_defaults_null_semantics_and_candidate_floor() {
+        let omitted: SearchParams = serde_json::from_value(json!({ "query": "memory" }))
+            .expect("deserialize omitted search controls");
+        assert_eq!(omitted.mmr_threshold, Some(0.85));
+        assert_eq!(omitted.graph_expand_hops, Some(1));
+
+        let disabled: SearchParams = serde_json::from_value(json!({
+            "query": "memory",
+            "mmr_threshold": null,
+        }))
+        .expect("deserialize explicit MMR disable");
+        assert_eq!(disabled.mmr_threshold, None);
+
+        assert_eq!(normalized_candidates_per_channel(None, 6), 20);
+        assert_eq!(normalized_candidates_per_channel(Some(1), 100), 100);
+        assert_eq!(normalized_candidates_per_channel(Some(999_999), 6), 500);
+
+        let action: MemoryActionParams = serde_json::from_value(json!({
+            "action": "search",
+            "query": "memory",
+        }))
+        .expect("deserialize omitted HAPI search controls");
+        let action_params = action.search_params().expect("HAPI search params");
+        assert_eq!(action_params.mmr_threshold, Some(0.85));
+        assert_eq!(action_params.graph_expand_hops, Some(1));
     }
 
     /// A caller-forced `top_k=999999` (the DoS lever an uncapped value would
