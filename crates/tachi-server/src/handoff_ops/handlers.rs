@@ -9,7 +9,7 @@ use super::memo::{memo_from_entry, memo_matches_agent, memo_to_memory_entry};
 use super::pending::{
     pending_handoff_entries, supersede_pending_handoffs, upsert_acknowledged_entry,
 };
-use super::HANDOFF_MEMORY_LIMIT;
+use super::{DEPRECATION_NOTICE, HANDOFF_MEMORY_LIMIT};
 
 pub(crate) async fn handle_handoff_leave(
     server: &MemoryServer,
@@ -50,6 +50,7 @@ pub(crate) async fn handle_handoff_leave(
         "memo_id": memo_id,
         "from_agent": from_agent,
         "memo": memo_json,
+        "deprecated": DEPRECATION_NOTICE,
     }))
     .map_err(|e| format!("serialize: {e}"))
 }
@@ -69,6 +70,7 @@ pub(crate) async fn handle_handoff_check(
     let result = serde_json::to_string(&json!({
         "pending_memos": matching.len(),
         "memos": matching,
+        "deprecated": DEPRECATION_NOTICE,
     }))
     .map_err(|e| format!("serialize: {e}"))?;
 

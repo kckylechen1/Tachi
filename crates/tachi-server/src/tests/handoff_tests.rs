@@ -155,6 +155,13 @@ async fn handoff_leave_and_check_roundtrip() {
     assert_eq!(leave_json["status"], json!("memo_left"));
     assert_eq!(leave_json["from_agent"], json!("agent-a"));
     assert!(leave_json["memo_id"].is_string());
+    // #1016: deprecation field present, points at the replacements.
+    let leave_deprecated = leave_json["deprecated"]
+        .as_str()
+        .expect("leave response carries deprecated field");
+    assert!(leave_deprecated.contains("#1016"));
+    assert!(leave_deprecated.contains("sticky_leave"));
+    assert!(leave_deprecated.contains("handoff_write"));
 
     // Check as agent-b — should see the memo
     let check_b = server
@@ -167,6 +174,11 @@ async fn handoff_leave_and_check_roundtrip() {
     let check_b_json: serde_json::Value = serde_json::from_str(&check_b).expect("should be JSON");
     assert_eq!(check_b_json["pending_memos"], json!(1));
     assert_eq!(check_b_json["memos"][0]["from_agent"], json!("agent-a"));
+    // #1016: deprecation field present on check responses too.
+    assert!(check_b_json["deprecated"]
+        .as_str()
+        .expect("check response carries deprecated field")
+        .contains("#1016"));
 
     // Check as agent-c — should NOT see it (targeted at agent-b)
     let check_c = server
