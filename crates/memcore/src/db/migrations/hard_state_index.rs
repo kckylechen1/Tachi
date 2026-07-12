@@ -25,8 +25,11 @@ use crate::error::MemoryError;
 /// exists (e.g. a fresh DB created after this migration was added, where
 /// `ddl.rs`'s `MIGRATED_INDEXES_SQL`/base schema might already carry it),
 /// and this migration is additionally skipped entirely once the
-/// `v12_hard_state_ns_updated_index` sentinel is set.
-pub(super) fn migrate_v12_add_hard_state_index(conn: &Connection) -> Result<usize, MemoryError> {
+/// `v13_hard_state_ns_updated_index` sentinel is set.
+///
+/// Renumbered from v12 to v13 (#1017 fixup): v12 belongs to #1007's
+/// `session_claims` presence migration, which lives on a separate branch.
+pub(super) fn migrate_v13_add_hard_state_index(conn: &Connection) -> Result<usize, MemoryError> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_hard_state_ns_updated \
          ON hard_state(namespace, updated_at DESC)",

@@ -16,8 +16,12 @@
 //! - v9: relocate non-empty `location` into `path` / metadata, then drop `location`
 //! - v10: drop retired skill-pack tables (`packs`, `agent_projections`)
 //! - v11: drop retired `domains` registry table (#757)
-//! - v12: add `idx_hard_state_ns_updated` on `hard_state(namespace, updated_at
-//!   DESC)` — collapses `list_state`'s full temp-B-tree sort (perf pack)
+//! - v13: add `idx_hard_state_ns_updated` on `hard_state(namespace, updated_at
+//!   DESC)` — collapses `list_state`'s full temp-B-tree sort (perf pack).
+//!   Renumbered from v12 to v13 (#1017 fixup): v12 is owned by #1007's
+//!   `session_claims` presence migration, which merges to `main` separately.
+//!   This branch does not itself define a v12 migration — its sentinel list
+//!   is only self-consistent against a `main` that already carries #1007.
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -29,10 +33,11 @@
 //! written by a newer kernel fails loudly instead of silently proceeding
 //! against data/columns it doesn't understand yet.
 //!
-//! [`EXPECTED_SCHEMA_VERSION`] counts the migration sequence above: 12
-//! sentinel migrations (v1..v12) plus the pre-sentinel baseline schema (v0),
-//! so the current stamp is 12. Bump this const (and add a `vN` doc line
-//! above) whenever a new migration is appended to [`run_data_migrations`].
+//! [`EXPECTED_SCHEMA_VERSION`] counts the migration sequence above: 13
+//! sentinel migrations (v1..v13, with v12 owned by #1007 and merged
+//! separately) plus the pre-sentinel baseline schema (v0), so the current
+//! stamp is 13. Bump this const (and add a `vN` doc line above) whenever a
+//! new migration is appended to [`run_data_migrations`].
 //!
 //! ### Compatibility transaction widened to cover `init_schema_inner` (#984 F1 round 3)
 //!
@@ -61,7 +66,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 12;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 13;
 
 mod basic;
 mod cross_db;
@@ -284,10 +289,13 @@ pub(crate) fn run_data_migrations_in_tx(
     )?
     .unwrap_or(0);
 
+    // v12 = session_claims (#1007's presence migration; merges via #1007,
+    // not defined in this branch). This branch owns v13 only — see the
+    // module doc comment above for the renumbering rationale.
     report.hard_state_index_added = apply_versioned_migration(
         conn,
-        "v12_hard_state_ns_updated_index",
-        migrate_v12_add_hard_state_index,
+        "v13_hard_state_ns_updated_index",
+        migrate_v13_add_hard_state_index,
     )?
     .unwrap_or(0);
 
@@ -808,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn v12_adds_hard_state_namespace_updated_index() {
+    fn v13_adds_hard_state_namespace_updated_index() {
         let (mut conn, tmp) = open_test_db();
         assert!(!index_present(&conn, "idx_hard_state_ns_updated"));
 
@@ -1119,14 +1127,16 @@ mod tests {
         "v9_relocate_and_drop_location",
         "v10_drop_pack_tables",
         "v11_drop_domains_table",
-        "v12_hard_state_ns_updated_index",
+        // v12 (session_claims, #1007) is not defined on this branch — see
+        // the module doc comment's v12/v13 renumbering note.
+        "v13_hard_state_ns_updated_index",
     ];
 
     /// Ties `EXPECTED_SCHEMA_VERSION` to the migration count the runner
     /// *itself* produces — not a hand-maintained duplicate list — by running
     /// the real `run_data_migrations` against a fresh DB and counting the
     /// sentinel rows it actually wrote to `hard_state`. Appending a
-    /// `v12_...` migration to `run_data_migrations_in_tx` (with its own
+    /// `v13_...` migration to `run_data_migrations_in_tx` (with its own
     /// `mark_run` call, as every migration above does) increases this count
     /// automatically; forgetting to bump `EXPECTED_SCHEMA_VERSION` to match
     /// then fails this test — silently under-stamping newly-migrated DBs
@@ -1135,6 +1145,15 @@ mod tests {
     /// `ALL_MIGRATION_SENTINEL_KEYS` above is a separate, hand-maintained
     /// list used only to seed the "genuine existing sentinels" fixture; this
     /// test intentionally does not depend on it being complete or in sync.
+    ///
+    /// NOTE (#1017 fixup): on this branch in isolation this test is
+    /// expected to FAIL — `run_data_migrations` marks 12 sentinels here
+    /// (v1..v11, v13; v12 is owned by #1007 and not present on this
+    /// branch) while `EXPECTED_SCHEMA_VERSION` is 13, anticipating v12
+    /// landing from `main` via #1007. This only becomes self-consistent
+    /// once this branch is merged on top of a `main` that already carries
+    /// #1007 — a merge-order concern left to the leader, not something to
+    /// paper over here with a branch-local v12 stub.
     #[test]
     fn expected_schema_version_matches_migration_count() {
         let (mut conn, tmp) = open_test_db();
