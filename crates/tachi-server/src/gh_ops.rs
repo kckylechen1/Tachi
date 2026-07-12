@@ -5,8 +5,9 @@ use crate::gh_safe_merge::{
 };
 use crate::shell_ops::{append_github_event, merge_github_status, run_dir_for_flow_id};
 use crate::tool_params::{
-    GhCommentParams, GhIssueCreateParams, GhIssueListParams, GhIssueReadParams, GhPrCommentsParams,
-    GhPrListParams, GhPrReadParams, GhRepoViewParams, TachiGhParams, TachiVerifyParams,
+    GhCommentParams, GhIssueCreateParams, GhIssueListParams, GhIssueReadParams, GhLabelParams,
+    GhPrCommentsParams, GhPrListParams, GhPrReadParams, GhRepoViewParams, TachiGhParams,
+    TachiVerifyParams,
 };
 use crate::vault_ops::read_unlocked_vault_secret;
 use crate::verify_ops::{evaluate_verification_gate, record_items as record_verification_items};
@@ -22,7 +23,9 @@ type GhPrCommentsBundle = (Vec<Value>, Vec<Value>, Vec<Value>);
 
 mod ci_watch;
 mod comments;
+mod issue_freshness;
 mod issues;
+mod labels;
 mod prs;
 mod repo;
 mod review_digest;
@@ -37,6 +40,7 @@ mod safe_merge_tests;
 mod ship_tests;
 
 use self::issues::*;
+use self::labels::*;
 use self::prs::*;
 use self::repo::*;
 use self::review_digest::*;
@@ -46,5 +50,10 @@ use self::transport::*;
 
 pub(crate) use self::ci_watch::{daemon_ci_reader, spawn_ci_watch};
 pub(crate) use self::comments::{gh_comment_marker_present, handle_gh_comment};
+pub(crate) use self::issue_freshness::{
+    briefing_freshness_queues, fetch_and_scan_same_surface_churn, fetch_and_scan_stale_candidates,
+    fetch_and_scan_zombies, reap_stale_kind_rows, save_freshness_row, FreshnessRow,
+    KIND_CHURN_CANDIDATE, KIND_STALE_CANDIDATE, KIND_ZOMBIE, STALE_CANDIDATE_NS, ZOMBIE_NS,
+};
 pub(crate) use self::router::handle_tachi_gh;
 pub(crate) use self::safe_merge::{gh_client_for_server, handle_github_safe_merge};

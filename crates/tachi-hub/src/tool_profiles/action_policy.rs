@@ -236,10 +236,17 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             _ => None,
         },
         "tachi_gh" => match action.as_str() {
-            "repo_view" | "issue_list" | "issue_read" | "pr_list" | "pr_read" | "pr_comments"
-            | "pr_review_digest" | "pr_status" => Some(ToolBundle::Observe),
-            "issue_create" | "issue_comment" | "pr_comment" | "safe_merge" | "ship" | "link_pr"
-            | "pr_handoff" | "release_note" => Some(ToolBundle::Coordinate),
+            "repo_view"
+            | "issue_list"
+            | "issue_read"
+            | "issue_freshness_scan"
+            | "pr_list"
+            | "pr_read"
+            | "pr_comments"
+            | "pr_review_digest"
+            | "pr_status" => Some(ToolBundle::Observe),
+            "issue_create" | "issue_comment" | "issue_label" | "pr_comment" | "safe_merge"
+            | "ship" | "link_pr" | "pr_handoff" | "release_note" => Some(ToolBundle::Coordinate),
             _ => None,
         },
         "tachi_event" => match action.as_str() {
