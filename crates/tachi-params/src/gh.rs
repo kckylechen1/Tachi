@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Unified GitHub facade — one tool for all GitHub operations.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct TachiGhParams {
-    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "issue_comment", "pr_list", "pr_read", "pr_comments", "pr_comment", "pr_review_digest", "safe_merge", "ship", "link_pr", "pr_status", "pr_handoff", "release_note"
+    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "issue_comment", "issue_label", "issue_freshness_scan", "pr_list", "pr_read", "pr_comments", "pr_comment", "pr_review_digest", "safe_merge", "ship", "link_pr", "pr_status", "pr_handoff", "release_note"
     pub action: String,
     /// Repository in "owner/repo" format. Required for GitHub primitive actions; lifecycle actions may infer from issue_ref/pr_ref/flow_id.
     #[serde(default)]
@@ -136,6 +136,45 @@ pub struct TachiGhParams {
     /// to the flow's automation-plan title, then the task summary, when unset.
     #[serde(default)]
     pub notes: Option<String>,
+    /// Label mode for action="issue_label": "add" (default) or "remove".
+    #[serde(default)]
+    pub label_mode: Option<String>,
+    /// Max merged PRs to scan for action="issue_freshness_scan" (default 100).
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u32_from_string_or_number"
+    )]
+    #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
+    pub scan_limit: Option<u32>,
+    /// Minimum number of distinct recently-merged PRs touching the same
+    /// file-surface as an inactive open issue before action="issue_freshness_scan"
+    /// flags it as a same-surface-churn candidate (default 3).
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u32_from_string_or_number"
+    )]
+    #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
+    pub churn_threshold: Option<u32>,
+    /// RFC3339 activity cutoff for action="issue_freshness_scan"'s
+    /// same-surface-churn heuristic: issues updated/commented at or after this
+    /// timestamp count as active and are excluded. Defaults to 30 days before
+    /// the scan runs.
+    #[serde(default)]
+    pub churn_activity_since: Option<String>,
+}
+
+/// Parameters for adding/removing labels on a GitHub issue or PR (write-back arc).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct GhLabelParams {
+    /// Repository in "owner/repo" format
+    pub repo: String,
+    /// Issue or PR number to label
+    pub number: u64,
+    /// Labels to add or remove
+    pub labels: Vec<String>,
+    /// "add" (default) or "remove"
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 /// Parameters for reading a GitHub issue

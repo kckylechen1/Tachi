@@ -303,6 +303,13 @@ pub(crate) async fn handle_memory_briefing(
     // feature briefing (which only sees the flow already in scope).
     let open_loops = crate::shell_ops::scan_open_loops(8);
 
+    // Issue freshness (#1000): zombie (fixed-but-open) + stale-candidate
+    // queues, projected from already-scanned review-candidate rows
+    // (state_kv). This reads only — population happens via
+    // `tachi_gh(action='issue_freshness_scan')` + candidate save, kept out
+    // of the briefing hot path.
+    let issue_freshness = crate::gh_ops::briefing_freshness_queues(server, 5);
+
     // Presence 工位表 (#1001): read-only, failure-safe projection of live
     // session claims + advisory collision warnings against any explicit
     // issue_ref this briefing call was scoped to. Never fails briefing.
@@ -392,6 +399,14 @@ pub(crate) async fn handle_memory_briefing(
             insert_non_empty_compact_section(&mut response, "verification", json!(verification));
             insert_non_empty_compact_section(&mut response, "kanban", board);
             insert_non_empty_compact_section(&mut response, "open_loops", json!(open_loops));
+            if issue_freshness["zombies"]["count"].as_u64().unwrap_or(0) > 0
+                || issue_freshness["stale_candidates"]["count"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    > 0
+            {
+                response.insert("issue_freshness".to_string(), issue_freshness.clone());
+            }
             if presence_board["count"].as_u64().unwrap_or(0) > 0 || !presence_warnings.is_empty() {
                 response.insert(
                     "presence".to_string(),
@@ -423,6 +438,7 @@ pub(crate) async fn handle_memory_briefing(
             "verification": verification,
             "kanban": board,
             "open_loops": open_loops,
+            "issue_freshness": issue_freshness,
             "presence": {
                 "board": presence_board,
                 "warnings": presence_warnings,
@@ -467,6 +483,7 @@ pub(crate) async fn handle_memory_briefing(
         &checkpoints,
         &open_loops,
         &component_governance,
+        &issue_freshness,
         &presence_for_markdown,
         compact,
     );

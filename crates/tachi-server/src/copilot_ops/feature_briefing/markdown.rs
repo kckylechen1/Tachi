@@ -101,6 +101,18 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
             out.push(format!("- {detail} → `{action}`"));
         }
     }
+    // #1000 round-3 codex review finding 5: the JSON response has carried
+    // `issue_freshness` since #1000 shipped, but this markdown renderer
+    // never rendered it — `tachi_memory`'s compatibility briefing did (via
+    // `agent_markdown::format_briefing`), `tachi_task`'s feature briefing
+    // markdown did not. Shared helper keeps the two renderers' wording (and
+    // the finding-7 wording fix) from drifting apart.
+    if let Some(section) = value
+        .get("issue_freshness")
+        .and_then(crate::agent_markdown::render_issue_freshness_section)
+    {
+        out.push(section);
+    }
     out.push(markdown_presence_section(value));
     out.push(format!(
         "\n## Next Action\n{}",
@@ -256,4 +268,75 @@ pub(super) fn compact_value_line(value: &Value) -> String {
         return format!("`{id}` [{state}] {summary}");
     }
     value.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #1000 round-3 codex review finding 5: `issue_freshness` is present on
+    /// the JSON response (`handlers.rs` always inserts it, even when both
+    /// queues are empty), but the markdown renderer used to drop it
+    /// entirely — no "Issue freshness" section appeared anywhere in
+    /// `tachi_task`'s markdown output, unlike `tachi_memory`'s briefing.
+    #[test]
+    fn feature_briefing_markdown_renders_issue_freshness_section_when_nonempty() {
+        let value = json!({
+            "objective": "test",
+            "current_stage": "intake",
+            "issue_freshness": {
+                "zombies": {
+                    "count": 1,
+                    "items": [{ "issue_ref": "owner/repo#979" }],
+                    "overflow": 0,
+                },
+                "stale_candidates": {
+                    "count": 0,
+                    "items": [],
+                    "overflow": 0,
+                },
+            },
+        });
+        let markdown = format_feature_briefing_markdown(&value);
+        assert!(
+            markdown.contains("Issue freshness"),
+            "expected an Issue freshness section, got: {markdown}"
+        );
+        assert!(
+            markdown.contains("owner/repo#979"),
+            "expected the zombie issue_ref surfaced, got: {markdown}"
+        );
+    }
+
+    /// Empty-queue case must not emit an empty/misleading section — same
+    /// convention as every other `markdown_section` call in this renderer.
+    #[test]
+    fn feature_briefing_markdown_omits_issue_freshness_section_when_empty() {
+        let value = json!({
+            "objective": "test",
+            "current_stage": "intake",
+            "issue_freshness": {
+                "zombies": { "count": 0, "items": [], "overflow": 0 },
+                "stale_candidates": { "count": 0, "items": [], "overflow": 0 },
+            },
+        });
+        let markdown = format_feature_briefing_markdown(&value);
+        assert!(
+            !markdown.contains("Issue freshness"),
+            "expected no Issue freshness section when both queues are empty, got: {markdown}"
+        );
+    }
+
+    /// Missing `issue_freshness` field entirely (defensive — shouldn't
+    /// happen since `handlers.rs` always inserts it, but the renderer must
+    /// not panic) must degrade to omitting the section, not erroring.
+    #[test]
+    fn feature_briefing_markdown_handles_missing_issue_freshness_field() {
+        let value = json!({
+            "objective": "test",
+            "current_stage": "intake",
+        });
+        let markdown = format_feature_briefing_markdown(&value);
+        assert!(!markdown.contains("Issue freshness"));
+    }
 }
