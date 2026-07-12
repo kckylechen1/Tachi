@@ -58,6 +58,7 @@ mod formatting;
 mod handoff_facade;
 mod hub_facade;
 mod memory_facade;
+mod peer_facade;
 mod pipeline_facade;
 mod runtime_context_facade;
 mod sandbox_facade;

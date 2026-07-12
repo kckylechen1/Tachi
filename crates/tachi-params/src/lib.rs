@@ -6,6 +6,7 @@ mod foundry;
 mod gh;
 mod hub;
 mod memory;
+mod peer;
 mod project_db;
 mod sandbox;
 
@@ -16,6 +17,7 @@ pub use foundry::*;
 pub use gh::*;
 pub use hub::*;
 pub use memory::*;
+pub use peer::*;
 pub use project_db::*;
 pub use sandbox::*;
 
