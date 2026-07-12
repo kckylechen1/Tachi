@@ -35,6 +35,21 @@ use crate::MemoryServer;
 const TASK_WAIT_INITIAL_POLL_DELAY: StdDuration = StdDuration::from_millis(250);
 const TASK_WAIT_MAX_POLL_DELAY: StdDuration = StdDuration::from_secs(2);
 
+/// `tachi_task(action='wait')` timeout_secs default/cap (see
+/// `task_facade::handle_tachi_task_wait`). `pub(crate)` so
+/// `cli_client::transport::daemon_call_timeout` can derive the outer RPC
+/// timeout from the *same* numbers instead of a hand-mirrored copy that can
+/// drift out of sync (see #970, #1028).
+pub(crate) const TASK_WAIT_TIMEOUT_DEFAULT_SECS: u64 = 600;
+pub(crate) const TASK_WAIT_TIMEOUT_CAP_SECS: u64 = 86_400;
+
+/// `tachi_task(action='status'|'cancel')` timeout_secs default/cap for the
+/// acpx control-plane call (see `task_facade::handle_tachi_task_status` and
+/// `handle_tachi_task_cancel`). Same cross-module sharing rationale as
+/// `TASK_WAIT_TIMEOUT_DEFAULT_SECS` above.
+pub(crate) const TASK_CONTROL_TIMEOUT_DEFAULT_SECS: u64 = 30;
+pub(crate) const TASK_CONTROL_TIMEOUT_CAP_SECS: u64 = 300;
+
 mod component_facade;
 mod continuity_facade;
 mod dispatch_complete_defaults;

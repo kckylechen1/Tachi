@@ -11,7 +11,12 @@ pub(super) async fn handle_tachi_task_wait(
         .filter(|id| !id.is_empty())
         .ok_or_else(|| "dispatch_id is required when action='wait'".to_string())?
         .to_string();
-    let timeout = StdDuration::from_secs(params.timeout_secs.unwrap_or(600).min(86_400));
+    let timeout = StdDuration::from_secs(
+        params
+            .timeout_secs
+            .unwrap_or(TASK_WAIT_TIMEOUT_DEFAULT_SECS)
+            .min(TASK_WAIT_TIMEOUT_CAP_SECS),
+    );
     let deadline = Instant::now() + timeout;
     let mut last_task = None;
     let mut poll_delay = TASK_WAIT_INITIAL_POLL_DELAY;
@@ -108,7 +113,12 @@ pub(super) async fn handle_tachi_task_status(
         .and_then(Value::as_str)
         == Some("acpx")
     {
-        let timeout = StdDuration::from_secs(params.timeout_secs.unwrap_or(30).min(300));
+        let timeout = StdDuration::from_secs(
+            params
+                .timeout_secs
+                .unwrap_or(TASK_CONTROL_TIMEOUT_DEFAULT_SECS)
+                .min(TASK_CONTROL_TIMEOUT_CAP_SECS),
+        );
         match crate::dispatch_ops::run_acpx_control_from_status(
             &run_dir,
             &response["run_status"],
@@ -178,7 +188,12 @@ pub(super) async fn handle_tachi_task_cancel(
         }))
         .map_err(|e| format!("serialize cancel response: {e}"));
     }
-    let timeout = StdDuration::from_secs(params.timeout_secs.unwrap_or(30).min(300));
+    let timeout = StdDuration::from_secs(
+        params
+            .timeout_secs
+            .unwrap_or(TASK_CONTROL_TIMEOUT_DEFAULT_SECS)
+            .min(TASK_CONTROL_TIMEOUT_CAP_SECS),
+    );
     let acpx_cancel =
         crate::dispatch_ops::run_acpx_control_from_status(&run_dir, &status, "cancel", timeout)
             .await?;
