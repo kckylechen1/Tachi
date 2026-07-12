@@ -3,6 +3,7 @@ use super::*;
 // ─── opencode_serve harness preflight ────────────────────────────────────────
 
 pub(super) struct HarnessPreflightInputs<'a> {
+    pub(super) server: &'a MemoryServer,
     pub(super) harness_transport: &'a str,
     pub(super) harness_server_url: &'a Option<String>,
     pub(super) credential_env: &'a HashMap<String, String>,
@@ -89,6 +90,15 @@ pub(super) fn run_harness_preflight(inputs: HarnessPreflightInputs<'_>) -> Resul
                 "timeout_secs": inputs.timeout_secs_for_status,
                 "error": err.clone(),
             })),
+        );
+        // #773 Layer-2 ② (hole b): preflight failure is a terminal dispatch
+        // state the agent never `tachi_complete`s — record a canonical outcome
+        // row (first-writer-wins on dispatch_id) so the router sees it.
+        crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+            inputs.server,
+            inputs.dispatch_id,
+            "preflight",
+            Some(inputs.agent_norm),
         );
         return Err(err);
     }

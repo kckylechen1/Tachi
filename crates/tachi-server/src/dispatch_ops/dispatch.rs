@@ -562,6 +562,7 @@ pub(crate) async fn handle_tachi_dispatch(
             acpx_enabled,
             native_acp_enabled,
         } = prepare_dispatch_backend(DispatchBackendContext {
+            server,
             trajectory_path: &trajectory_path,
             workspace_dir: &workspace_dir,
             dispatch_id: &dispatch_id,
@@ -616,6 +617,7 @@ pub(crate) async fn handle_tachi_dispatch(
 
         // 7. Harness preflight (opencode_serve only)
         run_harness_preflight(HarnessPreflightInputs {
+            server,
             harness_transport: &harness_transport,
             harness_server_url: &harness_server_url,
             credential_env: &credentials.env,

@@ -454,6 +454,14 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- Adjudication evidence lives in the append-only dispatch_adjudications
         -- table (#1035); this table holds mutable execution facts only — a
         -- replayed complete may rewrite any column here.
+        --
+        -- Truthfulness (#773 Layer-2 ②): `execution_outcome` is the
+        -- MACHINE-RESOLVED terminal verdict (after the #878-A completion
+        -- predicate intercepts a false success, or the terminal state a
+        -- non-`tachi_complete` path reached), NOT the raw self-report;
+        -- `reported_outcome` keeps the agent's verbatim claim (NULL when a
+        -- terminal path carried no self-report). New `reported_outcome` column
+        -- is back-filled onto existing DBs by the v14 sentinel migration.
         CREATE TABLE IF NOT EXISTS dispatch_outcomes (
             outcome_id       TEXT PRIMARY KEY,
             dispatch_id      TEXT NOT NULL DEFAULT '',
@@ -463,7 +471,12 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             role             TEXT,
             seat             TEXT,
             task_type        TEXT,
+            -- machine-resolved terminal verdict (completed/failed/aborted/partial)
             execution_outcome    TEXT NOT NULL,
+            -- raw self-reported outcome, verbatim; NULL for no-self-report terminals
+            reported_outcome     TEXT,
+            -- retry_count: awaiting dispatch-context plumb (no source at write
+            -- points yet) — stays 0 until the dispatch retry ledger is wired.
             retry_count      INTEGER NOT NULL DEFAULT 0,
             error_class      TEXT,
             issue_ref        TEXT,

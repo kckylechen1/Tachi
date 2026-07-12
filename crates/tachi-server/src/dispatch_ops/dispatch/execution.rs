@@ -285,6 +285,18 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         d_id, kanban_state, error
                     );
                 }
+                // #773 Layer-2 ② (hole b): exit-0-without-tachi_complete that
+                // the predicate intercepts as a FALSE SUCCESS is a terminal
+                // FAILED the agent never `tachi_complete`d — record a canonical
+                // outcome row (reported_outcome NULL — no self-report reached us).
+                if kanban_state == "TASK_STATE_FAILED" {
+                    crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+                        &server_clone,
+                        &d_id,
+                        "watchdog",
+                        Some(agent_for_watchdog.as_str()),
+                    );
+                }
             } else {
                 // Crash / timeout / error: record a failure eval so the
                 // failure is still visible in the ledger, but tag it as
@@ -370,6 +382,15 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         d_id, error
                     );
                 }
+                // #773 Layer-2 ② (hole b): crash/timeout is a terminal FAILED
+                // the agent never `tachi_complete`d — record a canonical outcome
+                // row so the router learns from the failure (not just successes).
+                crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+                    &server_clone,
+                    &d_id,
+                    "watchdog",
+                    Some(agent_for_watchdog.as_str()),
+                );
             }
         }
 
