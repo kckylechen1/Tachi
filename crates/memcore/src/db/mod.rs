@@ -2,6 +2,8 @@ mod agent_state;
 mod audit;
 mod common;
 mod daily_pipeline;
+#[cfg(feature = "admin")]
+pub mod dispatch_outcomes;
 mod doctor_probe;
 mod event_ledger;
 #[cfg(feature = "admin")]
@@ -39,6 +41,11 @@ pub use daily_pipeline::{
     count_distinct_access_days, list_eval_evidence, list_memory_ids_needing_embedding,
     list_promotion_candidate_ids, promote_memory_to_durable, CategorySourceGroup,
     DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow,
+};
+#[cfg(feature = "admin")]
+pub use dispatch_outcomes::{
+    derive_idempotency_key, get_outcome, list_outcomes_by_issue_ref,
+    list_outcomes_by_vendor_window, upsert_outcome, DispatchOutcomeRow, NewDispatchOutcome,
 };
 pub use doctor_probe::{
     checkpoint_wal_truncate, count_chunks_rows, count_memories_missing_domain, count_memories_rows,
