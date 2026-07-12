@@ -28,6 +28,7 @@ fn test_memo(id: &str, to: Option<&str>) -> StickyMemo {
         text: "do the thing".to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
         ttl_days: 7,
+        identity_assurance: "session".to_string(),
     }
 }
 
@@ -958,6 +959,14 @@ async fn cp2_round3_sticky_leave_from_agent_uses_seat_not_profile() {
         "from_agent must be the TACHI_AGENT_SEAT value, not the shared TACHI_PROFILE"
     );
     assert_ne!(parsed["from_agent"], "codex_55_review");
+    // #1016: no explicit `agent_id` param was passed (server-side
+    // TACHI_AGENT_SEAT chain resolved it) — identity_assurance must be
+    // "session", never "caller_asserted".
+    assert_eq!(
+        parsed["identity_assurance"], "session",
+        "server-resolved from_agent (via TACHI_AGENT_SEAT, no explicit agent_id param) must be \
+         marked identity_assurance=session, not caller_asserted"
+    );
 
     let _ = std::fs::remove_file(&db_path);
     match original_profile {
@@ -1003,6 +1012,13 @@ async fn sticky_leave_accepts_explicit_agent_id_for_one_shot_channels() {
         parsed["from_agent"], "leader-oneshot",
         "explicit agent_id must be stamped as from_agent"
     );
+    // #1016: an explicit `agent_id` param is the caller self-reporting an
+    // identity the server never verifies — the response must say so.
+    assert_eq!(
+        parsed["identity_assurance"], "caller_asserted",
+        "an explicit agent_id param must be marked identity_assurance=caller_asserted in the \
+         sticky_leave response"
+    );
 
     let stored_memo = server
         .with_global_store_read(|store| {
@@ -1016,6 +1032,10 @@ async fn sticky_leave_accepts_explicit_agent_id_for_one_shot_channels() {
     assert_eq!(
         stored_memo.from_agent, "leader-oneshot",
         "persisted row must carry the explicit agent_id as from_agent, matching the response"
+    );
+    assert_eq!(
+        stored_memo.identity_assurance, "caller_asserted",
+        "persisted row must carry identity_assurance=caller_asserted, matching the response"
     );
 
     let _ = std::fs::remove_file(&db_path);
@@ -1107,6 +1127,7 @@ fn raw_secret_test_memo(id: &str, to: Option<&str>) -> StickyMemo {
             .to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
         ttl_days: 7,
+        identity_assurance: "session".to_string(),
     }
 }
 
@@ -1207,6 +1228,166 @@ fn cp4_round3_sticky_check_json_route_masks_hand_inserted_raw_secret_row() {
             );
         }
     }
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+// ─── #1016: identity_assurance — caller-asserted from_agent is visibly
+// self-reported ─────────────────────────────────────────────────────────
+//
+// Terminal-review fixup (#964/#1016): sticky_leave's `params.agent_id`
+// override lands straight in `from_agent` with zero marking — a server-
+// resolved identity and a caller's bare self-report are byte-identical in
+// the ledger, so an impersonated seat name is silent. The same_host self-
+// report trust model itself is owner-ratified and unchanged (advisory, not
+// a permission gate) — this only adds the visible marking these two tests
+// pin down: (a) the persisted row's `identity_assurance` field, and (b) the
+// suffix every downstream renderer (briefing markdown AND sticky_check JSON,
+// both fed by the same `pending.rs` choke point) shows for it.
+#[tokio::test]
+async fn explicit_agent_id_row_is_caller_asserted_and_renders_with_self_reported_suffix() {
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-identity-assurance-caller-asserted-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
+    handle_sticky_leave(
+        &server,
+        StickyLeaveInput {
+            text: "note from a self-reported seat".to_string(),
+            to: None,
+            ttl_days: None,
+            agent_id: Some("impersonator-or-honest-seat".to_string()),
+        },
+    )
+    .await
+    .expect("sticky_leave");
+
+    // (a) Row-level: the persisted StickyMemo must carry the marking.
+    let stored_memo = server
+        .with_global_store_read(|store| {
+            let entries = all_sticky_entries(store)?;
+            entries
+                .iter()
+                .find_map(sticky_from_entry)
+                .ok_or_else(|| "expected exactly one persisted sticky".to_string())
+        })
+        .expect("read back persisted sticky");
+    assert_eq!(
+        stored_memo.identity_assurance, "caller_asserted",
+        "a sticky sent with an explicit agent_id must persist identity_assurance=caller_asserted"
+    );
+
+    // (b) Render-level: both consumers of the same delivered-row choke point
+    // (briefing markdown, and sticky_check's raw JSON) must show the suffix.
+    let claimed =
+        claim_unread_stickies_for_briefing(&server, None, 5).expect("claim for briefing render");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(
+        claimed[0]["from_agent"], "impersonator-or-honest-seat (自报)",
+        "the delivered JSON row's from_agent (consumed verbatim by both briefing markdown and \
+         sticky_check JSON) must carry the (自报) suffix for a caller-asserted identity"
+    );
+
+    let markdown = crate::agent_markdown::format_briefing(
+        "test query",
+        None,
+        &serde_json::json!(claimed),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &serde_json::json!({}),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &[],
+        &serde_json::json!({}),
+        &serde_json::json!({}),
+        &serde_json::json!({}),
+        false,
+    );
+    assert!(
+        markdown.contains("impersonator-or-honest-seat (自报)"),
+        "rendered briefing markdown must show the (自报) suffix for a caller-asserted \
+         from_agent; got: {markdown}"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn no_explicit_agent_id_row_is_session_and_renders_without_suffix() {
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-identity-assurance-session-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
+    handle_sticky_leave(
+        &server,
+        StickyLeaveInput {
+            text: "note with no explicit agent_id".to_string(),
+            to: None,
+            ttl_days: None,
+            agent_id: None,
+        },
+    )
+    .await
+    .expect("sticky_leave");
+
+    // (a) Row-level: no explicit agent_id param -> server-resolved chain ->
+    // identity_assurance must be "session" (here it bottoms out at the
+    // implicit-leader/"unknown-agent" end of the chain, same as before this
+    // fix — the marking is additive, it does not change from_agent itself).
+    let stored_memo = server
+        .with_global_store_read(|store| {
+            let entries = all_sticky_entries(store)?;
+            entries
+                .iter()
+                .find_map(sticky_from_entry)
+                .ok_or_else(|| "expected exactly one persisted sticky".to_string())
+        })
+        .expect("read back persisted sticky");
+    assert_eq!(
+        stored_memo.identity_assurance, "session",
+        "a sticky sent with no explicit agent_id must persist identity_assurance=session"
+    );
+
+    // (b) Render-level: no (自报) suffix anywhere.
+    let claimed =
+        claim_unread_stickies_for_briefing(&server, None, 5).expect("claim for briefing render");
+    assert_eq!(claimed.len(), 1);
+    let from_agent = claimed[0]["from_agent"]
+        .as_str()
+        .expect("from_agent is a string");
+    assert!(
+        !from_agent.contains("自报"),
+        "a session-resolved from_agent must render with no (自报) suffix; got: {from_agent}"
+    );
+
+    let markdown = crate::agent_markdown::format_briefing(
+        "test query",
+        None,
+        &serde_json::json!(claimed),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &serde_json::json!({}),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &[],
+        &serde_json::json!({}),
+        &serde_json::json!({}),
+        &serde_json::json!({}),
+        false,
+    );
+    assert!(
+        !markdown.contains("自报"),
+        "rendered briefing markdown must show no (自报) suffix for a session-resolved \
+         from_agent; got: {markdown}"
+    );
 
     let _ = std::fs::remove_file(&db_path);
 }

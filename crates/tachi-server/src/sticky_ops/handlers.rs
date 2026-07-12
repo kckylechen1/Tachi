@@ -32,6 +32,25 @@ pub(crate) async fn handle_sticky_leave(
     // reject empty — before falling back through the same server-side chain
     // used when the param is absent) so a caller that *does* know its own
     // seat name can stamp it explicitly.
+    //
+    // #1016: a non-empty `params.agent_id` is the caller SELF-REPORTING an
+    // identity the server never verifies (advisory-only trust, owner-ratified
+    // same_host semantics) — distinct from every other link in the same
+    // resolution chain (`agent_profile`, `TACHI_AGENT_SEAT`), which the
+    // server resolved on its own. Compute that distinction independently of
+    // `resolve_caller_agent_id`'s output so the from_agent resolution logic
+    // itself is untouched — only which branch fired is now recorded.
+    let is_caller_asserted = input
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    let identity_assurance = if is_caller_asserted {
+        "caller_asserted"
+    } else {
+        "session"
+    }
+    .to_string();
     let from_agent = resolve_caller_agent_id(server, input.agent_id.as_deref())
         .unwrap_or_else(|| "unknown-agent".to_string());
     // Round-5 CONCERN (codex review of #1003): unbounded ttl_days let a caller
@@ -56,6 +75,7 @@ pub(crate) async fn handle_sticky_leave(
         text: safe_text,
         created_at: Utc::now().to_rfc3339(),
         ttl_days,
+        identity_assurance: identity_assurance.clone(),
     };
 
     let entry = sticky_to_memory_entry(server, &memo);
@@ -67,6 +87,7 @@ pub(crate) async fn handle_sticky_leave(
         "from_agent": from_agent,
         "to": memo.to,
         "ttl_days": ttl_days,
+        "identity_assurance": identity_assurance,
     }))
     .map_err(|e| format!("serialize: {e}"))
 }
