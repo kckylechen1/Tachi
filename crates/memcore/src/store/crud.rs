@@ -63,6 +63,26 @@ impl MemoryStore {
             .map_err(MemoryError::from)
     }
 
+    /// Run `PRAGMA optimize` on the write connection.
+    ///
+    /// SQLite's query planner relies on `sqlite_stat1` (populated by
+    /// `ANALYZE`) to choose between candidate indexes; on a long-lived,
+    /// heavily-written DB that table goes stale as row-count/value
+    /// distributions shift, and the planner can mis-pick an index that made
+    /// sense at `ANALYZE` time but no longer reflects the data (observed:
+    /// the planner favoring `idx_memories_archived` over a more selective
+    /// index once `memories` grew past its original shape). `PRAGMA
+    /// optimize` runs SQLite's own heuristic — a lightweight `ANALYZE` only
+    /// on tables it judges likely to have stale statistics — so it's safe
+    /// and cheap to call often; the project's own docs recommend it "run
+    /// occasionally, or once before closing the database." Best-effort: a
+    /// failure here should never fail whatever else the caller was doing.
+    pub fn run_optimize(&self) -> Result<(), MemoryError> {
+        self.conn
+            .execute_batch("PRAGMA optimize;")
+            .map_err(MemoryError::from)
+    }
+
     /// Fetch multiple newest entries up to a limit (used for dedup).
     pub fn get_all(&self, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError> {
         self.get_all_with_options(limit, false)

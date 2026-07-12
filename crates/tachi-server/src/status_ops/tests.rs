@@ -21,6 +21,7 @@ fn daemon_running() -> serde_json::Value {
     serde_json::json!({ "running": true })
 }
 
+mod coldpath_scoping;
 mod daemon_manifest;
 mod dispatch_eval;
 mod markers_errors;
