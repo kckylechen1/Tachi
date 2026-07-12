@@ -300,6 +300,7 @@ async fn sticky_leave_scrubs_secrets_in_storage_and_briefing_render() {
             text: raw_secret_text.to_string(),
             to: None,
             ttl_days: None,
+            agent_id: None,
         },
     )
     .await
@@ -848,11 +849,11 @@ fn cp2_tachi_profile_env_alone_no_longer_resolves_a_seat() {
     }
 }
 
-// ─── CP2 round-3: sender-side identity (`resolve_from_agent`) must not
+// ─── CP2 round-3: sender-side identity (`fallback_agent_id`) must not
 // resolve a tool-profile string either ─────────────────────────────────────
 //
 // Round-2 only fixed the DELIVERY path (`resolve_caller_agent_id`)'s env
-// fallback. `resolve_from_agent` (used by `sticky_leave` to stamp
+// fallback. `fallback_agent_id` (used by `sticky_leave` to stamp
 // `from_agent`) still read `TACHI_PROFILE` as its fallback — so a caller
 // launched with `TACHI_PROFILE=standard` set (a tool-profile selector, not a
 // seat) but no `agent_profile` registered would author a sticky's
@@ -945,6 +946,7 @@ async fn cp2_round3_sticky_leave_from_agent_uses_seat_not_profile() {
             text: "note from worker-a".to_string(),
             to: None,
             ttl_days: None,
+            agent_id: None,
         },
     )
     .await
@@ -968,6 +970,57 @@ async fn cp2_round3_sticky_leave_from_agent_uses_seat_not_profile() {
     }
 }
 
+// #964 follow-up (discovered in live one-shot-channel use): a one-shot stdio
+// MCP connection has no persistent `agent_profile` and no dispatch-injected
+// `TACHI_AGENT_SEAT` env var, so `sticky_leave` used to always stamp
+// `from_agent: "unknown-agent"` for such callers even when the caller knew
+// its own seat name. `sticky_leave` now accepts the same `agent_id` override
+// `sticky_check` already has; assert an explicit value round-trips as
+// `from_agent` (and is preferred over the empty server-side fallback env
+// state this test deliberately leaves in place).
+#[tokio::test]
+async fn sticky_leave_accepts_explicit_agent_id_for_one_shot_channels() {
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-leave-explicit-agent-id-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
+    let result = handle_sticky_leave(
+        &server,
+        StickyLeaveInput {
+            text: "note from a one-shot channel".to_string(),
+            to: None,
+            ttl_days: None,
+            agent_id: Some("leader-oneshot".to_string()),
+        },
+    )
+    .await
+    .expect("sticky_leave");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("parse sticky_leave result");
+    assert_eq!(
+        parsed["from_agent"], "leader-oneshot",
+        "explicit agent_id must be stamped as from_agent"
+    );
+
+    let stored_memo = server
+        .with_global_store_read(|store| {
+            let entries = all_sticky_entries(store)?;
+            entries
+                .iter()
+                .find_map(sticky_from_entry)
+                .ok_or_else(|| "expected exactly one persisted sticky".to_string())
+        })
+        .expect("read back persisted sticky");
+    assert_eq!(
+        stored_memo.from_agent, "leader-oneshot",
+        "persisted row must carry the explicit agent_id as from_agent, matching the response"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
 // R5 CONCERN (codex review of #964/PR #1003): ttl_days only had a `.max(1)`
 // floor — a caller passing u32::MAX got a sticky that, for all practical
 // purposes, never expires. Assert the ceiling is enforced both in the
@@ -988,6 +1041,7 @@ async fn sticky_leave_clamps_ttl_days_to_thirty_day_ceiling() {
             text: "practically-forever note".to_string(),
             to: None,
             ttl_days: Some(9999),
+            agent_id: None,
         },
     )
     .await

@@ -30,30 +30,28 @@ fn current_agent_id(server: &MemoryServer) -> Option<String> {
 /// could still resolve its OWN `from_agent` (the sender identity stamped on
 /// a `sticky_leave`) to that shared profile string, so two workers on the
 /// same tool profile would author stickies under the same `from_agent`. The
-/// sender path now shares the exact same chain the delivery path
-/// (`resolve_caller_agent_id`) already trusts: no caller-supplied
-/// `agent_id` param here (there is none on the `sticky_leave` FROM side), so
-/// this is `server-side agent_profile` -> `TACHI_AGENT_SEAT` -> `None`.
+/// sender path shares the exact same chain the delivery path
+/// (`resolve_caller_agent_id`) already trusts: `server-side agent_profile`
+/// -> `TACHI_AGENT_SEAT` -> `None` -> `"unknown-agent"`.
 pub(super) fn fallback_agent_id(registered_agent: Option<String>) -> String {
     registered_agent
         .or_else(|| non_empty_env("TACHI_AGENT_SEAT"))
         .unwrap_or_else(|| "unknown-agent".to_string())
 }
 
-pub(super) fn resolve_from_agent(server: &MemoryServer) -> String {
-    fallback_agent_id(current_agent_id(server))
-}
-
 /// Server-side identity resolution for the sticky DELIVERY path (briefing
-/// inclusion + `sticky_check`), mirroring the same three-step chain
-/// `sticky_leave` already trusts via `resolve_from_agent` above (CP2,
-/// opus xhigh review of #964/PR #1003).
+/// inclusion + `sticky_check`), mirroring the same three-step chain the
+/// SEND path (`sticky_leave`, via `fallback_agent_id` above) already trusts
+/// (CP2, opus xhigh review of #964/PR #1003).
 ///
-/// `sticky_leave` resolves `from_agent` server-side; the delivery path used
-/// to trust ONLY the caller-supplied `params.agent_id`, with no fallback —
-/// so a worker briefing call with no `agent_id` param was silently treated
-/// as the leader and consumed broadcast (`to`-absent) stickies meant for the
-/// real leader.
+/// `sticky_leave` used to resolve `from_agent` server-side only (no
+/// caller-supplied override); the delivery path used to trust ONLY the
+/// caller-supplied `params.agent_id`, with no fallback — so a worker
+/// briefing call with no `agent_id` param was silently treated as the
+/// leader and consumed broadcast (`to`-absent) stickies meant for the real
+/// leader. `sticky_leave` now also accepts an explicit `agent_id` override
+/// via this same function (one-shot stdio channels have no persistent
+/// `agent_profile`/env identity to fall back on — see `handle_sticky_leave`).
 ///
 /// Chain: `params.agent_id` -> server-side `agent_profile.agent_id` ->
 /// `TACHI_AGENT_SEAT` env var -> `None` (leader).
