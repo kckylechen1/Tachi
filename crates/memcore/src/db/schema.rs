@@ -414,7 +414,11 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         .ok();
     if let Some(sql) = existing_sql.as_deref() {
         let has_source_check = sql.contains("CHECK (source") || sql.contains("CHECK(source");
-        let has_latest_category_values = sql.contains("'eval'");
+        // #964: 'sticky' is the newest category value: check it (not 'eval')
+        // so DBs stamped before the sticky category was added re-run this
+        // rebuild once, same idempotent-sentinel pattern as every prior
+        // category/source addition here.
+        let has_latest_category_values = sql.contains("'sticky'");
         let has_latest_source_values = sql.contains("'foundry_recall_rerank_cache'");
         if has_source_check && has_latest_category_values && has_latest_source_values {
             return Ok(());
@@ -572,7 +576,7 @@ fn normalize_category(conn: &Connection) -> Result<(), MemoryError> {
     conn.execute(
         "UPDATE memories SET category = 'other'
          WHERE category IS NULL OR category = ''
-            OR category NOT IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide','eval')",
+            OR category NOT IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide','eval','sticky')",
         [],
     )?;
     Ok(())
@@ -671,7 +675,7 @@ fn rebuild_memories_with_check_constraints(conn: &Connection) -> Result<(), Memo
              recall_count    INTEGER NOT NULL DEFAULT 0,
              query_diversity INTEGER NOT NULL DEFAULT 0,
              tier            TEXT NOT NULL DEFAULT 'raw',
-             CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide','eval')),
+             CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide','eval','sticky')),
             CHECK (scope IN ('user','project','general')),
             CHECK (retention_policy IS NULL OR retention_policy IN ('ephemeral','durable','permanent','pinned')),
             CHECK (

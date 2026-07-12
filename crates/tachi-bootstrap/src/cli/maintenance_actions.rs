@@ -3,6 +3,26 @@ use std::path::PathBuf;
 
 pub const DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS: u64 = 7;
 
+/// Machine-local execution profile. This is separate from agent dispatch
+/// profiles: it controls the highest side-effect level allowed on this host.
+#[derive(Subcommand, Debug, Clone)]
+pub enum HostAction {
+    /// Show the active host profile and its maximum execution level.
+    Show {
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Persist a host profile in TACHI_HOME/config.env for future processes.
+    Set {
+        /// One of: development, home_data, release.
+        profile: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// Managed worktree lifecycle (#484 disk governor open/close).
 #[derive(Subcommand, Debug, Clone)]
 pub enum WorktreeAction {

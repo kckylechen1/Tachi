@@ -176,6 +176,7 @@ pub(super) async fn handle_convoy_dispatch_action(
                 agent: slice_agent.clone(),
                 profile: slice_profile.clone(),
                 task: prompt,
+                execution_level: None,
                 cwd: slice_cwd.clone(),
                 // Convoy slices supply a bare (per-slice) cwd; declare it
                 // unmanaged for the fail-safe env gate (#894 S1 §1.3). Per-slice

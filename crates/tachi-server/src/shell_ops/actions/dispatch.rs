@@ -72,6 +72,7 @@ pub(super) async fn handle_dispatch_action(
             agent,
             profile: params.profile.clone(),
             task: prompt,
+            execution_level: None,
             cwd: params.cwd.clone(),
             // Shell dispatch supplies a bare cwd; declare it unmanaged so the
             // fail-safe env gate accepts it and stamps `env: unmanaged` (#894

@@ -7,7 +7,6 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::registry::{self, RegisterOptions, RegisterOutputFormat};
 use crate::wt_clean::OutputFormat;
@@ -479,13 +478,18 @@ fn validate_ref(raw: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Generate a short random id for default branch/path leaves. A uuid v4 is
+/// used precisely because it carries no timestamp/pid dependence: the prior
+/// `nanos ^ (pid << 32)` scheme masked down to 24 bits and dropped the pid
+/// entirely (pid lived at bit 32+, past the mask), so two default-name
+/// provisions within ~16.8ms collided on path/branch (#1026 sibling, found
+/// by codex review scanning the same generator class fixed in
+/// `exec_env_ops::generate_env_id`). 12 hex chars keeps names short while
+/// giving 48 bits of real randomness; the `:299` path-exists check remains
+/// the backstop against the residual collision probability.
 fn short_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let mixed = nanos ^ ((std::process::id() as u128) << 32);
-    format!("{:06x}", mixed & 0x00ff_ffff)
+    let full = uuid::Uuid::new_v4().simple().to_string();
+    full[..12].to_string()
 }
 
 fn sanitize_segment(raw: &str) -> String {
@@ -730,6 +734,20 @@ pub fn run_wt_open_with_emit(options: OpenOptions) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn default_short_id_is_12_hex_and_unique() {
+        // Discriminating test for the #1026 sibling fix: 12 chars pins the
+        // truncation width (a regression to the old 6-hex mask would fail
+        // here), hex-only pins the uuid `simple()` form, and two consecutive
+        // calls differing pins the same-instant-collision fix itself.
+        let a = short_id();
+        let b = short_id();
+        assert_eq!(a.len(), 12, "short_id must keep 48 bits (12 hex chars)");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_ne!(a, b, "consecutive short_ids must not collide");
+    }
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

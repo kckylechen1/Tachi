@@ -16,6 +16,7 @@ fn dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams {
         agent: agent.map(str::to_string),
         profile: None,
         task: task.to_string(),
+        execution_level: None,
         cwd: None,
         env_id: None,
         unmanaged_cwd: None,
@@ -53,6 +54,7 @@ fn task_params(action: &str) -> TachiTaskParams {
             .unwrap_or_else(|e| panic!("valid tachi_task action '{action}': {e}")),
         format: Some("json".to_string()),
         task: None,
+        execution_level: None,
         agent_id: None,
         domain: None,
         path_prefix: None,
@@ -200,6 +202,10 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         turn_id: None,
         event_type: None,
         messages: Vec::new(),
+        to: None,
+        ttl_days: None,
+        include_read: false,
+        agent_id: None,
     }
 }
 

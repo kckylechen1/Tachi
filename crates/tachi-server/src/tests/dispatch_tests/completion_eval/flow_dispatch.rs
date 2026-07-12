@@ -153,6 +153,155 @@ async fn tachi_complete_infers_task_agent_and_profile_from_dispatch_card() {
     );
 }
 
+/// #773 (S2 prep, sol-terminal-review-certified): eval rows carry
+/// dispatch_id but almost never issue_ref because the calling agent must
+/// manually re-supply it and mostly doesn't. `tachi_complete` must
+/// auto-inject issue_ref from the dispatch's own kanban card (populated at
+/// launch by `init_kanban_task`) whenever the caller supplies dispatch_id
+/// but omits issue_ref.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn tachi_complete_auto_injects_issue_ref_from_kanban_card_when_missing() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let dispatch_id = "20260712T000001Z-custom-issueref-autoinject";
+    let issue_ref = "kckylechen1/tachi#773";
+
+    // Seed the kanban card the way a real dispatch launch would
+    // (`dispatch_ops::kanban_helpers::init_kanban_task`), with issue_ref on
+    // file from launch but no explicit flow_id — this exercises the
+    // stand-alone kanban lookup, not the flow_id-mediated path.
+    crate::memory_search_ops::handle_save_memory(
+        &server,
+        crate::tool_params::SaveMemoryParams {
+            text: "Dispatch Task\nAgent: custom\nTask: issue_ref autoinject fixture".to_string(),
+            summary: "Kanban: issue_ref autoinject fixture".to_string(),
+            path: format!("/kanban/tasks/{dispatch_id}"),
+            importance: 0.7,
+            category: "fact".to_string(),
+            topic: "kanban".to_string(),
+            keywords: vec!["kanban".to_string(), "dispatch".to_string()],
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            scope: "project".to_string(),
+            vector: None,
+            id: None,
+            force: true,
+            auto_link: true,
+            project: None,
+            retention_policy: Some(memcore::RetentionPolicy::Pinned.as_str().to_string()),
+            domain: Some("system".to_string()),
+            timestamp: None,
+            valid_from: None,
+            valid_until: None,
+            metadata: Some(json!({
+                "type": "a2a_task",
+                "dispatch_id": dispatch_id,
+                "a2a_state": "TASK_STATE_WORKING",
+                "agent": "custom",
+                "issue_ref": issue_ref,
+                "eval_ledger_id": null,
+            })),
+            emit_continuity: false,
+        },
+    )
+    .await
+    .expect("seed kanban card with issue_ref on file");
+
+    let mut complete_params = task_params("complete");
+    complete_params.format = Some("full".to_string());
+    complete_params.task = Some("Auto-inject issue_ref at completion".to_string());
+    complete_params.agent = Some("custom".to_string());
+    complete_params.outcome = Some("success".to_string());
+    complete_params.task_id = Some("eval-issueref-autoinject".to_string());
+    complete_params.dispatch_id = Some(dispatch_id.to_string());
+    complete_params.evidence_refs = vec!["result.md".to_string()];
+    complete_params.scope = Some("project".to_string());
+    // Deliberately no issue_ref supplied — this is the propagation gap.
+    let raw = server
+        .tachi_task(Parameters(complete_params))
+        .await
+        .expect("complete should succeed");
+    let bundle: Value = serde_json::from_str(&raw).expect("complete bundle");
+
+    assert_eq!(
+        bundle["issue_ref"],
+        json!(issue_ref),
+        "review bundle should reflect the auto-injected issue_ref: {bundle:#}"
+    );
+
+    // Confirm the persisted eval memory row's metadata itself carries the
+    // auto-injected issue_ref (not just the transient response bundle).
+    let eval_id = bundle["eval_entry"]["id"]
+        .as_str()
+        .expect("eval entry should return memory id")
+        .to_string();
+    let fetched_str = server
+        .get_memory(Parameters(GetMemoryParams {
+            id: eval_id,
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("get_memory should succeed");
+    let fetched: Value = serde_json::from_str(&fetched_str).expect("memory JSON");
+    assert_eq!(
+        fetched["metadata"]["issue_ref"],
+        json!(issue_ref),
+        "eval record metadata should carry the auto-injected issue_ref: {fetched:#}"
+    );
+}
+
+/// Fail-safe half of #773: when there is no dispatch record to look up (or
+/// the record has no issue_ref on file), completion must proceed without
+/// error and without an issue_ref — never fail the completion over a
+/// missing provenance value.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn tachi_complete_proceeds_without_issue_ref_when_no_dispatch_record_found() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let dispatch_id = "20260712T000002Z-custom-no-kanban-record";
+
+    let mut complete_params = task_params("complete");
+    complete_params.format = Some("full".to_string());
+    complete_params.task = Some("Complete with dispatch_id but no kanban card".to_string());
+    complete_params.agent = Some("custom".to_string());
+    complete_params.outcome = Some("success".to_string());
+    complete_params.task_id = Some("eval-no-issueref".to_string());
+    complete_params.dispatch_id = Some(dispatch_id.to_string());
+    complete_params.evidence_refs = vec!["result.md".to_string()];
+    complete_params.scope = Some("project".to_string());
+    let raw = server
+        .tachi_task(Parameters(complete_params))
+        .await
+        .expect("complete should still succeed with no dispatch record on file");
+    let bundle: Value = serde_json::from_str(&raw).expect("complete bundle");
+
+    assert_eq!(bundle["recorded"], json!(true), "{bundle:#}");
+    assert!(
+        bundle["issue_ref"].is_null(),
+        "no issue_ref should be present when there is nothing to look up: {bundle:#}"
+    );
+
+    let eval_id = bundle["eval_entry"]["id"]
+        .as_str()
+        .expect("eval entry should return memory id")
+        .to_string();
+    let fetched_str = server
+        .get_memory(Parameters(GetMemoryParams {
+            id: eval_id,
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("get_memory should succeed");
+    let fetched: Value = serde_json::from_str(&fetched_str).expect("memory JSON");
+    assert!(
+        fetched["metadata"].get("issue_ref").is_none(),
+        "eval metadata must not gain a phantom issue_ref key: {fetched:#}"
+    );
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_complete_surfaces_warning_when_kanban_card_is_missing() {
