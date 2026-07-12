@@ -111,6 +111,17 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
             | "tachi_verify"
             | "tachi_workflow"
             | "tachi_gh"
+            // #757 Cut3-S1 round-2 (review fixup): `tachi_sandbox` folds
+            // `sandbox_set_rule`/`sandbox_set_policy` (both destructive:true
+            // in the alias manifest, see tools/alias_manifest.rs) alongside
+            // three read-only actions. Same tool-level (not action-aware)
+            // precedent as `tachi_memory`/`tachi_task` above: the MCP
+            // destructive_hint is per-tool, not per-action, so the whole
+            // verb is annotated destructive rather than fail open for its
+            // mutating actions. S2+ direction (sol blueprint): derive
+            // destructive_hint per-action from the manifest/action-policy
+            // gate instead of this tool-level allowlist.
+            | "tachi_sandbox"
     );
     let idempotent = matches!(
         name,
@@ -733,5 +744,60 @@ mod tests {
             Some(true),
             "tachi_memory must be destructive_hint=true (fronts delete/gc, both destructive)"
         );
+    }
+
+    fn annotated_destructive_hint(name: &str) -> Option<bool> {
+        let mut tool: rmcp::model::Tool = serde_json::from_value(json!({
+            "name": name,
+            "description": format!("tool {name}"),
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": true,
+            }
+        }))
+        .expect("failed to build test tool");
+        annotate_tool(&mut tool);
+        tool.annotations.expect("annotations set").destructive_hint
+    }
+
+    /// #757 Cut3-S1 round-2 (review fixup): `tachi_sandbox` folds
+    /// `sandbox_set_rule`/`sandbox_set_policy` (destructive actions per the
+    /// alias manifest) among its five actions, so it was missing from the
+    /// destructive match list entirely and fell to `destructive_hint=false`
+    /// — a fail-open MCP client-facing hint. Assert the verb is annotated
+    /// destructive.
+    #[test]
+    fn tachi_sandbox_facade_is_annotated_destructive() {
+        assert_eq!(
+            annotated_destructive_hint("tachi_sandbox"),
+            Some(true),
+            "tachi_sandbox must be destructive_hint=true (fronts set_rule/set_policy, both destructive)"
+        );
+    }
+
+    /// The six legacy sandbox alias names are NOT in the tool-level
+    /// destructive match list (and never were on main pre-fold — see the
+    /// #757 fold history), so folding them into `tachi_sandbox` must not
+    /// change their own annotated hint. This pins the alias-side "unchanged"
+    /// half of the round-2 fix: only `tachi_sandbox` itself gained
+    /// destructive_hint=true, the six aliases stay exactly as before.
+    #[test]
+    fn sandbox_aliases_keep_their_pre_fold_destructive_hint() {
+        for legacy_name in [
+            "sandbox_set_rule",
+            "sandbox_check",
+            "sandbox_set_policy",
+            "sandbox_get_policy",
+            "sandbox_list_policies",
+            "sandbox_exec_audit",
+        ] {
+            assert_eq!(
+                annotated_destructive_hint(legacy_name),
+                Some(false),
+                "legacy alias '{legacy_name}' must keep its pre-fold destructive_hint=false \
+                 (tool-level annotation is unaware of the alias manifest's per-action \
+                 destructive bit; this is documented as the S2+ direction, not fixed here)"
+            );
+        }
     }
 }
