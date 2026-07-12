@@ -365,6 +365,14 @@ pub enum Commands {
         /// Also run live provider smoke probes. This can make network calls and should not be used in cheap polling loops.
         #[arg(long)]
         probe_keys: bool,
+        /// Probe every manifest DB (the full fleet), not just the global DB
+        /// and the current project DB. This is the pre-#coldpath-perf-pack
+        /// behavior; it opens and queries every registered DB read-only
+        /// (job histogram, vector health, namespace counts, continuity
+        /// metrics) and is measurably slower on hosts with many registered
+        /// DBs. Omit for the fast default (global + current-project only).
+        #[arg(long)]
+        all_dbs: bool,
     },
     /// Inspect or terminate the running tachi daemon.
     Daemon {

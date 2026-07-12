@@ -140,11 +140,19 @@ pub(crate) async fn handle_tachi_complete(
     // never lose this row; this call itself is fail-safe (see module docs)
     // and never fails the completion. `reported_outcome` keeps the raw
     // self-report; `execution_outcome` is the machine verdict computed above.
+    //
+    // #774 round 2: `reported_outcome` must be the agent's VERBATIM claim
+    // (trim only, no case-folding) — `outcome_norm` is `params.outcome`
+    // lowercased for the machine-side bucketing logic above/in
+    // `build_complete_eval_record`, not the self-report itself. Passing
+    // `outcome_norm` here silently rewrote "Complete " -> "complete" in the
+    // row the module doc promises is verbatim.
+    let reported_outcome_verbatim = params.outcome.trim();
     let dispatch_outcome_status = super::dispatch_outcome::record_complete_outcome(
         server,
         &params,
         &eval_memory_id,
-        &outcome_norm,
+        reported_outcome_verbatim,
         &machine_execution_outcome,
         outcome_error_class,
         verification_present,

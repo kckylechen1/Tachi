@@ -617,6 +617,16 @@ fn dispatch_runs_root_uses_canonical_tachi_home_aliases() {
     }
 }
 
+/// Minimal isolated `MemoryServer` for tests that need a real DB target but
+/// no project store — mirrors `complete_ops::dispatch_outcome`'s local
+/// `test_server` helper.
+fn test_server() -> (MemoryServer, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let global_db = dir.path().join("global.sqlite");
+    let server = MemoryServer::new(global_db, None).expect("server");
+    (server, dir)
+}
+
 #[test]
 fn recover_orphaned_dispatch_runs_marks_working_runs_failed() {
     let _guard = crate::utils::global_test_lock()
@@ -627,6 +637,8 @@ fn recover_orphaned_dispatch_runs_marks_working_runs_failed() {
     let original_tachi_home = std::env::var_os("TACHI_HOME");
     std::env::set_var("HOME", temp_home.path());
     std::env::remove_var("TACHI_HOME");
+
+    let (server, _db_dir) = test_server();
 
     let run_dir = dispatch_runs_root().join("20260614T000000Z-claude-deadbeef");
     std::fs::create_dir_all(&run_dir).expect("run dir");
@@ -641,7 +653,7 @@ fn recover_orphaned_dispatch_runs_marks_working_runs_failed() {
     )
     .expect("status");
 
-    let recovered = recover_orphaned_dispatch_runs();
+    let recovered = recover_orphaned_dispatch_runs(&server);
     assert_eq!(
         recovered,
         vec!["20260614T000000Z-claude-deadbeef".to_string()]
@@ -652,6 +664,31 @@ fn recover_orphaned_dispatch_runs_marks_working_runs_failed() {
             .unwrap();
     assert_eq!(status["state"], "TASK_STATE_FAILED");
     assert_eq!(status["recovery_reason"], "daemon_restart_orphan_recovery");
+
+    // #774 round 2: recovery is a terminal path — it must also write a
+    // canonical dispatch_outcomes row (previously it only rewrote
+    // status.json and left the outcome ledger silent about this dispatch).
+    let rows = server
+        .with_global_store_read(|store| {
+            memcore::list_outcomes_by_vendor_window(
+                store.connection(),
+                "claude",
+                "1970-01-01T00:00:00Z",
+                None,
+            )
+            .map_err(|e| e.to_string())
+        })
+        .expect("read outcomes");
+    let row = rows
+        .iter()
+        .find(|r| r.dispatch_id == "20260614T000000Z-claude-deadbeef")
+        .expect("recovered orphan outcome row present");
+    assert_eq!(row.execution_outcome, "failed");
+    assert_eq!(
+        row.reported_outcome, None,
+        "no self-report on a recovered orphan"
+    );
+    assert_eq!(row.error_class.as_deref(), Some("recovered_orphan"));
 
     if let Some(value) = original_home {
         std::env::set_var("HOME", value);

@@ -189,11 +189,26 @@ fn resolve_outcome_lane(params: &TachiCompleteParams) -> (Option<String>, String
 /// recorder tagging `backend`) is not clobbered by a later coarser catch-all
 /// (the generic early-exit closer tagging `dispatch`). Fail-safe: any error is
 /// logged and swallowed — this must never escalate on an already-failing path.
+///
+/// Scope symmetry (#774 round 2): [`record_complete_outcome`] resolves its
+/// write target from the SAME dispatch's `project` field before falling back
+/// to `resolve_write_scope("")` — a bare `resolve_write_scope("")` here
+/// (ignoring `project` entirely) could land this row in a different DB than
+/// a later/earlier `tachi_complete` for the same `dispatch_id`, splitting the
+/// first-writer-wins invariant across two stores. `project` here is threaded
+/// from the ORIGINAL dispatch's `TachiDispatchParams::project` at each call
+/// site that still has that context (backend prep, harness preflight,
+/// post-init early-exit); it is `None` for the daemon-restart orphan-recovery
+/// path (`recover_orphaned_dispatch_runs`), which has no live dispatch
+/// context to read a project from — that path always falls back to the
+/// default `resolve_write_scope("")` branch, a documented, narrower gap this
+/// fix does not close.
 pub(crate) fn record_terminal_failure_outcome(
     server: &MemoryServer,
     dispatch_id: &str,
     error_class: &str,
     agent: Option<&str>,
+    project: Option<&str>,
 ) {
     let dispatch_id = dispatch_id.trim();
     if dispatch_id.is_empty() {
@@ -217,9 +232,7 @@ pub(crate) fn record_terminal_failure_outcome(
         ..Default::default()
     };
 
-    let (scope, _) = server.resolve_write_scope("");
-    let write_result = server.with_store_for_scope(scope, |store| {
-        let conn = store.connection();
+    let write_fn = |conn: &rusqlite::Connection| {
         // First-writer-wins: skip if this dispatch already has an outcome row.
         if memcore::outcome_exists_for_dispatch(conn, dispatch_id).map_err(|e| e.to_string())? {
             return Ok(false);
@@ -227,7 +240,17 @@ pub(crate) fn record_terminal_failure_outcome(
         memcore::upsert_outcome(conn, &new_outcome)
             .map(|_| true)
             .map_err(|e| e.to_string())
-    });
+    };
+    // Mirrors `record_complete_outcome`'s branching: a named project DB (when
+    // the original dispatch carried one) takes priority over the scope
+    // fallback, same as the complete path prioritizes `params.project` over
+    // `params.scope`.
+    let write_result = if let Some(project) = project.map(str::trim).filter(|s| !s.is_empty()) {
+        server.with_named_project_store(project, |store| write_fn(store.connection()))
+    } else {
+        let (scope, _) = server.resolve_write_scope("");
+        server.with_store_for_scope(scope, |store| write_fn(store.connection()))
+    };
     if let Err(error) = write_result {
         tracing::warn!(
             error = %error,
@@ -398,7 +421,13 @@ mod tests {
     fn records_terminal_failure_row_with_error_class_and_null_report() {
         let (server, _dir) = test_server();
 
-        super::record_terminal_failure_outcome(&server, "dispatch-watchdog", "watchdog", Some("codex"));
+        super::record_terminal_failure_outcome(
+            &server,
+            "dispatch-watchdog",
+            "watchdog",
+            Some("codex"),
+            None,
+        );
 
         let rows = server
             .with_global_store_read(|store| {
@@ -425,6 +454,7 @@ mod tests {
             "dispatch-watchdog",
             "dispatch",
             Some("codex"),
+            None,
         );
         let rows_after = server
             .with_global_store_read(|store| {
@@ -447,5 +477,147 @@ mod tests {
             Some("watchdog"),
             "first classifier ('watchdog') is preserved, not clobbered by 'dispatch'"
         );
+    }
+
+    /// #774 round 2 discriminator: `record_terminal_failure_outcome` must
+    /// resolve its write target the same way `record_complete_outcome` does
+    /// for the SAME dispatch — via the dispatch's named `project`, not a
+    /// blind `resolve_write_scope("")`. Before this fix the terminal path
+    /// ignored `project` entirely, so a terminal-failure call and a
+    /// `tachi_complete` call for the same dispatch_id/project could land in
+    /// two DIFFERENT stores (this server's global DB vs. the named project
+    /// DB), producing two outcome rows instead of one and defeating
+    /// first-writer-wins. Runs both call orders against the SAME named
+    /// project DB and asserts exactly one row lands there either way.
+    fn with_named_project_env<F: FnOnce(&str)>(project_name: &str, f: F) {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tachi_home tmp");
+        let saved_home = std::env::var_os("TACHI_HOME");
+        let saved_sigil = std::env::var_os("SIGIL_HOME");
+        let saved_app = std::env::var_os("TACHI_APP_HOME");
+        std::env::set_var("TACHI_HOME", tmp.path());
+        std::env::remove_var("SIGIL_HOME");
+        std::env::remove_var("TACHI_APP_HOME");
+
+        let named_db = tmp.path().join("projects").join(project_name).join("memory.db");
+        std::fs::create_dir_all(named_db.parent().unwrap()).expect("named project dir");
+        std::fs::write(&named_db, b"").expect("named project db placeholder");
+
+        f(project_name);
+
+        if let Some(v) = saved_home {
+            std::env::set_var("TACHI_HOME", v);
+        } else {
+            std::env::remove_var("TACHI_HOME");
+        }
+        if let Some(v) = saved_sigil {
+            std::env::set_var("SIGIL_HOME", v);
+        } else {
+            std::env::remove_var("SIGIL_HOME");
+        }
+        if let Some(v) = saved_app {
+            std::env::set_var("TACHI_APP_HOME", v);
+        } else {
+            std::env::remove_var("TACHI_APP_HOME");
+        }
+    }
+
+    #[test]
+    fn terminal_then_complete_same_project_lands_one_row() {
+        with_named_project_env("hyperion", |project_name| {
+            let (server, _dir) = test_server();
+
+            super::record_terminal_failure_outcome(
+                &server,
+                "dispatch-scope-sym-a",
+                "preflight",
+                Some("codex"),
+                Some(project_name),
+            );
+
+            let mut params = base_params();
+            params.dispatch_id = Some("dispatch-scope-sym-a".to_string());
+            params.project = Some(project_name.to_string());
+            let status = record_complete_outcome(
+                &server, &params, "eval-mem-sym-a", "success", "completed", None, true, true, &[],
+            );
+            assert_eq!(status["recorded"], json!(true));
+
+            let rows = server
+                .with_named_project_store(project_name, |store| {
+                    memcore::list_outcomes_by_vendor_window(
+                        store.connection(),
+                        "codex",
+                        "1970-01-01T00:00:00Z",
+                        None,
+                    )
+                    .map_err(|e| e.to_string())
+                })
+                .expect("read named project outcomes");
+            let matching: Vec<_> = rows
+                .iter()
+                .filter(|r| r.dispatch_id == "dispatch-scope-sym-a")
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "terminal-then-complete for the same dispatch/project must land ONE row \
+                 in the named project store, not split across it and the global default"
+            );
+            assert_eq!(matching[0].execution_outcome, "completed");
+        });
+    }
+
+    #[test]
+    fn complete_then_terminal_same_project_lands_one_row() {
+        with_named_project_env("hyperion", |project_name| {
+            let (server, _dir) = test_server();
+
+            let mut params = base_params();
+            params.dispatch_id = Some("dispatch-scope-sym-b".to_string());
+            params.project = Some(project_name.to_string());
+            let status = record_complete_outcome(
+                &server, &params, "eval-mem-sym-b", "success", "completed", None, true, true, &[],
+            );
+            assert_eq!(status["recorded"], json!(true));
+
+            // A stray terminal classifier arriving after a real completion
+            // must be a no-op (first-writer-wins), not a second row in a
+            // different store.
+            super::record_terminal_failure_outcome(
+                &server,
+                "dispatch-scope-sym-b",
+                "watchdog",
+                Some("codex"),
+                Some(project_name),
+            );
+
+            let rows = server
+                .with_named_project_store(project_name, |store| {
+                    memcore::list_outcomes_by_vendor_window(
+                        store.connection(),
+                        "codex",
+                        "1970-01-01T00:00:00Z",
+                        None,
+                    )
+                    .map_err(|e| e.to_string())
+                })
+                .expect("read named project outcomes");
+            let matching: Vec<_> = rows
+                .iter()
+                .filter(|r| r.dispatch_id == "dispatch-scope-sym-b")
+                .collect();
+            assert_eq!(
+                matching.len(),
+                1,
+                "complete-then-terminal for the same dispatch/project must land ONE row"
+            );
+            assert_eq!(
+                matching[0].execution_outcome, "completed",
+                "the real completion's verdict is preserved, not clobbered by the later stray terminal call"
+            );
+        });
     }
 }

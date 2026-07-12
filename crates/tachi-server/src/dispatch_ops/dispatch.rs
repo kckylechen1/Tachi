@@ -636,6 +636,7 @@ pub(crate) async fn handle_tachi_dispatch(
             native_acp_enabled,
             capability_bundle_card: &capability_bundle_card,
             timeout_secs_for_status,
+            project: params.project.as_deref(),
         })?;
 
         let flow_dispatch_slot =
@@ -671,7 +672,13 @@ pub(crate) async fn handle_tachi_dispatch(
         }
         Ok(PostInitDispatchOutcome::Ready(ready)) => *ready,
         Err(e) => {
-            close_kanban_row_on_early_exit(server, &dispatch_id, "post-init dispatch stage").await;
+            close_kanban_row_on_early_exit(
+                server,
+                &dispatch_id,
+                "post-init dispatch stage",
+                params.project.as_deref(),
+            )
+            .await;
             return Err(e);
         }
     };
@@ -682,6 +689,7 @@ pub(crate) async fn handle_tachi_dispatch(
         server: server.clone(),
         dispatch_id: dispatch_id.clone(),
         agent: agent_norm.clone(),
+        project: params.project.clone(),
         stage: params.stage.clone(),
         trajectory_path: trajectory_path.clone(),
         workspace_dir: workspace_dir.clone(),

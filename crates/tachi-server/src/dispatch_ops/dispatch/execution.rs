@@ -25,6 +25,11 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) dispatch_id: String,
     pub(super) agent: String,
     pub(super) stage: Option<String>,
+    /// The dispatch's `TachiDispatchParams::project`, threaded through so a
+    /// watchdog-recorded terminal outcome row lands in the same DB a
+    /// `tachi_complete` for this dispatch would resolve to (scope symmetry,
+    /// #774 round 2).
+    pub(super) project: Option<String>,
     pub(super) trajectory_path: PathBuf,
     pub(super) workspace_dir: PathBuf,
     pub(super) v2: bool,
@@ -48,6 +53,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let server_clone = ctx.server;
     let d_id = ctx.dispatch_id;
     let agent_for_watchdog = ctx.agent;
+    let project_for_watchdog = ctx.project;
     let stage_for_traj = ctx.stage;
     let traj_path_for_spawn = ctx.trajectory_path;
     let workspace_dir = ctx.workspace_dir.clone();
@@ -295,6 +301,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         &d_id,
                         "watchdog",
                         Some(agent_for_watchdog.as_str()),
+                        project_for_watchdog.as_deref(),
                     );
                 }
             } else {
@@ -390,6 +397,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     &d_id,
                     "watchdog",
                     Some(agent_for_watchdog.as_str()),
+                    project_for_watchdog.as_deref(),
                 );
             }
         }

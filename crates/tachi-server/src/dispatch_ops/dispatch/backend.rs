@@ -67,6 +67,7 @@ pub(super) fn prepare_dispatch_backend(
             ctx.dispatch_id,
             "backend",
             Some(ctx.agent_norm),
+            ctx.params.project.as_deref(),
         );
     };
 

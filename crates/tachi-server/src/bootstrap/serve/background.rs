@@ -27,6 +27,11 @@ pub(super) fn spawn_idle_connection_cleanup(
 /// (observed: a 25 MB orphaned WAL on a busy agent DB, causing slow reads and
 /// lock contention). Cadence via `TACHI_WAL_CHECKPOINT_SECS` (default 300s,
 /// min 30s; set 0 to disable).
+///
+/// Also runs `PRAGMA optimize` (see `MemoryStore::run_optimize`) on the same
+/// tick: both are cheap, best-effort, write-connection maintenance ops that
+/// want a "quiet moment" cadence, so they share this timer rather than
+/// running two near-identical interval loops.
 pub(super) fn spawn_wal_checkpoint(
     server: &MemoryServer,
     shutdown: CancellationToken,
@@ -49,11 +54,21 @@ pub(super) fn spawn_wal_checkpoint(
                     }) {
                         eprintln!("[wal] global checkpoint skipped: {e}");
                     }
+                    if let Err(e) = ckpt_server.with_global_store(|store| {
+                        store.run_optimize().map_err(|e| e.to_string())
+                    }) {
+                        eprintln!("[optimize] global optimize skipped: {e}");
+                    }
                     if ckpt_server.has_project_db() {
                         if let Err(e) = ckpt_server.with_project_store(|store| {
                             store.checkpoint_wal_truncate().map_err(|e| e.to_string())
                         }) {
                             eprintln!("[wal] project checkpoint skipped: {e}");
+                        }
+                        if let Err(e) = ckpt_server.with_project_store(|store| {
+                            store.run_optimize().map_err(|e| e.to_string())
+                        }) {
+                            eprintln!("[optimize] project optimize skipped: {e}");
                         }
                     }
                     for name in crate::path_utils::list_named_projects() {
@@ -61,6 +76,11 @@ pub(super) fn spawn_wal_checkpoint(
                             store.checkpoint_wal_truncate().map_err(|e| e.to_string())
                         }) {
                             eprintln!("[wal] named-project '{name}' checkpoint skipped: {e}");
+                        }
+                        if let Err(e) = ckpt_server.with_named_project_store(&name, |store| {
+                            store.run_optimize().map_err(|e| e.to_string())
+                        }) {
+                            eprintln!("[optimize] named-project '{name}' optimize skipped: {e}");
                         }
                     }
                 }

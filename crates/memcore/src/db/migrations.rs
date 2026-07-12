@@ -17,16 +17,11 @@
 //! - v10: drop retired skill-pack tables (`packs`, `agent_projections`)
 //! - v11: drop retired `domains` registry table (#757)
 //! - v12: `session_claims` identity-triple UNIQUE index (#1001 round 2)
-//! - v13: `hard_state` index (#1017) — defined and registered in that PR,
-//!        NOT here; this branch (#773) leaves the v13 slot to #1017 and only
-//!        adds v14 on top. `EXPECTED_SCHEMA_VERSION = 14` is therefore only
-//!        self-consistent once #1017 has merged first (leader merge order:
-//!        #1017 → this). In this branch in isolation the sentinel count is 13
-//!        (v1..v12 + v14, the v13 slot empty) — see
-//!        `expected_schema_version_matches_migration_count` for how that
-//!        documented gap is encoded.
+//! - v13: add `idx_hard_state_ns_updated` on `hard_state(namespace, updated_at
+//!   DESC)` — collapses `list_state`'s full temp-B-tree sort (perf pack;
+//!   numbered after #1007's v12, see #1017)
 //! - v14: `dispatch_outcomes.reported_outcome` column (#773 Layer-2 ②) —
-//!        dual-truth: raw self-report vs machine-resolved verdict.
+//!   dual-truth: raw self-report vs machine-resolved verdict.
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -38,13 +33,10 @@
 //! written by a newer kernel fails loudly instead of silently proceeding
 //! against data/columns it doesn't understand yet.
 //!
-//! [`EXPECTED_SCHEMA_VERSION`] counts the migration sequence above. The final
-//! target is 14 (v1..v12 baseline + v13 from #1017 + v14 here), but v13 lives
-//! in the in-flight #1017 PR, not this branch — so `EXPECTED_SCHEMA_VERSION`
-//! is set to 14 with the understanding that #1017 merges first (see the v13
-//! doc line above and the count test's documented gap). Bump this const (and
-//! add a `vN` doc line above) whenever a new migration is appended to
-//! [`run_data_migrations`].
+//! [`EXPECTED_SCHEMA_VERSION`] counts the migration sequence above: 14
+//! sentinel migrations (v1..v14) plus the pre-sentinel baseline schema (v0),
+//! so the current stamp is 14. Bump this const (and add a `vN` doc line
+//! above) whenever a new migration is appended to [`run_data_migrations`].
 //!
 //! ### Compatibility transaction widened to cover `init_schema_inner` (#984 F1 round 3)
 //!
@@ -75,18 +67,11 @@ use super::common::now_utc_iso;
 /// counts and when to bump it.
 pub const EXPECTED_SCHEMA_VERSION: u32 = 14;
 
-/// Migration slots that live in an in-flight PR (not this branch) and are
-/// therefore counted in [`EXPECTED_SCHEMA_VERSION`] but NOT yet marked-run by
-/// this branch's [`run_data_migrations`]. Today this is exactly the v13
-/// `hard_state` index (#1017), which merges before this branch (#773) per the
-/// leader's merge order. Set back to 0 once #1017 has landed on the base this
-/// branch rebases onto (at which point the real sentinel count reaches 14).
-pub const INFLIGHT_MIGRATION_SLOTS: u32 = 1;
-
 mod basic;
 mod cross_db;
 mod dispatch_outcomes_reported;
 mod domain_retire;
+mod hard_state_index;
 mod legacy_columns;
 mod pack_retire;
 mod sentinel;
@@ -96,6 +81,7 @@ use basic::*;
 use cross_db::*;
 use dispatch_outcomes_reported::*;
 use domain_retire::*;
+use hard_state_index::*;
 use legacy_columns::*;
 pub use legacy_columns::{
     fold_and_drop_legacy_persons_column, migrate_v9_relocate_and_drop_location,
@@ -123,6 +109,7 @@ pub struct MigrationReport {
     pub pack_tables_dropped: usize,
     pub domains_table_dropped: usize,
     pub session_claims_duplicates_deduped: usize,
+    pub hard_state_index_added: usize,
     pub dispatch_outcomes_reported_outcome_added: usize,
 }
 
@@ -314,10 +301,13 @@ pub(crate) fn run_data_migrations_in_tx(
     )?
     .unwrap_or(0);
 
-    // NOTE: the v13 `hard_state` index migration (#1017) is registered in that
-    // PR, not here — this branch (#773) leaves the v13 sentinel slot to it and
-    // registers only v14 on top. See EXPECTED_SCHEMA_VERSION / the module doc
-    // for the merge-order dependency.
+    report.hard_state_index_added = apply_versioned_migration(
+        conn,
+        "v13_hard_state_ns_updated_index",
+        migrate_v13_add_hard_state_index,
+    )?
+    .unwrap_or(0);
+
     report.dispatch_outcomes_reported_outcome_added = apply_versioned_migration(
         conn,
         "v14_dispatch_outcomes_reported_outcome",
@@ -841,6 +831,62 @@ mod tests {
         assert!(!table_present(&conn, "domains"));
     }
 
+    #[test]
+    fn v13_adds_hard_state_namespace_updated_index() {
+        let (mut conn, tmp) = open_test_db();
+        assert!(!index_present(&conn, "idx_hard_state_ns_updated"));
+
+        let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+        assert_eq!(report.hard_state_index_added, 1);
+        assert!(index_present(&conn, "idx_hard_state_ns_updated"));
+
+        // The query plan for list_state's WHERE+ORDER BY now uses the new
+        // index instead of falling back to a temp B-tree sort.
+        let plan = query_plan(
+            &conn,
+            "SELECT key, value_json, version, updated_at FROM hard_state \
+             WHERE namespace = 'orchestrator' ORDER BY updated_at DESC, key ASC",
+        );
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("idx_hard_state_ns_updated")),
+            "expected plan to use idx_hard_state_ns_updated, got: {plan:?}"
+        );
+        // The index provides updated_at DESC order directly, so SQLite no
+        // longer needs a full sort of the result set — at most a tiny
+        // "LAST TERM OF ORDER BY" tie-break sort among rows sharing the same
+        // updated_at (the secondary `key ASC` term). A full/bare
+        // "USE TEMP B-TREE FOR ORDER BY" (sorting on every term) would mean
+        // the index isn't actually satisfying the primary sort key.
+        assert!(
+            !plan
+                .iter()
+                .any(|line| line == "USE TEMP B-TREE FOR ORDER BY"),
+            "expected no full temp B-tree sort once indexed, got: {plan:?}"
+        );
+
+        // Idempotent: re-running is a no-op (sentinel guards it), index stays.
+        let report2 = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+        assert_eq!(report2.hard_state_index_added, 0);
+        assert!(index_present(&conn, "idx_hard_state_ns_updated"));
+    }
+
+    fn index_present(conn: &Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name = ?1",
+            params![name],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false)
+    }
+
+    fn query_plan(conn: &Connection, sql: &str) -> Vec<String> {
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let rows = stmt.query_map([], |row| row.get::<_, String>(3)).unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
     // --- #984: schema version stamp / hard-fail gate ---------------------
 
     #[test]
@@ -1099,7 +1145,7 @@ mod tests {
         "v10_drop_pack_tables",
         "v11_drop_domains_table",
         "v12_session_claims_unique_identity",
-        // v13 (hard_state index) lives in the in-flight #1017 PR, not here.
+        "v13_hard_state_ns_updated_index",
         "v14_dispatch_outcomes_reported_outcome",
     ];
 
@@ -1107,7 +1153,7 @@ mod tests {
     /// *itself* produces — not a hand-maintained duplicate list — by running
     /// the real `run_data_migrations` against a fresh DB and counting the
     /// sentinel rows it actually wrote to `hard_state`. Appending a
-    /// `v12_...` migration to `run_data_migrations_in_tx` (with its own
+    /// `v13_...` migration to `run_data_migrations_in_tx` (with its own
     /// `mark_run` call, as every migration above does) increases this count
     /// automatically; forgetting to bump `EXPECTED_SCHEMA_VERSION` to match
     /// then fails this test — silently under-stamping newly-migrated DBs
@@ -1130,21 +1176,10 @@ mod tests {
             )
             .unwrap();
 
-        // In-flight-gap note (#773 / #1017): the v13 `hard_state` index
-        // migration lives in the not-yet-merged #1017 PR, so this branch marks
-        // 13 sentinels (v1..v12 + v14) while EXPECTED_SCHEMA_VERSION is 14.
-        // `INFLIGHT_MIGRATION_SLOTS` (currently 1, the v13 slot) closes that
-        // documented gap; the check still catches a forgotten EXPECTED bump for
-        // v14 (or any future migration) because any drift OTHER than the known
-        // in-flight slot count re-breaks the equality. Set
-        // INFLIGHT_MIGRATION_SLOTS back to 0 once #1017 has landed on this
-        // branch's base (real sentinel count then reaches 14).
         assert_eq!(
-            sentinel_count + INFLIGHT_MIGRATION_SLOTS,
-            EXPECTED_SCHEMA_VERSION,
+            sentinel_count, EXPECTED_SCHEMA_VERSION,
             "EXPECTED_SCHEMA_VERSION ({EXPECTED_SCHEMA_VERSION}) must equal the number of \
-             sentinel migrations run_data_migrations actually marks run ({sentinel_count}) plus \
-             the documented in-flight slots ({INFLIGHT_MIGRATION_SLOTS}, #1017 v13) — \
+             sentinel migrations run_data_migrations actually marks run ({sentinel_count}) — \
              bump the const (and add a vN doc line) when a new migration is appended"
         );
     }

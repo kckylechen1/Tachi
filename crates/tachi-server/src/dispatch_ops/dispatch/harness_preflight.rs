@@ -10,6 +10,11 @@ pub(super) struct HarnessPreflightInputs<'a> {
     pub(super) dispatch_id: &'a str,
     pub(super) agent_norm: &'a str,
     pub(super) task: &'a str,
+    /// The dispatch's `TachiDispatchParams::project`, threaded through so a
+    /// preflight-failure terminal outcome row lands in the same DB a later
+    /// `tachi_complete` for this dispatch would resolve to (scope symmetry,
+    /// #774 round 2).
+    pub(super) project: Option<&'a str>,
     pub(super) trajectory_path: &'a Path,
     pub(super) workspace_dir: &'a Path,
     pub(super) v2: bool,
@@ -99,6 +104,7 @@ pub(super) fn run_harness_preflight(inputs: HarnessPreflightInputs<'_>) -> Resul
             inputs.dispatch_id,
             "preflight",
             Some(inputs.agent_norm),
+            inputs.project,
         );
         return Err(err);
     }

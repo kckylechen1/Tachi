@@ -125,12 +125,14 @@ pub(super) async fn run_pre_serve_command(
             json,
             hide_orphans,
             probe_keys,
+            all_dbs,
         } => {
             crate::status_ops::status_cli::run_status(
                 *watch,
                 *json,
                 *hide_orphans,
                 *probe_keys,
+                *all_dbs,
                 app_home,
                 global_db_path,
                 project_db_path.map(PathBuf::as_path),

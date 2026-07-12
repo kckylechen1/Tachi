@@ -6,7 +6,7 @@ pub(crate) fn collect_snapshot(
     global_db_path: &Path,
     project_db_path: Option<&Path>,
 ) -> StatusSnapshot {
-    collect_snapshot_inner(app_home, global_db_path, project_db_path, false)
+    collect_snapshot_scoped(app_home, global_db_path, project_db_path, false)
 }
 
 pub(crate) fn collect_snapshot_with_provider_value_compare(
@@ -14,7 +14,22 @@ pub(crate) fn collect_snapshot_with_provider_value_compare(
     global_db_path: &Path,
     project_db_path: Option<&Path>,
 ) -> StatusSnapshot {
-    collect_snapshot_inner(app_home, global_db_path, project_db_path, true)
+    collect_snapshot_inner(app_home, global_db_path, project_db_path, true, true)
+}
+
+/// Default-scoped `collect_snapshot`, with the coldpath fleet-probe gate
+/// (#coldpath perf pack item 5) explicit at the call site: `all_dbs = false`
+/// probes only the global DB + current-project DB (the two paths every
+/// `tachi status` invocation actually has open); `all_dbs = true` restores
+/// the full manifest fleet view. See `collect_snapshot_inner` for what
+/// "probe" means and why skipping it is cheap.
+pub(crate) fn collect_snapshot_scoped(
+    app_home: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+    all_dbs: bool,
+) -> StatusSnapshot {
+    collect_snapshot_inner(app_home, global_db_path, project_db_path, false, all_dbs)
 }
 
 fn collect_snapshot_inner(
@@ -22,6 +37,7 @@ fn collect_snapshot_inner(
     global_db_path: &Path,
     project_db_path: Option<&Path>,
     compare_provider_values: bool,
+    all_dbs: bool,
 ) -> StatusSnapshot {
     let daemon = collect_daemon_status(app_home, global_db_path);
     let daemon_inventory = collect_daemon_inventory(app_home, global_db_path);
@@ -29,8 +45,34 @@ fn collect_snapshot_inner(
 
     let manifest = Manifest::load(&manifest_path).unwrap_or_else(|_| Manifest::empty());
 
-    let mut dbs: Vec<DbStatus> = Vec::with_capacity(manifest.dbs.len());
-    for entry in &manifest.dbs {
+    // Coldpath scoping (perf pack item 5): probing every manifest DB
+    // read-only (job histogram, vector health, namespace counts, continuity
+    // metrics — several queries each) is the dominant cost of `tachi
+    // status` on hosts with many registered DBs (~220ms -> ~60ms measured
+    // going from a 7-DB fleet down to 2). The default view only opens the
+    // global DB and the current-project DB — the two paths this
+    // invocation's caller actually cares about — and `--all-dbs` restores
+    // the full fleet. This does NOT change what's IN the manifest, only
+    // which entries get probed for this render; entries skipped this way
+    // are simply absent from `dbs` (and therefore from `Summary`'s "N dbs"
+    // count) rather than shown with a placeholder, since unlike a missing
+    // DB file this isn't an error condition worth flagging.
+    let scoped_entries: Vec<&DbEntry> = if all_dbs {
+        manifest.dbs.iter().collect()
+    } else {
+        manifest
+            .dbs
+            .iter()
+            .filter(|entry| {
+                let path = PathBuf::from(&entry.path);
+                paths_equal(&path, global_db_path)
+                    || project_db_path.is_some_and(|p| paths_equal(&path, p))
+            })
+            .collect()
+    };
+
+    let mut dbs: Vec<DbStatus> = Vec::with_capacity(scoped_entries.len());
+    for entry in scoped_entries {
         let path = PathBuf::from(&entry.path);
         let label = db_status_label(entry, &path);
         let orphan = is_orphan_entry(entry, &path, global_db_path, project_db_path);
