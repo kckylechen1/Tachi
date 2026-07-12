@@ -236,9 +236,26 @@ pub(crate) fn record_access_with_updates(
     Ok(updates)
 }
 
+/// Per-`memory_id` cap on rows `get_access_times` will read from
+/// `access_history`. ACT-R base-level activation (`base_level_activation` in
+/// `scorer.rs`) sums `t_j^(-d)` over every returned access age — a plain sum,
+/// so it is order-independent and dominated by the most recent (least-decayed)
+/// accesses; older accesses beyond this cap contribute a vanishingly small
+/// share of the sum. This mirrors `GcConfig::access_history_keep_per_memory`
+/// (default 256): in steady state GC already prunes each memory_id down to
+/// this many rows, so the cap changes nothing for GC'd data and only bounds
+/// the query's worst case for a memory_id whose history has grown past that
+/// (e.g. between GC runs) — access_history is the fastest-growing table
+/// (15.6k rows observed on a single live DB) and this query was previously
+/// unbounded per id.
+const ACCESS_TIMES_MAX_PER_MEMORY: i64 = 256;
+
 /// Fetch access timestamps for a set of memory IDs (for ACT-R base-level activation).
 /// Returns a map from memory_id -> sorted list of seconds-since-epoch (age in seconds).
 /// Handles batching internally to stay under SQLite's 999 parameter limit.
+/// Caps each memory_id to its [`ACCESS_TIMES_MAX_PER_MEMORY`] most recent
+/// accesses (see that constant's doc comment for why this preserves ACT-R
+/// semantics).
 pub fn get_access_times(
     conn: &Connection,
     ids: &[String],
@@ -256,13 +273,25 @@ pub fn get_access_times(
             .enumerate()
             .map(|(i, _)| format!("?{}", i + 1))
             .collect();
+        let hash_idx = batch.len() + 1;
         let sql = format!(
-            "SELECT memory_id, accessed_at FROM access_history WHERE memory_id IN ({}) ORDER BY accessed_at DESC",
+            "SELECT memory_id, accessed_at FROM (
+                 SELECT memory_id, accessed_at,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY memory_id
+                            ORDER BY accessed_at DESC
+                        ) AS rn
+                 FROM access_history
+                 WHERE memory_id IN ({})
+             ) ranked
+             WHERE rn <= ?{hash_idx}
+             ORDER BY accessed_at DESC",
             placeholders.join(", ")
         );
         let mut stmt = conn.prepare(&sql)?;
-        let params_vec: Vec<&dyn rusqlite::ToSql> =
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> =
             batch.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        params_vec.push(&ACCESS_TIMES_MAX_PER_MEMORY);
         let rows = stmt.query_map(params_vec.as_slice(), |row| {
             let mem_id: String = row.get(0)?;
             let at: String = row.get(1)?;
@@ -279,4 +308,77 @@ pub fn get_access_times(
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod get_access_times_tests {
+    use super::*;
+    use crate::MemoryStore;
+    use chrono::Duration as ChronoDuration;
+
+    fn seed_memory(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO memories
+                (id, path, summary, text, importance, timestamp, category, topic,
+                 keywords, entities, source, scope, archived,
+                 created_at, updated_at, access_count, last_access, revision, metadata)
+             VALUES (?1, '/facts/readonly', '', '', 0.5, '2026-01-01T00:00:00Z', 'fact', '',
+                     '[]', '[]', 'manual', 'general', 0,
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0, NULL, 1, '{}')",
+            rusqlite::params![id],
+        )
+        .expect("seed memory row");
+    }
+
+    /// Inserts `count` `access_history` rows for `id`, each one second older
+    /// than the last (row 0 = most recent = `now`), so the returned ages are
+    /// deterministic and ordering is unambiguous.
+    fn seed_access_history(conn: &Connection, id: &str, count: i64) {
+        let now = Utc::now();
+        for i in 0..count {
+            let at = (now - ChronoDuration::seconds(i)).to_rfc3339();
+            conn.execute(
+                "INSERT INTO access_history (memory_id, accessed_at, query_hash) VALUES (?1, ?2, '')",
+                rusqlite::params![id, at],
+            )
+            .expect("seed access_history row");
+        }
+    }
+
+    #[test]
+    fn caps_at_max_per_memory_and_keeps_most_recent() {
+        let store = MemoryStore::open_in_memory().expect("open in-memory store");
+        let conn = store.connection();
+        seed_memory(conn, "busy");
+        // One more row than the cap — the oldest single row must be dropped.
+        seed_access_history(conn, "busy", ACCESS_TIMES_MAX_PER_MEMORY + 1);
+
+        let times = get_access_times(conn, &["busy".to_string()]).expect("get_access_times");
+        let ages = times.get("busy").expect("busy has access history");
+
+        assert_eq!(
+            ages.len(),
+            ACCESS_TIMES_MAX_PER_MEMORY as usize,
+            "must truncate to the cap, not return all {}+1 rows",
+            ACCESS_TIMES_MAX_PER_MEMORY
+        );
+        // Row `count-1` (age ~= count-1 seconds, the OLDEST inserted row) must
+        // be the one dropped; the youngest row (age ~= 0s) must survive.
+        let max_age = ages.iter().cloned().fold(0.0_f64, f64::max);
+        assert!(
+            max_age < ACCESS_TIMES_MAX_PER_MEMORY as f64,
+            "oldest surviving access must be younger than the row that got dropped, got max_age={max_age}"
+        );
+    }
+
+    #[test]
+    fn under_cap_is_unaffected() {
+        let store = MemoryStore::open_in_memory().expect("open in-memory store");
+        let conn = store.connection();
+        seed_memory(conn, "quiet");
+        seed_access_history(conn, "quiet", 3);
+
+        let times = get_access_times(conn, &["quiet".to_string()]).expect("get_access_times");
+        assert_eq!(times.get("quiet").map(Vec::len), Some(3));
+    }
 }

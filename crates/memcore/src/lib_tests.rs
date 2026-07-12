@@ -130,6 +130,45 @@ fn checkpoint_wal_truncate_reclaims_wal_file() {
 }
 
 #[test]
+fn run_optimize_refreshes_planner_statistics() {
+    let temp = tempfile::NamedTempFile::new().expect("temp db");
+    let db_path = temp.path().to_string_lossy().to_string();
+
+    let mut store = MemoryStore::open(&db_path).expect("open writable store");
+    for i in 0..50 {
+        store
+            .upsert(&test_entry(&format!("optimize-{i}")))
+            .expect("seed memory");
+    }
+
+    store
+        .run_optimize()
+        .expect("PRAGMA optimize should succeed");
+
+    // PRAGMA optimize's ANALYZE-equivalent effect is observable via
+    // sqlite_stat1: it should now carry at least one row for `memories`,
+    // giving the planner real selectivity data instead of guessing.
+    let stat_rows: i64 = store
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_stat1 WHERE tbl = 'memories'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    assert!(
+        stat_rows > 0,
+        "PRAGMA optimize should populate sqlite_stat1 for the memories table"
+    );
+
+    // Idempotent / repeat-safe: calling it again on the same connection
+    // must not error.
+    store
+        .run_optimize()
+        .expect("PRAGMA optimize should be safe to call repeatedly");
+}
+
+#[test]
 fn save_derived_with_id_upserts_existing_row() {
     let store = MemoryStore::open_in_memory().expect("open in-memory store");
     let metadata = serde_json::json!({"version": 1});
