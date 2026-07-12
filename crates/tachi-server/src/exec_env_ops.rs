@@ -34,8 +34,11 @@ pub(crate) struct ProvisionEnvOptions {
 /// Outcome of provisioning: the underlying worktree open report plus the lease
 /// id when a lease row was recorded. `env_id` is `None` when the worktree open
 /// failed / was a dry-run, or when the (non-fatal) lease insert failed — in the
-/// latter case a warning is appended to `report.warnings` and the sweep backstop
-/// still governs the orphaned worktree.
+/// latter case a warning is appended to `report.warnings` and the worktree
+/// stands untracked (no lease). Such an untracked worktree directory is
+/// reclaimed by the age-based `clean sweep` (`tachi_clean::sweep`), not by the
+/// stale-lease backstop (which only reclaims leases, and here none was
+/// recorded).
 #[derive(Debug, Clone)]
 pub(crate) struct ProvisionedEnv {
     pub env_id: Option<String>,
@@ -164,8 +167,9 @@ fn generate_env_id() -> String {
 ///
 /// Provisioning failures (or dry-run) return the report with `env_id: None` and
 /// no lease. A lease-insert failure after a successful open is non-fatal: the
-/// worktree stands, a warning is attached, and the sweep backstop still governs
-/// it.
+/// worktree stands, a warning is attached, and the orphaned worktree directory
+/// is left to the age-based `clean sweep` (there is no lease for the stale-lease
+/// backstop to reclaim in this case).
 pub(crate) fn provision_managed_env(
     conn: &rusqlite::Connection,
     opts: &ProvisionEnvOptions,
@@ -197,8 +201,9 @@ pub(crate) fn provision_managed_env(
         }),
         Err(err) => {
             report.warnings.push(format!(
-                "worktree provisioned but exec_env lease record failed: {err}; the sweep \
-                 backstop will still reclaim it"
+                "worktree provisioned but exec_env lease record failed: {err}; it is now an \
+                 untracked worktree with no managed lease — reclaim the orphaned directory via \
+                 the age-based `clean sweep`"
             ));
             Ok(ProvisionedEnv {
                 env_id: None,
@@ -244,8 +249,18 @@ impl MemoryServer {
     }
 
     /// THE single reclaim path for a lease (#894 S1). Flips `active` ->
-    /// `reclaimed` transactionally and idempotently; safe_merge / cancel /
-    /// terminal-state all route here.
+    /// `reclaimed` transactionally and idempotently.
+    ///
+    /// Wired producers today: only the `safe_merge` completion path
+    /// ([`gh_ops::router`], via [`reclaim_exec_env_for_worktree`]). Routing the
+    /// remaining terminal transitions — dispatch `cancel` and generic
+    /// terminal-state — through here is a #894 S2 policy call (a terminal task
+    /// may still be sitting on unmerged work, so reclaim there is not
+    /// unconditional) and is deliberately NOT wired in S1. Until S2 lands, the
+    /// `clean sweep` stale-lease backstop (see
+    /// `bootstrap::clean_cli::sweep_stale_exec_env_leases`) is what keeps a
+    /// crash / kill -9 / non-safe_merge exit from leaking an `active` lease
+    /// forever: it reclaims leases whose worktree is already gone from disk.
     pub(crate) fn reclaim_exec_env(
         &self,
         selector: &ExecEnvSelector,
