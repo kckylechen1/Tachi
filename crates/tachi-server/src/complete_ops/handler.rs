@@ -185,6 +185,14 @@ pub(crate) async fn handle_tachi_complete(
 
     // --- Kanban Hook: auto-update task board ---
     if let Some(ref did) = params.dispatch_id {
+        // #1001 round 2 item 1: release the presence claim this dispatch
+        // registered (auto_register_or_heartbeat_claim keys it on
+        // dispatch_id). Fires unconditionally for a completed dispatch,
+        // ahead of the predicate/kanban logic below, so a claim never stays
+        // `active` because a later step in this function returned early or
+        // erred. Fail-safe — degrades to a warn, never fails completion.
+        crate::claims_ops::release_claim_for_dispatch(server, did, "complete");
+
         // #878-A: gate the COMPLETED/reviewed write behind a machine-checkable
         // completion predicate declared at dispatch time. A self-reported
         // outcome="success" only earns a *reviewed* COMPLETED when the declared

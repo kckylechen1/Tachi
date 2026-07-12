@@ -47,4 +47,10 @@ impl MemoryStore {
     pub fn list_state(&self, namespace: &str) -> Result<Vec<db::StateRow>, MemoryError> {
         db::list_state(&self.conn, namespace)
     }
+
+    /// Delete a single deterministic key-value state row. Returns whether a
+    /// row was actually removed.
+    pub fn delete_state(&self, namespace: &str, key: &str) -> Result<bool, MemoryError> {
+        db::delete_state(&self.conn, namespace, key)
+    }
 }

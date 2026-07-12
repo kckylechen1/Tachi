@@ -13,6 +13,8 @@ pub(crate) fn format_briefing(
     checkpoints: &Value,
     open_loops: &[Value],
     component_governance: &Value,
+    issue_freshness: &Value,
+    presence: &Value,
     compact: bool,
 ) -> String {
     let memory_cap = if compact { 6 } else { 12 };
@@ -81,6 +83,65 @@ pub(crate) fn format_briefing(
             match item.get("action").and_then(Value::as_str) {
                 Some(action) => out.push(format!("- {detail} → `{action}`")),
                 None => out.push(format!("- {detail}")),
+            }
+        }
+    }
+
+    if let Some(section) = render_issue_freshness_section(issue_freshness) {
+        out.push(section);
+    }
+
+    let presence_board = presence.get("board");
+    let presence_items = presence_board
+        .and_then(|b| b.get("items"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    // #527: `briefing_claims_board` caps `items` at `PRESENCE_BOARD_DISPLAY_CAP`
+    // and reports the cut-off count in `overflow` — surface that as a
+    // "+N more" note (#1004 convention) instead of a silently-truncated list.
+    let presence_overflow = presence_board
+        .and_then(|b| b.get("overflow"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let presence_warnings = presence
+        .get("warnings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !presence_items.is_empty() || !presence_warnings.is_empty() {
+        out.push(
+            "\n### Presence 工位表 (who's working what) [AUTHORITY: WORKFLOW STATE]".to_string(),
+        );
+        out.push(
+            "_Advisory only — never a lock. TTL-expired claims disappear on their own._"
+                .to_string(),
+        );
+        for row in &presence_items {
+            let session = row
+                .get("session_client")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let issue_ref = row.get("issue_ref").and_then(Value::as_str);
+            let flow_id = row.get("flow_id").and_then(Value::as_str);
+            let heartbeat = row
+                .get("heartbeat_at")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let target = issue_ref.or(flow_id).unwrap_or("(no issue/flow declared)");
+            out.push(format!(
+                "- **{session}** → {target} (heartbeat {heartbeat})"
+            ));
+        }
+        if presence_overflow > 0 {
+            out.push(format!(
+                "- _+{presence_overflow} more (showing {})_",
+                presence_items.len()
+            ));
+        }
+        for warning in &presence_warnings {
+            if let Some(text) = warning.as_str() {
+                out.push(format!("- ⚠️ {text}"));
             }
         }
     }
@@ -272,6 +333,62 @@ pub(crate) fn format_briefing(
     );
 
     out.join("\n")
+}
+
+/// Render the "Issue freshness" section shared by `tachi_memory`'s
+/// compatibility briefing (`format_briefing`, above) and `tachi_task`'s
+/// feature briefing markdown (#1000 round-3 codex review finding 5: the
+/// `tachi_task` markdown renderer never rendered this section at all, even
+/// though the JSON response already carried `issue_freshness` — only
+/// `tachi_memory`'s renderer did). Returns `None` when there is nothing to
+/// show (both queues empty) so callers can skip the section entirely rather
+/// than emit an empty header.
+///
+/// Wording (#1000 round-3 codex review finding 7, reworded round-4): these
+/// rows are review candidates, never verdicts — the blurb below used to
+/// describe them as settled judgments, which said the opposite of what the
+/// module's own frozen posture is ("圈候选不判决" — circle the candidate, do
+/// not judge it).
+pub(crate) fn render_issue_freshness_section(issue_freshness: &Value) -> Option<String> {
+    let zombie_count = issue_freshness["zombies"]["count"].as_u64().unwrap_or(0);
+    let stale_count = issue_freshness["stale_candidates"]["count"]
+        .as_u64()
+        .unwrap_or(0);
+    if zombie_count == 0 && stale_count == 0 {
+        return None;
+    }
+    let mut out = vec!["\n### Issue freshness [AUTHORITY: WORKFLOW STATE]".to_string()];
+    out.push(
+        "_GitHub is truth for content; these are judgment-free review candidates, not verdicts or auto-closes._"
+            .to_string(),
+    );
+    if zombie_count > 0 {
+        out.push(format!(
+            "- **{zombie_count} zombie(s)** (fixed, still open) — top: {}",
+            issue_freshness["zombies"]["items"]
+                .as_array()
+                .map(|items| items
+                    .iter()
+                    .filter_map(|i| i.get("issue_ref").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join(", "))
+                .unwrap_or_default()
+        ));
+    }
+    if stale_count > 0 {
+        out.push(format!(
+            "- **{stale_count} stale-spec candidate(s)** (review, no verdict) — top: {}",
+            issue_freshness["stale_candidates"]["items"]
+                .as_array()
+                .map(|items| items
+                    .iter()
+                    .filter_map(|i| i.get("issue_ref").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join(", "))
+                .unwrap_or_default()
+        ));
+    }
+    Some(out.join("\n"))
 }
 
 fn briefing_next_step(
