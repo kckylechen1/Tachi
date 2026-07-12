@@ -482,6 +482,7 @@ async fn handle_tachi_status_detail(
     // the provider detail there, so the arrays don't need repeating).
     let runtime = runtime_observability_json(server, &app_home, Some(&snapshot.daemon), full);
     let mut warnings = build_status_warnings(&snapshot, &daemon_state);
+    push_unregistered_project_db_warning(&mut warnings, &app_home);
     let recall_eval = crate::status_ops::recall_eval::read_recall_eval_status(&app_home);
     if let Some(warning) = crate::status_ops::recall_eval::recall_eval_warning(&recall_eval) {
         warnings.push(warning);

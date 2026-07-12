@@ -438,11 +438,30 @@ pub(crate) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, St
         // Branch #5: GC foundry jobs in terminal state >= 30 days old
         // (was 7d, see project owner's lifecycle spec).
         let foundry_deleted = memcore::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
+        // #1001 follow-up (R2 review of #1007 CONCERN, #1029 lesson):
+        // `session_claims` shipped with no reaper — `released` rows were
+        // retained forever and a dead `active` heartbeat (crashed/killed
+        // session that never called release) was invisible to *readers*
+        // (`list_active_claims`'s lazy TTL filter) but stayed in storage
+        // forever. `session_claims` is global-store-only (`claims_ops`
+        // always writes via `with_global_store`), so this sweep only runs
+        // here, not in the project-DB arm below.
+        let claims_gc =
+            memcore::gc_session_claims(store.connection(), chrono::Utc::now(), 7, 30)
+                .map_err(|e| format!("GC session_claims failed on global DB: {e}"))?;
         if let Some(object) = gc.as_object_mut() {
             object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
             object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
             object.insert("handoff_memories_pruned".into(), json!(handoff_deleted));
             object.insert("sticky_memories_expired".into(), json!(sticky_expired));
+            object.insert(
+                "session_claims_released_pruned".into(),
+                json!(claims_gc.released_pruned),
+            );
+            object.insert(
+                "session_claims_active_staled".into(),
+                json!(claims_gc.active_staled),
+            );
         }
         Ok(gc)
     })?;

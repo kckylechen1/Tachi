@@ -384,6 +384,7 @@ pub(crate) async fn handle_tachi_memory(
                     text,
                     to: params.to.clone(),
                     ttl_days: params.ttl_days,
+                    agent_id: params.agent_id.clone(),
                 },
             )
             .await
