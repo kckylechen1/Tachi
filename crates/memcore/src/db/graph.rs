@@ -18,6 +18,18 @@ pub fn add_edge(conn: &Connection, edge: &MemoryEdge) -> Result<(), MemoryError>
     } else {
         normalize_utc_iso_or_now(&edge.valid_from)
     };
+    // Freeze normalized UTC half-open interval [valid_from, valid_to) semantics:
+    // valid_to must be normalized to the same RFC3339-with-millis format as
+    // valid_from/created_at so it stays comparable with the read-side's
+    // format-agnostic datetime() comparison (see get_edges / get_edges_batch /
+    // get_contradiction_count). Storing it raw let same-day RFC3339 values
+    // remain lexically "active" forever against SQLite's differently
+    // formatted datetime('now') text (#773 Sol correction 4).
+    let valid_to = edge
+        .valid_to
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(normalize_utc_iso_or_now);
     let meta_str = serde_json::to_string(&edge.metadata).unwrap_or_else(|_| "{}".to_string());
 
     conn.execute(
@@ -25,7 +37,7 @@ pub fn add_edge(conn: &Connection, edge: &MemoryEdge) -> Result<(), MemoryError>
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
            ON CONFLICT(source_id, target_id, relation)
            DO UPDATE SET weight = ?4, metadata = ?5, created_at = ?6, valid_from = ?7, valid_to = ?8"#,
-        params![edge.source_id, edge.target_id, edge.relation, edge.weight, meta_str, created, valid_from, edge.valid_to],
+        params![edge.source_id, edge.target_id, edge.relation, edge.weight, meta_str, created, valid_from, valid_to],
     )?;
     Ok(())
 }
@@ -55,13 +67,13 @@ pub fn get_edges(
     let base_sql = match direction {
         "incoming" =>
             "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to FROM memory_edges WHERE target_id = ?1
-             AND (valid_to IS NULL OR valid_to > datetime('now'))",
+             AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))",
         "outgoing" =>
             "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to FROM memory_edges WHERE source_id = ?1
-             AND (valid_to IS NULL OR valid_to > datetime('now'))",
+             AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))",
         _ =>
             "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to FROM memory_edges WHERE (source_id = ?1 OR target_id = ?1)
-             AND (valid_to IS NULL OR valid_to > datetime('now'))",
+             AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))",
     };
 
     // Use parameterized query for relation_filter to prevent SQL injection
@@ -117,7 +129,7 @@ fn get_edges_batch(
         "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to \
          FROM memory_edges \
          WHERE (source_id IN ({ph}) OR target_id IN ({ph})) \
-         AND (valid_to IS NULL OR valid_to > datetime('now'))",
+         AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))",
         ph = placeholders
     );
 
@@ -177,7 +189,7 @@ fn get_edges_batch(
 /// Used by surprise scoring to detect controversial/surprising memories.
 pub fn get_contradiction_count(conn: &Connection, memory_id: &str) -> Result<u32, MemoryError> {
     let count: u32 = conn.query_row(
-        "SELECT COUNT(*) FROM memory_edges WHERE (source_id = ?1 OR target_id = ?1) AND relation = 'contradicts' AND (valid_to IS NULL OR valid_to > datetime('now'))",
+        "SELECT COUNT(*) FROM memory_edges WHERE (source_id = ?1 OR target_id = ?1) AND relation = 'contradicts' AND (valid_to IS NULL OR datetime(valid_to) > datetime('now'))",
         params![memory_id],
         |row| row.get(0),
     )?;

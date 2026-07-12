@@ -3,8 +3,7 @@ use super::{
 };
 use crate::tool_params::{
     InitProjectDbParams, TachiDomainAdapterParams, TachiEventParams, TachiMemoryParams,
-    TachiProfileDocumentParams, TachiProfileParams, TachiSearchParams, TachiSkillParams,
-    TachiTaskParams,
+    TachiSearchParams, TachiSkillParams, TachiTaskParams,
 };
 use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
@@ -69,10 +68,13 @@ fn tachi_memory_params(action: &str) -> TachiMemoryParams {
         turn_id: None,
         event_type: None,
         messages: Vec::new(),
+        to: None,
+        ttl_days: None,
+        include_read: false,
+        agent_id: None,
     }
 }
 
-mod agent_profile;
 mod briefing;
 mod cli_daemon;
 mod domain_adapter;

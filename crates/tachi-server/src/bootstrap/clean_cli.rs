@@ -164,6 +164,151 @@ fn provision_managed_env_cli(
     }
 }
 
+/// CLI wrapper for the stale-lease sweep backstop (#1029). Opens the global
+/// store and, **gated on the same `force` flag as the worktree sweep**, either
+/// previews (read-only) or reclaims any `active` exec_env lease whose worktree
+/// is gone. Fail-open: an absent / unopenable global store is surfaced as a
+/// one-line warning and skipped, never an error — the stale-lease sweep is a
+/// best-effort backstop, not the caller's contract (#1029 D2).
+///
+/// `force == false` (preview / dry-run, the default) lists the stale leases and
+/// reports the count a real sweep WOULD reclaim, but never mutates — preview
+/// must not change state (#1029 D1). `force == true` runs the mutate path.
+/// NOTE (#1029 review): opening the store here runs pending schema migrations
+/// like every other read command in this binary (briefing, status, search).
+/// That open-on-read behavior is systemic, not a sweep-specific mutation; the
+/// destructive gate this function owns is lease reclaim, and that is strictly
+/// `force`-gated below.
+fn sweep_stale_exec_env_leases_cli(force: bool) {
+    let global_db = crate::path_utils::tachi_home()
+        .join("global")
+        .join("memory.db");
+    let db_str = match global_db.to_str() {
+        Some(s) => s,
+        None => {
+            eprintln!(
+                "exec_env lease sweep: warning: global db path is not valid UTF-8; backstop skipped"
+            );
+            tracing::debug!("global db path is not valid UTF-8; skipping stale-lease sweep");
+            return;
+        }
+    };
+    match memcore::MemoryStore::open_with_label(db_str, "global") {
+        Ok(mut store) => {
+            if !force {
+                // Preview / dry-run: read-only point-count. List what a real
+                // (`--force`) sweep would reclaim and report it, but do NOT
+                // mutate — preview must not change state (#1029 D1).
+                match list_stale_exec_env_leases(store.connection()) {
+                    Ok(stale) => eprintln!(
+                        "exec_env lease sweep (preview): would reclaim {} stale lease(s)",
+                        stale.len()
+                    ),
+                    Err(err) => {
+                        eprintln!(
+                            "exec_env lease sweep: warning: listing stale leases failed: {err}"
+                        );
+                        tracing::warn!(error = %err, "stale exec_env lease listing failed");
+                    }
+                }
+                return;
+            }
+            match sweep_stale_exec_env_leases(store.connection_mut()) {
+                Ok(reclaimed) => {
+                    eprintln!("exec_env lease sweep (force): reclaimed {reclaimed} stale lease(s)");
+                    if reclaimed > 0 {
+                        tracing::info!(reclaimed, "sweep reclaimed stale exec_env leases");
+                    }
+                }
+                Err(err) => {
+                    eprintln!("exec_env lease sweep: warning: reclaim failed: {err}");
+                    tracing::warn!(error = %err, "stale exec_env lease sweep failed");
+                }
+            }
+        }
+        // #1029 D2: fail-open on a missing/unopenable global store so the
+        // worktree sweep it rides along with never fails, but make the skipped
+        // backstop observable with a one-line warning instead of a silent
+        // `debug!` that made `clean sweep` look all-green while the backstop was
+        // quietly not running.
+        Err(err) => {
+            eprintln!(
+                "exec_env lease sweep: warning: lease store unavailable, backstop skipped ({err})"
+            );
+            tracing::warn!(
+                error = %err,
+                "exec_env lease store unavailable; skipping stale-lease sweep"
+            );
+        }
+    }
+}
+
+/// Read-only: list `active` exec_env leases whose worktree path no longer exists
+/// on disk (#1029 sweep backstop, preview half). Never mutates — the preview /
+/// dry-run path calls this and reports the count WITHOUT reclaiming, preserving
+/// the "preview does not change state" contract (#1029 D1).
+///
+/// Active leases whose path still exists are left out: only a crash / kill -9 /
+/// any non-`safe_merge` exit leaves an `active` lease pointing at a worktree that
+/// is already gone, and `find_active_exec_env_by_path` would otherwise hand that
+/// stale lease to a later dispatch (#976).
+fn list_stale_exec_env_leases(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<memcore::ExecEnvLease>, String> {
+    let active = memcore::list_exec_envs(conn, Some(memcore::ExecEnvState::Active))
+        .map_err(|e| e.to_string())?;
+    Ok(active
+        .into_iter()
+        .filter(|lease| !std::path::Path::new(&lease.path).exists())
+        .collect())
+}
+
+/// Write: reclaim the given stale leases (#1029 sweep backstop, mutate half).
+/// Returns the count reclaimed.
+///
+/// This is a *backstop*, never the owning transition: wiring `cancel` /
+/// terminal-state through the reclaim path is a #894 S2 policy call and is out of
+/// scope here.
+///
+/// Each stale lease is reclaimed **by env_id, not by path**: `exec_envs.path`
+/// has no UNIQUE constraint and the path-based reclaim selector resolves a single
+/// row (LIMIT 1), so a path carrying multiple `active` leases must be drained
+/// row-by-row or the extra leases would leak.
+fn reclaim_stale_exec_env_leases(
+    conn: &mut rusqlite::Connection,
+    stale: &[memcore::ExecEnvLease],
+) -> Result<usize, String> {
+    let mut reclaimed = 0usize;
+    for lease in stale {
+        // Re-check right before the write: the path may have reappeared
+        // between the list (read) half and this reclaim (write) half — e.g. a
+        // provision recreating the same leaf. A lease whose worktree exists
+        // again is no longer stale and must not be reclaimed (TOCTOU guard).
+        if std::path::Path::new(&lease.path).exists() {
+            continue;
+        }
+        let outcome = memcore::reclaim_exec_env(
+            conn,
+            &memcore::ExecEnvSelector::EnvId(lease.env_id.clone()),
+            Some("sweep_stale"),
+        )
+        .map_err(|e| e.to_string())?;
+        if matches!(outcome, memcore::ReclaimOutcome::Reclaimed { .. }) {
+            reclaimed += 1;
+        }
+    }
+    Ok(reclaimed)
+}
+
+/// Mutate path = list (preview half) then reclaim (mutate half). Returns the
+/// count reclaimed. Used by the `--force` CLI branch and the sweep tests; the
+/// preview branch calls `list_stale_exec_env_leases` alone so it never reaches
+/// the reclaim half (#1029 D1).
+fn sweep_stale_exec_env_leases(conn: &mut rusqlite::Connection) -> Result<usize, String> {
+    let stale = list_stale_exec_env_leases(conn)?;
+    reclaim_stale_exec_env_leases(conn, &stale)
+}
+
 fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
     match action {
         CleanAction::Target {
@@ -192,12 +337,21 @@ fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
             force,
             dry_run: _,
             json,
-        } => tachi_clean::sweep::run_sweep(SweepOptions {
-            roots: root,
-            max_age_days,
-            force,
-            output: output_format(json),
-        }),
+        } => {
+            // Backstop reclaim of stale exec_env leases (#1029) rides along with
+            // the age-based worktree sweep, gated on the SAME `force` flag: the
+            // worktree sweep only removes with `--force` (preview otherwise), so
+            // the lease backstop must too — without `--force` it previews
+            // read-only and never reclaims (D1). Fail-open: a missing/unopenable
+            // global store must never fail the worktree sweep it accompanies (D2).
+            sweep_stale_exec_env_leases_cli(force);
+            tachi_clean::sweep::run_sweep(SweepOptions {
+                roots: root,
+                max_age_days,
+                force,
+                output: output_format(json),
+            })
+        }
         CleanAction::Tachi {
             home,
             force,
@@ -256,5 +410,148 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    fn open_lease_store(dir: &std::path::Path) -> memcore::MemoryStore {
+        let db = dir.join("memory.db");
+        memcore::MemoryStore::open(db.to_str().unwrap()).unwrap()
+    }
+
+    fn insert_active_lease(store: &memcore::MemoryStore, env_id: &str, path: &str) {
+        memcore::insert_exec_env(
+            store.connection(),
+            &memcore::NewExecEnvLease {
+                env_id: env_id.to_string(),
+                kind: "worktree".to_string(),
+                path: path.to_string(),
+                repo_root: "/repo".to_string(),
+                branch: "tachi/1029/w".to_string(),
+                base_sha: "abc123".to_string(),
+                dispatch_id: None,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+    }
+
+    fn lease_state(store: &memcore::MemoryStore, env_id: &str) -> memcore::ExecEnvLease {
+        memcore::get_exec_env(store.connection(), env_id)
+            .unwrap()
+            .expect("lease present")
+    }
+
+    #[test]
+    fn sweep_reclaims_lease_whose_worktree_is_gone() {
+        let dir = unique_temp_dir("tachi-clean-cli-lease-gone");
+        let mut store = open_lease_store(&dir);
+        // A path that does not exist on disk (the worktree was deleted / never
+        // survived a crash) — the stale lease must be reclaimed.
+        let gone = dir.join("does-not-exist-wt");
+        insert_active_lease(&store, "env-gone", gone.to_str().unwrap());
+
+        let n = sweep_stale_exec_env_leases(store.connection_mut()).unwrap();
+        assert_eq!(n, 1);
+
+        let lease = lease_state(&store, "env-gone");
+        assert_eq!(lease.state, memcore::ExecEnvState::Reclaimed);
+        assert_eq!(lease.reclaim_reason.as_deref(), Some("sweep_stale"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sweep_leaves_lease_whose_worktree_exists() {
+        let dir = unique_temp_dir("tachi-clean-cli-lease-live");
+        let mut store = open_lease_store(&dir);
+        // A live worktree directory: its lease must NOT be touched — only
+        // safe_merge / #894 S2 own that transition, never the sweep.
+        let live = dir.join("live-wt");
+        std::fs::create_dir_all(&live).unwrap();
+        insert_active_lease(&store, "env-live", live.to_str().unwrap());
+
+        let n = sweep_stale_exec_env_leases(store.connection_mut()).unwrap();
+        assert_eq!(n, 0);
+
+        let lease = lease_state(&store, "env-live");
+        assert_eq!(lease.state, memcore::ExecEnvState::Active);
+        assert_eq!(lease.reclaim_reason, None);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sweep_drains_all_active_leases_sharing_a_gone_path() {
+        let dir = unique_temp_dir("tachi-clean-cli-lease-dup");
+        let mut store = open_lease_store(&dir);
+        // `exec_envs.path` has no UNIQUE constraint and the path-based reclaim
+        // is LIMIT 1; two active leases on one gone path must BOTH be reclaimed,
+        // which only holds because the sweep reclaims by env_id row-by-row.
+        let gone = dir.join("shared-gone-wt");
+        insert_active_lease(&store, "env-dup-a", gone.to_str().unwrap());
+        insert_active_lease(&store, "env-dup-b", gone.to_str().unwrap());
+
+        let n = sweep_stale_exec_env_leases(store.connection_mut()).unwrap();
+        assert_eq!(n, 2);
+
+        assert_eq!(
+            lease_state(&store, "env-dup-a").state,
+            memcore::ExecEnvState::Reclaimed
+        );
+        assert_eq!(
+            lease_state(&store, "env-dup-b").state,
+            memcore::ExecEnvState::Reclaimed
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn preview_lists_stale_lease_without_reclaiming() {
+        let dir = unique_temp_dir("tachi-clean-cli-lease-preview");
+        let store = open_lease_store(&dir);
+        // Active lease whose worktree path is gone: the preview / dry-run path
+        // must SEE it (so it can report the count) but must NOT reclaim it —
+        // preview does not change state (#1029 D1). This is the read-only half
+        // the `!force` CLI branch calls.
+        let gone = dir.join("does-not-exist-preview-wt");
+        insert_active_lease(&store, "env-preview", gone.to_str().unwrap());
+
+        let stale = list_stale_exec_env_leases(store.connection()).unwrap();
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].env_id, "env-preview");
+
+        // The lease is untouched: still active, no reclaim reason stamped.
+        let lease = lease_state(&store, "env-preview");
+        assert_eq!(lease.state, memcore::ExecEnvState::Active);
+        assert_eq!(lease.reclaim_reason, None);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn force_path_reclaims_after_preview_leaves_active() {
+        let dir = unique_temp_dir("tachi-clean-cli-lease-gate");
+        let mut store = open_lease_store(&dir);
+        // End-to-end gating: the same stale lease is left active by the preview
+        // half, then reclaimed by the force/mutate half (#1029 D1 gate flip).
+        let gone = dir.join("does-not-exist-gate-wt");
+        insert_active_lease(&store, "env-gate", gone.to_str().unwrap());
+
+        // Preview (read-only) sees it but leaves it active.
+        let stale = list_stale_exec_env_leases(store.connection()).unwrap();
+        assert_eq!(stale.len(), 1);
+        assert_eq!(
+            lease_state(&store, "env-gate").state,
+            memcore::ExecEnvState::Active
+        );
+
+        // Force/mutate path reclaims the same lease.
+        let reclaimed = sweep_stale_exec_env_leases(store.connection_mut()).unwrap();
+        assert_eq!(reclaimed, 1);
+        let lease = lease_state(&store, "env-gate");
+        assert_eq!(lease.state, memcore::ExecEnvState::Reclaimed);
+        assert_eq!(lease.reclaim_reason.as_deref(), Some("sweep_stale"));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -13,54 +13,69 @@ use serde_json::Value;
 
 use super::detect::DaemonInfo;
 use super::tool_map::remap_daemon_tool;
+use crate::tools::{
+    TASK_CONTROL_TIMEOUT_CAP_SECS, TASK_CONTROL_TIMEOUT_DEFAULT_SECS,
+    TASK_WAIT_TIMEOUT_CAP_SECS, TASK_WAIT_TIMEOUT_DEFAULT_SECS,
+};
 
 const DAEMON_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Hard ceiling on the derived per-call RPC timeout for long-poll tools.
-/// Mirrors `task_facade::handle_tachi_task_wait`'s own `timeout_secs` cap
-/// (86_400s / 24h) so the RPC layer never becomes the binding constraint
-/// below the tool's own documented maximum, while still bounding how long a
-/// single daemon connection can be pinned open.
-const DAEMON_CALL_TIMEOUT_CEILING: Duration = Duration::from_secs(86_400);
-
-/// Headroom added on top of a caller-supplied poll timeout so the outer RPC
-/// timeout comfortably outlives the daemon-side wait loop (which returns its
-/// own `"status":"timeout"` payload as a *successful* response at its
-/// deadline — the RPC timeout is only meant to catch cases where the daemon
-/// hangs past that, not to race it).
+/// Headroom added on top of a caller-supplied poll/control timeout so the
+/// outer RPC timeout comfortably outlives the daemon-side wait/control loop
+/// (which returns its own terminal payload — e.g. `"status":"timeout"` — as
+/// a *successful* response at its own deadline; the RPC timeout is only
+/// meant to catch cases where the daemon hangs past that, not to race it).
 const LONG_POLL_TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 
 /// Derive the outer RPC timeout to use for `peer.call_tool(params)`.
 ///
 /// Most tools get the fixed `DAEMON_CALL_TIMEOUT` (60s) baseline. A small
-/// set of "long-poll" tools carry their own caller-supplied poll timeout in
-/// `arguments` and can legitimately run far longer than 60s by design (see
-/// `tools/task_facade.rs::handle_tachi_task_wait`, which polls up to
-/// `timeout_secs` capped at 86_400s, default 600s). For those, the derived
-/// timeout is the tool's own timeout plus [`LONG_POLL_TIMEOUT_MARGIN`],
-/// capped at [`DAEMON_CALL_TIMEOUT_CEILING`].
+/// whitelist of `tachi_task` long-poll/control actions carry their own
+/// caller-supplied timeout in `arguments.timeout_secs` and can legitimately
+/// run longer than 60s by design:
 ///
-/// Currently the only known long-poll daemon tool is `tachi_task` with
-/// `action == "wait"` (see #970, and the review-fix that closed the
-/// string/null gap #970's first pass left open). `timeout_secs` is coerced
-/// with [`tachi_params::opt_u64_from_value`] — the same lenient
-/// Null/Number/String-or-number mapping the daemon-side
+/// - `action == "wait"` polls up to `timeout_secs`, default
+///   [`TASK_WAIT_TIMEOUT_DEFAULT_SECS`] (600s), capped at
+///   [`TASK_WAIT_TIMEOUT_CAP_SECS`] (86_400s / 24h) —
+///   `tools/task_facade.rs::handle_tachi_task_wait`.
+/// - `action == "status"` / `action == "cancel"` drive the acpx
+///   control-plane call with the same shape, default
+///   [`TASK_CONTROL_TIMEOUT_DEFAULT_SECS`] (30s), capped at
+///   [`TASK_CONTROL_TIMEOUT_CAP_SECS`] (300s) —
+///   `handle_tachi_task_status` / `handle_tachi_task_cancel`.
+///
+/// These four constants are shared (`crate::tools::TASK_*`) with the
+/// daemon-side handlers rather than mirrored, so the RPC-layer default/cap
+/// can't drift out of sync with what the daemon actually applies (see #970,
+/// #991, #1028).
+///
+/// The **invariant**: for every whitelisted action, the derived RPC timeout
+/// is `min(requested_or_default, daemon_cap) + LONG_POLL_TIMEOUT_MARGIN` —
+/// the daemon-side cap is applied *first*, then the margin is added on top.
+/// That ordering means the margin is never eaten by capping (the #970/#1028
+/// bug: capping `requested + margin` at a ceiling equal to the daemon's own
+/// cap could squeeze the margin to zero right at the boundary, racing the
+/// daemon's own clean timeout response), and it holds across the whole
+/// parameter domain including the cap boundary itself — there is no longer
+/// a separate outer ceiling to keep in sync with the per-action cap.
+///
+/// `timeout_secs` is coerced with [`tachi_params::opt_u64_from_value`] — the
+/// same lenient Null/Number/String-or-number mapping the daemon-side
 /// `TachiTaskParams::timeout_secs` field uses via
 /// `opt_u64_from_string_or_number` — so a JSON number, a numeric string
 /// (`"600"`), `null`, an empty string, or an absent key all resolve to the
-/// *same* effective timeout the daemon will actually apply
-/// (`unwrap_or(600)` in `handle_tachi_task_wait`), instead of the RPC layer
-/// silently disagreeing with the daemon about what "no timeout supplied"
-/// means.
+/// *same* effective default the daemon will actually apply, instead of the
+/// RPC layer silently disagreeing with the daemon about what "no timeout
+/// supplied" means.
 ///
-/// A non-numeric garbage string (e.g. `"abc"`) also maps to `None` → the
-/// 600s wait default here, even though daemon-side `TachiTaskParams`
-/// deserialization would *reject* that value outright (a hard parse error
-/// before the wait loop ever starts). That's intentionally harmless: the
-/// whole `tachi_task` call fails fast on the daemon's strict param parse,
-/// so no real 600s-or-longer wait is ever entered — the derived 630s RPC
-/// timeout here only needs to not undercut/race that fast failure, and it
-/// doesn't.
+/// A non-numeric garbage string (e.g. `"abc"`) or a negative number also
+/// maps to `None` → the action's default here, even though daemon-side
+/// `TachiTaskParams` deserialization would *reject* that value outright (a
+/// hard parse error before the wait/control loop ever starts). That's
+/// intentionally harmless: the whole `tachi_task` call fails fast on the
+/// daemon's strict param parse, so no real long-running call is ever
+/// entered under that value — the derived RPC timeout here only needs to
+/// not undercut/race that fast failure, and it doesn't.
 pub(super) fn daemon_call_timeout(params: &CallToolRequestParams) -> Duration {
     if params.name.as_ref() != "tachi_task" {
         return DAEMON_CALL_TIMEOUT;
@@ -68,30 +83,28 @@ pub(super) fn daemon_call_timeout(params: &CallToolRequestParams) -> Duration {
     let Some(arguments) = params.arguments.as_ref() else {
         return DAEMON_CALL_TIMEOUT;
     };
-    let is_wait = arguments
-        .get("action")
-        .and_then(Value::as_str)
-        .map(|action| action == "wait")
-        .unwrap_or(false);
-    if !is_wait {
-        return DAEMON_CALL_TIMEOUT;
-    }
+    let action = arguments.get("action").and_then(Value::as_str).unwrap_or("");
+    let (default_secs, cap_secs) = match action {
+        "wait" => (TASK_WAIT_TIMEOUT_DEFAULT_SECS, TASK_WAIT_TIMEOUT_CAP_SECS),
+        "status" | "cancel" => (
+            TASK_CONTROL_TIMEOUT_DEFAULT_SECS,
+            TASK_CONTROL_TIMEOUT_CAP_SECS,
+        ),
+        _ => return DAEMON_CALL_TIMEOUT,
+    };
 
-    // Mirror handle_tachi_task_wait's own default (600s) when the caller
-    // didn't supply timeout_secs, or supplied a value that coerces to
-    // `None` (null, "", or a non-numeric string — see doc comment above),
-    // so all of those derive the same timeout the daemon will actually use
-    // rather than falling back to a generic 60s default that would
-    // recreate #970 for anything but a bare JSON number.
-    const WAIT_DEFAULT_SECS: u64 = 600;
     let requested_secs = arguments
         .get("timeout_secs")
         .and_then(tachi_params::opt_u64_from_value)
-        .unwrap_or(WAIT_DEFAULT_SECS);
+        .unwrap_or(default_secs);
 
-    let requested = Duration::from_secs(requested_secs);
-    let derived = requested.saturating_add(LONG_POLL_TIMEOUT_MARGIN);
-    derived.min(DAEMON_CALL_TIMEOUT_CEILING)
+    // Cap to the daemon's own effective wait/control ceiling *before*
+    // adding the margin — see the invariant in the doc comment above. This
+    // is the #1028 fix: the old code added the margin first and only then
+    // capped at a ceiling equal to the daemon's own cap, which could shave
+    // the margin down to nothing right at the boundary.
+    let effective_secs = requested_secs.min(cap_secs);
+    Duration::from_secs(effective_secs) + LONG_POLL_TIMEOUT_MARGIN
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,8 +274,12 @@ mod tests {
     }
 
     fn wait_params(timeout_secs: Option<Value>) -> CallToolRequestParams {
+        action_params("wait", timeout_secs)
+    }
+
+    fn action_params(action: &str, timeout_secs: Option<Value>) -> CallToolRequestParams {
         let mut args = serde_json::Map::new();
-        args.insert("action".into(), Value::String("wait".into()));
+        args.insert("action".into(), Value::String(action.into()));
         if let Some(v) = timeout_secs {
             args.insert("timeout_secs".into(), v);
         }
@@ -298,10 +315,76 @@ mod tests {
         );
     }
 
+    // #1028: this replaces the old `wait_above_ceiling_is_capped` assertion
+    // (`daemon_call_timeout == DAEMON_CALL_TIMEOUT_CEILING`, i.e. exactly
+    // 86_400s with the margin fully eaten). That was the bug: capping
+    // `requested + margin` at a ceiling equal to the daemon's own cap
+    // squeezes the margin to zero right at the boundary the daemon itself
+    // uses, racing its clean `"status":"timeout"` response instead of
+    // comfortably outliving it. The fix caps `requested` at the daemon's
+    // cap *first*, then always adds the full margin on top — so a
+    // wildly-over-cap request and a request sitting exactly on the cap
+    // boundary both land at `cap + margin`, never `cap`.
     #[test]
-    fn wait_above_ceiling_is_capped() {
+    fn wait_above_cap_gets_cap_plus_margin_not_truncated() {
         let params = wait_params(Some(json!(999_999)));
-        assert_eq!(daemon_call_timeout(&params), DAEMON_CALL_TIMEOUT_CEILING);
+        assert_eq!(
+            daemon_call_timeout(&params),
+            Duration::from_secs(TASK_WAIT_TIMEOUT_CAP_SECS) + LONG_POLL_TIMEOUT_MARGIN
+        );
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(86_430));
+    }
+
+    #[test]
+    fn wait_at_cap_boundary_still_gets_full_margin() {
+        // requested == the daemon's own cap exactly (86_400s) is the
+        // precise boundary #1028 called out: the old ceiling-after-margin
+        // code shaved the margin to 0 here. min(86_400, 86_400) + 30 must
+        // be 86_430, not 86_400.
+        let params = wait_params(Some(json!(TASK_WAIT_TIMEOUT_CAP_SECS)));
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(86_430));
+    }
+
+    #[test]
+    fn status_with_explicit_timeout_gets_timeout_plus_margin() {
+        let params = action_params("status", Some(json!(300)));
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(330));
+    }
+
+    #[test]
+    fn status_above_cap_is_capped_before_margin() {
+        // requested (301) > daemon cap (300) for status/cancel: the daemon
+        // itself clamps to 300 (`unwrap_or(30).min(300)` in
+        // `handle_tachi_task_status`), so the RPC layer must derive from
+        // the *clamped* 300, not the raw 301 — otherwise it'd still be
+        // correct by accident here, but the point is the cap, not the
+        // requested value, drives the derived timeout once over cap.
+        let params = action_params("status", Some(json!(301)));
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(330));
+    }
+
+    #[test]
+    fn status_with_absent_timeout_mirrors_task_facade_default() {
+        let params = action_params("status", None);
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn cancel_with_explicit_timeout_gets_timeout_plus_margin() {
+        let params = action_params("cancel", Some(json!(300)));
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(330));
+    }
+
+    #[test]
+    fn cancel_above_cap_is_capped_before_margin() {
+        let params = action_params("cancel", Some(json!(999_999)));
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(330));
+    }
+
+    #[test]
+    fn cancel_with_absent_timeout_mirrors_task_facade_default() {
+        let params = action_params("cancel", None);
+        assert_eq!(daemon_call_timeout(&params), Duration::from_secs(60));
     }
 
     #[test]

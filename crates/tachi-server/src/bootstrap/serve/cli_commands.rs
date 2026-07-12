@@ -73,6 +73,10 @@ pub(super) async fn run_pre_serve_command(
             super::super::harness_cli::run_harness_command(action.clone()).await?;
             Ok(true)
         }
+        Commands::Host { action } => {
+            crate::host_profile::run_cli(action.clone(), app_home)?;
+            Ok(true)
+        }
         Commands::SkillSurface { action } => {
             super::super::skill_surface_cli::run_skill_surface_command(action.clone()).await?;
             Ok(true)

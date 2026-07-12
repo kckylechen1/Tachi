@@ -9,6 +9,7 @@ async fn dispatch_prompt_invokes_stage_and_waza_skills_for_execute_slice() {
             agent: Some("claude".to_string()),
             profile: None,
             task: "修好 tachi-server 报错，先找根因再改".to_string(),
+            execution_level: None,
             cwd: None,
             env_id: None,
             unmanaged_cwd: None,
@@ -69,6 +70,7 @@ async fn dispatch_prompt_invokes_native_subagent_factory_for_dispatch_stage() {
             profile: None,
             task: "Split this implementation plan into worker slices and run review gates"
                 .to_string(),
+            execution_level: None,
             cwd: None,
             env_id: None,
             unmanaged_cwd: None,

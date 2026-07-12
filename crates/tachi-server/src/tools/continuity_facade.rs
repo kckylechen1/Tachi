@@ -121,6 +121,10 @@ impl MemoryServer {
             turn_id: None,
             event_type: None,
             messages: Vec::new(),
+            to: None,
+            ttl_days: None,
+            include_read: false,
+            agent_id: None,
         };
         crate::facade_memory_ops::handle_tachi_memory(self, params).await
     }

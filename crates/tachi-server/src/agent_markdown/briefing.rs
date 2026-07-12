@@ -3,6 +3,7 @@ use super::*;
 pub(crate) fn format_briefing(
     query: &str,
     project_label: Option<&str>,
+    stickies: &Value,
     memories: &Value,
     wiki: &Value,
     cross_project: &Value,
@@ -38,6 +39,39 @@ pub(crate) fn format_briefing(
             .to_string(),
     );
 
+    // #964: unread stickies render FIRST (frozen semantics #4 — surfaced at
+    // the top of the briefing, ahead of open loops/cross-project/everything
+    // else). Each row shown here was already atomically claimed as a side
+    // effect of this briefing call.
+    if let Some(rows) = stickies.as_array() {
+        if !rows.is_empty() {
+            out.push("\n### 📌 Sticky notes (unread) [AUTHORITY: WORKFLOW STATE]".to_string());
+            out.push(
+                "_Read-once notes addressed to you. Already marked read by this briefing call — use `tachi_memory(action='sticky_check', include_read=true)` to see the archive._"
+                    .to_string(),
+            );
+            for row in rows {
+                let from = row.get("from_agent").and_then(Value::as_str).unwrap_or("?");
+                let text = row.get("text").and_then(Value::as_str).unwrap_or("");
+                // CP4 belt-and-suspenders, round-3 (codex final review of
+                // #964/PR #1003): the PRIMARY scrub now lives at the single
+                // row-load choke point (`sticky_ops::pending::
+                // scrub_sticky_text_for_read`, applied to every row before
+                // it ever reaches this `stickies` JSON value or either JSON
+                // route), so `text` here should already be masked. Re-scrub
+                // here anyway, at the render boundary, as defense-in-depth —
+                // a row reaching this renderer through some future path
+                // that bypasses the choke point still cannot leak a live
+                // secret into rendered briefing output.
+                let (scrubbed_text, _redactions) = scrub_secrets(text);
+                out.push(format!(
+                    "- from **{from}**: {}",
+                    md_escape(&compact_text_line(&scrubbed_text, 200))
+                ));
+            }
+        }
+    }
+
     if !open_loops.is_empty() {
         out.push("\n### ⚠️ Open Loops (closure debt) [AUTHORITY: WORKFLOW STATE]".to_string());
         out.push(
@@ -62,7 +96,7 @@ pub(crate) fn format_briefing(
                 "\n### Cross-project (global handoffs) [AUTHORITY: WORKFLOW STATE]".to_string(),
             );
             out.push(
-                "_Pending memos from other repos/agents. Ack with `tachi_handoff(action='check')` or leave via `tachi_handoff(action='leave')`._".to_string(),
+                "_Pending memos from other repos/agents. Ack with `tachi_handoff(action='check')` or leave via `tachi_handoff(action='leave')` (deprecated, #1016 — prefer `tachi_memory(action='sticky_leave'|'sticky_check')` for new notes)._".to_string(),
             );
             for row in handoffs.iter().take(cross_cap) {
                 let from = row.get("from_agent").and_then(Value::as_str).unwrap_or("?");

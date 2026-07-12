@@ -17,6 +17,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_dispatch_mock(
             agent: Some("custom".to_string()),
             profile: None,
             task: "Poke no-op mock dispatch".to_string(),
+            execution_level: None,
             cwd: Some(cwd.to_string_lossy().to_string()),
             env_id: None,
             unmanaged_cwd: Some(true),

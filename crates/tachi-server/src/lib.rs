@@ -74,7 +74,6 @@
 
 mod agent_eval;
 mod agent_markdown;
-mod agent_profile_ops;
 mod agent_registry;
 mod arena_ops;
 mod bootstrap;
@@ -104,12 +103,12 @@ mod facade_memory_ops;
 mod facade_save_ops;
 mod facade_search_ops;
 mod feedback_rule_ops;
-mod foundry_ops;
 mod foundry_runtime_ops;
 mod foundry_scheduler;
 mod gh_ops;
 mod gh_safe_merge;
 mod handoff_ops;
+mod host_profile;
 mod hub_ops;
 mod kanban;
 mod manifest;
@@ -141,6 +140,7 @@ mod signature_evidence;
 mod skill_chain_ops;
 mod skill_policy;
 mod status_ops;
+mod sticky_ops;
 mod task_lifecycle;
 #[cfg(test)]
 mod test_support;
@@ -159,7 +159,7 @@ mod workflow_closure;
 use crate::tool_params::*;
 
 pub(crate) mod server_state;
-pub(crate) use server_state::{AgentProfile, CachedVaultKey, DbScope, MemoryServer, VaultState};
+pub(crate) use server_state::{CachedVaultKey, DbScope, MemoryServer, VaultState};
 
 // Enrichment batcher methods are in enrichment.rs
 

@@ -217,6 +217,7 @@ mod tests {
             agent: Some("custom".to_string()),
             profile: None,
             task: "noop".to_string(),
+            execution_level: None,
             cwd: Some("/tmp/project".to_string()),
             env_id: None,
             unmanaged_cwd: None,

@@ -8,7 +8,7 @@ mod types;
 
 use crate::server_state::MemoryServer;
 
-use evolution::{run_agent_evolution_stage, run_skill_evolution_stage};
+use evolution::run_skill_evolution_stage;
 use health::{load_manifest_targets, run_health_check};
 use maintenance::run_truth_maintenance_stage;
 use report::{render_daily_report_markdown, save_daily_health_wiki};
@@ -45,7 +45,6 @@ pub(crate) async fn run_daily_pipeline(
         eprintln!("[daily_pipeline] truth maintenance skipped: {e}");
     }
 
-    let agent_stage = run_agent_evolution_stage(server, &app_home).await;
     let skill_stage = run_skill_evolution_stage(server).await;
     let routing_stage = run_routing_analysis_stage(server, &date).await;
 
@@ -53,7 +52,6 @@ pub(crate) async fn run_daily_pipeline(
         date: date.clone(),
         report_path: Some(report_path.display().to_string()),
         health_check: health_stage,
-        agent_evolution: agent_stage,
         skill_evolution: skill_stage,
         routing_analysis: routing_stage,
     };

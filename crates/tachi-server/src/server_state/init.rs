@@ -157,7 +157,6 @@ impl MemoryServer {
             // #913 dead-code round found zero remaining in-crate callers).
             tool_router: Self::continuity_tool_router()
                 + Self::component_tool_router()
-                + Self::agent_profile_tool_router()
                 + Self::copilot_tool_router()
                 + Self::dispatch_tool_router()
                 + Self::handoff_tool_router()

@@ -333,7 +333,7 @@ fn make_test_tool(name: &str) -> rmcp::model::Tool {
     .expect("failed to build test tool")
 }
 
-fn make_mcp_capability(id: &str, version: u32) -> HubCapability {
+pub(crate) fn make_mcp_capability(id: &str, version: u32) -> HubCapability {
     let name = id.strip_prefix("mcp:").unwrap_or(id).to_string();
     HubCapability {
         id: id.to_string(),

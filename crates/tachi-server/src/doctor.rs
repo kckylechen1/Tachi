@@ -19,6 +19,7 @@
 
 mod autofix;
 mod classify;
+mod hub_lint;
 mod render;
 mod scan;
 mod secrets;
@@ -26,6 +27,7 @@ mod types;
 
 pub use autofix::auto_fix_safe;
 pub use classify::classify_one;
+pub use hub_lint::hub_capability_discovery_status_warnings;
 pub use render::render_report;
 pub use scan::{default_scan_roots, scan, ScanOptions};
 // Unit tests assert on backup filename classification via `super::*`.

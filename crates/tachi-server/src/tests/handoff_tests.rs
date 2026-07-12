@@ -1,8 +1,10 @@
 use super::make_server;
 use crate::tool_params::{
-    AgentRegisterParams, ChainSkillsParams, ChainStep, GetMemoryParams, HandoffCheckParams,
-    HandoffLeaveParams, HubRegisterParams,
+    ChainSkillsParams, ChainStep, GetMemoryParams, HandoffCheckParams, HandoffLeaveParams,
+    HubRegisterParams,
 };
+use chrono::Utc;
+use memory_server_runtime::AgentProfile;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 
@@ -123,17 +125,18 @@ async fn handoff_leave_and_check_roundtrip() {
     let server = make_server();
 
     // Register as "agent-a" first
-    server
-        .agent_register(Parameters(AgentRegisterParams {
+    {
+        let mut guard = server.agent_runtime_write();
+        guard.agent_profile = Some(AgentProfile {
             agent_id: "agent-a".to_string(),
-            display_name: Some("Agent A".to_string()),
+            display_name: "Agent A".to_string(),
             capabilities: vec![],
             tool_filter: None,
             rate_limit_rpm: None,
             rate_limit_burst: None,
-        }))
-        .await
-        .expect("register agent-a");
+            registered_at: Utc::now().to_rfc3339(),
+        });
+    }
 
     // Leave a handoff memo targeted at agent-b
     let leave = server
@@ -152,6 +155,13 @@ async fn handoff_leave_and_check_roundtrip() {
     assert_eq!(leave_json["status"], json!("memo_left"));
     assert_eq!(leave_json["from_agent"], json!("agent-a"));
     assert!(leave_json["memo_id"].is_string());
+    // #1016: deprecation field present, points at the replacements.
+    let leave_deprecated = leave_json["deprecated"]
+        .as_str()
+        .expect("leave response carries deprecated field");
+    assert!(leave_deprecated.contains("#1016"));
+    assert!(leave_deprecated.contains("sticky_leave"));
+    assert!(leave_deprecated.contains("handoff_write"));
 
     // Check as agent-b — should see the memo
     let check_b = server
@@ -164,6 +174,11 @@ async fn handoff_leave_and_check_roundtrip() {
     let check_b_json: serde_json::Value = serde_json::from_str(&check_b).expect("should be JSON");
     assert_eq!(check_b_json["pending_memos"], json!(1));
     assert_eq!(check_b_json["memos"][0]["from_agent"], json!("agent-a"));
+    // #1016: deprecation field present on check responses too.
+    assert!(check_b_json["deprecated"]
+        .as_str()
+        .expect("check response carries deprecated field")
+        .contains("#1016"));
 
     // Check as agent-c — should NOT see it (targeted at agent-b)
     let check_c = server
