@@ -215,7 +215,16 @@ async fn briefing_surfaces_file_scope_collision_using_the_calling_sessions_own_d
     );
     assert!(warnings[0].as_str().unwrap().contains("file-scope overlap"));
     assert!(warnings[0].as_str().unwrap().contains("seat-a"));
-    assert!(warnings[0].as_str().unwrap().contains("claims_ops.rs"));
+    // #1023: sanitize_presence_field now ESCAPES metachars (fidelity
+    // preserved) instead of deleting them, so the underscore in the real
+    // filename survives as a self-escaping `\_` pair rather than as a bare
+    // `_` (which round 4 replaced with a space, breaking this exact
+    // assertion — this is the discriminating fix: pre-fix the substring
+    // check below would have failed against `claims ops.rs`).
+    assert!(warnings[0]
+        .as_str()
+        .unwrap()
+        .contains("claims\\_ops.rs"));
 
     // And session A's own briefing symmetrically surfaces the same overlap
     // against B.
@@ -252,5 +261,41 @@ async fn briefing_does_not_self_collide_on_its_own_declared_scope() {
     assert!(
         warnings.is_empty(),
         "a session must never see its own claim reported as a collision: {warnings:?}"
+    );
+}
+
+/// #527 CONCERN: an unbounded presence board grows every briefing payload
+/// linearly with fleet size. Six live claims (distinct `issue_ref`s under
+/// one session — enough to produce 6 distinct claim rows, since a claim's
+/// identity key is `(session_client, issue_ref, flow_id)`) must render as
+/// exactly 5 board rows plus an `overflow: 1` marker — never a silent 6th
+/// row, and never a silently-dropped count either.
+#[tokio::test]
+async fn presence_board_caps_at_five_and_reports_overflow() {
+    let server = make_server();
+    server.set_session_identity(Some("seat-cap".to_string()), None, None);
+    for n in 0..6 {
+        auto_register_or_heartbeat_claim(
+            &server,
+            &ClaimHookInput {
+                issue_ref: Some(format!("org/repo#{n}")),
+                flow_id: None,
+                dispatch_id: None,
+                branch: None,
+                declared_file_scope: None,
+            },
+        );
+    }
+
+    let board = briefing_claims_board(&server);
+    assert_eq!(
+        board["count"], 6,
+        "count must report the TOTAL live-claim count, not just what's shown: {board:?}"
+    );
+    let items = board["items"].as_array().unwrap();
+    assert_eq!(items.len(), 5, "items must be capped at 5: {board:?}");
+    assert_eq!(
+        board["overflow"], 1,
+        "overflow must report exactly the cut-off count: {board:?}"
     );
 }

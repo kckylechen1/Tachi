@@ -26,7 +26,9 @@
 //! briefing splice) treat a claim whose `heartbeat_at` is older than a TTL as
 //! effectively expired without a second write. A stale claim's row is left in
 //! place (for audit) until something actually releases it or a fresh claim
-//! recycles the same issue/lane.
+//! recycles the same `(session_client, issue_ref, flow_id)` identity triple
+//! (the `ON CONFLICT` target `upsert_or_heartbeat_claim` upserts on — see
+//! that function's doc comment).
 
 use rusqlite::{params, Connection, OptionalExtension};
 

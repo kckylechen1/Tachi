@@ -123,12 +123,21 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
 /// when there is nothing to show — both board and warnings empty.
 pub(super) fn markdown_presence_section(value: &Value) -> String {
     let presence = value.get("presence").unwrap_or(&Value::Null);
-    let items = presence
-        .get("board")
+    let board = presence.get("board");
+    let items = board
         .and_then(|b| b.get("items"))
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    // #527: `briefing_claims_board` already caps `items` at
+    // `PRESENCE_BOARD_DISPLAY_CAP` and reports how many live claims were cut
+    // off in `overflow` — render that as a "+N more" note (#1004 convention)
+    // rather than silently showing a partial list with no indication
+    // anything was truncated.
+    let overflow = board
+        .and_then(|b| b.get("overflow"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let warnings = presence
         .get("warnings")
         .and_then(Value::as_array)
@@ -156,6 +165,9 @@ pub(super) fn markdown_presence_section(value: &Value) -> String {
         out.push(format!(
             "- **{session}** → {target} (heartbeat {heartbeat})"
         ));
+    }
+    if overflow > 0 {
+        out.push(format!("- _+{overflow} more (showing {})_", items.len()));
     }
     for warning in &warnings {
         if let Some(text) = warning.as_str() {

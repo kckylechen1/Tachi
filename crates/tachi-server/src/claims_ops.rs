@@ -77,50 +77,99 @@ const SANITIZE_TEXT_CAP: usize = 160;
 ///    can still reorder how the rendered line visually reads, or hide
 ///    payload, even though the underlying bytes are unchanged
 ///    (`is_unicode_format_char`).
-/// 3. Strip Markdown-active metacharacters, INCLUDING backslash (`* _ \ ` `
-///    [ ] ( ) # < > | ~`) so a claim field can never close/open emphasis,
-///    links, headings, inline HTML/autolinks, table cells, or strikethrough
-///    in a DIFFERENT session's rendered briefing, and can never escape the
-///    renderer's own fixed closing `**` either — every consumer of this
-///    field renders it raw (`format!("- **{session}** → {target} ...")`),
-///    so a `session` value ending in a bare `\` would otherwise make the
-///    literal text end in `\**`, which a CommonMark-compliant renderer
-///    reads as an escaped literal `*` followed by one still-open `*`,
-///    leaving emphasis open past the intended closing marker (round-4
-///    codex finding: backslash was missing from the round-3 metachar set).
-///    The guarantee must live here, not be an opt-in the renderer remembers
-///    to apply.
+/// 3. **Escape, not delete**, Markdown-active metacharacters INCLUDING
+///    backslash itself (`\ * _ \` [ ] ( ) # < > | ~`) by prefixing each with
+///    a literal `\` (the same CommonMark backslash-escape a human author
+///    would type to neutralize a metacharacter while keeping it legible) —
+///    round 4 replaced these with a bare space, which destroyed real values
+///    a claim legitimately carries (`claims_ops.rs`'s own filename, a
+///    `flow_id` like `owner/repo#1042`) instead of just neutralizing the
+///    Markdown activation (#1023: round 4 fixed the injection but broke
+///    fidelity by deleting instead of escaping). Escaping still guarantees a
+///    claim field can never close/open emphasis, links, headings, inline
+///    HTML/autolinks, table cells, or strikethrough in a DIFFERENT session's
+///    rendered briefing, and can never escape the renderer's own fixed
+///    closing `**` either — every consumer of this field renders it raw
+///    (`format!("- **{session}** → {target} ...")`), so a `session` value
+///    ending in a bare `\` would otherwise make the literal text end in
+///    `\**`, which a CommonMark-compliant renderer reads as an escaped
+///    literal `*` followed by one still-open `*`, leaving emphasis open past
+///    the intended closing marker (round-4 codex finding). Backslash is
+///    escaped in the SAME left-to-right pass as every other metacharacter
+///    (each input char is inspected exactly once, never the characters this
+///    function itself just emitted) so a literal backslash in the input can
+///    never be mistaken for an escape marker this function produced, and
+///    never gets escaped twice. The guarantee must live here, not be an
+///    opt-in the renderer remembers to apply.
 /// 4. Collapse to a single line (whitespace-joined), trim, then cap to `cap`
-///    chars with a `…` suffix when truncated.
+///    chars with a `…` suffix when truncated. The cap is enforced on the
+///    ESCAPED string, so truncation can land in the middle of a two-char
+///    escape pair (`\` + metachar); when it does, the trailing bare `\` is
+///    dropped rather than kept as a dangling escape marker with nothing
+///    after it (which would itself misparse in a renderer, e.g. escaping
+///    into the `…` suffix or a subsequent line).
 pub(crate) fn sanitize_presence_field(raw: &str, cap: usize) -> String {
-    const MD_METACHARS: &[char] = &[
-        '*', '_', '`', '[', ']', '(', ')', '#', '<', '>', '|', '~', '\\',
-    ];
-    let stripped: String = raw
-        .chars()
-        .filter(|ch| !is_unicode_format_char(*ch))
-        .map(|ch| {
-            if ch.is_control() {
-                ' '
-            } else if MD_METACHARS.contains(&ch) {
-                ' '
-            } else {
-                ch
-            }
-        })
-        .collect();
+    const MD_METACHARS: &[char] = &['*', '_', '`', '[', ']', '(', ')', '#', '<', '>', '|', '~'];
+    let mut stripped = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if is_unicode_format_char(ch) {
+            continue;
+        }
+        if ch.is_control() {
+            stripped.push(' ');
+        } else if ch == '\\' || MD_METACHARS.contains(&ch) {
+            // Same pass, same input char: escape backslash itself here too,
+            // so this loop never re-scans (and therefore never re-escapes)
+            // a `\` it just emitted for some other metacharacter.
+            stripped.push('\\');
+            stripped.push(ch);
+        } else {
+            stripped.push(ch);
+        }
+    }
     let one_line = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
     let one_line = one_line.trim();
     if one_line.is_empty() {
         return String::new();
     }
-    let char_count = one_line.chars().count();
+    cap_already_sanitized(one_line, cap)
+}
+
+/// Bound an ALREADY-escaped/collapsed field to `cap` chars with a `…`
+/// suffix, applying the same truncation-boundary guard as
+/// [`sanitize_presence_field`] (never split a `\` + metachar escape pair,
+/// leaving a dangling `\`) — WITHOUT re-running the strip/escape passes.
+///
+/// [`collision_warnings`] composes several pieces that are EACH already
+/// individually run through [`sanitize_presence_field`] (`claim_session`,
+/// `claim_heartbeat`, `safe_issue_ref`/`safe_overlap`) into one warning
+/// line, and only needs to re-bound the TOTAL composed length (a
+/// multi-path `safe_overlap` join can exceed `SANITIZE_TEXT_CAP` even
+/// though each individual path was already capped at
+/// `SANITIZE_IDENTIFIER_CAP`). Re-running full `sanitize_presence_field` on
+/// that ALREADY-escaped composed string would be a real bug under the
+/// escape-not-delete scheme: escaping is NOT idempotent under
+/// re-application the way deletion was (round 3/4's delete-based sanitizer
+/// happened to tolerate double-application harmlessly — deleting an
+/// already-deleted metachar is a no-op; escaping an already-escaped `\_`
+/// pair a second time corrupts it into `\\\_`). This function is the
+/// length-only half of sanitization, safe to apply to already-sanitized
+/// input any number of times.
+fn cap_already_sanitized(s: &str, cap: usize) -> String {
+    let char_count = s.chars().count();
     if char_count <= cap {
-        one_line.to_string()
-    } else {
-        let keep = cap.saturating_sub(1).max(1);
-        format!("{}…", one_line.chars().take(keep).collect::<String>())
+        return s.to_string();
     }
+    let keep = cap.saturating_sub(1).max(1);
+    let mut kept: Vec<char> = s.chars().take(keep).collect();
+    // Truncation boundary guard: never leave a lone trailing `\` that was
+    // meant to escape the character truncation just cut away — that bare
+    // backslash would itself be live Markdown-escape syntax against
+    // whatever follows it (the `…` suffix), the opposite of "safe".
+    if kept.last() == Some(&'\\') {
+        kept.pop();
+    }
+    format!("{}…", kept.into_iter().collect::<String>())
 }
 
 /// True iff `ch`'s Unicode `General_Category` is `Cf` (Format) — bidi
@@ -354,7 +403,11 @@ pub(crate) fn collision_warnings(
         if let (Some(issue_ref), Some(claim_issue)) = (issue_ref, claim.issue_ref.as_deref()) {
             if issue_ref == claim_issue {
                 let safe_issue_ref = sanitize_presence_field(issue_ref, SANITIZE_IDENTIFIER_CAP);
-                warnings.push(sanitize_presence_field(
+                // #1023: cap-only, NOT a second `sanitize_presence_field`
+                // pass — every interpolated piece above is already
+                // individually escaped; re-escaping the composed string
+                // would double-escape it (see `cap_already_sanitized` doc).
+                warnings.push(cap_already_sanitized(
                     &format!(
                         "double-claim: {safe_issue_ref} already has a live claim from {claim_session} (heartbeat {claim_heartbeat})"
                     ),
@@ -378,7 +431,10 @@ pub(crate) fn collision_warnings(
                         .map(|s| sanitize_presence_field(s, SANITIZE_IDENTIFIER_CAP))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    warnings.push(sanitize_presence_field(
+                    // #1023: cap-only (see above) — `claim_session`,
+                    // `claim_heartbeat`, and every path in `safe_overlap`
+                    // are already individually escaped.
+                    warnings.push(cap_already_sanitized(
                         &format!(
                             "file-scope overlap with live claim from {claim_session} (heartbeat {claim_heartbeat}): {safe_overlap}"
                         ),
@@ -482,6 +538,14 @@ pub(crate) fn handle_manual_release(
     }))
 }
 
+/// Max rows [`briefing_claims_board`] puts in `items` — aligned with #1004's
+/// top-N + overflow-marker convention (JSON side carries the total/overflow
+/// counts; a markdown renderer shows the capped rows and a "+N more" note).
+/// #527 CONCERN: an unbounded presence board — every live claim, no cap —
+/// grows every briefing payload linearly with fleet size; a handful of the
+/// most relevant (freshest) claims is what a briefing reader actually needs.
+const PRESENCE_BOARD_DISPLAY_CAP: usize = 5;
+
 /// Briefing 工位表 projection: compact JSON rows the markdown/JSON briefing
 /// surfaces both render. Read-failure-safe (empty on any storage error).
 ///
@@ -490,10 +554,20 @@ pub(crate) fn handle_manual_release(
 /// from POTENTIALLY ANOTHER session, rendered verbatim into markdown by both
 /// briefing surfaces, so it must never carry newlines/control chars/
 /// unbounded length into a DIFFERENT session's briefing output.
+///
+/// `items` is capped at [`PRESENCE_BOARD_DISPLAY_CAP`] (#527); `count` is
+/// the TOTAL live-claim count (not just what's shown) and `overflow` is how
+/// many live claims were cut off (`0` when everything fit) — both markdown
+/// renderers (`agent_markdown::briefing::format_briefing`,
+/// `copilot_ops::feature_briefing::markdown::markdown_presence_section`)
+/// read `overflow` to append a "+N more" note rather than silently dropping
+/// rows with no indication anything was cut.
 pub(crate) fn briefing_claims_board(server: &MemoryServer) -> serde_json::Value {
     let live = list_live_claims_for_briefing(server);
+    let total = live.len();
     let rows: Vec<serde_json::Value> = live
         .iter()
+        .take(PRESENCE_BOARD_DISPLAY_CAP)
         .map(|c| {
             serde_json::json!({
                 "session_client": sanitize_presence_identifier(c.session_client.as_deref()),
@@ -504,9 +578,11 @@ pub(crate) fn briefing_claims_board(server: &MemoryServer) -> serde_json::Value 
             })
         })
         .collect();
+    let overflow = total.saturating_sub(rows.len());
     serde_json::json!({
-        "count": rows.len(),
+        "count": total,
         "items": rows,
+        "overflow": overflow,
     })
 }
 
@@ -716,17 +792,39 @@ mod tests {
 
     // --- #1001 round 3 item 5: markdown-metacharacter + bidi/format stripping
 
+    /// #1023: round-4 replaced every metachar occurrence with a bare space,
+    /// which is a "not contains" test's easiest way to pass — but it also
+    /// destroys real values (a filename, an `owner/repo#N` ref). The correct
+    /// invariant is narrower: no metachar may appear BARE/unescaped (i.e.
+    /// active Markdown syntax), not "no metachar may appear at all".
     #[test]
-    fn sanitize_presence_field_neutralizes_markdown_metacharacters() {
+    fn sanitize_presence_field_escapes_markdown_metacharacters() {
         let raw = "**bold** [x](javascript:alert(1)) #heading <script>alert(1)</script> `code` ~~strike~~ | pipe \\escaped";
         let out = sanitize_presence_field(raw, 200);
-        for meta in [
-            '*', '_', '`', '[', ']', '(', ')', '#', '<', '>', '|', '~', '\\',
-        ] {
-            assert!(
-                !out.contains(meta),
-                "output must not contain markdown metachar {meta:?}: {out:?}"
-            );
+        const METACHARS: &[char] = &['*', '_', '`', '[', ']', '(', ')', '#', '<', '>', '|', '~'];
+        let chars: Vec<char> = out.chars().collect();
+        for (i, &ch) in chars.iter().enumerate() {
+            if METACHARS.contains(&ch) {
+                assert!(
+                    i > 0 && chars[i - 1] == '\\',
+                    "markdown metachar {ch:?} at index {i} must be escaped (preceded by `\\`), never bare/active: {out:?}"
+                );
+            }
+        }
+        // Every backslash in the output is itself part of a 2-char escape
+        // pair — never a lone/dangling one that could merge with whatever
+        // text follows it.
+        let mut idx = 0;
+        while idx < chars.len() {
+            if chars[idx] == '\\' {
+                assert!(
+                    idx + 1 < chars.len(),
+                    "trailing bare backslash with nothing to escape: {out:?}"
+                );
+                idx += 2;
+            } else {
+                idx += 1;
+            }
         }
     }
 
@@ -749,14 +847,22 @@ mod tests {
     fn sanitize_presence_field_mission_example_renders_inert() {
         // Mission's literal adversarial example: session_client/scope
         // containing bold-close, a javascript: link, and a bidi override.
+        // #1023: metacharacters must survive ESCAPED (fidelity preserved),
+        // never bare/active — "renders inert" no longer means "deleted".
         let raw = "**bold** [x](javascript:..) \u{202E}";
         let out = sanitize_presence_field(raw, 200);
-        assert!(!out.contains('*'));
-        assert!(!out.contains('['));
-        assert!(!out.contains(']'));
-        assert!(!out.contains('('));
-        assert!(!out.contains(')'));
-        assert!(!out.contains('\u{202E}'));
+        assert!(
+            out.contains("\\*\\*bold\\*\\*"),
+            "bold markers must survive escaped, not bare/active: {out:?}"
+        );
+        assert!(
+            out.contains("\\[x\\]\\(javascript:..\\)"),
+            "link syntax must survive escaped, not bare/active: {out:?}"
+        );
+        assert!(
+            !out.contains('\u{202E}'),
+            "bidi override must still be stripped (unrelated to escaping): {out:?}"
+        );
     }
 
     /// End-to-end: a malicious claim field renders inert through BOTH
@@ -839,10 +945,23 @@ mod tests {
         }
 
         // Warning line (the `declared_file_scope`/collision-warning path):
-        // no markdown heading/backtick/newline must survive either.
+        // no newline must survive, and the heading/backtick metachars must
+        // survive ESCAPED (fidelity) rather than deleted — so a literal `#`
+        // or backtick from a real value is preserved — but never bare/active,
+        // so the payload can never actually render as a live heading.
         assert!(!sanitized_scope.contains('\n'));
-        assert!(!sanitized_scope.contains('#'));
-        assert!(!sanitized_scope.contains('`'));
+        assert!(
+            sanitized_scope.contains("\\#"),
+            "hash must survive escaped, not deleted: {sanitized_scope:?}"
+        );
+        assert!(
+            sanitized_scope.contains("\\`"),
+            "backtick must survive escaped, not deleted: {sanitized_scope:?}"
+        );
+        assert!(
+            !sanitized_scope.contains("## SYSTEM"),
+            "must never render as a bare/active heading: {sanitized_scope:?}"
+        );
         assert!(sanitized_scope.starts_with("seat"));
     }
 
@@ -908,11 +1027,18 @@ mod tests {
         }
     }
 
+    /// #1023: backslash must be ESCAPED (doubled), not deleted — deletion
+    /// destroys fidelity for no extra safety, since a self-escaping pair is
+    /// already inert. Renamed from `..._strips_backslash` (round-4 name;
+    /// round-4's behavior deleted it) to match the corrected behavior.
     #[test]
-    fn sanitize_presence_field_strips_backslash() {
+    fn sanitize_presence_field_escapes_backslash_not_deletes() {
         let raw = "seat\\a";
         let out = sanitize_presence_field(raw, 200);
-        assert!(!out.contains('\\'), "{out:?}");
+        assert_eq!(
+            out, "seat\\\\a",
+            "a literal backslash must survive as a self-escaping pair: {out:?}"
+        );
     }
 
     /// (c) end-to-end: a `session_client` ending in a bare backslash must not
@@ -931,11 +1057,26 @@ mod tests {
         // CommonMark-compliant renderer reads a backslash-escaped literal
         // `*` there, leaving the SECOND `*` of the closing `**` with no
         // partner, so emphasis stays open past the intended boundary.
+        //
+        // #1023: round-4's fix deleted the backslash entirely to close that
+        // hole; this round instead ESCAPES it (self-pairs it: `\` -> `\\`),
+        // which closes the same hole without destroying a legitimate
+        // trailing-backslash value. The safety invariant is no longer "zero
+        // backslashes reach the render" — it's "any backslash(es) directly
+        // in front of the renderer's fixed closing `**` form a
+        // self-canceling PAIR (even count), never a lone/dangling one that
+        // could eat one of the two closing `*` characters".
         let raw_session = "seat-a\\";
         let sanitized_session = sanitize_presence_identifier(Some(raw_session)).unwrap_or_default();
-        assert!(
-            !sanitized_session.ends_with('\\'),
-            "sanitized session must not end in a bare backslash: {sanitized_session:?}"
+        let trailing_backslashes = sanitized_session
+            .chars()
+            .rev()
+            .take_while(|&c| c == '\\')
+            .count();
+        assert_eq!(
+            trailing_backslashes % 2,
+            0,
+            "trailing backslashes must be an even (self-escaping) count, never odd/dangling: {sanitized_session:?}"
         );
 
         let board_row = serde_json::json!({
@@ -986,22 +1127,91 @@ mod tests {
 
         for rendered in [&legacy_line, &feature_line] {
             assert!(
-                rendered.starts_with("- **seat-a** →"),
-                "the renderer's own fixed closing `**` must land un-escaped \
-                 right after the session text (no stray backslash swallowing \
-                 half of it): {rendered:?}"
+                rendered.starts_with("- **seat-a"),
+                "sanitized session content must still lead the bold span: {rendered:?}"
             );
+            // The renderer's own fixed closing `**` must land INTACT and
+            // adjacent to ` → {target}` — proving it was never consumed by
+            // a payload backslash, even though the payload's (now
+            // self-escaped) backslash pair legitimately reaches the
+            // rendered text right before it.
             assert!(
-                !rendered.contains('\\'),
-                "no backslash from the payload may reach the rendered line at all: {rendered:?}"
+                rendered.contains("** → org/repo#1"),
+                "the fixed closing `**` must land intact, un-consumed by a payload backslash: {rendered:?}"
             );
-            // The literal two-char sequence `\*` (escaped asterisk) must
-            // never appear — that is the CommonMark escape that would eat
-            // one half of the closing `**`.
-            assert!(
-                !rendered.contains("\\*"),
-                "payload must never produce a backslash-escaped asterisk in the rendered line: {rendered:?}"
+            // Whatever run of backslashes sits directly before that closing
+            // `**` must be an even (self-escaping) count — never odd, which
+            // is what would eat one of the two closing `*` characters.
+            let before_close = rendered.split("** →").next().unwrap();
+            let trailing_backslashes = before_close.chars().rev().take_while(|&c| c == '\\').count();
+            assert_eq!(
+                trailing_backslashes % 2,
+                0,
+                "backslash run immediately before the closing `**` must be even (self-escaping), never odd/dangling: {rendered:?}"
             );
         }
+    }
+
+    /// #1023 discriminating test: sanitize must ESCAPE, not delete,
+    /// Markdown-active metacharacters — deletion (round 4's behavior)
+    /// silently mangled real values a claim legitimately carries (this
+    /// module's own filename, an `owner/repo#N` issue ref, a pipe in free
+    /// text). Escaping must both (a) visibly retain every original
+    /// character via a `\`-prefixed pair and (b) keep the ORIGINAL
+    /// character sequence recoverable by stripping just the escape
+    /// backslashes back out.
+    #[test]
+    fn sanitize_presence_field_escapes_not_deletes_preserving_fidelity() {
+        let raw = "claims_ops.rs owner/repo#42 a|b";
+        let out = sanitize_presence_field(raw, 200);
+        assert!(
+            out.contains("\\_"),
+            "underscore must be escaped, not deleted: {out:?}"
+        );
+        assert!(
+            out.contains("\\#"),
+            "hash must be escaped, not deleted: {out:?}"
+        );
+        assert!(
+            out.contains("\\|"),
+            "pipe must be escaped, not deleted: {out:?}"
+        );
+        // De-escape (drop every backslash that precedes another char) and
+        // confirm the ORIGINAL text round-trips exactly — this is the
+        // fidelity half of "escape not delete".
+        let mut unescaped = String::new();
+        let mut chars = out.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                if let Some(&next) = chars.peek() {
+                    unescaped.push(next);
+                    chars.next();
+                    continue;
+                }
+            }
+            unescaped.push(c);
+        }
+        assert_eq!(
+            unescaped, raw,
+            "de-escaped output must recover the original text verbatim: {out:?}"
+        );
+    }
+
+    /// #1023 truncation boundary test: the `cap` is enforced on the escaped
+    /// string, so truncation can land exactly on the `\` half of a 2-char
+    /// escape pair (`\` + metachar). The guard must drop that trailing bare
+    /// `\` rather than emit a dangling escape marker with nothing after it.
+    #[test]
+    fn sanitize_presence_field_truncation_never_leaves_a_dangling_backslash() {
+        // Escaped form of "aaaa#bbbb" is "aaaa\#bbbb" (10 chars). cap=6
+        // forces keep=5, which lands exactly on the `\` half of the `\#`
+        // pair (index 4, the 5th char).
+        let raw = "aaaa#bbbb";
+        let out = sanitize_presence_field(raw, 6);
+        assert!(
+            !out.trim_end_matches('…').ends_with('\\'),
+            "truncated output must never end in a bare/dangling backslash: {out:?}"
+        );
+        assert_eq!(out, "aaaa…");
     }
 }

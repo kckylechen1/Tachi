@@ -52,12 +52,19 @@ pub(crate) fn format_briefing(
         }
     }
 
-    let presence_items = presence
-        .get("board")
+    let presence_board = presence.get("board");
+    let presence_items = presence_board
         .and_then(|b| b.get("items"))
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    // #527: `briefing_claims_board` caps `items` at `PRESENCE_BOARD_DISPLAY_CAP`
+    // and reports the cut-off count in `overflow` — surface that as a
+    // "+N more" note (#1004 convention) instead of a silently-truncated list.
+    let presence_overflow = presence_board
+        .and_then(|b| b.get("overflow"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let presence_warnings = presence
         .get("warnings")
         .and_then(Value::as_array)
@@ -85,6 +92,12 @@ pub(crate) fn format_briefing(
             let target = issue_ref.or(flow_id).unwrap_or("(no issue/flow declared)");
             out.push(format!(
                 "- **{session}** → {target} (heartbeat {heartbeat})"
+            ));
+        }
+        if presence_overflow > 0 {
+            out.push(format!(
+                "- _+{presence_overflow} more (showing {})_",
+                presence_items.len()
             ));
         }
         for warning in &presence_warnings {
