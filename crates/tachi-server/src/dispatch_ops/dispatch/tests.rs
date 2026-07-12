@@ -10,6 +10,12 @@ struct EnvGuard {
 }
 
 impl EnvGuard {
+    fn set_value(key: &'static str, value: &str) -> Self {
+        let original = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, original }
+    }
+
     fn set_path(key: &'static str, value: &std::path::Path) -> Self {
         let original = std::env::var_os(key);
         std::env::set_var(key, value);
@@ -38,6 +44,7 @@ fn test_dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams 
         agent: agent.map(str::to_string),
         profile: None,
         task: task.to_string(),
+        execution_level: None,
         cwd: None,
         env_id: None,
         unmanaged_cwd: None,
@@ -131,7 +138,7 @@ async fn generate_mcp_config_sets_owner_only_permissions() {
     std::env::remove_var("TACHI_HOME");
 
     let server = crate::tests::make_server();
-    let path = generate_mcp_config(&server, "test-perms", true, false, None, &[])
+    let path = generate_mcp_config(&server, "test-perms", true, false, None, None, &[])
         .await
         .expect("generate mcp config")
         .expect("config path");
@@ -170,6 +177,114 @@ async fn generate_mcp_config_sets_owner_only_permissions() {
     }
 }
 
+// ─── CP2 (round-3): dispatch-id seat, not profile-derived seat ────────────
+//
+// CP2 (codex final review of #964/PR #1003): `agent_seat` used to be derived
+// from `params.profile` (falling back to `agent_norm`) — but `params.profile`
+// is a `DispatchProfile` (e.g. "codex_55_review"), a capability-surface
+// selector shared by every worker dispatched on that profile, NOT a seat.
+// Two workers dispatched with the SAME `profile` therefore got the SAME
+// `TACHI_AGENT_SEAT`, and could cross-consume each other's `to:`-addressed
+// stickies. The seat is now the dispatch's own `dispatch_id` (unique per
+// lane by construction — see `new_dispatch_id`), so this collision is
+// structurally impossible regardless of what `profile`/`agent` two
+// concurrent dispatches share.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cp2_two_dispatches_on_same_profile_get_distinct_agent_seats() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let original_home = std::env::var_os("HOME");
+    let original_tachi_home = std::env::var_os("TACHI_HOME");
+    std::env::set_var("HOME", temp_home.path());
+    std::env::remove_var("TACHI_HOME");
+
+    let server = crate::tests::make_server();
+
+    // Simulate two workers dispatched on the identical `profile` name
+    // ("codex_55_review") — the exact scenario codex's CP2 finding named.
+    // In the real handler, `agent_seat` is `Some(dispatch_id.as_str())`
+    // (dispatch.rs); each dispatch call gets its own freshly generated
+    // `dispatch_id` (new_dispatch_id embeds a uuid suffix), never the shared
+    // `profile` string. Two distinct dispatch_ids stand in for that here.
+    let dispatch_id_a = new_dispatch_id(Utc::now(), "codex");
+    let dispatch_id_b = new_dispatch_id(Utc::now(), "codex");
+    assert_ne!(
+        dispatch_id_a, dispatch_id_b,
+        "two dispatch calls must get distinct dispatch_ids"
+    );
+
+    let path_a = generate_mcp_config(
+        &server,
+        &dispatch_id_a,
+        true,
+        false,
+        Some("codex_55_review"),
+        Some(&dispatch_id_a),
+        &[],
+    )
+    .await
+    .expect("generate mcp config a")
+    .expect("config path a");
+    let path_b = generate_mcp_config(
+        &server,
+        &dispatch_id_b,
+        true,
+        false,
+        Some("codex_55_review"),
+        Some(&dispatch_id_b),
+        &[],
+    )
+    .await
+    .expect("generate mcp config b")
+    .expect("config path b");
+
+    let seat_of = |path: &std::path::Path| -> String {
+        let raw = std::fs::read_to_string(path).expect("read mcp config");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse mcp config json");
+        json["mcpServers"]["tachi"]["env"]["TACHI_AGENT_SEAT"]
+            .as_str()
+            .expect("TACHI_AGENT_SEAT present in generated config")
+            .to_string()
+    };
+    let seat_a = seat_of(&path_a);
+    let seat_b = seat_of(&path_b);
+
+    assert_eq!(
+        seat_a, dispatch_id_a,
+        "seat must be the dispatch id, not the shared profile"
+    );
+    assert_eq!(
+        seat_b, dispatch_id_b,
+        "seat must be the dispatch id, not the shared profile"
+    );
+    assert_ne!(
+        seat_a, seat_b,
+        "two workers on the SAME profile must get DISTINCT seats — this is the CP2 regression"
+    );
+    assert_ne!(
+        seat_a, "codex_55_review",
+        "seat must never equal the shared profile name"
+    );
+    assert_ne!(
+        seat_b, "codex_55_review",
+        "seat must never equal the shared profile name"
+    );
+
+    if let Some(value) = original_home {
+        std::env::set_var("HOME", value);
+    } else {
+        std::env::remove_var("HOME");
+    }
+    if let Some(value) = original_tachi_home {
+        std::env::set_var("TACHI_HOME", value);
+    } else {
+        std::env::remove_var("TACHI_HOME");
+    }
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn opencode_serve_dispatch_fails_fast_when_probe_auth_fails() {
@@ -178,6 +293,7 @@ async fn opencode_serve_dispatch_fails_fast_when_probe_auth_fails() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp home");
     let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let _host_profile = EnvGuard::set_value("TACHI_HOST_PROFILE", "development");
     let run_root = dispatch_runs_root();
     let _password = EnvGuard::remove("OPENCODE_SERVER_PASSWORD");
     let _username = EnvGuard::remove("OPENCODE_SERVER_USERNAME");
@@ -223,6 +339,8 @@ async fn opencode_serve_dispatch_fails_fast_when_probe_auth_fails() {
         serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
             .expect("status JSON");
     assert_eq!(status["state"], json!("TASK_STATE_FAILED"));
+    assert_eq!(status["host_profile"], json!("development"));
+    assert_eq!(status["execution_level"], json!("L1"));
     assert_eq!(
         status["harness_server_status"]["doc_error"],
         json!("OpenCode /doc returned HTTP 401")
@@ -400,6 +518,43 @@ async fn dispatch_rejects_bare_cwd_without_unmanaged_optin_or_env_id() {
     assert_eq!(
         run_dir_count, 0,
         "the gate must fire before any run directory is created"
+    );
+}
+
+/// #1010: an L2 request on a development machine must be rejected before the
+/// existing environment/workspace setup path can create a run directory.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn dispatch_rejects_level_above_host_profile_before_workspace_creation() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let _host_profile = EnvGuard::set_value("TACHI_HOST_PROFILE", "development");
+    let run_root = dispatch_runs_root();
+    let server = crate::tests::make_server();
+
+    let mut params = test_dispatch_params(Some("custom"), "read product diagnostics");
+    params.execution_level = Some(tachi_params::ExecutionLevel::L2);
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+
+    let err = handle_tachi_dispatch(&server, params)
+        .await
+        .expect_err("development profile must reject L2 before dispatch setup");
+    assert!(
+        err.contains("host_profile_mismatch"),
+        "unexpected error: {err}"
+    );
+    assert!(err.contains("development"), "unexpected error: {err}");
+    assert!(err.contains("L2"), "unexpected error: {err}");
+
+    let run_dir_count = std::fs::read_dir(&run_root)
+        .map(|entries| entries.filter_map(Result::ok).count())
+        .unwrap_or(0);
+    assert_eq!(
+        run_dir_count, 0,
+        "host-profile rejection must fire before any run directory exists"
     );
 }
 

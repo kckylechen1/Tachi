@@ -127,6 +127,10 @@ impl MemoryServer {
             claim_id: None,
             dispatch_id: None,
             release_reason: None,
+            to: None,
+            ttl_days: None,
+            include_read: false,
+            agent_id: None,
         };
         crate::facade_memory_ops::handle_tachi_memory(self, params).await
     }

@@ -13,11 +13,33 @@ use super::lessons::run_lesson_post_complete_hook;
 
 pub(crate) async fn handle_tachi_complete(
     server: &MemoryServer,
-    params: TachiCompleteParams,
+    mut params: TachiCompleteParams,
 ) -> Result<String, String> {
     let now = Utc::now();
     let date = now.format("%Y-%m-%d").to_string();
     let ts = now.format("%Y%m%dT%H%M%SZ").to_string();
+
+    // #773 (S2 prep): eval rows carry dispatch_id but almost never issue_ref
+    // because the calling agent must manually re-supply it and mostly
+    // doesn't (live: 0/15 at time of design). Auto-inject from the
+    // dispatch's own kanban card — which already has issue_ref on file from
+    // launch (`init_kanban_task`) — when the caller gave us dispatch_id but
+    // no issue_ref. Fail-safe: any lookup miss leaves params.issue_ref as
+    // None and completion proceeds unchanged; this must never fail the
+    // completion. Runs before `build_complete_eval_record` so the injected
+    // value flows into the eval metadata, the kanban/flow completion
+    // payloads, and the review bundle exactly as a caller-supplied
+    // issue_ref would have.
+    if params.issue_ref.as_deref().is_none_or(str::is_empty) {
+        if let Some(dispatch_id) = params
+            .dispatch_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+        {
+            params.issue_ref =
+                super::flow_link::resolve_issue_ref_for_dispatch(server, dispatch_id, None);
+        }
+    }
 
     let CompleteEvalRecord {
         task_id,
@@ -386,7 +408,7 @@ pub(crate) async fn handle_tachi_complete(
     // leader rulings as /precedents rows. Best-effort — a malformed ruling is
     // skipped + warned and never fails completion (the primary contract).
     pipeline_status["precedent_recording"] =
-        crate::precedent_ops::record_complete_rulings(server, &params, &date).await;
+        crate::precedent_ops::record_complete_rulings(server, &params).await;
 
     pipeline_status["post_complete_hooks"] = run_lesson_post_complete_hook(
         server,

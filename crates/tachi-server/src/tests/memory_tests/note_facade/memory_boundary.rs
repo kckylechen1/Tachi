@@ -69,6 +69,10 @@ async fn tachi_memory_save_with_title_stays_memory() {
             claim_id: None,
             dispatch_id: None,
             release_reason: None,
+            to: None,
+            ttl_days: None,
+            include_read: false,
+            agent_id: None,
         }))
         .await
         .expect("tachi_memory save should succeed");

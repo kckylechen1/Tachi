@@ -133,6 +133,10 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
             claim_id: None,
             dispatch_id: None,
             release_reason: None,
+            to: None,
+            ttl_days: None,
+            include_read: false,
+            agent_id: None,
         },
     )
     .await

@@ -1,7 +1,7 @@
 use super::{
     CardAction, CleanAction, DaemonAction, DistillAction, EnvAction, EvalAction, FoundryAction,
-    HarnessAction, HubAction, ManifestAction, McpAction, PokeAction, RepairAction, RescueAction,
-    SkillSurfaceAction, VaultAction, WatcherAction, WikiAction, WorktreeAction,
+    HarnessAction, HostAction, HubAction, ManifestAction, McpAction, PokeAction, RepairAction,
+    RescueAction, SkillSurfaceAction, VaultAction, WatcherAction, WikiAction, WorktreeAction,
 };
 use clap::Subcommand;
 use std::path::PathBuf;
@@ -124,6 +124,11 @@ pub enum Commands {
     Harness {
         #[command(subcommand)]
         action: HarnessAction,
+    },
+    /// Show or set this machine's local execution profile.
+    Host {
+        #[command(subcommand)]
+        action: HostAction,
     },
     /// Inspect local skill stores and host-specific skill projections
     SkillSurface {

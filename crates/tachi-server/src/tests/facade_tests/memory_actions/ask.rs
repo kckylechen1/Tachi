@@ -70,6 +70,10 @@ async fn tachi_memory_ask_returns_evidence_contract() {
             claim_id: None,
             dispatch_id: None,
             release_reason: None,
+            to: None,
+            ttl_days: None,
+            include_read: false,
+            agent_id: None,
         },
     )
     .await

@@ -40,6 +40,11 @@ fn memory_action_requires_admin(action: &str) -> bool {
     matches!(action, "delete" | "gc" | "ingest" | "ingest_source")
 }
 
+// Note: sticky_leave/sticky_check (#964) are deliberately NOT admin-only —
+// worker/delegate seats must be able to leave/check stickies addressed to
+// their own seat name, which is the feature's core worker↔leader use case.
+// They are classified Remember/Observe below, same tier as save/search.
+
 /// A profile that already allows every bundle (standard/admin) gains nothing
 /// from an unclassified-action fallback: it would have allowed the action
 /// anyway once classified, so letting the call through to the handler (for a
@@ -148,6 +153,8 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "readiness"
                 | "claim"
                 | "release"
+                | "sticky_leave"
+                | "sticky_check"
         ),
         "tachi_skill" => matches!(action, "discover" | "run" | "bundle"),
         "tachi_event" => matches!(action, "emit" | "query" | "metrics" | "context" | "a2a"),
@@ -188,11 +195,11 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             // (`tachi_doctor_scan` in OBSERVE_TOOL_PATTERNS) — keep parity,
             // do not narrow a read-only action past its prior visibility.
             "search" | "get" | "briefing" | "alerts" | "ask" | "progress" | "readiness"
-            | "doctor_scan" => Some(ToolBundle::Observe),
+            | "doctor_scan" | "sticky_check" => Some(ToolBundle::Observe),
             // #1001: claim/release are advisory presence bookkeeping, same
             // worker-writable tier as save/checkpoint — a dispatched lane
             // must be able to register/release its own presence claim.
-            "save" | "extract_facts" | "checkpoint" | "claim" | "release" => {
+            "save" | "extract_facts" | "checkpoint" | "claim" | "release" | "sticky_leave" => {
                 Some(ToolBundle::Remember)
             }
             "consolidate"

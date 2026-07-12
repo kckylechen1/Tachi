@@ -77,6 +77,10 @@ async fn tachi_memory_briefing_defaults_to_named_wiki_project_hits() {
             claim_id: None,
             dispatch_id: None,
             release_reason: None,
+            to: None,
+            ttl_days: None,
+            include_read: false,
+            agent_id: None,
         },
     )
     .await

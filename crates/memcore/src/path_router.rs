@@ -3,6 +3,9 @@
 //! Canonical path conventions:
 //!   /handoff/{agent_id}   - handoff memos (project-local by default;
 //!                           handoff_ops opts into cross-project for global DB)
+//!   /sticky/{to-or-broadcast} - sticky notes (project-local by default;
+//!                           sticky_ops opts into cross-project for global DB;
+//!                           "broadcast" bucket = no `to` addressee, leader-only)
 //!   /kanban/{board}       - kanban cards (project-local by default;
 //!                           kanban opts into cross-project for global DB)
 //!   /wiki/{category}/...  - wiki entries (wiki DB only)
@@ -119,6 +122,9 @@ pub(crate) fn classify_path(p: &str) -> PathRouting {
     if n == "/handoff" || n.starts_with("/handoff/") {
         return PathRouting::Project;
     }
+    if n == "/sticky" || n.starts_with("/sticky/") {
+        return PathRouting::Project;
+    }
     if n == "/agents" || n.starts_with("/agents/") {
         return PathRouting::Project;
     }
@@ -172,6 +178,18 @@ pub fn standardize_handoff_path(agent_id: Option<&str>) -> String {
     format!("/handoff/{id}")
 }
 
+/// Build the canonical sticky path bucket for a `to` addressee, defaulting to
+/// `/sticky/broadcast` when `to` is absent (frozen semantics: absent `to`
+/// means addressed to the leader/main session only — worker seats never
+/// consume unaddressed stickies).
+pub fn standardize_sticky_path(to: Option<&str>) -> String {
+    let id = to
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("broadcast");
+    format!("/sticky/{id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +201,7 @@ mod tests {
             "/wiki/foo",
             "/wiki/Foo/Bar",
             "/handoff/agent-1",
+            "/sticky/broadcast",
             "/agents/X/notes",
         ] {
             let once = normalize_path(p);
@@ -228,11 +247,22 @@ mod tests {
         assert_eq!(classify_path("/Wiki/foo"), PathRouting::WikiOnly);
         assert_eq!(classify_path("/handoff"), PathRouting::Project);
         assert_eq!(classify_path("/handoff/agent-x"), PathRouting::Project);
+        assert_eq!(classify_path("/sticky"), PathRouting::Project);
+        assert_eq!(classify_path("/sticky/broadcast"), PathRouting::Project);
+        assert_eq!(classify_path("/sticky/oz"), PathRouting::Project);
         assert_eq!(classify_path("/kanban/board-1"), PathRouting::Project);
         assert_eq!(classify_path("/agents/x"), PathRouting::Project);
         assert_eq!(classify_path("/domain/domain-pack/notes"), PathRouting::Any);
         assert_eq!(classify_path("/foo/bar"), PathRouting::Project);
         assert_eq!(classify_path("/"), PathRouting::Project);
+    }
+
+    #[test]
+    fn standardize_sticky_path_defaults_to_broadcast() {
+        assert_eq!(standardize_sticky_path(None), "/sticky/broadcast");
+        assert_eq!(standardize_sticky_path(Some("  ")), "/sticky/broadcast");
+        assert_eq!(standardize_sticky_path(Some("oz")), "/sticky/oz");
+        assert_eq!(standardize_sticky_path(Some(" oz ")), "/sticky/oz");
     }
 
     #[test]

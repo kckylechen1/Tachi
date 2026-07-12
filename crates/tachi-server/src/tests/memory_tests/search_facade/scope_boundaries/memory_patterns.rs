@@ -122,6 +122,10 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         claim_id: None,
         dispatch_id: None,
         release_reason: None,
+        to: None,
+        ttl_days: None,
+        include_read: false,
+        agent_id: None,
     }
 }
 

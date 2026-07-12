@@ -447,6 +447,7 @@ mod tests {
         assert_eq!(MemoryCategory::normalize("wiki"), "wiki");
         assert_eq!(MemoryCategory::normalize("Guide"), "guide");
         assert_eq!(MemoryCategory::normalize("eval"), "eval");
+        assert_eq!(MemoryCategory::normalize("Sticky"), "sticky");
     }
 
     #[test]

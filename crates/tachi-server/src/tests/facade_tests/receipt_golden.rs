@@ -69,6 +69,10 @@ fn memory_save_params(text: String, path: &str, format: Option<&str>) -> TachiMe
         claim_id: None,
         dispatch_id: None,
         release_reason: None,
+        to: None,
+        ttl_days: None,
+        include_read: false,
+        agent_id: None,
     }
 }
 
@@ -263,6 +267,10 @@ async fn g5_checkpoint_receipt_default_under_500_bytes() {
             claim_id: None,
             dispatch_id: None,
             release_reason: None,
+            to: None,
+            ttl_days: None,
+            include_read: false,
+            agent_id: None,
         },
     )
     .await

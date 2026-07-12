@@ -61,6 +61,40 @@ pub enum CompletionPredicate {
     OutputMatches { pattern: String },
 }
 
+/// Declared side-effect level for a dispatched task. This describes the
+/// target state, not the agent's permission flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize, JsonSchema)]
+pub enum ExecutionLevel {
+    #[serde(rename = "L0", alias = "l0", alias = "0")]
+    L0,
+    #[serde(rename = "L1", alias = "l1", alias = "1")]
+    L1,
+    #[serde(rename = "L2", alias = "l2", alias = "2")]
+    L2,
+    #[serde(rename = "L3", alias = "l3", alias = "3")]
+    L3,
+}
+
+impl ExecutionLevel {
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::L0 => 0,
+            Self::L1 => 1,
+            Self::L2 => 2,
+            Self::L3 => 3,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::L0 => "L0",
+            Self::L1 => "L1",
+            Self::L2 => "L2",
+            Self::L3 => "L3",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiDispatchParams {
     /// Agent backend: "claude" | "codex" | "grok" | "kimi" | "custom" (aliases accepted)
@@ -80,6 +114,11 @@ pub struct TachiDispatchParams {
 
     /// Task description / prompt for the agent
     pub task: String,
+
+    /// Declared execution level for host-profile routing. Omitted legacy
+    /// dispatches default to L1 (temporary local state), never L0.
+    #[serde(default)]
+    pub execution_level: Option<ExecutionLevel>,
 
     /// Working directory for the agent (default: current project root)
     #[serde(default)]
@@ -524,7 +563,12 @@ pub struct TachiCompleteParams {
 }
 
 /// One caller-supplied leader adjudication captured at `complete` (#950). Stored
-/// faithfully under `/precedents/<project>/<date>-<shortid>` with structured
+/// faithfully under `/precedents/<project>/<shortid>`, where `shortid` is a
+/// deterministic hash of the ruling's case identity and content — project,
+/// `issue_ref`, and every normalized ruling field; never the capture date,
+/// capture provenance (dispatch/flow/pr), or randomness — see
+/// `precedent_ops::precedent_short_id`. Re-capturing the same ruling dedupes
+/// to the first row (which keeps the first capture's provenance), with structured
 /// fields in metadata and a human-readable rendering in the body. `case` and
 /// `ruling` are the two required fields; a ruling missing either is skipped with
 /// a warning and never fails the enclosing `complete` call.

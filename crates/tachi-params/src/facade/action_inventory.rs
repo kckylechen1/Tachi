@@ -84,6 +84,9 @@ pub const TACHI_MEMORY_ACTIONS: &[&str] = &[
     // #1001: manual presence-claim backstop.
     "claim",
     "release",
+    // #964: read-once agent-to-agent ephemeral notes.
+    "sticky_leave",
+    "sticky_check",
 ];
 
 /// `tachi_verify` actions.
@@ -124,7 +127,13 @@ mod tests {
 
     #[test]
     fn f0_memory_and_verify_counts() {
-        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 23);
+        // Merge of #1001 (claim, release) and #964 (sticky_leave,
+        // sticky_check) landing together bumps this from 23 -> 25, which
+        // lands exactly AT TACHI_MEMORY_ACTION_SOFT_MAX — the soft-ceiling
+        // assertion below still passes (`<=`), but the next legitimate
+        // addition needs an explicit look at whether the ceiling itself
+        // should move, not just this exact-count tripwire.
+        assert_eq!(TACHI_MEMORY_ACTIONS.len(), 25);
         assert!(TACHI_MEMORY_ACTIONS.len() <= TACHI_MEMORY_ACTION_SOFT_MAX);
         assert_eq!(TACHI_VERIFY_ACTIONS.len(), 4);
     }

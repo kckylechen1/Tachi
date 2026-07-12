@@ -74,6 +74,10 @@ async fn tachi_memory_progress_writes_append_only_jsonl() {
             claim_id: None,
             dispatch_id: None,
             release_reason: None,
+            to: None,
+            ttl_days: None,
+            include_read: false,
+            agent_id: None,
         },
     )
     .await

@@ -185,7 +185,8 @@ pub(crate) async fn handle_memory_briefing(
         None
     };
 
-    let (memories_result, wiki_result, cross_project_result) = tokio::join!(
+    let sticky_cap = if compact { 3 } else { 5 };
+    let (memories_result, wiki_result, cross_project_result, sticky_result) = tokio::join!(
         handle_search_memory(server, mem_params, true),
         async {
             if let Some(wp) = wiki_params {
@@ -195,6 +196,27 @@ pub(crate) async fn handle_memory_briefing(
             }
         },
         async { crate::handoff_ops::list_pending_handoffs_for_briefing(server, cross_project_cap) },
+        // #964: unread stickies for the caller. A caller with no seat
+        // identity (agent_id absent) is treated as leader (frozen semantics
+        // #3/#4) — worker seats only see stickies explicitly addressed to
+        // their seat name. Inclusion here IS the read: each row returned is
+        // atomically claimed (read-once) as a side effect.
+        //
+        // CP2: identity is resolved server-side (params.agent_id ->
+        // agent_profile -> TACHI_AGENT_SEAT env -> leader), NOT trusted from
+        // params.agent_id alone — an unauthenticated/param-less worker
+        // briefing call must not be silently treated as the leader and
+        // consume broadcast (`to`-absent) stickies meant for the real
+        // leader. See sticky_ops::identity::resolve_caller_agent_id.
+        async {
+            let resolved_agent_id =
+                crate::sticky_ops::resolve_caller_agent_id(server, params.agent_id.as_deref());
+            crate::sticky_ops::claim_unread_stickies_for_briefing(
+                server,
+                resolved_agent_id.as_deref(),
+                sticky_cap,
+            )
+        },
     );
 
     let memory_rows = parse_evidence_array(memories_result?);
@@ -216,6 +238,7 @@ pub(crate) async fn handle_memory_briefing(
         json!([])
     };
     let cross_project = json!(cross_project_result?);
+    let stickies = json!(sticky_result?);
 
     let (warnings_res, board_res, checkpoints_res, wiki_counts_res) = tokio::join!(
         async {
@@ -362,6 +385,7 @@ pub(crate) async fn handle_memory_briefing(
             response.insert("available_projects".to_string(), json!(available_projects));
             response.insert("binding".to_string(), binding);
             response.insert("health".to_string(), health_summary);
+            insert_non_empty_compact_section(&mut response, "stickies", stickies.clone());
             insert_non_empty_compact_section(&mut response, "memories", memories);
             insert_non_empty_compact_section(&mut response, "wiki", wiki);
             insert_non_empty_compact_section(&mut response, "cross_project", cross_project);
@@ -391,6 +415,7 @@ pub(crate) async fn handle_memory_briefing(
             "project": named_project,
             "available_projects": available_projects,
             "binding": binding,
+            "stickies": stickies,
             "memories": memories,
             "wiki": wiki,
             "cross_project": cross_project,
@@ -432,6 +457,7 @@ pub(crate) async fn handle_memory_briefing(
     let mut markdown = agent_markdown::format_briefing(
         &query,
         named_project.as_deref(),
+        &stickies,
         &memories,
         &wiki,
         &cross_project,
