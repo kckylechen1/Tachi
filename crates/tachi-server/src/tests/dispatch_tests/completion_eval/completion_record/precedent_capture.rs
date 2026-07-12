@@ -5,10 +5,22 @@
 //!   with the structured ruling intact in metadata and provenance linked;
 //! - a `complete` with no `rulings[]` writes no `/precedents` row (byte-compat
 //!   with pre-#950 callers);
-//! - a malformed ruling is skipped + warned but never fails the completion.
+//! - a malformed ruling is skipped + warned but never fails the completion;
+//! - #1027: retrying `complete` with the identical ruling dedupes onto the
+//!   existing `/precedents` row (deterministic path derivation) instead of
+//!   duplicating it, while two distinct rulings still land as two distinct
+//!   rows;
+//! - #1027 follow-up (B2): the identical ruling recaptured from a
+//!   *different* dispatch/flow still dedupes onto the same row — precedent
+//!   identity is the ruling content, not the capturing dispatch, so
+//!   provenance never leaks into the dedup-gated `text`;
+//! - #1027 follow-up (B1): a NUL byte straddling the `case`/`options`
+//!   boundary can't collide two distinct rulings onto the same
+//!   deterministic path — the short-id seed frames every field with an
+//!   explicit length prefix instead of a bare separator.
 
 use super::*;
-use crate::tool_params::RulingRecordParams;
+use crate::tool_params::{ListMemoriesParams, RulingRecordParams};
 
 fn base_complete() -> TachiCompleteParams {
     TachiCompleteParams {
@@ -146,6 +158,375 @@ async fn complete_with_rulings_persists_retrievable_precedent_rows() {
     assert!(
         text.contains("Ruling: env-flippable security switches are standing bypasses"),
         "body should render the ruling: {text}"
+    );
+}
+
+/// #1027: the path used to embed a random `Uuid::new_v4()` short id (plus the
+/// capture date), so a retried `complete` call carrying the identical ruling
+/// never landed on the same path and the exact-path+exact-text dedup gate in
+/// `save_memory::persist::find_exact_path_text_duplicate` could never fire —
+/// every retry duplicated the row. The short id is now a deterministic
+/// `Uuid::new_v5` hash of the ruling's own content (`precedent_short_id`), so
+/// retrying the same capture must resolve to the same path and the same
+/// existing row's id, not a fresh one.
+#[tokio::test]
+async fn retrying_same_ruling_dedupes_to_one_precedent_row() {
+    let server = make_server();
+
+    let mut params = base_complete();
+    params.rulings = vec![RulingRecordParams {
+        case: "duplicate capture check: a retried complete call carrying the identical ruling"
+            .to_string(),
+        options_considered: Some(
+            "keep the random per-capture short id / derive it deterministically from ruling content"
+                .to_string(),
+        ),
+        ruling: "derive the precedent path deterministically from ruling content so a retried \
+                  complete lands on the existing row instead of duplicating it"
+            .to_string(),
+        principles_cited: vec!["precedent:1027-dedup".to_string()],
+        outcome: Some("validated".to_string()),
+        overturned_by: None,
+    }];
+
+    // First capture.
+    let first_resp = server
+        .tachi_complete(Parameters(params.clone()))
+        .await
+        .expect("first tachi_complete should succeed");
+    let first_bundle: Value = serde_json::from_str(&first_resp).expect("bundle JSON");
+    let first_recording = &first_bundle["pipeline"]["precedent_recording"];
+    let first_recorded = first_recording["recorded"]
+        .as_array()
+        .expect("recorded array present");
+    assert_eq!(
+        first_recorded.len(),
+        1,
+        "first capture should record one row: {first_recording:#}"
+    );
+    let first_id = first_recorded[0]["id"]
+        .as_str()
+        .expect("id present")
+        .to_string();
+    let first_path = first_recorded[0]["path"]
+        .as_str()
+        .expect("path present")
+        .to_string();
+
+    // Second capture: identical rulings + identical completion metadata — a
+    // retry of the exact same `complete` call.
+    let second_resp = server
+        .tachi_complete(Parameters(params))
+        .await
+        .expect("second (retried) tachi_complete should succeed");
+    let second_bundle: Value = serde_json::from_str(&second_resp).expect("bundle JSON");
+    let recording = &second_bundle["pipeline"]["precedent_recording"];
+    let second_recorded = recording["recorded"]
+        .as_array()
+        .expect("recorded array present");
+    assert_eq!(
+        second_recorded.len(),
+        1,
+        "retried capture should still resolve to exactly one recorded ruling, not a second row: \
+         {recording:#}"
+    );
+    assert!(
+        recording["skipped"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true),
+        "a deduplicated retry is a legitimate exact-duplicate response (real id), never a skip: \
+         {recording:#}"
+    );
+
+    let second_id = second_recorded[0]["id"]
+        .as_str()
+        .expect("id present")
+        .to_string();
+    let second_path = second_recorded[0]["path"]
+        .as_str()
+        .expect("path present")
+        .to_string();
+    assert_eq!(
+        second_id, first_id,
+        "retried capture of the same ruling must dedupe onto the existing row's id, not mint a \
+         new one"
+    );
+    assert_eq!(
+        second_path, first_path,
+        "same ruling content must derive the same deterministic precedent path across attempts"
+    );
+
+    // And there is, in fact, exactly one row sitting at that path — not two
+    // rows that merely happen to share an id in the response.
+    let listing = server
+        .list_memories(Parameters(ListMemoriesParams {
+            path_prefix: first_path.clone(),
+            limit: 50,
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("list_memories should succeed");
+    let rows: Vec<Value> = serde_json::from_str(&listing).expect("list JSON");
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["path"] == json!(first_path))
+            .count(),
+        1,
+        "exactly one precedent row should exist at the deterministic path after a retry: {rows:#?}"
+    );
+}
+
+/// The flip side of the dedup guarantee: two *different* rulings must never
+/// collide onto the same deterministic path (the hash is over the ruling's
+/// own content, not a shared constant).
+#[tokio::test]
+async fn different_ruling_content_gets_a_different_precedent_path() {
+    let server = make_server();
+
+    let mut params = base_complete();
+    params.rulings = vec![
+        RulingRecordParams {
+            case: "first distinct case: worktree isolation boundary ruling".to_string(),
+            options_considered: None,
+            ruling: "first ruling text: dispatched lanes never touch the main checkout"
+                .to_string(),
+            principles_cited: vec!["precedent:1027-distinct-a".to_string()],
+            outcome: Some("validated".to_string()),
+            overturned_by: None,
+        },
+        RulingRecordParams {
+            case: "second distinct case: review-implementation vendor separation ruling"
+                .to_string(),
+            options_considered: None,
+            ruling: "second ruling text: implementer and reviewer are always different vendors"
+                .to_string(),
+            principles_cited: vec!["precedent:1027-distinct-b".to_string()],
+            outcome: Some("validated".to_string()),
+            overturned_by: None,
+        },
+    ];
+
+    let resp = server
+        .tachi_complete(Parameters(params))
+        .await
+        .expect("tachi_complete with two distinct rulings should succeed");
+    let bundle: Value = serde_json::from_str(&resp).expect("bundle JSON");
+    let recording = &bundle["pipeline"]["precedent_recording"];
+    let recorded = recording["recorded"]
+        .as_array()
+        .expect("recorded array present");
+    assert_eq!(
+        recorded.len(),
+        2,
+        "two distinct rulings should both persist as separate rows: {recording:#}"
+    );
+
+    let path_a = recorded[0]["path"].as_str().expect("path present");
+    let path_b = recorded[1]["path"].as_str().expect("path present");
+    assert_ne!(
+        path_a, path_b,
+        "distinct ruling content must derive distinct deterministic precedent paths: \
+         {recording:#}"
+    );
+    let id_a = recorded[0]["id"].as_str().expect("id present");
+    let id_b = recorded[1]["id"].as_str().expect("id present");
+    assert_ne!(
+        id_a, id_b,
+        "distinct rulings must land as two separate rows, not dedupe onto each other: \
+         {recording:#}"
+    );
+}
+
+/// #1027 follow-up (B2): a precedent's identity is the *ruling content*,
+/// never which dispatch happened to capture it. The pre-follow-up
+/// `render_body` rendered a "Provenance: dispatch X / flow Y" line straight
+/// into the dedup-gated `text`, so the identical ruling recaptured under a
+/// *different* `dispatch_id`/`flow_id` derived the same deterministic path
+/// but a different `text` — `find_exact_path_text_duplicate` (path+text,
+/// both required) never fired, and the retry silently duplicated the row.
+/// Provenance now lives only in `metadata`/`keywords`, never `text`, so a
+/// same-ruling recapture from an unrelated dispatch must dedupe onto the
+/// same row exactly like a same-dispatch retry does.
+#[tokio::test]
+async fn same_ruling_different_dispatch_still_dedupes_to_one_row() {
+    let server = make_server();
+
+    let ruling = RulingRecordParams {
+        case: "same ruling, recaptured from an entirely different dispatch/flow".to_string(),
+        options_considered: None,
+        ruling: "a precedent's identity is its ruling content, not the dispatch that captured it"
+            .to_string(),
+        principles_cited: vec!["precedent:1027-b2".to_string()],
+        outcome: Some("validated".to_string()),
+        overturned_by: None,
+    };
+
+    let mut first_params = base_complete();
+    first_params.dispatch_id = Some("disp-A".to_string());
+    first_params.flow_id = Some("flow-A".to_string());
+    first_params.rulings = vec![ruling.clone()];
+
+    let first_resp = server
+        .tachi_complete(Parameters(first_params))
+        .await
+        .expect("first tachi_complete should succeed");
+    let first_bundle: Value = serde_json::from_str(&first_resp).expect("bundle JSON");
+    let first_recording = &first_bundle["pipeline"]["precedent_recording"];
+    let first_recorded = first_recording["recorded"]
+        .as_array()
+        .expect("recorded array present");
+    assert_eq!(
+        first_recorded.len(),
+        1,
+        "first capture should record one row: {first_recording:#}"
+    );
+    let first_id = first_recorded[0]["id"]
+        .as_str()
+        .expect("id present")
+        .to_string();
+    let first_path = first_recorded[0]["path"]
+        .as_str()
+        .expect("path present")
+        .to_string();
+
+    // Second capture: identical ruling, but a different dispatch/flow —
+    // simulating a retry that happened to originate from a different
+    // dispatch entirely, not a literal retry of the same one.
+    let mut second_params = base_complete();
+    second_params.dispatch_id = Some("disp-B".to_string());
+    second_params.flow_id = Some("flow-B".to_string());
+    second_params.rulings = vec![ruling];
+
+    let second_resp = server
+        .tachi_complete(Parameters(second_params))
+        .await
+        .expect("second tachi_complete should succeed");
+    let second_bundle: Value = serde_json::from_str(&second_resp).expect("bundle JSON");
+    let recording = &second_bundle["pipeline"]["precedent_recording"];
+    let second_recorded = recording["recorded"]
+        .as_array()
+        .expect("recorded array present");
+    assert_eq!(
+        second_recorded.len(),
+        1,
+        "second (different-dispatch) capture should still resolve to exactly one recorded \
+         ruling, not a second row: {recording:#}"
+    );
+    assert!(
+        recording["skipped"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true),
+        "a deduplicated cross-dispatch retry is a legitimate exact-duplicate response, never a \
+         skip: {recording:#}"
+    );
+
+    let second_id = second_recorded[0]["id"]
+        .as_str()
+        .expect("id present")
+        .to_string();
+    let second_path = second_recorded[0]["path"]
+        .as_str()
+        .expect("path present")
+        .to_string();
+    assert_eq!(
+        second_id, first_id,
+        "same ruling captured from a different dispatch must dedupe onto the existing row's id, \
+         not mint a new one"
+    );
+    assert_eq!(
+        second_path, first_path,
+        "same ruling content must derive the same deterministic precedent path regardless of \
+         which dispatch/flow captured it"
+    );
+
+    let listing = server
+        .list_memories(Parameters(ListMemoriesParams {
+            path_prefix: first_path.clone(),
+            limit: 50,
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("list_memories should succeed");
+    let rows: Vec<Value> = serde_json::from_str(&listing).expect("list JSON");
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row["path"] == json!(first_path))
+            .count(),
+        1,
+        "exactly one precedent row should exist at the deterministic path after a \
+         different-dispatch retry: {rows:#?}"
+    );
+}
+
+/// #1027 follow-up (B1): the pre-follow-up seed NUL-joined fields with a
+/// bare `\u{0}` separator and no framing, which doesn't disambiguate a field
+/// that itself contains a NUL byte. `case="a\0b", options=None` and
+/// `case="a", options=Some("b\0")` NUL-join to the identical byte sequence
+/// (`"a\0b\0" == "a" + "\0" + "b\0" + "\0"`), so two genuinely distinct
+/// rulings derived the same short id and the same `/precedents` path.
+/// `precedent_short_id` now frames every field with an explicit
+/// byte-length prefix (`frame_field`) before concatenating, which is
+/// provably injective across field boundaries regardless of embedded NUL
+/// bytes — these two rulings must land on distinct paths.
+#[tokio::test]
+async fn nul_ambiguous_ruling_pair_gets_distinct_precedent_paths() {
+    let server = make_server();
+
+    let mut params = base_complete();
+    params.rulings = vec![
+        RulingRecordParams {
+            case: "nul-ambiguity check: embedded NUL byte inside `case`, no options\u{0}tail"
+                .to_string(),
+            options_considered: None,
+            ruling: "nul-ambiguity check ruling text shared by both fixtures in this pair"
+                .to_string(),
+            principles_cited: vec!["precedent:1027-b1".to_string()],
+            outcome: Some("validated".to_string()),
+            overturned_by: None,
+        },
+        RulingRecordParams {
+            case: "nul-ambiguity check: embedded NUL byte inside `case`, no options".to_string(),
+            options_considered: Some("tail\u{0}".to_string()),
+            ruling: "nul-ambiguity check ruling text shared by both fixtures in this pair"
+                .to_string(),
+            principles_cited: vec!["precedent:1027-b1".to_string()],
+            outcome: Some("validated".to_string()),
+            overturned_by: None,
+        },
+    ];
+
+    let resp = server
+        .tachi_complete(Parameters(params))
+        .await
+        .expect("tachi_complete with the NUL-ambiguous pair should succeed");
+    let bundle: Value = serde_json::from_str(&resp).expect("bundle JSON");
+    let recording = &bundle["pipeline"]["precedent_recording"];
+    let recorded = recording["recorded"]
+        .as_array()
+        .expect("recorded array present");
+    assert_eq!(
+        recorded.len(),
+        2,
+        "both fixtures in the NUL-ambiguous pair should persist as separate rows: {recording:#}"
+    );
+
+    let path_a = recorded[0]["path"].as_str().expect("path present");
+    let path_b = recorded[1]["path"].as_str().expect("path present");
+    assert_ne!(
+        path_a, path_b,
+        "a NUL byte straddling the case/options boundary must not collide two distinct rulings \
+         onto the same deterministic precedent path: {recording:#}"
+    );
+    let id_a = recorded[0]["id"].as_str().expect("id present");
+    let id_b = recorded[1]["id"].as_str().expect("id present");
+    assert_ne!(
+        id_a, id_b,
+        "the NUL-ambiguous pair must land as two separate rows, not dedupe onto each other: \
+         {recording:#}"
     );
 }
 
