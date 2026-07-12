@@ -20,6 +20,8 @@ mod open;
 mod recall_cache;
 mod sandbox;
 mod schema;
+#[cfg(feature = "admin")]
+pub mod session_claims;
 mod sqlite_vec;
 mod state;
 mod stats_gc;

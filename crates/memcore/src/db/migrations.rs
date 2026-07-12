@@ -16,6 +16,7 @@
 //! - v9: relocate non-empty `location` into `path` / metadata, then drop `location`
 //! - v10: drop retired skill-pack tables (`packs`, `agent_projections`)
 //! - v11: drop retired `domains` registry table (#757)
+//! - v12: `session_claims` identity-triple UNIQUE index (#1001 round 2)
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -27,9 +28,9 @@
 //! written by a newer kernel fails loudly instead of silently proceeding
 //! against data/columns it doesn't understand yet.
 //!
-//! [`EXPECTED_SCHEMA_VERSION`] counts the migration sequence above: 11
-//! sentinel migrations (v1..v11) plus the pre-sentinel baseline schema (v0),
-//! so the current stamp is 11. Bump this const (and add a `vN` doc line
+//! [`EXPECTED_SCHEMA_VERSION`] counts the migration sequence above: 12
+//! sentinel migrations (v1..v12) plus the pre-sentinel baseline schema (v0),
+//! so the current stamp is 12. Bump this const (and add a `vN` doc line
 //! above) whenever a new migration is appended to [`run_data_migrations`].
 //!
 //! ### Compatibility transaction widened to cover `init_schema_inner` (#984 F1 round 3)
@@ -59,7 +60,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 11;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 12;
 
 mod basic;
 mod cross_db;
@@ -67,6 +68,7 @@ mod domain_retire;
 mod legacy_columns;
 mod pack_retire;
 mod sentinel;
+mod session_claims_identity;
 
 use basic::*;
 use cross_db::*;
@@ -77,6 +79,7 @@ pub use legacy_columns::{
 };
 use pack_retire::*;
 use sentinel::*;
+use session_claims_identity::*;
 
 const MIGRATION_NS: &str = "migrations";
 const SANITY_QUARANTINE_FRACTION: f64 = 0.5;
@@ -96,6 +99,7 @@ pub struct MigrationReport {
     pub location_columns_dropped: usize,
     pub pack_tables_dropped: usize,
     pub domains_table_dropped: usize,
+    pub session_claims_duplicates_deduped: usize,
 }
 
 /// Read the schema version stamp (`PRAGMA user_version`). Absent/fresh DBs
@@ -276,6 +280,13 @@ pub(crate) fn run_data_migrations_in_tx(
         conn,
         "v11_drop_domains_table",
         migrate_v11_drop_domains_table,
+    )?
+    .unwrap_or(0);
+
+    report.session_claims_duplicates_deduped = apply_versioned_migration(
+        conn,
+        "v12_session_claims_unique_identity",
+        migrate_v12_session_claims_unique_identity,
     )?
     .unwrap_or(0);
 
@@ -875,6 +886,7 @@ mod tests {
         assert_eq!(report.location_columns_dropped, 0);
         assert_eq!(report.pack_tables_dropped, 0);
         assert_eq!(report.domains_table_dropped, 0);
+        assert_eq!(report.session_claims_duplicates_deduped, 0);
 
         // Sentinels skipped the data work, but the version stamp — which is
         // independent of the sentinel mechanism — still advances.
@@ -1051,6 +1063,7 @@ mod tests {
         "v9_relocate_and_drop_location",
         "v10_drop_pack_tables",
         "v11_drop_domains_table",
+        "v12_session_claims_unique_identity",
     ];
 
     /// Ties `EXPECTED_SCHEMA_VERSION` to the migration count the runner

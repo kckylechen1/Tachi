@@ -14,6 +14,7 @@ pub(crate) fn format_briefing(
     open_loops: &[Value],
     component_governance: &Value,
     issue_freshness: &Value,
+    presence: &Value,
     compact: bool,
 ) -> String {
     let memory_cap = if compact { 6 } else { 12 };
@@ -88,6 +89,61 @@ pub(crate) fn format_briefing(
 
     if let Some(section) = render_issue_freshness_section(issue_freshness) {
         out.push(section);
+    }
+
+    let presence_board = presence.get("board");
+    let presence_items = presence_board
+        .and_then(|b| b.get("items"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    // #527: `briefing_claims_board` caps `items` at `PRESENCE_BOARD_DISPLAY_CAP`
+    // and reports the cut-off count in `overflow` — surface that as a
+    // "+N more" note (#1004 convention) instead of a silently-truncated list.
+    let presence_overflow = presence_board
+        .and_then(|b| b.get("overflow"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let presence_warnings = presence
+        .get("warnings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !presence_items.is_empty() || !presence_warnings.is_empty() {
+        out.push(
+            "\n### Presence 工位表 (who's working what) [AUTHORITY: WORKFLOW STATE]".to_string(),
+        );
+        out.push(
+            "_Advisory only — never a lock. TTL-expired claims disappear on their own._"
+                .to_string(),
+        );
+        for row in &presence_items {
+            let session = row
+                .get("session_client")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let issue_ref = row.get("issue_ref").and_then(Value::as_str);
+            let flow_id = row.get("flow_id").and_then(Value::as_str);
+            let heartbeat = row
+                .get("heartbeat_at")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let target = issue_ref.or(flow_id).unwrap_or("(no issue/flow declared)");
+            out.push(format!(
+                "- **{session}** → {target} (heartbeat {heartbeat})"
+            ));
+        }
+        if presence_overflow > 0 {
+            out.push(format!(
+                "- _+{presence_overflow} more (showing {})_",
+                presence_items.len()
+            ));
+        }
+        for warning in &presence_warnings {
+            if let Some(text) = warning.as_str() {
+                out.push(format!("- ⚠️ {text}"));
+            }
+        }
     }
 
     if let Some(handoffs) = cross_project.as_array() {

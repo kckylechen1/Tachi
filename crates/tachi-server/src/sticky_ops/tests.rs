@@ -356,6 +356,7 @@ async fn sticky_leave_scrubs_secrets_in_storage_and_briefing_render() {
         &[],
         &serde_json::json!({}),
         &serde_json::json!({}), // issue_freshness (empty for this sticky-scrub test)
+        &serde_json::json!({}), // presence (empty for this sticky-scrub test)
         false,
     );
     assert!(

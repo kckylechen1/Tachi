@@ -54,6 +54,7 @@ mod tests {
             &[],
             &serde_json::json!({"matches": []}),
             &serde_json::json!({"zombies": {"count": 0}, "stale_candidates": {"count": 0}}),
+            &serde_json::json!({}),
             false,
         );
 
@@ -116,6 +117,7 @@ mod tests {
             &[],
             &empty_gov,
             &serde_json::json!({"zombies": {"count": 0}, "stale_candidates": {"count": 0}}),
+            &serde_json::json!({}),
             true,
         );
         let full = format_briefing(
@@ -132,6 +134,7 @@ mod tests {
             &[],
             &empty_gov,
             &serde_json::json!({"zombies": {"count": 0}, "stale_candidates": {"count": 0}}),
+            &serde_json::json!({}),
             false,
         );
 
@@ -216,6 +219,7 @@ mod tests {
             &[],
             &serde_json::json!({"matches": []}),
             &serde_json::json!({"zombies": {"count": 0}, "stale_candidates": {"count": 0}}),
+            &serde_json::json!({}),
             true,
         );
         let gate_rows = compact
@@ -250,6 +254,7 @@ mod tests {
             &[],
             &serde_json::json!({"matches": []}),
             &issue_freshness,
+            &serde_json::json!({}),
             false,
         );
         assert!(out.contains("### Issue freshness"));
@@ -281,6 +286,7 @@ mod tests {
             &[],
             &serde_json::json!({"matches": []}),
             &issue_freshness,
+            &serde_json::json!({}),
             false,
         );
         assert!(!out.contains("### Issue freshness"));
@@ -326,6 +332,7 @@ mod tests {
             &[],
             &serde_json::json!({"matches": []}),
             &issue_freshness,
+            &serde_json::json!({}), // presence (empty for this sticky-scrub test)
             false,
         );
 

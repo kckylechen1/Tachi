@@ -151,6 +151,8 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "ask"
                 | "progress"
                 | "readiness"
+                | "claim"
+                | "release"
                 | "sticky_leave"
                 | "sticky_check"
         ),
@@ -194,7 +196,12 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             // do not narrow a read-only action past its prior visibility.
             "search" | "get" | "briefing" | "alerts" | "ask" | "progress" | "readiness"
             | "doctor_scan" | "sticky_check" => Some(ToolBundle::Observe),
-            "save" | "extract_facts" | "checkpoint" | "sticky_leave" => Some(ToolBundle::Remember),
+            // #1001: claim/release are advisory presence bookkeeping, same
+            // worker-writable tier as save/checkpoint — a dispatched lane
+            // must be able to register/release its own presence claim.
+            "save" | "extract_facts" | "checkpoint" | "claim" | "release" | "sticky_leave" => {
+                Some(ToolBundle::Remember)
+            }
             "consolidate"
             | "recall_simulate"
             | "recall_proposals"
