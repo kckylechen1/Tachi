@@ -116,6 +116,16 @@ pub fn is_eval_entry(entry: &MemoryEntry) -> bool {
     path_in_namespace(&entry.path, "/eval") || entry.category.eq_ignore_ascii_case("eval")
 }
 
+/// tachi#773 item 4: anchor rows (`ensure_anchor`, `/anchors/<kind>/...`,
+/// `anchor:`-prefixed ids). Unlike kanban/handoff/wiki, anchors have no
+/// scoped "browse anchors as regular search results" use case — they are
+/// pinned plumbing rows for the memory graph's entity endpoints, never
+/// content a user is searching for. So there is no `path_prefix` override
+/// here; [`is_namespace_search_noise`] excludes them unconditionally.
+pub fn is_anchor_entry(entry: &MemoryEntry) -> bool {
+    path_in_namespace(&entry.path, "/anchors") || entry.id.starts_with("anchor:")
+}
+
 pub fn is_namespace_search_noise(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool {
     let kanban_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/kanban"));
     let handoff_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/handoff"));
@@ -127,4 +137,5 @@ pub fn is_namespace_search_noise(entry: &MemoryEntry, path_prefix: Option<&str>)
         || (!path_prefix_opts_into_recall_cache(path_prefix) && is_recall_cache_entry(entry))
         || (!kanban_scoped && is_kanban_entry(entry))
         || (!handoff_scoped && is_handoff_entry(entry))
+        || is_anchor_entry(entry)
 }

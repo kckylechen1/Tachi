@@ -89,7 +89,13 @@ async fn save_memory_single_shared_entity_no_vector_suppresses_related_to() {
 /// .. }` so the matched-but-not-actually-read entries do not get their
 /// `access_count` / `last_access` bumped (which would inflate ACT-R frequency,
 /// suppress the `access_count = 0` GC prune path, and bias promotion ranking).
-
+///
+/// tachi#773 item 2 retired auto_link's `related_to` emission entirely: two
+/// shared entities with no supersede/reinforce signal now produce NO edge at
+/// all (previously `related_to`). This test now engineers a `supersedes`
+/// trigger instead (same path root + same category + newer timestamp + 2
+/// shared entities) so there is still an edge to assert the access-count
+/// invariant against.
 #[tokio::test]
 async fn save_memory_auto_link_does_not_bump_target_access_count() {
     let server = make_server();
@@ -97,12 +103,10 @@ async fn save_memory_auto_link_does_not_bump_target_access_count() {
     // Seed an entry tagged with the entity we will later search via auto-link.
     let seeded_id = format!("auto-link-target-{}", uuid::Uuid::new_v4());
     let mut seeded = make_entry(&seeded_id);
-    // Two shared entities so the #773 related_to floor is met. The seed and
-    // the save below use DIFFERENT path roots ("/alpha" vs "/beta") so that
-    // `should_supersede`'s path_root-equality check fails and the edge
-    // actually exercises the `related_to` path, not `supersedes` (same path
-    // root + 2 shared entities + newer timestamp would otherwise route to
-    // supersede).
+    // Two shared entities, same path root, same category ("fact") — meets
+    // `should_supersede`'s gate once the new save lands with a newer
+    // timestamp, so the auto-link edge is deterministically `supersedes`
+    // rather than depending on the retired `related_to` fallback.
     seeded.entities = vec!["sigil".to_string(), "tachi-server".to_string()];
     seeded.text = "Original notes about sigil tachi-server internals".to_string();
     seeded.path = "/alpha".to_string();
@@ -136,7 +140,7 @@ async fn save_memory_auto_link_does_not_bump_target_access_count() {
         .save_memory(Parameters(SaveMemoryParams {
             text: "New observation about sigil rotation".to_string(),
             summary: String::new(),
-            path: "/beta".to_string(),
+            path: "/alpha".to_string(),
             importance: 0.7,
             category: "fact".to_string(),
             topic: String::new(),
@@ -168,7 +172,7 @@ async fn save_memory_auto_link_does_not_bump_target_access_count() {
         .to_string();
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-    let related_to_edge: memcore::MemoryEdge = loop {
+    let supersede_edge: memcore::MemoryEdge = loop {
         let found = server
             .with_global_store_read(|store| {
                 store
@@ -187,13 +191,14 @@ async fn save_memory_auto_link_does_not_bump_target_access_count() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     };
 
-    // Different path roots (seed "/alpha" vs save "/beta") mean
-    // should_supersede's path_root-equality check fails, so the 2
-    // shared-entity edge must be `related_to`, not `supersedes`.
+    // Same path root ("/alpha" both sides), same category ("fact"), newer
+    // timestamp on the save, 2 shared entities -> should_supersede's gate
+    // fires deterministically (tachi#773 item 2: related_to is retired, so
+    // this is no longer a related_to/supersedes fork).
     assert_eq!(
-        related_to_edge.relation, "related_to",
-        "2 shared entities across different path roots must produce a related_to edge, got {:?}",
-        related_to_edge.relation
+        supersede_edge.relation, "supersedes",
+        "2 shared entities + same path root + newer timestamp must produce a supersedes edge, got {:?}",
+        supersede_edge.relation
     );
 
     // Re-read the seeded entry. Its access_count MUST still be 0 — auto-link

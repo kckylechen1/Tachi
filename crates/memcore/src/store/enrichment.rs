@@ -236,6 +236,7 @@ impl MemoryStore {
                 let mut stmt = self.conn.prepare(&format!(
                     "SELECT id, text, summary, revision FROM memories
                      WHERE id NOT IN (SELECT id FROM memories_vec)
+                       AND id NOT LIKE 'anchor:%'
                        AND NOT ({})
                      ORDER BY rowid
                      LIMIT ?1",
@@ -257,6 +258,7 @@ impl MemoryStore {
                 let mut stmt = self.conn.prepare(
                     "SELECT id, text, summary, revision FROM memories
                      WHERE id NOT IN (SELECT id FROM memories_vec)
+                     AND id NOT LIKE 'anchor:%'
                      AND source != ?1
                      ORDER BY rowid
                      LIMIT ?2",
@@ -277,6 +279,7 @@ impl MemoryStore {
                 let mut stmt = self.conn.prepare(
                     "SELECT id, text, summary, revision FROM memories
                      WHERE id NOT IN (SELECT id FROM memories_vec)
+                     AND id NOT LIKE 'anchor:%'
                      ORDER BY rowid
                      LIMIT ?1",
                 )?;

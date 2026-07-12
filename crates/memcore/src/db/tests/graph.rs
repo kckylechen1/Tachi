@@ -111,6 +111,325 @@ fn graph_expand_bfs() {
 }
 
 #[test]
+fn add_edge_rejects_illegal_relation() {
+    let mut conn = make_conn();
+    let e1 = make_entry("illegal-src", "source");
+    let e2 = make_entry("illegal-tgt", "target");
+    upsert(&mut conn, &e1, false).unwrap();
+    upsert(&mut conn, &e2, false).unwrap();
+
+    let edge = MemoryEdge {
+        source_id: "illegal-src".into(),
+        target_id: "illegal-tgt".into(),
+        relation: "shares_entities".into(),
+        weight: 0.5,
+        metadata: serde_json::json!({}),
+        created_at: String::new(),
+        valid_from: String::new(),
+        valid_to: None,
+    };
+    let err = add_edge(&conn, &edge).unwrap_err();
+    assert!(err.to_string().contains("shares_entities"));
+
+    // Never reached the INSERT.
+    let out = get_edges(&conn, "illegal-src", "outgoing", None).unwrap();
+    assert!(out.is_empty(), "rejected edge must not be persisted");
+}
+
+#[test]
+fn add_edge_rejects_related_to_new_writes() {
+    let mut conn = make_conn();
+    let e1 = make_entry("dep-src", "source");
+    let e2 = make_entry("dep-tgt", "target");
+    upsert(&mut conn, &e1, false).unwrap();
+    upsert(&mut conn, &e2, false).unwrap();
+
+    let edge = MemoryEdge {
+        source_id: "dep-src".into(),
+        target_id: "dep-tgt".into(),
+        relation: "related_to".into(),
+        weight: 0.5,
+        metadata: serde_json::json!({}),
+        created_at: String::new(),
+        valid_from: String::new(),
+        valid_to: None,
+    };
+    let err = add_edge(&conn, &edge).unwrap_err();
+    assert!(err.to_string().contains("related_to"));
+}
+
+#[test]
+fn add_edge_accepts_ontology_v1_and_about() {
+    let mut conn = make_conn();
+    let e1 = make_entry("ok-src", "source");
+    let e2 = make_entry("ok-tgt", "target");
+    upsert(&mut conn, &e1, false).unwrap();
+    upsert(&mut conn, &e2, false).unwrap();
+
+    for relation in ["causes", "about", "supports", "supersedes"] {
+        let edge = MemoryEdge {
+            source_id: "ok-src".into(),
+            target_id: "ok-tgt".into(),
+            relation: relation.into(),
+            weight: 0.5,
+            metadata: serde_json::json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        };
+        add_edge(&conn, &edge).unwrap_or_else(|e| panic!("{relation} should be legal: {e}"));
+    }
+    let out = get_edges(&conn, "ok-src", "outgoing", None).unwrap();
+    assert_eq!(out.len(), 4);
+}
+
+/// Sol post-adjudication kill-test ②: the generic `add_edge` choke point —
+/// the same one the NAPI `add_edge` surface and continuity projection funnel
+/// through — must REJECT every #772 grandfathered relation and leave zero rows.
+/// This is what shuts the "launder a string relation into the graph" path.
+#[test]
+fn add_edge_rejects_component_governance_grandfathered_on_generic_path() {
+    let mut conn = make_conn();
+    let e1 = make_entry("gf-src", "source");
+    let e2 = make_entry("gf-tgt", "target");
+    upsert(&mut conn, &e1, false).unwrap();
+    upsert(&mut conn, &e2, false).unwrap();
+
+    for relation in ["owns", "consumes", "backflow_candidate", "blocked_by"] {
+        let edge = MemoryEdge {
+            source_id: "gf-src".into(),
+            target_id: "gf-tgt".into(),
+            relation: relation.into(),
+            weight: 0.5,
+            metadata: serde_json::json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        };
+        let err = add_edge(&conn, &edge).unwrap_err();
+        assert!(
+            err.to_string().contains(relation),
+            "generic add_edge must reject grandfathered relation '{relation}', got: {err}"
+        );
+    }
+
+    // Never reached the INSERT for any of the four.
+    let out = get_edges(&conn, "gf-src", "outgoing", None).unwrap();
+    assert!(
+        out.is_empty(),
+        "grandfathered relations must not persist via the generic path, got {out:?}"
+    );
+}
+
+/// Sol post-adjudication kill-test ③: the typed, caller-scoped door
+/// `add_component_governance_edge` accepts exactly the four grandfathered
+/// relations (via the closed enum) and persists them — the one sanctioned
+/// seeding path.
+#[test]
+fn add_component_governance_edge_accepts_exactly_the_four_typed_relations() {
+    let mut conn = make_conn();
+    // Distinct target per relation so the (source, target, relation) upsert key
+    // keeps all four as separate rows.
+    let src = make_entry("cg-src", "component");
+    upsert(&mut conn, &src, false).unwrap();
+    let variants = [
+        ComponentGovernanceRelation::Owns,
+        ComponentGovernanceRelation::Consumes,
+        ComponentGovernanceRelation::BackflowCandidate,
+        ComponentGovernanceRelation::BlockedBy,
+    ];
+    for (i, relation) in variants.iter().enumerate() {
+        let tgt_id = format!("cg-tgt-{i}");
+        let tgt = make_entry(&tgt_id, "component");
+        upsert(&mut conn, &tgt, false).unwrap();
+        let edge = MemoryEdge {
+            source_id: "cg-src".into(),
+            target_id: tgt_id.clone(),
+            // Deliberately wrong string to prove the enum (not this field) is
+            // authoritative for the stored relation.
+            relation: "IGNORED".into(),
+            weight: 1.0,
+            metadata: serde_json::json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        };
+        add_component_governance_edge(&conn, &edge, *relation)
+            .unwrap_or_else(|e| panic!("typed door must accept {}: {e}", relation.as_str()));
+    }
+
+    let out = get_edges(&conn, "cg-src", "outgoing", None).unwrap();
+    assert_eq!(out.len(), 4, "all four typed governance edges must persist");
+    let mut stored: Vec<String> = out.iter().map(|e| e.relation.clone()).collect();
+    stored.sort();
+    assert_eq!(
+        stored,
+        vec![
+            "backflow_candidate".to_string(),
+            "blocked_by".to_string(),
+            "consumes".to_string(),
+            "owns".to_string(),
+        ],
+        "typed door must store the enum's as_str(), not edge.relation"
+    );
+}
+
+/// Insert a legacy `related_to` edge with an open `valid_to` (simulating a
+/// pre-#773 row) via raw SQL, bypassing `add_edge`'s new-write validation —
+/// exactly the grandfathered-read scenario this maintenance fn targets.
+fn insert_legacy_related_to_edge(conn: &Connection, source: &str, target: &str) {
+    conn.execute(
+        "INSERT INTO memory_edges (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
+         VALUES (?1, ?2, 'related_to', 0.5, '{}', ?3, ?3, NULL)",
+        params![source, target, "2026-01-01T00:00:00.000Z"],
+    )
+    .unwrap();
+}
+
+#[test]
+fn close_related_to_fog_closes_open_rows_and_excludes_from_get_edges() {
+    let mut conn = make_conn();
+    let e1 = make_entry("fog-src", "source");
+    let e2 = make_entry("fog-tgt", "target");
+    upsert(&mut conn, &e1, false).unwrap();
+    upsert(&mut conn, &e2, false).unwrap();
+    insert_legacy_related_to_edge(&conn, "fog-src", "fog-tgt");
+
+    // Red: before closure, the legacy fog edge is still traversable.
+    let before = get_edges(&conn, "fog-src", "outgoing", None).unwrap();
+    assert_eq!(
+        before.len(),
+        1,
+        "legacy related_to edge should be open pre-closure"
+    );
+    assert!(before[0].valid_to.is_none());
+
+    let closed = close_related_to_fog(&conn).unwrap();
+    assert_eq!(closed, 1);
+
+    // Green: closed edge leaves get_edges immediately (valid_to <= now).
+    let after = get_edges(&conn, "fog-src", "outgoing", None).unwrap();
+    assert!(
+        after.is_empty(),
+        "closed related_to edge must leave get_edges traversal, got {after:?}"
+    );
+}
+
+#[test]
+fn ensure_anchor_composes_with_add_edge_via_about_relation() {
+    // tachi#773 item 4 guard (d): both edge endpoints must exist in the same
+    // physical DB. Since ensure_anchor and add_edge share one Connection,
+    // this composes naturally — a memory row can point an `about` edge at a
+    // freshly-ensured anchor with no cross-DB id smuggling possible.
+    let mut conn = make_conn();
+    let memory = make_entry("about-src", "note about issue 773");
+    upsert(&mut conn, &memory, false).unwrap();
+
+    let anchor = ensure_anchor(&conn, AnchorKind::Issue, "kckylechen1/tachi:773").unwrap();
+    assert_eq!(
+        anchor,
+        anchor_id(AnchorKind::Issue, "kckylechen1/tachi:773")
+    );
+
+    add_edge(
+        &conn,
+        &MemoryEdge {
+            source_id: "about-src".into(),
+            target_id: anchor.clone(),
+            relation: "about".into(),
+            weight: 1.0,
+            metadata: serde_json::json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        },
+    )
+    .unwrap();
+
+    let out = get_edges(&conn, "about-src", "outgoing", None).unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].target_id, anchor);
+    assert_eq!(out[0].relation, "about");
+}
+
+#[test]
+fn close_related_to_fog_closed_edge_valid_to_exactly_now_is_closed_not_active() {
+    // Boundary pin (matches PR #1013's discrimination test): a same-day
+    // closed edge must not stay lexically "active" against SQLite's
+    // differently-formatted datetime('now') text.
+    let mut conn = make_conn();
+    let e1 = make_entry("fog-boundary-src", "source");
+    let e2 = make_entry("fog-boundary-tgt", "target");
+    upsert(&mut conn, &e1, false).unwrap();
+    upsert(&mut conn, &e2, false).unwrap();
+    insert_legacy_related_to_edge(&conn, "fog-boundary-src", "fog-boundary-tgt");
+
+    close_related_to_fog(&conn).unwrap();
+
+    let out = get_edges(&conn, "fog-boundary-src", "outgoing", None).unwrap();
+    assert!(
+        out.is_empty(),
+        "edge closed at ~now must be excluded immediately, not stay lexically active: {out:?}"
+    );
+}
+
+#[test]
+fn close_related_to_fog_is_idempotent() {
+    let mut conn = make_conn();
+    let e1 = make_entry("fog-idem-src", "source");
+    let e2 = make_entry("fog-idem-tgt", "target");
+    upsert(&mut conn, &e1, false).unwrap();
+    upsert(&mut conn, &e2, false).unwrap();
+    insert_legacy_related_to_edge(&conn, "fog-idem-src", "fog-idem-tgt");
+
+    let first = close_related_to_fog(&conn).unwrap();
+    assert_eq!(first, 1);
+
+    // Second pass: nothing left open, so nothing is closed again.
+    let second = close_related_to_fog(&conn).unwrap();
+    assert_eq!(
+        second, 0,
+        "idempotent re-run must not re-touch already-closed rows"
+    );
+}
+
+#[test]
+fn close_related_to_fog_leaves_other_relations_untouched() {
+    let mut conn = make_conn();
+    let e1 = make_entry("fog-other-src", "source");
+    let e2 = make_entry("fog-other-tgt", "target");
+    upsert(&mut conn, &e1, false).unwrap();
+    upsert(&mut conn, &e2, false).unwrap();
+    add_edge(
+        &conn,
+        &MemoryEdge {
+            source_id: "fog-other-src".into(),
+            target_id: "fog-other-tgt".into(),
+            relation: "causes".into(),
+            weight: 0.9,
+            metadata: serde_json::json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        },
+    )
+    .unwrap();
+
+    let closed = close_related_to_fog(&conn).unwrap();
+    assert_eq!(
+        closed, 0,
+        "no related_to rows exist; causes edge must be untouched"
+    );
+
+    let out = get_edges(&conn, "fog-other-src", "outgoing", None).unwrap();
+    assert_eq!(out.len(), 1);
+    assert!(
+        out[0].valid_to.is_none(),
+        "non-related_to edge must stay open"
+    );
+}
+
+#[test]
 fn closed_edge_valid_to_now_is_excluded_immediately() {
     // Sol correction 4 (#773 v3): add_edge stores valid_to UNNORMALIZED, while
     // edge-active reads compare that raw text against SQLite's differently

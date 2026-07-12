@@ -31,6 +31,27 @@ fn upsert_folds_persons_into_entities_without_persisting_persons_column() {
 }
 
 #[test]
+fn upsert_rejects_anchor_namespace_ids() {
+    // tachi#773 item 4 guard (c): the `anchor:` id namespace is reserved for
+    // `ensure_anchor`; ordinary upsert must fail closed, never silently
+    // create or overwrite a row there.
+    let mut conn = make_conn();
+    let e = make_entry("anchor:issue:kckylechen1/tachi:773", "smuggled anchor row");
+    let err = upsert(&mut conn, &e, false).unwrap_err();
+    assert!(err.to_string().contains("anchor:"));
+    assert!(err.to_string().contains("reserved"));
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE id = 'anchor:issue:kckylechen1/tachi:773'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0, "rejected write must not land any row");
+}
+
+#[test]
 fn upsert_idempotent() {
     let mut conn = make_conn();
     let mut e = make_entry("dup", "first text");

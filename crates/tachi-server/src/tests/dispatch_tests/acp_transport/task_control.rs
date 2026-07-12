@@ -131,3 +131,113 @@ async fn tachi_task_cancel_invokes_acpx_cancel_and_records_request() {
         json!("cancelled")
     );
 }
+
+/// #1001 round 2 item 1: `tachi_task(action='cancel')` must release the
+/// presence claim its dispatch registered — same discipline as
+/// `tachi_complete` (see `completion_eval::completion_record::
+/// presence_claim_release`), and the module doc in
+/// `memcore::session_claims` promises manual `release`, `complete`, and
+/// `cancel` all route through the single release path.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn tachi_task_cancel_releases_the_presence_claim_registered_for_its_dispatch_id() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let temp_python = tempfile::tempdir().expect("temp python module");
+    write_fake_acpx_control_module(temp_python.path());
+    let _pythonpath = EnvVarGuard::set_path("PYTHONPATH", temp_python.path());
+    let dispatch_id = "99991231T235955Z-presence-release-cancel";
+    let run_dir = temp_home.temp_home.join(".tachi/runs").join(dispatch_id);
+    write_acpx_control_fixture(&run_dir, dispatch_id);
+
+    crate::claims_ops::auto_register_or_heartbeat_claim(
+        &server,
+        &crate::claims_ops::ClaimHookInput {
+            issue_ref: Some("org/repo#1001".to_string()),
+            flow_id: None,
+            dispatch_id: Some(dispatch_id.to_string()),
+            branch: Some("feat/x".to_string()),
+            declared_file_scope: None,
+        },
+    );
+    let live_before = crate::claims_ops::list_live_claims_for_briefing(&server);
+    assert!(
+        live_before
+            .iter()
+            .any(|c| c.dispatch_id.as_deref() == Some(dispatch_id)),
+        "fixture sanity: claim must be live before cancel"
+    );
+
+    let mut params = task_params("cancel");
+    params.dispatch_id = Some(dispatch_id.to_string());
+    params.timeout_secs = Some(5);
+    let response = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("cancel should succeed");
+    let parsed: Value = serde_json::from_str(&response).expect("cancel JSON");
+    assert_eq!(parsed["status"], json!("cancel_requested"));
+
+    let live_after = crate::claims_ops::list_live_claims_for_briefing(&server);
+    assert!(
+        !live_after
+            .iter()
+            .any(|c| c.dispatch_id.as_deref() == Some(dispatch_id)),
+        "claim for dispatch_id={dispatch_id} must no longer be active after cancel: {live_after:?}"
+    );
+}
+
+/// The already-terminal early-return branch in `handle_tachi_task_cancel`
+/// must ALSO release the claim — a dispatch that reached a terminal state
+/// through some other path (e.g. the watchdog) but was never explicitly
+/// completed/cancelled should not leave its presence claim stuck active
+/// forever just because a caller's cancel request arrives after the fact.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn tachi_task_cancel_on_already_terminal_dispatch_still_releases_the_claim() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let dispatch_id = "99991231T235954Z-presence-release-cancel-terminal";
+    let run_dir = temp_home.temp_home.join(".tachi/runs").join(dispatch_id);
+    std::fs::create_dir_all(&run_dir).expect("create run dir");
+    std::fs::write(
+        run_dir.join("status.json"),
+        serde_json::to_string_pretty(&json!({
+            "dispatch_id": dispatch_id,
+            "agent": "codex",
+            "task": "already terminal before cancel arrives",
+            "state": "TASK_STATE_COMPLETED",
+            "exit_code": 0,
+            "updated_at": Utc::now().to_rfc3339(),
+        }))
+        .expect("status json"),
+    )
+    .expect("write status");
+
+    crate::claims_ops::auto_register_or_heartbeat_claim(
+        &server,
+        &crate::claims_ops::ClaimHookInput {
+            issue_ref: Some("org/repo#1001".to_string()),
+            flow_id: None,
+            dispatch_id: Some(dispatch_id.to_string()),
+            branch: Some("feat/x".to_string()),
+            declared_file_scope: None,
+        },
+    );
+
+    let mut params = task_params("cancel");
+    params.dispatch_id = Some(dispatch_id.to_string());
+    params.timeout_secs = Some(5);
+    let response = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("cancel on already-terminal dispatch should still succeed");
+    let parsed: Value = serde_json::from_str(&response).expect("cancel JSON");
+    assert_eq!(parsed["status"], json!("already_terminal"));
+
+    let live_after = crate::claims_ops::list_live_claims_for_briefing(&server);
+    assert!(
+        !live_after
+            .iter()
+            .any(|c| c.dispatch_id.as_deref() == Some(dispatch_id)),
+        "claim must be released even on the already-terminal early-return branch: {live_after:?}"
+    );
+}

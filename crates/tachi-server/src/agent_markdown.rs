@@ -13,7 +13,7 @@ mod wiki;
 use shared::{format_section_rows, md_escape};
 
 pub(crate) use alerts::format_alerts;
-pub(crate) use briefing::format_briefing;
+pub(crate) use briefing::{format_briefing, render_issue_freshness_section};
 pub(crate) use search::format_search_sections;
 pub(crate) use wiki::{
     format_wiki_browse_category, format_wiki_browse_stats, format_wiki_read, format_wiki_search,
@@ -53,6 +53,8 @@ mod tests {
             &checkpoints,
             &[],
             &serde_json::json!({"matches": []}),
+            &serde_json::json!({"zombies": {"count": 0}, "stale_candidates": {"count": 0}}),
+            &serde_json::json!({}),
             false,
         );
 
@@ -114,6 +116,8 @@ mod tests {
             &serde_json::json!(checkpoints),
             &[],
             &empty_gov,
+            &serde_json::json!({"zombies": {"count": 0}, "stale_candidates": {"count": 0}}),
+            &serde_json::json!({}),
             true,
         );
         let full = format_briefing(
@@ -129,6 +133,8 @@ mod tests {
             &serde_json::json!(checkpoints),
             &[],
             &empty_gov,
+            &serde_json::json!({"zombies": {"count": 0}, "stale_candidates": {"count": 0}}),
+            &serde_json::json!({}),
             false,
         );
 
@@ -212,6 +218,8 @@ mod tests {
             &empty,
             &[],
             &serde_json::json!({"matches": []}),
+            &serde_json::json!({"zombies": {"count": 0}, "stale_candidates": {"count": 0}}),
+            &serde_json::json!({}),
             true,
         );
         let gate_rows = compact
@@ -221,6 +229,67 @@ mod tests {
         assert_eq!(gate_rows, 3);
         assert!(compact.contains("### Verification gates"));
         assert!(compact.contains("tachi_verify(action='board')"));
+    }
+
+    #[test]
+    fn format_briefing_renders_issue_freshness_section_when_nonempty() {
+        let empty = serde_json::json!([]);
+        let health = serde_json::json!({"health_score": 95, "warnings": [], "wiki": {}});
+        let kanban = serde_json::json!({"tasks": []});
+        let issue_freshness = serde_json::json!({
+            "zombies": {"count": 2, "items": [{"issue_ref": "o/r#979"}, {"issue_ref": "o/r#947"}]},
+            "stale_candidates": {"count": 1, "items": [{"issue_ref": "o/r#500"}]},
+        });
+        let out = format_briefing(
+            "q",
+            Some("sigil"),
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &health,
+            &empty,
+            &kanban,
+            &empty,
+            &[],
+            &serde_json::json!({"matches": []}),
+            &issue_freshness,
+            &serde_json::json!({}),
+            false,
+        );
+        assert!(out.contains("### Issue freshness"));
+        assert!(out.contains("2 zombie(s)"));
+        assert!(out.contains("o/r#979"));
+        assert!(out.contains("o/r#947"));
+        assert!(out.contains("1 stale-spec candidate(s)"));
+        assert!(out.contains("o/r#500"));
+    }
+
+    #[test]
+    fn format_briefing_omits_issue_freshness_section_when_empty() {
+        let empty = serde_json::json!([]);
+        let health = serde_json::json!({"health_score": 95, "warnings": [], "wiki": {}});
+        let kanban = serde_json::json!({"tasks": []});
+        let issue_freshness =
+            serde_json::json!({"zombies": {"count": 0}, "stale_candidates": {"count": 0}});
+        let out = format_briefing(
+            "q",
+            Some("sigil"),
+            &empty,
+            &empty,
+            &empty,
+            &empty,
+            &health,
+            &empty,
+            &kanban,
+            &empty,
+            &[],
+            &serde_json::json!({"matches": []}),
+            &issue_freshness,
+            &serde_json::json!({}),
+            false,
+        );
+        assert!(!out.contains("### Issue freshness"));
     }
 
     // CP4 belt-and-suspenders (codex final review of #964/PR #1003): a
@@ -246,6 +315,8 @@ mod tests {
         let empty = serde_json::json!([]);
         let health = serde_json::json!({"health_score": 95, "warnings": [], "wiki": {}});
         let kanban = serde_json::json!({"tasks": []});
+        let issue_freshness =
+            serde_json::json!({"zombies": {"count": 0}, "stale_candidates": {"count": 0}});
 
         let out = format_briefing(
             "q",
@@ -260,6 +331,8 @@ mod tests {
             &empty,
             &[],
             &serde_json::json!({"matches": []}),
+            &issue_freshness,
+            &serde_json::json!({}), // presence (empty for this sticky-scrub test)
             false,
         );
 

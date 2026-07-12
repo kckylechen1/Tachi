@@ -1,7 +1,10 @@
 mod agent_state;
+pub mod anchor;
 mod audit;
 mod common;
 mod daily_pipeline;
+#[cfg(feature = "admin")]
+pub mod dispatch_outcomes;
 mod doctor_probe;
 mod event_ledger;
 #[cfg(feature = "admin")]
@@ -20,6 +23,8 @@ mod open;
 mod recall_cache;
 mod sandbox;
 mod schema;
+#[cfg(feature = "admin")]
+pub mod session_claims;
 mod sqlite_vec;
 mod state;
 mod stats_gc;
@@ -29,6 +34,7 @@ mod vault_db;
 mod virtual_capability;
 
 pub use agent_state::{get_agent_known_revisions, update_agent_known_state};
+pub use anchor::{anchor_id, anchor_path, ensure_anchor, AnchorKind};
 pub use audit::{audit_log_insert, audit_log_list};
 pub(crate) use common::normalize_utc_iso;
 pub use common::{normalize_utc_iso_or_now, row_to_entry};
@@ -37,6 +43,11 @@ pub use daily_pipeline::{
     count_distinct_access_days, list_eval_evidence, list_memory_ids_needing_embedding,
     list_promotion_candidate_ids, promote_memory_to_durable, CategorySourceGroup,
     DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow,
+};
+#[cfg(feature = "admin")]
+pub use dispatch_outcomes::{
+    derive_idempotency_key, get_outcome, list_outcomes_by_issue_ref,
+    list_outcomes_by_vendor_window, upsert_outcome, DispatchOutcomeRow, NewDispatchOutcome,
 };
 pub use doctor_probe::{
     checkpoint_wal_truncate, count_chunks_rows, count_memories_missing_domain, count_memories_rows,
@@ -49,8 +60,9 @@ pub use gc_candidates::{
     CategoryPathPrefixMemoryRow, PathPrefixMemoryRow,
 };
 pub use graph::{
-    add_edge, avg_importance, count_same_topic, get_contradiction_count, get_edges,
-    get_superseded_ids, graph_expand, remove_edge,
+    add_component_governance_edge, add_edge, avg_importance, close_related_to_fog,
+    count_same_topic, get_contradiction_count, get_edges, get_superseded_ids, graph_expand,
+    remove_edge,
 };
 #[cfg(feature = "admin")]
 pub use hub_db::{
@@ -88,8 +100,8 @@ pub use sandbox::{
 pub use schema::{init_schema, init_schema_with_label_mut};
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
 pub use state::{
-    get_state, insert_state_if_absent, list_derived_by_source, list_state, save_derived,
-    save_derived_with_id, set_state, set_state_if_version, StateRow,
+    delete_state, get_state, insert_state_if_absent, list_derived_by_source, list_state,
+    save_derived, save_derived_with_id, set_state, set_state_if_version, StateRow,
 };
 pub use stats_gc::{archive_stale_memories, gc_tables, stats};
 #[cfg(feature = "admin")]
