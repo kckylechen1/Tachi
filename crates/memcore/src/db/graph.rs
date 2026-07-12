@@ -2,13 +2,47 @@ use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 
 use crate::error::MemoryError;
+use crate::relation_ontology::ComponentGovernanceRelation;
 use crate::types::{GraphExpandResult, MemoryEdge};
 
 use super::common::{normalize_utc_iso_or_now, now_utc_iso};
 use super::memory_crud::fetch_by_ids;
 
+/// Generic edge write. The relation must be admissible on the **generic**
+/// ontology-v1 path — this is the single choke point every dynamic string
+/// caller (continuity projection, the NAPI `add_edge` surface, tools) funnels
+/// through, so the #772 grandfathered relations are rejected here. Callers
+/// that legitimately seed a grandfathered relation must use
+/// [`add_component_governance_edge`].
 pub fn add_edge(conn: &Connection, edge: &MemoryEdge) -> Result<(), MemoryError> {
     crate::relation_ontology::validate_relation_for_write(&edge.relation)?;
+    write_edge_row(conn, edge, &edge.relation)
+}
+
+/// Typed, caller-scoped write door for the #772 component-governance
+/// grandfathered relations (`owns` / `consumes` / `backflow_candidate` /
+/// `blocked_by`). The `relation` argument is the closed
+/// [`ComponentGovernanceRelation`] enum, not a string, so these four relations
+/// can only enter the graph through this single call — the generic [`add_edge`]
+/// rejects them. The enum is authoritative for the stored `relation` column;
+/// `edge.relation` is ignored. Bypassing the generic ontology check here is
+/// deliberate: the enum type *is* the validation.
+pub fn add_component_governance_edge(
+    conn: &Connection,
+    edge: &MemoryEdge,
+    relation: ComponentGovernanceRelation,
+) -> Result<(), MemoryError> {
+    write_edge_row(conn, edge, relation.as_str())
+}
+
+/// Shared INSERT/UPSERT for [`add_edge`] and [`add_component_governance_edge`].
+/// `relation` is the (already-validated) relation string to persist; all
+/// timestamp normalization is identical across both entry points.
+fn write_edge_row(
+    conn: &Connection,
+    edge: &MemoryEdge,
+    relation: &str,
+) -> Result<(), MemoryError> {
     let created = if edge.created_at.is_empty() {
         now_utc_iso()
     } else {
@@ -38,7 +72,7 @@ pub fn add_edge(conn: &Connection, edge: &MemoryEdge) -> Result<(), MemoryError>
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
            ON CONFLICT(source_id, target_id, relation)
            DO UPDATE SET weight = ?4, metadata = ?5, created_at = ?6, valid_from = ?7, valid_to = ?8"#,
-        params![edge.source_id, edge.target_id, edge.relation, edge.weight, meta_str, created, valid_from, valid_to],
+        params![edge.source_id, edge.target_id, relation, edge.weight, meta_str, created, valid_from, valid_to],
     )?;
     Ok(())
 }

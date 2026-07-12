@@ -81,6 +81,129 @@ fn event_query_from_params(params: &TachiEventParams) -> TachiEventQuery {
 mod tests {
     use super::*;
     use crate::DbScope;
+    use memcore::MemoryEntry;
+
+    /// Minimal ordinary (non-component) memory so a causal edge's endpoints
+    /// exist and projection reaches the ontology gate rather than the
+    /// endpoint-missing skip.
+    fn min_memory_entry(id: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: "/".to_string(),
+            summary: String::new(),
+            text: "kill-test memory".to_string(),
+            importance: 0.5,
+            timestamp: now_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: String::new(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "test".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    /// Sol post-adjudication kill-test ①: continuity projection forwards a
+    /// dynamic `relation="owns"` (a #772 grandfathered relation) between two
+    /// ordinary, non-component memories. The generic `add_edge` choke point
+    /// must reject it — and projection must stay **fail-soft**: the edge is
+    /// dropped into `skipped`, zero edges land, and the run still completes
+    /// (no panic, no hard error bubbling up to boot/projection).
+    #[test]
+    fn continuity_projection_rejects_grandfathered_relation_fail_soft() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = dir.path().join("memory.db");
+        let server = MemoryServer::new(db, None).expect("test server");
+        let target = ContinuityEventTarget::new(DbScope::Global, None, None);
+
+        // Two ordinary memories so both edge endpoints exist.
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&min_memory_entry("mem-src"))
+                    .map_err(|e| e.to_string())?;
+                store
+                    .upsert(&min_memory_entry("mem-tgt"))
+                    .map_err(|e| e.to_string())?;
+                // A timeline event carrying a causal edge with a grandfathered
+                // relation — exactly the laundering path this rework closes.
+                let event = TachiEventRecord {
+                    id: "timeline-owns-1".to_string(),
+                    source_repo: "tachi".to_string(),
+                    adapter: "test".to_string(),
+                    project: "sigil".to_string(),
+                    domain: "agent_os".to_string(),
+                    session_id: "s1".to_string(),
+                    actor: "codex".to_string(),
+                    event_type: "session.captured".to_string(),
+                    authority: AuthorityLevel::CollectOnly,
+                    effects: vec![EffectScope::None],
+                    projection_hints: vec![ProjectionKind::Timeline],
+                    payload: json!({
+                        "summary": "Timeline with a laundered governance edge",
+                        "text": "projection should reject the owns relation",
+                        "projection_key": "timeline-owns",
+                        "causal_edges": [{
+                            "source_id": "mem-src",
+                            "target_id": "mem-tgt",
+                            "relation": "owns",
+                        }],
+                    }),
+                    provenance: json!({"source": "test"}),
+                    created_at: now_rfc3339(),
+                };
+                store.insert_tachi_event(&event).map_err(|e| e.to_string())
+            })
+            .expect("seed event + memories");
+
+        // Fail-soft: the run completes without erroring out.
+        let report = project_auto_continuity_events_for_target(
+            &server,
+            ContinuityEventTarget::new(DbScope::Global, None, None),
+            20,
+        )
+        .expect("projection must not hard-error on a rejected edge");
+        assert_eq!(
+            report["status"],
+            json!("completed"),
+            "projection must stay fail-soft, got: {report}"
+        );
+        // The timeline projection itself was produced (so we actually reached
+        // the edge-persist path), but the grandfathered edge was skipped.
+        assert!(
+            report["projected_count"].as_u64().unwrap_or(0) >= 1,
+            "timeline projection should have been produced: {report}"
+        );
+
+        // Zero edges landed in the store.
+        server
+            .with_global_store_read(|store| {
+                let out = store
+                    .get_edges("mem-src", "outgoing", None)
+                    .map_err(|e| e.to_string())?;
+                assert!(
+                    out.is_empty(),
+                    "grandfathered relation must not land via projection, got {out:?}"
+                );
+                Ok::<(), String>(())
+            })
+            .expect("read edges");
+    }
 
     #[test]
     fn parses_continuity_candidates_with_projection_aliases() {

@@ -4,14 +4,29 @@ use crate::{
     db,
     db::AnchorKind,
     error::MemoryError,
+    relation_ontology::ComponentGovernanceRelation,
     types::{GraphExpandResult, MemoryEdge},
     MemoryStore,
 };
 
 impl MemoryStore {
-    /// Add or update an edge in the memory graph.
+    /// Add or update an edge in the memory graph. Generic path: the relation
+    /// must be admissible on ontology-v1 (the #772 grandfathered relations are
+    /// rejected here — use [`MemoryStore::add_component_governance_edge`]).
     pub fn add_edge(&self, edge: &MemoryEdge) -> Result<(), MemoryError> {
         db::add_edge(&self.conn, edge)
+    }
+
+    /// Typed, caller-scoped write door for the #772 component-governance
+    /// grandfathered relations. Only `component_governance_ops` seeding should
+    /// call this; the closed [`ComponentGovernanceRelation`] enum is the
+    /// authoritative relation (and the caller-scoping mechanism).
+    pub fn add_component_governance_edge(
+        &self,
+        edge: &MemoryEdge,
+        relation: ComponentGovernanceRelation,
+    ) -> Result<(), MemoryError> {
+        db::add_component_governance_edge(&self.conn, edge, relation)
     }
 
     /// Remove a specific edge.

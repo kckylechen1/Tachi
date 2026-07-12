@@ -183,6 +183,97 @@ fn add_edge_accepts_ontology_v1_and_about() {
     assert_eq!(out.len(), 4);
 }
 
+/// Sol post-adjudication kill-test ②: the generic `add_edge` choke point —
+/// the same one the NAPI `add_edge` surface and continuity projection funnel
+/// through — must REJECT every #772 grandfathered relation and leave zero rows.
+/// This is what shuts the "launder a string relation into the graph" path.
+#[test]
+fn add_edge_rejects_component_governance_grandfathered_on_generic_path() {
+    let mut conn = make_conn();
+    let e1 = make_entry("gf-src", "source");
+    let e2 = make_entry("gf-tgt", "target");
+    upsert(&mut conn, &e1, false).unwrap();
+    upsert(&mut conn, &e2, false).unwrap();
+
+    for relation in ["owns", "consumes", "backflow_candidate", "blocked_by"] {
+        let edge = MemoryEdge {
+            source_id: "gf-src".into(),
+            target_id: "gf-tgt".into(),
+            relation: relation.into(),
+            weight: 0.5,
+            metadata: serde_json::json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        };
+        let err = add_edge(&conn, &edge).unwrap_err();
+        assert!(
+            err.to_string().contains(relation),
+            "generic add_edge must reject grandfathered relation '{relation}', got: {err}"
+        );
+    }
+
+    // Never reached the INSERT for any of the four.
+    let out = get_edges(&conn, "gf-src", "outgoing", None).unwrap();
+    assert!(
+        out.is_empty(),
+        "grandfathered relations must not persist via the generic path, got {out:?}"
+    );
+}
+
+/// Sol post-adjudication kill-test ③: the typed, caller-scoped door
+/// `add_component_governance_edge` accepts exactly the four grandfathered
+/// relations (via the closed enum) and persists them — the one sanctioned
+/// seeding path.
+#[test]
+fn add_component_governance_edge_accepts_exactly_the_four_typed_relations() {
+    let mut conn = make_conn();
+    // Distinct target per relation so the (source, target, relation) upsert key
+    // keeps all four as separate rows.
+    let src = make_entry("cg-src", "component");
+    upsert(&mut conn, &src, false).unwrap();
+    let variants = [
+        ComponentGovernanceRelation::Owns,
+        ComponentGovernanceRelation::Consumes,
+        ComponentGovernanceRelation::BackflowCandidate,
+        ComponentGovernanceRelation::BlockedBy,
+    ];
+    for (i, relation) in variants.iter().enumerate() {
+        let tgt_id = format!("cg-tgt-{i}");
+        let tgt = make_entry(&tgt_id, "component");
+        upsert(&mut conn, &tgt, false).unwrap();
+        let edge = MemoryEdge {
+            source_id: "cg-src".into(),
+            target_id: tgt_id.clone(),
+            // Deliberately wrong string to prove the enum (not this field) is
+            // authoritative for the stored relation.
+            relation: "IGNORED".into(),
+            weight: 1.0,
+            metadata: serde_json::json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        };
+        add_component_governance_edge(&conn, &edge, *relation)
+            .unwrap_or_else(|e| panic!("typed door must accept {}: {e}", relation.as_str()));
+    }
+
+    let out = get_edges(&conn, "cg-src", "outgoing", None).unwrap();
+    assert_eq!(out.len(), 4, "all four typed governance edges must persist");
+    let mut stored: Vec<String> = out.iter().map(|e| e.relation.clone()).collect();
+    stored.sort();
+    assert_eq!(
+        stored,
+        vec![
+            "backflow_candidate".to_string(),
+            "blocked_by".to_string(),
+            "consumes".to_string(),
+            "owns".to_string(),
+        ],
+        "typed door must store the enum's as_str(), not edge.relation"
+    );
+}
+
 /// Insert a legacy `related_to` edge with an open `valid_to` (simulating a
 /// pre-#773 row) via raw SQL, bypassing `add_edge`'s new-write validation —
 /// exactly the grandfathered-read scenario this maintenance fn targets.

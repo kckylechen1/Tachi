@@ -77,6 +77,7 @@ pub use namespace::{
 };
 pub use noise::{is_noise_text, should_skip_query};
 pub use recall_config::RecallConfig;
+pub use relation_ontology::ComponentGovernanceRelation;
 pub use scorer::{
     generic_precision_multiplier, surprise_score, DecayPolicy, DecayPolicyContext,
     DefaultDecayPolicy, HybridWeights, PrecisionMatcher, DEFAULT_DECAY_POLICY,

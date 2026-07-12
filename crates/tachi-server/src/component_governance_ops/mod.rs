@@ -10,7 +10,7 @@
 //! `blocked_by`, `backflow_candidate`) are seeded as `MemoryEdge` rows.
 
 use crate::MemoryServer;
-use memcore::{MemoryEdge, MemoryEntry};
+use memcore::{ComponentGovernanceRelation, MemoryEdge, MemoryEntry};
 use serde_json::{json, Value};
 
 pub(crate) const COMPONENT_PATH_PREFIX: &str = "/components/v0/";
@@ -200,19 +200,26 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
                 .filter_map(Value::as_str)
             {
                 if let Some(target_id) = known_ids.iter().find(|c| consumer.contains(c.as_str())) {
-                    let relation = if is_kernel { "owns" } else { "consumes" };
+                    let relation = if is_kernel {
+                        ComponentGovernanceRelation::Owns
+                    } else {
+                        ComponentGovernanceRelation::Consumes
+                    };
                     store
-                        .add_edge(&MemoryEdge {
-                            source_id: entry_id.clone(),
-                            target_id: deterministic_component_id(target_id),
-                            relation: relation.to_string(),
-                            weight: 1.0,
-                            metadata: Value::Null,
-                            created_at: chrono::Utc::now().to_rfc3339(),
-                            valid_from: chrono::Utc::now().to_rfc3339(),
-                            valid_to: None,
-                        })
-                        .map_err(|e| format!("seed {relation} edge: {e}"))?;
+                        .add_component_governance_edge(
+                            &MemoryEdge {
+                                source_id: entry_id.clone(),
+                                target_id: deterministic_component_id(target_id),
+                                relation: relation.as_str().to_string(),
+                                weight: 1.0,
+                                metadata: Value::Null,
+                                created_at: chrono::Utc::now().to_rfc3339(),
+                                valid_from: chrono::Utc::now().to_rfc3339(),
+                                valid_to: None,
+                            },
+                            relation,
+                        )
+                        .map_err(|e| format!("seed {} edge: {e}", relation.as_str()))?;
                 }
             }
             for drift in record
@@ -226,24 +233,27 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 let relation = match classification {
-                    "backflow_candidate" => Some("backflow_candidate"),
-                    "blocked_fork" => Some("blocked_by"),
+                    "backflow_candidate" => Some(ComponentGovernanceRelation::BackflowCandidate),
+                    "blocked_fork" => Some(ComponentGovernanceRelation::BlockedBy),
                     _ => None,
                 };
                 if let Some(rel) = relation {
                     // self-edge documenting the drift classification on this record
                     store
-                        .add_edge(&MemoryEdge {
-                            source_id: entry_id.clone(),
-                            target_id: entry_id.clone(),
-                            relation: rel.to_string(),
-                            weight: 0.5,
-                            metadata: json!({"drift": drift.clone()}),
-                            created_at: chrono::Utc::now().to_rfc3339(),
-                            valid_from: chrono::Utc::now().to_rfc3339(),
-                            valid_to: None,
-                        })
-                        .map_err(|e| format!("seed {rel} drift edge: {e}"))?;
+                        .add_component_governance_edge(
+                            &MemoryEdge {
+                                source_id: entry_id.clone(),
+                                target_id: entry_id.clone(),
+                                relation: rel.as_str().to_string(),
+                                weight: 0.5,
+                                metadata: json!({"drift": drift.clone()}),
+                                created_at: chrono::Utc::now().to_rfc3339(),
+                                valid_from: chrono::Utc::now().to_rfc3339(),
+                                valid_to: None,
+                            },
+                            rel,
+                        )
+                        .map_err(|e| format!("seed {} drift edge: {e}", rel.as_str()))?;
                 }
             }
         }

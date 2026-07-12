@@ -1,23 +1,33 @@
 //! Relation ontology v1 (tachi#773 S1 — "定型+止血").
 //!
 //! Frozen design (issue #773 v4, "设计 v4(冻结稿)"): the legal edge-relation
-//! vocabulary for **new writes** is the existing scorer weight table
-//! (`scorer::graph_relation_activation_weight`) plus `about`
+//! vocabulary for **new writes** on the generic path is the existing scorer
+//! weight table (`scorer::graph_relation_activation_weight`) plus `about`
 //! (memory → anchor). `related_to` remains a legal *value* — historical rows
-//! stay readable and keep scoring via the scorer's `_ => 0.50` fallback arm —
-//! but it is no longer accepted on new writes: tachi#773 item 2 retires the
-//! `auto_link` emission path that used to be its only producer, so by the
-//! end of this branch nothing in-tree writes it anymore.
+//! stay readable and keep scoring via the scorer's explicit
+//! `"similar_to" | "related_to" | "merge_hint" => 0.55` arm — but it is no
+//! longer accepted on new writes: tachi#773 item 2 retires the `auto_link`
+//! emission path that used to be its only producer, so by the end of this
+//! branch nothing in-tree writes it anymore.
 //!
-//! One extra grandfather: `component_governance_ops` (tachi#772, #796/#815)
-//! seeds `owns` / `consumes` / `backflow_candidate` / `blocked_by` edges on
-//! every server boot (`seed_component_records`, idempotent). #772 is
-//! explicitly gated out of the #773 S1 scope ("component registry 行将来走
-//! 同一 anchor 惯例, S1 落地前不动" — v3 design comment) and is not migrated
-//! by this branch. Rejecting those relations here would turn a live,
-//! intentional write path into a boot-time failure, which is not a S1 goal.
-//! They are listed separately below so the #772 migration can delete this
-//! block without touching the v1 ontology proper.
+//! One extra grandfather, **caller-scoped** (Sol post-adjudication rework):
+//! `component_governance_ops` (tachi#772, #796/#815) seeds `owns` /
+//! `consumes` / `backflow_candidate` / `blocked_by` edges on every server
+//! boot (`seed_component_records`, idempotent). #772 is explicitly gated out
+//! of the #773 S1 scope ("component registry 行将来走同一 anchor 惯例,
+//! S1 落地前不动" — v3 design comment) and is not migrated by this branch.
+//!
+//! Critically, the grandfathering is **not** an unconditional relation-name
+//! allowance: the generic write path
+//! ([`is_legal_new_relation`] / [`validate_relation_for_write`], reached by
+//! every dynamic string caller — continuity projection, the NAPI `add_edge`
+//! surface, etc.) **rejects** all four. Only `component_governance_ops`, via
+//! the typed [`crate::db::add_component_governance_edge`] door that takes the
+//! closed [`ComponentGovernanceRelation`] enum (never a string), may seed
+//! them. This shuts the laundering paths (projection forwarding a dynamic
+//! `relation="owns"`, NAPI whitewashing `"blocked_by"`) that a name-only
+//! allow-list left open. Growing the set past four requires an explicit
+//! #772/S2 ontology adjudication, tripwired below.
 //!
 //! Enforcement lives at memcore's single edge-write choke point,
 //! [`crate::db::add_edge`] — every `INSERT INTO memory_edges` in the
@@ -52,21 +62,60 @@ pub const ONTOLOGY_V1: &[&str] = &[
     "supports",
 ];
 
-/// `related_to` is a legal stored *value* (grandfathered reads, scorer
-/// fallback still scores it at 0.55) but is deprecated for new writes: its
-/// only producer (`auto_link`) stops emitting it as of tachi#773 item 2.
+/// `related_to` is a legal stored *value* (grandfathered reads; the scorer
+/// scores it at 0.55 via its explicit
+/// `"similar_to" | "related_to" | "merge_hint"` arm, not the `_ => 0.50`
+/// fallback) but is deprecated for new writes: its only producer
+/// (`auto_link`) stops emitting it as of tachi#773 item 2.
 pub const DEPRECATED_RELATION: &str = "related_to";
 
 /// #772 component-governance relations (`seed_component_records`), gated out
 /// of the #773 S1 ontology migration. See module docs.
+///
+/// This list is **documentation + tripwire anchor only** — it is deliberately
+/// NOT consulted by [`is_legal_new_relation`], so the generic write path
+/// rejects these names. The only writer is the typed
+/// [`ComponentGovernanceRelation`] path. Keep the two in lockstep: every enum
+/// variant's [`ComponentGovernanceRelation::as_str`] must appear here, and the
+/// set is size-locked at four by the module's tripwire test.
 pub const COMPONENT_GOVERNANCE_GRANDFATHERED: &[&str] =
     &["owns", "consumes", "backflow_candidate", "blocked_by"];
 
-/// Whether `relation` may be used on a *new* edge write.
+/// Closed set of #772 component-governance relations, the *only* type that can
+/// reach [`crate::db::add_component_governance_edge`]. Being an enum (not a
+/// string) is the caller-scoping mechanism: a dynamic string caller physically
+/// cannot construct one, so the four grandfathered relations enter the graph
+/// through exactly one typed door. Adding a variant is the deliberate #772/S2
+/// decision point (and trips the size-lock test until the tripwire is updated).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComponentGovernanceRelation {
+    Owns,
+    Consumes,
+    BackflowCandidate,
+    BlockedBy,
+}
+
+impl ComponentGovernanceRelation {
+    /// The stored `relation` string for this grandfathered relation. This is
+    /// the authoritative value written to `memory_edges.relation`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Owns => "owns",
+            Self::Consumes => "consumes",
+            Self::BackflowCandidate => "backflow_candidate",
+            Self::BlockedBy => "blocked_by",
+        }
+    }
+}
+
+/// Whether `relation` may be used on a *new* edge write via the **generic**
+/// path ([`crate::db::add_edge`]).
 ///
-/// Rejects: anything not in [`ONTOLOGY_V1`], the deprecated
-/// [`DEPRECATED_RELATION`], empty/whitespace-only strings. Accepts the #772
-/// grandfathered set unconditionally (see module docs).
+/// Accepts exactly [`ONTOLOGY_V1`]. Rejects: anything else, the deprecated
+/// [`DEPRECATED_RELATION`], empty/whitespace-only strings, **and the #772
+/// [`COMPONENT_GOVERNANCE_GRANDFATHERED`] set** — those are caller-scoped to
+/// the typed [`crate::db::add_component_governance_edge`] door and must not be
+/// admissible from dynamic string callers (see module docs).
 pub fn is_legal_new_relation(relation: &str) -> bool {
     let trimmed = relation.trim();
     if trimmed.is_empty() {
@@ -75,7 +124,7 @@ pub fn is_legal_new_relation(relation: &str) -> bool {
     if trimmed == DEPRECATED_RELATION {
         return false;
     }
-    ONTOLOGY_V1.contains(&trimmed) || COMPONENT_GOVERNANCE_GRANDFATHERED.contains(&trimmed)
+    ONTOLOGY_V1.contains(&trimmed)
 }
 
 /// Validate a relation for a new edge write, returning a
@@ -151,11 +200,52 @@ mod tests {
     }
 
     #[test]
-    fn component_governance_grandfathered_relations_remain_legal() {
+    fn component_governance_grandfathered_rejected_on_generic_path() {
+        // Sol post-adjudication rework: the grandfathering is caller-scoped.
+        // The generic path must REJECT all four — only the typed
+        // add_component_governance_edge door may write them.
         for relation in COMPONENT_GOVERNANCE_GRANDFATHERED {
             assert!(
-                is_legal_new_relation(relation),
-                "#772 grandfathered relation '{relation}' must stay legal until its own migration"
+                !is_legal_new_relation(relation),
+                "#772 grandfathered relation '{relation}' must be rejected on the generic write path"
+            );
+            assert!(
+                validate_relation_for_write(relation).is_err(),
+                "generic validate must reject grandfathered relation '{relation}'"
+            );
+        }
+    }
+
+    /// Size- and content-lock tripwire: the grandfathered exemption is a
+    /// temporary #772 concession, not a growable side-vocabulary. This asserts
+    /// the *exact* four-element set, so adding a fifth (or renaming one) turns
+    /// this test red — forcing an explicit #772/S2 adjudication rather than a
+    /// silent creep into a permanent second ontology. (The old test merely
+    /// iterated the constant, so a longer list would still pass.)
+    #[test]
+    fn component_governance_grandfathered_set_is_size_and_content_locked() {
+        assert_eq!(
+            COMPONENT_GOVERNANCE_GRANDFATHERED.len(),
+            4,
+            "grandfathered set size changed — a new exemption needs #772/S2 sign-off"
+        );
+        assert_eq!(
+            COMPONENT_GOVERNANCE_GRANDFATHERED,
+            &["owns", "consumes", "backflow_candidate", "blocked_by"][..],
+            "grandfathered set contents changed — a new exemption needs #772/S2 sign-off"
+        );
+    }
+
+    /// Lockstep: every typed enum variant must map to a name in the
+    /// documented grandfathered set (and only those names).
+    #[test]
+    fn component_governance_enum_matches_grandfathered_set() {
+        use ComponentGovernanceRelation::*;
+        for variant in [Owns, Consumes, BackflowCandidate, BlockedBy] {
+            assert!(
+                COMPONENT_GOVERNANCE_GRANDFATHERED.contains(&variant.as_str()),
+                "enum variant {variant:?} ({}) missing from grandfathered set",
+                variant.as_str()
             );
         }
     }
