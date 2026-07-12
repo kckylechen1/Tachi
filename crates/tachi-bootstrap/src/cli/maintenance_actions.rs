@@ -331,6 +331,11 @@ pub enum DistillAction {
         /// Project DB path (defaults to `--project-db` when set).
         #[arg(long, value_name = "PATH")]
         db: Option<PathBuf>,
+        /// #1043 D3 escape hatch: skip the pre-selection consolidate pass
+        /// (byte-identical duplicate collapse) and select candidates
+        /// straight from the raw, undeduplicated pool — pre-#1043 behavior.
+        #[arg(long)]
+        no_consolidate: bool,
     },
 }
 

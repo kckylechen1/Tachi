@@ -100,6 +100,7 @@ fn default_capture_importance() -> f64 {
 
 // Re-export items so sibling modules (main.rs etc.) can use them
 pub(crate) use daily_distill::run_daily_batch_distill;
+pub(crate) use daily_distill::run_daily_batch_distill_with_options;
 pub(crate) use daily_distill::scrub_agent_noise;
 pub(crate) use handlers::{
     handle_capture_session, handle_compact_context, handle_compact_rollup,
