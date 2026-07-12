@@ -198,11 +198,13 @@ fn resolve_outcome_lane(params: &TachiCompleteParams) -> (Option<String>, String
 /// first-writer-wins invariant across two stores. `project` here is threaded
 /// from the ORIGINAL dispatch's `TachiDispatchParams::project` at each call
 /// site that still has that context (backend prep, harness preflight,
-/// post-init early-exit); it is `None` for the daemon-restart orphan-recovery
-/// path (`recover_orphaned_dispatch_runs`), which has no live dispatch
-/// context to read a project from — that path always falls back to the
-/// default `resolve_write_scope("")` branch, a documented, narrower gap this
-/// fix does not close.
+/// post-init early-exit). The daemon-restart orphan-recovery path
+/// (`recover_orphaned_dispatch_runs`) has no live dispatch context either,
+/// but (#774 round 3) reads `project` back off the same on-disk `status.json`
+/// receipt the dispatch seeded it into at dispatch time, so it now threads a
+/// real value through too when the receipt carries one; only run
+/// directories written before that receipt field existed fall back to the
+/// default `resolve_write_scope("")` branch.
 pub(crate) fn record_terminal_failure_outcome(
     server: &MemoryServer,
     dispatch_id: &str,

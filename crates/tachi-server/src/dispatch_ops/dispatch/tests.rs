@@ -627,6 +627,14 @@ fn test_server() -> (MemoryServer, tempfile::TempDir) {
     (server, dir)
 }
 
+/// #774 round 3 discriminator (leg 3, regression): a pre-round-3 `status.json`
+/// blob (no `"project"` key at all — every run directory written before this
+/// fix) must recover exactly as before: the outcome row lands in the default
+/// store via `resolve_write_scope("")`, not silently break or panic on the
+/// missing field. `status.get("project")` on a blob without that key is
+/// `None`, so `record_terminal_failure_outcome` takes its `project: None`
+/// branch same as pre-fix — this test's assertions (global-store row present)
+/// are unchanged from round 2 and still pass, proving backward compatibility.
 #[test]
 fn recover_orphaned_dispatch_runs_marks_working_runs_failed() {
     let _guard = crate::utils::global_test_lock()
@@ -689,6 +697,159 @@ fn recover_orphaned_dispatch_runs_marks_working_runs_failed() {
         "no self-report on a recovered orphan"
     );
     assert_eq!(row.error_class.as_deref(), Some("recovered_orphan"));
+
+    if let Some(value) = original_home {
+        std::env::set_var("HOME", value);
+    } else {
+        std::env::remove_var("HOME");
+    }
+    if let Some(value) = original_tachi_home {
+        std::env::set_var("TACHI_HOME", value);
+    } else {
+        std::env::remove_var("TACHI_HOME");
+    }
+}
+
+/// #774 round 3 discriminator (leg 1): a named-project dispatch's
+/// `status.json` receipt must carry `params.project` — this is the ONLY
+/// place daemon-restart orphan recovery (`recover_orphaned_dispatch_runs`)
+/// can read it back from after a crash, since the original
+/// `TachiDispatchParams` is gone by then. Checks both the receipt-first seed
+/// and the post-artifacts enrich write land the field (reading status.json
+/// after `handle_tachi_dispatch` returns observes whichever write happened
+/// last, since both run synchronously before the background subprocess
+/// spawns).
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn named_project_dispatch_receipt_carries_project_field() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let run_root = dispatch_runs_root();
+    let server = crate::tests::make_server();
+
+    // The dispatch's own background completion also resolves `project` —
+    // give it a real named-project store so the fast subprocess below can
+    // complete cleanly instead of erroring on a missing store.
+    let named_db = temp_home
+        .path()
+        .join(".tachi")
+        .join("projects")
+        .join("hyperion")
+        .join("memory.db");
+    std::fs::create_dir_all(named_db.parent().unwrap()).expect("named project dir");
+    std::fs::write(&named_db, b"").expect("named project db placeholder");
+
+    let mut params = test_dispatch_params(Some("custom"), "stamp project into receipt");
+    params.project = Some("hyperion".to_string());
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+
+    handle_tachi_dispatch(&server, params)
+        .await
+        .expect("dispatch should start");
+
+    let run_dir = single_run_dir(&run_root);
+    let status: Value =
+        serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
+            .expect("status JSON");
+    assert_eq!(
+        status["project"],
+        json!("hyperion"),
+        "receipt must carry the dispatch's named project so crash recovery can read it back: {status}"
+    );
+}
+
+/// #774 round 3 discriminator (leg 2): recovery must resolve the recovered
+/// orphan's terminal outcome row to the SAME named-project store a live
+/// `tachi_complete` for that dispatch would have used — reusing round 2's
+/// `with_named_project_store` addressing (same directory shape
+/// `with_named_project_env` sets up in `complete_ops::dispatch_outcome`'s
+/// tests: `<TACHI_HOME>/projects/<name>/memory.db`) but exercised through the
+/// crash-recovery path instead of a live dispatch. Before this fix,
+/// `recover_orphaned_dispatch_runs` always passed `project: None`, so this
+/// row would have landed in the default global store instead — reproducing
+/// the exact split round 2 closed for the other three terminal-without-
+/// complete call sites.
+#[test]
+fn recover_orphaned_dispatch_runs_honors_project_from_receipt() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let original_home = std::env::var_os("HOME");
+    let original_tachi_home = std::env::var_os("TACHI_HOME");
+    std::env::set_var("HOME", temp_home.path());
+    std::env::remove_var("TACHI_HOME");
+
+    let named_db = crate::path_utils::tachi_home()
+        .join("projects")
+        .join("hyperion")
+        .join("memory.db");
+    std::fs::create_dir_all(named_db.parent().unwrap()).expect("named project dir");
+    std::fs::write(&named_db, b"").expect("named project db placeholder");
+
+    let (server, _db_dir) = test_server();
+
+    let run_dir = dispatch_runs_root().join("20260614T000000Z-codex-feedcafe");
+    std::fs::create_dir_all(&run_dir).expect("run dir");
+    std::fs::write(
+        run_dir.join("status.json"),
+        json!({
+            "dispatch_id": "20260614T000000Z-codex-feedcafe",
+            "state": "TASK_STATE_WORKING",
+            "agent": "codex",
+            "project": "hyperion",
+        })
+        .to_string(),
+    )
+    .expect("status");
+
+    let recovered = recover_orphaned_dispatch_runs(&server);
+    assert_eq!(
+        recovered,
+        vec!["20260614T000000Z-codex-feedcafe".to_string()]
+    );
+
+    // The row must land in the NAMED project store, not the default global
+    // one `test_server()` set up.
+    let named_rows = server
+        .with_named_project_store("hyperion", |store| {
+            memcore::list_outcomes_by_vendor_window(
+                store.connection(),
+                "codex",
+                "1970-01-01T00:00:00Z",
+                None,
+            )
+            .map_err(|e| e.to_string())
+        })
+        .expect("read named project outcomes");
+    let row = named_rows
+        .iter()
+        .find(|r| r.dispatch_id == "20260614T000000Z-codex-feedcafe")
+        .expect("recovered orphan outcome row present in the NAMED project store");
+    assert_eq!(row.execution_outcome, "failed");
+    assert_eq!(row.error_class.as_deref(), Some("recovered_orphan"));
+
+    let global_rows = server
+        .with_global_store_read(|store| {
+            memcore::list_outcomes_by_vendor_window(
+                store.connection(),
+                "codex",
+                "1970-01-01T00:00:00Z",
+                None,
+            )
+            .map_err(|e| e.to_string())
+        })
+        .expect("read global outcomes");
+    assert!(
+        !global_rows
+            .iter()
+            .any(|r| r.dispatch_id == "20260614T000000Z-codex-feedcafe"),
+        "a named-project recovery must not ALSO land a row in the default \
+         global store — that would split first-writer-wins across two stores"
+    );
 
     if let Some(value) = original_home {
         std::env::set_var("HOME", value);
