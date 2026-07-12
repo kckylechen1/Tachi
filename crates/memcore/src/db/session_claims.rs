@@ -17,18 +17,25 @@
 //!                               idempotent no-op, never an error.
 //! ```
 //!
-//! There is exactly one function that flips a claim to `released`
-//! ([`release_claim`]) — manual `release`, `complete`, and `cancel` all route
-//! through it, same discipline as `reclaim_exec_env`.
+//! [`release_claim`] is the single per-row release path — manual `release`,
+//! `complete`, and `cancel` all route through it, same discipline as
+//! `reclaim_exec_env`. [`gc_session_claims`] (#1001 follow-up) is the one
+//! deliberate second writer: a batch sweep, not a per-row selector call, that
+//! (a) reaches the identical terminal `released` state (with
+//! `release_reason = "gc_stale"`) for `active` rows whose heartbeat has gone
+//! dark, and (b) deletes `released` rows past a retention window — see that
+//! function's doc comment for why a batch statement is used instead of N
+//! calls through `release_claim`.
 //!
-//! Unlike `exec_envs`, there is no background reaper in this slice: staleness
-//! is lazy — [`list_active_claims`] and [`is_claim_stale`] let a caller (the
-//! briefing splice) treat a claim whose `heartbeat_at` is older than a TTL as
-//! effectively expired without a second write. A stale claim's row is left in
-//! place (for audit) until something actually releases it or a fresh claim
-//! recycles the same `(session_client, issue_ref, flow_id)` identity triple
-//! (the `ON CONFLICT` target `upsert_or_heartbeat_claim` upserts on — see
-//! that function's doc comment).
+//! [`list_active_claims`] and [`is_claim_stale`] additionally let a *reader*
+//! (the briefing splice, collision-warning checks) treat a claim whose
+//! `heartbeat_at` is older than a TTL as effectively expired without any
+//! write at all — `gc_session_claims`'s staleness sweep does not change what
+//! those reads already do, it only bounds how long a dead row sits
+//! unreaped in storage. A fresh claim recycling the same `(session_client,
+//! issue_ref, flow_id)` identity triple can also supersede a stale row before
+//! GC ever runs (the `ON CONFLICT` target `upsert_or_heartbeat_claim` upserts
+//! on — see that function's doc comment).
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -401,6 +408,79 @@ pub fn release_claim(
     };
     tx.commit()?;
     Ok(outcome)
+}
+
+/// Outcome of a [`gc_session_claims`] sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SessionClaimsGc {
+    /// `released` rows deleted outright (aged past the audit window).
+    pub released_pruned: usize,
+    /// `active` rows server-released as `gc_stale` (dead heartbeat).
+    pub active_staled: usize,
+}
+
+/// GC sweep for `session_claims` (#1001 follow-up; R2 review of #1007
+/// CONCERN, same unbounded-growth shape as the #1029 lesson). Unlike
+/// `exec_envs`, this table shipped with no reaper at all: a `released` row
+/// is retained forever by design (for audit — see the module doc comment),
+/// and staleness detection here is lazy-*read*-only (`is_claim_stale`,
+/// `list_active_claims` filter a dead-heartbeat row out of what a *reader*
+/// sees, but never write the row) — so a session that crashes or gets
+/// killed mid-dispatch without ever calling `release_claim` leaves its
+/// `active` row live in storage forever, and every released row (normal or
+/// stale) accumulates without end.
+///
+/// Two independent sweeps, run in this order (order does not matter for
+/// correctness — they touch disjoint row sets — but staleness-release runs
+/// first so a row it flips this call is deliberately NOT also eligible for
+/// the prune below in the same pass, since its fresh `released_at` cannot
+/// be older than `released_max_age_days`):
+///
+/// 1. **Staleness release**: any `active` row whose `heartbeat_at` is older
+///    than `active_staleness_days` is flipped to `released` with
+///    `release_reason = 'gc_stale'` — the same terminal state a normal
+///    release reaches, just server-initiated instead of caller-initiated.
+///    This is a batch `UPDATE` over every stale row in one statement, not a
+///    per-row call through [`release_claim`] (that function is selector-
+///    scoped to one row and only fires from an explicit session action).
+/// 2. **Aged-released prune**: any `released` row (from a normal release or
+///    from step 1 above, in a prior or this call) whose `released_at` is
+///    older than `released_max_age_days` is `DELETE`d outright — the audit
+///    retention window is bounded, not permanent.
+///
+/// Timestamp comparison is lexicographic string comparison against a cutoff
+/// formatted with the same fixed-width, zero-padded, millisecond-precision
+/// RFC3339 shape every write in this module already stamps via
+/// `normalize_utc_iso_or_now` (`common.rs`) — the same idiom `gc_foundry_jobs`
+/// uses, safe because that format sorts identically to its chronological
+/// order.
+pub fn gc_session_claims(
+    conn: &Connection,
+    now: chrono::DateTime<chrono::Utc>,
+    active_staleness_days: i64,
+    released_max_age_days: i64,
+) -> Result<SessionClaimsGc, MemoryError> {
+    let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let staleness_cutoff = (now - chrono::Duration::days(active_staleness_days))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let active_staled = conn.execute(
+        "UPDATE session_claims SET state = 'released', released_at = ?1, \
+         release_reason = 'gc_stale' WHERE state = 'active' AND heartbeat_at < ?2",
+        params![now_iso, staleness_cutoff],
+    )?;
+
+    let released_cutoff = (now - chrono::Duration::days(released_max_age_days))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let released_pruned = conn.execute(
+        "DELETE FROM session_claims WHERE state = 'released' AND released_at IS NOT NULL \
+         AND released_at < ?1",
+        params![released_cutoff],
+    )?;
+
+    Ok(SessionClaimsGc {
+        released_pruned,
+        active_staled,
+    })
 }
 
 #[cfg(test)]
@@ -842,5 +922,92 @@ mod tests {
             "both concurrent callers must resolve to the identical winning claim_id"
         );
         assert_eq!(active[0].claim_id, claim_id_a);
+    }
+
+    // --- gc_session_claims (#1001 follow-up / R2 review of #1007 CONCERN) -
+
+    #[test]
+    fn gc_prunes_released_rows_older_than_max_age() {
+        let mut conn = open_conn();
+        insert_claim(&conn, &new_claim("aged-released", "org/repo#700")).unwrap();
+        release_claim(
+            &mut conn,
+            &ClaimSelector::ClaimId("aged-released".to_string()),
+            Some("manual release"),
+        )
+        .unwrap();
+        // Backdate released_at to 35 days before "now" — past the 30-day
+        // prune window.
+        conn.execute(
+            "UPDATE session_claims SET released_at = '2026-06-06T00:00:00.000Z' \
+             WHERE claim_id = 'aged-released'",
+            [],
+        )
+        .unwrap();
+
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-11T00:00:00Z")
+            .unwrap()
+            .to_utc();
+        let outcome = gc_session_claims(&conn, now, 7, 30).unwrap();
+        assert_eq!(outcome.released_pruned, 1);
+        assert_eq!(outcome.active_staled, 0);
+        assert!(
+            get_claim(&conn, "aged-released").unwrap().is_none(),
+            "released row older than the 30-day window must be deleted, not just marked"
+        );
+    }
+
+    #[test]
+    fn gc_staleness_releases_dead_active_rows_past_heartbeat_ttl() {
+        let conn = open_conn();
+        insert_claim(&conn, &new_claim("dead-heartbeat", "org/repo#701")).unwrap();
+        // Backdate heartbeat_at to 8 days before "now" — past the 7-day
+        // staleness window, simulating a crashed session that stopped
+        // heartbeating and never called release_claim.
+        conn.execute(
+            "UPDATE session_claims SET heartbeat_at = '2026-07-03T00:00:00.000Z' \
+             WHERE claim_id = 'dead-heartbeat'",
+            [],
+        )
+        .unwrap();
+
+        let now = chrono::DateTime::parse_from_rfc3339("2026-07-11T00:00:00Z")
+            .unwrap()
+            .to_utc();
+        let outcome = gc_session_claims(&conn, now, 7, 30).unwrap();
+        assert_eq!(outcome.active_staled, 1);
+        assert_eq!(outcome.released_pruned, 0);
+
+        let got = get_claim(&conn, "dead-heartbeat").unwrap().unwrap();
+        assert_eq!(
+            got.state,
+            ClaimState::Released,
+            "dead-heartbeat active row must be server-released, not left active forever"
+        );
+        assert_eq!(got.release_reason.as_deref(), Some("gc_stale"));
+        assert!(got.released_at.is_some());
+    }
+
+    #[test]
+    fn gc_leaves_fresh_active_row_untouched() {
+        let conn = open_conn();
+        insert_claim(&conn, &new_claim("fresh-claim", "org/repo#702")).unwrap();
+        // heartbeat_at defaults to created_at == real "now" via new_claim's
+        // empty created_at, so use the actual current time as the GC clock
+        // too — this row is well within both windows either way.
+        let now = chrono::Utc::now();
+        let outcome = gc_session_claims(&conn, now, 7, 30).unwrap();
+        assert_eq!(
+            outcome.active_staled, 0,
+            "a fresh active row must not be staleness-released"
+        );
+        assert_eq!(
+            outcome.released_pruned, 0,
+            "no released rows exist yet to prune"
+        );
+
+        let got = get_claim(&conn, "fresh-claim").unwrap().unwrap();
+        assert_eq!(got.state, ClaimState::Active, "fresh active row untouched");
+        assert!(got.released_at.is_none());
     }
 }
