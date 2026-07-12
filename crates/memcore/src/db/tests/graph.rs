@@ -519,6 +519,234 @@ fn edge_valid_to_exactly_now_is_closed_not_active() {
     );
 }
 
+/// #774 kill-test ①: two independent observations of the SAME
+/// (source, target, relation) triple must accumulate TWO ledger rows while
+/// `memory_edges` stays a single last-write-wins projection row holding the
+/// most recent value. This is the whole point of the ledger — the graph
+/// collapses re-observations, the ledger does not.
+#[test]
+fn edge_observations_accumulate_while_graph_row_collapses() {
+    let mut conn = make_conn();
+    let e1 = make_entry("obs-src", "source");
+    let e2 = make_entry("obs-tgt", "target");
+    upsert(&mut conn, &e1, false).unwrap();
+    upsert(&mut conn, &e2, false).unwrap();
+
+    let base = MemoryEdge {
+        source_id: "obs-src".into(),
+        target_id: "obs-tgt".into(),
+        relation: "causes".into(),
+        weight: 0.3,
+        metadata: serde_json::json!({}),
+        created_at: String::new(),
+        valid_from: String::new(),
+        valid_to: None,
+    };
+
+    // First observation.
+    add_edge_with_provenance(
+        &conn,
+        &base,
+        &EdgeProvenance {
+            capture_event_kind: "recall".into(),
+            capture_event_id: "evt-1".into(),
+            actor: "projector".into(),
+            reason_code: "co_occurrence".into(),
+            evidence_hash: None,
+        },
+    )
+    .unwrap();
+
+    // Second, independent observation of the SAME triple, new capture event and
+    // a new (last-write-wins) weight.
+    let second = MemoryEdge {
+        weight: 0.9,
+        ..base.clone()
+    };
+    add_edge_with_provenance(
+        &conn,
+        &second,
+        &EdgeProvenance {
+            capture_event_kind: "recall".into(),
+            capture_event_id: "evt-2".into(),
+            actor: "projector".into(),
+            reason_code: "co_occurrence".into(),
+            evidence_hash: None,
+        },
+    )
+    .unwrap();
+
+    // Ledger: two rows, distinct observation ids, distinct capture events.
+    let obs = list_observations_for_edge(&conn, "obs-src", "obs-tgt", "causes").unwrap();
+    assert_eq!(obs.len(), 2, "each write must append one observation row");
+    assert_ne!(
+        obs[0].observation_id, obs[1].observation_id,
+        "observation ids must be unique per write"
+    );
+    let mut event_ids: Vec<String> = obs.iter().map(|o| o.capture_event_id.clone()).collect();
+    event_ids.sort();
+    assert_eq!(event_ids, vec!["evt-1".to_string(), "evt-2".to_string()]);
+    assert_eq!(
+        count_active_observations(&conn, "obs-src", "obs-tgt", "causes").unwrap(),
+        2
+    );
+
+    // Graph: exactly one row, holding the LAST-written value.
+    let edges = get_edges(&conn, "obs-src", "outgoing", None).unwrap();
+    assert_eq!(edges.len(), 1, "graph must collapse to one projection row");
+    assert_eq!(
+        edges[0].weight, 0.9,
+        "graph row must hold the last-write-wins value"
+    );
+}
+
+/// #774 kill-test ②: a rejected edge write (illegal relation) must leave ZERO
+/// observations — the ledger never records an observation for a write that did
+/// not persist. Validation fails before the savepoint opens, and the atomicity
+/// guarantee covers any post-INSERT failure inside it.
+#[test]
+fn rejected_edge_write_appends_no_observation() {
+    let mut conn = make_conn();
+    let e1 = make_entry("rej-src", "source");
+    let e2 = make_entry("rej-tgt", "target");
+    upsert(&mut conn, &e1, false).unwrap();
+    upsert(&mut conn, &e2, false).unwrap();
+
+    let edge = MemoryEdge {
+        source_id: "rej-src".into(),
+        target_id: "rej-tgt".into(),
+        relation: "shares_entities".into(), // illegal on the generic path
+        weight: 0.5,
+        metadata: serde_json::json!({}),
+        created_at: String::new(),
+        valid_from: String::new(),
+        valid_to: None,
+    };
+    add_edge(&conn, &edge).unwrap_err();
+
+    // No graph row and no ledger row.
+    assert!(get_edges(&conn, "rej-src", "outgoing", None)
+        .unwrap()
+        .is_empty());
+    let obs = list_observations_for_edge(&conn, "rej-src", "rej-tgt", "shares_entities").unwrap();
+    assert!(
+        obs.is_empty(),
+        "a rejected write must not append an observation, got {obs:?}"
+    );
+    // Nothing anywhere in the ledger.
+    let total: u32 = conn
+        .query_row("SELECT COUNT(*) FROM edge_observations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(total, 0, "ledger must be empty after a rejected write");
+}
+
+/// #774 kill-test ③: invalidation is a soft stamp — `count_active` drops by
+/// one, but `list_observations_for_edge` still returns the row (history is
+/// never deleted). A second invalidate of the same id is an idempotent no-op.
+#[test]
+fn invalidate_observation_drops_active_count_but_keeps_history() {
+    let mut conn = make_conn();
+    let e1 = make_entry("inv-src", "source");
+    let e2 = make_entry("inv-tgt", "target");
+    upsert(&mut conn, &e1, false).unwrap();
+    upsert(&mut conn, &e2, false).unwrap();
+
+    let edge = MemoryEdge {
+        source_id: "inv-src".into(),
+        target_id: "inv-tgt".into(),
+        relation: "causes".into(),
+        weight: 0.5,
+        metadata: serde_json::json!({}),
+        created_at: String::new(),
+        valid_from: String::new(),
+        valid_to: None,
+    };
+    add_edge(&conn, &edge).unwrap();
+    add_edge(&conn, &edge).unwrap();
+
+    assert_eq!(
+        count_active_observations(&conn, "inv-src", "inv-tgt", "causes").unwrap(),
+        2
+    );
+    let obs = list_observations_for_edge(&conn, "inv-src", "inv-tgt", "causes").unwrap();
+    assert_eq!(obs.len(), 2);
+    let victim = obs[0].observation_id.clone();
+
+    // First invalidate transitions the row.
+    let changed = invalidate_observation(&conn, &victim, "").unwrap();
+    assert!(changed, "first invalidate must transition an active row");
+
+    // Active count drops by one; history (list) still has both rows.
+    assert_eq!(
+        count_active_observations(&conn, "inv-src", "inv-tgt", "causes").unwrap(),
+        1,
+        "invalidated observation must not count as active"
+    );
+    let after = list_observations_for_edge(&conn, "inv-src", "inv-tgt", "causes").unwrap();
+    assert_eq!(after.len(), 2, "history must be retained, not deleted");
+    let invalidated = after
+        .iter()
+        .find(|o| o.observation_id == victim)
+        .expect("invalidated row must still be listed");
+    assert!(
+        invalidated.invalidated_at.is_some(),
+        "invalidated row must carry an invalidated_at stamp"
+    );
+
+    // Idempotent: re-invalidating the same id changes nothing.
+    let changed_again = invalidate_observation(&conn, &victim, "").unwrap();
+    assert!(!changed_again, "re-invalidate must be an idempotent no-op");
+    assert_eq!(
+        count_active_observations(&conn, "inv-src", "inv-tgt", "causes").unwrap(),
+        1
+    );
+}
+
+/// #774 kill-test ④: the typed component-governance write door lands an
+/// observation too — the ledger covers BOTH edge-write paths, not just the
+/// generic one. The observation's relation is the enum's `as_str()` (the same
+/// authoritative value the graph row stores), not `edge.relation`.
+#[test]
+fn component_governance_edge_write_appends_observation() {
+    let mut conn = make_conn();
+    let src = make_entry("cg-obs-src", "component");
+    let tgt = make_entry("cg-obs-tgt", "component");
+    upsert(&mut conn, &src, false).unwrap();
+    upsert(&mut conn, &tgt, false).unwrap();
+
+    let edge = MemoryEdge {
+        source_id: "cg-obs-src".into(),
+        target_id: "cg-obs-tgt".into(),
+        relation: "IGNORED".into(), // enum is authoritative, not this string
+        weight: 1.0,
+        metadata: serde_json::json!({}),
+        created_at: String::new(),
+        valid_from: String::new(),
+        valid_to: None,
+    };
+    add_component_governance_edge(&conn, &edge, ComponentGovernanceRelation::Owns).unwrap();
+
+    // Observation is recorded under the enum's relation ("owns"), and none
+    // under the ignored "IGNORED" string.
+    let owns = list_observations_for_edge(&conn, "cg-obs-src", "cg-obs-tgt", "owns").unwrap();
+    assert_eq!(
+        owns.len(),
+        1,
+        "typed governance write must append one observation under 'owns'"
+    );
+    assert_eq!(owns[0].relation, "owns");
+    let ignored =
+        list_observations_for_edge(&conn, "cg-obs-src", "cg-obs-tgt", "IGNORED").unwrap();
+    assert!(
+        ignored.is_empty(),
+        "observation must key off the enum relation, not edge.relation"
+    );
+    assert_eq!(
+        count_active_observations(&conn, "cg-obs-src", "cg-obs-tgt", "owns").unwrap(),
+        1
+    );
+}
+
 #[test]
 fn delete_cascades_edges() {
     let mut conn = make_conn();

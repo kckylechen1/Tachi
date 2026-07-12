@@ -60,9 +60,11 @@ pub use gc_candidates::{
     CategoryPathPrefixMemoryRow, PathPrefixMemoryRow,
 };
 pub use graph::{
-    add_component_governance_edge, add_edge, avg_importance, close_related_to_fog,
+    add_component_governance_edge, add_component_governance_edge_with_provenance, add_edge,
+    add_edge_with_provenance, avg_importance, close_related_to_fog, count_active_observations,
     count_same_topic, get_contradiction_count, get_edges, get_superseded_ids, graph_expand,
-    remove_edge,
+    invalidate_observation, list_observations_for_edge, remove_edge, EdgeObservation,
+    EdgeProvenance,
 };
 #[cfg(feature = "admin")]
 pub use hub_db::{
