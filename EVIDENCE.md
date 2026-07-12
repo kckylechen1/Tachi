@@ -1,369 +1,480 @@
-# SQLite/recall/coldpath perf pack — evidence log
+# #964 round-2 rework — verification evidence
 
-Branch: `feat/perf-sqlite-pack`. Each item below is opus-xhigh-adjudicated
-DO-NOW, independently proved, zero correctness risk. Real production data
-used for evidence: a read-only copy of the live `~/.tachi/global/memory.db`
-(474 memories, 15,608 `access_history` rows, 152 `hard_state` rows) copied
-into `.perf-evidence/memory_readonly_copy.db` inside this worktree — never
-the live daemon's file.
+Base commit: `837d1c301dba5f42989dcea20e0337eeaeb9b05f` (origin/feat/964-sticky)
+
+Local verification note: the shared `CARGO_TARGET_DIR` (`$HOME/.cache/sigil-shared-target`)
+produced a phantom compile error (`cannot find function standardize_sticky_path in module
+memcore::path_router`) even though the function genuinely exists at
+`crates/memcore/src/path_router.rs:185` — this is the documented
+shared-target-contamination failure mode (stale/foreign `memcore` object in the shared
+cache from a concurrent worktree). Switched to
+`CARGO_TARGET_DIR=<worktree>/isolated-target` for all verification below, which compiles
+clean. Oz should re-verify on its own dedicated target.
+
+## fmt --check
+
+```
+$ cargo fmt -p tachi-server -- --check
+(no output, exit 0)
+```
+
+## clippy -p tachi-server --all-targets --no-deps -- -D warnings
+
+```
+$ cargo clippy -p tachi-server --all-targets --no-deps -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.46s
+(exit 0, zero warnings)
+```
+
+## cargo check -p tachi-server --all-targets
+
+```
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 56.62s
+(exit 0)
+```
+
+## Item 1 — TACHI_AGENT_SEAT (BUG CP2) — RED then GREEN
+
+RED (identity.rs's delivery-path fallback temporarily reverted to read
+`TACHI_PROFILE` instead of `TACHI_AGENT_SEAT`, new tests kept as-is):
+
+```
+$ cargo test -p tachi-server --lib sticky_ops::tests::cp2_
+running 4 tests
+test sticky_ops::tests::cp2_identity_less_caller_resolves_to_leader ... ok
+test sticky_ops::tests::cp2_caller_with_explicit_agent_id_consumes_only_its_own_addressed_stickies ... ok
+test sticky_ops::tests::cp2_tachi_profile_env_alone_no_longer_resolves_a_seat ... FAILED
+test sticky_ops::tests::cp2_param_less_caller_with_tachi_agent_seat_env_does_not_consume_broadcast ... FAILED
+
+---- sticky_ops::tests::cp2_tachi_profile_env_alone_no_longer_resolves_a_seat stdout ----
+thread '...' panicked at crates/tachi-server/src/sticky_ops/tests.rs:824:5:
+assertion `left == right` failed: TACHI_PROFILE alone (no TACHI_AGENT_SEAT, no param) must resolve to leader, not a tool-profile-named seat
+  left: Some("standard")
+ right: None
+
+---- sticky_ops::tests::cp2_param_less_caller_with_tachi_agent_seat_env_does_not_consume_broadcast stdout ----
+thread '...' panicked at crates/tachi-server/src/sticky_ops/tests.rs:737:9:
+assertion `left == right` failed: param-less caller must resolve via the TACHI_AGENT_SEAT env fallback
+  left: Some("standard")
+ right: Some("wizard")
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 1607 filtered out; finished in 0.31s
+```
+
+GREEN (fix restored):
+
+```
+$ cargo test -p tachi-server --lib sticky_ops::
+running 18 tests
+... (all 18 ok, see full run below)
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 1593 filtered out; finished in 0.67s
+```
+
+## Item 2 — CP3 doc honesty — GREEN (doc-verification test, no behavior change)
+
+`cp3_row_stuck_unread_after_cas_win_is_still_recoverable_via_include_read` hand-simulates
+the exact crash window (CAS commits via `try_claim_sticky`, `mark_claimed` never runs) and
+asserts: (a) the normal unread-claim path never re-delivers it (the "silently drop" half the
+doc is now honest about), and (b) `include_read=true` still recovers the original text (the
+recovery-escape claim). This test is new code-verification, not a regression test against a
+prior bug — there was no code change for Item 2, only the module doc. It passed on first run
+(see aggregate run below); no red/green pair applicable since no behavior changed.
+
+## Item 3 — render-time scrub (CP4 belt-and-suspenders) — RED then GREEN
+
+RED (briefing.rs's sticky render loop temporarily reverted to skip `scrub_secrets`):
+
+```
+$ cargo test -p tachi-server --lib agent_markdown::tests::format_briefing_scrubs_secrets_in_sticky_text
+---- agent_markdown::tests::format_briefing_scrubs_secrets_in_sticky_text_even_if_row_bypassed_write_scrub stdout ----
+rendered briefing must never contain the raw secret token:
+## Tachi briefing
+...
+### 📌 Sticky notes (unread) [AUTHORITY: WORKFLOW STATE]
+...
+- from **wizard**: here is the key: sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345
+...
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1610 filtered out; finished in 0.01s
+```
+
+GREEN (fix restored):
+
+```
+$ cargo test -p tachi-server --lib agent_markdown::tests::
+running 4 tests
+test agent_markdown::tests::format_briefing_compact_caps_verification_gates ... ok
+test agent_markdown::tests::format_briefing_truncates_long_checkpoint_titles ... ok
+test agent_markdown::tests::format_briefing_compact_caps_section_rows ... ok
+test agent_markdown::tests::format_briefing_scrubs_secrets_in_sticky_text_even_if_row_bypassed_write_scrub ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1607 filtered out; finished in 0.01s
+```
+
+## Aggregate green run (all sticky/dispatch-config/briefing tests, fix in place)
+
+```
+$ cargo test -p tachi-server --lib -- sticky_ops:: dispatch_ops::dispatch::tests:: agent_markdown::tests::
+running 33 tests
+test dispatch_ops::dispatch::tests::mcp_cleanup_removes_temp_config_on_drop ... ok
+test agent_markdown::tests::format_briefing_compact_caps_verification_gates ... ok
+test agent_markdown::tests::format_briefing_truncates_long_checkpoint_titles ... ok
+test agent_markdown::tests::format_briefing_compact_caps_section_rows ... ok
+test agent_markdown::tests::format_briefing_scrubs_secrets_in_sticky_text_even_if_row_bypassed_write_scrub ... ok
+test sticky_ops::tests::addressed_sticky_visible_only_to_named_seat ... ok
+test dispatch_ops::dispatch::tests::flow_dispatch_slot_blocks_duplicate_active_task ... ok
+test sticky_ops::tests::broadcast_sticky_visible_only_to_leader ... ok
+test dispatch_ops::dispatch::tests::global_dispatch_slot_blocks_duplicate_active_task_without_flow_id ... ok
+test dispatch_ops::dispatch::tests::dispatch_runs_root_uses_canonical_tachi_home_aliases ... ok
+test dispatch_ops::dispatch::tests::flow_dispatch_slot_reclaims_stale_lock_when_run_status_is_missing ... ok
+test sticky_ops::tests::briefing_claims_sticky_exactly_once_then_absent ... ok
+test sticky_ops::tests::addressed_sticky_invisible_to_leader_and_other_seats ... ok
+test dispatch_ops::dispatch::tests::generate_mcp_config_sets_owner_only_permissions ... ok
+test sticky_ops::tests::cp3_row_stuck_unread_after_cas_win_is_still_recoverable_via_include_read ... ok
+test sticky_ops::tests::gc_sweep_archives_expired_unread_stickies ... ok
+test sticky_ops::tests::expired_sticky_hidden_from_unread_but_visible_in_archive ... ok
+test sticky_ops::tests::concurrent_claim_smoke_single_winner_under_load ... ok
+test sticky_ops::tests::is_claimed_reflects_successful_claim ... ok
+test dispatch_ops::dispatch::tests::opencode_serve_dispatch_fails_fast_when_probe_auth_fails ... ok
+test sticky_ops::tests::mark_claimed_error_branch_is_reachable_and_does_not_affect_cas_outcome ... ok
+test sticky_ops::tests::ttl_expiry_matrix ... ok
+test sticky_ops::tests::sticky_persists_and_reads_back ... ok
+test sticky_ops::tests::sticky_leave_scrubs_secrets_in_storage_and_briefing_render ... ok
+test sticky_ops::tests::try_claim_sticky_is_cas_not_naive_upsert ... ok
+test dispatch_ops::dispatch::tests::opencode_serve_preflight_uses_dispatch_credential_env ... ok
+test dispatch_ops::dispatch::tests::dispatch_rejects_bare_cwd_without_unmanaged_optin_or_env_id ... ok
+test dispatch_ops::dispatch::tests::recover_orphaned_dispatch_runs_marks_working_runs_failed ... ok
+test dispatch_ops::dispatch::tests::v2_auto_stage_rejects_unsupported_sandbox_before_plan_stage_spawn ... ok
+test sticky_ops::tests::cp2_caller_with_explicit_agent_id_consumes_only_its_own_addressed_stickies ... ok
+test sticky_ops::tests::cp2_identity_less_caller_resolves_to_leader ... ok
+test sticky_ops::tests::cp2_param_less_caller_with_tachi_agent_seat_env_does_not_consume_broadcast ... ok
+test sticky_ops::tests::cp2_tachi_profile_env_alone_no_longer_resolves_a_seat ... ok
+
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 1578 filtered out; finished in 1.62s
+```
+
+## Not run
+
+Full workspace `cargo test` (all crates) was not run locally — scoped to `-p tachi-server`
+per this packet's file ownership (`crates/tachi-server/**` only). Oz should run the full
+suite (and the shared-target build) to confirm no cross-crate breakage and to get a clean
+build off the shared cache once other worktrees vacate it.
 
 ---
 
-## Item 1 — Read-pool pragmas (`crates/memcore/src/db/open.rs`)
+# #964 round-3 rework — verification evidence
 
-**Before**: `configure_connection` (called by both `open_read_write` and
-`open_read_only`) set only `busy_timeout`. The `cache_size = -16000` value
-was already computed and applied on the writer connection (`schema/ddl.rs`
-`CONNECTION_PRAGMA_SQL`) but never reached read-only handles opened via
-`open_read_only` — every read pool connection ran with SQLite's tiny default
-page cache (~2MB) instead of the already-chosen 16MB budget.
+Base commit: `e1b1ab0ec855fc9a1736757d1646336c8020fed4` (origin/feat/964-sticky, round-2 HEAD)
 
-**Change**: added `configure_read_only_connection` (called only from
-`open_read_only`), setting:
-- `PRAGMA cache_size = -16000` (16 MB page cache — matches the writer value)
-- `PRAGMA mmap_size = 268435456` (256 MB mmap window)
+Same shared-target-contamination note as round-2 applies again this round (phantom
+`cannot find function standardize_sticky_path` against `$HOME/.cache/sigil-shared-target`
+even though the function is present at `crates/memcore/src/path_router.rs:185`) — switched
+to an isolated `CARGO_TARGET_DIR` under the session scratchpad for all verification below,
+which compiles clean. Oz should re-verify on its own dedicated target.
 
-Both PRAGMAs are legal on read-only handles — they configure this
-connection's local cache/mmap window, not the DB file. `journal_mode` and
-`foreign_keys` were deliberately NOT added to the read path per the task
-scope (writer/schema concerns).
+## Finding 1 (CP2 — identity semantics, both halves)
 
-**File:line**: `crates/memcore/src/db/open.rs:34-38` (`open_read_only`),
-new fn `configure_read_only_connection` at `crates/memcore/src/db/open.rs`
-(added below `configure_connection`).
+- `crates/tachi-server/src/sticky_ops/identity.rs:25-41` — sender path
+  (`fallback_agent_id`, used by `sticky_leave`'s `resolve_from_agent`) now falls back to
+  `TACHI_AGENT_SEAT` instead of `TACHI_PROFILE`, matching the delivery path's chain
+  (`resolve_caller_agent_id`, unchanged from round-2, already correct).
+- `crates/tachi-server/src/dispatch_ops/dispatch.rs:285-301` — `agent_seat` is now
+  `Some(dispatch_id.as_str())` instead of derived from `params.profile`/`agent_norm`.
+  `dispatch_id` (`new_dispatch_id`) embeds a uuid suffix and is unique per dispatch call,
+  so two workers dispatched on the identical `profile` (e.g. `codex_55_review`, the
+  scenario codex's finding named) can no longer collide onto the same
+  `TACHI_AGENT_SEAT`.
+- `crates/tachi-server/src/sticky_ops/handlers.rs:71` — stale comment fix (said
+  `TACHI_PROFILE`, the delivery chain's env fallback has read `TACHI_AGENT_SEAT` since
+  round-2).
+- `crates/tachi-server/src/facade_memory_ops/briefing_ops.rs:206` — same stale-comment fix.
 
-**Verification**: `cargo test -p memcore --lib` — 328 passed, 0 failed (no
-existing test asserted on read-connection PRAGMA state, so this is a
-behavior-additive, non-breaking change; covered by every existing
-`open_read_only`-exercising test continuing to pass).
+### RED (sender-path fix reverted: `fallback_agent_id` back to reading `TACHI_PROFILE`)
+
+```
+$ cargo test -p tachi-server --lib cp2_round3
+running 3 tests
+test sticky_ops::tests::cp2_round3_sender_identity_never_resolves_to_tool_profile_string ... FAILED
+test sticky_ops::tests::cp2_round3_sender_identity_uses_tachi_agent_seat_not_tachi_profile ... FAILED
+test sticky_ops::tests::cp2_round3_sticky_leave_from_agent_uses_seat_not_profile ... FAILED
+
+---- sticky_ops::tests::cp2_round3_sender_identity_never_resolves_to_tool_profile_string stdout ----
+thread '...' panicked at crates/tachi-server/src/sticky_ops/tests.rs:876:5:
+assertion `left == right` failed: sender identity must never resolve to a tool-profile string like 'standard' even with TACHI_PROFILE set
+  left: "standard"
+ right: "unknown-agent"
+
+---- sticky_ops::tests::cp2_round3_sender_identity_uses_tachi_agent_seat_not_tachi_profile stdout ----
+thread '...' panicked at crates/tachi-server/src/sticky_ops/tests.rs:904:5:
+assertion `left == right` failed: sender identity must resolve via TACHI_AGENT_SEAT, ignoring TACHI_PROFILE entirely
+  left: "standard"
+ right: "wizard-worker-3"
+
+---- sticky_ops::tests::cp2_round3_sticky_leave_from_agent_uses_seat_not_profile stdout ----
+thread '...' panicked at crates/tachi-server/src/sticky_ops/tests.rs:950:5:
+assertion `left == right` failed: from_agent must be the TACHI_AGENT_SEAT value, not the shared TACHI_PROFILE
+  left: String("codex_55_review")
+ right: "worker-a"
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 1612 filtered out; finished in 0.21s
+```
+
+### GREEN (fix restored)
+
+```
+$ cargo test -p tachi-server --lib cp2_round3
+running 3 tests
+test sticky_ops::tests::cp2_round3_sender_identity_never_resolves_to_tool_profile_string ... ok
+test sticky_ops::tests::cp2_round3_sender_identity_uses_tachi_agent_seat_not_tachi_profile ... ok
+test sticky_ops::tests::cp2_round3_sticky_leave_from_agent_uses_seat_not_profile ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1612 filtered out; finished in 0.23s
+```
+
+### Dispatch-id-seat test (finding 1b), GREEN
+
+`crates/tachi-server/src/dispatch_ops/dispatch/tests.rs::cp3_two_dispatches_on_same_profile_get_distinct_agent_seats`
+calls `generate_mcp_config` twice with two freshly generated `dispatch_id`s (same shared
+`profile` "codex_55_review"), reads back each generated MCP config JSON's
+`mcpServers.tachi.env.TACHI_AGENT_SEAT`, and asserts they equal their respective
+`dispatch_id`s, differ from each other, and never equal the shared profile string:
+
+```
+$ cargo test -p tachi-server --lib "dispatch_ops::dispatch::tests::"
+running 12 tests
+... (all 12 ok, including cp3_two_dispatches_on_same_profile_get_distinct_agent_seats)
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 1605 filtered out; finished in 1.51s
+```
+
+## Finding 2 (CP3 — doc-only narrowing, no behavior change)
+
+`crates/tachi-server/src/sticky_ops.rs:57-77` — narrows the round-2 "Recovery escape" doc
+comment: `include_read` recovery is scoped to the identity a sticky is actually visible to
+(the leader cannot recover a sticky `to:`-addressed to a worker; only that worker's own
+identity can), notes the `STICKY_DB_LIMIT` (500) row-scan cap and the `include_read`
+branch's own 50-row page cap, and explicitly declines a leader-sees-all override as
+out-of-scope (noted as a follow-up candidate). Doc-only; no test required per the
+adjudication, and none of the existing CP3 crash-window tests changed behavior.
+
+## Finding 3 (CP4 — scrub at the single row-load choke point)
+
+- `crates/tachi-server/src/sticky_ops/pending.rs:9-27` — new `scrub_sticky_text_for_read`
+  helper (mirrors `sticky_leave`'s `scrub_think_tags` -> `scrub_secrets` order), applied at
+  both row-emit sites: `claim_unread_stickies_for_briefing`'s `delivered.push` (the
+  unread/briefing/`sticky_check` path) and `list_or_claim_stickies`'s `include_read` branch
+  (the archive path). Both are the sites every JSON route (briefing JSON compact+full,
+  `sticky_check` JSON) and the markdown renderer consume — scrubbing here covers all of
+  them from one place.
+- `crates/tachi-server/src/agent_markdown/briefing.rs:55-63` — kept the existing
+  belt-and-suspenders `scrub_secrets` re-scrub at the markdown render boundary (adjudication:
+  "remove... only if... provably covers it, else keep both"); updated its comment to note
+  the choke-point scrub is now the primary layer.
+
+### RED (choke-point scrub reverted: both `pending.rs` emit sites back to raw `memo.text`)
+
+```
+$ cargo test -p tachi-server --lib cp4_round3
+running 2 tests
+test sticky_ops::tests::cp4_round3_briefing_json_route_masks_hand_inserted_raw_secret_row ... FAILED
+test sticky_ops::tests::cp4_round3_sticky_check_json_route_masks_hand_inserted_raw_secret_row ... FAILED
+
+---- sticky_ops::tests::cp4_round3_briefing_json_route_masks_hand_inserted_raw_secret_row stdout ----
+thread '...' panicked at crates/tachi-server/src/sticky_ops/tests.rs:1019:5:
+raw bearer token must never appear in the JSON `text` field the briefing JSON route serializes directly; got: heads up: Authorization: Bearer sk-cp4round3secretvalue000111222 is still live
+
+---- sticky_ops::tests::cp4_round3_sticky_check_json_route_masks_hand_inserted_raw_secret_row stdout ----
+thread '...' panicked at crates/tachi-server/src/sticky_ops/tests.rs:1052:5:
+sticky_check (include_read=false) JSON text must never contain the raw token; got: heads up: Authorization: Bearer sk-cp4round3secretvalue000111222 is still live
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 1615 filtered out; finished in 0.25s
+```
+
+### GREEN (fix restored)
+
+```
+$ cargo test -p tachi-server --lib cp4_round3
+running 2 tests
+test sticky_ops::tests::cp4_round3_briefing_json_route_masks_hand_inserted_raw_secret_row ... ok
+test sticky_ops::tests::cp4_round3_sticky_check_json_route_masks_hand_inserted_raw_secret_row ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1615 filtered out; finished in 0.22s
+```
+
+These tests hand-insert a raw-secret row directly into the store via `test_entry`/`upsert`
+(bypassing `sticky_leave`'s write-time scrub entirely — the exact "bypassed write-time
+scrub" residual both scrub comments call out), then assert the JSON `text` field itself
+(not a markdown rendering of it) is masked — discriminating the choke-point fix from the
+pre-existing write-time-only + markdown-only-render scrub coverage.
+
+## Full sticky_ops + dispatch aggregate, GREEN (fix in place)
+
+```
+$ cargo test -p tachi-server --lib sticky_ops::
+running 23 tests
+... (all 23 ok)
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 1594 filtered out; finished in 0.65s/0.70s
+
+$ cargo test -p tachi-server --lib "dispatch_ops::dispatch::tests::"
+running 12 tests
+... (all 12 ok)
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 1605 filtered out; finished in 1.51s/1.62s
+```
+
+## fmt --check (round-3)
+
+```
+$ cargo fmt --check -p tachi-server
+(no output, exit 0 — after one `cargo fmt -p tachi-server` pass to fix line-wrap on the new tests)
+```
+
+## clippy -p tachi-server --all-targets --no-deps -- -D warnings (round-3)
+
+```
+$ cargo clippy -p tachi-server --all-targets --no-deps -- -D warnings
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 25.80s
+(exit 0, zero warnings — required adding #[allow(clippy::await_holding_lock)] to the new
+cp2_round3_sticky_leave_from_agent_uses_seat_not_profile test, matching the existing
+pattern used by generate_mcp_config_sets_owner_only_permissions for the same lint)
+```
+
+## Not run (round-3)
+
+Full workspace `cargo test` (all crates) and the shared `CARGO_TARGET_DIR` build were not
+run locally this round either, for the same reasons as round-2 (scoped to `-p tachi-server`
+per file ownership; shared target dir showed contamination from a concurrent worktree).
+Oz should run the full suite off its own dedicated target.
+
+## Tooling note (unrelated to code correctness)
+
+This round hit a prolonged, severe sandbox transport instability partway through (many
+consecutive tool-call failures across `git`/`Read`/`cargo`, with only intermittent success
+on trivial `echo`). During that window one `Edit` call was issued to `pending.rs` referencing
+a nonexistent placeholder constant, under the (correct, in hindsight) assumption that the
+tool transport might not have applied it — once the transport recovered, `git diff` confirmed
+the placeholder edit never actually landed on disk, so no revert was needed. Recorded here for
+completeness; it does not affect the verified code above.
 
 ---
 
-## Item 2 — `hard_state` index (migration v12)
+# #1016 — `handoff_ops` deprecation chore — verification evidence
 
-**Before** (real DB, `orchestrator` namespace, 127 rows):
+Branch: `chore/handoff-ops-deprecation` off `origin/main` @ `71460133`
+(`fix(#987,#997): deflake stdio_proxy / component_check / subprocess-reap families (#1006)`).
 
-```
-sqlite> EXPLAIN QUERY PLAN
-   ...> SELECT key, value_json, version, updated_at FROM hard_state
-   ...> WHERE namespace = 'orchestrator' ORDER BY updated_at DESC, key ASC;
-QUERY PLAN
-|--SEARCH hard_state USING INDEX sqlite_autoindex_hard_state_1 (namespace=?)
-`--USE TEMP B-TREE FOR ORDER BY
-```
+Scope: `crates/tachi-server/**` only, per packet. No deletion — `handoff_ops` marked
+deprecated (module doc, facade tool descriptions, `deprecated` field on
+`handoff_leave`/`handoff_check` responses), `promote_issue` left untouched (no replacement
+yet), one doc paragraph added recording the #1016 ruling.
 
-Full temp-B-tree sort of every namespace-matched row.
-
-**After** (same DB, index applied):
-
-```sql
-CREATE INDEX IF NOT EXISTS idx_hard_state_ns_updated
-  ON hard_state(namespace, updated_at DESC);
-```
+## Grep sweep — in-tree callers of `handoff_leave`/`handoff_check`
 
 ```
-QUERY PLAN
-|--SEARCH hard_state USING INDEX idx_hard_state_ns_updated (namespace=?)
-`--USE TEMP B-TREE FOR LAST TERM OF ORDER BY
+$ grep -rn "handoff_leave\|handoff_check\|handle_handoff_leave\|handle_handoff_check\|HandoffLeaveParams\|HandoffCheckParams\|tachi_handoff\b" crates \
+  | grep -v "/tests\.rs\|/tests/\|handoff_ops/handlers.rs\|handoff_ops.rs\|handoff_facade.rs"
+
+crates/tachi-server/src/sticky_ops.rs:22:  (doc comment, references old semantics being replaced)
+crates/tachi-server/src/shared_defs.rs:69:            "handoff_leave",   (NON_IDEMPOTENT_TOOL_NAMES registry entry)
+crates/tachi-server/src/server_state/cache.rs:64-65,77: "handoff_leave"/"handoff_check"/"tachi_handoff" (idempotency-key registry entries)
+crates/tachi-server/src/handoff_ops/memo.rs:25:          "handoff_leave"  (memo category tag, internal to handoff_ops itself)
+crates/tachi-server/src/agent_markdown/briefing.rs:94:   cross-project briefing prose pointing agents at tachi_handoff
+crates/tachi-hub/src/tool_profiles/patterns.rs:62-65:    tool-name allow-list entries (policy registry, not a caller)
+crates/tachi-params/src/agent.rs:15,33:                  HandoffLeaveParams/HandoffCheckParams struct defs (not a call site)
 ```
 
-The index satisfies `WHERE namespace = ?` AND the primary `ORDER BY
-updated_at DESC` term directly; only the secondary `key ASC` tiebreak
-(among rows sharing an identical `updated_at` — rare) needs any sort, per
-opus's "collapses to LAST TERM OF ORDER BY" characterization. Confirmed
-verbatim on the live dataset, not a synthetic fixture.
+Only one is a genuine "production caller" beyond the handoff_ops module and its own facade/tests:
+`agent_markdown/briefing.rs:94`, the cross-project-handoffs briefing section that tells agents to
+call `tachi_handoff(action='check'/'leave')`. Not trivially mechanical to migrate (it renders
+pre-existing `/handoff`-path memory rows written by the old code path; switching the *read* side to
+sticky/HandoffPacket without a data migration would silently stop surfacing old pending handoffs) —
+updated its prose in place to point at the replacements as a follow-up pointer rather than migrating
+the read path in this chore. Listed here as the PR-body follow-up per the packet's instruction.
+The registry/pattern-list entries (`shared_defs.rs`, `server_state/cache.rs`,
+`tachi-hub/tool_profiles/patterns.rs`) are tool-name classification lists (idempotency /
+profile-allow-list), not call sites — deprecated tools still need to be classified there, so no
+change needed.
 
-**Implementation**: sentinel-gated migration `v12_hard_state_ns_updated_index`
-in `crates/memcore/src/db/migrations/hard_state_index.rs`
-(`migrate_v12_add_hard_state_index`), wired into
-`run_data_migrations_in_tx` in `crates/memcore/src/db/migrations.rs`
-following the exact v10/v11 discipline (#978/#984): `apply_versioned_migration`
-gate, `MigrationReport.hard_state_index_added` field,
-`EXPECTED_SCHEMA_VERSION` bumped 11 → 12, `ALL_MIGRATION_SENTINEL_KEYS` test
-fixture updated, module doc comment v12 line added.
-
-**File:line**:
-- `crates/memcore/src/db/migrations/hard_state_index.rs:1-30` (new file)
-- `crates/memcore/src/db/migrations.rs:64` (`EXPECTED_SCHEMA_VERSION = 12`)
-- `crates/memcore/src/db/migrations.rs` (`run_data_migrations_in_tx`, new
-  `hard_state_index_added` migration call after v11)
-
-**Verification**:
-- New unit test `v12_adds_hard_state_namespace_updated_index` in
-  `crates/memcore/src/db/migrations.rs` — creates the index via the real
-  migration runner, asserts `EXPLAIN QUERY PLAN` uses
-  `idx_hard_state_ns_updated` and does NOT fall back to a full
-  `"USE TEMP B-TREE FOR ORDER BY"`, and asserts idempotency (second run
-  reports 0 added, index still present).
-- `expected_schema_version_matches_migration_count` (pre-existing #984 F3(e)
-  invariant test) passes unmodified — confirms the sentinel count the
-  runner actually writes (12) matches the bumped `EXPECTED_SCHEMA_VERSION`.
-- `cargo test -p memcore --lib` — 329 passed (328 + 1 new), 0 failed.
-- Real-DB EXPLAIN QUERY PLAN before/after captured directly above via
-  `sqlite3` CLI against the read-only production-data copy.
-
----
-
-## Build/lint gates (items 1+2, memcore)
+## Build
 
 ```
-$ cargo fmt -p memcore -- --check      # clean
-$ cargo clippy -p memcore --all-targets --no-deps -- -D warnings   # clean
-$ cargo test -p memcore --lib          # 328 passed, 0 failed, 2 ignored (baseline, unrelated)
+$ export CARGO_TARGET_DIR=<worktree>/isolated-target
+$ cargo build -p tachi-server
+   ... (workspace deps)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 54s
+(exit 0)
 ```
 
----
-
-## Item 3 — ANALYZE/optimize (planner mis-pick root cause)
-
-**Before** (real DB, no `sqlite_stat1` ever populated — this DB predates
-any `ANALYZE`):
+## Touched tests — GREEN (includes two new `deprecated`-field assertions)
 
 ```
-sqlite> SELECT COUNT(*) FROM sqlite_stat1;
-Error: no such table: sqlite_stat1
+$ cargo test -p tachi-server handoff
+running 28 tests
+test handoff_ops::tests::agent_resolution::resolve_from_agent_falls_back_to_profile_env_then_unknown ... ok
+test handoff_ops::tests::promotion::existing_issue_url_extracts_from_metadata ... ok
+test handoff_ops::tests::promotion::promoted_status_is_not_pending ... ok
+test handoff_ops::tests::persisted_ack::pending_handoff_entries_reads_persisted_memory ... ok
+test handoff_ops::tests::persisted_ack::acknowledge_updates_persisted_handoff_metadata ... ok
+test handoff_ops::tests::promotion::promoting_intermediate_state_is_set_before_issue_creation ... ok
+test handoff_ops::tests::cleanup_supersede::test_gc_expired_handoff_memories ... ok
+test handoff_ops::tests::cleanup_supersede::test_handoff_leave_supersedes_pending_duplicate ... ok
+test handoff_ops::tests::promotion::promote_rejects_invalid_flow_id_before_issue_creation ... ok
+test handoff_ops::tests::promotion::promote_dedup_returns_already_promoted_without_force ... ok
+test handoff_ops::tests::persisted_ack::handoff_check_reads_and_acks_persisted_memos_after_restart ... ok
+test handoff_ops::tests::promotion::promote_force_creates_new_issue_even_if_already_promoted ... ok
+test handoff_ops::tests::cleanup_supersede::supersede_pending_handoffs_propagates_db_errors ... ok
+test tests::dispatch_tests::workflow_artifacts::pr_release_handoff::release_note::validation::lifecycle_release_note_requires_flow_or_pr_ref_before_github_access ... ok
+test tests::handoff_tests::chain_skills_mock_step_reports_simulated_raw_output ... ok
+test tests::handoff_tests::chain_skills_document_steps_pipe_verbatim_without_simulation_marker ... ok
+test tests::dispatch_tests::workflow_artifacts::pr_release_handoff::release_note::validation::tachi_gh_release_note_uses_lifecycle_validation_without_repo ... ok
+test handoff_ops::tests::promotion::promote_handoff_issue_updates_memory_and_flow_artifacts ... ok
+test tests::handoff_tests::handoff_leave_and_check_roundtrip ... ok
+test tests::handoff_tests::handoff_leave_persists_to_memory_store ... ok
+test tests::handoff_tests::handoff_untargeted_memo_visible_to_all ... ok
+test tests::orchestrator_tests::orchestrator_recovery_briefing_ignores_completed_todo_without_handoff ... ok
+test tests::orchestrator_tests::orchestrator_todos_and_handoff_persist ... ok
+test tests::dispatch_tests::workflow_artifacts::briefing_doc_index::feature_briefing::handoff_board::tachi_task_briefing_returns_feature_scoped_handoff_board ... ok
+test tests::dispatch_tests::workflow_artifacts::pr_release_handoff::pr_handoff::tachi_gh_pr_handoff_writes_pr_body_with_verification_and_gaps ... ok
+test tests::dispatch_tests::workflow_artifacts::pr_release_handoff::release_note::flow_artifact::lifecycle_release_note_writes_flow_artifact_with_refs ... ok
+test tests::dispatch_tests::workflow_artifacts::pr_release_handoff::release_note::optional_fields::lifecycle_release_note_skips_empty_optional_github_fields ... ok
+test tests::dispatch_tests::workflow_artifacts::pr_release_handoff::release_note::pr_mismatch::lifecycle_release_note_rejects_mismatched_pr_ref_for_cached_flow_pr ... ok
 
-sqlite> EXPLAIN QUERY PLAN
-   ...> SELECT id FROM memories WHERE archived = 0 AND path = '/facts/readonly'
-   ...> ORDER BY timestamp DESC LIMIT 20;
-QUERY PLAN
-|--SEARCH memories USING INDEX idx_memories_archived (archived=?)
-`--USE TEMP B-TREE FOR ORDER BY
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 1576 filtered out; finished in 3.42s
 ```
 
-Without planner statistics, SQLite falls back to structural heuristics and
-picks `idx_memories_archived` — a boolean column, 237/474 rows match
-(barely better than a full scan) — over the much more selective
-`idx_memories_path` (2 rows/path on average) or the purpose-built partial
-index `idx_memories_path_active_ts ON memories(path, timestamp DESC) WHERE
-archived = 0 AND superseded_by IS NULL`, confirming opus's "planner
-mis-picking idx_memories_archived" diagnosis on live data.
+New assertions added to `handoff_leave_and_check_roundtrip` (in
+`crates/tachi-server/src/tests/handoff_tests.rs`) verify the `deprecated` field exists on both
+the `leave` and `check` JSON responses and names `#1016`, `sticky_leave`, and `handoff_write` —
+this is deliberately not a red/green pair (deprecation is additive, no prior behavior to break),
+but the assertions fail-closed if the field is ever dropped.
 
-**After** (`PRAGMA optimize;` run once):
+## Full `tachi-server --lib` suite — GREEN
 
 ```
-sqlite> SELECT COUNT(*) FROM sqlite_stat1;
-74
-sqlite> SELECT * FROM sqlite_stat1 WHERE tbl='memories';
-memories|idx_memories_path_active_ts|370 2 1
-memories|idx_memories_archived|474 237
-memories|idx_memories_path|474 2
-... (11 more rows, one per index)
-
-sqlite> EXPLAIN QUERY PLAN
-   ...> SELECT id FROM memories WHERE archived = 0 AND path = '/facts/readonly'
-   ...> ORDER BY timestamp DESC LIMIT 20;
-QUERY PLAN
-|--SEARCH memories USING INDEX idx_memories_path (path=?)
-`--USE TEMP B-TREE FOR ORDER BY
+$ cargo test -p tachi-server --lib
+test result: ok. 1602 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 180.96s
 ```
 
-With `sqlite_stat1` populated, the planner switches off the low-selectivity
-`idx_memories_archived` to the far more selective `idx_memories_path`.
-
-**Implementation**: `MemoryStore::run_optimize()` (new method,
-`crates/memcore/src/store/crud.rs`, next to the existing
-`checkpoint_wal_truncate`) runs `PRAGMA optimize;` — SQLite's own built-in
-heuristic for "ANALYZE only the tables likely to have stale stats," safe
-and cheap to call often per SQLite's own docs. Wired into the same periodic
-background loop that already runs WAL-checkpoint maintenance
-(`crates/tachi-server/src/bootstrap/serve/background.rs`
-`spawn_wal_checkpoint`, cadence `TACHI_WAL_CHECKPOINT_SECS`, default 300s)
-for the global store, project store, and every named-project store — no
-new timer, no new config knob, reuses the existing "quiet moment" cadence.
-
-**File:line**:
-- `crates/memcore/src/store/crud.rs` (`run_optimize`, added after
-  `checkpoint_wal_truncate`)
-- `crates/tachi-server/src/bootstrap/serve/background.rs`
-  (`spawn_wal_checkpoint`, `run_optimize()` calls added alongside each
-  existing `checkpoint_wal_truncate()` call)
-
-**Verification**:
-- New unit test `run_optimize_refreshes_planner_statistics` in
-  `crates/memcore/src/lib_tests.rs` — seeds 50 rows, calls `run_optimize`,
-  asserts `sqlite_stat1` now has rows for `memories`, and asserts a second
-  call doesn't error (repeat-safe).
-- `cargo test -p memcore --lib` — 329 passed (328 + 1 new), 0 failed.
-- Real-DB `sqlite_stat1`/`EXPLAIN QUERY PLAN` before/after captured above
-  via `sqlite3` CLI against the read-only production-data copy (temp copy,
-  discarded after).
-- `cargo build -p memcore -p tachi-server` — clean.
-- `cargo fmt -p memcore -p tachi-server -- --check` — clean.
-- `cargo clippy -p memcore --all-targets --no-deps -- -D warnings` — clean.
-- `cargo clippy -p tachi-server --all-targets --no-deps -- -D warnings` —
-  clean.
-
----
-
-## Item 4 — `get_access_times` LIMIT (`access_history` is the fastest-growing table)
-
-**Semantics check first**: `get_access_times`' result feeds ACT-R
-base-level activation (`base_level_activation` in `scorer.rs`):
-`B_i = ln(Σ t_j^(-d))` — a plain sum over every returned access age, so it
-is order-independent, and each term's contribution shrinks with `-d` decay
-as `t_j` (age) grows. The existing query already orders
-`accessed_at DESC` (most recent first). So capping to the N *most recent*
-accesses per memory_id preserves the dominant terms of the sum and only
-drops the vanishingly-small-contribution tail — not an approximation that
-changes ranking behavior in any observable way, only a bound on unbounded
-growth.
-
-**Cap chosen**: `ACCESS_TIMES_MAX_PER_MEMORY = 256`, matching
-`GcConfig::access_history_keep_per_memory` (default 256,
-`crates/memcore/src/types/entry.rs:160`) — the number of rows GC already
-prunes each memory_id down to in steady state
-(`crates/memcore/src/db/stats_gc.rs`). Confirmed on the live DB: the
-busiest memory_ids in `access_history` (15,608 rows total) sit at exactly
-256 rows each (GC-steady-state), so this cap changes nothing for GC'd data
-and only bounds worst-case cost for memory_ids whose history grew past 256
-between GC runs.
+## fmt --check — clean
 
 ```
-$ sqlite3 memory_readonly_copy.db \
-    "SELECT memory_id, COUNT(*) c FROM access_history GROUP BY memory_id ORDER BY c DESC LIMIT 5;"
-21d97267-...|256
-38010cb3-...|256
-4ebf65d3-...|256
-6112ba35-...|256
-708b7fe8-...|256
+$ cargo fmt --check
+(no output, exit 0)
 ```
 
-**Before** (unbounded, `EXPLAIN QUERY PLAN` for two busy ids):
+## clippy -p tachi-server --all-targets --no-deps -- -D warnings — clean
 
 ```
-QUERY PLAN
-|--SEARCH access_history USING COVERING INDEX idx_access_hist_mem_time (memory_id=?)
-`--USE TEMP B-TREE FOR ORDER BY
+$ cargo clippy -p tachi-server --all-targets --no-deps -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 08s
+(exit 0, zero warnings)
 ```
 
-**After** (bounded via `ROW_NUMBER() OVER (PARTITION BY memory_id ORDER BY
-accessed_at DESC)`, same covering index still used for the
-partition/order):
+## Files touched
 
-```
-QUERY PLAN
-|--CO-ROUTINE ranked
-|  |--CO-ROUTINE (subquery-3)
-|  |  `--SEARCH access_history USING COVERING INDEX idx_access_hist_mem_time (memory_id=?)
-|  `--SCAN (subquery-3)
-|--SCAN ranked
-`--USE TEMP B-TREE FOR ORDER BY
-```
-
-Row-count check on the two busiest live ids (both already at the 256 GC
-ceiling) confirmed identical output before/after — zero behavior change on
-real data, as expected.
-
-**Implementation**: `crates/memcore/src/db/memory_crud/access.rs`
-`get_access_times` — added `ACCESS_TIMES_MAX_PER_MEMORY: i64 = 256` and
-rewrote the per-batch query to select from a `ROW_NUMBER()`-ranked subquery
-filtered to `rn <= 256`, following the exact partition/order pattern
-`stats_gc.rs`'s GC query already uses (same shape, same covering index).
-
-**File:line**: `crates/memcore/src/db/memory_crud/access.rs`
-(`ACCESS_TIMES_MAX_PER_MEMORY` const + `get_access_times` body).
-
-**Verification**:
-- New test module `get_access_times_tests` in the same file:
-  - `caps_at_max_per_memory_and_keeps_most_recent` — seeds 257 access rows
-    for one memory_id (one over the cap), asserts the result is truncated
-    to exactly 256 and the oldest (dropped) row's age never appears.
-  - `under_cap_is_unaffected` — 3 rows in, 3 rows out (no accidental
-    over-truncation).
-- `cargo test -p memcore --lib` — 331 passed (329 + 2 new), 0 failed,
-  including all `golden_corpus`/`ops_audit_corpus` recall-ranking tests
-  unchanged (confirms no observable ranking-order regression).
-- `cargo fmt -p memcore -- --check` — clean.
-- `cargo clippy -p memcore --all-targets --no-deps -- -D warnings` — clean.
-- Real-DB `EXPLAIN QUERY PLAN` + row-count before/after captured above via
-  `sqlite3` CLI against the read-only production-data copy.
-
----
-
-## Item 5 — coldpath: scope default `tachi status` probe, gate fleet view behind `--all-dbs`
-
-**Before**: `collect_snapshot`/`collect_snapshot_inner` iterated every entry
-in `manifest.dbs` unconditionally, opening each as a read-only `MemoryStore`
-and running a full probe (job histogram, vector health, namespace counts,
-continuity metrics — several queries each). On this machine's real
-`~/.tachi/manifest.json`, that's 7 DBs:
-
-```
-$ python3 -c "import json; m=json.load(open('~/.tachi/manifest.json')); print(len(m['dbs']))"
-7
-```
-
-Timed via the built `tachi` binary, `tachi status --json`, warm runs
-(first run excluded — cold page cache):
-
-| scope | wall time (5 warm runs) |
-|---|---|
-| `--all-dbs` (old default, full 7-db fleet) | 0.38s, 0.16s, 0.17s, 0.18s, 0.18s |
-| default (new, global+project only) | 0.08s, 0.08s, 0.08s, 0.09s, 0.23s |
-
-Consistent with opus's "~220ms -> ~60ms" characterization for this class
-of change (exact numbers vary with OS scheduling noise, but the *shape* —
-2-3x faster scoped to 2 DBs vs 7 — reproduces every run).
-
-**After**: `collect_snapshot_scoped(app_home, global_db_path,
-project_db_path, all_dbs)` — when `all_dbs = false` (the new CLI default),
-`manifest.dbs` is filtered to only the entries whose path equals
-`global_db_path` or `project_db_path` (via the existing `paths_equal`
-canonicalization helper — the same one `is_orphan_entry` already used) BEFORE
-the probe loop runs, so skipped entries never open a `MemoryStore` at all.
-`--all-dbs` restores the exact prior fleet-wide behavior; the new
-`collect_snapshot_with_provider_value_compare` path (used only by
-`--probe-keys`, live network provider probing, already opt-in and rare)
-is left as full-fleet unconditionally — not worth a second scoping axis.
-
-This does NOT change what's IN the manifest, and does not affect any other
-manifest consumer (`tachi doctor`, `tachi manifest`, etc.) — only which
-entries `tachi status`'s render probes for a given invocation. The human
-render prints `[i] scoped to global + current-project db; pass --all-dbs
-for the full fleet` under the `Manifest (N dbs)` line when scoped, and the
-JSON output carries `dbs_scoped_to_global_and_project: true/false` so
-machine consumers don't silently read a partial fleet as the whole
-manifest.
-
-**File:line**:
-- `crates/tachi-server/src/status_ops/snapshot.rs` (`collect_snapshot_scoped`,
-  `collect_snapshot_inner`'s new `all_dbs` parameter + `scoped_entries`
-  filter)
-- `crates/tachi-server/src/status_ops/status_cli/status_render.rs`
-  (`run_status`/`render_one` thread `all_dbs` through; human + JSON output
-  additions)
-- `crates/tachi-bootstrap/src/cli/commands.rs` (`Commands::Status` new
-  `all_dbs: bool` field, `--all-dbs` flag)
-- `crates/tachi-server/src/bootstrap/serve/cli_commands.rs` (wires the new
-  field through to `run_status`)
-
-**Verification**:
-- New test module `crates/tachi-server/src/status_ops/tests/coldpath_scoping.rs`
-  (registered in `status_ops/tests.rs`): builds a real 3-DB manifest fixture
-  (global + project + one "extra" agent DB standing in for the rest of a
-  fleet) and asserts:
-  - `default_scope_probes_only_global_and_project` — scoped snapshot has
-    exactly 2 `dbs` entries (global + project), not 3.
-  - `all_dbs_flag_restores_full_fleet` — `all_dbs=true` returns all 3.
-  - `default_scope_with_no_project_db_probes_only_global` — no project db
-    path -> exactly 1 entry (global only), not a false-positive match.
-- `cargo test -p tachi-server --lib status_ops` — 64 passed, 0 failed.
-- `cargo test -p tachi-server --lib manifest` — 50 passed, 0 failed.
-- Full-suite run: `cargo test -p tachi-server --lib` — 1577/1580 passed on
-  one run, with 1-5 failures varying run-to-run entirely in
-  `bootstrap::serve::stdio::tests::*` (async proxy timeouts) and
-  `gh_ops::ship_tests::*` (temp-file races) — **none in `status_ops`,
-  `manifest`, or any file this item touches**, each individually passes
-  when re-run in isolation, and the failing set changes between runs
-  (confirmed pre-existing parallel-test-load flakiness on this machine, not
-  a regression from this change — see also this repo's own
-  `feedback_test_worktree_race` operational note on shared-cache test
-  contention).
-- `cargo build -p tachi-server -p tachi-bootstrap` — clean.
-- `cargo fmt -p tachi-server -p tachi-bootstrap -- --check` — clean.
-- `cargo clippy -p tachi-server -p tachi-bootstrap --all-targets --no-deps -- -D warnings` — clean.
-- Real-binary timing above captured directly against this machine's live
-  `~/.tachi/manifest.json` (7 DBs) via the built `tachi` binary,
-  `status --json` (read-only; verified no writes happen on this path
-  outside `--probe-keys`).
+- `crates/tachi-server/src/handoff_ops.rs` — module doc (deprecation + replacement split) +
+  `DEPRECATION_NOTICE` const.
+- `crates/tachi-server/src/handoff_ops/handlers.rs` — `deprecated` field on both response JSONs.
+- `crates/tachi-server/src/tools/handoff_facade.rs` — `DEPRECATED (#1016): ...` prefix on
+  `handoff_leave`/`handoff_check`/`tachi_handoff` tool descriptions.
+- `crates/tachi-server/src/orchestrator_ops.rs` — module doc cross-reference to the #1016 ruling
+  (HandoffPacket = canonical baton).
+- `crates/tachi-server/src/agent_markdown/briefing.rs` — briefing prose pointer to sticky/HandoffPacket.
+- `crates/tachi-server/src/tests/handoff_tests.rs` — `deprecated`-field assertions.
+- `docs/engineering/architecture/facade-granularity-and-profile-alignment.md` — new §4b recording
+  the #1016 ruling (closest existing doc that already tracks facade-consolidation rulings, e.g.
+  the #757 PR-lifecycle dedup; no dedicated handoff/sticky architecture doc exists yet).

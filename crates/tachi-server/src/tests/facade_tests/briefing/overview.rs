@@ -64,6 +64,10 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
             turn_id: None,
             event_type: None,
             messages: Vec::new(),
+            to: None,
+            ttl_days: None,
+            include_read: false,
+            agent_id: None,
         },
     )
     .await

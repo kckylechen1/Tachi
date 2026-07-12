@@ -108,6 +108,7 @@ mod foundry_scheduler;
 mod gh_ops;
 mod gh_safe_merge;
 mod handoff_ops;
+mod host_profile;
 mod hub_ops;
 mod kanban;
 mod manifest;
@@ -139,6 +140,7 @@ mod signature_evidence;
 mod skill_chain_ops;
 mod skill_policy;
 mod status_ops;
+mod sticky_ops;
 mod task_lifecycle;
 #[cfg(test)]
 mod test_support;

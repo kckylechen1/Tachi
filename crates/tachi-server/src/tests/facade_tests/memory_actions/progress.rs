@@ -68,6 +68,10 @@ async fn tachi_memory_progress_writes_append_only_jsonl() {
             turn_id: None,
             event_type: None,
             messages: Vec::new(),
+            to: None,
+            ttl_days: None,
+            include_read: false,
+            agent_id: None,
         },
     )
     .await

@@ -1,5 +1,6 @@
 //! Human-readable Markdown formatting for agent-facing MCP tools.
 
+use crate::memory_search_ops::scrub_secrets;
 use crate::utils::compact_text_line;
 use serde_json::Value;
 
@@ -42,6 +43,7 @@ mod tests {
         let out = format_briefing(
             "q",
             Some("sigil"),
+            &serde_json::json!([]),
             &memories,
             &wiki,
             &cross,
@@ -102,6 +104,7 @@ mod tests {
         let compact = format_briefing(
             "q",
             None,
+            &serde_json::json!([]),
             &serde_json::json!(memories),
             &serde_json::json!(wiki),
             &cross,
@@ -116,6 +119,7 @@ mod tests {
         let full = format_briefing(
             "q",
             None,
+            &serde_json::json!([]),
             &serde_json::json!(memories),
             &serde_json::json!(wiki),
             &cross,
@@ -201,6 +205,7 @@ mod tests {
             &empty,
             &empty,
             &empty,
+            &empty,
             &health,
             &serde_json::json!(verification),
             &kanban,
@@ -216,5 +221,60 @@ mod tests {
         assert_eq!(gate_rows, 3);
         assert!(compact.contains("### Verification gates"));
         assert!(compact.contains("tachi_verify(action='board')"));
+    }
+
+    // CP4 belt-and-suspenders (codex final review of #964/PR #1003): a
+    // pre-merge DB cannot contain a raw-secret sticky row (write-time
+    // scrubbing in `sticky_ops::handlers::handle_sticky_leave` already
+    // covers that — the feature never shipped without it), but this proves
+    // the render boundary itself is a second, independent line of defense —
+    // a row that somehow bypassed write-time scrubbing (hand-inserted here,
+    // simulating a migrated/legacy/out-of-band row) still cannot leak a live
+    // secret into the rendered briefing markdown.
+    #[test]
+    fn format_briefing_scrubs_secrets_in_sticky_text_even_if_row_bypassed_write_scrub() {
+        let stickies = serde_json::json!([
+            {
+                "id": "s-raw-token",
+                "from_agent": "wizard",
+                "to": serde_json::Value::Null,
+                "text": "here is the key: sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+                "created_at": "2026-07-11T00:00:00Z",
+                "kind": "sticky",
+            }
+        ]);
+        let empty = serde_json::json!([]);
+        let health = serde_json::json!({"health_score": 95, "warnings": [], "wiki": {}});
+        let kanban = serde_json::json!({"tasks": []});
+
+        let out = format_briefing(
+            "q",
+            Some("sigil"),
+            &stickies,
+            &empty,
+            &empty,
+            &empty,
+            &health,
+            &empty,
+            &kanban,
+            &empty,
+            &[],
+            &serde_json::json!({"matches": []}),
+            false,
+        );
+
+        assert!(
+            !out.contains("sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"),
+            "rendered briefing must never contain the raw secret token:\n{out}"
+        );
+        // `format_briefing` runs sticky text through `md_escape` (escapes
+        // `[`/`]`/`*`/`_`), so the masked marker survives as the escaped
+        // `\[REDACTED\]`, not the raw `[REDACTED]` — mirrors the existing
+        // assertion shape in `sticky_ops::tests::
+        // sticky_leave_scrubs_secrets_in_storage_and_briefing_render`.
+        assert!(
+            out.contains("\\[REDACTED\\]"),
+            "rendered briefing must show the redaction marker in place of the secret:\n{out}"
+        );
     }
 }

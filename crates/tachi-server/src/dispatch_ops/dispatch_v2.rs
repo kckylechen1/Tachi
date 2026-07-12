@@ -243,6 +243,20 @@ pub(super) fn write_status_json(
     }
 
     let path = run_dir.join("status.json");
+    // Host-profile routing is fixed at dispatch acceptance. Later lifecycle
+    // writers (preflight failure, watchdog, completion) describe a changing
+    // state but must not erase that admission decision from the receipt.
+    if let Ok(previous) = std::fs::read_to_string(&path) {
+        if let Ok(Value::Object(previous)) = serde_json::from_str::<Value>(&previous) {
+            for key in ["host_profile", "execution_level"] {
+                if !obj.contains_key(key) {
+                    if let Some(value) = previous.get(key) {
+                        obj.insert(key.to_string(), value.clone());
+                    }
+                }
+            }
+        }
+    }
     let body =
         serde_json::to_string_pretty(&Value::Object(obj)).unwrap_or_else(|_| "{}".to_string());
     if let Err(e) = crate::utils::write_owner_only_file_atomic(&path, body.as_bytes()) {
