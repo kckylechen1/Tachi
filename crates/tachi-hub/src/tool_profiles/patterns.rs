@@ -34,6 +34,11 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_component",
     // Research verb (read-side evidence pipeline; #530)
     "tachi_research",
+    // Peer-publication broker read surface (#1016 S1): advisory, structurally
+    // read-only, self-asserted-local. Coordinate/operate/observe profiles reach
+    // it through this Observe bundle; standard/delegate need it on their
+    // curated allow-lists below to see it through the intersection.
+    "peer_query",
 ];
 
 pub const REMEMBER_TOOL_PATTERNS: &[&str] = &[
@@ -139,6 +144,8 @@ pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "vault_status",
     // GitHub facade (token checked at call time, not at list time)
     "tachi_gh",
+    // Peer-publication broker (#1016 S1): advisory read-only peer awareness.
+    "peer_query",
 ];
 
 /// Delegate profile allow-list. For worker agents spawned by tachi_dispatch.
@@ -168,4 +175,7 @@ pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_complete",
     // Canonical skill workflow facade (discover/run/bundle under action policy)
     "tachi_skill",
+    // Peer-publication broker (#1016 S1): a worker lane reads a peer's advisory
+    // presence to avoid colliding blind. Read-only; no write path exists.
+    "peer_query",
 ];

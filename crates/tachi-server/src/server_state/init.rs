@@ -168,7 +168,8 @@ impl MemoryServer {
                 + Self::vault_tool_router()
                 + Self::workflow_tool_router()
                 + Self::wiki_tool_router()
-                + Self::sandbox_tool_router(),
+                + Self::sandbox_tool_router()
+                + Self::peer_tool_router(),
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_activity_ms: Arc::new(std::sync::atomic::AtomicI64::new(
