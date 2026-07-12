@@ -379,6 +379,23 @@ async fn call_tool_via_server(
         .server
         .take()
         .expect("TestServer inner server already taken");
+    call_tool_on_server(inner, tool_name, arguments).await
+}
+
+/// Same as `call_tool_via_server`, but takes an owned `MemoryServer` directly
+/// instead of a `TestServer` wrapper. `MemoryServer` is `Clone` over shared
+/// `Arc`s (see `DbRuntime::global_store`), so callers that need to thread
+/// state across several sequential calls against the SAME underlying store
+/// (e.g. a write-then-read-back golden that proves a legacy alias and its
+/// canonical verb persist identical state, not just identical echoed
+/// responses) can `server.clone()` a `TestServer`'s inner server N times and
+/// drive each call through this function while the original `TestServer`
+/// still owns cleanup of the backing sqlite file.
+pub(crate) async fn call_tool_on_server(
+    inner: MemoryServer,
+    tool_name: &str,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
     let mut params = rmcp::model::CallToolRequestParams::new(tool_name.to_string());
     if let Some(arguments) = arguments.filter(|args| !args.is_empty()) {
         params = params.with_arguments(arguments);
