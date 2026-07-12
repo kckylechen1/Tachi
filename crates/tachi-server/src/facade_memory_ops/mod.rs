@@ -6,7 +6,7 @@
 
 mod briefing_ops;
 mod checkpoint_ops;
-mod consolidate_ops;
+pub(crate) mod consolidate_ops;
 mod evidence_format;
 mod pattern_feedback_ops;
 mod progress_ops;
@@ -173,37 +173,18 @@ pub(crate) async fn handle_tachi_memory(
                 return Ok(body);
             }
 
-            let text = params
-                .text
-                .clone()
-                .ok_or_else(|| "text is required when action='extract_facts'".to_string())?;
-            let save_params = TachiSaveParams {
-                text,
-                id: params.id.clone(),
-                kind: Some("extract_facts".to_string()),
-                title: params.title.clone(),
-                summary: params.summary.clone(),
-                path: params.path.clone(),
-                importance: params.importance,
-                category: params.category.clone(),
-                keywords: params.keywords.clone(),
-                entities: params.entities.clone(),
-                scope: params.scope.clone(),
-                project: params.project.clone(),
-                domain: params.domain.clone(),
-                retention_policy: params.retention_policy.clone(),
-                force: params.force,
-                references: Vec::new(),
-                topic: params.topic.clone(),
-                source: params.source.clone(),
-                valid_from: params.valid_from.clone(),
-                valid_until: params.valid_until.clone(),
-                metadata: params.metadata.clone(),
-                emit_continuity: false,
-                files: params.files.clone(),
-                format: None,
-            };
-            let body = handle_tachi_save(server, save_params).await?;
+            // #1043 D1: call the real atomizer directly — the SAME function
+            // (`pipeline_ops::handle_extract_facts`) the standalone
+            // `extract_facts` tool calls, with the same `ExtractFactsParams`
+            // shape. Previously this routed through `handle_tachi_save`'s
+            // generic kind-dispatch, an indirection that (a) diverged from
+            // the standalone tool's call path and (b) made this action
+            // impossible to distinguish from a plain single-entry save at
+            // the call site. No behavior-affecting field is dropped: the
+            // save-router hop only ever forwarded text/source/project for
+            // this kind.
+            let extract_params = extract_facts_params_from_facade(&params)?;
+            let body = crate::pipeline_ops::handle_extract_facts(server, extract_params).await?;
             if wants_json(params.format.as_deref()) {
                 return json_string(&parse_json_or_empty(body));
             }
@@ -413,6 +394,29 @@ fn should_forward_facade_read(action: &str) -> bool {
     )
 }
 
+/// #1043 D1: build the `ExtractFactsParams` the facade hands to the real
+/// atomizer (`pipeline_ops::handle_extract_facts`). Split into its own
+/// function so a test can assert this produces the same params a client
+/// would get by calling the standalone `extract_facts` tool directly with
+/// the same text/source/project — same shape in, same real pipeline, same
+/// shape out.
+fn extract_facts_params_from_facade(
+    params: &TachiMemoryParams,
+) -> Result<ExtractFactsParams, String> {
+    let text = params
+        .text
+        .clone()
+        .ok_or_else(|| "text is required when action='extract_facts'".to_string())?;
+    Ok(ExtractFactsParams {
+        text,
+        source: params
+            .source
+            .clone()
+            .unwrap_or_else(|| "extraction".to_string()),
+        project: params.project.clone(),
+    })
+}
+
 // Re-export pub(crate) items that external modules reference.
 pub(crate) use checkpoint_ops::{
     capture_latest_claude_jsonl_checkpoint, claude_jsonl_passive_watcher_status,
@@ -420,7 +424,7 @@ pub(crate) use checkpoint_ops::{
 
 #[cfg(test)]
 mod tests {
-    use super::should_forward_facade_read;
+    use super::*;
 
     #[test]
     fn facade_read_actions_include_briefing_forwarding() {
@@ -458,5 +462,72 @@ mod tests {
                 "{action} should keep its write/state-specific forwarding path"
             );
         }
+    }
+
+    /// #1043 D1 judgement test 3: the facade action and the standalone
+    /// `extract_facts` tool must construct byte-identical `ExtractFactsParams`
+    /// for the same caller-supplied fixture — same shape in, same real
+    /// atomizer function (`pipeline_ops::handle_extract_facts`) called, same
+    /// shape out. No network call needed: this proves isomorphism at the
+    /// param-construction boundary, which is the only place the two call
+    /// paths could still diverge post-#1043.
+    #[test]
+    fn extract_facts_facade_params_match_standalone_tool_params() {
+        let text = "Redis and Postgres now share a connection pool cap of 200.";
+
+        // No source/project override: standalone tool falls back to its
+        // serde default ("extraction"); facade must match.
+        let standalone: ExtractFactsParams =
+            serde_json::from_value(serde_json::json!({ "text": text }))
+                .expect("standalone extract_facts params deserialize");
+        let facade_params: TachiMemoryParams = serde_json::from_value(serde_json::json!({
+            "action": "extract_facts",
+            "text": text,
+        }))
+        .expect("facade params deserialize");
+        let via_facade = extract_facts_params_from_facade(&facade_params)
+            .expect("facade extract_facts params build");
+        assert_eq!(
+            serde_json::to_value(&standalone).unwrap(),
+            serde_json::to_value(&via_facade).unwrap(),
+            "facade and standalone extract_facts must construct identical \
+             ExtractFactsParams for the same fixture text"
+        );
+
+        // Explicit source/project override: both must honor it identically.
+        let standalone_with_opts: ExtractFactsParams = serde_json::from_value(serde_json::json!({
+            "text": text,
+            "source": "cursor",
+            "project": "sigil",
+        }))
+        .expect("standalone extract_facts params deserialize (with opts)");
+        let facade_with_opts: TachiMemoryParams = serde_json::from_value(serde_json::json!({
+            "action": "extract_facts",
+            "text": text,
+            "source": "cursor",
+            "project": "sigil",
+        }))
+        .expect("facade params deserialize (with opts)");
+        let via_facade_with_opts = extract_facts_params_from_facade(&facade_with_opts)
+            .expect("facade extract_facts params build (with opts)");
+        assert_eq!(
+            serde_json::to_value(&standalone_with_opts).unwrap(),
+            serde_json::to_value(&via_facade_with_opts).unwrap(),
+            "facade and standalone extract_facts must honor an explicit \
+             source/project override identically"
+        );
+    }
+
+    #[test]
+    fn extract_facts_facade_requires_text() {
+        let facade_params: TachiMemoryParams = serde_json::from_value(serde_json::json!({
+            "action": "extract_facts",
+        }))
+        .expect("facade params deserialize (no text)");
+        let result = extract_facts_params_from_facade(&facade_params);
+        assert!(
+            result.is_err(),
+            "extract_facts facade action must reject a missing text field"
+        );
     }
 }
