@@ -649,6 +649,7 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             actor TEXT NOT NULL CHECK (length(trim(actor)) > 0),
             evidence_ref TEXT NOT NULL CHECK (length(trim(evidence_ref)) > 0),
             created_at TEXT NOT NULL DEFAULT '',
+            insertion_seq INTEGER NOT NULL,
             CHECK (
                 (verdict IS NOT NULL AND length(trim(verdict)) > 0 AND not_required_reason IS NULL)
                 OR

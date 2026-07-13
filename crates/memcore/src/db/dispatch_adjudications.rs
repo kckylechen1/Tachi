@@ -48,6 +48,7 @@ pub struct DispatchAdjudication {
     pub actor: String,
     pub evidence_ref: String,
     pub created_at: String,
+    pub insertion_seq: i64,
     pub signatures: Vec<DispatchAdjudicationSignature>,
 }
 
@@ -75,20 +76,14 @@ pub fn append_dispatch_adjudication(
     // propagation), so a mid-append failure atomically disappears the entire
     // event, parent row included.
     let tx = conn.unchecked_transaction()?;
-    if let Some(existing) = get_by_event_key(&tx, &new.event_key)? {
-        // Idempotent replay: return the original row without writing. The
-        // transaction held only a SELECT; dropping it without commit is a
-        // harmless rollback.
-        return Ok(existing);
-    }
-    // FIX-3 (#1035): orphan-verdict guard. The adjudication table carries no
-    // FK to `dispatch_outcomes` (the portable-kernel build creates both
-    // tables without one), so without this check a caller could mint a
-    // judgment against a hallucinated `outcome_id`, producing an orphan row
-    // that aggregation queries then silently inflate. The existence check
-    // runs INSIDE the transaction so a missing parent rolls back the entire
-    // append — the SELECT precedes the INSERT, so on rejection no row is
-    // written and the transaction harmlessly rolls back on drop.
+
+    // FIX-1 (#1035 round 4): outcome existence check runs BEFORE the
+    // event_key short-circuit. Previously the short-circuit came first, so
+    // a replay carrying a valid event_key but an UNKNOWN outcome_id
+    // returned the old event instead of erroring — the existence check was
+    // unreachable on the replay path. Checking existence first closes that
+    // bypass. The check also runs INSIDE the transaction so a missing
+    // parent rolls back the entire append.
     let parent_exists: Option<i64> = tx
         .query_row(
             "SELECT 1 FROM dispatch_outcomes WHERE outcome_id = ?1",
@@ -103,13 +98,41 @@ pub fn append_dispatch_adjudication(
             new.outcome_id
         )));
     }
+
+    if let Some(existing) = get_by_event_key(&tx, &new.event_key)? {
+        // FIX-1 (#1035 round 4): a collision guard. The event_key hit must
+        // belong to the SAME outcome the caller requested — an event_key
+        // tied to a different outcome_id is misuse or a collision, not an
+        // idempotent replay. The transaction held only SELECTs; dropping it
+        // without commit is a harmless rollback.
+        if existing.outcome_id != new.outcome_id {
+            return Err(MemoryError::InvalidArg(
+                "event_key collision or misuse: existing event belongs to a different outcome"
+                    .to_string(),
+            ));
+        }
+        // Idempotent replay: return the original row without writing.
+        return Ok(existing);
+    }
+
+    // FIX-3 (#1035 round 4): durable per-outcome insertion sequence. The
+    // hidden rowid is not durable under VACUUM INTO (SQLite may recompact
+    // and reorder it), so it cannot serve as a ledger ordering. An explicit
+    // per-outcome counter assigned inside the transaction is stable across
+    // vacuum/backup cycles.
+    let insertion_seq: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(insertion_seq), 0) + 1 FROM dispatch_adjudications WHERE outcome_id = ?1",
+        params![new.outcome_id],
+        |row| row.get(0),
+    )?;
+
     let created_at = normalize_utc_iso_or_now("");
     tx.execute(
         "INSERT INTO dispatch_adjudications
-         (adjudication_id, outcome_id, event_key, verdict, not_required_reason, actor, evidence_ref, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         (adjudication_id, outcome_id, event_key, verdict, not_required_reason, actor, evidence_ref, created_at, insertion_seq)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![new.adjudication_id, new.outcome_id, new.event_key, new.verdict,
-            new.not_required_reason, new.actor, new.evidence_ref, created_at],
+            new.not_required_reason, new.actor, new.evidence_ref, created_at, insertion_seq],
     )?;
     for signature in &new.signatures {
         tx.execute(
@@ -134,14 +157,15 @@ pub fn list_adjudications_for_outcome(
     conn: &Connection,
     outcome_id: &str,
 ) -> Result<Vec<DispatchAdjudication>, MemoryError> {
-    // Event order = insertion order. `created_at` alone ties when two events
-    // land in the same millisecond, and `adjudication_id` is a random UUID —
-    // a coin-flip tie-break that made "which event came first" flip on ~1/3
-    // of runs (caught by kill-test 5). `rowid` is monotonically assigned on
-    // this append-only table, so it is the honest secondary key.
+    // FIX-3 (#1035 round 4): event order = durable per-outcome insertion
+    // sequence, NOT the hidden rowid. `rowid` is monotonically assigned on
+    // this append-only table but is NOT durable under VACUUM INTO — SQLite
+    // may recompact and reorder it. An explicit `insertion_seq` counter
+    // assigned inside the append transaction is stable across vacuum/backup
+    // cycles and is the honest ledger ordering.
     let mut statement = conn.prepare(
         "SELECT adjudication_id, outcome_id, event_key, verdict, not_required_reason, actor, evidence_ref, created_at
-         FROM dispatch_adjudications WHERE outcome_id = ?1 ORDER BY created_at, rowid",
+         FROM dispatch_adjudications WHERE outcome_id = ?1 ORDER BY insertion_seq",
     )?;
     let ids = statement
         .query_map([outcome_id], |row| row.get::<_, String>(0))?
@@ -180,10 +204,10 @@ fn get_by_id(
     adjudication_id: &str,
 ) -> Result<DispatchAdjudication, MemoryError> {
     let event = conn.query_row(
-        "SELECT adjudication_id, outcome_id, event_key, verdict, not_required_reason, actor, evidence_ref, created_at
+        "SELECT adjudication_id, outcome_id, event_key, verdict, not_required_reason, actor, evidence_ref, created_at, insertion_seq
          FROM dispatch_adjudications WHERE adjudication_id = ?1",
         [adjudication_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
     )?;
     let mut statement = conn.prepare(
         "SELECT signature_id, evidence_ref, resolved FROM dispatch_adjudication_signatures WHERE adjudication_id = ?1 ORDER BY signature_id",
@@ -206,6 +230,7 @@ fn get_by_id(
         actor: event.5,
         evidence_ref: event.6,
         created_at: event.7,
+        insertion_seq: event.8,
         signatures,
     })
 }
@@ -346,8 +371,8 @@ mod tests {
             assert!(conn
                 .execute(
                     "INSERT INTO dispatch_adjudications
-                     (adjudication_id, outcome_id, event_key, verdict, not_required_reason, actor, evidence_ref, created_at)
-                      VALUES (?1, 'outcome', ?2, ?3, ?4, ?5, 'evidence', 'now')",
+                     (adjudication_id, outcome_id, event_key, verdict, not_required_reason, actor, evidence_ref, created_at, insertion_seq)
+                      VALUES (?1, 'outcome', ?2, ?3, ?4, ?5, 'evidence', 'now', 1)",
                     params![uuid::Uuid::new_v4().to_string(), uuid::Uuid::new_v4().to_string(), verdict, reason, actor],
                 )
                 .is_err());
@@ -515,5 +540,99 @@ mod tests {
             )
             .unwrap();
         assert_eq!(sig_count, 0, "no orphan signature rows either");
+    }
+
+    /// FIX-1 (#1035 round 4): a replay carrying a VALID event_key but an
+    /// UNKNOWN outcome_id must be rejected — NOT silently return the old
+    /// event. Pre-fix, `get_by_event_key` short-circuited BEFORE the
+    /// outcome existence check, so the replay path never validated
+    /// outcome_id at all. RED on pre-round-4 code: the second append
+    /// returns `Ok(old_event)` instead of `Err(InvalidArg)`.
+    #[test]
+    fn replay_with_unknown_outcome_id_is_rejected_not_short_circuited() {
+        let conn = open_conn();
+        // First: append a legitimate event for outcome-1.
+        let first = append_dispatch_adjudication(&conn, &event("event-replay-bypass")).unwrap();
+
+        // Second: SAME event_key but an outcome_id that does not exist.
+        let mut replay = event("event-replay-bypass");
+        replay.outcome_id = "outcome-that-does-not-exist".to_string();
+
+        let err = append_dispatch_adjudication(&conn, &replay)
+            .expect_err("a replay with an unknown outcome_id must not short-circuit");
+        assert!(
+            err.to_string().contains("unknown outcome_id"),
+            "error must name the unknown outcome_id, not return the old event: {err}"
+        );
+
+        // The original event is untouched.
+        let rows = list_adjudications_for_outcome(&conn, "outcome-1").unwrap();
+        assert_eq!(rows.len(), 1, "original event still the only row");
+        assert_eq!(rows[0].adjudication_id, first.adjudication_id);
+    }
+
+    /// FIX-1 (#1035 round 4): a replay carrying a VALID event_key and a
+    /// DIFFERENT but real outcome_id must be rejected as a collision — the
+    /// event_key is bound to a specific outcome. Pre-fix, the short-circuit
+    /// returned the old event with no outcome_id comparison. RED on
+    /// pre-round-4 code: the second append returns `Ok(old_event)` instead
+    /// of `Err(InvalidArg)`.
+    #[test]
+    fn replay_with_different_real_outcome_id_is_collision() {
+        let conn = open_conn();
+        // First: append for outcome-1.
+        append_dispatch_adjudication(&conn, &event("event-collision")).unwrap();
+
+        // Second: SAME event_key but outcome-nr (which DOES exist).
+        let mut replay = event("event-collision");
+        replay.outcome_id = "outcome-nr".to_string();
+
+        let err = append_dispatch_adjudication(&conn, &replay)
+            .expect_err("an event_key bound to a different outcome must be rejected");
+        assert!(
+            err.to_string().contains("collision"),
+            "error must name the collision, not return the old event: {err}"
+        );
+
+        // No row landed for outcome-nr.
+        let rows_nr = list_adjudications_for_outcome(&conn, "outcome-nr").unwrap();
+        assert!(rows_nr.is_empty(), "no adjudication for outcome-nr");
+        // outcome-1 still has exactly its one event.
+        let rows_1 = list_adjudications_for_outcome(&conn, "outcome-1").unwrap();
+        assert_eq!(rows_1.len(), 1);
+    }
+
+    /// FIX-3 (#1035 round 4): insertion_seq is a durable per-outcome
+    /// counter. Three events for the same outcome get insertion_seq 1, 2,
+    /// 3, and `list_adjudications_for_outcome` returns them in that order.
+    /// RED on pre-round-4 code: `insertion_seq` column does not exist.
+    #[test]
+    fn insertion_seq_orders_events_per_outcome() {
+        let conn = open_conn();
+
+        let mut e1 = event("seq-1");
+        e1.verdict = Some("accepted".to_string());
+        let row1 = append_dispatch_adjudication(&conn, &e1).unwrap();
+        assert_eq!(row1.insertion_seq, 1, "first event gets insertion_seq 1");
+
+        let mut e2 = event("seq-2");
+        e2.verdict = Some("rejected".to_string());
+        let row2 = append_dispatch_adjudication(&conn, &e2).unwrap();
+        assert_eq!(row2.insertion_seq, 2, "second event gets insertion_seq 2");
+
+        let mut e3 = event("seq-3");
+        e3.verdict = Some("accepted".to_string());
+        let row3 = append_dispatch_adjudication(&conn, &e3).unwrap();
+        assert_eq!(row3.insertion_seq, 3, "third event gets insertion_seq 3");
+
+        // List returns them in insertion_seq order.
+        let history = list_adjudications_for_outcome(&conn, "outcome-1").unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].insertion_seq, 1);
+        assert_eq!(history[1].insertion_seq, 2);
+        assert_eq!(history[2].insertion_seq, 3);
+        assert_eq!(history[0].verdict.as_deref(), Some("accepted"));
+        assert_eq!(history[1].verdict.as_deref(), Some("rejected"));
+        assert_eq!(history[2].verdict.as_deref(), Some("accepted"));
     }
 }

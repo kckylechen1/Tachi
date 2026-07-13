@@ -587,12 +587,17 @@ pub(crate) fn record_posthoc_adjudication(
 /// content — the set of fields whose meaning defines the event. Two calls
 /// with the same representation are the SAME adjudication (a transport
 /// retry) and must derive the same `event_key`; a changed field (verdict,
-/// reason, adjudicator, evidence, or the resolved signature-id set) is a
+/// reason, adjudicator, evidence, or any resolved signature field) is a
 /// REAL correction and derives a new key so the append preserves history.
 ///
-/// Signature ids are sorted before joining so the same SET in a different
-/// caller order is still the same event. `\x1F` (ASCII unit separator) is
-/// the stable delimiter — it cannot appear in a legal field value.
+/// FIX-2 (#1035 round 4): the representation is a serde_json-serialized
+/// ordered array covering every identity field: outcome_id, verdict,
+/// not_required_reason, adjudicator, evidence_ref, and the full per-
+/// signature triples [id, evidence_ref, resolved] sorted by signature_id.
+/// JSON string escaping eliminates the `\x1F` delimiter-collision risk
+/// (a field value containing that byte could previously forge a match),
+/// and including evidence_ref + resolved per signature means a correction
+/// that only changed those fields is no longer silently de-duplicated.
 fn posthoc_payload_repr(
     outcome_id: &str,
     verdict: Option<&str>,
@@ -601,14 +606,21 @@ fn posthoc_payload_repr(
     evidence_ref: &str,
     signatures: &[memcore::DispatchAdjudicationSignature],
 ) -> String {
-    let mut sig_ids: Vec<&str> = signatures.iter().map(|s| s.signature_id.as_str()).collect();
-    sig_ids.sort_unstable();
-    format!(
-        "{outcome_id}\x1F{verdict_v}\x1F{reason_v}\x1F{adjudicator}\x1F{evidence_ref}\x1F{sigs}",
-        verdict_v = verdict.unwrap_or(""),
-        reason_v = not_required_reason.unwrap_or(""),
-        sigs = sig_ids.join(","),
-    )
+    let mut sorted: Vec<&memcore::DispatchAdjudicationSignature> = signatures.iter().collect();
+    sorted.sort_by_key(|s| s.signature_id.as_str());
+    let sig_triples: Vec<Value> = sorted
+        .iter()
+        .map(|s| json!([s.signature_id, s.evidence_ref, s.resolved]))
+        .collect();
+    serde_json::to_string(&json!([
+        outcome_id,
+        verdict,
+        not_required_reason,
+        adjudicator,
+        evidence_ref,
+        sig_triples,
+    ]))
+    .expect("payload representation must serialize")
 }
 
 /// Resolve `(role, vendor, model)` for the outcome row from the completion's
@@ -2457,5 +2469,174 @@ mod tests {
         );
         assert_eq!(rows_after_3[0].verdict.as_deref(), Some("accepted"));
         assert_eq!(rows_after_3[1].verdict.as_deref(), Some("rejected"));
+    }
+
+    // ─── #1035 round 4 FIX-2: per-signature identity completeness ──────────
+
+    /// Helper: a SignatureRecordParams with a custom evidence_ref.
+    fn sig_with_evidence(id: &str, evidence_ref: &str) -> SignatureRecordParams {
+        SignatureRecordParams {
+            signature: id.to_string(),
+            severity: None,
+            evidence_ref: Some(evidence_ref.to_string()),
+            resolved: false,
+            role: None,
+            vendor: None,
+        }
+    }
+
+    /// Helper: a SignatureRecordParams with a custom resolved flag.
+    fn sig_with_resolved(id: &str, resolved: bool) -> SignatureRecordParams {
+        SignatureRecordParams {
+            signature: id.to_string(),
+            severity: None,
+            evidence_ref: Some("review-1".to_string()),
+            resolved,
+            role: None,
+            vendor: None,
+        }
+    }
+
+    /// FIX-2 (#1035 round 4): two adjudicate calls with the SAME signature
+    /// id but a DIFFERENT per-signature evidence_ref must produce TWO
+    /// events — the evidence_ref is part of the event identity. Pre-fix,
+    /// only the signature id was hashed, so the second call derived the
+    /// same event_key and was silently de-duplicated (1 event). RED on
+    /// pre-round-4 code: the second call short-circuits idempotently and
+    /// `rows.len()` is 1, not 2.
+    #[test]
+    fn posthoc_same_id_different_evidence_ref_produces_two_events() {
+        let (server, _dir) = test_server();
+        let outcome_id = record_outcome_for_adjudicate(&server);
+
+        let adj = AdjudicationParams {
+            verdict: Some("accepted".to_string()),
+            not_required_reason: None,
+            adjudicator: "leader".to_string(),
+            evidence_ref: Some("review-fix2".to_string()),
+        };
+
+        // Call 1: signature with evidence_ref "review-a".
+        let s1 = record_posthoc_adjudication(
+            &server,
+            Some(&outcome_id),
+            None,
+            &adj,
+            &[sig_with_evidence("fake_security_fix", "review-a")],
+            None,
+            None,
+        );
+        assert_eq!(s1["recorded"], json!(true));
+
+        // Call 2: SAME id, DIFFERENT evidence_ref "review-b".
+        let s2 = record_posthoc_adjudication(
+            &server,
+            Some(&outcome_id),
+            None,
+            &adj,
+            &[sig_with_evidence("fake_security_fix", "review-b")],
+            None,
+            None,
+        );
+        assert_eq!(s2["recorded"], json!(true));
+
+        let rows = adjudication_outcome_rows(&server, &outcome_id);
+        assert_eq!(
+            rows.len(),
+            2,
+            "different per-signature evidence_ref must produce two events, not one"
+        );
+        assert_eq!(
+            rows[0].signatures[0].evidence_ref.as_deref(),
+            Some("review-a")
+        );
+        assert_eq!(
+            rows[1].signatures[0].evidence_ref.as_deref(),
+            Some("review-b")
+        );
+    }
+
+    /// FIX-2 (#1035 round 4): two adjudicate calls with the SAME signature
+    /// id but a DIFFERENT resolved flag must produce TWO events. Pre-fix,
+    /// resolved was not part of the payload, so a correction that only
+    /// flipped resolved was silently de-duplicated. RED on pre-round-4
+    /// code: the second call short-circuits and `rows.len()` is 1.
+    #[test]
+    fn posthoc_same_id_different_resolved_produces_two_events() {
+        let (server, _dir) = test_server();
+        let outcome_id = record_outcome_for_adjudicate(&server);
+
+        let adj = AdjudicationParams {
+            verdict: Some("accepted".to_string()),
+            not_required_reason: None,
+            adjudicator: "leader".to_string(),
+            evidence_ref: Some("review-fix2b".to_string()),
+        };
+
+        // Call 1: signature resolved=false.
+        let s1 = record_posthoc_adjudication(
+            &server,
+            Some(&outcome_id),
+            None,
+            &adj,
+            &[sig_with_resolved("fake_security_fix", false)],
+            None,
+            None,
+        );
+        assert_eq!(s1["recorded"], json!(true));
+
+        // Call 2: SAME id, resolved=true.
+        let s2 = record_posthoc_adjudication(
+            &server,
+            Some(&outcome_id),
+            None,
+            &adj,
+            &[sig_with_resolved("fake_security_fix", true)],
+            None,
+            None,
+        );
+        assert_eq!(s2["recorded"], json!(true));
+
+        let rows = adjudication_outcome_rows(&server, &outcome_id);
+        assert_eq!(
+            rows.len(),
+            2,
+            "different per-signature resolved must produce two events"
+        );
+        assert!(!rows[0].signatures[0].resolved, "first event unresolved");
+        assert!(rows[1].signatures[0].resolved, "second event resolved");
+    }
+
+    /// FIX-2 (#1035 round 4): two adjudicate calls with IDENTICAL content
+    /// (including identical per-signature evidence_ref and resolved) still
+    /// produce exactly ONE event — the fix does not break idempotency for
+    /// genuine transport retries.
+    #[test]
+    fn posthoc_identical_content_remains_idempotent_round4() {
+        let (server, _dir) = test_server();
+        let outcome_id = record_outcome_for_adjudicate(&server);
+
+        let adj = AdjudicationParams {
+            verdict: Some("accepted".to_string()),
+            not_required_reason: None,
+            adjudicator: "leader".to_string(),
+            evidence_ref: Some("review-fix2c".to_string()),
+        };
+        let sigs = [sig_with_evidence("fake_security_fix", "review-identical")];
+
+        let s1 =
+            record_posthoc_adjudication(&server, Some(&outcome_id), None, &adj, &sigs, None, None);
+        assert_eq!(s1["recorded"], json!(true));
+
+        let s2 =
+            record_posthoc_adjudication(&server, Some(&outcome_id), None, &adj, &sigs, None, None);
+        assert_eq!(s2["recorded"], json!(true));
+
+        let rows = adjudication_outcome_rows(&server, &outcome_id);
+        assert_eq!(
+            rows.len(),
+            1,
+            "identical content including per-signature fields must remain idempotent"
+        );
     }
 }
