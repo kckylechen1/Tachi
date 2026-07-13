@@ -244,7 +244,7 @@ fn collect_snapshot_inner(
         fresh_provider_probe_cache.map(|cache| cache.rotation_groups.as_slice()),
     );
     let health_score = status_health::health_score_from_deductions(&health_deductions);
-    let disk = disk::collect_disk_status();
+    let disk = disk::collect_disk_status(global_db_path);
 
     StatusSnapshot {
         daemon,

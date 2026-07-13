@@ -71,6 +71,7 @@ fn empty_disk_status() -> disk::DiskStatus {
     disk::DiskStatus {
         worktrees_root: volume.clone(),
         shared_target_dir: volume,
+        top_consumers: Vec::new(),
     }
 }
 

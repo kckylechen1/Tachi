@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 use tachi_bootstrap::cli::{CleanAction, WorktreeAction};
+
+use crate::exec_env_reaper::ReapOptions;
 use tachi_clean::sweep::SweepOptions;
 use tachi_clean::tachi_clean::TachiCleanOptions;
 use tachi_clean::target_clean::TargetCleanOptions;
@@ -379,6 +381,24 @@ fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
                 output: output_format(json),
             })
         }
+        CleanAction::Orphans {
+            root,
+            max_age_days,
+            force,
+            dry_run: _,
+            json,
+        } => run_orphan_reap_cli(
+            ReapOptions {
+                roots: if root.is_empty() {
+                    crate::exec_env_reaper::default_orphan_roots()
+                } else {
+                    root
+                },
+                max_age_days,
+                force,
+            },
+            output_format(json),
+        ),
         CleanAction::Tachi {
             home,
             force,
@@ -392,9 +412,115 @@ fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
     }
 }
 
+/// CLI wrapper for the orphan build-artifact reaper (#894 S2b).
+///
+/// # `--force` is REFUSED. This command reports; it does not delete.
+///
+/// Unlike the rest of the `clean` family, `--force` here does not mean "now do it": an
+/// adversarial audit (`codex-g6f99`) found the delete path unsafe, so
+/// [`crate::exec_env_reaper::certify_destructive`] rejects the request — **before this
+/// function opens the ledger, stats a directory, or reads the process table** — and the
+/// CLI prints the reason and exits non-zero. A destructive request that quietly
+/// degraded into a dry run would be worse than either: the operator would read
+/// "reclaimed 0 bytes" as "there was nothing to reclaim".
+///
+/// Without `--force` it does what it has always done, and that is now the whole product:
+/// a full accounting of the dead build artifacts on this machine — where they are, how
+/// big, how old, who (if anyone) holds them, and everything the scan could not see.
+///
+/// An unopenable ledger is a hard error rather than a warning, because the byte report
+/// is grouped out of that ledger and a report that silently loses half its history is
+/// the off-the-books reclaim #1029 called out, in reverse.
+///
+/// Exit status comes from [`crate::exec_env_reaper::reap_exit_status`]: a run whose scan
+/// left `incomplete-or-error` units (a named root that is not there, a subtree `read_dir`
+/// could not open) or whose protected set could not be fully resolved (`ps` unavailable,
+/// `HOME` unset) exits non-zero, because it cannot honestly say it saw its whole scope.
+fn run_orphan_reap_cli(opts: ReapOptions, output: OutputFormat) -> Result<(), String> {
+    // The first gate, above everything: no ledger, no filesystem, no process table.
+    if let Err(refusal) = crate::exec_env_reaper::certify_destructive(opts.force) {
+        crate::exec_env_reaper::emit_destructive_refusal(&refusal, output)?;
+        return Err(refusal.to_string());
+    }
+
+    let global_db = crate::path_utils::tachi_home()
+        .join("global")
+        .join("memory.db");
+    if let Some(parent) = global_db.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let db_str = global_db
+        .to_str()
+        .ok_or("global db path is not valid UTF-8")?;
+    let mut store = memcore::MemoryStore::open_with_label(db_str, "global")
+        .map_err(|err| format!("exec_env resource ledger unavailable: {err}"))?;
+
+    // The protected set's sources are read from the process environment HERE — at the
+    // edge, once — and handed to the reaper as a value. The reaper itself reads no
+    // ambient state, which is what keeps "HOME is unset" a property of one run instead of
+    // a property of the process (see `ProtectionSources`).
+    let sources = crate::exec_env_reaper::ProtectionSources::from_process_env();
+
+    // `force` is already impossible here (refused above), so this is always the
+    // report-only path; the `Err` arm is the second fence, not a live branch.
+    let report = crate::exec_env_reaper::run_orphan_reap(
+        store.connection_mut(),
+        &opts,
+        &sources,
+        std::time::SystemTime::now(),
+        &crate::exec_env_reaper::lsof_holder_probe,
+    )
+    .map_err(|refusal| refusal.to_string())?;
+    crate::exec_env_reaper::emit_reap_report(&report, output)?;
+    // The report is emitted first, THEN the exit status is derived from it — an
+    // incomplete run must still show the operator what it did see. `reap_exit_status`
+    // is the single place that rule lives (sol's frozen accounting invariant: a run
+    // that could not examine its whole authorized scope may not exit 0, `--force`
+    // waives it no more than any other gate).
+    crate::exec_env_reaper::reap_exit_status(&report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `tachi clean orphans --force` must exit NON-ZERO with the refusal, and must not
+    /// reach the ledger or the filesystem on its way out (#894 S2b; audit `codex-g6f99`).
+    ///
+    /// The assertion is on *which* error comes back, and that is deliberate: this run
+    /// names a root that does not exist, so a reaper whose gate failed to fire would ALSO
+    /// return an `Err` — "scan incomplete". A test that only asserted `is_err()` would
+    /// pass with the seal removed. Only the refusal's own words prove the gate fired.
+    #[test]
+    fn orphan_reap_cli_refuses_force_with_a_nonzero_exit() {
+        let err = run_orphan_reap_cli(
+            ReapOptions {
+                roots: vec![PathBuf::from(
+                    "/tachi-reaper-this-root-must-never-be-scanned",
+                )],
+                max_age_days: 7,
+                force: true,
+            },
+            OutputFormat::Text,
+        )
+        .expect_err("--force must be refused, not merely downgraded to a dry run");
+
+        assert!(
+            err.contains("report-only") && err.contains("not certified"),
+            "the non-zero exit must carry the refusal, not some incidental error: {err}"
+        );
+        assert!(
+            err.contains("codex-g6f99"),
+            "and it must name the audit that sheathed it: {err}"
+        );
+    }
+
+    // NOTE: there is deliberately no CLI-level test of the *report* path here. It would
+    // open the real global ledger under `tachi_home()`, and a unit test has no business
+    // writing to the operator's `~/.tachi`. The report path is covered where it can be
+    // driven against a temp store: `exec_env_reaper`'s own tests, through the same sealed
+    // entry point this CLI calls. The refusal above needs no such fixture — it returns
+    // before the ledger is opened, which is itself part of the contract.
 
     #[test]
     fn clean_target_defaults_to_dry_run_and_json_output() {

@@ -3,6 +3,11 @@ use std::path::PathBuf;
 
 pub const DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS: u64 = 7;
 
+/// Staleness gate for the orphan build-artifact reaper (#894 S2b). Same 7 days
+/// as the worktree sweep: a build target nothing has touched in a week is not
+/// part of a live build.
+pub const DEFAULT_ORPHAN_REAP_MAX_AGE_DAYS: u64 = 7;
+
 /// Machine-local execution profile. This is separate from agent dispatch
 /// profiles: it controls the highest side-effect level allowed on this host.
 #[derive(Subcommand, Debug, Clone)]
@@ -233,6 +238,28 @@ pub enum CleanAction {
         #[arg(long, default_value_t = DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS)]
         max_age_days: u64,
         /// Remove candidates with git worktree remove --force.
+        #[arg(long, conflicts_with = "dry_run")]
+        force: bool,
+        /// Preview only (default).
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reap orphaned build artifacts (dead cargo targets / cargo homes) that no
+    /// process holds and no lease binds, booking every freed byte in the
+    /// exec_env resource ledger (#894 S2b).
+    Orphans {
+        /// Root to scan. Repeatable; defaults to TMPDIR, /private/tmp, temp_dir
+        /// and ~/.cache.
+        #[arg(long, value_name = "PATH")]
+        root: Vec<PathBuf>,
+        /// Minimum age in days before an artifact is considered orphaned.
+        #[arg(long, default_value_t = DEFAULT_ORPHAN_REAP_MAX_AGE_DAYS)]
+        max_age_days: u64,
+        /// Actually delete eligible artifacts. Without this flag, only prints
+        /// the plan (and writes nothing to the ledger).
         #[arg(long, conflicts_with = "dry_run")]
         force: bool,
         /// Preview only (default).

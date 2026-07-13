@@ -33,25 +33,43 @@ pub(crate) struct DiskVolumeStatus {
     pub(crate) error: Option<String>,
 }
 
+/// A single big consumer from the exec_env resource ledger (#894 S2a/S2b).
+/// Informational only — it answers "what is eating the disk" next to the
+/// free-space numbers, and never moves the health score.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct ResourceConsumer {
+    pub(crate) path: String,
+    pub(crate) kind: String,
+    pub(crate) bytes: i64,
+    pub(crate) state: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct DiskStatus {
     pub(crate) worktrees_root: DiskVolumeStatus,
     pub(crate) shared_target_dir: DiskVolumeStatus,
+    /// Biggest still-live resources on the books, largest first (top 3).
+    pub(crate) top_consumers: Vec<ResourceConsumer>,
 }
+
+/// How many consumers `tachi status` surfaces.
+pub(crate) const TOP_CONSUMERS: usize = 3;
 
 /// `(free_bytes, total_bytes)` for the filesystem holding `path`, or an
 /// error string. Injectable seam for tests.
 pub(crate) type DiskUsageProbe = dyn Fn(&Path) -> Result<(u64, u64), String>;
 
 /// Real collection: resolves the managed worktrees root and shared cargo
-/// target dir (both may not exist on disk yet) and probes each with
-/// `statvfs`.
-pub(crate) fn collect_disk_status() -> DiskStatus {
-    collect_disk_status_with_probe(
+/// target dir (both may not exist on disk yet), probes each with `statvfs`,
+/// and reads the top byte consumers out of the resource ledger.
+pub(crate) fn collect_disk_status(global_db_path: &Path) -> DiskStatus {
+    let mut status = collect_disk_status_with_probe(
         tachi_clean::wt_open::default_worktrees_root(),
         tachi_clean::wt_open::default_shared_cargo_target_dir(),
         &real_disk_usage,
-    )
+    );
+    status.top_consumers = collect_top_consumers(global_db_path, TOP_CONSUMERS);
+    status
 }
 
 pub(crate) fn collect_disk_status_with_probe(
@@ -62,7 +80,42 @@ pub(crate) fn collect_disk_status_with_probe(
     DiskStatus {
         worktrees_root: probe_volume("worktrees_root", worktrees_root, probe),
         shared_target_dir: probe_volume("shared_target_dir", shared_target_dir, probe),
+        top_consumers: Vec::new(),
     }
+}
+
+/// Top byte consumers still on disk according to the resource ledger.
+///
+/// Fail-open by design: this is an informational line on `tachi status`. A DB
+/// that cannot be opened (or predates the resource ledger) yields an empty list
+/// — never an error and never a health deduction. `reclaimed` rows are excluded:
+/// their bytes are gone, and reporting freed bytes as a "consumer" is the exact
+/// row-vs-bytes confusion #1029 called out.
+pub(crate) fn collect_top_consumers(global_db_path: &Path, limit: usize) -> Vec<ResourceConsumer> {
+    let Some(path_str) = global_db_path.to_str() else {
+        return Vec::new();
+    };
+    let Ok(store) = memcore::MemoryStore::open_read_only(path_str) else {
+        return Vec::new();
+    };
+    let Ok(resources) = memcore::list_resources(store.connection(), None, None) else {
+        return Vec::new();
+    };
+    let mut consumers: Vec<ResourceConsumer> = resources
+        .into_iter()
+        .filter(|resource| resource.state != memcore::ResourceState::Reclaimed)
+        .filter_map(|resource| {
+            resource.bytes.map(|bytes| ResourceConsumer {
+                path: resource.path,
+                kind: resource.kind.as_str().to_string(),
+                bytes,
+                state: resource.state.as_str().to_string(),
+            })
+        })
+        .collect();
+    consumers.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    consumers.truncate(limit);
+    consumers
 }
 
 fn probe_volume(
@@ -272,6 +325,58 @@ mod tests {
             free <= total,
             "free ({free}) should not exceed total ({total})"
         );
+    }
+
+    #[test]
+    fn top_consumers_rank_live_resources_and_exclude_reclaimed_bytes() {
+        let dir =
+            std::env::temp_dir().join(format!("tachi-disk-consumers-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("memory.db");
+        let mut store = memcore::MemoryStore::open(db.to_str().unwrap()).unwrap();
+
+        let insert = |store: &mut memcore::MemoryStore, id: &str, path: &str, bytes: i64| {
+            memcore::insert_resource(
+                store.connection_mut(),
+                &memcore::NewExecEnvResource {
+                    resource_id: id.to_string(),
+                    kind: memcore::ResourceKind::BuildTarget,
+                    path: path.to_string(),
+                    bytes: Some(bytes),
+                    created_at: String::new(),
+                },
+            )
+            .unwrap();
+        };
+        insert(&mut store, "res-small", "/tmp/small-target", 1_000);
+        insert(&mut store, "res-huge", "/tmp/huge-target", 61_000_000_000);
+        insert(&mut store, "res-mid", "/tmp/mid-target", 5_000_000);
+        insert(&mut store, "res-gone", "/tmp/gone-target", 99_000_000_000);
+        // The biggest row of all is already reclaimed: its bytes are FREE, so it
+        // must not be reported as a consumer.
+        memcore::reclaim_resource(store.connection_mut(), "res-gone", Some("orphan"), |_res| {
+            Ok(99_000_000_000)
+        })
+        .unwrap();
+
+        let consumers = collect_top_consumers(&db, 3);
+        let paths: Vec<_> = consumers.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["/tmp/huge-target", "/tmp/mid-target", "/tmp/small-target"],
+            "consumers must be ranked by bytes, reclaimed rows excluded"
+        );
+        assert_eq!(consumers[0].bytes, 61_000_000_000);
+        assert_eq!(consumers[0].kind, "build_target");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn top_consumers_are_empty_when_the_ledger_is_unreadable() {
+        // Informational surface: a missing DB is an empty list, never an error.
+        let missing = std::env::temp_dir().join("tachi-disk-consumers-missing/memory.db");
+        assert!(collect_top_consumers(&missing, 3).is_empty());
     }
 
     #[test]
