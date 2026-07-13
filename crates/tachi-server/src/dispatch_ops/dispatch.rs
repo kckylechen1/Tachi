@@ -396,6 +396,16 @@ pub(crate) async fn handle_tachi_dispatch(
             "cwd": params.cwd.clone(),
             "completion_predicate":
                 serde_json::to_value(&params.completion_predicate).unwrap_or(Value::Null),
+            // #774 round 3: stamp the dispatch's named project (if any) into
+            // the receipt itself. Daemon-restart orphan recovery
+            // (`recover_orphaned_dispatch_runs`) only has this on-disk
+            // status.json to read from — it has no live `TachiDispatchParams`
+            // — so unless `project` rides along in the receipt, a crash
+            // mid-flight silently drops a named-project dispatch's terminal
+            // outcome row into the default store instead of the named one,
+            // splitting the same first-writer-wins invariant round 2 fixed
+            // for the backend/preflight/watchdog/early-exit paths.
+            "project": params.project.clone(),
         })),
     );
 
@@ -479,6 +489,10 @@ pub(crate) async fn handle_tachi_dispatch(
             "env_id": env_id_stamp,
             "completion_predicate":
                 serde_json::to_value(&params.completion_predicate).unwrap_or(Value::Null),
+            // #774 round 3: same rationale as the receipt-first seed above —
+            // re-stamped here since this write's `extra` is a fresh object,
+            // not a merge with the seed's.
+            "project": params.project.clone(),
         })),
     );
 
@@ -562,6 +576,7 @@ pub(crate) async fn handle_tachi_dispatch(
             acpx_enabled,
             native_acp_enabled,
         } = prepare_dispatch_backend(DispatchBackendContext {
+            server,
             trajectory_path: &trajectory_path,
             workspace_dir: &workspace_dir,
             dispatch_id: &dispatch_id,
@@ -616,6 +631,7 @@ pub(crate) async fn handle_tachi_dispatch(
 
         // 7. Harness preflight (opencode_serve only)
         run_harness_preflight(HarnessPreflightInputs {
+            server,
             harness_transport: &harness_transport,
             harness_server_url: &harness_server_url,
             credential_env: &credentials.env,
@@ -634,6 +650,7 @@ pub(crate) async fn handle_tachi_dispatch(
             native_acp_enabled,
             capability_bundle_card: &capability_bundle_card,
             timeout_secs_for_status,
+            project: params.project.as_deref(),
         })?;
 
         let flow_dispatch_slot =
@@ -669,7 +686,13 @@ pub(crate) async fn handle_tachi_dispatch(
         }
         Ok(PostInitDispatchOutcome::Ready(ready)) => *ready,
         Err(e) => {
-            close_kanban_row_on_early_exit(server, &dispatch_id, "post-init dispatch stage").await;
+            close_kanban_row_on_early_exit(
+                server,
+                &dispatch_id,
+                "post-init dispatch stage",
+                params.project.as_deref(),
+            )
+            .await;
             return Err(e);
         }
     };
@@ -680,6 +703,7 @@ pub(crate) async fn handle_tachi_dispatch(
         server: server.clone(),
         dispatch_id: dispatch_id.clone(),
         agent: agent_norm.clone(),
+        project: params.project.clone(),
         stage: params.stage.clone(),
         trajectory_path: trajectory_path.clone(),
         workspace_dir: workspace_dir.clone(),

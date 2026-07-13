@@ -127,3 +127,94 @@ pub struct SandboxExecAuditParams {
     #[serde(default = "default_sandbox_exec_audit_limit")]
     pub limit: usize,
 }
+
+// ─── Unified sandbox verb facade (#757 Cut3-S1) ─────────────────────────────
+
+/// Parameters for the folded `tachi_sandbox` verb. The six pre-fold sandbox
+/// tools (`sandbox_set_rule`/`check`/`set_policy`/`get_policy`/`list_policies`/
+/// `exec_audit`) are now `action=` selectors on this one struct; the six legacy
+/// tool names survive as forwarding aliases. Per-action required fields are
+/// validated in the facade dispatcher (`tools::sandbox_facade`), not by serde,
+/// so a caller supplying the wrong action gets a precise error rather than a
+/// deserialization failure. Defaults mirror the per-action structs above so a
+/// folded call and its legacy alias produce byte-identical handler output.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TachiSandboxParams {
+    /// Which sandbox operation to run: "set_rule" | "check" | "set_policy" |
+    /// "get_policy" | "list_policies" | "exec_audit".
+    pub action: String,
+
+    // ── set_rule / check ──
+    /// Agent role (set_rule, check). e.g. "code-review", "domain-pack", "admin".
+    #[serde(default)]
+    pub agent_role: Option<String>,
+
+    // ── set_rule ──
+    /// Path pattern to match (set_rule). e.g. "/domain-pack/*".
+    #[serde(default)]
+    pub path_pattern: Option<String>,
+    /// Access level (set_rule): "read", "write", or "deny".
+    #[serde(default = "default_access_level")]
+    pub access_level: String,
+
+    // ── check ──
+    /// Memory path to check (check).
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Operation type (check): "read" or "write".
+    #[serde(default = "default_sandbox_operation")]
+    pub operation: String,
+
+    // ── set_policy / get_policy / exec_audit ──
+    /// Capability ID (set_policy/get_policy require it; exec_audit optional).
+    #[serde(default)]
+    pub capability_id: Option<String>,
+
+    // ── set_policy ──
+    /// Runtime type (set_policy): "process" | "wasm".
+    #[serde(default = "default_runtime_type")]
+    pub runtime_type: String,
+    /// Environment variable allowlist (set_policy).
+    #[serde(default)]
+    pub env_allowlist: Vec<String>,
+    /// Allowed read roots for filesystem access (set_policy).
+    #[serde(default)]
+    pub fs_read_roots: Vec<String>,
+    /// Allowed write roots for filesystem access (set_policy).
+    #[serde(default)]
+    pub fs_write_roots: Vec<String>,
+    /// Allowed working-directory roots for process startup (set_policy).
+    #[serde(default)]
+    pub cwd_roots: Vec<String>,
+    /// Startup timeout cap in milliseconds (set_policy).
+    #[serde(default = "default_sandbox_startup_ms")]
+    pub max_startup_ms: u64,
+    /// Tool call timeout cap in milliseconds (set_policy).
+    #[serde(default = "default_sandbox_tool_ms")]
+    pub max_tool_ms: u64,
+    /// Max concurrency cap for the capability (set_policy).
+    #[serde(default = "default_sandbox_max_concurrency")]
+    pub max_concurrency: u32,
+    /// Whether this policy is enabled (set_policy).
+    #[serde(default = "default_true_bool")]
+    pub enabled: bool,
+
+    // ── list_policies ──
+    /// Only return enabled policies (list_policies).
+    #[serde(default)]
+    pub enabled_only: bool,
+
+    // ── exec_audit ──
+    /// Optional stage filter (exec_audit): "preflight", "startup", "tool_call".
+    #[serde(default)]
+    pub stage: Option<String>,
+    /// Optional decision filter (exec_audit): "allowed", "denied", "timeout".
+    #[serde(default)]
+    pub decision: Option<String>,
+
+    // ── shared (list_policies + exec_audit) ──
+    /// Max rows returned (list_policies, exec_audit). Both pre-fold tools
+    /// defaulted to 100, so a single field with a shared default is faithful.
+    #[serde(default = "default_sandbox_policy_limit")]
+    pub limit: usize,
+}

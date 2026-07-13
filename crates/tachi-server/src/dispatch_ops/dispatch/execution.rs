@@ -25,6 +25,11 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) dispatch_id: String,
     pub(super) agent: String,
     pub(super) stage: Option<String>,
+    /// The dispatch's `TachiDispatchParams::project`, threaded through so a
+    /// watchdog-recorded terminal outcome row lands in the same DB a
+    /// `tachi_complete` for this dispatch would resolve to (scope symmetry,
+    /// #774 round 2).
+    pub(super) project: Option<String>,
     pub(super) trajectory_path: PathBuf,
     pub(super) workspace_dir: PathBuf,
     pub(super) v2: bool,
@@ -48,6 +53,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let server_clone = ctx.server;
     let d_id = ctx.dispatch_id;
     let agent_for_watchdog = ctx.agent;
+    let project_for_watchdog = ctx.project;
     let stage_for_traj = ctx.stage;
     let traj_path_for_spawn = ctx.trajectory_path;
     let workspace_dir = ctx.workspace_dir.clone();
@@ -285,6 +291,19 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         d_id, kanban_state, error
                     );
                 }
+                // #773 Layer-2 ② (hole b): exit-0-without-tachi_complete that
+                // the predicate intercepts as a FALSE SUCCESS is a terminal
+                // FAILED the agent never `tachi_complete`d — record a canonical
+                // outcome row (reported_outcome NULL — no self-report reached us).
+                if kanban_state == "TASK_STATE_FAILED" {
+                    crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+                        &server_clone,
+                        &d_id,
+                        "watchdog",
+                        Some(agent_for_watchdog.as_str()),
+                        project_for_watchdog.as_deref(),
+                    );
+                }
                 crate::claims_ops::emit_terminal_receipt(
                     &server_clone,
                     &d_id,
@@ -378,6 +397,16 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         d_id, error
                     );
                 }
+                // #773 Layer-2 ② (hole b): crash/timeout is a terminal FAILED
+                // the agent never `tachi_complete`d — record a canonical outcome
+                // row so the router learns from the failure (not just successes).
+                crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+                    &server_clone,
+                    &d_id,
+                    "watchdog",
+                    Some(agent_for_watchdog.as_str()),
+                    project_for_watchdog.as_deref(),
+                );
                 crate::claims_ops::emit_terminal_receipt(
                     &server_clone,
                     &d_id,

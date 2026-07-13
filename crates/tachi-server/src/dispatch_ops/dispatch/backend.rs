@@ -1,6 +1,7 @@
 use super::*;
 
 pub(super) struct DispatchBackendContext<'a> {
+    pub(super) server: &'a MemoryServer,
     pub(super) trajectory_path: &'a Path,
     pub(super) workspace_dir: &'a Path,
     pub(super) dispatch_id: &'a str,
@@ -57,6 +58,17 @@ pub(super) fn prepare_dispatch_backend(
             capability_bundle_card: ctx.capability_bundle_card,
             timeout_secs_for_status: ctx.timeout_secs_for_status,
         });
+        // #773 Layer-2 ② (hole b): backend-prep failure is a terminal dispatch
+        // state the agent never `tachi_complete`s — record a canonical outcome
+        // row so the router sees it. First-writer-wins on dispatch_id keeps this
+        // 'backend' class from being clobbered by the generic early-exit closer.
+        crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+            ctx.server,
+            ctx.dispatch_id,
+            "backend",
+            Some(ctx.agent_norm),
+            ctx.params.project.as_deref(),
+        );
     };
 
     let execution = if acpx_enabled {

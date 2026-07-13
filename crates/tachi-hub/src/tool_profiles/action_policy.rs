@@ -160,8 +160,11 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
         "tachi_event" => matches!(action, "emit" | "query" | "metrics" | "context" | "a2a"),
         // Non-facade tools on the delegate list (no action concept): tool
         // visibility is enough, regardless of what's in the `action` arg.
+        // `peer_query` (#1016 S1) is action-less (its selector is `noun`, gated
+        // internally by an exhaustive whitelist) and read-only, so it belongs
+        // here rather than in an action-bundle map.
         "tachi_tools" | "runtime_info" | "tachi_web_search" | "tachi_browse" | "tachi_unstick"
-        | "tachi_complete" | "run_skill" => true,
+        | "tachi_complete" | "run_skill" | "peer_query" => true,
         // Anything else — a tool not on the delegate allow-list at all, or a
         // gated facade we forgot to enumerate above — is denied by default.
         _ => false,

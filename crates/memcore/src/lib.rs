@@ -44,8 +44,9 @@ pub use agent_profile::{
 };
 #[cfg(feature = "admin")]
 pub use db::dispatch_outcomes::{
-    derive_idempotency_key, get_outcome, list_outcomes_by_issue_ref,
-    list_outcomes_by_vendor_window, upsert_outcome, DispatchOutcomeRow, NewDispatchOutcome,
+    derive_idempotency_key, find_outcome_by_dispatch_id, get_outcome, list_outcomes_by_issue_ref,
+    list_outcomes_by_vendor_window, outcome_exists_for_dispatch, upsert_outcome,
+    upsert_outcome_reconciling_terminal_placeholder, DispatchOutcomeRow, NewDispatchOutcome,
 };
 #[cfg(feature = "admin")]
 pub use db::exec_env::{
@@ -64,9 +65,9 @@ pub use db::foundry_jobs::{
 pub use db::row_to_entry;
 #[cfg(feature = "admin")]
 pub use db::session_claims::{
-    get_claim, get_claim_for_dispatch, heartbeat_claim, insert_claim, is_claim_stale,
+    gc_session_claims, get_claim, get_claim_for_dispatch, heartbeat_claim, insert_claim, is_claim_stale,
     list_active_claims, list_claims, release_claim, upsert_or_heartbeat_claim, ClaimSelector,
-    ClaimState, NewSessionClaim, ReleaseOutcome, SessionClaim,
+    ClaimState, NewSessionClaim, ReleaseOutcome, SessionClaim, SessionClaimsGc,
 };
 #[cfg(feature = "admin")]
 pub use db::terminal_inbox::{

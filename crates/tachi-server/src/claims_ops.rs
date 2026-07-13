@@ -622,15 +622,7 @@ pub(crate) fn briefing_claims_board(server: &MemoryServer) -> serde_json::Value 
     let rows: Vec<serde_json::Value> = live
         .iter()
         .take(PRESENCE_BOARD_DISPLAY_CAP)
-        .map(|c| {
-            serde_json::json!({
-                "session_client": sanitize_presence_identifier(c.session_client.as_deref()),
-                "issue_ref": sanitize_presence_identifier(c.issue_ref.as_deref()),
-                "flow_id": sanitize_presence_identifier(c.flow_id.as_deref()),
-                "branch": sanitize_presence_field(&c.branch, SANITIZE_IDENTIFIER_CAP),
-                "heartbeat_at": sanitize_presence_field(&c.heartbeat_at, SANITIZE_IDENTIFIER_CAP),
-            })
-        })
+        .map(sanitize_board_row)
         .collect();
     let overflow = total.saturating_sub(rows.len());
     serde_json::json!({
@@ -638,6 +630,112 @@ pub(crate) fn briefing_claims_board(server: &MemoryServer) -> serde_json::Value 
         "items": rows,
         "overflow": overflow,
     })
+}
+
+/// The single sanitized-row shape both the briefing 工位表
+/// ([`briefing_claims_board`]) and the #1016 peer-publication read surface
+/// ([`project_peer_presence`]) emit — every caller-supplied field routed
+/// through the same [`sanitize_presence_field`]/[`sanitize_presence_identifier`]
+/// choke point (#1001 round 2 item 5), so a claim from ANOTHER session can
+/// never carry newlines/control chars/active-markdown/unbounded length into a
+/// reader's rendered output regardless of which surface renders it.
+fn sanitize_board_row(c: &SessionClaim) -> serde_json::Value {
+    serde_json::json!({
+        "session_client": sanitize_presence_identifier(c.session_client.as_deref()),
+        "issue_ref": sanitize_presence_identifier(c.issue_ref.as_deref()),
+        "flow_id": sanitize_presence_identifier(c.flow_id.as_deref()),
+        "branch": sanitize_presence_field(&c.branch, SANITIZE_IDENTIFIER_CAP),
+        "heartbeat_at": sanitize_presence_field(&c.heartbeat_at, SANITIZE_IDENTIFIER_CAP),
+    })
+}
+
+/// Result of projecting a set of snapshot-time-fresh presence claims into the
+/// #1016 peer-publication `result` shape.
+pub(crate) struct PeerPresenceProjection {
+    /// `{count, items, overflow}` — `count` is the ALIVE-at-render total,
+    /// `items` the top-[`PRESENCE_BOARD_DISPLAY_CAP`] freshest alive rows,
+    /// `overflow` the alive rows beyond the cap.
+    pub board: serde_json::Value,
+    /// Rows that were fresh when the read-only snapshot was taken but crossed
+    /// the TTL horizon before this projection ran (#1016 sol invariant 7) —
+    /// surfaced flagged, NEVER folded into `count`/`items` where they would
+    /// masquerade as live. Capped at [`PRESENCE_BOARD_DISPLAY_CAP`].
+    pub expired_during_render: Vec<serde_json::Value>,
+    /// Freshest alive `heartbeat_at` (raw server-stamped timestamp), or `None`
+    /// when there is no alive row. This is the source `as_of`.
+    pub as_of: Option<String>,
+}
+
+/// Project snapshot-time-fresh presence `candidates` into the peer-publication
+/// `result` shape, re-applying the lazy TTL a SECOND time at render/serialize
+/// time (#1016 sol invariant 7).
+///
+/// `candidates` are the rows [`memcore::list_active_claims`] already filtered
+/// with the SNAPSHOT clock (so all were fresh when the read-only transaction
+/// ran). Between that read and this projection the render clock (`now_render`)
+/// can advance past a row's TTL horizon; such a row is emitted under
+/// `expired_during_render` and excluded from the alive `count`/`items` — an
+/// expired heartbeat must never be presented as a live seat. Reuses the shared
+/// [`sanitize_board_row`] shaping and [`PRESENCE_BOARD_DISPLAY_CAP`] so the
+/// peer read surface and the briefing 工位表 render identical, equally-safe
+/// rows.
+pub(crate) fn project_peer_presence(
+    candidates: &[SessionClaim],
+    now_render: chrono::DateTime<chrono::Utc>,
+    ttl_seconds: i64,
+) -> PeerPresenceProjection {
+    let mut alive: Vec<&SessionClaim> = Vec::new();
+    let mut expired: Vec<&SessionClaim> = Vec::new();
+    for claim in candidates {
+        if memcore::is_claim_stale(claim, now_render, ttl_seconds) {
+            expired.push(claim);
+        } else {
+            alive.push(claim);
+        }
+    }
+
+    let alive_total = alive.len();
+    let items: Vec<serde_json::Value> = alive
+        .iter()
+        .copied()
+        .take(PRESENCE_BOARD_DISPLAY_CAP)
+        .map(sanitize_board_row)
+        .collect();
+    let overflow = alive_total.saturating_sub(items.len());
+
+    // `candidates` arrive newest-heartbeat-first (`list_claims` ORDER BY
+    // heartbeat_at DESC), and the partition above preserves that order, so the
+    // first alive row is the freshest.
+    let as_of = alive
+        .first()
+        .map(|c| c.heartbeat_at.clone())
+        .filter(|hb| !hb.is_empty());
+
+    let expired_during_render: Vec<serde_json::Value> = expired
+        .iter()
+        .copied()
+        .take(PRESENCE_BOARD_DISPLAY_CAP)
+        .map(|c| {
+            let mut row = sanitize_board_row(c);
+            if let Some(obj) = row.as_object_mut() {
+                obj.insert(
+                    "expired_during_render".to_string(),
+                    serde_json::Value::Bool(true),
+                );
+            }
+            row
+        })
+        .collect();
+
+    PeerPresenceProjection {
+        board: serde_json::json!({
+            "count": alive_total,
+            "items": items,
+            "overflow": overflow,
+        }),
+        expired_during_render,
+        as_of,
+    }
 }
 
 /// THE single entry point (#1001 Scope item 3) both briefing surfaces

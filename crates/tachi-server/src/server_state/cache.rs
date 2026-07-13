@@ -83,6 +83,10 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_arena",
     "tachi_verify",
     "tachi_shell",
+    // #757 Cut3-S1: folded sandbox verb is mixed read/write (set_rule/
+    // set_policy mutate) — invalidate like the legacy sandbox_set_* aliases
+    // above, matching the whole-facade invalidation used for tachi_memory.
+    "tachi_sandbox",
 ];
 
 pub(crate) struct CachedResult {

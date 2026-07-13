@@ -5,8 +5,25 @@ use serde_json::json;
 use crate::memory_search_ops::{scrub_secrets, scrub_think_tags};
 
 use super::claim::try_claim_sticky;
-use super::memo::{sticky_from_entry, sticky_row_is_unread, sticky_ttl_expired, sticky_visible_to};
+use super::memo::{
+    sticky_from_entry, sticky_row_is_unread, sticky_ttl_expired, sticky_visible_to, StickyMemo,
+};
 use super::STICKY_PATH;
+
+/// #1016: the single choke point where a delivered sticky's `from_agent`
+/// gets rendered into every downstream surface (briefing markdown's
+/// `row.get("from_agent")` and `sticky_check`'s raw JSON both consume this
+/// value verbatim, with no further transform) — so marking a
+/// caller-asserted identity here, once, covers both without either renderer
+/// needing its own awareness of `identity_assurance`. Mirrors the existing
+/// `scrub_sticky_text_for_read` choke-point pattern above for `text`.
+fn sticky_display_from_agent(memo: &StickyMemo) -> String {
+    if memo.identity_assurance == "caller_asserted" {
+        format!("{} (自报)", memo.from_agent)
+    } else {
+        memo.from_agent.clone()
+    }
+}
 
 /// Round-3 fix (codex final review of #964/PR #1003, BUG CP4): the single
 /// row-load choke point every sticky-reading route flows through
@@ -123,7 +140,7 @@ pub(crate) fn claim_unread_stickies_for_briefing(
             }
             delivered.push(json!({
                 "id": sticky_id,
-                "from_agent": memo.from_agent,
+                "from_agent": sticky_display_from_agent(&memo),
                 "to": memo.to,
                 "text": scrub_sticky_text_for_read(&memo.text),
                 "created_at": memo.created_at,
@@ -168,9 +185,10 @@ pub(crate) fn list_or_claim_stickies(
                         .and_then(|v| v.as_str())
                         .unwrap_or("unread")
                         .to_string();
+                    let from_agent = sticky_display_from_agent(&memo);
                     Some(json!({
                         "id": memo.id,
-                        "from_agent": memo.from_agent,
+                        "from_agent": from_agent,
                         "to": memo.to,
                         "text": scrub_sticky_text_for_read(&memo.text),
                         "created_at": memo.created_at,

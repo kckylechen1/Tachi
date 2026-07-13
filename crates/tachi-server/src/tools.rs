@@ -50,6 +50,13 @@ pub(crate) const TASK_WAIT_TIMEOUT_CAP_SECS: u64 = 86_400;
 pub(crate) const TASK_CONTROL_TIMEOUT_DEFAULT_SECS: u64 = 30;
 pub(crate) const TASK_CONTROL_TIMEOUT_CAP_SECS: u64 = 300;
 
+// Machine-readable fold-alias registry. Consumed today by the fold-contract
+// and tripwire tests; kept as a production module (not test-gated) so future
+// runtime surfaces (e.g. a deprecation listing) can read it. Until such a
+// runtime consumer exists, suppress dead_code only in non-test builds — test
+// builds keep the lint strict so genuinely-unused entries still surface.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod alias_manifest;
 mod component_facade;
 mod continuity_facade;
 mod dispatch_complete_defaults;
@@ -58,6 +65,7 @@ mod formatting;
 mod handoff_facade;
 mod hub_facade;
 mod memory_facade;
+mod peer_facade;
 mod pipeline_facade;
 mod runtime_context_facade;
 mod sandbox_facade;

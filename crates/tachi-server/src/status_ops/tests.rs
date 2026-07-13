@@ -26,5 +26,6 @@ mod daemon_manifest;
 mod dispatch_eval;
 mod markers_errors;
 mod snapshot_labels;
+mod unregistered_project_dbs;
 mod vector_namespace;
 mod warnings_score;

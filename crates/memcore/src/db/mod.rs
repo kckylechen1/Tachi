@@ -48,8 +48,9 @@ pub use daily_pipeline::{
 };
 #[cfg(feature = "admin")]
 pub use dispatch_outcomes::{
-    derive_idempotency_key, get_outcome, list_outcomes_by_issue_ref,
-    list_outcomes_by_vendor_window, upsert_outcome, DispatchOutcomeRow, NewDispatchOutcome,
+    derive_idempotency_key, find_outcome_by_dispatch_id, get_outcome, list_outcomes_by_issue_ref,
+    list_outcomes_by_vendor_window, outcome_exists_for_dispatch, upsert_outcome,
+    upsert_outcome_reconciling_terminal_placeholder, DispatchOutcomeRow, NewDispatchOutcome,
 };
 pub use doctor_probe::{
     checkpoint_wal_truncate, count_chunks_rows, count_memories_missing_domain, count_memories_rows,
@@ -62,9 +63,11 @@ pub use gc_candidates::{
     CategoryPathPrefixMemoryRow, PathPrefixMemoryRow,
 };
 pub use graph::{
-    add_component_governance_edge, add_edge, avg_importance, close_related_to_fog,
+    add_component_governance_edge, add_component_governance_edge_with_provenance, add_edge,
+    add_edge_with_provenance, avg_importance, close_related_to_fog, count_active_observations,
     count_same_topic, get_contradiction_count, get_edges, get_superseded_ids, graph_expand,
-    remove_edge,
+    invalidate_observation, list_observations_for_edge, remove_edge, EdgeObservation,
+    EdgeProvenance,
 };
 #[cfg(feature = "admin")]
 pub use hub_db::{

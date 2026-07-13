@@ -17,6 +17,16 @@ impl MemoryStore {
         db::add_edge(&self.conn, edge)
     }
 
+    /// [`MemoryStore::add_edge`] plus explicit provenance for the appended
+    /// `edge_observations` row (#774).
+    pub fn add_edge_with_provenance(
+        &self,
+        edge: &MemoryEdge,
+        provenance: &db::EdgeProvenance,
+    ) -> Result<(), MemoryError> {
+        db::add_edge_with_provenance(&self.conn, edge, provenance)
+    }
+
     /// Typed, caller-scoped write door for the #772 component-governance
     /// grandfathered relations. Only `component_governance_ops` seeding should
     /// call this; the closed [`ComponentGovernanceRelation`] enum is the
@@ -27,6 +37,17 @@ impl MemoryStore {
         relation: ComponentGovernanceRelation,
     ) -> Result<(), MemoryError> {
         db::add_component_governance_edge(&self.conn, edge, relation)
+    }
+
+    /// [`MemoryStore::add_component_governance_edge`] plus explicit provenance
+    /// for the appended `edge_observations` row (#774).
+    pub fn add_component_governance_edge_with_provenance(
+        &self,
+        edge: &MemoryEdge,
+        relation: ComponentGovernanceRelation,
+        provenance: &db::EdgeProvenance,
+    ) -> Result<(), MemoryError> {
+        db::add_component_governance_edge_with_provenance(&self.conn, edge, relation, provenance)
     }
 
     /// Remove a specific edge.

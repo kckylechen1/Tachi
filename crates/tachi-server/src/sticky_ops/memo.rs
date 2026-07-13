@@ -15,6 +15,25 @@ pub(crate) struct StickyMemo {
     pub(crate) text: String,
     pub(crate) created_at: String,
     pub(crate) ttl_days: u32,
+    /// #964/#1016 identity-assurance follow-up (owner-ratified same_host
+    /// self-report is advisory, not a permission gate — this adds a
+    /// visibility marking, not a restriction): whether `from_agent` came
+    /// from the server-side identity chain (`agent_profile` /
+    /// `TACHI_AGENT_SEAT` / implicit leader — `"session"`) or from a caller
+    /// stamping an explicit `agent_id` param the server never verified
+    /// (`"caller_asserted"`). Without this, a sticky row's self-reported
+    /// `from_agent` and a server-resolved one are byte-identical in the
+    /// ledger — impersonation-by-typo or malice is silent. `#[serde(default
+    /// = ...)]` so rows persisted before this field existed still
+    /// deserialize (treated as `"session"`, the least-alarming default —
+    /// it does not retroactively flag a pre-existing row as self-reported
+    /// it never claimed to be).
+    #[serde(default = "default_identity_assurance")]
+    pub(crate) identity_assurance: String,
+}
+
+fn default_identity_assurance() -> String {
+    "session".to_string()
 }
 
 /// Whether `memo` is visible to a caller identified by `agent_id`.

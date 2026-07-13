@@ -185,6 +185,22 @@ pub(crate) fn resolve_completion_state(
     }
 }
 
+/// Map a resolved terminal kanban state to the machine `execution_outcome`
+/// value recorded on the `dispatch_outcomes` row (#773 Layer-2 ②). This is the
+/// MACHINE verdict (post-predicate / terminal-path), sharing the
+/// `normalize_dispatch_outcome` vocabulary so every outcome-row column speaks
+/// one dialect. Non-terminal states fall through to `"unknown"` — the caller
+/// only records outcomes for terminal transitions.
+pub(crate) fn execution_outcome_for_kanban_state(state: &str) -> &'static str {
+    match state {
+        "TASK_STATE_COMPLETED" => "completed",
+        "TASK_STATE_FAILED" => "failed",
+        "TASK_STATE_CANCELED" => "aborted",
+        "TASK_STATE_INPUT_REQUIRED" => "partial",
+        _ => "unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +208,52 @@ mod tests {
 
     fn td() -> tempfile::TempDir {
         tempfile::tempdir().expect("temp dir")
+    }
+
+    #[test]
+    fn execution_outcome_maps_each_terminal_state() {
+        // #773 ②: a false-success interception resolves to FAILED, which MUST
+        // map to the machine `execution_outcome` value 'failed' recorded on the
+        // outcome row — the kill-test-5 invariant. The other terminals map to
+        // the shared normalize_dispatch_outcome vocabulary.
+        assert_eq!(
+            execution_outcome_for_kanban_state("TASK_STATE_COMPLETED"),
+            "completed"
+        );
+        assert_eq!(
+            execution_outcome_for_kanban_state("TASK_STATE_FAILED"),
+            "failed"
+        );
+        assert_eq!(
+            execution_outcome_for_kanban_state("TASK_STATE_CANCELED"),
+            "aborted"
+        );
+        assert_eq!(
+            execution_outcome_for_kanban_state("TASK_STATE_INPUT_REQUIRED"),
+            "partial"
+        );
+        assert_eq!(
+            execution_outcome_for_kanban_state("TASK_STATE_WORKING"),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn false_success_resolves_to_failed_execution_outcome() {
+        // End-to-end of the ② machine verdict: reported success + predicate
+        // Fail → resolved kanban FAILED → execution_outcome 'failed'.
+        let (state, _reviewed, override_reason) =
+            resolve_completion_state("success", &PredicateVerdict::Fail("missing".into()));
+        assert_eq!(state, "TASK_STATE_FAILED");
+        assert!(override_reason.is_some(), "false success must be flagged");
+        assert_eq!(execution_outcome_for_kanban_state(state), "failed");
+
+        // Passing predicate keeps the honest success as 'completed'.
+        let (ok_state, _, ok_reason) =
+            resolve_completion_state("success", &PredicateVerdict::Pass);
+        assert_eq!(ok_state, "TASK_STATE_COMPLETED");
+        assert!(ok_reason.is_none());
+        assert_eq!(execution_outcome_for_kanban_state(ok_state), "completed");
     }
 
     #[test]

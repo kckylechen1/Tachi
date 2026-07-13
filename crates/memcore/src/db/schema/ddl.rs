@@ -68,6 +68,40 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_edges_target ON memory_edges(target_id);
         CREATE INDEX IF NOT EXISTS idx_edges_relation ON memory_edges(relation);
 
+        -- Append-only observation ledger under the working graph (#774 Layer-2,
+        -- sol audit cut ①). `memory_edges` is a mutable last-write-wins working
+        -- projection: its PK (source_id, target_id, relation) + ON CONFLICT DO
+        -- UPDATE collapses every re-observation of the same triple into ONE row
+        -- (created_at/valid_from/valid_to included), which erases the evidence
+        -- count Layer-2 induction needs. Each successful edge write appends
+        -- exactly one immutable row here in the same transaction, so this
+        -- ledger accumulates one row per observation while the graph keeps a
+        -- single mutable projection row. `observed_at` is immutable;
+        -- invalidation is a soft `invalidated_at` stamp, never a delete, so the
+        -- history stays complete.
+        --   Layer-2 counts observations (rows here), not graph rows
+        --   (#774 sol audit ruling).
+        -- Added as a pure additive CREATE TABLE IF NOT EXISTS with no
+        -- schema-version bump — the same in-place-on-BASE_SCHEMA convention
+        -- exec_envs / dispatch_outcomes / session_claims entered by.
+        CREATE TABLE IF NOT EXISTS edge_observations (
+            observation_id     TEXT PRIMARY KEY,
+            source_id          TEXT NOT NULL,
+            target_id          TEXT NOT NULL,
+            relation           TEXT NOT NULL,
+            capture_event_kind TEXT NOT NULL DEFAULT 'unknown',
+            capture_event_id   TEXT NOT NULL DEFAULT '',
+            actor              TEXT NOT NULL DEFAULT 'unknown',
+            reason_code        TEXT NOT NULL DEFAULT '',
+            observed_at        TEXT NOT NULL,
+            evidence_hash      TEXT,
+            invalidated_at     TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_edge_obs_edge
+            ON edge_observations(source_id, target_id, relation);
+        CREATE INDEX IF NOT EXISTS idx_edge_obs_observed_at
+            ON edge_observations(observed_at);
+
         -- Deterministic KV state (no vector search, no LLM)
         CREATE TABLE IF NOT EXISTS hard_state (
             namespace        TEXT NOT NULL,
@@ -454,6 +488,14 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- Adjudication evidence lives in the append-only dispatch_adjudications
         -- table (#1035); this table holds mutable execution facts only — a
         -- replayed complete may rewrite any column here.
+        --
+        -- Truthfulness (#773 Layer-2 ②): `execution_outcome` is the
+        -- MACHINE-RESOLVED terminal verdict (after the #878-A completion
+        -- predicate intercepts a false success, or the terminal state a
+        -- non-`tachi_complete` path reached), NOT the raw self-report;
+        -- `reported_outcome` keeps the agent's verbatim claim (NULL when a
+        -- terminal path carried no self-report). New `reported_outcome` column
+        -- is back-filled onto existing DBs by the v14 sentinel migration.
         CREATE TABLE IF NOT EXISTS dispatch_outcomes (
             outcome_id       TEXT PRIMARY KEY,
             dispatch_id      TEXT NOT NULL DEFAULT '',
@@ -463,7 +505,12 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             role             TEXT,
             seat             TEXT,
             task_type        TEXT,
+            -- machine-resolved terminal verdict (completed/failed/aborted/partial)
             execution_outcome    TEXT NOT NULL,
+            -- raw self-reported outcome, verbatim; NULL for no-self-report terminals
+            reported_outcome     TEXT,
+            -- retry_count: awaiting dispatch-context plumb (no source at write
+            -- points yet) — stays 0 until the dispatch retry ledger is wired.
             retry_count      INTEGER NOT NULL DEFAULT 0,
             error_class      TEXT,
             issue_ref        TEXT,

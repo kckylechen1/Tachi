@@ -28,6 +28,7 @@ fn test_memo(id: &str, to: Option<&str>) -> StickyMemo {
         text: "do the thing".to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
         ttl_days: 7,
+        identity_assurance: "session".to_string(),
     }
 }
 
@@ -300,6 +301,7 @@ async fn sticky_leave_scrubs_secrets_in_storage_and_briefing_render() {
             text: raw_secret_text.to_string(),
             to: None,
             ttl_days: None,
+            agent_id: None,
         },
     )
     .await
@@ -848,21 +850,28 @@ fn cp2_tachi_profile_env_alone_no_longer_resolves_a_seat() {
     }
 }
 
-// ─── CP2 round-3: sender-side identity (`resolve_from_agent`) must not
-// resolve a tool-profile string either ─────────────────────────────────────
+// ─── CP2 round-3: sender-side identity must not resolve a tool-profile
+// string either ──────────────────────────────────────────────────────────
 //
 // Round-2 only fixed the DELIVERY path (`resolve_caller_agent_id`)'s env
-// fallback. `resolve_from_agent` (used by `sticky_leave` to stamp
-// `from_agent`) still read `TACHI_PROFILE` as its fallback — so a caller
-// launched with `TACHI_PROFILE=standard` set (a tool-profile selector, not a
-// seat) but no `agent_profile` registered would author a sticky's
-// `from_agent` as `"standard"`, not its actual seat. Two tools sharing a
-// `TACHI_PROFILE` value would author stickies under the identical
-// `from_agent`, indistinguishable from each other. The sender path now
-// shares the exact `TACHI_AGENT_SEAT` fallback the delivery path already
-// uses.
-#[test]
-fn cp2_round3_sender_identity_never_resolves_to_tool_profile_string() {
+// fallback. The SEND path (`sticky_leave`, stamping `from_agent`) used to
+// read `TACHI_PROFILE` as its own separate fallback — so a caller launched
+// with `TACHI_PROFILE=standard` set (a tool-profile selector, not a seat)
+// but no `agent_profile` registered would author a sticky's `from_agent` as
+// `"standard"`, not its actual seat. Two tools sharing a `TACHI_PROFILE`
+// value would author stickies under the identical `from_agent`,
+// indistinguishable from each other.
+//
+// The send path now shares `resolve_caller_agent_id` directly (see
+// `identity.rs` — the round-3-era `fallback_agent_id` wrapper this test
+// used to poke directly was retired as dead weight once `handle_sticky_leave`
+// switched to calling `resolve_caller_agent_id` itself; verified by grep +
+// git archaeology, see identity.rs doc comment), so this asserts the
+// behavior end-to-end through the real production entry point instead of a
+// since-removed internal helper.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cp2_round3_sticky_leave_from_agent_never_resolves_to_tool_profile_string() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -871,17 +880,36 @@ fn cp2_round3_sender_identity_never_resolves_to_tool_profile_string() {
     std::env::set_var("TACHI_PROFILE", "standard");
     std::env::remove_var("TACHI_AGENT_SEAT");
 
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-cp2-round3-leave-no-seat-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
     // No agent_profile registered (the expected post-#973 runtime state) and
     // no TACHI_AGENT_SEAT — TACHI_PROFILE must NOT leak through as the
     // resolved sender identity.
-    let resolved = super::identity::fallback_agent_id(None);
+    let result = super::handlers::handle_sticky_leave(
+        &server,
+        super::handlers::StickyLeaveInput {
+            text: "note with no resolvable seat".to_string(),
+            to: None,
+            ttl_days: None,
+            agent_id: None,
+        },
+    )
+    .await
+    .expect("sticky_leave");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("parse sticky_leave result");
     assert_eq!(
-        resolved, "unknown-agent",
+        parsed["from_agent"], "unknown-agent",
         "sender identity must never resolve to a tool-profile string like \
          'standard' even with TACHI_PROFILE set"
     );
-    assert_ne!(resolved, "standard");
+    assert_ne!(parsed["from_agent"], "standard");
 
+    let _ = std::fs::remove_file(&db_path);
     match original_profile {
         Some(v) => std::env::set_var("TACHI_PROFILE", v),
         None => std::env::remove_var("TACHI_PROFILE"),
@@ -892,31 +920,12 @@ fn cp2_round3_sender_identity_never_resolves_to_tool_profile_string() {
     }
 }
 
-#[test]
-fn cp2_round3_sender_identity_uses_tachi_agent_seat_not_tachi_profile() {
-    let _guard = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let original_profile = std::env::var_os("TACHI_PROFILE");
-    let original_seat = std::env::var_os("TACHI_AGENT_SEAT");
-    std::env::set_var("TACHI_PROFILE", "standard");
-    std::env::set_var("TACHI_AGENT_SEAT", "wizard-worker-3");
-
-    let resolved = super::identity::fallback_agent_id(None);
-    assert_eq!(
-        resolved, "wizard-worker-3",
-        "sender identity must resolve via TACHI_AGENT_SEAT, ignoring TACHI_PROFILE entirely"
-    );
-
-    match original_profile {
-        Some(v) => std::env::set_var("TACHI_PROFILE", v),
-        None => std::env::remove_var("TACHI_PROFILE"),
-    }
-    match original_seat {
-        Some(v) => std::env::set_var("TACHI_AGENT_SEAT", v),
-        None => std::env::remove_var("TACHI_AGENT_SEAT"),
-    }
-}
+// `cp2_round3_sender_identity_uses_tachi_agent_seat_not_tachi_profile`
+// (the TACHI_PROFILE-and-TACHI_AGENT_SEAT-both-set scenario) used to be a
+// direct unit test against the now-removed `fallback_agent_id` helper; it
+// is redundant with `cp2_round3_sticky_leave_from_agent_uses_seat_not_profile`
+// below, which already exercises the identical scenario end-to-end through
+// `handle_sticky_leave` — removed rather than duplicated.
 
 // End-to-end variant through `handle_sticky_leave`: two dispatched workers
 // sharing a `TACHI_PROFILE` (tool-profile) but distinct `TACHI_AGENT_SEAT`
@@ -945,6 +954,7 @@ async fn cp2_round3_sticky_leave_from_agent_uses_seat_not_profile() {
             text: "note from worker-a".to_string(),
             to: None,
             ttl_days: None,
+            agent_id: None,
         },
     )
     .await
@@ -956,6 +966,14 @@ async fn cp2_round3_sticky_leave_from_agent_uses_seat_not_profile() {
         "from_agent must be the TACHI_AGENT_SEAT value, not the shared TACHI_PROFILE"
     );
     assert_ne!(parsed["from_agent"], "codex_55_review");
+    // #1016: no explicit `agent_id` param was passed (server-side
+    // TACHI_AGENT_SEAT chain resolved it) — identity_assurance must be
+    // "session", never "caller_asserted".
+    assert_eq!(
+        parsed["identity_assurance"], "session",
+        "server-resolved from_agent (via TACHI_AGENT_SEAT, no explicit agent_id param) must be \
+         marked identity_assurance=session, not caller_asserted"
+    );
 
     let _ = std::fs::remove_file(&db_path);
     match original_profile {
@@ -966,6 +984,129 @@ async fn cp2_round3_sticky_leave_from_agent_uses_seat_not_profile() {
         Some(v) => std::env::set_var("TACHI_AGENT_SEAT", v),
         None => std::env::remove_var("TACHI_AGENT_SEAT"),
     }
+}
+
+// #964 follow-up (discovered in live one-shot-channel use): a one-shot stdio
+// MCP connection has no persistent `agent_profile` and no dispatch-injected
+// `TACHI_AGENT_SEAT` env var, so `sticky_leave` used to always stamp
+// `from_agent: "unknown-agent"` for such callers even when the caller knew
+// its own seat name. `sticky_leave` now accepts the same `agent_id` override
+// `sticky_check` already has; assert an explicit value round-trips as
+// `from_agent` (and is preferred over the empty server-side fallback env
+// state this test deliberately leaves in place).
+#[tokio::test]
+async fn sticky_leave_accepts_explicit_agent_id_for_one_shot_channels() {
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-leave-explicit-agent-id-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
+    let result = handle_sticky_leave(
+        &server,
+        StickyLeaveInput {
+            text: "note from a one-shot channel".to_string(),
+            to: None,
+            ttl_days: None,
+            agent_id: Some("leader-oneshot".to_string()),
+        },
+    )
+    .await
+    .expect("sticky_leave");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("parse sticky_leave result");
+    assert_eq!(
+        parsed["from_agent"], "leader-oneshot",
+        "explicit agent_id must be stamped as from_agent"
+    );
+    // #1016: an explicit `agent_id` param is the caller self-reporting an
+    // identity the server never verifies — the response must say so.
+    assert_eq!(
+        parsed["identity_assurance"], "caller_asserted",
+        "an explicit agent_id param must be marked identity_assurance=caller_asserted in the \
+         sticky_leave response"
+    );
+
+    let stored_memo = server
+        .with_global_store_read(|store| {
+            let entries = all_sticky_entries(store)?;
+            entries
+                .iter()
+                .find_map(sticky_from_entry)
+                .ok_or_else(|| "expected exactly one persisted sticky".to_string())
+        })
+        .expect("read back persisted sticky");
+    assert_eq!(
+        stored_memo.from_agent, "leader-oneshot",
+        "persisted row must carry the explicit agent_id as from_agent, matching the response"
+    );
+    assert_eq!(
+        stored_memo.identity_assurance, "caller_asserted",
+        "persisted row must carry identity_assurance=caller_asserted, matching the response"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+// R5 CONCERN (codex review of #964/PR #1003): ttl_days only had a `.max(1)`
+// floor — a caller passing u32::MAX got a sticky that, for all practical
+// purposes, never expires. Assert the ceiling is enforced both in the
+// `sticky_leave` response and in what actually lands in storage (via
+// `sticky_ttl_expired`, the same predicate the GC sweep and unread-listing
+// paths use).
+#[tokio::test]
+async fn sticky_leave_clamps_ttl_days_to_thirty_day_ceiling() {
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-ttl-clamp-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
+    let result = handle_sticky_leave(
+        &server,
+        StickyLeaveInput {
+            text: "practically-forever note".to_string(),
+            to: None,
+            ttl_days: Some(9999),
+            agent_id: None,
+        },
+    )
+    .await
+    .expect("sticky_leave");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result).expect("parse sticky_leave result");
+    assert_eq!(
+        parsed["ttl_days"], 30,
+        "response must report the clamped ttl_days, not the caller-supplied value"
+    );
+
+    let stored_memo = server
+        .with_global_store_read(|store| {
+            let entries = all_sticky_entries(store)?;
+            entries
+                .iter()
+                .find_map(sticky_from_entry)
+                .ok_or_else(|| "expected exactly one persisted sticky".to_string())
+        })
+        .expect("read back persisted sticky");
+    assert_eq!(
+        stored_memo.ttl_days, 30,
+        "persisted row must store the clamped ttl_days"
+    );
+
+    let now = chrono::DateTime::parse_from_rfc3339(&stored_memo.created_at)
+        .expect("created_at is rfc3339")
+        .with_timezone(&chrono::Utc);
+    assert!(
+        !sticky_ttl_expired(&stored_memo, now + chrono::Duration::days(29)),
+        "29 days after creation: still within the clamped 30-day window"
+    );
+    assert!(
+        sticky_ttl_expired(&stored_memo, now + chrono::Duration::days(31)),
+        "31 days after creation: expired under the clamped 30-day ceiling, not u32::MAX"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
 }
 
 // ─── CP4 round-3: JSON routes must inherit the scrub, not just markdown ───
@@ -993,6 +1134,7 @@ fn raw_secret_test_memo(id: &str, to: Option<&str>) -> StickyMemo {
             .to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
         ttl_days: 7,
+        identity_assurance: "session".to_string(),
     }
 }
 
@@ -1093,6 +1235,166 @@ fn cp4_round3_sticky_check_json_route_masks_hand_inserted_raw_secret_row() {
             );
         }
     }
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+// ─── #1016: identity_assurance — caller-asserted from_agent is visibly
+// self-reported ─────────────────────────────────────────────────────────
+//
+// Terminal-review fixup (#964/#1016): sticky_leave's `params.agent_id`
+// override lands straight in `from_agent` with zero marking — a server-
+// resolved identity and a caller's bare self-report are byte-identical in
+// the ledger, so an impersonated seat name is silent. The same_host self-
+// report trust model itself is owner-ratified and unchanged (advisory, not
+// a permission gate) — this only adds the visible marking these two tests
+// pin down: (a) the persisted row's `identity_assurance` field, and (b) the
+// suffix every downstream renderer (briefing markdown AND sticky_check JSON,
+// both fed by the same `pending.rs` choke point) shows for it.
+#[tokio::test]
+async fn explicit_agent_id_row_is_caller_asserted_and_renders_with_self_reported_suffix() {
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-identity-assurance-caller-asserted-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
+    handle_sticky_leave(
+        &server,
+        StickyLeaveInput {
+            text: "note from a self-reported seat".to_string(),
+            to: None,
+            ttl_days: None,
+            agent_id: Some("impersonator-or-honest-seat".to_string()),
+        },
+    )
+    .await
+    .expect("sticky_leave");
+
+    // (a) Row-level: the persisted StickyMemo must carry the marking.
+    let stored_memo = server
+        .with_global_store_read(|store| {
+            let entries = all_sticky_entries(store)?;
+            entries
+                .iter()
+                .find_map(sticky_from_entry)
+                .ok_or_else(|| "expected exactly one persisted sticky".to_string())
+        })
+        .expect("read back persisted sticky");
+    assert_eq!(
+        stored_memo.identity_assurance, "caller_asserted",
+        "a sticky sent with an explicit agent_id must persist identity_assurance=caller_asserted"
+    );
+
+    // (b) Render-level: both consumers of the same delivered-row choke point
+    // (briefing markdown, and sticky_check's raw JSON) must show the suffix.
+    let claimed =
+        claim_unread_stickies_for_briefing(&server, None, 5).expect("claim for briefing render");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(
+        claimed[0]["from_agent"], "impersonator-or-honest-seat (自报)",
+        "the delivered JSON row's from_agent (consumed verbatim by both briefing markdown and \
+         sticky_check JSON) must carry the (自报) suffix for a caller-asserted identity"
+    );
+
+    let markdown = crate::agent_markdown::format_briefing(
+        "test query",
+        None,
+        &serde_json::json!(claimed),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &serde_json::json!({}),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &[],
+        &serde_json::json!({}),
+        &serde_json::json!({}),
+        &serde_json::json!({}),
+        false,
+    );
+    assert!(
+        markdown.contains("impersonator-or-honest-seat (自报)"),
+        "rendered briefing markdown must show the (自报) suffix for a caller-asserted \
+         from_agent; got: {markdown}"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[tokio::test]
+async fn no_explicit_agent_id_row_is_session_and_renders_without_suffix() {
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-identity-assurance-session-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
+    handle_sticky_leave(
+        &server,
+        StickyLeaveInput {
+            text: "note with no explicit agent_id".to_string(),
+            to: None,
+            ttl_days: None,
+            agent_id: None,
+        },
+    )
+    .await
+    .expect("sticky_leave");
+
+    // (a) Row-level: no explicit agent_id param -> server-resolved chain ->
+    // identity_assurance must be "session" (here it bottoms out at the
+    // implicit-leader/"unknown-agent" end of the chain, same as before this
+    // fix — the marking is additive, it does not change from_agent itself).
+    let stored_memo = server
+        .with_global_store_read(|store| {
+            let entries = all_sticky_entries(store)?;
+            entries
+                .iter()
+                .find_map(sticky_from_entry)
+                .ok_or_else(|| "expected exactly one persisted sticky".to_string())
+        })
+        .expect("read back persisted sticky");
+    assert_eq!(
+        stored_memo.identity_assurance, "session",
+        "a sticky sent with no explicit agent_id must persist identity_assurance=session"
+    );
+
+    // (b) Render-level: no (自报) suffix anywhere.
+    let claimed =
+        claim_unread_stickies_for_briefing(&server, None, 5).expect("claim for briefing render");
+    assert_eq!(claimed.len(), 1);
+    let from_agent = claimed[0]["from_agent"]
+        .as_str()
+        .expect("from_agent is a string");
+    assert!(
+        !from_agent.contains("自报"),
+        "a session-resolved from_agent must render with no (自报) suffix; got: {from_agent}"
+    );
+
+    let markdown = crate::agent_markdown::format_briefing(
+        "test query",
+        None,
+        &serde_json::json!(claimed),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &serde_json::json!({}),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &serde_json::json!([]),
+        &[],
+        &serde_json::json!({}),
+        &serde_json::json!({}),
+        &serde_json::json!({}),
+        false,
+    );
+    assert!(
+        !markdown.contains("自报"),
+        "rendered briefing markdown must show no (自报) suffix for a session-resolved \
+         from_agent; got: {markdown}"
+    );
 
     let _ = std::fs::remove_file(&db_path);
 }

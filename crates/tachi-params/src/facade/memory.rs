@@ -614,7 +614,7 @@ pub struct TachiMemoryParams {
     pub to: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=sticky_leave] Days until an unread sticky auto-archives (default 7)."
+        description = "[action=sticky_leave] Days until an unread sticky auto-archives (1-30, default 7; clamped to this range)."
     )]
     pub ttl_days: Option<u32>,
     #[serde(default)]
@@ -624,7 +624,7 @@ pub struct TachiMemoryParams {
     pub include_read: bool,
     #[serde(default)]
     #[schemars(
-        description = "[action=sticky_check|briefing] Caller's seat/agent name for addressing. Omit to be treated as the leader/main session."
+        description = "[action=sticky_leave|sticky_check|briefing] Caller's seat/agent name for addressing. Omit to be treated as the leader/main session; for sticky_leave, omit to fall back to server-resolved identity."
     )]
     pub agent_id: Option<String>,
 }

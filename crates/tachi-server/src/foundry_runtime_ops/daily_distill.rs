@@ -19,6 +19,7 @@
 
 mod candidates;
 mod config;
+mod consolidate_prepass;
 mod parser;
 mod persist;
 mod prompt;
@@ -26,7 +27,7 @@ mod runner;
 mod types;
 
 pub use config::scrub_agent_noise;
-pub use runner::run_daily_batch_distill;
+pub use runner::{run_daily_batch_distill, run_daily_batch_distill_with_options};
 
 #[cfg(test)]
 use candidates::collect_candidate_groups;

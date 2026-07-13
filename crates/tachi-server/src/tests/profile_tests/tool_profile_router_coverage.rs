@@ -107,6 +107,9 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "tachi_audit_log",
     "tachi_init_project_db",
     // tachi_research is now observe-bundled (#963/#530), no longer admin-only.
+    // #757 Cut3-S1: folded sandbox verb (its six forwarding aliases above are
+    // also admin-only) — absent from every profile bundle.
+    "tachi_sandbox",
     "tachi_task_brief",
     "tachi_wiki_organize",
     "vault_get",

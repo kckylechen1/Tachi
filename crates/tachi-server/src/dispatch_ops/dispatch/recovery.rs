@@ -1,5 +1,9 @@
 use super::*;
 
+/// Terminal-outcome `error_class` written for a dispatch this function
+/// closes out with no live process behind it (daemon restarted mid-run).
+const RECOVERED_ORPHAN_ERROR_CLASS: &str = "recovered_orphan";
+
 pub(super) fn dispatch_status_needs_recovery(status: &serde_json::Value) -> bool {
     if status.get("exit_code").is_some() {
         return false;
@@ -12,7 +16,30 @@ pub(super) fn dispatch_status_needs_recovery(status: &serde_json::Value) -> bool
 }
 
 /// Mark orphaned in-flight dispatch runs as failed after daemon restart.
-pub(crate) fn recover_orphaned_dispatch_runs() -> Vec<String> {
+///
+/// This is a terminal path in its own right (#774 round 2): the run never
+/// reaches `tachi_complete` (there is no live process left to call it) and
+/// previously the daemon-restart recovery only rewrote `status.json`,
+/// leaving the canonical `dispatch_outcomes` ledger silent about it — the
+/// same "terminal state with no outcome row" hole `record_terminal_failure_outcome`
+/// closes for the backend/preflight/watchdog/early-exit paths. Each
+/// recovered run now also gets a canonical outcome row via that same writer
+/// (`error_class = "recovered_orphan"`, `reported_outcome` NULL — there was
+/// no self-report to preserve).
+///
+/// `project` (#774 round 3): recovery has no live `TachiDispatchParams` to
+/// read from — the dispatching process is gone — but `dispatch.rs`'s
+/// receipt-first `status.json` seed now stamps `TachiDispatchParams::project`
+/// into the on-disk blob at dispatch time (same field name, `"project"`),
+/// specifically so a crash-recovered run can still resolve its terminal
+/// outcome to the same named-project store a live `tachi_complete` for it
+/// would have used. This function reads that field straight off the
+/// pre-overwrite status blob below (same place `agent` is read) and threads
+/// it through. Older run directories written before this field existed have
+/// no `"project"` key, so `status.get("project")` is `None` for them and
+/// they fall back to `resolve_write_scope("")` exactly as before — pure
+/// backward compatibility, not a behavior change for already-written blobs.
+pub(crate) fn recover_orphaned_dispatch_runs(server: &MemoryServer) -> Vec<String> {
     let root = dispatch_runs_root();
     let Ok(entries) = std::fs::read_dir(&root) else {
         return Vec::new();
@@ -43,6 +70,14 @@ pub(crate) fn recover_orphaned_dispatch_runs() -> Vec<String> {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string();
+        let agent = status
+            .get("agent")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let project = status
+            .get("project")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
 
         append_trajectory_event(
             &run_dir.join("trajectory.jsonl"),
@@ -83,6 +118,18 @@ pub(crate) fn recover_orphaned_dispatch_runs() -> Vec<String> {
                 "recovery_reason": "daemon_restart_orphan_recovery",
                 "previous_state": previous_state,
             })),
+        );
+        // #774 round 2: this recovery IS the terminal path for an orphaned
+        // run — no `tachi_complete` is coming — so it writes the same
+        // canonical outcome row every other terminal-without-complete path
+        // writes (first-writer-wins, so this is a no-op if some earlier
+        // classifier already recorded the row for this dispatch_id).
+        crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+            server,
+            &dispatch_id,
+            RECOVERED_ORPHAN_ERROR_CLASS,
+            agent.as_deref(),
+            project.as_deref(),
         );
         recovered.push(dispatch_id);
     }
