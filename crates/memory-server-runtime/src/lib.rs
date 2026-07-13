@@ -80,6 +80,16 @@ struct ReadPoolInner {
     /// and without being tied to any particular (possibly still-busy) slot.
     release_signal: StdMutex<u64>,
     release_cv: Condvar,
+    /// Test-only causal observation point (codex-qa111 R4-1): senders
+    /// registered here are notified exactly when a checkout, having scanned
+    /// every slot and found none free, is about to block in `wait_while` —
+    /// see `ReadStorePool::observe_next_parked_checkout_for_test`. `#[cfg(test)]`-gated
+    /// so it adds no field, lock, or branch to non-test builds. Never read
+    /// or written from any production path — test-only, for proving a
+    /// specific waiter has actually reached the wait before a test triggers
+    /// whatever event it expects to wake it.
+    #[cfg(test)]
+    parked_observers: StdMutex<Vec<std::sync::mpsc::Sender<()>>>,
 }
 
 /// RAII notifier: bumps the release generation and wakes every waiter when
@@ -141,8 +151,37 @@ impl ReadStorePool {
                 stores,
                 release_signal: StdMutex::new(0),
                 release_cv: Condvar::new(),
+                #[cfg(test)]
+                parked_observers: StdMutex::new(Vec::new()),
             }),
         })
+    }
+
+    /// Test-only: register to be notified the next time a checkout that
+    /// finds every slot busy is about to block on `release_cv` (fires once,
+    /// for the next such checkout only — register again for a second one).
+    /// Never call this from production code (codex-qa111 R4-1): it exists
+    /// purely so tests can prove a specific waiter has genuinely reached
+    /// `wait_while`, replacing a probabilistic "signal that it started, then
+    /// hope it got far enough" with a real causal signal.
+    #[cfg(test)]
+    fn observe_next_parked_checkout_for_test(&self) -> std::sync::mpsc::Receiver<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        lock_or_recover(&self.inner.parked_observers, "read_pool_parked_observers").push(tx);
+        rx
+    }
+
+    /// Test-only: fire every observer registered via
+    /// `observe_next_parked_checkout_for_test`, then clear them (each
+    /// observer is one-shot). Called immediately before `wait_while` in
+    /// `with_store_recording`.
+    #[cfg(test)]
+    fn notify_parked_observers_for_test(&self) {
+        let mut observers =
+            lock_or_recover(&self.inner.parked_observers, "read_pool_parked_observers");
+        for observer in observers.drain(..) {
+            let _ = observer.send(());
+        }
     }
 
     /// Check out an available store and run `f` against it.
@@ -217,6 +256,14 @@ impl ReadStorePool {
             // rescan. We deliberately don't keep the guard `wait_while` hands
             // back — the next iteration's `lock_or_recover` reacquires it.
             let generation_before_wait = *gen_guard;
+            // Test-only causal observation point (codex-qa111 R4-1): fires
+            // immediately before we actually block, while still holding
+            // `gen_guard` — a test that already registered an observer is
+            // guaranteed this checkout is about to enter `wait_while` the
+            // instant it receives this. No effect and no cost outside test
+            // builds.
+            #[cfg(test)]
+            self.notify_parked_observers_for_test();
             drop(
                 self.inner
                     .release_cv
@@ -1102,43 +1149,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(temp);
     }
 
-    /// codex-m56e0 BUG-1 / codex-o964f R3-2: a panicking checkout closure
-    /// must not leave another already-in-flight checkout parked forever.
-    /// Pre-fix (both the original missing-notify-on-panic bug and the
-    /// residual drop-order race R3-1 fixed the same round as this test),
-    /// a waiter blocked in `wait_while` on the same slot could be left
-    /// permanently unwoken.
+    /// codex-m56e0 BUG-1 / codex-o964f R3-1 / codex-qa111 R4-2: a panicking
+    /// checkout closure must not leave another already-parked checkout
+    /// blocked forever. Pre-fix (either the original missing-notify-on-panic
+    /// bug, or the residual drop-order race that fired the notify before the
+    /// slot actually unlocked), a waiter blocked in `wait_while` on the same
+    /// slot could be left permanently unwoken.
     ///
-    /// This is run as `TRIALS` independent trials, not a single shot: the
-    /// R3-1 drop-order race window is narrow (a few instructions between
-    /// this guard's notify and the slot's actual unlock), so on
-    /// *pre-fix-ordering* code a single trial only has a *significant*, not
-    /// guaranteed, probability of landing a waiter's rescan inside that
-    /// window and reproducing the stall. Repeating raises that probability
-    /// close to certainty for catching a regression, while on the (fixed)
-    /// code under test here every trial is expected to pass deterministically
-    /// — there is no window left to land in.
+    /// The causal chain (codex-qa111 R4-2 — no sleeping, no "signals
+    /// probably far enough along" guessing):
+    /// 1. Pool size 1. The panicker's `entered` signal proves it holds the
+    ///    sole slot before we do anything else.
+    /// 2. We register a parked-observer (`observe_next_parked_checkout_for_test`,
+    ///    R4-1) *before* spawning the waiter — so there is no window in
+    ///    which the waiter could reach the wait point before we're listening
+    ///    for it.
+    /// 3. We spawn the waiter. Its `with_store` call is against a pool whose
+    ///    sole slot is provably still held (step 1), so it is guaranteed to
+    ///    scan, find the slot busy, and call `notify_parked_observers_for_test`
+    ///    immediately before `wait_while` — there is no other path.
+    /// 4. We block on the parked-observer channel (bounded `recv_timeout`).
+    ///    Receiving it is proof the waiter is now *actually inside*
+    ///    `wait_while`, not merely "checkout in flight" — a timeout here
+    ///    means our own test scaffolding is broken (thread never scheduled,
+    ///    channel wiring wrong, etc.), not the bug under test, so it fails
+    ///    as a hard test-infrastructure assertion.
+    /// 5. Only now do we trigger the panic. The panic is caught with
+    ///    `catch_unwind` inside the panicker thread so it is contained and
+    ///    inspectable rather than just failing that thread silently.
+    /// 6. The waiter's result is collected via a bounded `recv_timeout`
+    ///    (never a bare `.join()`, since on unfixed code the waiter thread
+    ///    can hang forever and a bare join would hang this test right along
+    ///    with it) — *this* is the actual assertion about the bug under
+    ///    test. The waiter's `JoinHandle` is intentionally dropped, not
+    ///    joined, for the same reason.
     ///
-    /// "Parked" is proven causally, not by sleeping: pool size 1, so once
-    /// the panicker's `entered` signal confirms it holds the sole slot, and
-    /// the waiter's `started` signal confirms its `with_store` call is
-    /// already in flight against that (still-held) slot, the waiter is
-    /// necessarily either mid-scan or already inside `wait_while` at the
-    /// moment we trigger the panic — both states must resolve to "woken and
-    /// completes" under a correct fix. The panic is caught with
-    /// `catch_unwind` inside the panicker thread so it is contained and
-    /// inspectable rather than just failing that thread silently.
-    ///
-    /// The waiter's result is collected via a bounded `recv_timeout`
-    /// (codex-o964f R3-2) — never a bare `.join()` — because on unfixed
-    /// code the waiter thread can hang forever; a bare join would hang this
-    /// test (and the whole test binary) right along with it. A timeout here
-    /// is treated as the failure signal, not swallowed. The waiter's
-    /// `JoinHandle` is intentionally dropped, not joined, for the same
-    /// reason: on a stalled trial that thread may simply never finish.
+    /// Because step 4 makes "parked" a proven fact rather than a
+    /// probability, a single trial is now a sound discriminator (unlike the
+    /// prior revision's `started`-signal proxy, which only proved the
+    /// checkout was in flight, not that it had reached the wait — R4-2's
+    /// whole point). `TRIALS` repeats are kept only as cheap margin against
+    /// unrelated scheduling flakiness, not to accumulate statistical power.
     #[test]
     fn panicking_checkout_still_wakes_a_waiter_parked_on_the_same_slot() {
-        const TRIALS: usize = 10;
+        const TRIALS: usize = 3;
         for trial in 0..TRIALS {
             run_panicking_checkout_wakeup_trial(trial);
         }
@@ -1184,24 +1238,30 @@ mod tests {
                 panic!("trial {trial}: panicker should hold the sole slot before we proceed: {e}")
             });
 
+        // Register BEFORE spawning the waiter (step 2): closes the window in
+        // which the waiter could reach the wait point before we're listening.
+        let parked_rx = pool.observe_next_parked_checkout_for_test();
+
         // Not joined (see doc comment): on a stalled trial this thread may
         // never finish. Its result reaches us only through this channel,
         // collected below with a bounded `recv_timeout`.
-        let (waiter_started_tx, waiter_started_rx) = std::sync::mpsc::channel();
         let (waiter_result_tx, waiter_result_rx) = std::sync::mpsc::channel();
         let waiter_pool = pool.clone();
         let _waiter = std::thread::spawn(move || {
-            waiter_started_tx.send(()).expect("waiter started signal");
             let result = waiter_pool.with_store("waiter", |_store| Ok(()));
             let _ = waiter_result_tx.send(result.is_ok());
         });
-        waiter_started_rx
-            .recv_timeout(Duration::from_secs(2))
-            .unwrap_or_else(|e| {
-                panic!(
-                    "trial {trial}: waiter should signal started before we trigger the panic: {e}"
-                )
-            });
+
+        // Step 4: this is a test-infrastructure assertion, not the bug under
+        // test — the waiter is guaranteed to reach `wait_while` (the sole
+        // slot is provably still held), so a timeout here means our own
+        // scaffolding broke, not the fix.
+        parked_rx.recv_timeout(Duration::from_secs(3)).unwrap_or_else(|e| {
+            panic!(
+                "trial {trial}: test infrastructure failure — waiter never reached \
+                 wait_while (parked-observer channel): {e}"
+            )
+        });
 
         // Trigger the panic: the sole slot's only holder panics instead of
         // returning normally. The panicker thread itself is short-lived and
@@ -1220,6 +1280,9 @@ mod tests {
             "trial {trial}: panicker checkout should have panicked as intended"
         );
 
+        // This is the actual assertion about the bug under test: the waiter
+        // was proven parked in `wait_while` (step 4) before the panic fired,
+        // so it must now complete.
         let waiter_completed = waiter_result_rx.recv_timeout(Duration::from_secs(3));
         assert!(
             waiter_completed.is_ok(),
