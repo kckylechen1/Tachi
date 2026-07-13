@@ -1079,7 +1079,10 @@ mod tests {
     fn missing_app_home_profile_rejects_inherited_and_repo_elevation() {
         let fixture = HostProfileEnvFixture::new();
         fixture.seed_elevated_sources();
-        fixture.write_env(fixture.app_home.path().join("config.env"), "OTHER=kept\n");
+        fixture.write_env(
+            fixture.app_home.path().join("config.env"),
+            "# intentionally missing TACHI_HOST_PROFILE\n",
+        );
 
         fixture.load();
 
