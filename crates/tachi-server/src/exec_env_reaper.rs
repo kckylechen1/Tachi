@@ -281,6 +281,9 @@ impl Protection {
     /// That last case is not paranoia — `remove_dir_all` on an ancestor takes the
     /// protected directory with it, so an ancestor of a protected path is exactly
     /// as untouchable as a descendant. The first cut only tested one direction.
+    /// May this directory be DELETED? Bidirectional: deleting an ancestor of a
+    /// protected path takes the protected path with it, so an ancestor is just
+    /// as untouchable as a descendant. This is the fence the deleter asks.
     pub(crate) fn covers(&self, dir: &Path) -> bool {
         let real = std::fs::canonicalize(dir).ok();
         self.paths.iter().any(|protected| {
@@ -288,6 +291,28 @@ impl Protection {
                 || real
                     .as_deref()
                     .is_some_and(|real| overlaps(real, protected))
+        })
+    }
+
+    /// Is this directory INSIDE a protected path? Descendant-only — a different
+    /// question from [`Self::covers`], and the scan must ask this one instead.
+    ///
+    /// Asking `covers` at walk time is what makes the reaper blind: `~/.cache`
+    /// is a default scan root and `~/.cache/sigil-shared-target` is protected,
+    /// so the bidirectional test marks the *root itself* as covered and the walk
+    /// bails before it enumerates anything (caught by
+    /// `cargo_target_dir_is_never_a_reap_candidate`, which asserts a genuinely
+    /// dead sibling is still reaped). A directory that merely *contains* a live
+    /// target must still be walked into — it just may never be deleted itself,
+    /// which is exactly what `covers` keeps enforcing at candidacy and at the
+    /// deleter.
+    pub(crate) fn contains_dir(&self, dir: &Path) -> bool {
+        let real = std::fs::canonicalize(dir).ok();
+        self.paths.iter().any(|protected| {
+            dir.starts_with(protected)
+                || real
+                    .as_deref()
+                    .is_some_and(|real| real.starts_with(protected))
         })
     }
 }
@@ -514,7 +539,9 @@ pub(crate) fn scan_orphan_candidates(
         }
         let mut stack = vec![(root.clone(), 0usize)];
         while let Some((dir, depth)) = stack.pop() {
-            if protection.covers(&dir) {
+            // Inside a protected path: nothing under a live build cache is ever
+            // a candidate, and there is nothing to find by descending.
+            if protection.contains_dir(&dir) {
                 continue;
             }
             let name = dir
@@ -525,7 +552,11 @@ pub(crate) fn scan_orphan_candidates(
             // A matching directory is a leaf: never descend into a target to
             // find nested "targets".
             if depth > 0 {
-                if let Some(kind) = classify_orphan_dir_name(&name) {
+                // `covers` (bidirectional) still gates CANDIDACY: a name-matched
+                // dir that happens to contain a protected path must never be
+                // offered up for deletion, even though we walked into it.
+                if let Some(kind) = classify_orphan_dir_name(&name).filter(|_| !protection.covers(&dir))
+                {
                     candidates.push(OrphanCandidate {
                         staleness: staleness(&dir, now, cutoff),
                         path: dir,
@@ -1462,6 +1493,48 @@ mod tests {
     ///
     /// Discriminating: a genuinely dead target sits in the same root and MUST be
     /// reaped by the same run, so this cannot pass by the reaper doing nothing.
+    /// The regression that `cargo_target_dir_is_never_a_reap_candidate` caught:
+    /// a scan root that *contains* a protected path (the real shape — `~/.cache`
+    /// is a default root and `~/.cache/sigil-shared-target` is protected) must
+    /// still be walked. The bidirectional `covers` test marks such a root as
+    /// protected, so asking it at walk time blinds the reaper completely: it
+    /// enumerates nothing and reclaims nothing, forever, while reporting success.
+    #[test]
+    fn a_scan_root_that_contains_a_protected_path_is_still_walked() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let root = unique_temp_dir("tachi-reaper-root-contains-protected");
+        let live = make_target_dir(&root, "live-shared-target");
+        let dead = make_target_dir(&root, "dead-target");
+        let _env = EnvGuard::set(CARGO_TARGET_DIR_ENV, &live);
+
+        let protection = protected_paths();
+        assert!(
+            protection.covers(&root),
+            "the root DOES contain a protected path — that is the whole trap"
+        );
+        assert!(
+            !protection.contains_dir(&root),
+            "but the root is not INSIDE it, so the walk must proceed"
+        );
+
+        let candidates = scan_orphan_candidates(
+            &[root.clone()],
+            &protection,
+            aged_now(30),
+            7,
+        );
+        assert!(
+            candidates.iter().any(|c| c.path == dead),
+            "the dead sibling must survive the walk: {candidates:?}"
+        );
+        assert!(
+            !candidates.iter().any(|c| c.path == live),
+            "and the live target must never be a candidate"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn cargo_target_dir_is_never_a_reap_candidate() {
         let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
