@@ -184,24 +184,41 @@ pub(super) async fn handle_tachi_task_facade(
                 .ok_or_else(|| "task is required when action='recommend'".to_string())?;
             let mut file_paths = params.doc_paths.clone();
             file_paths.extend(params.spec_paths.clone());
-            crate::dispatch_profile::handle_dispatch_recommendation(
+            let admission = crate::host_profile::admit_execution_level(params.execution_level);
+            if !admission.allowed {
+                return serde_json::to_string(&serde_json::json!({
+                    "host_admission": admission.to_json(),
+                }))
+                .map_err(|e| format!("serialize host admission decline: {e}"));
+            }
+            let raw = crate::dispatch_profile::handle_dispatch_recommendation(
                 server,
                 &task,
                 params.risk.as_deref(),
                 params.limit.unwrap_or(500),
                 &file_paths,
-            )
+            )?;
+            attach_host_admission(raw, &admission)
         }
         TachiTaskAction::RouteSimulate => {
             let mut file_paths = params.doc_paths.clone();
             file_paths.extend(params.spec_paths.clone());
-            crate::dispatch_profile::handle_route_simulation(
+            let admission = crate::host_profile::admit_execution_level(params.execution_level);
+            if !admission.allowed {
+                return serde_json::to_string(&serde_json::json!({
+                    "action": "route_simulate",
+                    "host_admission": admission.to_json(),
+                }))
+                .map_err(|e| format!("serialize host admission decline: {e}"));
+            }
+            let raw = crate::dispatch_profile::handle_route_simulation(
                 server,
                 params.limit.unwrap_or(500),
                 params.task.as_deref(),
                 params.risk.as_deref(),
                 &file_paths,
-            )
+            )?;
+            attach_host_admission(raw, &admission)
         }
         TachiTaskAction::Proposals => crate::dispatch_profile::handle_route_policy_proposals(
             server,
@@ -301,6 +318,18 @@ pub(super) async fn handle_tachi_task_facade(
         &raw,
         params.format.as_deref(),
     )
+}
+
+fn attach_host_admission(
+    raw: String,
+    admission: &crate::host_profile::HostAdmission,
+) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse recommend/route payload: {e}"))?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("host_admission".to_string(), admission.to_json());
+    }
+    serde_json::to_string(&value).map_err(|e| format!("serialize host admission attach: {e}"))
 }
 
 /// Defense-in-depth for the task facade; primary gate is F3
