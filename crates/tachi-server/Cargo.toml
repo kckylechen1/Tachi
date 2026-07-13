@@ -84,6 +84,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }
+# Cryptographic digest for the #894 S2e postflight workspace manifest
+# (`exec_env_postflight`). The worker this gate is aimed at can run arbitrary
+# code, so the fingerprint must not be forgeable — a non-cryptographic hash
+# (FNV/SipHash) would let a deliberate edit be dressed up as an unchanged file.
+# blake2 0.10.6 is ALREADY resolved in this workspace's dependency graph via
+# `argon2` (see Cargo.lock), so this adds no new crate to the build, only a
+# direct-dependency edge onto something already compiled (same rationale as the
+# `icu_properties` edge below).
+blake2 = "0.10"
 base64 = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
