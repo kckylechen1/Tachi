@@ -428,11 +428,18 @@ fn run_orphan_reap_cli(opts: ReapOptions, output: OutputFormat) -> Result<(), St
     let mut store = memcore::MemoryStore::open_with_label(db_str, "global")
         .map_err(|err| format!("exec_env resource ledger unavailable: {err}"))?;
 
+    // The protected set's sources are read from the process environment HERE — at the
+    // edge, once — and handed to the reaper as a value. The reaper itself reads no
+    // ambient state, which is what keeps "HOME is unset" a property of one run instead of
+    // a property of the process (see `ProtectionSources`).
+    let sources = crate::exec_env_reaper::ProtectionSources::from_process_env();
+
     // `force` is already impossible here (refused above), so this is always the
     // report-only path; the `Err` arm is the second fence, not a live branch.
     let report = crate::exec_env_reaper::run_orphan_reap(
         store.connection_mut(),
         &opts,
+        &sources,
         std::time::SystemTime::now(),
         &crate::exec_env_reaper::lsof_holder_probe,
     )

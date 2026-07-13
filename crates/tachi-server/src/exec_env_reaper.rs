@@ -553,6 +553,82 @@ fn canonicalize_expected(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The process table, as a source: injectable for exactly the reason [`HolderProbe`]
+/// is — it is a live reading of the world outside this process, and a test that wants
+/// to stage "a build claimed this target between the scan and the delete" must be able
+/// to stage it *there*, which is where a real one appears.
+pub(crate) type LiveBuildScan = dyn Fn() -> (Vec<PathBuf>, Vec<String>);
+
+/// Where [`protected_paths`] gets its answers — **an explicit argument, never a read of
+/// the ambient process environment.**
+///
+/// ## Why this exists (the test-suite race, and why the fix is injection, not a lock)
+///
+/// `protected_paths` used to call `std::env::var_os` itself, and the BUG 3 tests used to
+/// prove the fail-closed behaviour by *unsetting `HOME` in the process*. `set_var` /
+/// `remove_var` are process-global: cargo runs a test binary's tests as threads of one
+/// process, so "unset HOME for my test" is really "unset HOME for every test running
+/// right now". Every reaper test then depended on `HOME` — including the ones that never
+/// mention it — and one of them (`an_incomplete_forced_scan_does_not_exit_clean`, whose
+/// second half asserts a *complete* run) failed whenever it happened to overlap the test
+/// that removed it.
+///
+/// The lock-shaped fixes (`#[serial]`, `--test-threads=1`, widening the old `env_lock` to
+/// every test in the module) all treat the symptom: the shared mutable global is still
+/// there, still implicit, and the next test that forgets to take the lock is bitten
+/// again. So the global is *gone* from the call graph instead. The environment is read
+/// exactly once, at the process edge ([`Self::from_process_env`], called by the CLI), and
+/// from there the protected set is computed from a value that was handed to it. A test
+/// hands it a value with `home: None` and gets fail-closed behaviour in its own thread,
+/// affecting nobody.
+///
+/// ## What is a snapshot and what is live
+///
+/// The three environment variables are a **snapshot**, and that is not a weakening: they
+/// are *this* process's environment, and no other process can reach in and change them.
+/// A build that starts after the scan cannot appear in our `HOME`; it appears in the
+/// **process table**, which is why that source stays a live callable (the `live_builds`
+/// field) and is re-run at the delete (see [`run_orphan_reap_uncertified`]).
+pub(crate) struct ProtectionSources<'a> {
+    /// `CARGO_TARGET_DIR` — what cargo actually reads, and what every build seat in this
+    /// repo exports. `None` = the variable is unset or empty (not a gap: nothing says a
+    /// machine must have it).
+    cargo_target_dir: Option<PathBuf>,
+    /// `TACHI_SHARED_CARGO_TARGET_DIR` — the Tachi-managed override written into managed
+    /// worktrees (#484).
+    shared_cargo_target_dir: Option<PathBuf>,
+    /// `HOME` (or `USERPROFILE`), from which `~/.cache/sigil-shared-target` — the
+    /// documented default cache, protected even when neither variable above is set — is
+    /// resolved. **`None` is a GAP**, not an absence: it means the most likely home of the
+    /// live 16 GB cache could not be named, and a run that cannot name it may not exit
+    /// clean (BUG 3).
+    home: Option<PathBuf>,
+    /// Every target dir a *running* build names. The one source that must be re-read
+    /// rather than snapshotted.
+    live_builds: &'a LiveBuildScan,
+}
+
+/// The real process table, as something with a `'static` address to hand out.
+static PROCESS_TABLE: fn() -> (Vec<PathBuf>, Vec<String>) = live_build_target_dirs;
+
+impl ProtectionSources<'static> {
+    /// **The only place the process environment is read.** Called at the process edge (the
+    /// CLI), once per run.
+    pub(crate) fn from_process_env() -> Self {
+        let var = |key: &str| {
+            std::env::var_os(key)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        };
+        Self {
+            cargo_target_dir: var(CARGO_TARGET_DIR_ENV),
+            shared_cargo_target_dir: var(SHARED_CARGO_TARGET_DIR_ENV),
+            home: var("HOME").or_else(|| var("USERPROFILE")),
+            live_builds: &PROCESS_TABLE,
+        }
+    }
+}
+
 /// Everything the reaper must never touch, from every source that knows where a
 /// live build cache is:
 ///
@@ -564,24 +640,30 @@ fn canonicalize_expected(path: &Path) -> Option<PathBuf> {
 ///    against,
 /// 4. every target dir a *running* build names ([`live_build_target_dirs`]).
 ///
+/// All four arrive in [`ProtectionSources`]; this function reads no ambient state of its
+/// own, so what it protects is a pure function of what it was handed (plus the live
+/// process table, which it re-reads through the source it was given).
+///
 /// Live **lease bindings** are the fifth class, and they are enforced where they
 /// are known — in [`cheap_verdict`], and again inside S2a's own reclaim
 /// transaction — rather than here, so a bound resource still appears in the
 /// report as a visible `skip` carrying its refcount instead of silently vanishing
 /// from the scan.
-pub(crate) fn protected_paths() -> Protection {
-    let (mut paths, mut warnings) = live_build_target_dirs();
+pub(crate) fn protected_paths(sources: &ProtectionSources<'_>) -> Protection {
+    let (mut paths, mut warnings) = (sources.live_builds)();
 
-    for var in [CARGO_TARGET_DIR_ENV, SHARED_CARGO_TARGET_DIR_ENV] {
-        let Some(raw) = std::env::var_os(var) else {
+    for (var, dir) in [
+        (CARGO_TARGET_DIR_ENV, &sources.cargo_target_dir),
+        (
+            SHARED_CARGO_TARGET_DIR_ENV,
+            &sources.shared_cargo_target_dir,
+        ),
+    ] {
+        let Some(path) = dir else {
             continue;
         };
-        if raw.is_empty() {
-            continue;
-        }
-        let path = PathBuf::from(&raw);
         if path.is_absolute() {
-            paths.push(path);
+            paths.push(path.clone());
         } else {
             // A relative target-dir resolves against the cwd of whichever process
             // set it, which we do not know, so it cannot be matched against a scan
@@ -594,13 +676,9 @@ pub(crate) fn protected_paths() -> Protection {
         }
     }
 
-    match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        Some(home) if !home.is_empty() => paths.push(
-            PathBuf::from(home)
-                .join(".cache")
-                .join("sigil-shared-target"),
-        ),
-        _ => warnings.push(
+    match &sources.home {
+        Some(home) => paths.push(home.join(".cache").join("sigil-shared-target")),
+        None => warnings.push(
             "HOME (and USERPROFILE) is unset: the default shared cargo target dir \
              (~/.cache/sigil-shared-target) cannot be resolved and is NOT in the protected set"
                 .to_string(),
@@ -1636,14 +1714,19 @@ pub(crate) struct ReapOptions {
 ///
 /// The gate is duplicated in the CLI on purpose (which refuses before even opening the
 /// ledger). Two fences, one source of truth: both call [`certify_destructive`].
+///
+/// `sources` is what the run may protect from ([`ProtectionSources`]) — passed in, not
+/// read from the ambient environment, so the protected set is a function of an argument
+/// the caller can see and a test can supply.
 pub(crate) fn run_orphan_reap(
     conn: &mut rusqlite::Connection,
     opts: &ReapOptions,
+    sources: &ProtectionSources<'_>,
     now: SystemTime,
     probe: &HolderProbe,
 ) -> Result<ReapReport, DestructiveRefusal> {
     certify_destructive(opts.force)?;
-    Ok(run_orphan_reap_uncertified(conn, opts, now, probe))
+    Ok(run_orphan_reap_uncertified(conn, opts, sources, now, probe))
 }
 
 /// The reaper's body — **including the destructive path, which is not certified and is
@@ -1661,10 +1744,11 @@ pub(crate) fn run_orphan_reap(
 fn run_orphan_reap_uncertified(
     conn: &mut rusqlite::Connection,
     opts: &ReapOptions,
+    sources: &ProtectionSources<'_>,
     now: SystemTime,
     probe: &HolderProbe,
 ) -> ReapReport {
-    let protection = protected_paths();
+    let protection = protected_paths(sources);
     let scan = scan_orphan_candidates(&opts.roots, &protection, now, opts.max_age_days);
 
     // BUG 3, fail-closed: a protected set that could not be fully built does not merely
@@ -1787,14 +1871,20 @@ fn run_orphan_reap_uncertified(
 
         if let (ReapDecision::Reclaim(claim), true) = (&decision, opts.force) {
             // **sol audit fix (BUG 1).** The protected set is recomputed HERE, at the
-            // delete, from a re-read of the environment and a re-scan of the process
-            // table — it is NOT the snapshot the scan took. The snapshot is stale by
+            // delete — it is NOT the snapshot the scan took. The snapshot is stale by
             // construction: a build that claimed `--target-dir` after the scan is
             // invisible to it, and the holder probe (which the deleter *does* re-run)
             // proves nothing about a `cargo` sitting between two compile units with no
             // fd open. Snapshot + fd-only recheck is exactly the window in which a live
             // build cache gets deleted.
-            let fresh = protected_paths();
+            //
+            // What "recomputed" means precisely, now that the sources are explicit: the
+            // live source — the **process table** — is re-read here, and it is the one a
+            // late claim actually arrives through. The environment half of `sources` is a
+            // per-run snapshot on purpose: another process cannot reach into *our*
+            // `CARGO_TARGET_DIR`, so re-reading it would re-read the same bytes and prove
+            // nothing.
+            let fresh = protected_paths(sources);
             // A gap that appears only at delete time (a `ps` that has started failing)
             // still costs the run its clean exit.
             if !fresh.is_complete() {
@@ -2480,52 +2570,96 @@ mod tests {
         }
     }
 
-    /// Serializes the tests that repoint `CARGO_TARGET_DIR` at a fixture, so they
-    /// cannot see each other's value.
-    fn env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    // ── protection sources: injected, never ambient ─────────────────────────
+    //
+    // There is no `EnvGuard` here any more, and no `env_lock` either. Both are gone
+    // for the same reason: the `set_var` / `remove_var` pair mutates the environment of
+    // the *process*, and cargo runs this module's tests as threads of one process. A
+    // test that unset `HOME` to prove the fail-closed path unset it for every test
+    // running beside it — which is precisely how `an_incomplete_forced_scan_does_not_
+    // exit_clean` (whose second half asserts a COMPLETE run) went red on a build seat
+    // while the four tests that own that behaviour all passed.
+    //
+    // A lock is not the fix; a lock is a promise every future test must remember to
+    // keep. The protected set's sources are an argument now ([`ProtectionSources`]), so
+    // a test that wants a missing `HOME` says so in its own stack frame and nobody else
+    // can tell. `no_test_mutates_the_process_environment` keeps it that way.
+
+    /// An empty process table: no build is running anywhere. The default for every test
+    /// that is not itself about live builds — and, unlike shelling out to the real `ps`,
+    /// the same answer on every machine.
+    fn no_live_builds() -> (Vec<PathBuf>, Vec<String>) {
+        (Vec::new(), Vec::new())
     }
 
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
+    static NO_LIVE_BUILDS: fn() -> (Vec<PathBuf>, Vec<String>) = no_live_builds;
+
+    /// Sources with every fence resolvable: a home that resolves, no target-dir override,
+    /// an empty process table. The baseline for every test whose subject is *not* the
+    /// protected set — it must be COMPLETE, or those tests would be asserting against a
+    /// run that is incomplete for reasons they never mention.
+    ///
+    /// The home is a path no fixture lives under, so the only thing it changes about a run
+    /// is that the fence could be *computed* — which is the property these tests need and
+    /// the one the process's real `HOME` was accidentally providing.
+    fn resolved_sources() -> ProtectionSources<'static> {
+        ProtectionSources {
+            cargo_target_dir: None,
+            shared_cargo_target_dir: None,
+            home: Some(PathBuf::from("/nonexistent-home-for-tests")),
+            live_builds: &NO_LIVE_BUILDS,
+        }
     }
 
-    impl EnvGuard {
-        fn set(key: &'static str, value: &Path) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
+    impl<'a> ProtectionSources<'a> {
+        fn with_cargo_target_dir(mut self, dir: &Path) -> Self {
+            self.cargo_target_dir = Some(dir.to_path_buf());
+            self
         }
 
-        /// Remember the current value and restore it on drop — for a test that sets
-        /// the variable itself, *mid-run* (a build claiming a target dir after the
-        /// scan has already looked).
-        fn capture(key: &'static str) -> Self {
-            Self {
-                key,
-                previous: std::env::var_os(key),
+        fn with_shared_cargo_target_dir(mut self, dir: &Path) -> Self {
+            self.shared_cargo_target_dir = Some(dir.to_path_buf());
+            self
+        }
+
+        /// The BUG 3 gap, staged in one test's own stack frame instead of in the
+        /// process's environment.
+        fn without_home(mut self) -> Self {
+            self.home = None;
+            self
+        }
+
+        /// Stand in for the process table — the source a build that starts *after* the
+        /// scan actually arrives through.
+        fn with_live_builds<'b>(self, scan: &'b LiveBuildScan) -> ProtectionSources<'b> {
+            ProtectionSources {
+                cargo_target_dir: self.cargo_target_dir,
+                shared_cargo_target_dir: self.shared_cargo_target_dir,
+                home: self.home,
+                live_builds: scan,
             }
         }
-
-        /// Unset the variable for the duration of the test, restoring it on drop — for
-        /// the BUG 3 tests, where a protection source that cannot be resolved must
-        /// fail-CLOSED rather than quietly protect nothing.
-        fn remove(key: &'static str) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::remove_var(key);
-            Self { key, previous }
-        }
     }
 
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(previous) => std::env::set_var(self.key, previous),
-                None => std::env::remove_var(self.key),
-            }
-        }
+    /// The sealed entry point, on fully resolved sources.
+    fn reap_sealed(
+        conn: &mut rusqlite::Connection,
+        opts: &ReapOptions,
+        now: SystemTime,
+        probe: &HolderProbe,
+    ) -> Result<ReapReport, DestructiveRefusal> {
+        run_orphan_reap(conn, opts, &resolved_sources(), now, probe)
+    }
+
+    /// The sheathed body (the only way `force` reaches the delete path), on fully
+    /// resolved sources.
+    fn reap_uncertified(
+        conn: &mut rusqlite::Connection,
+        opts: &ReapOptions,
+        now: SystemTime,
+        probe: &HolderProbe,
+    ) -> ReapReport {
+        run_orphan_reap_uncertified(conn, opts, &resolved_sources(), now, probe)
     }
 
     // ── name matching ───────────────────────────────────────────────────────
@@ -2572,13 +2706,11 @@ mod tests {
     /// enumerates nothing and reclaims nothing, forever, while reporting success.
     #[test]
     fn a_scan_root_that_contains_a_protected_path_is_still_walked() {
-        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let root = unique_temp_dir("tachi-reaper-root-contains-protected");
         let live = make_target_dir(&root, "live-shared-target");
         let dead = make_target_dir(&root, "dead-target");
-        let _env = EnvGuard::set(CARGO_TARGET_DIR_ENV, &live);
 
-        let protection = protected_paths();
+        let protection = protected_paths(&resolved_sources().with_cargo_target_dir(&live));
         assert!(
             protection.covers(&root),
             "the root DOES contain a protected path — that is the whole trap"
@@ -2604,14 +2736,13 @@ mod tests {
 
     #[test]
     fn cargo_target_dir_is_never_a_reap_candidate() {
-        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let root = unique_temp_dir("tachi-reaper-cargo-target-dir");
         let live = make_target_dir(&root, "live-shared-target");
         let dead = make_target_dir(&root, "dead-target");
-        let _env = EnvGuard::set(CARGO_TARGET_DIR_ENV, &live);
         let mut store = open_store(&root);
+        let sources = resolved_sources().with_cargo_target_dir(&live);
 
-        let protection = protected_paths();
+        let protection = protected_paths(&sources);
         assert!(
             protection.covers(&live),
             "the dir CARGO_TARGET_DIR points at must be protected: {:?}",
@@ -2625,6 +2756,7 @@ mod tests {
         let report = run_orphan_reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
+            &sources,
             aged_now(30),
             &*unheld_probe(),
         );
@@ -2654,17 +2786,56 @@ mod tests {
 
     #[test]
     fn tachi_shared_target_env_is_protected_too() {
-        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let root = unique_temp_dir("tachi-reaper-shared-env");
         let shared = make_target_dir(&root, "managed-shared-target");
-        let _env = EnvGuard::set(SHARED_CARGO_TARGET_DIR_ENV, &shared);
 
         assert!(
-            protected_paths().covers(&shared),
+            protected_paths(&resolved_sources().with_shared_cargo_target_dir(&shared))
+                .covers(&shared),
             "both target-dir variables are read, not just one"
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **The wiring test.** Every other test in this module hands the reaper injected
+    /// sources; without this one, `ProtectionSources::from_process_env` — the thing the
+    /// *binary* actually runs on — could silently start reading the wrong variables (or
+    /// none) and the whole suite would stay green.
+    ///
+    /// It only READS the environment. It never sets or removes anything, so it is safe
+    /// beside every other test in the process, which is the entire point of the change it
+    /// guards.
+    #[test]
+    fn the_production_sources_are_read_from_the_process_environment() {
+        let sources = ProtectionSources::from_process_env();
+        let live = |key: &str| {
+            std::env::var_os(key)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        };
+
+        assert_eq!(sources.cargo_target_dir, live(CARGO_TARGET_DIR_ENV));
+        assert_eq!(
+            sources.shared_cargo_target_dir,
+            live(SHARED_CARGO_TARGET_DIR_ENV)
+        );
+        assert_eq!(
+            sources.home,
+            live("HOME").or_else(|| live("USERPROFILE")),
+            "the default cache is resolved from HOME, falling back to USERPROFILE"
+        );
+
+        // And the value really reaches the fence: the documented default cache under the
+        // home this process was handed is protected.
+        if let Some(home) = &sources.home {
+            let protection = protected_paths(&sources);
+            assert!(
+                protection.covers(&home.join(".cache").join("sigil-shared-target")),
+                "the default shared cargo target dir must be protected: {:?}",
+                protection.paths()
+            );
+        }
     }
 
     #[test]
@@ -2783,7 +2954,7 @@ mod tests {
             HolderCheck::Unknown("cannot run lsof: No such file or directory".to_string())
         };
 
-        let report = run_orphan_reap_uncertified(
+        let report = reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -2924,7 +3095,7 @@ mod tests {
 
         // Real `now`: the fixture was created a moment ago, so the age gate skips
         // it — and the expensive probes must never have run.
-        let report = run_orphan_reap_uncertified(
+        let report = reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             SystemTime::now(),
@@ -3109,7 +3280,7 @@ mod tests {
         let mut store = open_store(&root);
 
         // The SEALED entry point: this is the path the CLI takes.
-        let report = run_orphan_reap(
+        let report = reap_sealed(
             store.connection_mut(),
             &opts(&root, false),
             aged_now(30),
@@ -3148,7 +3319,7 @@ mod tests {
         let dead = make_target_dir(&root, "codex-bootstrap-target");
         let mut store = open_store(&root);
 
-        let report = run_orphan_reap_uncertified(
+        let report = reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -3193,7 +3364,7 @@ mod tests {
         let dead = make_target_dir(&root, "lane-target");
         let mut store = open_store(&root);
 
-        let first = run_orphan_reap_uncertified(
+        let first = reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -3204,7 +3375,7 @@ mod tests {
 
         // The lane runs again, rebuilds the same target, and dies again.
         let reborn = make_target_dir(&root, "lane-target");
-        let second = run_orphan_reap_uncertified(
+        let second = reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -3265,7 +3436,7 @@ mod tests {
         .unwrap();
         memcore::bind_resource(store.connection_mut(), "env-holder", "res-bound").unwrap();
 
-        let report = run_orphan_reap_uncertified(
+        let report = reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -3298,7 +3469,7 @@ mod tests {
         let held = make_target_dir(&root, "busy-target");
         let mut store = open_store(&root);
 
-        let report = run_orphan_reap_uncertified(
+        let report = reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -3336,7 +3507,7 @@ mod tests {
             }
         };
 
-        let report = run_orphan_reap_uncertified(
+        let report = reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -3400,36 +3571,55 @@ mod tests {
 
     /// **The accident this fence exists for.** The run took ONE snapshot of the
     /// protected set at the top and never took another; the deleter re-probed only
-    /// for holder *file descriptors*. So: a build claims `--target-dir` (or exports
-    /// `CARGO_TARGET_DIR`) after the scan has looked, and the delete lands in the
-    /// gap between two compile units, when that build holds no fd anywhere under the
-    /// tree. Stale snapshot says "not protected", fd probe says "nobody home", and a
-    /// live build cache is deleted.
+    /// for holder *file descriptors*. So: a build claims a target dir after the scan has
+    /// looked, and the delete lands in the gap between two compile units, when that build
+    /// holds no fd anywhere under the tree. Stale snapshot says "not protected", fd probe
+    /// says "nobody home", and a live build cache is deleted.
     ///
     /// The probe here *is* the claim: it fires between the scan and the delete and
     /// still answers `None`, so nothing but a freshly recomputed protected set can
     /// save the bytes.
+    ///
+    /// The claim arrives through the **process table** — a `cargo` that was not running
+    /// when the scan looked and is running now. That is where a real late claim arrives:
+    /// another process cannot reach into *this* process's `CARGO_TARGET_DIR`, so the old
+    /// version of this test (which staged the claim by calling `set_var` on our own
+    /// environment, from inside the probe) was simulating something that cannot happen —
+    /// and poisoning every test running beside it while it did.
     #[test]
     fn a_target_claimed_after_the_scan_is_refused_at_delete_time() {
-        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let root = unique_temp_dir("tachi-reaper-late-claim");
         let contested = make_target_dir(&root, "contested-target");
         let mut store = open_store(&root);
 
-        // Unset for the scan — the candidate must be genuinely eligible — and set by
-        // the probe, i.e. after the run's opening snapshot was taken.
-        let _env = EnvGuard::capture(CARGO_TARGET_DIR_ENV);
-        std::env::remove_var(CARGO_TARGET_DIR_ENV);
-        let claimed = contested.clone();
-        let claiming_probe = move |_path: &Path| {
-            std::env::set_var(CARGO_TARGET_DIR_ENV, &claimed);
-            // …and it holds nothing open right now: the fd-only recheck is blind to it.
-            HolderCheck::None
+        // The process table is empty while the scan looks — the candidate must be
+        // genuinely eligible — and names the contested dir from the moment the holder
+        // probe fires, i.e. after the run's opening snapshot was taken.
+        let claimed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let claiming_probe = {
+            let claimed = std::rc::Rc::clone(&claimed);
+            move |_path: &Path| {
+                claimed.set(true);
+                // …and it holds nothing open right now: the fd-only recheck is blind to it.
+                HolderCheck::None
+            }
+        };
+        let process_table = {
+            let claimed = std::rc::Rc::clone(&claimed);
+            let contested = contested.clone();
+            move || {
+                if claimed.get() {
+                    (vec![contested.clone()], Vec::new())
+                } else {
+                    (Vec::new(), Vec::new())
+                }
+            }
         };
 
         let report = run_orphan_reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
+            &resolved_sources().with_live_builds(&process_table),
             aged_now(30),
             &claiming_probe,
         );
@@ -3507,7 +3697,7 @@ mod tests {
             HolderCheck::None
         };
 
-        let report = run_orphan_reap_uncertified(
+        let report = reap_uncertified(
             store.connection_mut(),
             &opts(&link, true),
             aged_now(30),
@@ -3623,7 +3813,7 @@ mod tests {
         let mut store = open_store(&root);
         let missing = root.join("no-such-root");
 
-        let incomplete = run_orphan_reap_uncertified(
+        let incomplete = reap_uncertified(
             store.connection_mut(),
             &ReapOptions {
                 roots: vec![root.clone(), missing],
@@ -3651,7 +3841,7 @@ mod tests {
         // Same fixture, whole scope examined ⇒ clean exit. Without this half the test
         // would pass on a reaper that never exits 0 at all.
         let reborn = make_target_dir(&root, "dead-target");
-        let complete = run_orphan_reap_uncertified(
+        let complete = reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -3689,7 +3879,7 @@ mod tests {
             }
         };
 
-        let report = run_orphan_reap_uncertified(
+        let report = reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -3728,7 +3918,7 @@ mod tests {
         let dead = make_target_dir(&root, "dead-target");
         let mut store = open_store(&root);
 
-        let refusal = run_orphan_reap(
+        let refusal = reap_sealed(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -3751,7 +3941,7 @@ mod tests {
             .is_empty());
 
         // The discriminating half: this fixture is NOT inert.
-        let report = run_orphan_reap_uncertified(
+        let report = reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -3781,7 +3971,22 @@ mod tests {
                 "the refusal must name every blocking defect; missing: {defect}"
             );
         }
-        assert!(!DESTRUCTIVE_CERTIFIED, "the day this flips, the seal opens");
+        // A tripwire on a compile-time constant, deliberately: `clippy` calls a constant
+        // assertion pointless because a constant cannot surprise you at runtime — which is
+        // the whole reason this one is here. It states the premise the two assertions above
+        // depend on (they only mean "the seal refuses" while the seal is shut), so the day
+        // somebody flips `DESTRUCTIVE_CERTIFIED` this test goes red and names the seal.
+        //
+        // Kept a RUNTIME assertion rather than promoted to `const { assert!(…) }`: the
+        // person who eventually flips that constant is mid-way through certifying the
+        // delete path and needs the suite to still compile and run so they can watch the
+        // rest of the fences go green. A compile-time trip would stop them from running any
+        // test in the crate at all — a louder failure, but a less useful one, and just as
+        // easy to delete.
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(!DESTRUCTIVE_CERTIFIED, "the day this flips, the seal opens");
+        }
     }
 
     /// The report says the knife is sheathed, so a reader cannot mistake
@@ -3792,7 +3997,7 @@ mod tests {
         make_target_dir(&root, "dead-target");
         let mut store = open_store(&root);
 
-        let report = run_orphan_reap(
+        let report = reap_sealed(
             store.connection_mut(),
             &opts(&root, false),
             aged_now(30),
@@ -3924,19 +4129,23 @@ mod tests {
     /// A protection source that cannot be resolved makes the run incomplete and costs it
     /// a clean exit — it does not merely print a warning and carry on.
     ///
-    /// `HOME` unset is the reproducible source: it is what `~/.cache/sigil-shared-target`
-    /// (the documented default cache, protected even when no variable names it) is
-    /// resolved from. The first cut called that a warning, deleted anyway, and exited 0.
+    /// An unresolvable `HOME` is the source it is staged with: `HOME` is what
+    /// `~/.cache/sigil-shared-target` (the documented default cache, protected even when
+    /// no variable names it) is resolved from. The first cut called that a warning,
+    /// deleted anyway, and exited 0.
+    ///
+    /// The gap is staged by handing this run a [`ProtectionSources`] with no home — NOT
+    /// by unsetting `HOME` in the process, which is what the previous version did and
+    /// which made every test in this binary silently depend on `HOME` being set.
     #[test]
     fn an_incomplete_protection_set_never_exits_clean() {
-        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let root = unique_temp_dir("tachi-reaper-protection-gap");
         make_target_dir(&root, "dead-target");
         let mut store = open_store(&root);
 
         // The complete half: with the protection sources resolvable, the same run is
         // clean. (Without this, a reaper that called *every* run incomplete would pass.)
-        let complete = run_orphan_reap(
+        let complete = reap_sealed(
             store.connection_mut(),
             &opts(&root, false),
             aged_now(30),
@@ -3947,13 +4156,11 @@ mod tests {
         assert!(!complete.incomplete, "{complete:?}");
         assert!(reap_exit_status(&complete).is_ok(), "{complete:?}");
 
-        // Now break a protection source.
-        let _home = EnvGuard::remove("HOME");
-        let _userprofile = EnvGuard::remove("USERPROFILE");
-
+        // Now break a protection source — for this run, and this run only.
         let gapped = run_orphan_reap(
             store.connection_mut(),
             &opts(&root, false),
+            &resolved_sources().without_home(),
             aged_now(30),
             &*unheld_probe(),
         )
@@ -4001,5 +4208,130 @@ mod tests {
         );
         assert!(!gapped.is_complete());
         assert_eq!(gapped.gaps().len(), 1);
+    }
+
+    // ── the race BUG 3's own test used to cause ─────────────────────────────
+
+    /// **The discriminating test for the fix.** A run with a MISSING protection source and
+    /// a run with a COMPLETE one, in flight *at the same time, in the same process*, each
+    /// getting its own answer.
+    ///
+    /// This is the exact shape that could not exist before. The gap used to be staged by
+    /// `remove_var("HOME")`, which is process-global: while it was removed, every other
+    /// test in this binary — including ones that never mention `HOME` — was running
+    /// against a reaper that could not resolve the default cache, so
+    /// `an_incomplete_forced_scan_does_not_exit_clean`'s "the same fixture, whole scope
+    /// examined ⇒ clean exit" half failed on a build seat while the four tests that own
+    /// the fail-closed behaviour all passed. A lock would have hidden that by forbidding
+    /// the overlap; injection makes the overlap *harmless*, which is the property worth
+    /// pinning.
+    ///
+    /// The two runs are held in the same window on purpose: each one's holder probe waits
+    /// for the other to reach its own probe, so both are provably mid-run — past the
+    /// protected-set computation, before the verdict — at the same instant. The wait has a
+    /// deadline rather than a barrier, so a regression that stops one run from probing
+    /// fails the assertions instead of hanging the suite.
+    #[test]
+    fn a_gapped_run_and_a_resolved_run_are_in_flight_together_without_contaminating_each_other() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Instant;
+
+        let gapped_root = unique_temp_dir("tachi-reaper-parallel-gapped");
+        let resolved_root = unique_temp_dir("tachi-reaper-parallel-resolved");
+        make_target_dir(&gapped_root, "dead-target");
+        make_target_dir(&resolved_root, "dead-target");
+
+        let arrived = AtomicUsize::new(0);
+        let rendezvous = |_path: &Path| {
+            arrived.fetch_add(1, Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while arrived.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            HolderCheck::None
+        };
+
+        let (gapped, resolved) = std::thread::scope(|scope| {
+            let gapped = scope.spawn(|| {
+                let mut store = open_store(&gapped_root);
+                run_orphan_reap(
+                    store.connection_mut(),
+                    &opts(&gapped_root, false),
+                    &resolved_sources().without_home(),
+                    aged_now(30),
+                    &rendezvous,
+                )
+                .expect("report-only")
+            });
+            let resolved = scope.spawn(|| {
+                let mut store = open_store(&resolved_root);
+                run_orphan_reap(
+                    store.connection_mut(),
+                    &opts(&resolved_root, false),
+                    &resolved_sources(),
+                    aged_now(30),
+                    &rendezvous,
+                )
+                .expect("report-only")
+            });
+            (gapped.join().unwrap(), resolved.join().unwrap())
+        });
+
+        // Both really were in the same window (each probe saw the other arrive), so the
+        // verdicts below were computed concurrently — not one after the other.
+        assert_eq!(
+            arrived.load(Ordering::SeqCst),
+            2,
+            "both runs must have reached their holder probe, or they never overlapped"
+        );
+
+        // The gapped run is fail-closed …
+        assert!(!gapped.protection_complete, "{gapped:?}");
+        assert!(gapped.incomplete, "{gapped:?}");
+        assert!(
+            gapped.warnings.iter().any(|w| w.contains("HOME")),
+            "{:?}",
+            gapped.warnings
+        );
+        assert!(reap_exit_status(&gapped).is_err(), "{gapped:?}");
+
+        // … and its neighbour, which shared the process with it the whole time, is not
+        // touched by it: complete protected set, clean exit.
+        assert!(
+            resolved.protection_complete,
+            "the neighbouring run's protected set must not be gapped by someone else's \
+             missing source: {:?}",
+            resolved.warnings
+        );
+        assert!(!resolved.incomplete, "{resolved:?}");
+        assert!(reap_exit_status(&resolved).is_ok(), "{resolved:?}");
+
+        let _ = std::fs::remove_dir_all(&gapped_root);
+        let _ = std::fs::remove_dir_all(&resolved_root);
+    }
+
+    /// **The escape hatch stays closed.** `set_var` / `remove_var` are how the race got
+    /// in: they mutate the environment of the *process*, and cargo runs these tests as
+    /// threads of one. Nothing in this module — production or test — may reach for them
+    /// again; a protection source that needs to vary is an argument
+    /// ([`ProtectionSources`]), not a global.
+    ///
+    /// A source-level fence rather than a code-level one, because the failure it guards
+    /// against is a *future test* reintroducing the mutation, and no runtime assertion in
+    /// the current tests can see that coming.
+    #[test]
+    fn no_test_mutates_the_process_environment() {
+        // Assembled at runtime, or this test's own source would be the first hit.
+        let forbidden = ["set", "remove"].map(|verb| format!("env::{verb}_var"));
+        let source = include_str!("exec_env_reaper.rs");
+
+        for needle in &forbidden {
+            assert!(
+                !source.contains(needle.as_str()),
+                "`{needle}` is back in exec_env_reaper.rs. It mutates the environment of the \
+                 whole test process, which is what made every reaper test depend on HOME and \
+                 turned an unrelated test red. Inject a `ProtectionSources` instead."
+            );
+        }
     }
 }
