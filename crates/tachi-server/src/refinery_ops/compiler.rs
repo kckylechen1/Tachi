@@ -82,24 +82,33 @@ pub(crate) fn split_paragraphs(body: &str) -> (Vec<SourceSpanV1>, Vec<SourceSpan
 }
 
 /// Build an [`IssueEvidenceV1`] from an already-hashed snapshot plus
-/// pre-resolved anchors. `doc_anchors_by_span`/`issue_ref_anchors_by_span`
-/// carry the byte span of the `Spec-Ref:`/relation line each anchor was
-/// parsed from (see `refinery_ops::parse`), so a claim only receives the
-/// anchors whose declaring line falls inside that claim's paragraph.
+/// pre-resolved anchors. `source_text` is the FULL source the caller parsed
+/// anchors from — issue body plus every `selected_comment_revisions` entry,
+/// double-newline joined (see `refinery_ops::mod`'s `build_refinery_packet`)
+/// — NOT just `snapshot.body`. Coverage accounting (F3, build-seat
+/// REQUEST-CHANGES) must cover every byte the evidence compiler actually
+/// read to produce claims/relations/anchors, and selected comments feed
+/// Spec-Ref/relation parsing exactly like the body does; a coverage report
+/// that silently excluded them would be under-reporting its own input.
+/// `doc_anchors_by_span`/`issue_ref_anchors_by_span` carry the byte span
+/// (into `source_text`) of the `Spec-Ref:`/relation line each anchor was
+/// parsed from, so a claim only receives the anchors whose declaring line
+/// falls inside that claim's paragraph.
 ///
 /// Every claim's `verification` is `ClaimVerificationV1::ModelOnly` — this
 /// builder never has repo-tool evidence in hand, and the type itself has no
 /// zero-evidence `Verified` constructor (#1002 acceptance criterion 6).
 pub(crate) fn build_issue_evidence(
     snapshot: IssueSnapshotV1,
+    source_text: &str,
     linked_specs: Vec<CanonicalDocRefV1>,
     relations: Vec<IssueRelationV1>,
     grounding_status: GroundingStatusV1,
     doc_anchors_by_span: &[(SourceSpanV1, CanonicalDocRefV1)],
     issue_ref_anchors_by_span: &[(SourceSpanV1, String)],
 ) -> IssueEvidenceV1 {
-    let (claim_spans, omitted_spans) = split_paragraphs(&snapshot.body);
-    let source_bytes = snapshot.body.len();
+    let (claim_spans, omitted_spans) = split_paragraphs(source_text);
+    let source_bytes = source_text.len();
     let mut covered_bytes = 0usize;
 
     let claims: Vec<ClaimV1> = claim_spans
@@ -107,7 +116,7 @@ pub(crate) fn build_issue_evidence(
         .enumerate()
         .map(|(i, span)| {
             covered_bytes += span.len();
-            let text = snapshot.body[span.start_byte..span.end_byte].to_string();
+            let text = source_text[span.start_byte..span.end_byte].to_string();
             let mut anchors = Vec::new();
             for (anchor_span, doc_ref) in doc_anchors_by_span {
                 if span.overlaps(anchor_span) {

@@ -3,16 +3,20 @@
 //! network (#1002 acceptance criterion 7).
 
 use super::doc_resolver::{DocRefResolver, DocResolution};
-use std::collections::HashMap;
-use tachi_params::CanonicalDocRefV1;
+use tachi_params::{CanonicalDocRefV1, RepoRevisionV1};
 
-/// A resolver whose answers are pre-registered by the test. Anything not
-/// explicitly registered as resolved comes back `Unresolved` — this is the
-/// injection point `build_refinery_packet` takes in place of the real
-/// `GitRefResolver` (see `refinery_ops::doc_resolver`).
+/// A resolver whose answers are pre-registered by the test via
+/// [`FixtureDocResolver::with_resolved`]. Matching is EXACT across every
+/// field the real `GitRefResolver` verifies — repo, commit_sha, path,
+/// blob_sha, section, AND trusted_ref — not just path+commit_sha (F6,
+/// build-seat REQUEST-CHANGES: a lenient match made "exact anchor" tests
+/// pass even when the fixture's registered repo/blob/section/trusted_ref
+/// didn't actually match what the test body declared). Anything not
+/// exactly registered comes back `Unresolved`.
 #[derive(Default)]
 pub(crate) struct FixtureDocResolver {
-    resolved: HashMap<String, CanonicalDocRefV1>,
+    resolved: Vec<CanonicalDocRefV1>,
+    repo_revision: Option<RepoRevisionV1>,
 }
 
 impl FixtureDocResolver {
@@ -20,19 +24,34 @@ impl FixtureDocResolver {
         Self::default()
     }
 
-    pub(crate) fn with_resolved(mut self, commit_sha: &str, path: &str) -> Self {
-        let doc_ref = CanonicalDocRefV1 {
-            repo: "owner/repo".to_string(),
-            trusted_ref: "origin/main".to_string(),
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_resolved(
+        mut self,
+        repo: &str,
+        commit_sha: &str,
+        path: &str,
+        blob_sha: &str,
+        section: &str,
+        trusted_ref: &str,
+    ) -> Self {
+        self.resolved.push(CanonicalDocRefV1 {
+            repo: repo.to_string(),
+            trusted_ref: trusted_ref.to_string(),
             commit_sha: commit_sha.to_string(),
             path: path.to_string(),
-            blob_sha: fixture_blob_sha(),
-            section: "3".to_string(),
-            authority_receipt: None,
-            verified_reachable_at: Some("2026-07-13T00:00:00Z".to_string()),
-        };
-        self.resolved
-            .insert(format!("{path}@{commit_sha}"), doc_ref);
+            blob_sha: blob_sha.to_string(),
+            section: section.to_string(),
+            authority_receipt: "fixture:pre-registered".to_string(),
+            verified_reachable_at: "2026-07-13T00:00:00Z".to_string(),
+        });
+        self
+    }
+
+    /// Configure what `current_repo_revision` returns — the fixture
+    /// equivalent of `GitRefResolver`'s real `git rev-parse <trusted_ref>`
+    /// (F2, build-seat REQUEST-CHANGES).
+    pub(crate) fn with_repo_revision(mut self, revision: RepoRevisionV1) -> Self {
+        self.repo_revision = Some(revision);
         self
     }
 }
@@ -40,26 +59,42 @@ impl FixtureDocResolver {
 impl DocRefResolver for FixtureDocResolver {
     fn resolve(
         &self,
-        _repo: &str,
+        repo: &str,
         path: &str,
         commit_sha: &str,
-        _blob_sha: &str,
-        _section: &str,
-        _trusted_ref: &str,
+        blob_sha: &str,
+        section: &str,
+        trusted_ref: &str,
     ) -> DocResolution {
-        let key = format!("{path}@{commit_sha}");
-        match self.resolved.get(&key) {
+        let found = self.resolved.iter().find(|d| {
+            d.repo == repo
+                && d.path == path
+                && d.commit_sha == commit_sha
+                && d.blob_sha == blob_sha
+                && d.section == section
+                && d.trusted_ref == trusted_ref
+        });
+        match found {
             Some(doc_ref) => DocResolution::Resolved(doc_ref.clone()),
             None => DocResolution::Unresolved {
-                reason: format!("fixture: no resolution registered for {key}"),
+                reason: format!(
+                    "fixture: no exact registration for repo={repo} path={path} \
+                     commit={commit_sha} blob={blob_sha} section={section} \
+                     trusted_ref={trusted_ref}"
+                ),
             },
         }
     }
+
+    fn current_repo_revision(&self, _repo: &str, _trusted_ref: &str) -> Option<RepoRevisionV1> {
+        self.repo_revision.clone()
+    }
 }
 
-/// A resolver matching [`FixtureDocResolver::with_resolved`]'s exact commit
-/// SHA + blob SHA so `build_refinery_packet`'s Spec-Ref parsing round-trips
-/// cleanly in tests: the commit/blob pair a fixture issue body declares.
+/// This leaf's own fixture convention for constructing Spec-Ref bodies:
+/// repo/commit/blob/section a caller can either use as-is (matching
+/// [`FixtureDocResolver::new`] registered via these same constants) or
+/// override entirely via explicit `with_resolved(...)` args.
 pub(crate) const FIXTURE_COMMIT_SHA: &str = "abc1234abc1234abc1234abc1234abc1234abcd";
 pub(crate) const FIXTURE_DOC_PATH: &str = "docs/engineering/architecture/example.md";
 
@@ -85,12 +120,13 @@ pub(crate) fn minimal_evidence(
     let (repo, number) = issue_ref
         .rsplit_once('#')
         .expect("issue_ref must be 'owner/repo#N'");
+    let body = "Fixture issue body for disposition-classifier tests.".to_string();
     let snapshot = tachi_params::IssueSnapshotV1 {
         issue_ref: issue_ref.to_string(),
         repo: repo.to_string(),
         number: number.parse().unwrap_or(0),
         title: "fixture".to_string(),
-        body: "Fixture issue body for disposition-classifier tests.".to_string(),
+        body: body.clone(),
         state: state.to_string(),
         labels: labels.iter().map(|s| s.to_string()).collect(),
         milestone: None,
@@ -102,6 +138,7 @@ pub(crate) fn minimal_evidence(
     };
     super::compiler::build_issue_evidence(
         snapshot,
+        &body,
         Vec::new(),
         Vec::new(),
         tachi_params::GroundingStatusV1::Grounded,
@@ -111,7 +148,10 @@ pub(crate) fn minimal_evidence(
 }
 
 /// Build a `gh issue view --json ...` result payload shape. `comments` is a
-/// list of `(id, author_login, created_at, body)` tuples.
+/// list of `(id, author_login, created_at, updated_at, body)` tuples —
+/// `updated_at` is `None` when a fixture wants to exercise the
+/// `updatedAt`-absent fallback-to-`createdAt` path (F5).
+#[allow(clippy::type_complexity)]
 pub(crate) fn gh_issue_json(
     title: &str,
     body: &str,
@@ -119,7 +159,7 @@ pub(crate) fn gh_issue_json(
     labels: &[&str],
     milestone: Option<&str>,
     updated_at: &str,
-    comments: &[(&str, &str, &str, &str)],
+    comments: &[(&str, &str, &str, Option<&str>, &str)],
 ) -> serde_json::Value {
     serde_json::json!({
         "title": title,
@@ -130,13 +170,17 @@ pub(crate) fn gh_issue_json(
         "updatedAt": updated_at,
         "comments": comments
             .iter()
-            .map(|(id, author, created_at, comment_body)| {
-                serde_json::json!({
+            .map(|(id, author, created_at, comment_updated_at, comment_body)| {
+                let mut obj = serde_json::json!({
                     "id": id,
                     "author": {"login": author},
                     "createdAt": created_at,
                     "body": comment_body,
-                })
+                });
+                if let Some(u) = comment_updated_at {
+                    obj["updatedAt"] = serde_json::json!(u);
+                }
+                obj
             })
             .collect::<Vec<_>>(),
     })

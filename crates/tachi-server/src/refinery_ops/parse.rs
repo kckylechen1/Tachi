@@ -42,28 +42,49 @@ pub(crate) struct SpecRefLine {
     pub(crate) span: SourceSpanV1,
 }
 
-/// Scan `text` line by line (byte-offset tracked) for `Spec-Ref:` lines.
-/// Malformed lines are silently skipped (not a hard parse error) — an
-/// unresolvable Spec-Ref simply never becomes a linked spec, which the
-/// caller must treat as a missing anchor if that was the issue's only
-/// grounding path.
-pub(crate) fn parse_spec_ref_lines(text: &str) -> Vec<SpecRefLine> {
-    let mut out = Vec::new();
+/// A line that declared itself a `Spec-Ref:` but failed to parse against
+/// the frozen syntax (canon doc §5). This must NOT be silently skipped —
+/// the issue explicitly claimed a canonical anchor here and failed to
+/// supply a usable one, which is exactly the "requested anchor cannot be
+/// resolved" case canon doc §4.1 requires to degrade the whole packet
+/// (F1: previously a malformed line was simply invisible to the grounding
+/// check, leaving the packet falsely `Grounded`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MalformedSpecRefLine {
+    pub(crate) raw: String,
+    pub(crate) span: SourceSpanV1,
+}
+
+/// Scan `text` line by line (byte-offset tracked) for `Spec-Ref:` lines,
+/// returning both successfully parsed refs and malformed ones (a line that
+/// started with `Spec-Ref:` but didn't match the frozen syntax) — the
+/// caller must treat every malformed line as a missing anchor, not ignore
+/// it (F1).
+pub(crate) fn parse_spec_ref_lines(text: &str) -> (Vec<SpecRefLine>, Vec<MalformedSpecRefLine>) {
+    let mut ok = Vec::new();
+    let mut malformed = Vec::new();
     let mut offset = 0usize;
     for line in text.split_inclusive('\n') {
         let trimmed = line.trim_end_matches(['\n', '\r']).trim_start();
         if let Some(rest) = trimmed.strip_prefix("Spec-Ref:") {
-            if let Some(mut parsed) = parse_spec_ref_value(rest.trim()) {
-                parsed.span = SourceSpanV1 {
-                    start_byte: offset,
-                    end_byte: offset + line.len(),
-                };
-                out.push(parsed);
+            let span = SourceSpanV1 {
+                start_byte: offset,
+                end_byte: offset + line.len(),
+            };
+            match parse_spec_ref_value(rest.trim()) {
+                Some(mut parsed) => {
+                    parsed.span = span;
+                    ok.push(parsed);
+                }
+                None => malformed.push(MalformedSpecRefLine {
+                    raw: rest.trim().to_string(),
+                    span,
+                }),
             }
         }
         offset += line.len();
     }
-    out
+    (ok, malformed)
 }
 
 fn parse_spec_ref_value(value: &str) -> Option<SpecRefLine> {
@@ -247,9 +268,20 @@ pub(crate) fn parse_issue_snapshot_from_gh_json(
                         .or_else(|| v.as_u64().map(|n| n.to_string()))
                 })
                 .unwrap_or_default();
+            // F5: prefer `updatedAt` — a comment edited without changing its
+            // text (unusual, but possible) must still produce a different
+            // semantic snapshot hash. `createdAt` never changes after an
+            // edit and would make such an edit invisible to
+            // `compute_snapshot_hash`. Unverified whether `gh issue view
+            // --json comments` actually exposes `updatedAt` in this gh CLI
+            // version (no network access to confirm) — if it doesn't, this
+            // falls back to `createdAt` (today's behavior, not a
+            // regression); Oz/a live smoke test should confirm the real
+            // field name.
             let updated_at = c
-                .get("createdAt")
+                .get("updatedAt")
                 .and_then(|v| v.as_str())
+                .or_else(|| c.get("createdAt").and_then(|v| v.as_str()))
                 .unwrap_or_default()
                 .to_string();
             let author = c

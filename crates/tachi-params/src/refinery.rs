@@ -50,36 +50,41 @@ pub enum EvidenceRelationV1 {
     AppliesTo,
 }
 
-/// The immutable-revision union carried by an `EvidenceRefV1`. Internally
-/// tagged (`kind`) — the canon doc shows this as a set of shape alternatives
-/// without a literal wire envelope, so the JSON tagging here is this leaf's
-/// implementation choice, documented rather than left implicit.
+/// The immutable-revision union carried by an `EvidenceRefV1`. Untagged
+/// (F4 fidelity fix, build-seat REQUEST-CHANGES) to match canon doc §3's
+/// literal wire shape: `issue_snapshot_hash | issue_body_hash | {
+/// comment_id, updated_at, body_hash } | pr_snapshot_hash | pr_head_sha |
+/// blob_sha | memory_revision` — the six hash-shaped alternatives serialize
+/// as BARE strings, not `{"kind": ..., "value": ...}` wrapper objects; the
+/// `EvidenceRefV1` this is attached to already carries
+/// `target_kind: SourceKindV1`, so the pairing disambiguates which kind of
+/// hash it is without a second discriminant on this type. The comment
+/// alternative serializes as the exact named object canon shows.
+///
+/// KNOWN LIMITATION (not fully resolved, flagged rather than hidden):
+/// `#[serde(untagged)]` deserialization is ambiguous across the six
+/// bare-string variants — serde tries each declared variant in order and
+/// the first string-shaped one always matches, so `Deserialize` cannot
+/// currently distinguish e.g. a `BlobSha` string from a `PrHeadSha` string
+/// round-tripped back in. This is inert today (evidence refs in this leaf
+/// are only ever serialized outward, never parsed back via `Deserialize`)
+/// but would need a real fix (e.g. a paired discriminant field elsewhere,
+/// or accepting that only construction-time Rust type identity matters)
+/// before anything relies on deserializing this union.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(untagged)]
 pub enum ImmutableRevisionV1 {
-    IssueSnapshotHash {
-        value: String,
-    },
-    IssueBodyHash {
-        value: String,
-    },
     Comment {
         comment_id: String,
         updated_at: String,
         body_hash: String,
     },
-    PrSnapshotHash {
-        value: String,
-    },
-    PrHeadSha {
-        value: String,
-    },
-    BlobSha {
-        value: String,
-    },
-    MemoryRevision {
-        value: String,
-    },
+    IssueSnapshotHash(String),
+    IssueBodyHash(String),
+    PrSnapshotHash(String),
+    PrHeadSha(String),
+    BlobSha(String),
+    MemoryRevision(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,10 +118,20 @@ pub struct CanonicalDocRefV1 {
     pub path: String,
     pub blob_sha: String,
     pub section: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authority_receipt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verified_reachable_at: Option<String>,
+    /// F4 fidelity fix (build-seat REQUEST-CHANGES): canon doc §3 lists this
+    /// as a required field, not `Option<String>` — a resolver that hasn't
+    /// verified authority has no business constructing a `Resolved`
+    /// `CanonicalDocRefV1` at all. A real, honest value describing HOW
+    /// authority was verified (e.g. `"git:reachable-from:<trusted_ref>"` for
+    /// the live resolver, `"fixture:pre-registered"` for test doubles) —
+    /// never a fabricated placeholder posing as a real verification.
+    pub authority_receipt: String,
+    /// F4 fidelity fix: same rationale as `authority_receipt` — every
+    /// existing construction site already always supplied a real timestamp
+    /// (`Option` was never actually exercised as `None` outside one hand-
+    /// written test fixture), so making it required drops no real
+    /// information.
+    pub verified_reachable_at: String,
 }
 
 // ─── §4.1: grounding + spans ────────────────────────────────────────────────
@@ -435,15 +450,48 @@ impl EngineReceiptV1 {
     }
 }
 
+/// F4 fidelity note (build-seat REQUEST-CHANGES): canon doc §4.2's literal
+/// snippet lists 9 fields (`issue_ref`, `based_on_repo_revisions`,
+/// `based_on_issue_snapshot_hash`, `disposition`, `evidence_refs`,
+/// `contradictions`, `proposed_comment`, `proposed_labels`,
+/// `proposed_doc_deltas`). The 7 fields below that snippet does not show
+/// are each kept for a specific, cited reason — none are unjustified
+/// scope-creep — see each field's own doc comment for its basis. A full
+/// field→basis table also ships in this leaf's delivery report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueDispositionProposalV1 {
+    /// Extension. Not in the §4.2 snippet; required by #1002's own dispatch
+    /// instructions ("proposal 绑 packet id/proposal hash/source bundle
+    /// hash/..."), which are a frozen input to this leaf distinct from (but
+    /// not contradicting) the design-doc snippet. Deterministic:
+    /// `issue-refinery/<issue_ref>/<issue_snapshot_hash>`.
     pub packet_id: String,
+    /// Extension, same #1002 dispatch-instruction basis as `packet_id`.
+    /// SHA-256 over the proposal's own decision-relevant fields (§5 hashing
+    /// contract) — the reproducibility anchor `check_proposal_replay`-style
+    /// consumers can use to prove a proposal wasn't tampered with in transit.
     pub proposal_hash: String,
+    /// Extension, same #1002 dispatch-instruction basis. SHA-256 fingerprint
+    /// of the evidence bundle (issue snapshot hash + doc/repo revisions)
+    /// this proposal was built from — lets a caller cheaply check "is this
+    /// proposal even talking about the bundle I have" before running the
+    /// full `check_proposal_replay`.
     pub source_bundle_hash: String,
     pub issue_ref: String,
     pub based_on_issue_snapshot_hash: String,
     pub based_on_repo_revisions: Vec<RepoRevisionV1>,
+    /// Extension beyond the literal §4.2 snippet (which shows
+    /// `based_on_repo_revisions` but not a doc-revision sibling) — required
+    /// by #1002's own dispatch instructions ("doc 修订/repo 修订") and by
+    /// §5's replay contract itself, which is explicitly about detecting
+    /// drift in "a changed blob SHA" — that requires pinning WHICH doc
+    /// revisions the proposal was based on in the first place.
     pub based_on_doc_revisions: Vec<CanonicalDocRefV1>,
+    /// Extension. Canon doc §4.1 defines the `grounding_status` concept
+    /// (`grounding_status=missing_anchor`) as a property of the evidence
+    /// packet; carrying it onto the disposition proposal too lets a
+    /// consumer of ONLY the proposal (without the full evidence packet)
+    /// still see why a `DECISION_REQUIRED` disposition was forced.
     pub grounding_status: GroundingStatusV1,
     pub disposition: DispositionV1,
     pub evidence_refs: Vec<EvidenceRefV1>,
@@ -452,7 +500,21 @@ pub struct IssueDispositionProposalV1 {
     pub proposed_comment: Option<String>,
     pub proposed_labels: Vec<String>,
     pub proposed_doc_deltas: Vec<DocDeltaProposalV1>,
+    /// Extension. Canon doc §3/§4.3 establishes the preview-only concept
+    /// ("Unknown identity ... makes the result preview-only"; "#1002 ...
+    /// proposal-only apply boundary") without listing it as a named
+    /// `IssueDispositionProposalV1` field in the §4.2 snippet — carrying it
+    /// explicitly (rather than leaving it implicit/undocumented) makes the
+    /// invariant machine-checkable instead of a convention a consumer has
+    /// to already know. Unconditionally `true` in this leaf (see
+    /// `refinery_ops::mod` doc comments).
     pub preview_only: bool,
+    /// Extension, paired with `preview_only` — canon doc §3 defines
+    /// `EngineReceiptV1` and the rule "Unknown identity, an undeclared
+    /// fallback, provider timeout, or missing tool access makes the result
+    /// preview-only"; carrying the receipt itself lets a reviewer see WHY
+    /// `preview_only` is true, not just that it is. Always `None` in this
+    /// leaf (no live path captures a real engine identity yet).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_receipt: Option<EngineReceiptV1>,
 }
@@ -504,10 +566,13 @@ pub fn check_proposal_replay(
     }
 
     for repo_rev in &proposal.based_on_repo_revisions {
+        // Match by (repo, ref) — not repo alone — so a proposal pinned
+        // against one ref can't be silently checked against a different
+        // ref's commit for the same repo.
         let actual = current
             .repo_revisions
             .iter()
-            .find(|r| r.repo == repo_rev.repo);
+            .find(|r| r.repo == repo_rev.repo && r.git_ref == repo_rev.git_ref);
         let actual_sha = actual.map(|r| r.commit_sha.clone());
         if actual_sha.as_deref() != Some(repo_rev.commit_sha.as_str()) {
             reasons.push(StalenessReasonV1::RepoRevisionChanged {
@@ -523,12 +588,23 @@ pub fn check_proposal_replay(
             .doc_revisions
             .iter()
             .find(|d| d.path == doc_rev.path && d.repo == doc_rev.repo);
-        let actual_blob = actual.map(|d| d.blob_sha.clone());
-        if actual_blob.as_deref() != Some(doc_rev.blob_sha.as_str()) {
+        // All three axes must match — commit_sha, trusted_ref, AND blob_sha.
+        // Canon doc §5: "a SHA alone does not grant canonical authority" —
+        // an identical blob_sha at a DIFFERENT commit/trusted_ref must still
+        // be treated as stale (the original approval was scoped to the
+        // pinned commit's full context, not just this one file's content).
+        let matches = actual
+            .map(|d| {
+                d.commit_sha == doc_rev.commit_sha
+                    && d.trusted_ref == doc_rev.trusted_ref
+                    && d.blob_sha == doc_rev.blob_sha
+            })
+            .unwrap_or(false);
+        if !matches {
             reasons.push(StalenessReasonV1::DocRevisionChanged {
                 path: doc_rev.path.clone(),
                 expected_blob_sha: doc_rev.blob_sha.clone(),
-                actual_blob_sha: actual_blob,
+                actual_blob_sha: actual.map(|d| d.blob_sha.clone()),
             });
         }
     }
@@ -775,6 +851,50 @@ mod tests {
             .any(|r| matches!(r, StalenessReasonV1::DocRevisionChanged { .. })));
     }
 
+    /// F2 (build-seat REQUEST-CHANGES): identical blob content at a
+    /// DIFFERENT commit must still be treated as stale — "a SHA alone does
+    /// not grant canonical authority" (canon doc §5). A byte-identical file
+    /// re-verified at a different commit was not the commit the original
+    /// approval was scoped to.
+    #[test]
+    fn check_proposal_replay_rejects_same_blob_at_a_different_commit() {
+        let proposal = sample_proposal();
+        let mut current = CurrentGroundStateV1 {
+            issue_snapshot_hash: proposal.based_on_issue_snapshot_hash.clone(),
+            repo_revisions: proposal.based_on_repo_revisions.clone(),
+            doc_revisions: proposal.based_on_doc_revisions.clone(),
+        };
+        assert_eq!(
+            current.doc_revisions[0].blob_sha, proposal.based_on_doc_revisions[0].blob_sha,
+            "test setup: blob_sha must start identical"
+        );
+        current.doc_revisions[0].commit_sha = "a-different-commit-sha".to_string();
+        let err = check_proposal_replay(&proposal, &current)
+            .expect_err("same blob at a different commit must still be stale");
+        assert!(err
+            .iter()
+            .any(|r| matches!(r, StalenessReasonV1::DocRevisionChanged { .. })));
+    }
+
+    /// F2: repo HEAD moving (commit_sha drift on the SAME repo+ref) must
+    /// reject replay — this is the axis `based_on_repo_revisions` exists to
+    /// guard, previously untested because the live path never populated it.
+    #[test]
+    fn check_proposal_replay_rejects_repo_head_drift() {
+        let proposal = sample_proposal();
+        let mut current = CurrentGroundStateV1 {
+            issue_snapshot_hash: proposal.based_on_issue_snapshot_hash.clone(),
+            repo_revisions: proposal.based_on_repo_revisions.clone(),
+            doc_revisions: proposal.based_on_doc_revisions.clone(),
+        };
+        current.repo_revisions[0].commit_sha = "a-new-head-sha".to_string();
+        let err = check_proposal_replay(&proposal, &current)
+            .expect_err("repo HEAD drift must reject replay");
+        assert!(err
+            .iter()
+            .any(|r| matches!(r, StalenessReasonV1::RepoRevisionChanged { .. })));
+    }
+
     fn sample_proposal() -> IssueDispositionProposalV1 {
         IssueDispositionProposalV1 {
             packet_id: "issue-refinery/owner/repo#1/snap1".to_string(),
@@ -795,8 +915,8 @@ mod tests {
                 path: "docs/x.md".to_string(),
                 blob_sha: "blob1".to_string(),
                 section: "1".to_string(),
-                authority_receipt: None,
-                verified_reachable_at: None,
+                authority_receipt: "fixture:sample".to_string(),
+                verified_reachable_at: "2026-07-13T00:00:00Z".to_string(),
             }],
             grounding_status: GroundingStatusV1::Grounded,
             disposition: DispositionV1::Keep,

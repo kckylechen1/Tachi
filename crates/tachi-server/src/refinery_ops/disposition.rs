@@ -48,6 +48,20 @@ pub(crate) struct RelatedSignalV1 {
 /// `failure_class_protected_router_wins_over_other_signals`). Router
 /// protection is now derived directly from `evidence` inside `classify`
 /// (see [`is_protected_router`]) so the two can never desync again.
+///
+/// Live-path collection honesty (F7, build-seat REQUEST-CHANGES): `related`
+/// is live-derived from each relation line's own `[state]` annotation (see
+/// `parse::parse_related_state_suffix`); `stale_body_signal` is live-derived
+/// from a blob-sha-drift resolver reason (see `mod::build_refinery_packet`).
+/// `scope_collisions` and `shipped_evidence` are NOT collected by the live
+/// path at all (no scope-collision detection or shipped-evidence
+/// cross-check exists yet — both remain a follow-up slice, `Default`
+/// leaves them empty/`None`). `dispatch_packet_complete` is deliberately
+/// left `None` by the live path — there is no defined, canon-backed
+/// criterion yet for what makes a dispatch packet "complete" from a raw
+/// issue body. None of these defaults are measurements; `classify` treats
+/// an empty/`None` signal as a no-op, never as a false-positive "checked
+/// and clean".
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RefinerySignalsV1 {
     pub(crate) related: Vec<RelatedSignalV1>,
@@ -181,9 +195,9 @@ pub(crate) fn propose_disposition(
         relation: EvidenceRelationV1::DerivedFrom,
         target_kind: SourceKindV1::Issue,
         target_ref: evidence.issue_ref.clone(),
-        immutable_revision: ImmutableRevisionV1::IssueSnapshotHash {
-            value: evidence.issue_snapshot_hash.clone(),
-        },
+        immutable_revision: ImmutableRevisionV1::IssueSnapshotHash(
+            evidence.issue_snapshot_hash.clone(),
+        ),
         section_or_span: None,
         captured_at: captured_at.to_string(),
     }];

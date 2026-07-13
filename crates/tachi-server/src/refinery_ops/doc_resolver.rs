@@ -14,7 +14,7 @@
 //! deliberately fail-closed: any git command failure resolves to
 //! `Unresolved`, never a false `Resolved`.
 
-use tachi_params::CanonicalDocRefV1;
+use tachi_params::{CanonicalDocRefV1, RepoRevisionV1};
 
 pub(crate) enum DocResolution {
     Resolved(CanonicalDocRefV1),
@@ -32,10 +32,23 @@ pub(crate) trait DocRefResolver {
         section: &str,
         trusted_ref: &str,
     ) -> DocResolution;
+
+    /// The repo's current commit at `trusted_ref` (canon doc §3/§5's
+    /// `RepoRevisionV1`) — pins a proposal's `based_on_repo_revisions` so
+    /// `check_proposal_replay` can detect the repo itself moving, not just
+    /// a specific doc's blob sha (F2). `None` when unavailable (e.g. no
+    /// live git checkout to inspect) — a caller with no repo revision to
+    /// pin simply has an empty axis on replay, same as today.
+    fn current_repo_revision(&self, repo: &str, trusted_ref: &str) -> Option<RepoRevisionV1>;
 }
 
 pub(crate) struct GitRefResolver {
     pub(crate) repo_root: std::path::PathBuf,
+    /// The repo identity this local checkout actually is. A `Spec-Ref:`
+    /// line declaring a DIFFERENT repo must never be resolved against this
+    /// checkout's git history — that would silently grant canonical
+    /// authority to a doc in a repo this process never verified (F1).
+    pub(crate) known_repo: String,
 }
 
 impl DocRefResolver for GitRefResolver {
@@ -48,6 +61,15 @@ impl DocRefResolver for GitRefResolver {
         section: &str,
         trusted_ref: &str,
     ) -> DocResolution {
+        if repo != self.known_repo {
+            return DocResolution::Unresolved {
+                reason: format!(
+                    "repo identity mismatch: Spec-Ref declares '{repo}' but this checkout is '{}' — refusing to resolve against the wrong repo's git history",
+                    self.known_repo
+                ),
+            };
+        }
+
         let commit_exists = std::process::Command::new("git")
             .arg("-C")
             .arg(&self.repo_root)
@@ -112,8 +134,34 @@ impl DocRefResolver for GitRefResolver {
             path: path.to_string(),
             blob_sha: blob_sha.to_string(),
             section: section.to_string(),
-            authority_receipt: None,
-            verified_reachable_at: Some(chrono::Utc::now().to_rfc3339()),
+            authority_receipt: format!("git:reachable-from:{trusted_ref}"),
+            verified_reachable_at: chrono::Utc::now().to_rfc3339(),
+        })
+    }
+
+    fn current_repo_revision(&self, repo: &str, trusted_ref: &str) -> Option<RepoRevisionV1> {
+        if repo != self.known_repo {
+            return None;
+        }
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.repo_root)
+            .arg("rev-parse")
+            .arg(trusted_ref)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let commit_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if commit_sha.is_empty() {
+            return None;
+        }
+        Some(RepoRevisionV1 {
+            repo: repo.to_string(),
+            git_ref: trusted_ref.to_string(),
+            commit_sha,
+            verified_at: chrono::Utc::now().to_rfc3339(),
         })
     }
 }
