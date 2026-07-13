@@ -41,14 +41,19 @@
 //!    kill-test is not an executed one.** `codex --sandbox read-only` being a
 //!    *valid flag* ([`crate::validate_codex_sandbox`]) says nothing about
 //!    enforcement; neither does a [`ProviderQualification`] row that merely
-//!    *points at* a kill-test. Only [`Certification::KillTested`] — a row whose
-//!    kill-test actually runs in the suite — certifies anything. Today the codex
-//!    kill-test is `#[ignore]`d, so the shipped table certifies **nobody** and
-//!    read-only dispatches fail closed. Refusing beats pretending.
+//!    *points at* a kill-test. A row certifies a level **iff** it carries a
+//!    [`CertificationReceipt`]: a passing, checked-in record of a real kill-test
+//!    execution against a real vendor binary, and one whose `vendor_version`
+//!    matches the binary that is **actually installed** ([`probe_backend_version`],
+//!    run pre-spawn). Codex CLI 0.144.1 on macOS is certified for `read-only` by
+//!    `certifications/codex-cli.toml`; every other version, every other level,
+//!    and every other provider is not — and fails closed. Refusing beats
+//!    pretending.
 //! 6. **A mounted skill is an input, not a permission.** A skill that declares
 //!    workspace-write intent cannot widen a read-only contract — it is
 //!    *excluded* from the mount, with a reason in the receipt.
 
+use crate::certification::{probe_backend_version, CertificationReceipt, CODEX_CLI_RECEIPT};
 use crate::launcher::{reject_unsupported_sandbox, validate_codex_sandbox, PermissionProfile};
 use crate::profiles::DispatchProfileDef;
 use serde::Serialize;
@@ -169,10 +174,15 @@ pub struct ToolAuthority {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum Enforcement {
-    /// A kill-test-certified vendor sandbox enforces this level.
+    /// A kill-test-certified vendor sandbox enforces this level. The receipt is
+    /// named in full — id, the vendor version it was issued for, and the
+    /// kill-test that produced it — so a reader of a dispatch receipt can go and
+    /// check the evidence instead of taking "enforced" on faith.
     Enforced {
         provider: String,
         certified_by: &'static str,
+        receipt: &'static str,
+        vendor_version: &'static str,
     },
     /// Nothing machine-enforces this level on this provider: the contract is
     /// prompt/permission-level only. Stated out loud in the receipt rather than
@@ -349,103 +359,113 @@ pub fn provider_has_sandbox_primitive(backend: &str, transport: TransportKind) -
         .any(|(name, kind)| *name == backend && *kind == transport)
 }
 
-/// Version scope of a qualification entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VersionScope {
-    /// Every version of this provider is certified (no version-specific
-    /// regression is known).
-    Any,
-    /// Certified only from this version up. A dispatch whose provider version
-    /// cannot be determined fails CLOSED against an `AtLeast` scope — an
-    /// unknown version is not an old-enough version.
-    AtLeast(&'static str),
-}
-
 /// Why we believe — or explicitly do not believe — that a row enforces its
 /// levels. Certification is a statement about an **execution**, not about a
 /// flag and not about a *reference* to a test (invariant 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Certification {
-    /// A real-process kill-test ran and observed this provider refuse every
-    /// mutation in its matrix. `test` is a repo-relative path, and it must be a
-    /// test the ordinary suite actually executes — see
-    /// `certification_is_coupled_to_the_kill_tests_execution_state`, which fails
-    /// if a `KillTested` row points at an `#[ignore]`d test.
-    KillTested { test: &'static str },
-    /// The row exists (the provider has the flag, and we know which levels a
-    /// kill-test *would* cover) but nobody has watched it refuse anything.
-    /// Fails closed: `qualify_provider` never returns an `Unverified` row, so a
-    /// shell-capable read-only dispatch to it is refused pre-spawn.
+    /// A real-process kill-test ran, against a real vendor binary, and observed
+    /// this provider refuse every mutation in its matrix — and the run was
+    /// written down. The [`CertificationReceipt`] carries what was actually
+    /// exercised: which binary version, which OS, which levels, which mutations.
+    /// `qualify_provider` re-checks all of that against the dispatch at hand, so
+    /// this variant is not a claim, it is a citation.
+    KillTested {
+        receipt: &'static CertificationReceipt,
+    },
+    /// Nobody has watched this provider refuse anything. Fails closed:
+    /// `qualify_provider` never returns an `Unverified` row, so a shell-capable
+    /// read-only dispatch to it is refused pre-spawn.
     Unverified { reason: &'static str },
 }
 
 impl Certification {
-    /// The certifying kill-test, or `None` when the row is not certified.
-    pub fn kill_test(self) -> Option<&'static str> {
+    /// The receipt backing this row, or `None` when nothing does.
+    pub fn receipt(self) -> Option<&'static CertificationReceipt> {
         match self {
-            Self::KillTested { test } => Some(test),
+            Self::KillTested { receipt } => Some(receipt),
             Self::Unverified { .. } => None,
         }
     }
+
+    /// The certifying kill-test, or `None` when the row is not certified.
+    pub fn kill_test(self) -> Option<&'static str> {
+        self.receipt().map(|receipt| receipt.kill_test)
+    }
 }
 
-/// One row of the qualification table: `backend x transport x version`, the
-/// levels its kill-test matrix covers, and whether that kill-test has actually
-/// been executed.
+/// One row of the qualification table: which `backend x transport` has been
+/// proven to enforce what — and by which executed kill-test. There is
+/// deliberately no `versions` / `covers` field here: the scope of a
+/// certification is a property of the *execution that happened*, so it is read
+/// off the receipt and cannot drift away from it.
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderQualification {
     pub backend: &'static str,
     pub transport: TransportKind,
-    pub versions: VersionScope,
-    /// The levels this row's kill-test matrix covers. A level that is not listed
-    /// is never certified — and the levels that *are* listed only count when
-    /// `certification` is [`Certification::KillTested`].
-    pub covers: &'static [WorkspaceAuthority],
     pub certification: Certification,
 }
 
 /// The qualification table. **codex CLI is the only entry** — it is the only
 /// backend Tachi dispatches that ships a real sandbox primitive (owner-ratified,
-/// sol codex-e0255) — and that entry is **`Unverified`**: its kill-test
-/// (`crates/tachi-dispatch/tests/codex_sandbox_kill_test.rs`) is `#[ignore]`d
-/// and has never been executed against a real `codex` binary.
+/// sol codex-e0255) — and it is certified by an executed kill-test:
+/// [`CODEX_CLI_RECEIPT`] / `certifications/codex-cli.toml`.
 ///
-/// So today this table certifies **nobody**, and every shell-capable read-only
-/// dispatch — codex included — is refused pre-spawn with a receipt saying the
-/// provider is not kill-test certified. That is the intended fail-closed posture
-/// (owner-frozen invariant 5: *refusing beats pretending*), and it is the
-/// forcing function for certification.
+/// What that receipt does and does not buy, precisely:
 ///
-/// **To certify codex/cli** (the only way to make read-only lanes dispatchable
-/// again):
+/// * **codex-cli 0.144.1, macOS, `read-only`, over the ten-mutation matrix** —
+///   certified. `qualify_provider` returns this row, the contract compiles to
+///   `Enforcement::Enforced`, and the review/explore lanes run.
+/// * **Any other codex version** — refused. The installed binary's `--version`
+///   is probed pre-spawn ([`probe_provider_version`]); a mismatch, or a version
+///   we cannot determine, fails closed. Vendor conformance does not carry across
+///   versions; an unknown version is not a certified version.
+/// * **`workspace-write`** — not certified. The kill-test observed nothing about
+///   what that level contains, so a codex workspace-write contract stays
+///   *advisory* and says so in its receipt.
+/// * **Every other backend/transport** (claude, grok, kimi, custom/opencode,
+///   codex-over-acpx) — no sandbox primitive, no row, no certification: a
+///   shell-capable read-only dispatch to any of them is refused pre-spawn.
 ///
-/// 1. run the kill-test against a real binary —
-///    `cargo test -p tachi-dispatch --test codex_sandbox_kill_test -- --ignored --nocapture`;
-/// 2. if (and only if) every mutation in the matrix was refused, drop the
-///    `#[ignore]` from the test so the ordinary suite keeps re-certifying it, and
-/// 3. flip this row to
-///    `Certification::KillTested { test: "crates/tachi-dispatch/tests/codex_sandbox_kill_test.rs" }`.
+/// **To certify a new codex version** (the only way read-only lanes survive a
+/// codex upgrade):
 ///
-/// Doing (3) without (2) is a lie the unit test
-/// `certification_is_coupled_to_the_kill_tests_execution_state` refuses to let
-/// you tell.
+/// 1. `cargo test -p tachi-dispatch --test codex_sandbox_kill_test -- --ignored --nocapture`
+///    against the new binary — it mints a receipt block on the way out;
+/// 2. if (and only if) every mutation was refused, paste that block into
+///    `crates/tachi-dispatch/certifications/codex-cli.toml` and update
+///    [`CODEX_CLI_RECEIPT`] to match (`receipt_const_matches_the_checked_in_receipt_file`
+///    fails the build if you update one and not the other).
+///
+/// Skipping (1) and just editing the version string is the one thing this design
+/// exists to make hard: the receipt records the *blob* of the test that ran, who
+/// ran it, when, and for how long.
 pub const PROVIDER_QUALIFICATIONS: &[ProviderQualification] = &[ProviderQualification {
     backend: "codex",
     transport: TransportKind::Cli,
-    versions: VersionScope::Any,
-    covers: &[
-        WorkspaceAuthority::ReadOnly,
-        WorkspaceAuthority::WorkspaceWrite,
-    ],
-    certification: Certification::Unverified {
-        reason: "its kill-test (crates/tachi-dispatch/tests/codex_sandbox_kill_test.rs) is #[ignore]d and has never been executed against a real codex binary — nobody has yet watched this provider refuse a single write",
+    certification: Certification::KillTested {
+        receipt: &CODEX_CLI_RECEIPT,
     },
 }];
+
+/// The installed version of the vendor binary this dispatch would spawn, for the
+/// pre-spawn certification gate. `None` — including "this provider has no sandbox
+/// primitive, so there is nothing a version could certify" — fails closed at
+/// [`qualify_provider`].
+///
+/// Only providers with a primitive are probed: spawning `claude --version` to
+/// decide whether an *absent* sandbox is enforced would be pure cost.
+pub fn probe_provider_version(backend: &str, transport: TransportKind) -> Option<String> {
+    if !provider_has_sandbox_primitive(backend, transport) {
+        return None;
+    }
+    probe_backend_version(backend)
+}
 
 /// Parse a dotted version into comparable numeric components. String ordering
 /// is NOT version ordering ("0.9" > "0.10" lexically) — this is compared
 /// numerically on purpose.
-fn version_components(raw: &str) -> Option<Vec<u64>> {
+pub(crate) fn version_components(raw: &str) -> Option<Vec<u64>> {
     let cleaned = raw.trim().trim_start_matches('v');
     let head = cleaned.split(['-', '+', ' ']).next()?;
     let parts = head
@@ -459,31 +479,25 @@ fn version_components(raw: &str) -> Option<Vec<u64>> {
     }
 }
 
-fn version_at_least(actual: &str, minimum: &str) -> bool {
-    let (Some(actual), Some(minimum)) = (version_components(actual), version_components(minimum))
-    else {
-        return false;
-    };
-    let len = actual.len().max(minimum.len());
-    for idx in 0..len {
-        let a = actual.get(idx).copied().unwrap_or(0);
-        let m = minimum.get(idx).copied().unwrap_or(0);
-        match a.cmp(&m) {
-            std::cmp::Ordering::Greater => return true,
-            std::cmp::Ordering::Less => return false,
-            std::cmp::Ordering::Equal => {}
-        }
-    }
-    true
-}
-
 /// Look up whether `backend x transport x version` is certified to enforce
 /// `level`. `table` is a parameter (not the const) so the qualification policy
 /// itself is testable against synthetic tables.
 ///
-/// Never returns a [`Certification::Unverified`] row: an uncertified row is a
-/// row nobody has watched enforce anything, which is the same thing as no row at
-/// all — only with a better receipt.
+/// Every gate here is a question about an execution that happened:
+///
+/// 1. is there a row at all for this `backend x transport`?
+/// 2. does it carry a **receipt** — did anyone ever watch it refuse a write? (an
+///    [`Certification::Unverified`] row is never returned: a row nobody has
+///    watched enforce anything is the same thing as no row at all, only with a
+///    better error message);
+/// 3. did that run **pass**, and does the receipt actually attest *this*
+///    provider?
+/// 4. did it exercise **this level**? (codex's receipt covers `read-only` only —
+///    `workspace-write` containment was never probed, so it is never certified);
+/// 5. does it attest the **installed binary**? `version` is what
+///    [`probe_provider_version`] read out of `--version` moments ago. A version
+///    the receipt does not name — including `None`, "we could not tell" — fails
+///    closed. Provider conformance does not carry across vendor versions.
 pub fn qualify_provider<'a>(
     table: &'a [ProviderQualification],
     backend: &str,
@@ -501,45 +515,78 @@ pub fn qualify_provider<'a>(
         .iter()
         .filter(|entry| entry.backend == backend && entry.transport == transport)
     {
-        match entry.versions {
-            VersionScope::Any => {}
-            VersionScope::AtLeast(minimum) => match version {
-                None => {
-                    last_reason = format!(
-                        "qualification requires version >= {minimum} but the provider version could not be determined; an unknown version is not an old-enough version"
-                    );
-                    continue;
-                }
-                Some(actual) if !version_at_least(actual, minimum) => {
-                    last_reason =
-                        format!("qualification requires version >= {minimum}, got '{actual}'");
-                    continue;
-                }
-                Some(_) => {}
-            },
-        }
-        if !entry.covers.contains(&level) {
+        // (2) Invariant 5: the row existing is not the row being certified.
+        let receipt = match entry.certification {
+            Certification::KillTested { receipt } => receipt,
+            Certification::Unverified { reason } => {
+                last_reason = format!(
+                    "a qualification row exists for '{backend}/{}', but the row is NOT certified: {reason}",
+                    transport.as_str(),
+                );
+                continue;
+            }
+        };
+
+        // (3) A receipt that failed, or that attests some other provider, is not
+        //     evidence about this one.
+        if !receipt.passed() {
             last_reason = format!(
-                "the kill-test matrix for this provider covers [{}], not '{}'",
-                entry
+                "the certification receipt '{}' for '{backend}/{}' records a FAILED kill-test run ({} on {} {}) — the provider was watched, and it did not hold",
+                receipt.id,
+                transport.as_str(),
+                receipt.vendor_binary,
+                receipt.host_os,
+                receipt.executed_at
+            );
+            continue;
+        }
+        if receipt.backend != entry.backend || receipt.transport != entry.transport {
+            last_reason = format!(
+                "the receipt '{}' attests '{}/{}', not '{backend}/{}' — a certification is not transferable",
+                receipt.id,
+                receipt.backend,
+                receipt.transport.as_str(),
+                transport.as_str()
+            );
+            continue;
+        }
+
+        // (4) Only the levels the run actually exercised.
+        if !receipt.certifies_level(level) {
+            last_reason = format!(
+                "the executed kill-test ('{}') certifies [{}] on this provider, not '{}' — no run has observed it contain a '{}' contract",
+                receipt.id,
+                receipt
                     .covers
                     .iter()
                     .map(|l| l.as_str())
                     .collect::<Vec<_>>()
                     .join(", "),
+                level.as_str(),
                 level.as_str()
             );
             continue;
         }
-        // Invariant 5: the row existing is not the row being certified.
-        if let Certification::Unverified { reason } = entry.certification {
-            last_reason = format!(
-                "a qualification row exists for '{backend}/{}' and its matrix covers '{}', but the row is NOT certified: {reason}",
-                transport.as_str(),
-                level.as_str()
-            );
+
+        // (5) Only the binary the run actually exercised.
+        if !receipt.certifies_version(version) {
+            last_reason = match version {
+                Some(actual) => format!(
+                    "the certification receipt '{}' was issued for {} {} on {}, but the installed binary reports '{actual}'; provider conformance does not carry across vendor versions — re-run the kill-test against {actual} and issue a new receipt ({})",
+                    receipt.id,
+                    receipt.vendor_binary,
+                    receipt.vendor_version,
+                    receipt.host_os,
+                    receipt.source_file
+                ),
+                None => format!(
+                    "the certification receipt '{}' is scoped to {} {}, and the installed binary's version could not be determined (not on PATH, or `--version` failed); an unknown version is not a certified version",
+                    receipt.id, receipt.vendor_binary, receipt.vendor_version
+                ),
+            };
             continue;
         }
+
         return Ok(entry);
     }
     Err(last_reason)
@@ -784,17 +831,25 @@ pub fn compile_effective_contract(
             workspace_authority,
         ) {
             Ok(entry) => {
-                let certified_by = entry
+                let receipt = entry
                     .certification
-                    .kill_test()
+                    .receipt()
                     .expect("qualify_provider never returns an uncertified row");
                 explanation.push(format!(
-                    "provider '{provider_id}' is kill-test certified to enforce '{}' by {certified_by}",
-                    workspace_authority.as_str()
+                    "provider '{provider_id}' is kill-test certified to enforce '{}' by receipt '{}' ({} {}, {}, executed {} — {})",
+                    workspace_authority.as_str(),
+                    receipt.id,
+                    receipt.vendor_binary,
+                    receipt.vendor_version,
+                    receipt.host_os,
+                    receipt.executed_at,
+                    receipt.kill_test
                 ));
                 Enforcement::Enforced {
                     provider: provider_id.clone(),
-                    certified_by,
+                    certified_by: receipt.kill_test,
+                    receipt: receipt.id,
+                    vendor_version: receipt.vendor_version,
                 }
             }
             Err(reason) => {
@@ -895,35 +950,25 @@ pub fn compile_effective_contract(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::certification::CertificationResult;
     use crate::profiles::resolve_dispatch_profile;
 
-    /// The kill-test's own source, read at compile time. The certification
-    /// ratchet (`certification_is_coupled_to_the_kill_tests_execution_state`)
-    /// reads the `#[ignore]` attribute out of it, so "is this provider certified"
-    /// is answered by the test's *execution state*, not by a `&'static str` that
-    /// merely points at it.
+    /// The kill-test's own source, read at compile time — the ratchet
+    /// (`every_certified_row_is_backed_by_a_passing_executed_receipt`) checks
+    /// that the receipt's kill-test really exists and really contains the
+    /// function the receipt says was run.
     const KILL_TEST_SOURCE: &str = include_str!("../tests/codex_sandbox_kill_test.rs");
-    const KILL_TEST_PATH: &str = "crates/tachi-dispatch/tests/codex_sandbox_kill_test.rs";
 
-    /// A synthetic table that certifies codex/cli — i.e. exactly what
-    /// [`PROVIDER_QUALIFICATIONS`] becomes on the day somebody actually runs the
-    /// kill-test. The shipped table is `Unverified`, so every read-only case
-    /// below has to declare which world it is testing: `CERTIFIED_CODEX` is the
-    /// post-certification world, `PROVIDER_QUALIFICATIONS` is today's
-    /// fail-closed reality.
-    const CERTIFIED_CODEX: &[ProviderQualification] = &[ProviderQualification {
-        backend: "codex",
-        transport: TransportKind::Cli,
-        versions: VersionScope::Any,
-        covers: &[
-            WorkspaceAuthority::ReadOnly,
-            WorkspaceAuthority::WorkspaceWrite,
-        ],
-        certification: Certification::KillTested {
-            test: KILL_TEST_PATH,
-        },
-    }];
+    /// The version the shipped receipt was issued for. Every test below that
+    /// expects codex/cli to *be* certified must say so out loud by pinning it:
+    /// certification is scoped to one binary, and a test that forgets which
+    /// binary it is talking about is testing nothing.
+    const CERTIFIED_VERSION: &str = CODEX_CLI_RECEIPT.vendor_version;
 
+    /// Inputs with **no version determined** — the fail-closed world (codex not
+    /// on PATH, `--version` failed). The shipped row is certified, but a
+    /// certification is scoped to a binary, and this dispatch cannot say which
+    /// binary it has.
     fn inputs<'a>(
         backend: &'a str,
         profile: Option<&'a DispatchProfileDef>,
@@ -944,15 +989,18 @@ mod tests {
         }
     }
 
-    /// Same, but in the post-certification world: codex/cli is kill-tested, so
-    /// read-only lanes compile instead of failing closed.
+    /// The certified world, on the **shipped** table: the installed codex is the
+    /// exact binary the kill-test was executed against, so read-only lanes
+    /// compile. (Round 2 had to fake this with a synthetic `CERTIFIED_CODEX`
+    /// table because nothing was certified; it is real now, and the tests
+    /// exercise the table that actually ships.)
     fn certified_inputs<'a>(
         backend: &'a str,
         profile: Option<&'a DispatchProfileDef>,
         skills: &'a [SkillRequest],
     ) -> ContractInputs<'a> {
         ContractInputs {
-            qualifications: CERTIFIED_CODEX,
+            backend_version: Some(CERTIFIED_VERSION),
             ..inputs(backend, profile, skills)
         }
     }
@@ -1158,10 +1206,10 @@ mod tests {
     // ── Invariant 3: an omitted sandbox resolves from the profile ────────────
 
     /// Discriminating test ④: an omitted sandbox on a review profile compiles to
-    /// read-only — NOT codex's workspace-write default (the #894 S2d gap).
-    /// Stated in the post-certification world, because today the same dispatch is
-    /// refused outright (see
-    /// `read_only_lane_is_refused_while_the_shipped_table_certifies_nobody`).
+    /// read-only — NOT codex's workspace-write default (the #894 S2d gap). Stated
+    /// on the certified binary, because the same dispatch on a codex the receipt
+    /// does not name is refused outright (see
+    /// `read_only_lane_is_refused_when_the_installed_codex_is_not_the_certified_one`).
     #[test]
     fn omitted_sandbox_on_review_profile_resolves_to_read_only() {
         let profile = resolve_dispatch_profile("codex_55_review").expect("profile");
@@ -1184,24 +1232,45 @@ mod tests {
     }
 
     /// An executor profile still gets workspace-write when sandbox is omitted —
-    /// the fix narrows review lanes, it does not break implementers. It is also
-    /// NOT refused by the uncertified shipped table: a write level makes no
-    /// isolation claim worth certifying, so it compiles as advisory.
+    /// the fix narrows review lanes, it does not break implementers.
+    ///
+    /// And note what it is NOT: even on the certified binary, a workspace-write
+    /// contract is **advisory**. The kill-test only ever exercised `read-only`,
+    /// so `covers` says read-only, and codex's `--sandbox workspace-write` gets
+    /// passed as defense-in-depth while the receipt states plainly that nobody
+    /// has watched it contain anything. Certifying the level we tested and only
+    /// the level we tested is the whole point of invariant 5.
     #[test]
-    fn omitted_sandbox_on_executor_profile_stays_workspace_write() {
+    fn omitted_sandbox_on_executor_profile_stays_workspace_write_and_is_only_advisory() {
         let profile = resolve_dispatch_profile("glm_impl").expect("profile");
         let skills = Vec::new();
-        let input = inputs("codex", Some(profile), &skills);
+        let input = certified_inputs("codex", Some(profile), &skills);
         let contract = compile_effective_contract(&input).expect("executor contract compiles");
         assert_eq!(
             contract.workspace_authority,
             WorkspaceAuthority::WorkspaceWrite
         );
         assert_eq!(contract.sandbox_arg.as_deref(), Some("workspace-write"));
-        assert!(
-            matches!(contract.enforcement, Enforcement::Advisory { .. }),
-            "the shipped table certifies nobody, so nothing is claimed to be enforced: {:?}",
-            contract.enforcement
+        match &contract.enforcement {
+            Enforcement::Advisory { reason } => {
+                assert!(
+                    reason.contains("certifies [read-only]"),
+                    "the receipt must say which level was actually exercised: {reason}"
+                );
+                assert!(reason.contains("NOT machine-enforced"), "{reason}");
+                assert!(
+                    reason.contains("defense in depth"),
+                    "the flag is still passed; the receipt says so: {reason}"
+                );
+            }
+            other => {
+                panic!("a level no kill-test exercised must not be claimed as enforced: {other:?}")
+            }
+        }
+        assert_eq!(
+            contract.network,
+            NetworkAuthority::ProviderDefault,
+            "no enforcer, no network claim"
         );
     }
 
@@ -1310,11 +1379,22 @@ mod tests {
 
     // ── Invariant 5: certification means kill-tested ─────────────────────────
 
+    /// A synthetic receipt for a provider nobody ever kill-tested — used to build
+    /// tables that *look* certified so the gate has something to refuse.
+    const UNVERIFIED_ROW: &[ProviderQualification] = &[ProviderQualification {
+        backend: "codex",
+        transport: TransportKind::Cli,
+        certification: Certification::Unverified {
+            reason: "synthetic: the kill-test was never executed",
+        },
+    }];
+
     /// Discriminating test ③: a provider that HAS the vendor flag but is not
     /// kill-test certified must be refused — whether the table has no row for it
-    /// at all, or has a row that merely *names* a kill-test nobody ran. Vendor
-    /// flag validation is not provider qualification, and a named test is not an
-    /// executed one.
+    /// at all, or has a row nobody ever ran, or has a *passing* receipt that was
+    /// issued for a different binary than the one installed. Vendor flag
+    /// validation is not provider qualification, and a certification for another
+    /// version is not a certification for this one.
     #[test]
     fn a_valid_vendor_flag_is_not_a_certification() {
         // The flag itself is valid...
@@ -1324,18 +1404,35 @@ mod tests {
 
         let profile = resolve_dispatch_profile("codex_55_review").expect("profile");
         let skills = Vec::new();
-        for (world, table) in [
+        for (world, table, version, expected) in [
             (
                 "an empty table certifies nobody",
                 &[] as &[ProviderQualification],
+                Some(CERTIFIED_VERSION),
+                "no qualification entry",
             ),
             (
-                "the SHIPPED table's codex row is Unverified — its kill-test has never run",
+                "a row that names no executed run certifies nobody",
+                UNVERIFIED_ROW,
+                Some(CERTIFIED_VERSION),
+                "NOT certified",
+            ),
+            (
+                "the shipped receipt was issued for another binary version",
                 PROVIDER_QUALIFICATIONS,
+                Some("0.145.0"),
+                "does not carry across vendor versions",
+            ),
+            (
+                "the installed version cannot be determined at all",
+                PROVIDER_QUALIFICATIONS,
+                None,
+                "an unknown version is not a certified version",
             ),
         ] {
             let mut input = inputs("codex", Some(profile), &skills);
             input.qualifications = table;
+            input.backend_version = version;
 
             let err = match compile_effective_contract(&input) {
                 Ok(contract) => panic!(
@@ -1350,171 +1447,216 @@ mod tests {
                 text.contains("not kill-test certified") && text.contains("read-only"),
                 "[{world}] {text}"
             );
+            assert!(
+                text.contains(expected),
+                "[{world}] the receipt must say WHY: {text}"
+            );
         }
     }
 
-    /// Today's reality, asserted so nobody has to guess: with the shipped table
-    /// the review lane does not run at all. Refusing beats pretending — and this
-    /// is the forcing function for actually running the kill-test.
+    /// **The runtime version gate, end to end.** The shipped row IS certified —
+    /// and it still refuses the review lane on a codex the kill-test never saw.
+    /// A conformance result is a property of a binary, not of a brand.
     #[test]
-    fn read_only_lane_is_refused_while_the_shipped_table_certifies_nobody() {
+    fn read_only_lane_is_refused_when_the_installed_codex_is_not_the_certified_one() {
         let profile = resolve_dispatch_profile("codex_55_review").expect("profile");
         let skills = Vec::new();
+
+        // The certified binary → the lane runs.
+        let contract =
+            compile_effective_contract(&certified_inputs("codex", Some(profile), &skills))
+                .expect("the certified binary runs the review lane");
+        match &contract.enforcement {
+            Enforcement::Enforced {
+                receipt,
+                vendor_version,
+                certified_by,
+                ..
+            } => {
+                assert_eq!(*receipt, CODEX_CLI_RECEIPT.id);
+                assert_eq!(*vendor_version, CERTIFIED_VERSION);
+                assert_eq!(*certified_by, CODEX_CLI_RECEIPT.kill_test);
+            }
+            other => panic!("the certified binary must be Enforced, got {other:?}"),
+        }
+
+        // One patch bump → refused, with a receipt that names the gap.
+        let mut upgraded = certified_inputs("codex", Some(profile), &skills);
+        upgraded.backend_version = Some("0.144.2");
+        let err = compile_effective_contract(&upgraded)
+            .expect_err("an uncertified codex version must fail closed");
+        assert_eq!(err.code(), "provider_not_qualified");
+        let text = err.to_string();
+        assert!(text.contains("0.144.2"), "{text}");
+        assert!(text.contains("re-run the kill-test"), "{text}");
+
+        // Version unknown (no codex on PATH) → refused too.
         let err = compile_effective_contract(&inputs("codex", Some(profile), &skills))
-            .expect_err("codex/cli is Unverified today");
+            .expect_err("an unknown codex version must fail closed");
         assert_eq!(err.code(), "provider_not_qualified");
         assert!(
-            err.to_string().contains("has never been executed"),
-            "the receipt must say WHY the provider is uncertified: {err}"
+            err.to_string()
+                .contains("an unknown version is not a certified version"),
+            "{err}"
         );
     }
 
-    /// The ratchet: a `KillTested` row may only name a kill-test the ordinary
-    /// suite actually executes. Flip a row to `KillTested` while its test is
-    /// still `#[ignore]`d — i.e. claim a certification nobody ran — and this
-    /// fails. Un-ignore the test and it passes, because then the suite itself is
-    /// the certification.
+    /// **The ratchet, rewritten for receipts.** Round 2's version said "a
+    /// `KillTested` row may not point at an `#[ignore]`d test" — which forced the
+    /// certifying test into the ordinary suite, where a 60s real-binary probe
+    /// cannot live. The truer statement is this one: a row may claim `KillTested`
+    /// only if it carries a receipt of an execution that **passed**, names a
+    /// kill-test that **exists** and contains the function it says was run, and
+    /// certifies **at least one level** over a **non-empty matrix**. The
+    /// `#[ignore]` is fine; the fabrication is not.
     #[test]
-    fn certification_is_coupled_to_the_kill_tests_execution_state() {
-        fn is_ignored(source: &str) -> bool {
-            source
-                .lines()
-                .any(|line| line.trim_start().starts_with("#[ignore"))
-        }
-
+    fn every_certified_row_is_backed_by_a_passing_executed_receipt() {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..");
 
         for entry in PROVIDER_QUALIFICATIONS {
-            let Certification::KillTested { test } = entry.certification else {
+            let Certification::KillTested { receipt } = entry.certification else {
                 continue;
             };
-            let path = repo_root.join(test);
+            let id = receipt.id;
+            assert_eq!(
+                receipt.result,
+                CertificationResult::Pass,
+                "'{id}' certifies a run that did not pass"
+            );
+            assert_eq!(
+                receipt.backend, entry.backend,
+                "'{id}' attests another backend"
+            );
+            assert_eq!(
+                receipt.transport, entry.transport,
+                "'{id}' attests another transport"
+            );
+            assert!(
+                !receipt.covers.is_empty() && !receipt.matrix.is_empty(),
+                "'{id}' certifies nothing: it must name the levels it exercised and the mutations it saw refused"
+            );
+            assert!(
+                !receipt.vendor_version.trim().is_empty(),
+                "'{id}' must name the binary version it exercised — a version-less certification is a blank cheque"
+            );
+
+            let path = repo_root.join(receipt.kill_test);
             assert!(
                 path.exists(),
-                "'{}/{}' claims certification by '{test}', which does not exist",
-                entry.backend,
-                entry.transport.as_str()
+                "'{id}' claims certification by '{}', which does not exist",
+                receipt.kill_test
             );
             let source = std::fs::read_to_string(&path).expect("kill-test source");
             assert!(
-                !is_ignored(&source),
-                "'{}/{}' is marked KillTested, but '{test}' is #[ignore]d — it has never run, so the certification is a claim, not evidence (invariant 5)",
-                entry.backend,
-                entry.transport.as_str()
+                source.contains(&format!("fn {}", receipt.kill_test_fn)),
+                "'{id}' says '{}' ran, but '{}' contains no such test",
+                receipt.kill_test_fn,
+                receipt.kill_test
             );
-        }
 
-        // And the state of the world today: the codex kill-test IS ignored, so
-        // NOTHING in the shipped table may be certified.
-        if is_ignored(KILL_TEST_SOURCE) {
+            let receipt_file = repo_root.join(receipt.source_file);
             assert!(
-                PROVIDER_QUALIFICATIONS
-                    .iter()
-                    .all(|entry| entry.certification.kill_test().is_none()),
-                "the codex kill-test is #[ignore]d; no shipped row may claim KillTested"
+                receipt_file.exists(),
+                "'{id}' has no checked-in artifact of record at '{}' — an audit nobody can read is not an audit",
+                receipt.source_file
             );
         }
     }
 
+    /// The kill-test that certifies codex is allowed — required, even — to stay
+    /// `#[ignore]`d: it needs a real binary, real credentials and ~60s. Pinned so
+    /// nobody "fixes" it into the ordinary suite, where it would either fail on a
+    /// codex-less box or, far worse, go green without exercising anything.
     #[test]
-    fn shipped_qualification_table_has_one_uncertified_codex_row() {
+    fn the_certifying_kill_test_stays_out_of_the_ordinary_suite() {
+        assert!(
+            KILL_TEST_SOURCE.contains("#[ignore"),
+            "the real-binary kill-test must stay #[ignore]d; certification is an out-of-band event with a receipt (invariant 5)"
+        );
+    }
+
+    #[test]
+    fn shipped_table_certifies_codex_cli_read_only_and_nothing_else() {
         assert_eq!(PROVIDER_QUALIFICATIONS.len(), 1);
         let entry = &PROVIDER_QUALIFICATIONS[0];
         assert_eq!(entry.backend, "codex");
         assert_eq!(entry.transport, TransportKind::Cli);
-        assert!(
-            matches!(entry.certification, Certification::Unverified { .. }),
-            "the kill-test has never run: the row must not claim certification"
+        assert_eq!(
+            entry.certification.receipt().map(|r| r.id),
+            Some(CODEX_CLI_RECEIPT.id)
         );
-        assert_eq!(entry.certification.kill_test(), None);
 
-        // Nobody — codex included — qualifies out of the shipped table.
-        for backend in ["codex", "claude", "grok", "kimi", "custom", "opencode"] {
+        // codex/cli, certified version, read-only → the one thing that qualifies.
+        assert!(qualify_provider(
+            PROVIDER_QUALIFICATIONS,
+            "codex",
+            TransportKind::Cli,
+            Some(CERTIFIED_VERSION),
+            WorkspaceAuthority::ReadOnly
+        )
+        .is_ok());
+
+        // Every other backend: no row, no certification.
+        for backend in ["claude", "grok", "kimi", "custom", "opencode"] {
             assert!(
                 qualify_provider(
                     PROVIDER_QUALIFICATIONS,
                     backend,
                     TransportKind::Cli,
-                    None,
+                    Some(CERTIFIED_VERSION),
                     WorkspaceAuthority::ReadOnly
                 )
                 .is_err(),
                 "'{backend}' must not be certified to enforce read-only"
             );
         }
-    }
 
-    #[test]
-    fn version_scoped_qualification_fails_closed_on_unknown_versions() {
-        const TABLE: &[ProviderQualification] = &[ProviderQualification {
-            backend: "codex",
-            transport: TransportKind::Cli,
-            versions: VersionScope::AtLeast("0.50.0"),
-            covers: &[WorkspaceAuthority::ReadOnly],
-            certification: Certification::KillTested { test: "synthetic" },
-        }];
+        // codex over any other transport: the flag never reaches the child.
+        for transport in [
+            TransportKind::Acpx,
+            TransportKind::AcpNative,
+            TransportKind::HarnessServe,
+        ] {
+            assert!(
+                qualify_provider(
+                    PROVIDER_QUALIFICATIONS,
+                    "codex",
+                    transport,
+                    Some(CERTIFIED_VERSION),
+                    WorkspaceAuthority::ReadOnly
+                )
+                .is_err(),
+                "codex/{} has no sandbox primitive and must not be certified",
+                transport.as_str()
+            );
+        }
 
-        // Unknown version → refused (an unknown version is not an old-enough one).
-        let err = qualify_provider(
-            TABLE,
-            "codex",
-            TransportKind::Cli,
-            None,
-            WorkspaceAuthority::ReadOnly,
-        )
-        .expect_err("unknown version must fail closed");
-        assert!(err.contains("could not be determined"), "{err}");
-
-        // Too old → refused. Note 0.9.0 < 0.50.0 numerically even though it is
-        // greater as a string — the comparison must not be lexicographic.
-        assert!(qualify_provider(
-            TABLE,
-            "codex",
-            TransportKind::Cli,
-            Some("0.9.0"),
-            WorkspaceAuthority::ReadOnly
-        )
-        .is_err());
-
-        // New enough → certified.
-        assert!(qualify_provider(
-            TABLE,
-            "codex",
-            TransportKind::Cli,
-            Some("0.50.1"),
-            WorkspaceAuthority::ReadOnly
-        )
-        .is_ok());
-
-        // Covered for read-only only.
-        assert!(qualify_provider(
-            TABLE,
-            "codex",
-            TransportKind::Cli,
-            Some("0.51.0"),
-            WorkspaceAuthority::WorkspaceWrite
-        )
-        .is_err());
+        // Levels the run never exercised: never certified, on any version.
+        for level in [
+            WorkspaceAuthority::WorkspaceWrite,
+            WorkspaceAuthority::DangerFullAccess,
+        ] {
+            let err = qualify_provider(
+                PROVIDER_QUALIFICATIONS,
+                "codex",
+                TransportKind::Cli,
+                Some(CERTIFIED_VERSION),
+                level,
+            )
+            .expect_err("only the exercised level is certified");
+            assert!(err.contains("certifies [read-only]"), "{err}");
+        }
     }
 
     /// An `Unverified` row is never handed back, no matter how well it matches:
-    /// same backend, same transport, same version scope, level covered — and
-    /// still refused, because nobody has watched it enforce anything.
+    /// same backend, same transport, level asked for, version known — and still
+    /// refused, because nobody has watched it enforce anything.
     #[test]
     fn an_unverified_row_never_qualifies() {
-        const TABLE: &[ProviderQualification] = &[ProviderQualification {
-            backend: "codex",
-            transport: TransportKind::Cli,
-            versions: VersionScope::Any,
-            covers: &[WorkspaceAuthority::ReadOnly],
-            certification: Certification::Unverified {
-                reason: "synthetic: the kill-test was never executed",
-            },
-        }];
         let err = qualify_provider(
-            TABLE,
+            UNVERIFIED_ROW,
             "codex",
             TransportKind::Cli,
             Some("9.9.9"),
@@ -1523,6 +1665,48 @@ mod tests {
         .expect_err("an uncertified row must not qualify");
         assert!(err.contains("NOT certified"), "{err}");
         assert!(err.contains("never executed"), "{err}");
+    }
+
+    /// A receipt that records a FAILED run is expressible on purpose — a
+    /// regression is worth checking in — and it must certify exactly nothing.
+    #[test]
+    fn a_failed_receipt_never_qualifies() {
+        // Spelled out rather than a functional update of CODEX_CLI_RECEIPT:
+        // struct-update syntax is not available in a const initializer.
+        const FAILED: CertificationReceipt = CertificationReceipt {
+            id: "synthetic-failed-run",
+            source_file: "crates/tachi-dispatch/certifications/codex-cli.toml",
+            backend: "codex",
+            transport: TransportKind::Cli,
+            vendor_binary: "codex-cli",
+            vendor_version: CODEX_CLI_RECEIPT.vendor_version,
+            host_os: "macos",
+            host_os_version: "26.5.1",
+            kill_test: CODEX_CLI_RECEIPT.kill_test,
+            kill_test_fn: CODEX_CLI_RECEIPT.kill_test_fn,
+            result: CertificationResult::Fail,
+            executed_at: "2026-07-13",
+            executed_by: "synthetic",
+            duration_secs: "0.0",
+            executed_on_commit: "0000000000000000000000000000000000000000",
+            kill_test_source_blob: "0000000000000000000000000000000000000000",
+            covers: &[WorkspaceAuthority::ReadOnly],
+            matrix: &["create"],
+        };
+        const TABLE: &[ProviderQualification] = &[ProviderQualification {
+            backend: "codex",
+            transport: TransportKind::Cli,
+            certification: Certification::KillTested { receipt: &FAILED },
+        }];
+        let err = qualify_provider(
+            TABLE,
+            "codex",
+            TransportKind::Cli,
+            Some(CERTIFIED_VERSION),
+            WorkspaceAuthority::ReadOnly,
+        )
+        .expect_err("a failed kill-test certifies nothing");
+        assert!(err.contains("FAILED kill-test run"), "{err}");
     }
 
     // ── Invariant 6: a mounted skill is an input, not a permission ───────────

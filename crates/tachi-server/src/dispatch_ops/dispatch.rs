@@ -275,18 +275,29 @@ pub(crate) async fn handle_tachi_dispatch(
     // / `validate_codex_sandbox` calls stay as defense-in-depth for any future
     // caller that reaches a builder without passing through this entry point.
     //
-    // Fail-closed reality as shipped: the only row in `PROVIDER_QUALIFICATIONS`
-    // (codex/cli) is `Unverified` — its kill-test is `#[ignore]`d and has never
-    // been executed — so a dispatch that compiles to read-only AND can run shell
-    // unattended is refused right here, on every backend. Run the kill-test and
-    // certify the row to bring those lanes back (see `tachi_dispatch::authority`).
+    // Certification as shipped: the only row in `PROVIDER_QUALIFICATIONS`
+    // (codex/cli) is certified for `read-only` by an EXECUTED kill-test —
+    // `certifications/codex-cli.toml`, codex-cli 0.144.1 on macOS, every mutation
+    // in the matrix refused. That certification is scoped to that binary, so the
+    // installed version is probed here (cached per binary identity; only for
+    // providers that have a sandbox primitive at all) and handed to the gate: a
+    // codex the receipt does not name — an upgrade, or a codex we cannot version
+    // — fails closed like any uncertified provider, rather than inheriting a
+    // stale claim. Every other shell-capable read-only lane is still refused
+    // pre-spawn: no primitive, no receipt, no isolation (see
+    // `tachi_dispatch::authority` invariants 4 and 5).
     let harness_transport = effective_harness_transport(&params, &agent_norm);
+    let backend_version = tachi_dispatch::probe_provider_version(
+        &agent_norm,
+        tachi_dispatch::transport_kind(&harness_transport),
+    );
     let effective_contract = compile_dispatch_contract(
         &mut params,
         &agent_norm,
         &harness_transport,
         &resolved_profile,
         tachi_dispatch::PROVIDER_QUALIFICATIONS,
+        backend_version.as_deref(),
     )?;
     let authority_receipt = contract_receipt(&effective_contract);
 

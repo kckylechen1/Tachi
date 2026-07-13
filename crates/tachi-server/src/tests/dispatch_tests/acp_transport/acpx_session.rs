@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn dispatch_acpx_session_mode_derives_raven_for_review_profile() {
+async fn dispatch_acpx_session_mode_derives_raven_for_a_review_lane() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -32,13 +32,27 @@ print(json.dumps({"event": "end_turn", "final_response": "raven done"}))
     params.harness_transport = Some("acpx".to_string());
     params.cwd = Some(temp_home.path().to_string_lossy().to_string());
     params.unmanaged_cwd = Some(true);
-    // Deliberately profile-less. This test's subject is acpx session plumbing
-    // (mode/session/controls/result), and since #894 S2d a *read-only* profile
-    // such as `codex_55_review` cannot be dispatched over acpx at all: acpx has
-    // no sandbox primitive, codex runs shell unattended, and a read-only claim
-    // nobody enforces is refused pre-spawn (authority invariant 4). Pinning that
-    // refusal is `authority::tests`' job; keeping this lane dispatchable is this
-    // test's.
+    // The review lane is declared by `stage`, not by `profile`, and that is
+    // load-bearing rather than cosmetic.
+    //
+    // This test's subject is acpx session plumbing: a review lane must derive the
+    // `raven` session, reach the acpx process as `-s raven`, and be echoed back in
+    // the response and in status.json. `derive_acpx_session` builds that name from
+    // `profile` OR `stage` (`acpx::spec`), so either input exercises the subject.
+    //
+    // It cannot use `profile: codex_55_review` any more: since #894 S2d a read-only
+    // profile cannot be dispatched over acpx *at all* — acpx has no sandbox
+    // primitive, codex runs shell unattended, and a read-only claim nobody enforces
+    // is refused pre-spawn (authority invariant 4). Certifying codex/cli does not
+    // change that: the receipt certifies the codex **CLI** sandbox, and over acpx
+    // the `--sandbox` flag never reaches the child. That refusal is pinned in
+    // `authority::tests::derived_read_only_on_an_uncertified_provider_is_refused_not_downgraded`,
+    // and the profile→raven derivation is pinned in
+    // `dispatch_ops::acpx::tests::acpx_session_derives_raven_from_a_review_dispatch_profile`
+    // (added with this change, so that path keeps its coverage). Neither of those
+    // is this test's job — but the raven assertions below are, and they are
+    // unchanged.
+    params.stage = Some("review".to_string());
     params.timeout_secs = 5;
 
     let response = crate::dispatch_ops::handle_tachi_dispatch(&server, params)

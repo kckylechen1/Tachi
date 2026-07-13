@@ -13,10 +13,15 @@
 //!   through to codex's `workspace-write` default);
 //! - a read-only level that no kill-test-certified provider can enforce is
 //!   refused here, with a receipt — not after a run directory and a set of
-//!   materialized credentials already exist on disk. **As shipped that means
-//!   every shell-capable read-only dispatch is refused**: the codex/cli row is
-//!   `Unverified` until somebody runs the kill-test (`tachi_dispatch::authority`
-//!   invariant 5). Refusing beats pretending;
+//!   materialized credentials already exist on disk. As shipped, exactly one
+//!   provider is certified: **codex/cli at `read-only`, on the binary version
+//!   named in `certifications/codex-cli.toml`** (codex-cli 0.144.1, by an
+//!   executed kill-test). The installed binary's version is probed *here*, before
+//!   the gate, and a codex that the receipt does not name — including a codex we
+//!   cannot version — fails closed exactly like an uncertified provider. Every
+//!   other shell-capable read-only lane (claude, grok, kimi, custom/opencode,
+//!   codex-over-acpx) is still refused: no primitive, no receipt. Refusing beats
+//!   pretending;
 //! - the operator bypass (`permission_profile=full|verify`) is reconciled with
 //!   the profile ceiling here too — it claims `danger-full-access`, so it cannot
 //!   be smuggled past a review profile by also passing an explicit `sandbox`;
@@ -44,25 +49,27 @@ use tachi_dispatch::{
 /// sandbox primitive — never a vendor default), and `skills` becomes the
 /// mounted subset.
 ///
-/// `qualifications` is a parameter rather than the const so the tests can pin
-/// both worlds explicitly: the shipped table (whose only row, codex/cli, is
-/// `Unverified` because its kill-test has never been executed — so every
-/// shell-capable read-only dispatch is refused today) and a certified table (the
-/// world the moment someone runs it). The production caller passes
-/// [`tachi_dispatch::PROVIDER_QUALIFICATIONS`].
+/// `qualifications` and `backend_version` are parameters rather than the const +
+/// a probe call, so the tests can pin each world explicitly: the certified binary
+/// (codex-cli 0.144.1 — read-only lanes run), an *uncertified* codex version (a
+/// codex upgrade — read-only lanes fail closed until somebody re-runs the
+/// kill-test), and no codex at all (version unknown — fail closed). The
+/// production caller passes [`tachi_dispatch::PROVIDER_QUALIFICATIONS`] and the
+/// result of [`tachi_dispatch::probe_provider_version`].
 ///
-/// Provider version is passed as `None`: the shipped table's only row is
-/// `VersionScope::Any`, so no version probe is needed. If a future row is
-/// narrowed to `VersionScope::AtLeast(..)`, an unknown version fails CLOSED
-/// (`qualify_provider` refuses), which is the correct direction — it will surface
-/// immediately as a refused dispatch, not as a silent downgrade, and a
-/// `codex --version` probe can be added here at that point.
+/// `backend_version` is what the **installed** vendor binary reports right now.
+/// It is load-bearing: `PROVIDER_QUALIFICATIONS`'s codex row cites a receipt for
+/// one exact binary (`certifications/codex-cli.toml`), and `qualify_provider`
+/// refuses to hand it back for any other version — including an unknown one.
+/// That is the whole point of an evidence-based certification: it expires when
+/// the evidence stops describing the thing you are about to run.
 pub(super) fn compile_dispatch_contract(
     params: &mut TachiDispatchParams,
     agent_norm: &str,
     harness_transport: &str,
     resolved_profile: &ResolvedDispatchProfile,
     qualifications: &[ProviderQualification],
+    backend_version: Option<&str>,
 ) -> Result<EffectiveContract, String> {
     let permission_profile = tachi_dispatch::resolve_permission_profile(&DispatchLaunchParams {
         cwd: params.cwd.clone(),
@@ -98,7 +105,7 @@ pub(super) fn compile_dispatch_contract(
     let contract = compile_effective_contract(&ContractInputs {
         backend: agent_norm,
         transport: harness_transport,
-        backend_version: None,
+        backend_version,
         profile,
         requested_sandbox: params.sandbox.as_deref(),
         permission_profile,
@@ -126,29 +133,14 @@ mod tests {
     use super::*;
     use crate::dispatch_profile::resolve_and_apply_dispatch_profile;
     use serde_json::json;
-    use tachi_dispatch::{
-        Certification, TransportKind, VersionScope, WorkspaceAuthority, PROVIDER_QUALIFICATIONS,
-    };
+    use tachi_dispatch::{CODEX_CLI_RECEIPT, PROVIDER_QUALIFICATIONS};
 
-    /// The world once somebody actually runs the kill-test. The shipped table's
-    /// codex row is `Unverified` (the kill-test is `#[ignore]`d and has never
-    /// been executed), so a shell-capable read-only dispatch is refused today —
-    /// see `read_only_review_lane_is_refused_while_codex_is_uncertified`. The
-    /// tests that assert what a read-only contract *compiles to* therefore pin
-    /// this certified table explicitly, instead of quietly depending on a
-    /// certification nobody has.
-    const CERTIFIED_CODEX: &[ProviderQualification] = &[ProviderQualification {
-        backend: "codex",
-        transport: TransportKind::Cli,
-        versions: VersionScope::Any,
-        covers: &[
-            WorkspaceAuthority::ReadOnly,
-            WorkspaceAuthority::WorkspaceWrite,
-        ],
-        certification: Certification::KillTested {
-            test: "crates/tachi-dispatch/tests/codex_sandbox_kill_test.rs",
-        },
-    }];
+    /// The binary the shipped receipt was issued for. A test that expects codex
+    /// to *be* certified has to say which codex it is talking about — that is the
+    /// certification gate, not ceremony: `qualify_provider` refuses the shipped
+    /// row for any other version, and passing `None` here is how a box with no
+    /// codex on it behaves.
+    const CERTIFIED_CODEX_VERSION: Option<&str> = Some(CODEX_CLI_RECEIPT.vendor_version);
 
     /// The #878-B operator opt-in, scoped to one test (the sibling `tests`
     /// module's `EnvGuard` is private to it).
@@ -200,9 +192,15 @@ mod tests {
         }));
         assert_eq!(params.sandbox, None, "the caller omitted sandbox");
 
-        let contract =
-            compile_dispatch_contract(&mut params, "codex", "cli", &resolved, CERTIFIED_CODEX)
-                .expect("review contract compiles");
+        let contract = compile_dispatch_contract(
+            &mut params,
+            "codex",
+            "cli",
+            &resolved,
+            PROVIDER_QUALIFICATIONS,
+            CERTIFIED_CODEX_VERSION,
+        )
+        .expect("review contract compiles");
 
         assert_eq!(
             params.sandbox.as_deref(),
@@ -236,9 +234,26 @@ mod tests {
             "the pre-#894-S2d workspace-write default must be gone: {args:?}"
         );
 
+        // The dispatch receipt must carry the *evidence*, not just the verdict:
+        // which receipt, for which binary version, from which kill-test. A reader
+        // of `status.json` can then go and check it instead of trusting the word
+        // "enforced".
         let receipt = contract_receipt(&contract);
         assert_eq!(receipt["workspace_authority"], json!("read-only"));
         assert_eq!(receipt["enforcement"]["mode"], json!("enforced"));
+        assert_eq!(
+            receipt["enforcement"]["receipt"],
+            json!(CODEX_CLI_RECEIPT.id)
+        );
+        assert_eq!(
+            receipt["enforcement"]["vendor_version"],
+            json!(CODEX_CLI_RECEIPT.vendor_version)
+        );
+        assert_eq!(
+            receipt["enforcement"]["certified_by"],
+            json!(CODEX_CLI_RECEIPT.kill_test)
+        );
+        assert_eq!(receipt["network"], json!("restricted"));
     }
 
     /// Discriminating test ①: read-only profile + explicit `workspace-write` is
@@ -250,9 +265,15 @@ mod tests {
             "profile": "codex_55_review",
             "sandbox": "workspace-write",
         }));
-        let err =
-            compile_dispatch_contract(&mut params, "codex", "cli", &resolved, CERTIFIED_CODEX)
-                .expect_err("widening a read-only profile must be refused");
+        let err = compile_dispatch_contract(
+            &mut params,
+            "codex",
+            "cli",
+            &resolved,
+            PROVIDER_QUALIFICATIONS,
+            CERTIFIED_CODEX_VERSION,
+        )
+        .expect_err("widening a read-only profile must be refused");
         assert!(err.contains("authority conflict"), "{err}");
         assert!(err.contains("codex_55_review"), "{err}");
         assert!(err.contains("never widened"), "{err}");
@@ -279,9 +300,15 @@ mod tests {
             "permission_profile": "full",
         }));
 
-        let err =
-            compile_dispatch_contract(&mut params, "codex", "cli", &resolved, CERTIFIED_CODEX)
-                .expect_err("a read-only profile must never compile to a sandbox bypass");
+        let err = compile_dispatch_contract(
+            &mut params,
+            "codex",
+            "cli",
+            &resolved,
+            PROVIDER_QUALIFICATIONS,
+            CERTIFIED_CODEX_VERSION,
+        )
+        .expect_err("a read-only profile must never compile to a sandbox bypass");
         assert!(err.contains("authority conflict"), "{err}");
         assert!(
             err.contains("danger-full-access"),
@@ -317,9 +344,15 @@ mod tests {
             ],
         }));
 
-        let contract =
-            compile_dispatch_contract(&mut params, "codex", "cli", &resolved, CERTIFIED_CODEX)
-                .expect("review contract compiles");
+        let contract = compile_dispatch_contract(
+            &mut params,
+            "codex",
+            "cli",
+            &resolved,
+            PROVIDER_QUALIFICATIONS,
+            CERTIFIED_CODEX_VERSION,
+        )
+        .expect("review contract compiles");
 
         assert_eq!(
             params.skills,
@@ -355,7 +388,8 @@ mod tests {
             "custom",
             "cli",
             &exec_resolved,
-            CERTIFIED_CODEX,
+            PROVIDER_QUALIFICATIONS,
+            CERTIFIED_CODEX_VERSION,
         )
         .expect("executor contract compiles");
         assert!(exec_contract.excluded_skills.is_empty());
@@ -387,6 +421,7 @@ mod tests {
             "cli",
             &resolved,
             PROVIDER_QUALIFICATIONS,
+            CERTIFIED_CODEX_VERSION,
         )
         .expect_err("an unattended read-only lane needs a certified enforcer");
         assert!(err.contains("not kill-test certified"), "{err}");
@@ -394,32 +429,51 @@ mod tests {
         assert!(err.contains("fail-closed"), "{err}");
     }
 
-    /// Today's shipped reality, pinned so nobody discovers it by surprise in
-    /// production: codex/cli is `Unverified` (its kill-test is `#[ignore]`d and
-    /// has never run), so even the codex review lane — the one backend with a
-    /// real sandbox primitive — is refused. Certify it (run the kill-test, drop
-    /// the `#[ignore]`, flip the row) and the lane comes back; see
-    /// `omitted_sandbox_on_review_profile_reaches_codex_as_read_only`, which pins
-    /// the certified world.
+    /// **The version gate, at the entry point.** The codex review lane runs
+    /// because ONE binary was kill-tested; it must stop running the moment the
+    /// binary underneath it is not that one. A codex upgrade (or a box where
+    /// `codex --version` cannot be read at all) therefore refuses the lane
+    /// pre-spawn, with a receipt naming the gap and the way out — rather than
+    /// inheriting yesterday's evidence for today's binary.
+    ///
+    /// This is the shipped fail-closed posture, pinned so nobody discovers it by
+    /// surprise on upgrade day. Re-run the kill-test, issue a new receipt, and the
+    /// lane comes back.
     #[test]
-    fn read_only_review_lane_is_refused_while_codex_is_uncertified() {
-        let (mut params, resolved) = resolve(json!({
-            "task": "review the diff",
-            "profile": "codex_55_review",
-        }));
-        let err = compile_dispatch_contract(
-            &mut params,
-            "codex",
-            "cli",
-            &resolved,
-            PROVIDER_QUALIFICATIONS,
-        )
-        .expect_err("the shipped table certifies nobody");
-        assert!(err.contains("not kill-test certified"), "{err}");
-        assert!(
-            err.contains("has never been executed"),
-            "the receipt must say why: {err}"
-        );
+    fn a_codex_the_receipt_does_not_name_refuses_the_read_only_lane() {
+        for (world, version, expected) in [
+            (
+                "codex upgraded past the certified binary",
+                Some("0.145.0"),
+                "does not carry across vendor versions",
+            ),
+            (
+                "codex version cannot be determined (not installed / --version failed)",
+                None,
+                "an unknown version is not a certified version",
+            ),
+        ] {
+            let (mut params, resolved) = resolve(json!({
+                "task": "review the diff",
+                "profile": "codex_55_review",
+            }));
+            let err = compile_dispatch_contract(
+                &mut params,
+                "codex",
+                "cli",
+                &resolved,
+                PROVIDER_QUALIFICATIONS,
+                version,
+            )
+            .expect_err("an uncertified binary must not run a read-only lane");
+            assert!(err.contains("not kill-test certified"), "[{world}] {err}");
+            assert!(err.contains(expected), "[{world}] {err}");
+            assert!(err.contains("fail-closed"), "[{world}] {err}");
+            assert_eq!(
+                params.sandbox, None,
+                "[{world}] a refused dispatch must not have had its params rewritten"
+            );
+        }
     }
 
     /// A write-level dispatch on a provider with no sandbox primitive still gets
@@ -441,6 +495,7 @@ mod tests {
             "cli",
             &resolved,
             PROVIDER_QUALIFICATIONS,
+            CERTIFIED_CODEX_VERSION,
         )
         .expect("builder contract compiles");
 
