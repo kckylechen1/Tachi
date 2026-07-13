@@ -128,6 +128,30 @@ pub struct VaultState {
     pub auto_lock_after_secs: u64,
 }
 
+impl VaultState {
+    /// Single source of truth for "has the auto-lock timeout expired?".
+    ///
+    /// `auto_lock_after_secs == 0` means auto-lock is **disabled** (daemon
+    /// mode): the session never expires on its own, no matter how long ago it
+    /// was unlocked. This sentinel MUST be honored by every expiry check — both
+    /// the enforcement path (clearing the key in `maybe_auto_lock_vault` /
+    /// `with_vault_key`) and the status-reporting path (`runtime_observability_json`
+    /// vault block) — so reported state matches reality. A bare
+    /// `elapsed() > auto_lock_after_secs` without this sentinel makes a
+    /// `0`-configured daemon report `locked: true` one second after unlock while
+    /// the key is still live and usable.
+    ///
+    /// Returns `false` when there is no `unlock_time` (not unlocked); callers
+    /// handle the locked case separately.
+    pub fn auto_lock_expired(&self) -> bool {
+        let Some(unlock_time) = self.unlock_time else {
+            return false;
+        };
+        self.auto_lock_after_secs > 0
+            && unlock_time.elapsed() > Duration::from_secs(self.auto_lock_after_secs)
+    }
+}
+
 pub struct RateLimiter {
     pub windows: HashMap<String, VecDeque<Instant>>,
     pub bursts: HashMap<String, VecDeque<Instant>>,

@@ -43,10 +43,7 @@ pub(super) fn clear_cached_vault_state(server: &MemoryServer) {
 
 pub(super) fn maybe_auto_lock_vault(server: &MemoryServer) -> bool {
     let mut v = server.vault_write();
-    let expired = v.unlock_time.is_some_and(|unlock_time| {
-        v.auto_lock_after_secs > 0
-            && unlock_time.elapsed() > Duration::from_secs(v.auto_lock_after_secs)
-    });
+    let expired = v.auto_lock_expired();
     if expired {
         clear_cached_vault_state_locked(&mut v);
     }
@@ -78,11 +75,7 @@ pub(super) fn with_vault_key<T>(
             let mut v = server.vault_write();
             match v.unlock_time {
                 None => Err("Vault is locked. Call vault_unlock first.".to_string()),
-                Some(unlock_time)
-                    if v.auto_lock_after_secs > 0
-                        && unlock_time.elapsed()
-                            > Duration::from_secs(v.auto_lock_after_secs) =>
-                {
+                Some(_) if v.auto_lock_expired() => {
                     clear_cached_vault_state_locked(&mut v);
                     Err("Vault auto-locked. Call vault_unlock first.".to_string())
                 }
