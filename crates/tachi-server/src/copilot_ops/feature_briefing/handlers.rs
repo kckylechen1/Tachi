@@ -136,7 +136,8 @@ pub(crate) async fn handle_tachi_feature_briefing(
     server: &MemoryServer,
     params: &TachiTaskParams,
 ) -> Result<String, String> {
-    let top_k = if params.compact.unwrap_or(false) {
+    // #527: omitted compact defaults to true (agent packet). Full board is opt-in.
+    let top_k = if params.compact.unwrap_or(true) {
         params.top_k.unwrap_or(4).clamp(1, 4)
     } else {
         crate::clamp_facade_top_k(params.top_k.unwrap_or(6))

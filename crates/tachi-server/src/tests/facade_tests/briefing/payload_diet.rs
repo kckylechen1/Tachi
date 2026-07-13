@@ -8,6 +8,61 @@ fn compact_json_params(query: &str) -> TachiMemoryParams {
     params
 }
 
+/// #527: agent-facing default is compact. Omitting `compact` (serde default)
+/// must yield the tight packet — full board is opt-in via `compact=false`.
+#[tokio::test]
+async fn omitted_compact_defaults_to_compact_briefing_packet() {
+    // Wire shape agents actually send: action only, no compact field.
+    let params: TachiMemoryParams = serde_json::from_value(serde_json::json!({
+        "action": "briefing",
+        "format": "json",
+        "query": "default compact briefing"
+    }))
+    .expect("deserialize briefing params without compact");
+    assert!(
+        params.compact,
+        "omitted compact must default true (#527 agent default)"
+    );
+
+    let (server, _temp_home) = make_server_with_temp_home();
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect("default briefing should serialize");
+    let briefing: Value = serde_json::from_str(&body).expect("briefing JSON");
+    let object = briefing.as_object().expect("briefing object");
+
+    assert_eq!(
+        object.get("compact"),
+        Some(&Value::Bool(true)),
+        "default briefing response must mark compact=true"
+    );
+    assert!(
+        !object.contains_key("layer_authority"),
+        "default briefing must omit doctrine metadata (compact packet)"
+    );
+    assert!(
+        !object.contains_key("limits"),
+        "default briefing must omit static limit metadata (compact packet)"
+    );
+
+    // Discrimination: explicit full still has the fat fields.
+    let mut full = tachi_memory_params("briefing");
+    full.format = Some("json".to_string());
+    full.query = Some("default compact briefing".to_string());
+    full.compact = false;
+    let full_body = crate::facade_memory_ops::handle_tachi_memory(&server, full)
+        .await
+        .expect("full briefing");
+    let full_val: Value = serde_json::from_str(&full_body).expect("full JSON");
+    assert!(
+        full_val
+            .as_object()
+            .expect("full object")
+            .contains_key("layer_authority"),
+        "compact=false must restore full briefing board"
+    );
+}
+
 #[tokio::test]
 async fn compact_briefing_uses_status_warnings_and_omits_doctrine_metadata() {
     let (server, _temp_home) = make_server_with_temp_home();

@@ -495,9 +495,10 @@ pub struct TachiMemoryParams {
     pub domain: Option<String>,
 
     // --- briefing shape ---
-    #[serde(default)]
+    // #527: agent-facing default is compact; full briefing is opt-in via compact=false.
+    #[serde(default = "default_facade_true")]
     #[schemars(
-        description = "[action=briefing] When true, emit a tight 6-row summary: top 6 memories, top 3 wiki, top 3 kanban, top 2 checkpoints, no health snapshot. Default false (full briefing)."
+        description = "[action=briefing] When true (default), emit a tight summary: top 6 memories, top 3 wiki, top 3 kanban, top 2 checkpoints, no doctrine/limits metadata. Set false for the full briefing board."
     )]
     pub compact: bool,
 
