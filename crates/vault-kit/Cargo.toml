@@ -1,0 +1,36 @@
+[package]
+name = "vault-kit"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Shared Argon2id + AES-256-GCM vault crypto primitives and versioned KDF-parameter format, extracted for cross-product reuse (tachi#1080)."
+publish = false
+
+# Leaf crate: crypto + versioned format ONLY (tachi#1080 v1 scope, adjudicated
+# after adversarial review rejected the wider "crypto+store" v0 extraction —
+# see the issue for the full history). Deliberately depends on nothing else
+# in this workspace (not memcore, not tachi-server) so a downstream fork can
+# pin this crate alone without pulling product code.
+[dependencies]
+aes-gcm = { workspace = true }
+argon2 = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+# Swaps the compile-time Argon2 profile `derive`/`active_kdf_params_json`
+# use from the production cost (m=65536 KiB, t=3, p=4 — ~100-300ms/call) to
+# a lightweight test profile (m=64 KiB, t=1, p=1 — sub-millisecond).
+#
+# `#[cfg(test)]` alone only flips this for vault-kit's OWN `cargo test`; a
+# downstream crate's unit tests (e.g. tachi-server's, which link vault-kit
+# as an ordinary dependency, not build it in test mode) would otherwise pay
+# full production Argon2 cost on every derive call in their test suite.
+# Consumers get the fast profile back by depending on vault-kit twice: once
+# plainly in `[dependencies]` (production profile, used for real builds)
+# and once with `features = ["test-support"]` in `[dev-dependencies]`
+# (only unified in when a test/bench/example target is actually built).
+test-support = []
