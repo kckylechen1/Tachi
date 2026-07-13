@@ -421,7 +421,8 @@ fn write_adjudication_event(
 /// **FIX-4 (retry idempotency vs correction):** `event_key` is
 /// content-deterministic — `format!("adjudicate:{}", stable_hash(payload))`,
 /// where `payload` is the outcome_id + verdict/reason + adjudicator +
-/// evidence_ref + sorted signature-id set (see [`posthoc_payload_repr`]). A
+/// evidence_ref + the signature triples [id, evidence_ref, resolved] sorted
+/// by id (see [`posthoc_payload_repr`]). A
 /// transport retry of the SAME adjudication derives the SAME key and
 /// short-circuits idempotently inside the append transaction; a REAL
 /// correction (verdict/evidence/signatures changed) derives a new key and

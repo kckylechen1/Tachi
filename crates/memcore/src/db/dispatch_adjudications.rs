@@ -635,4 +635,30 @@ mod tests {
         assert_eq!(history[1].verdict.as_deref(), Some("rejected"));
         assert_eq!(history[2].verdict.as_deref(), Some("accepted"));
     }
+
+    /// The per-outcome sequence is schema-enforced, not merely
+    /// convention-enforced: two rows sharing (outcome_id, insertion_seq)
+    /// violate the UNIQUE constraint, so a concurrent append that read the
+    /// same MAX fails loudly instead of silently breaking total ordering.
+    #[test]
+    fn duplicate_insertion_seq_violates_schema_constraint() {
+        let conn = open_conn();
+        seed_outcome(&conn, "outcome-1");
+        let insert_raw = |id: &str, seq: i64| {
+            conn.execute(
+                "INSERT INTO dispatch_adjudications
+                 (adjudication_id, outcome_id, event_key, verdict, not_required_reason,
+                  actor, evidence_ref, created_at, insertion_seq)
+                 VALUES (?1, 'outcome-1', ?1, 'confirmed', NULL, 'leader', 'e', '', ?2)",
+                params![id, seq],
+            )
+        };
+        insert_raw("adj-1", 1).expect("first row at seq 1");
+        let err = insert_raw("adj-2", 1).expect_err("duplicate (outcome_id, insertion_seq)");
+        assert!(
+            err.to_string().to_lowercase().contains("unique"),
+            "duplicate sequence must fail the UNIQUE constraint, got: {err}"
+        );
+        insert_raw("adj-3", 2).expect("next sequence value is accepted");
+    }
 }
