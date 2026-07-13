@@ -82,6 +82,39 @@ struct ReadPoolInner {
     release_cv: Condvar,
 }
 
+/// RAII notifier: bumps the release generation and wakes every waiter when
+/// **dropped** — on both the normal-return path and a panicking `f` (`Drop`
+/// runs during unwind too), so a panicking checkout closure can never leave
+/// another thread parked forever in [`ReadStorePool::with_store_recording`]'s
+/// `wait_while` (codex-m56e0 BUG-1: the pre-fix code only bumped/notified
+/// after `f` returned normally — a panic inside `f` skipped it entirely,
+/// since the slot's `MutexGuard` unwinds and releases the slot but nothing
+/// downstream of the skipped call ever ran). This is the single source of
+/// notification for the pool; nothing else calls `notify_all` on
+/// `release_cv`.
+///
+/// Ordering note: on the normal-return path, `with_store_recording`
+/// explicitly drops the slot's `MutexGuard` before this guard's scope ends,
+/// so a woken waiter finds the slot already free. On a panicking `f`, Rust's
+/// unwind drops locals in reverse declaration order, so this guard (declared
+/// after the slot guard) fires its notify *before* the slot guard actually
+/// unlocks a few instructions later — a woken waiter can rescan into a
+/// still-locked slot and simply loop back to waiting, an ordinary spurious
+/// wakeup the loop already handles, not a lost one. The property this guard
+/// restores is that a wakeup happens at all.
+struct ReleaseNotifyGuard<'a> {
+    inner: &'a ReadPoolInner,
+}
+
+impl Drop for ReleaseNotifyGuard<'_> {
+    fn drop(&mut self) {
+        let mut generation = lock_or_recover(&self.inner.release_signal, "read_pool_release");
+        *generation = generation.wrapping_add(1);
+        drop(generation);
+        self.inner.release_cv.notify_all();
+    }
+}
+
 #[derive(Clone)]
 pub struct ReadStorePool {
     inner: Arc<ReadPoolInner>,
@@ -136,21 +169,26 @@ impl ReadStorePool {
         let checkout_started = Instant::now();
         loop {
             // Hold `release_signal` while scanning: any other in-flight
-            // checkout that wants to announce a release (`notify_released`)
-            // takes the same lock, so a release can never happen silently in
-            // the gap between "we saw every slot busy" and "we start
-            // waiting" — that gap is exactly what would otherwise cause a
-            // missed wakeup.
+            // checkout whose `ReleaseNotifyGuard` wants to announce a
+            // release takes the same lock, so a release can never happen
+            // silently in the gap between "we saw every slot busy" and "we
+            // start waiting" — that gap is exactly what would otherwise
+            // cause a missed wakeup.
             let gen_guard = lock_or_recover(&self.inner.release_signal, label);
             for slot in self.inner.stores.iter() {
                 if let Some(mut store) = try_lock_or_recover(slot, label) {
                     drop(gen_guard);
                     let pool_checkout_wait = checkout_started.elapsed();
+                    // Constructed before `f` runs so its `Drop` fires the
+                    // release notification unconditionally — including when
+                    // `f` panics (see the type's doc comment, codex-m56e0
+                    // BUG-1). Single source of notification: don't also call
+                    // anything else that bumps `release_signal` here.
+                    let _release_notify = ReleaseNotifyGuard { inner: &self.inner };
                     let op_started = Instant::now();
                     let result = f(&mut store);
                     let operation_wall_time = op_started.elapsed();
                     drop(store);
-                    self.notify_released();
                     return (
                         result,
                         ReadPoolCheckoutReceipt {
@@ -173,13 +211,6 @@ impl ReadStorePool {
                     .unwrap_or_else(|poisoned| poisoned.into_inner()),
             );
         }
-    }
-
-    fn notify_released(&self) {
-        let mut generation = lock_or_recover(&self.inner.release_signal, "read_pool_release");
-        *generation = generation.wrapping_add(1);
-        drop(generation);
-        self.inner.release_cv.notify_all();
     }
 
     pub fn len(&self) -> usize {
@@ -963,13 +994,17 @@ mod tests {
     /// exactly the reported convoy.
     ///
     /// Synchronization is entirely channel-based (an entrance signal proves
-    /// the occupier holds slot 0 before we proceed; a completion signal on a
-    /// second channel is what the final assertion is built on). The 500ms
-    /// bound below is a generous bound to avoid hanging forever, not a
-    /// narrow timing race: the occupier holds its slot until this test
-    /// explicitly releases it, so under the unfixed round-robin selector the
-    /// fifth checkout provably blocks (on a real `Mutex::lock()`) until that
-    /// release fires, which does not happen inside the bound.
+    /// the occupier holds slot 0 before we proceed; the checkout thread
+    /// signals `started` before it ever calls `with_store`, so the 500ms
+    /// bound below is timed from "thread definitely running", not from
+    /// "thread spawned" — otherwise scheduler latency alone could eat the
+    /// bound and false-RED the fixed code; a completion signal on a third
+    /// channel is what the final assertion is built on). The 500ms bound is
+    /// a generous bound to avoid hanging forever, not a narrow timing race:
+    /// the occupier holds its slot until this test explicitly releases it,
+    /// so under the unfixed round-robin selector the fifth checkout provably
+    /// blocks (on a real `Mutex::lock()`) until that release fires, which
+    /// does not happen inside the bound (codex-m56e0 BUG-2).
     #[test]
     fn read_pool_checkout_does_not_wait_behind_the_round_robin_occupied_slot() {
         let temp = unique_temp_dir("read-pool-convoy");
@@ -1011,12 +1046,22 @@ mod tests {
 
         // The fifth checkout: round-robin would route it back onto slot 0
         // (still held by `occupier`), even though slots 1-3 are idle again.
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let checkout_pool = pool.clone();
         let checkout = std::thread::spawn(move || {
+            // Signal BEFORE calling with_store, so the main thread's 500ms
+            // bound (below) times from "this thread is definitely running",
+            // not from "this thread was spawned" — scheduler delay between
+            // spawn and first instruction must not be counted against the
+            // checkout, or it could false-RED the fixed code under load.
+            started_tx.send(()).expect("checkout thread started signal");
             let result = checkout_pool.with_store("checkout", |_store| Ok(()));
             let _ = done_tx.send(result.is_ok());
         });
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("checkout thread should signal started before we start timing it");
 
         let completed_promptly = done_rx.recv_timeout(Duration::from_millis(500));
 
@@ -1037,6 +1082,106 @@ mod tests {
             completed_promptly.is_ok(),
             "checkout into an idle slot (1-3) must not wait behind the round-robin-selected, \
              still-occupied slot 0"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// codex-m56e0 BUG-1 regression: a panicking checkout closure must not
+    /// leave another already-in-flight checkout parked forever. Pre-fix,
+    /// `with_store_recording` only bumped the release generation and
+    /// notified waiters *after* `f` returned normally — a panic inside `f`
+    /// unwound straight past that call, so a waiter blocked in `wait_while`
+    /// on the same slot was never woken.
+    ///
+    /// Pool size 1 (deliberately): the only slot is held by the panicking
+    /// checkout, so the waiter has nowhere else to go — it can only proceed
+    /// once the panicking checkout's release notification fires (via
+    /// `ReleaseNotifyGuard`'s `Drop`, which must run during unwind). This
+    /// isolates the panic-path notification specifically, as opposed to the
+    /// multi-slot convoy covered by the test above.
+    ///
+    /// Ordering is pinned by two entrance signals, not by sleeping: the
+    /// panicker signals `entered` before it parks on its own release gate
+    /// (so the sole slot is provably held before the waiter is even
+    /// spawned), and the waiter signals `started` immediately before calling
+    /// `with_store` (so the main thread doesn't flip the panicker's gate —
+    /// triggering the panic — until the waiter's checkout is already in
+    /// flight against a slot that is, at that moment, still held). The panic
+    /// is caught with `catch_unwind` inside the panicker thread so it is
+    /// contained and inspectable rather than just failing that thread
+    /// silently.
+    #[test]
+    fn panicking_checkout_still_wakes_a_waiter_parked_on_the_same_slot() {
+        let temp = unique_temp_dir("read-pool-panic-wakeup");
+        let db_path = temp.join("memory.db");
+        drop(
+            MemoryStore::open_with_label(db_path.to_str().expect("db path utf8"), "seed")
+                .expect("seed db"),
+        );
+        let db_str = db_path.to_str().expect("db path utf8").to_string();
+        let pool = ReadStorePool::open_read_only(&db_str, 1).expect("open pool");
+
+        let panicker_gate = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+        let (panicker_entered_tx, panicker_entered_rx) = std::sync::mpsc::channel();
+        let panicker_pool = pool.clone();
+        let panicker_gate_clone = Arc::clone(&panicker_gate);
+        let panicker = std::thread::spawn(move || {
+            let checkout = |_store: &mut MemoryStore| -> Result<(), String> {
+                panicker_entered_tx
+                    .send(())
+                    .expect("panicker entrance signal");
+                let (proceed, wake) = &*panicker_gate_clone;
+                let mut proceed_guard = proceed.lock().expect("lock panicker gate");
+                while !*proceed_guard {
+                    proceed_guard = wake.wait(proceed_guard).expect("wait panicker gate");
+                }
+                panic!(
+                    "intentional test panic: checkout closure failure \
+                     (codex-m56e0 BUG-1 regression)"
+                );
+            };
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                panicker_pool.with_store("panicker", checkout)
+            }))
+            .is_err()
+        });
+        panicker_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("panicker should hold the sole slot before we proceed");
+
+        let (waiter_started_tx, waiter_started_rx) = std::sync::mpsc::channel();
+        let (waiter_done_tx, waiter_done_rx) = std::sync::mpsc::channel();
+        let waiter_pool = pool.clone();
+        let waiter = std::thread::spawn(move || {
+            waiter_started_tx.send(()).expect("waiter started signal");
+            let result = waiter_pool.with_store("waiter", |_store| Ok(()));
+            let _ = waiter_done_tx.send(result.is_ok());
+        });
+        waiter_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiter should signal started before we trigger the panic");
+
+        // Trigger the panic: the sole slot's only holder panics instead of
+        // returning normally.
+        {
+            let (proceed, wake) = &*panicker_gate;
+            *proceed.lock().expect("lock panicker gate") = true;
+            wake.notify_all();
+        }
+
+        assert!(
+            panicker.join().expect("panicker thread should join"),
+            "panicker checkout should have panicked as intended"
+        );
+
+        let waiter_completed = waiter_done_rx.recv_timeout(Duration::from_millis(500));
+        waiter.join().expect("waiter thread should join");
+
+        assert!(
+            waiter_completed.is_ok(),
+            "a panicking checkout closure must still wake a waiter parked on the \
+             same (sole) slot — otherwise the waiter is left blocked forever"
         );
 
         let _ = std::fs::remove_dir_all(temp);
@@ -1358,12 +1503,23 @@ mod bench {
     use super::tests::unique_temp_dir;
     use super::*;
 
-    fn percentile(sorted_micros: &[u128], pct: f64) -> u128 {
+    /// `None` means "no samples", distinct from a genuinely-measured `0`.
+    fn percentile(sorted_micros: &[u128], pct: f64) -> Option<u128> {
         if sorted_micros.is_empty() {
-            return 0;
+            return None;
         }
         let rank = (((sorted_micros.len() - 1) as f64) * pct).round() as usize;
-        sorted_micros[rank.min(sorted_micros.len() - 1)]
+        Some(sorted_micros[rank.min(sorted_micros.len() - 1)])
+    }
+
+    /// codex-m56e0 BUG-3 (last item): an empty sample set must print as
+    /// "N/A", not silently as `0` — printing `0` would misreport "measured
+    /// zero microseconds" when the truth is "nothing was measured at all".
+    fn fmt_percentile(value: Option<u128>) -> String {
+        match value {
+            Some(v) => v.to_string(),
+            None => "N/A".to_string(),
+        }
     }
 
     fn report(name: &str, mut checkout_wait_us: Vec<u128>, mut op_wall_us: Vec<u128>) {
@@ -1372,10 +1528,10 @@ mod bench {
         println!(
             "[bench:{name}] n={} checkout_wait_us(p50={} p95={}) op_wall_us(p50={} p95={})",
             checkout_wait_us.len().max(op_wall_us.len()),
-            percentile(&checkout_wait_us, 0.50),
-            percentile(&checkout_wait_us, 0.95),
-            percentile(&op_wall_us, 0.50),
-            percentile(&op_wall_us, 0.95),
+            fmt_percentile(percentile(&checkout_wait_us, 0.50)),
+            fmt_percentile(percentile(&checkout_wait_us, 0.95)),
+            fmt_percentile(percentile(&op_wall_us, 0.50)),
+            fmt_percentile(percentile(&op_wall_us, 0.95)),
         );
     }
 
@@ -1412,15 +1568,34 @@ mod bench {
     #[test]
     #[ignore = "manual before/after receipt; run with --ignored --nocapture"]
     fn one_long_read_with_concurrent_short_reads() {
-        // One reader holds a slot for the whole benchmark (simulating a slow
-        // scan); N short concurrent readers exercise the remaining slots.
-        // This is the exact shape of the reported convoy: on the unfixed
-        // round-robin selector, some fraction of the short readers'
-        // checkout_wait shows large tail latency (whichever ones the
-        // round-robin cursor happens to route onto the long reader's slot);
-        // on the fix, checkout_wait should stay low throughout since idle
-        // slots are always found before waiting. This benchmark's printed
-        // p50/p95 IS the before/after receipt — no separate assertion.
+        // One reader holds a slot for a fixed duration (simulating a slow
+        // scan); N short concurrent readers exercise the remaining slots
+        // while it does. This is the exact shape of the reported convoy: on
+        // the unfixed round-robin selector, some fraction of the short
+        // readers' checkout_wait shows large tail latency (whichever ones
+        // the round-robin cursor happens to route onto the long reader's
+        // slot); on the fix, checkout_wait should stay low throughout since
+        // idle slots are always found before waiting. This benchmark's
+        // printed p50/p95 IS the before/after receipt — no separate
+        // assertion.
+        //
+        // codex-m56e0 BUG-3: the long reader releases on its OWN timer
+        // (`HOLD_DURATION`), not by waiting for the short readers to finish
+        // first. An earlier revision released the long reader only after
+        // joining all 20 short readers — on the pre-fix round-robin
+        // selector, some of those readers land on the long reader's occupied
+        // slot and block until it releases, so that join could never
+        // complete and the base-SHA run would never produce a receipt at
+        // all. Releasing on a timer means the long reader always eventually
+        // lets go regardless of which readers are blocked on it.
+        //
+        // Collecting the short readers' receipts is ALSO bounded (a
+        // generous per-item timeout), not an unconditional `.join()`: a
+        // receipt legitimately arriving up to ~`HOLD_DURATION` late (pre-fix,
+        // for a reader routed onto the occupied slot) is expected, but
+        // anything past the bound is reported as an explicit observed
+        // timeout rather than hung on — on unfixed code, that count is
+        // itself the headline before/after number.
         let temp = unique_temp_dir("bench-convoy");
         let db_path = temp.join("memory.db");
         drop(
@@ -1430,18 +1605,16 @@ mod bench {
         let pool = ReadStorePool::open_read_only(db_path.to_str().expect("db path utf8"), 4)
             .expect("open pool");
 
-        let release = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+        const HOLD_DURATION: Duration = Duration::from_millis(200);
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let long_pool = pool.clone();
-        let long_release = Arc::clone(&release);
         let long_reader = std::thread::spawn(move || {
             long_pool.with_store("long_read", |_store| {
                 entered_tx.send(()).expect("long reader entrance signal");
-                let (released, wake) = &*long_release;
-                let mut released = released.lock().expect("lock release gate");
-                while !*released {
-                    released = wake.wait(released).expect("wait release gate");
-                }
+                // Simulated workload duration, reported implicitly via the
+                // short readers' checkout_wait — not itself a
+                // synchronization mechanism (nothing waits on this value).
+                std::thread::sleep(HOLD_DURATION);
                 Ok(())
             })
         });
@@ -1450,28 +1623,29 @@ mod bench {
             .expect("long reader should enter before short readers start");
 
         const SHORT_READERS: usize = 20;
-        let handles: Vec<_> = (0..SHORT_READERS)
-            .map(|_| {
-                let pool = pool.clone();
-                std::thread::spawn(move || {
-                    let (result, receipt) =
-                        pool.with_store_recording("short_read", |_store| Ok(()));
-                    result.expect("short read should succeed");
-                    receipt
-                })
-            })
-            .collect();
-
-        let receipts: Vec<ReadPoolCheckoutReceipt> = handles
-            .into_iter()
-            .map(|h| h.join().expect("short reader thread should join"))
-            .collect();
-
-        {
-            let (released, wake) = &*release;
-            *released.lock().expect("lock release gate") = true;
-            wake.notify_all();
+        let (receipt_tx, receipt_rx) = std::sync::mpsc::channel();
+        for _ in 0..SHORT_READERS {
+            let pool = pool.clone();
+            let receipt_tx = receipt_tx.clone();
+            std::thread::spawn(move || {
+                let (result, receipt) =
+                    pool.with_store_recording("short_read", |_store| Ok(()));
+                result.expect("short read should succeed");
+                let _ = receipt_tx.send(receipt);
+            });
         }
+        drop(receipt_tx);
+
+        const PER_ITEM_TIMEOUT: Duration = Duration::from_secs(2);
+        let mut receipts = Vec::with_capacity(SHORT_READERS);
+        let mut observed_timeouts = 0usize;
+        for _ in 0..SHORT_READERS {
+            match receipt_rx.recv_timeout(PER_ITEM_TIMEOUT) {
+                Ok(receipt) => receipts.push(receipt),
+                Err(_) => observed_timeouts += 1,
+            }
+        }
+
         long_reader
             .join()
             .expect("long reader thread should join")
@@ -1489,6 +1663,11 @@ mod bench {
             "one_long_read_with_concurrent_short_reads",
             checkout_wait_us,
             op_wall_us,
+        );
+        println!(
+            "[bench:one_long_read_with_concurrent_short_reads] \
+             observed_timeouts={observed_timeouts}/{SHORT_READERS} (a nonzero count here \
+             IS convoy evidence on the pre-fix selector, not a test failure)"
         );
 
         let _ = std::fs::remove_dir_all(temp);
