@@ -32,6 +32,19 @@ fn drop_claims_table(server: &crate::server_state::MemoryServer) {
         .expect("drop session_claims table for fail-safe test setup");
 }
 
+#[test]
+fn auto_register_hook_with_no_identity_writes_nothing() {
+    let server = make_server();
+    assert!(list_live_claims_for_briefing(&server).is_empty());
+
+    auto_register_or_heartbeat_claim(&server, &ClaimHookInput::default());
+
+    assert!(
+        list_live_claims_for_briefing(&server).is_empty(),
+        "a hook call without issue_ref or flow_id must not create a claim"
+    );
+}
+
 #[tokio::test]
 async fn auto_register_hook_degrades_to_no_op_when_claims_table_is_missing() {
     let server = make_server();

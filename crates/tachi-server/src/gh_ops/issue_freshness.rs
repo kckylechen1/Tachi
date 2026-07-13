@@ -1282,49 +1282,61 @@ mod tests {
     /// number fetch — both were still inline/untested, unlike their sibling
     /// parsers extracted under finding 8).
     #[test]
-    fn parse_issue_numbers_json_extracts_numbers() {
-        let value = serde_json::json!([{ "number": 979 }, { "number": 947 }]);
-        assert_eq!(parse_issue_numbers_json(&value), vec![979, 947]);
-    }
+    fn parse_issue_numbers_json_covers_all_input_classes() {
+        let cases = [
+            (
+                "extracts numbers",
+                serde_json::json!([{ "number": 979 }, { "number": 947 }]),
+                vec![979, 947],
+            ),
+            (
+                "skips rows missing number",
+                serde_json::json!([{ "number": 1 }, { "title": "no number field" }]),
+                vec![1],
+            ),
+            ("empty array", serde_json::json!([]), Vec::<u64>::new()),
+        ];
 
-    #[test]
-    fn parse_issue_numbers_json_skips_rows_missing_number() {
-        let value = serde_json::json!([{ "number": 1 }, { "title": "no number field" }]);
-        assert_eq!(parse_issue_numbers_json(&value), vec![1]);
-    }
-
-    #[test]
-    fn parse_issue_numbers_json_empty_array_yields_empty() {
-        let value = serde_json::json!([]);
-        assert_eq!(parse_issue_numbers_json(&value), Vec::<u64>::new());
+        for (name, value, expected) in cases {
+            assert_eq!(parse_issue_numbers_json(&value), expected, "{name}");
+        }
     }
 
     /// #1000 round-3 codex review finding 4: `gh issue list --json
     /// number,body` shape.
     #[test]
-    fn parse_issue_numbers_with_body_json_extracts_number_and_body() {
-        let value = serde_json::json!([
-            { "number": 1000, "body": "gated on #894" },
-            { "number": 1001, "body": "" }
-        ]);
-        let rows = parse_issue_numbers_with_body_json(&value);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], (1000, "gated on #894".to_string()));
-        assert_eq!(rows[1], (1001, String::new()));
-    }
+    fn parse_issue_numbers_with_body_json_covers_all_input_classes() {
+        let cases = [
+            (
+                "extracts number and body",
+                serde_json::json!([
+                    { "number": 1000, "body": "gated on #894" },
+                    { "number": 1001, "body": "" }
+                ]),
+                vec![(1000, "gated on #894".to_string()), (1001, String::new())],
+            ),
+            (
+                "defaults missing body to empty",
+                serde_json::json!([{ "number": 1 }]),
+                vec![(1, String::new())],
+            ),
+            (
+                "skips rows missing number",
+                serde_json::json!([
+                    { "body": "no number here" },
+                    { "number": 2, "body": "b" }
+                ]),
+                vec![(2, "b".to_string())],
+            ),
+        ];
 
-    #[test]
-    fn parse_issue_numbers_with_body_json_defaults_missing_body_to_empty() {
-        let value = serde_json::json!([{ "number": 1 }]);
-        let rows = parse_issue_numbers_with_body_json(&value);
-        assert_eq!(rows, vec![(1, String::new())]);
-    }
-
-    #[test]
-    fn parse_issue_numbers_with_body_json_skips_rows_missing_number() {
-        let value = serde_json::json!([{ "body": "no number here" }, { "number": 2, "body": "b" }]);
-        let rows = parse_issue_numbers_with_body_json(&value);
-        assert_eq!(rows, vec![(2, "b".to_string())]);
+        for (name, value, expected) in cases {
+            assert_eq!(
+                parse_issue_numbers_with_body_json(&value),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     /// #1000 codex review finding 8: `gh pr list --json number,files` shape.
@@ -1373,52 +1385,40 @@ mod tests {
     }
 
     #[test]
-    fn extracts_refs_hash_n_form() {
-        let text = "Fixes the bug.\n\nRefs #979";
-        assert_eq!(extract_referenced_issue_numbers(text), vec![979]);
-    }
+    fn extract_referenced_issue_numbers_covers_supported_and_rejected_forms() {
+        let cases = [
+            ("Refs line", "Fixes the bug.\n\nRefs #979", vec![979]),
+            (
+                "comma-separated Refs",
+                "Refs #530, #724, #921",
+                vec![530, 724, 921],
+            ),
+            (
+                "space-separated Refs",
+                "Refs #968 #517 #963",
+                vec![517, 963, 968],
+            ),
+            (
+                "parenthesized trailer",
+                "some commit trailer (#42) landed",
+                vec![42],
+            ),
+            ("singular Ref", "Ref #1", vec![1]),
+            ("Reference", "Reference: #2", vec![2]),
+            ("References", "References #3", vec![3]),
+            ("Referenced", "Referenced #4", vec![4]),
+            // "Refactor" must not match on "Ref" + word-boundary check.
+            ("Refactor is not Ref", "Refactor #5", Vec::<u64>::new()),
+            (
+                "plain body reference",
+                "just a plain body #5",
+                Vec::<u64>::new(),
+            ),
+        ];
 
-    #[test]
-    fn extracts_refs_multiple_comma_separated() {
-        let text = "Refs #530, #724, #921";
-        assert_eq!(extract_referenced_issue_numbers(text), vec![530, 724, 921]);
-    }
-
-    #[test]
-    fn extracts_refs_multiple_space_separated() {
-        let text = "Refs #968 #517 #963";
-        assert_eq!(extract_referenced_issue_numbers(text), vec![517, 963, 968]);
-    }
-
-    #[test]
-    fn extracts_paren_hash_n_form() {
-        let text = "some commit trailer (#42) landed";
-        assert_eq!(extract_referenced_issue_numbers(text), vec![42]);
-    }
-
-    #[test]
-    fn extracts_ref_singular_and_reference_forms() {
-        assert_eq!(extract_referenced_issue_numbers("Ref #1"), vec![1]);
-        assert_eq!(extract_referenced_issue_numbers("Reference: #2"), vec![2]);
-        assert_eq!(extract_referenced_issue_numbers("References #3"), vec![3]);
-        assert_eq!(extract_referenced_issue_numbers("Referenced #4"), vec![4]);
-    }
-
-    #[test]
-    fn does_not_match_refactor_as_ref_keyword() {
-        // "Refactor #5" must not match on "Ref" + word-boundary check.
-        assert_eq!(
-            extract_referenced_issue_numbers("Refactor #5"),
-            Vec::<u64>::new()
-        );
-    }
-
-    #[test]
-    fn no_refs_keyword_and_no_parens_yields_empty() {
-        assert_eq!(
-            extract_referenced_issue_numbers("just a plain body #5"),
-            Vec::<u64>::new()
-        );
+        for (name, text, expected) in cases {
+            assert_eq!(extract_referenced_issue_numbers(text), expected, "{name}");
+        }
     }
 
     /// Acceptance anchor from #1000: a replay against this repo's real
