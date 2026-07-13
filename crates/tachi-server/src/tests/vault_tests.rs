@@ -14,7 +14,5 @@ mod access_audit;
 mod api_key_pool;
 mod cached_key;
 mod env_injection;
-#[cfg(target_os = "macos")]
-mod keychain_kdf_gate;
 mod lifecycle;
 mod rotation;

@@ -7,8 +7,6 @@ pub(crate) fn load_keychain_vault_api_key_values(
         return Ok(Vec::new());
     }
 
-    use base64::{engine::general_purpose::STANDARD as B64, Engine};
-
     let output = std::process::Command::new("security")
         .args([
             "find-generic-password",
@@ -42,21 +40,23 @@ pub(crate) fn load_keychain_vault_api_key_values(
         return Ok(Vec::new());
     };
 
-    let salt = B64.decode(&config.salt)?;
-    // tachi#1080: derive using the STORED `vault_config.kdf_params`, not a
-    // compile-time constant. A malformed or unsupported stored value fails
-    // loud and versioned here — before `verify_password` — instead of silently
-    // degrading to an empty Vec (the pre-fix path masked a stored-format
-    // mismatch as "no provider keys").
-    let key_result = match crate::vault_crypto::parse_stored_kdf_params(&config.kdf_params) {
-        Ok(params) => crate::vault_crypto::DerivedVaultKey::derive_with_params(&password, &salt, &params)
-            .map_err(|e| e.to_string()),
-        Err(err) => Err(err.to_string()),
+    // tachi#1080: derive+verify through the shared in-process seam. A stored
+    // kdf_params format failure stays loud (Err) so the status-health consumer
+    // warns with the versioned message; a password mismatch / derivation
+    // failure degrades to an empty Vec (the pre-seam contract: a wrong
+    // keychain password returned Ok(empty), never an error to the caller).
+    let key = match crate::vault_crypto::derive_verified_key_from_stored_config(&config, &password) {
+        Ok(key) => key,
+        Err(err) => {
+            if err
+                .downcast_ref::<crate::vault_crypto::KdfParamsFormatError>()
+                .is_some()
+            {
+                return Err(err);
+            }
+            return Ok(Vec::new());
+        }
     };
-    let key = key_result?;
-    if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
-        return Ok(Vec::new());
-    }
 
     let mut out = Vec::new();
     for entry in store.vault_list_entries()? {
