@@ -85,7 +85,7 @@ mod tests {
                 "primary task schema must not advertise {action}; use tachi_gh"
             );
         }
-        assert_eq!(primary.len(), 24);
+        assert_eq!(primary.len(), 25);
         assert!(primary.len() <= TACHI_TASK_PRIMARY_ACTION_SOFT_MAX);
     }
 

@@ -117,6 +117,27 @@ pub fn signature_def(id: &str) -> Option<&'static SignatureDef> {
 /// double-check).
 pub const SIGNATURE_ALIASES: &[(&str, &str)] = &[];
 
+/// Resolve a caller-supplied signature id to its canonical taxonomy id using
+/// the supplied alias table.
+///
+/// First maps through `aliases` (alias → canonical), then verifies the result
+/// (or the raw id if no alias matched) actually exists in the taxonomy via
+/// [`signature_def`]. Returns `None` when neither path resolves. Extracted
+/// from [`resolve_signature_id`] so the alias path is testable with a
+/// synthetic table even while [`SIGNATURE_ALIASES`] is empty (#1035 FIX-4).
+///
+/// The returned `'static` reference always comes from [`signature_def`] (the
+/// taxonomy is code constants); the alias table borrow is independent and
+/// transient.
+pub fn resolve_signature_id_in(aliases: &[(&str, &str)], raw: &str) -> Option<&'static str> {
+    let candidate: &str = aliases
+        .iter()
+        .find(|(alias, _)| *alias == raw)
+        .map(|(_, canonical)| *canonical)
+        .unwrap_or(raw);
+    signature_def(candidate).map(|def| def.id)
+}
+
 /// Resolve a caller-supplied signature id to its canonical taxonomy id.
 ///
 /// First maps through [`SIGNATURE_ALIASES`] (alias → canonical), then
@@ -125,12 +146,7 @@ pub const SIGNATURE_ALIASES: &[(&str, &str)] = &[];
 /// resolves — the caller MUST treat `None` as an unknown id and reject loudly
 /// at the write chokepoint, never silently dropping it (#1035 frozen spec).
 pub fn resolve_signature_id(raw: &str) -> Option<&'static str> {
-    let candidate: &str = SIGNATURE_ALIASES
-        .iter()
-        .find(|(alias, _)| *alias == raw)
-        .map(|(_, canonical)| *canonical)
-        .unwrap_or(raw);
-    signature_def(candidate).map(|def| def.id)
+    resolve_signature_id_in(SIGNATURE_ALIASES, raw)
 }
 
 // ─── Provisional decay / projection parameters ─────────────────────────────
@@ -467,6 +483,43 @@ mod tests {
         // Unknown ids resolve to None — the caller must reject these loudly.
         assert_eq!(resolve_signature_id("nonsense"), None);
         assert_eq!(resolve_signature_id(""), None);
+    }
+
+    /// FIX-4 (#1035): the alias resolution path is exercised with a synthetic
+    /// alias table (the production [`SIGNATURE_ALIASES`] is intentionally
+    /// empty until a real alias is ratified). This test is RED on pre-FIX-4
+    /// code because there was no `resolve_signature_id_in` to call — the alias
+    /// path was inlinable only through the empty production table.
+    #[test]
+    fn resolve_signature_id_in_maps_alias_and_rejects_dangling() {
+        let table: &[(&str, &str)] = &[
+            ("fake_security", "fake_security_fix"),
+            ("fci", "falsified_ci_report"),
+        ];
+
+        // Alias → canonical taxonomy id.
+        assert_eq!(
+            resolve_signature_id_in(table, "fake_security"),
+            Some("fake_security_fix")
+        );
+        assert_eq!(
+            resolve_signature_id_in(table, "fci"),
+            Some("falsified_ci_report")
+        );
+
+        // Non-alias raw ids still resolve directly through the taxonomy.
+        assert_eq!(
+            resolve_signature_id_in(table, "assertion_weakening"),
+            Some("assertion_weakening")
+        );
+
+        // An alias pointing to a canonical that does NOT exist in the taxonomy
+        // returns None — the double-check gate catches dangling aliases.
+        let dangling: &[(&str, &str)] = &[("x", "nonexistent_taxonomy_id")];
+        assert_eq!(resolve_signature_id_in(dangling, "x"), None);
+
+        // Unknown raw id with no matching alias → None.
+        assert_eq!(resolve_signature_id_in(table, "totally_unknown"), None);
     }
 
     #[test]

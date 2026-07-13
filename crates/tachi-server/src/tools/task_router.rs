@@ -149,7 +149,7 @@ pub(super) async fn handle_tachi_task_facade(
                 format: params.format.clone(),
                 signatures: params.signatures.clone(),
                 rulings: params.rulings.clone(),
-                adjudication: None,
+                adjudication: params.adjudication.clone(),
             };
             crate::complete_ops::handle_tachi_complete(server, complete_params).await
         }
@@ -247,6 +247,22 @@ pub(super) async fn handle_tachi_task_facade(
                 "proposal_id is required when action='apply_proposals'".to_string()
             })?;
             crate::dispatch_profile::handle_route_policy_apply(server, proposal_id, params.confirm)
+        }
+        TachiTaskAction::Adjudicate => {
+            let adjudication = params
+                .adjudication
+                .clone()
+                .ok_or_else(|| "adjudication is required when action='adjudicate'".to_string())?;
+            let result = crate::complete_ops::dispatch_outcome::record_posthoc_adjudication(
+                server,
+                params.outcome_id.as_deref(),
+                params.dispatch_id.as_deref(),
+                &adjudication,
+                &params.signatures,
+                params.project.as_deref(),
+                params.scope.as_deref(),
+            );
+            serde_json::to_string(&result).map_err(|e| format!("serialize adjudicate result: {e}"))
         }
         TachiTaskAction::Merge => {
             if params.pr_ref.is_some() || params.issue_ref.is_some() {

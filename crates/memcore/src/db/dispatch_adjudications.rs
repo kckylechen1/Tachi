@@ -66,11 +66,23 @@ pub fn append_dispatch_adjudication(
             )));
         }
     }
-    if let Some(existing) = get_by_event_key(conn, &new.event_key)? {
+
+    // FIX-1 (#1035): the parent INSERT and every signature INSERT MUST be in
+    // one transaction. A unique-constraint violation on a signature row
+    // previously left a parentless half-event that the event_key short-circuit
+    // then permanently固化 — the next replay returned the orphan. An
+    // unchecked_transaction on &Connection auto-rolls-back on drop (any `?`
+    // propagation), so a mid-append failure atomically disappears the entire
+    // event, parent row included.
+    let tx = conn.unchecked_transaction()?;
+    if let Some(existing) = get_by_event_key(&tx, &new.event_key)? {
+        // Idempotent replay: return the original row without writing. The
+        // transaction held only a SELECT; dropping it without commit is a
+        // harmless rollback.
         return Ok(existing);
     }
     let created_at = normalize_utc_iso_or_now("");
-    conn.execute(
+    tx.execute(
         "INSERT INTO dispatch_adjudications
          (adjudication_id, outcome_id, event_key, verdict, not_required_reason, actor, evidence_ref, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -78,7 +90,7 @@ pub fn append_dispatch_adjudication(
             new.not_required_reason, new.actor, new.evidence_ref, created_at],
     )?;
     for signature in &new.signatures {
-        conn.execute(
+        tx.execute(
             "INSERT INTO dispatch_adjudication_signatures
              (adjudication_id, signature_id, evidence_ref, resolved) VALUES (?1, ?2, ?3, ?4)",
             params![
@@ -89,9 +101,11 @@ pub fn append_dispatch_adjudication(
             ],
         )?;
     }
-    get_by_event_key(conn, &new.event_key)?.ok_or_else(|| {
+    let result = get_by_event_key(&tx, &new.event_key)?.ok_or_else(|| {
         MemoryError::InvalidArg("inserted dispatch adjudication vanished".to_string())
-    })
+    })?;
+    tx.commit()?;
+    Ok(result)
 }
 
 pub fn list_adjudications_for_outcome(
@@ -233,6 +247,24 @@ mod tests {
             "one event retains both signatures"
         );
 
+        // FIX-4 (#1035): strengthen from row-count to per-signature field
+        // assertions — the two signature rows must be independently correct
+        // in evidence_ref and resolved, not merely present in the right count.
+        let fake_sig = first
+            .signatures
+            .iter()
+            .find(|s| s.signature_id == "fake_security_fix")
+            .expect("fake_security_fix signature present");
+        assert_eq!(fake_sig.evidence_ref.as_deref(), Some("review-1"));
+        assert!(!fake_sig.resolved, "fake_security_fix unresolved");
+        let zero_sig = first
+            .signatures
+            .iter()
+            .find(|s| s.signature_id == "zero_discriminating_test")
+            .expect("zero_discriminating_test signature present");
+        assert_eq!(zero_sig.evidence_ref.as_deref(), Some("review-2"));
+        assert!(!zero_sig.resolved, "zero_discriminating_test unresolved");
+
         let mut correction = event("event-2");
         correction.verdict = Some("rejected".to_string());
         correction.signatures.clear();
@@ -316,5 +348,72 @@ mod tests {
 
         // A different outcome with no events → still not adjudicated.
         assert!(!outcome_is_adjudicated(&conn, "outcome-other").unwrap());
+    }
+
+    /// FIX-1 (#1035): a unique-constraint violation on a signature INSERT
+    /// must roll back the ENTIRE event — parent row included. Before the
+    /// transaction wrapper the parent INSERT committed independently, leaving
+    /// a signatureless half-event that the event_key short-circuit then
+    /// permanently固化 (a replay returned the orphan row forever). This test
+    /// is RED on pre-FIX-1 code: the second signature's PK violation fails
+    /// AFTER the parent row is already committed, so the parent row count is
+    /// 1 instead of 0.
+    #[test]
+    fn duplicate_signature_rolls_back_entire_event_atomically() {
+        let conn = open_conn();
+        let mut duplicate = event("event-dup");
+        // Two signatures with the SAME signature_id under the same
+        // adjudication_id → PK violation on the second INSERT.
+        duplicate.signatures = vec![
+            DispatchAdjudicationSignature {
+                signature_id: "fake_security_fix".to_string(),
+                evidence_ref: Some("review-a".to_string()),
+                resolved: false,
+            },
+            DispatchAdjudicationSignature {
+                signature_id: "fake_security_fix".to_string(),
+                evidence_ref: Some("review-b".to_string()),
+                resolved: true,
+            },
+        ];
+
+        let err = append_dispatch_adjudication(&conn, &duplicate)
+            .err()
+            .expect("duplicate signature must fail the entire append");
+        assert!(
+            err.to_string().contains("UNIQUE") || err.to_string().contains("constraint"),
+            "error should be the PK violation: {err}"
+        );
+
+        // The parent row must NOT exist — the event atomically disappeared.
+        let parent_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_adjudications WHERE event_key = 'event-dup'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            parent_count, 0,
+            "FIX-1: parent row must roll back with the failed signature INSERT"
+        );
+
+        // And no signature rows either.
+        let sig_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_adjudication_signatures \
+                 WHERE adjudication_id = 'adjudication-event-dup'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sig_count, 0, "no orphan signature rows");
+
+        // The event_key is now free — a well-formed follow-up appends normally.
+        let mut clean = event("event-dup");
+        clean.signatures.truncate(1);
+        let row = append_dispatch_adjudication(&conn, &clean).unwrap();
+        assert_eq!(row.signatures.len(), 1);
+        assert_eq!(row.signatures[0].signature_id, "fake_security_fix");
     }
 }

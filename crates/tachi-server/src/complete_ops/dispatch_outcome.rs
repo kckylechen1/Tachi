@@ -274,30 +274,16 @@ pub(crate) fn record_complete_adjudication(
         });
     }
 
-    // Signature id gate: every id must resolve to a canonical taxonomy entry.
-    // An unknown id rejects the ENTIRE adjudication — the append-only ledger
-    // never accepts an event carrying an unresolvable signature (#1035).
-    let mut signatures = Vec::with_capacity(params.signatures.len());
-    for sig in &params.signatures {
-        match tachi_dispatch::resolve_signature_id(&sig.signature) {
-            Some(canonical) => signatures.push(memcore::DispatchAdjudicationSignature {
-                signature_id: canonical.to_string(),
-                evidence_ref: sig.evidence_ref.clone(),
-                resolved: sig.resolved,
-            }),
-            None => {
-                return json!({
-                    "recorded": false,
-                    "outcome_id": outcome_id,
-                    "error": format!(
-                        "unknown signature id '{}' in adjudication signatures; \
-                         each id must resolve via the error-signature taxonomy",
-                        sig.signature
-                    ),
-                });
-            }
+    let signatures = match resolve_adjudication_signatures(&params.signatures) {
+        Ok(sigs) => sigs,
+        Err(error) => {
+            return json!({
+                "recorded": false,
+                "outcome_id": outcome_id,
+                "error": error,
+            });
         }
-    }
+    };
 
     let evidence_ref = adjudication
         .evidence_ref
@@ -324,7 +310,56 @@ pub(crate) fn record_complete_adjudication(
     };
 
     let (scope, _) = server.resolve_write_scope(params.scope.as_deref().unwrap_or(""));
-    let write_result = if let Some(project) = params.project.as_deref().filter(|s| !s.is_empty()) {
+    write_adjudication_event(
+        server,
+        params.project.as_deref(),
+        scope,
+        &outcome_id,
+        new_adjudication,
+    )
+}
+
+/// Signature id gate shared by both the `complete` and `adjudicate` paths
+/// (#1035 FIX-3). Every caller-supplied id must resolve via
+/// `tachi_dispatch::resolve_signature_id`. An unknown id rejects the ENTIRE
+/// adjudication loudly (the error message names it) — never silently dropping
+/// it and writing a partial event. Returns the resolved canonical signatures
+/// on success.
+fn resolve_adjudication_signatures(
+    signatures: &[crate::tool_params::SignatureRecordParams],
+) -> Result<Vec<memcore::DispatchAdjudicationSignature>, String> {
+    let mut resolved = Vec::with_capacity(signatures.len());
+    for sig in signatures {
+        match tachi_dispatch::resolve_signature_id(&sig.signature) {
+            Some(canonical) => resolved.push(memcore::DispatchAdjudicationSignature {
+                signature_id: canonical.to_string(),
+                evidence_ref: sig.evidence_ref.clone(),
+                resolved: sig.resolved,
+            }),
+            None => {
+                return Err(format!(
+                    "unknown signature id '{}' in adjudication signatures; \
+                     each id must resolve via the error-signature taxonomy",
+                    sig.signature
+                ));
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+/// Store-selection + write shared by both paths (#1035 FIX-3). `project`
+/// (named project store) takes priority, otherwise `scope`. Mirrors
+/// [`record_complete_outcome`]'s two-branch write target exactly — splitting
+/// the outcome and its adjudication across two stores is the #774 accident.
+fn write_adjudication_event(
+    server: &MemoryServer,
+    project: Option<&str>,
+    scope: crate::DbScope,
+    outcome_id: &str,
+    new_adjudication: memcore::NewDispatchAdjudication,
+) -> Value {
+    let write_result = if let Some(project) = project.filter(|s| !s.trim().is_empty()) {
         server.with_named_project_store(project, |store| {
             memcore::append_dispatch_adjudication(store.connection(), &new_adjudication)
                 .map_err(|e| e.to_string())
@@ -360,6 +395,132 @@ pub(crate) fn record_complete_adjudication(
             })
         }
     }
+}
+
+/// Post-hoc leader adjudication for an ALREADY-RECORDED dispatch outcome
+/// (#1035 FIX-3 — the correction / kill-test-5 entrance).
+///
+/// Unlike [`record_complete_adjudication`] (which fires alongside a
+/// `tachi_complete`), this is a standalone `tachi_task(action="adjudicate")`
+/// call. The outcome must already exist — identified by `outcome_id` (direct)
+/// or `dispatch_id` (resolved via `find_outcome_by_dispatch_id`; resolution
+/// failure is an error, never a guess).
+///
+/// `event_key = "adjudicate:" + new_uuid` — each call is a fresh event, so
+/// corrections append naturally (history preserved, first row byte-for-byte
+/// stable). This closes the frozen spec's kill-test 5: confirm → overturn on
+/// the same outcome produces two rows, both queryable, first unchanged.
+///
+/// Fail-safe: every error (missing outcome, invalid params, unknown signature
+/// id, DB error) is surfaced in the returned JSON; this never crashes.
+pub(crate) fn record_posthoc_adjudication(
+    server: &MemoryServer,
+    outcome_id: Option<&str>,
+    dispatch_id: Option<&str>,
+    adjudication: &crate::tool_params::AdjudicationParams,
+    signatures: &[crate::tool_params::SignatureRecordParams],
+    project: Option<&str>,
+    scope: Option<&str>,
+) -> Value {
+    // Resolve outcome_id: direct wins; dispatch_id is resolved; neither → error.
+    let resolved_outcome_id = if let Some(id) = outcome_id.map(str::trim).filter(|s| !s.is_empty())
+    {
+        id.to_string()
+    } else if let Some(did) = dispatch_id.map(str::trim).filter(|s| !s.is_empty()) {
+        match resolve_outcome_id_from_dispatch(server, did, project) {
+            Ok(id) => id,
+            Err(error) => {
+                return json!({
+                    "recorded": false,
+                    "error": error,
+                });
+            }
+        }
+    } else {
+        return json!({
+            "recorded": false,
+            "error": "adjudicate requires either outcome_id or dispatch_id",
+        });
+    };
+
+    // Validate exactly-one-of (verdict | not_required_reason).
+    if let Err(error) = adjudication.validate_exactly_one() {
+        return json!({
+            "recorded": false,
+            "outcome_id": resolved_outcome_id,
+            "error": error,
+        });
+    }
+
+    let signatures = match resolve_adjudication_signatures(signatures) {
+        Ok(sigs) => sigs,
+        Err(error) => {
+            return json!({
+                "recorded": false,
+                "outcome_id": resolved_outcome_id,
+                "error": error,
+            });
+        }
+    };
+
+    let evidence_ref = adjudication
+        .evidence_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&resolved_outcome_id)
+        .to_string();
+    // Each adjudicate call is a NEW event — unlike complete (deterministic
+    // "complete:{outcome_id}"), here the uuid makes corrections append-only
+    // by default, preserving history.
+    let event_key = format!("adjudicate:{}", uuid::Uuid::new_v4());
+    let new_adjudication = memcore::NewDispatchAdjudication {
+        adjudication_id: uuid::Uuid::new_v4().to_string(),
+        outcome_id: resolved_outcome_id.clone(),
+        event_key,
+        verdict: adjudication.verdict.clone(),
+        not_required_reason: adjudication.not_required_reason.clone(),
+        actor: adjudication.adjudicator.clone(),
+        evidence_ref,
+        signatures,
+    };
+
+    let (write_scope, _) = server.resolve_write_scope(scope.unwrap_or(""));
+    write_adjudication_event(
+        server,
+        project,
+        write_scope,
+        &resolved_outcome_id,
+        new_adjudication,
+    )
+}
+
+/// Resolve an outcome_id from a dispatch_id, looking in the same store the
+/// outcome would have been written to (named project store when `project` is
+/// set, otherwise the resolved write scope). Returns an error message string
+/// when no outcome row exists for the dispatch.
+fn resolve_outcome_id_from_dispatch(
+    server: &MemoryServer,
+    dispatch_id: &str,
+    project: Option<&str>,
+) -> Result<String, String> {
+    let lookup = |conn: &rusqlite::Connection| {
+        memcore::find_outcome_by_dispatch_id(conn, dispatch_id)
+            .map(|opt| opt.map(|row| row.outcome_id))
+            .map_err(|e| e.to_string())
+    };
+    let found = if let Some(proj) = project.filter(|s| !s.trim().is_empty()) {
+        server.with_named_project_store_read(proj, |store| lookup(store.connection()))?
+    } else {
+        let (scope, _) = server.resolve_write_scope("");
+        server.with_store_for_scope_read(scope, |store| lookup(store.connection()))?
+    };
+    found.ok_or_else(|| {
+        format!(
+            "no dispatch_outcomes row found for dispatch_id '{dispatch_id}'; \
+             complete the dispatch first or pass outcome_id directly"
+        )
+    })
 }
 
 /// Resolve `(role, vendor, model)` for the outcome row from the completion's
@@ -1661,5 +1822,254 @@ mod tests {
             "an unknown signature id must prevent the ENTIRE adjudication from landing, \
              not just the bad signature"
         );
+    }
+
+    // ─── #1035 FIX-3: post-hoc adjudicate action ──────────────────────────
+
+    /// Helper: record a complete outcome and return the outcome_id.
+    fn record_outcome_for_adjudicate(server: &MemoryServer) -> String {
+        let params = base_params();
+        let status = record_complete_outcome(
+            server,
+            &params,
+            "eval-posthoc",
+            "success",
+            "completed",
+            None,
+            true,
+            true,
+            &[],
+        );
+        assert_eq!(status["recorded"], json!(true));
+        status["outcome_id"].as_str().unwrap().to_string()
+    }
+
+    /// FIX-3 discrimination test (a): post-hoc adjudicate a completed outcome
+    /// → the adjudication row lands and outcome_is_adjudicated returns true.
+    /// RED on pre-FIX-3 code: `record_posthoc_adjudication` does not exist.
+    #[test]
+    fn posthoc_adjudicate_lands_row_and_marks_adjudicated() {
+        let (server, _dir) = test_server();
+        let outcome_id = record_outcome_for_adjudicate(&server);
+
+        // No adjudication yet.
+        assert!(adjudication_outcome_rows(&server, &outcome_id).is_empty());
+
+        let status = record_posthoc_adjudication(
+            &server,
+            Some(&outcome_id),
+            None,
+            &AdjudicationParams {
+                verdict: Some("accepted".to_string()),
+                not_required_reason: None,
+                adjudicator: "leader".to_string(),
+                evidence_ref: Some("review-posthoc".to_string()),
+            },
+            &[signature_rec("fake_security_fix")],
+            None,
+            None,
+        );
+        assert_eq!(
+            status["recorded"],
+            json!(true),
+            "adjudicate recorded: {status}"
+        );
+
+        let rows = adjudication_outcome_rows(&server, &outcome_id);
+        assert_eq!(rows.len(), 1, "exactly one adjudication row");
+        assert_eq!(rows[0].verdict.as_deref(), Some("accepted"));
+        assert_eq!(rows[0].actor, "leader");
+        assert_eq!(rows[0].evidence_ref, "review-posthoc");
+        assert_eq!(rows[0].signatures.len(), 1);
+        assert_eq!(rows[0].signatures[0].signature_id, "fake_security_fix");
+
+        assert!(
+            server
+                .with_global_store_read(|store| {
+                    memcore::outcome_is_adjudicated(store.connection(), &outcome_id)
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap(),
+            "outcome_is_adjudicated returns true after post-hoc adjudicate"
+        );
+    }
+
+    /// FIX-3 discrimination test (b) — kill-test 5 end-to-end: adjudicate
+    /// "confirmed" then adjudicate "overturned" on the SAME outcome → both
+    /// rows present, first row byte-for-byte unchanged, history in time order.
+    /// RED on pre-FIX-3 code: `record_posthoc_adjudication` does not exist.
+    #[test]
+    fn kill_test_5_confirm_then_overturn_preserves_first_row() {
+        let (server, _dir) = test_server();
+        let outcome_id = record_outcome_for_adjudicate(&server);
+
+        // First adjudication: confirmed.
+        let confirm = record_posthoc_adjudication(
+            &server,
+            Some(&outcome_id),
+            None,
+            &AdjudicationParams {
+                verdict: Some("confirmed".to_string()),
+                not_required_reason: None,
+                adjudicator: "leader".to_string(),
+                evidence_ref: Some("evidence-confirm".to_string()),
+            },
+            &[
+                signature_rec("fake_security_fix"),
+                signature_rec("zero_discriminating_test"),
+            ],
+            None,
+            None,
+        );
+        assert_eq!(confirm["recorded"], json!(true));
+
+        let rows_after_confirm = adjudication_outcome_rows(&server, &outcome_id);
+        assert_eq!(rows_after_confirm.len(), 1);
+        let first_row = rows_after_confirm.into_iter().next().unwrap();
+
+        // Second adjudication: overturned — a NEW event (adjudicate:<uuid>),
+        // so it appends instead of overwriting.
+        let overturn = record_posthoc_adjudication(
+            &server,
+            Some(&outcome_id),
+            None,
+            &AdjudicationParams {
+                verdict: Some("overturned".to_string()),
+                not_required_reason: None,
+                adjudicator: "leader".to_string(),
+                evidence_ref: Some("evidence-overturn".to_string()),
+            },
+            &[signature_rec("assertion_weakening")],
+            None,
+            None,
+        );
+        assert_eq!(overturn["recorded"], json!(true));
+
+        let rows_after_overturn = adjudication_outcome_rows(&server, &outcome_id);
+        assert_eq!(
+            rows_after_overturn.len(),
+            2,
+            "correction appends a second row, does not overwrite"
+        );
+
+        // First row is byte-for-byte unchanged (correction preserves history).
+        assert_eq!(
+            rows_after_overturn[0], first_row,
+            "first adjudication row must be unchanged after the correction"
+        );
+        assert_eq!(rows_after_overturn[0].verdict.as_deref(), Some("confirmed"));
+        assert_eq!(
+            rows_after_overturn[0].signatures.len(),
+            2,
+            "first row retains both signatures"
+        );
+        assert_eq!(
+            rows_after_overturn[0].signatures[0].signature_id,
+            "fake_security_fix"
+        );
+
+        // Second row carries the new verdict.
+        assert_eq!(
+            rows_after_overturn[1].verdict.as_deref(),
+            Some("overturned")
+        );
+        assert_eq!(rows_after_overturn[1].evidence_ref, "evidence-overturn");
+        assert_eq!(rows_after_overturn[1].signatures.len(), 1);
+        assert_eq!(
+            rows_after_overturn[1].signatures[0].signature_id,
+            "assertion_weakening"
+        );
+
+        // list_adjudications_for_outcome returns rows in time order.
+        assert!(
+            rows_after_overturn[0].created_at <= rows_after_overturn[1].created_at,
+            "rows must be in chronological order"
+        );
+    }
+
+    /// FIX-3: dispatch_id is resolved to outcome_id when outcome_id is absent.
+    #[test]
+    fn posthoc_adjudicate_resolves_dispatch_id_to_outcome() {
+        let (server, _dir) = test_server();
+        let outcome_id = record_outcome_for_adjudicate(&server);
+
+        // Use dispatch_id instead of outcome_id.
+        let status = record_posthoc_adjudication(
+            &server,
+            None,
+            Some("dispatch-abc"), // matches base_params().dispatch_id
+            &AdjudicationParams {
+                verdict: Some("accepted".to_string()),
+                not_required_reason: None,
+                adjudicator: "leader".to_string(),
+                evidence_ref: None,
+            },
+            &[],
+            None,
+            None,
+        );
+        assert_eq!(status["recorded"], json!(true));
+        assert_eq!(
+            status["outcome_id"].as_str(),
+            Some(outcome_id.as_str()),
+            "dispatch_id resolved to the correct outcome_id"
+        );
+    }
+
+    /// FIX-3: neither outcome_id nor dispatch_id → error (do not guess).
+    #[test]
+    fn posthoc_adjudicate_without_outcome_or_dispatch_errors() {
+        let (server, _dir) = test_server();
+
+        let status = record_posthoc_adjudication(
+            &server,
+            None,
+            None,
+            &AdjudicationParams {
+                verdict: Some("accepted".to_string()),
+                not_required_reason: None,
+                adjudicator: "leader".to_string(),
+                evidence_ref: None,
+            },
+            &[],
+            None,
+            None,
+        );
+        assert_eq!(status["recorded"], json!(false));
+        assert!(
+            status["error"]
+                .as_str()
+                .unwrap()
+                .contains("outcome_id or dispatch_id"),
+            "error must explain what is missing: {status}"
+        );
+    }
+
+    /// FIX-3: unknown signature id rejects the entire post-hoc adjudication.
+    #[test]
+    fn posthoc_adjudicate_rejects_unknown_signature_id() {
+        let (server, _dir) = test_server();
+        let outcome_id = record_outcome_for_adjudicate(&server);
+
+        let status = record_posthoc_adjudication(
+            &server,
+            Some(&outcome_id),
+            None,
+            &AdjudicationParams {
+                verdict: Some("accepted".to_string()),
+                not_required_reason: None,
+                adjudicator: "leader".to_string(),
+                evidence_ref: None,
+            },
+            &[signature_rec("nonexistent_signature")],
+            None,
+            None,
+        );
+        assert_eq!(status["recorded"], json!(false));
+        assert!(status["error"]
+            .as_str()
+            .unwrap()
+            .contains("nonexistent_signature"));
+        assert!(adjudication_outcome_rows(&server, &outcome_id).is_empty());
     }
 }
