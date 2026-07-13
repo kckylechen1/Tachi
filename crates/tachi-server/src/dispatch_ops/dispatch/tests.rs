@@ -483,6 +483,55 @@ async fn v2_auto_stage_rejects_unsupported_sandbox_before_plan_stage_spawn() {
     );
 }
 
+/// #894 S2d discriminating test ③: a read-only REQUEST addressed to a backend
+/// that no kill-test has certified to enforce read-only must be refused
+/// **before spawn** — meaning before the run directory exists and therefore
+/// before any credential can be materialized into it
+/// (`plan_credential_materialization_with_run_dir` writes under the run dir,
+/// which is created in step 1; the authority compiler runs in step 0b). The
+/// receipt names the backend, the requested level, and the missing
+/// qualification: a valid vendor flag is not provider qualification.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn read_only_request_to_uncertified_backend_is_refused_before_run_dir_or_credentials() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let run_root = dispatch_runs_root();
+    let server = crate::tests::make_server();
+
+    let mut params = test_dispatch_params(
+        Some("claude"),
+        "read-only review on a backend that cannot enforce read-only",
+    );
+    params.sandbox = Some("read-only".to_string());
+    params.credential_profiles = vec!["opencode_shared".to_string()];
+
+    let err = handle_tachi_dispatch(&server, params)
+        .await
+        .expect_err("an uncertified backend must not receive a read-only dispatch");
+
+    assert!(
+        err.contains("claude") && err.contains("read-only"),
+        "receipt must name the backend and the requested level: {err}"
+    );
+    assert!(err.contains("fail-closed"), "{err}");
+    assert!(
+        err.contains("no kill-test-certified sandbox enforcement"),
+        "receipt must name the missing qualification, not just the missing flag: {err}"
+    );
+
+    let run_dirs = std::fs::read_dir(&run_root)
+        .map(|entries| entries.filter_map(Result::ok).count())
+        .unwrap_or(0);
+    assert_eq!(
+        run_dirs, 0,
+        "refusal must land before step 1 (run dir) — and therefore before any credential is materialized into it"
+    );
+}
+
 /// #894 S1: the fail-safe env-binding gate must fire through the real
 /// `handle_tachi_dispatch` entrypoint, not just at the pure
 /// `resolve_env_binding` unit level (see `exec_env_ops::tests`). A bare `cwd`
@@ -770,6 +819,55 @@ async fn named_project_dispatch_receipt_carries_project_field() {
         status["project"],
         json!("hyperion"),
         "receipt must carry the dispatch's named project so crash recovery can read it back: {status}"
+    );
+}
+
+/// #894 S2d: the authority receipt must actually land in the on-disk receipt
+/// and in the dispatch response — "who was stopping this agent from writing?"
+/// has to be answerable from the ledger after the fact, not only in the head of
+/// the code that compiled it. Uses the same fast `python3 -c pass` subprocess
+/// the project-receipt test uses so no vendor CLI is spawned.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn dispatch_receipt_carries_the_effective_authority_contract() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let server = crate::tests::make_server();
+
+    let mut params = test_dispatch_params(Some("custom"), "stamp the authority receipt");
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+
+    let dispatch_response = handle_tachi_dispatch(&server, params)
+        .await
+        .expect("dispatch should start");
+    let response: Value = serde_json::from_str(&dispatch_response).expect("response JSON");
+
+    assert_eq!(
+        response["authority"]["workspace_authority"],
+        json!("workspace-write"),
+        "profile-less custom dispatch keeps the legacy default: {response}"
+    );
+    assert_eq!(
+        response["authority"]["enforcement"]["mode"],
+        json!("advisory"),
+        "custom/opencode has no sandbox primitive — the receipt must say so, not imply isolation: {response}"
+    );
+
+    let run_dir = std::path::PathBuf::from(
+        response["run_dir"]
+            .as_str()
+            .expect("response carries run_dir"),
+    );
+    let status: Value =
+        serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
+            .expect("status JSON");
+    assert_eq!(
+        status["authority"]["enforcement"]["mode"],
+        json!("advisory"),
+        "the on-disk receipt must carry the enforcement mode: {status}"
     );
 }
 

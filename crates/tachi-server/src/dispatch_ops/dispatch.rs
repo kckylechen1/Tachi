@@ -36,11 +36,11 @@ use std::time::Duration;
 
 const DISPATCH_DEDUPE_STALE_LOCK_SECS: i64 = 300;
 
+/// Single-sourced from `tachi_dispatch::transport_kind` (#894 S2d) so the
+/// transport alias lists used by the authority compiler and by the launch path
+/// cannot drift.
 fn is_opencode_serve_transport(transport: &str) -> bool {
-    matches!(
-        transport.trim().to_ascii_lowercase().as_str(),
-        "serve" | "opencode_serve" | "server"
-    )
+    tachi_dispatch::transport_kind(transport) == tachi_dispatch::TransportKind::HarnessServe
 }
 
 fn infer_harness_server_url(
@@ -115,6 +115,7 @@ pub(crate) struct DispatchResult {
 }
 
 mod artifacts;
+mod authority;
 mod backend;
 mod backend_failure;
 mod credential_apply;
@@ -133,6 +134,7 @@ mod workspace_setup;
 mod tests;
 
 use self::artifacts::{write_dispatch_artifacts, DispatchArtifactInputs, DispatchArtifacts};
+use self::authority::{compile_dispatch_contract, contract_receipt};
 use self::backend::{prepare_dispatch_backend, DispatchBackendContext, PreparedDispatchBackend};
 use self::backend_failure::*;
 use self::credential_apply::{
@@ -172,52 +174,6 @@ fn effective_harness_transport(params: &TachiDispatchParams, agent_norm: &str) -
             "cli".to_string()
         }
     })
-}
-
-/// #894 S0 round 2 (cross-vendor review): the single choke-point for
-/// `params.sandbox` validation. Every dispatch caller (`tachi_task`, arena
-/// spawn, shell dispatch, convoy, poke probes) funnels through
-/// `handle_tachi_dispatch`, so running this check here — before step 1
-/// (workspace creation), before prompt assembly, before the V2 plan stage's
-/// `ClaudePool` spawn, and before any builder's own preflight (acpx's `node
-/// --version` probe, etc.) — closes the whole class of "expensive work
-/// happens before a doomed-to-fail sandbox request is rejected" findings in
-/// one place. The per-builder calls (`build_codex_launch`,
-/// `build_claude_launch`, `acpx::build_acpx_command_spec`,
-/// `acp_native::build_native_acp_run_spec`, ...) all still run their own copy
-/// of this check — kept intentionally as defense-in-depth, not removed, in
-/// case a future caller reaches a builder through a path that bypasses this
-/// entry point.
-fn validate_dispatch_sandbox_at_entry(
-    agent_norm: &str,
-    harness_transport: &str,
-    sandbox: Option<&str>,
-) -> Result<(), String> {
-    // Transport takes priority over agent name for the error label, matching
-    // the per-builder wording exactly: even a codex agent has no sandbox
-    // primitive once it's routed through acpx or native-ACP.
-    if is_acpx_transport(harness_transport) {
-        return tachi_dispatch::reject_unsupported_sandbox("acpx", sandbox);
-    }
-    if is_native_acp_transport(harness_transport) {
-        return tachi_dispatch::reject_unsupported_sandbox("acp-native", sandbox);
-    }
-    if agent_norm == "codex" {
-        // Codex is the one backend with a real sandbox primitive. Validate
-        // its enum here too (not just inside `build_codex_launch`) so a typo
-        // is rejected before Stage 1 spends a ClaudePool call.
-        return match sandbox.map(str::trim) {
-            None => Ok(()),
-            Some("") => Err(
-                "invalid codex --sandbox value: blank/whitespace-only sandbox request is malformed input, not equivalent to omitting it (fail-closed, #894 S0)"
-                    .to_string(),
-            ),
-            Some(value) => tachi_dispatch::validate_codex_sandbox(value).map(|_| ()),
-        };
-    }
-    // Every other backend (claude, grok, kimi, custom/opencode) has no
-    // sandbox concept.
-    tachi_dispatch::reject_unsupported_sandbox(agent_norm, sandbox)
 }
 
 /// #971 review-fix (F3): output of the guarded post-BOARD-FIRST-init
@@ -302,9 +258,30 @@ pub(crate) async fn handle_tachi_dispatch(
         },
     );
 
-    // 0b. Validate `params.sandbox` before ANY stage/preflight/spawn work.
+    // 0b. Compile the effective-authority contract before ANY stage/preflight/
+    // spawn work (#894 S2d). This is the single choke-point every dispatch
+    // caller (`tachi_task`, arena spawn, shell dispatch, convoy, poke probes)
+    // funnels through, so it runs before step 1 (workspace creation), before
+    // prompt assembly, before the V2 plan stage's `ClaudePool` spawn, before
+    // credential materialization, and before any builder's own preflight
+    // (acpx's `node --version` probe, etc.).
+    //
+    // It subsumes the #894 S0 `validate_dispatch_sandbox_at_entry` gate: an
+    // unhonorable sandbox request still fails closed with the same receipt, but
+    // now an *omitted* sandbox is resolved from the effective profile instead
+    // of falling through to codex's `workspace-write` default, a read-only
+    // level nothing can enforce is refused here, and write-intent skills are
+    // dropped from a read-only mount. The per-builder `reject_unsupported_sandbox`
+    // / `validate_codex_sandbox` calls stay as defense-in-depth for any future
+    // caller that reaches a builder without passing through this entry point.
     let harness_transport = effective_harness_transport(&params, &agent_norm);
-    validate_dispatch_sandbox_at_entry(&agent_norm, &harness_transport, params.sandbox.as_deref())?;
+    let effective_contract = compile_dispatch_contract(
+        &mut params,
+        &agent_norm,
+        &harness_transport,
+        &resolved_profile,
+    )?;
+    let authority_receipt = contract_receipt(&effective_contract);
 
     // 1. Create isolated workspace directory + MCP config
     //
@@ -390,6 +367,11 @@ pub(crate) async fn handle_tachi_dispatch(
             "capability_bundle": Value::Null,
             "feedback_rules": Value::Null,
             "timeout_secs": timeout_secs_for_status,
+            // #894 S2d: the authority receipt — compiled workspace authority,
+            // who enforces it (a certified provider, nobody, or an operator
+            // bypass), and which skills were excluded for asking for more than
+            // the contract grants.
+            "authority": authority_receipt.clone(),
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
             // machine-verify self-reported / exit-0 success against a contract.
@@ -478,6 +460,9 @@ pub(crate) async fn handle_tachi_dispatch(
             "capability_bundle": capability_bundle_card.clone(),
             "feedback_rules": feedback_rules_trace.clone(),
             "timeout_secs": timeout_secs_for_status,
+            // #894 S2d: same authority receipt as the receipt-first seed above
+            // (this write's `extra` is a fresh object, not a merge).
+            "authority": authority_receipt.clone(),
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
             // machine-verify self-reported / exit-0 success against a contract.
@@ -730,6 +715,7 @@ pub(crate) async fn handle_tachi_dispatch(
         agent_norm: &agent_norm,
         profile_payload: &profile_payload,
         resolved_profile: &resolved_profile,
+        authority: &authority_receipt,
         credential_reports_json: &credentials.reports_json,
         capability_bundle_card: &capability_bundle_card,
         capability_bundle_file: &capability_bundle_file,

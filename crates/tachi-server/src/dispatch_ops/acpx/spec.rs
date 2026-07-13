@@ -9,11 +9,12 @@ use super::types::{
     AcpxCommandSpec, AcpxRunMode, AcpxSession, ACPX_NODE_MIN_VERSION, ACPX_NODE_REQUIREMENT,
 };
 
+/// Single-sourced from `tachi_dispatch::transport_kind` (#894 S2d): the
+/// authority compiler decides whether a transport can carry a vendor sandbox
+/// flag from the same alias list this launch path uses, so the two can never
+/// drift apart.
 pub(in crate::dispatch_ops) fn is_acpx_transport(transport: &str) -> bool {
-    matches!(
-        transport.trim().to_ascii_lowercase().as_str(),
-        "acpx" | "acp"
-    )
+    tachi_dispatch::transport_kind(transport) == tachi_dispatch::TransportKind::Acpx
 }
 
 pub(in crate::dispatch_ops) fn prepare_acpx_prompt(

@@ -4,6 +4,7 @@
 //! Runtime orchestration, MCP config generation, run artifacts, and database
 //! writes stay in `tachi-server`.
 
+pub mod authority;
 mod launcher;
 mod model_registry;
 mod native_skill_ids;
@@ -14,6 +15,13 @@ mod routing;
 pub mod signatures;
 
 pub mod eval;
+pub use authority::{
+    compile_effective_contract, native_skill_requires_workspace_write,
+    provider_has_sandbox_primitive, qualify_provider, transport_kind, ContractError,
+    ContractInputs, EffectiveContract, Enforcement, ExcludedSkill, NetworkAuthority,
+    ProviderQualification, SkillRequest, ToolAuthority, TransportKind, VersionScope,
+    WorkspaceAuthority, PROVIDER_QUALIFICATIONS, SANDBOX_PRIMITIVE_PROVIDERS,
+};
 pub use launcher::{
     build_claude_launch, build_codex_launch, build_custom_launch, build_grok_launch,
     build_kimi_launch, is_trusted_dispatch_command, reject_unsupported_sandbox,
