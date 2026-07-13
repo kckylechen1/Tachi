@@ -167,7 +167,9 @@ impl ReadStorePool {
             drop(
                 self.inner
                     .release_cv
-                    .wait_while(gen_guard, |generation| *generation == generation_before_wait)
+                    .wait_while(gen_guard, |generation| {
+                        *generation == generation_before_wait
+                    })
                     .unwrap_or_else(|poisoned| poisoned.into_inner()),
             );
         }
@@ -1397,7 +1399,11 @@ mod bench {
             checkout_wait_us.push(receipt.pool_checkout_wait.as_micros());
             op_wall_us.push(receipt.operation_wall_time.as_micros());
         }
-        report("uncontended_checkout_overhead", checkout_wait_us, op_wall_us);
+        report(
+            "uncontended_checkout_overhead",
+            checkout_wait_us,
+            op_wall_us,
+        );
 
         let _ = std::fs::remove_dir_all(temp);
     }

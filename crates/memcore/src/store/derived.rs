@@ -62,7 +62,9 @@ impl MemoryStore {
     /// Thresholds are driven by `GcConfig` (replaces previously hardcoded literals).
     pub fn gc_tables(&mut self, cfg: &GcConfig) -> Result<serde_json::Value, MemoryError> {
         let db_label = self.db_label.clone();
-        db::retry_memory_locked("gc_tables", &db_label, || db::gc_tables(&mut self.conn, cfg))
+        db::retry_memory_locked("gc_tables", &db_label, || {
+            db::gc_tables(&mut self.conn, cfg)
+        })
     }
 
     /// Archive low-importance memories not accessed in `stale_days`.
