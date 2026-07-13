@@ -98,6 +98,17 @@ pub struct DerivedVaultKey {
     bytes: [u8; 32],
 }
 
+/// Hand-written, redacting `Debug` impl — deliberately **not**
+/// `#[derive(Debug)]`. A derive would format `bytes` (the raw 32-byte key
+/// material) verbatim, letting `{:?}`/`expect_err`/panic messages leak the
+/// vault key into logs or test failure output. Secret key material must
+/// never reach a `Debug` formatter.
+impl std::fmt::Debug for DerivedVaultKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DerivedVaultKey([REDACTED; 32])")
+    }
+}
+
 impl DerivedVaultKey {
     /// Derive using the compile-time production/test Argon2 profile
     /// (`active_kdf_params_json()`), exactly as every existing caller does
