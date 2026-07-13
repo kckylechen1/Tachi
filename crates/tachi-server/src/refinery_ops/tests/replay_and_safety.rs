@@ -14,7 +14,16 @@ const CAPTURED_AT: &str = "2026-07-13T00:00:00Z";
 #[test]
 fn a_fresh_proposal_replays_cleanly_against_its_own_pinned_state() {
     let body = "Fixture body for replay guard test.".to_string();
-    let gh_json = gh_issue_json(9301, "Replay fixture", &body, "OPEN", &[], None, CAPTURED_AT, &[]);
+    let gh_json = gh_issue_json(
+        9301,
+        "Replay fixture",
+        &body,
+        "OPEN",
+        &[],
+        None,
+        CAPTURED_AT,
+        &[],
+    );
     // R4-2: `check_proposal_replay` now rejects an empty repo-revision axis
     // outright, so a "replays cleanly" fixture must have a real one pinned.
     let resolver = FixtureDocResolver::new().with_repo_revision(RepoRevisionV1 {
@@ -318,7 +327,14 @@ fn null_doc_resolver_fails_closed_on_every_method() {
     let resolver = NullDocResolver {
         reason: "no reliable repo root found for 'owner/repo'".to_string(),
     };
-    match resolver.resolve("owner/repo", "docs/x.md", "sha1", "blob1", "1", "origin/main") {
+    match resolver.resolve(
+        "owner/repo",
+        "docs/x.md",
+        "sha1",
+        "blob1",
+        "1",
+        "origin/main",
+    ) {
         DocResolution::Unresolved { reason } => {
             assert!(reason.contains("no reliable repo root"));
         }

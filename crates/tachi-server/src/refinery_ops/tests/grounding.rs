@@ -389,8 +389,7 @@ fn comment_updated_at_is_preferred_over_created_at_when_present() {
         build_refinery_packet("owner/repo", 9007, &gh_json, &resolver, CAPTURED_AT)
             .expect("build_refinery_packet");
     assert_eq!(
-        evidence.issue_snapshot.selected_comment_revisions[0].updated_at,
-        "2026-07-20T00:00:00Z",
+        evidence.issue_snapshot.selected_comment_revisions[0].updated_at, "2026-07-20T00:00:00Z",
         "updatedAt must win over createdAt when both are present"
     );
 }

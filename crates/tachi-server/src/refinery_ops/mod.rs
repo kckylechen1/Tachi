@@ -264,17 +264,27 @@ fn validate_gh_issue_result(
     }
     match obj.get("title") {
         Some(v) if v.is_string() => {}
-        Some(v) => return Err(format!("issue_read result 'title' is not a string (got {v})")),
+        Some(v) => {
+            return Err(format!(
+                "issue_read result 'title' is not a string (got {v})"
+            ))
+        }
         None => return Err("issue_read result is missing 'title'".to_string()),
     }
     match obj.get("state") {
         Some(v) if v.is_string() => {}
-        Some(v) => return Err(format!("issue_read result 'state' is not a string (got {v})")),
+        Some(v) => {
+            return Err(format!(
+                "issue_read result 'state' is not a string (got {v})"
+            ))
+        }
         None => return Err("issue_read result is missing 'state'".to_string()),
     }
     if let Some(v) = obj.get("body") {
         if !v.is_string() && !v.is_null() {
-            return Err(format!("issue_read result 'body' is not a string (got {v})"));
+            return Err(format!(
+                "issue_read result 'body' is not a string (got {v})"
+            ));
         }
     }
     Ok(())
@@ -476,8 +486,9 @@ mod url_tests {
 
     #[test]
     fn mismatched_repo_is_never_treated_as_a_match() {
-        let actual = parse_owner_repo_from_git_url("https://github.com/someone-else/other-repo.git")
-            .expect("parses");
+        let actual =
+            parse_owner_repo_from_git_url("https://github.com/someone-else/other-repo.git")
+                .expect("parses");
         assert!(!actual.eq_ignore_ascii_case("kckylechen1/tachi"));
     }
 }

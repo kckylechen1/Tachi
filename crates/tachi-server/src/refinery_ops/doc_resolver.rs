@@ -49,8 +49,11 @@ pub(crate) trait DocRefResolver {
     /// repo identity mismatch, or the git command itself failing — carrying
     /// the reason so the caller can surface a real contradiction instead of
     /// silently leaving the replay axis empty.
-    fn current_repo_revision(&self, repo: &str, trusted_ref: &str)
-        -> Result<RepoRevisionV1, String>;
+    fn current_repo_revision(
+        &self,
+        repo: &str,
+        trusted_ref: &str,
+    ) -> Result<RepoRevisionV1, String>;
 }
 
 pub(crate) struct GitRefResolver {
