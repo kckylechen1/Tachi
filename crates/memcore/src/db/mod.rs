@@ -94,6 +94,10 @@ pub(crate) use open::{
     acquire_startup_lock, configure_connection, open_read_only, open_read_write,
     retry_memory_locked, sqlite_error_is_locked,
 };
+/// Public: benchmarks/diagnostics outside this crate read the process-wide
+/// lock-retry backoff counter without needing a tracing subscriber (see
+/// `open::lock_retry_backoff_count`'s doc comment).
+pub use open::lock_retry_backoff_count;
 pub use recall_cache::{
     recall_cache_get, recall_cache_purge_stale, recall_cache_put, recall_cache_record_hit,
     recall_cache_stats, RecallCacheHit, RecallCacheStats,

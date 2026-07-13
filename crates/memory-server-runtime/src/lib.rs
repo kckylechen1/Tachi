@@ -1,8 +1,8 @@
 use memcore::MemoryStore;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 const DEFAULT_MEMORY_READ_POOL_SIZE: usize = 4;
@@ -56,10 +56,35 @@ pub fn query_limit(limit: usize) -> usize {
     limit.clamp(1, 500)
 }
 
+/// Per-checkout diagnostics for a [`ReadStorePool::with_store_recording`]
+/// call: how long the caller waited for the pool to hand back an available
+/// slot, and how long the caller's closure then ran with that slot checked
+/// out. This is timing data only (no DB path, query text, memory content, or
+/// credential) — see `with_store_recording`'s doc comment for what it does
+/// and does not observe.
+#[derive(Debug, Clone, Copy)]
+pub struct ReadPoolCheckoutReceipt {
+    pub pool_checkout_wait: Duration,
+    pub operation_wall_time: Duration,
+}
+
+/// Shared state behind every clone of a [`ReadStorePool`]: the fixed slots
+/// plus a release signal used to wake checkout attempts that found every
+/// slot busy (see `with_store_recording`).
+struct ReadPoolInner {
+    stores: Vec<StdMutex<MemoryStore>>,
+    /// Monotonically increasing generation, bumped once per slot release.
+    /// Checkouts that find every slot busy snapshot this value, then block
+    /// on `release_cv` until it changes, then rescan — this is how a
+    /// checkout waits for "the next slot to free up" without polling/spinning
+    /// and without being tied to any particular (possibly still-busy) slot.
+    release_signal: StdMutex<u64>,
+    release_cv: Condvar,
+}
+
 #[derive(Clone)]
 pub struct ReadStorePool {
-    stores: Arc<Vec<StdMutex<MemoryStore>>>,
-    next: Arc<AtomicUsize>,
+    inner: Arc<ReadPoolInner>,
 }
 
 impl ReadStorePool {
@@ -70,27 +95,97 @@ impl ReadStorePool {
             stores.push(StdMutex::new(MemoryStore::open_read_only(db_path)?));
         }
         Ok(Self {
-            stores: Arc::new(stores),
-            next: Arc::new(AtomicUsize::new(0)),
+            inner: Arc::new(ReadPoolInner {
+                stores,
+                release_signal: StdMutex::new(0),
+                release_cv: Condvar::new(),
+            }),
         })
     }
 
+    /// Check out an available store and run `f` against it.
+    ///
+    /// Availability-aware: this tries every slot (`try_lock`) before waiting
+    /// on anything, so a checkout never waits behind a busy slot while
+    /// another slot sits idle (kckylechen1/tachi#1093 — the prior
+    /// `next.fetch_add(1) % len()` round robin could route a checkout onto a
+    /// specific busy slot even with other slots free). If every slot is
+    /// busy, this blocks on a release signal — notified once, by whichever
+    /// checkout releases a slot next — and rescans; no busy-spin, no
+    /// unbounded connections, pool size unchanged.
     pub fn with_store<T>(
         &self,
         label: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.stores.len();
-        let mut store = lock_or_recover(&self.stores[index], label);
-        f(&mut store)
+        self.with_store_recording(label, f).0
+    }
+
+    /// Same checkout behavior as [`Self::with_store`], plus a
+    /// [`ReadPoolCheckoutReceipt`] timing how long this call waited for a
+    /// slot (`pool_checkout_wait`) and how long `f` then ran
+    /// (`operation_wall_time`). Exists for the before/after benchmark suite
+    /// (see the `bench` test module below); production call sites use the
+    /// plain `with_store`, which pays only the cost of two `Instant::now()`
+    /// calls beyond this.
+    pub fn with_store_recording<T>(
+        &self,
+        label: &str,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> (Result<T, String>, ReadPoolCheckoutReceipt) {
+        let checkout_started = Instant::now();
+        loop {
+            // Hold `release_signal` while scanning: any other in-flight
+            // checkout that wants to announce a release (`notify_released`)
+            // takes the same lock, so a release can never happen silently in
+            // the gap between "we saw every slot busy" and "we start
+            // waiting" — that gap is exactly what would otherwise cause a
+            // missed wakeup.
+            let gen_guard = lock_or_recover(&self.inner.release_signal, label);
+            for slot in self.inner.stores.iter() {
+                if let Some(mut store) = try_lock_or_recover(slot, label) {
+                    drop(gen_guard);
+                    let pool_checkout_wait = checkout_started.elapsed();
+                    let op_started = Instant::now();
+                    let result = f(&mut store);
+                    let operation_wall_time = op_started.elapsed();
+                    drop(store);
+                    self.notify_released();
+                    return (
+                        result,
+                        ReadPoolCheckoutReceipt {
+                            pool_checkout_wait,
+                            operation_wall_time,
+                        },
+                    );
+                }
+            }
+            // No idle slot: block until the next release (never spin), then
+            // rescan. We deliberately don't keep the guard `wait_while` hands
+            // back — the next iteration's `lock_or_recover` reacquires it.
+            let generation_before_wait = *gen_guard;
+            drop(
+                self.inner
+                    .release_cv
+                    .wait_while(gen_guard, |generation| *generation == generation_before_wait)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
+        }
+    }
+
+    fn notify_released(&self) {
+        let mut generation = lock_or_recover(&self.inner.release_signal, "read_pool_release");
+        *generation = generation.wrapping_add(1);
+        drop(generation);
+        self.inner.release_cv.notify_all();
     }
 
     pub fn len(&self) -> usize {
-        self.stores.len()
+        self.inner.stores.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.stores.is_empty()
+        self.inner.stores.is_empty()
     }
 }
 
@@ -735,6 +830,24 @@ fn lock_or_recover<'a, T>(mutex: &'a StdMutex<T>, label: &str) -> std::sync::Mut
     }
 }
 
+/// Non-blocking availability probe: `Some(guard)` if the slot was free (or
+/// recovered from poisoning — poisoning is not "busy", it must not make a
+/// slot look permanently occupied), `None` only when another holder
+/// genuinely has it locked right now.
+fn try_lock_or_recover<'a, T>(
+    mutex: &'a StdMutex<T>,
+    label: &str,
+) -> Option<std::sync::MutexGuard<'a, T>> {
+    match mutex.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+            eprintln!("WARNING: mutex poisoned: {label}; recovering with inner state");
+            Some(poisoned.into_inner())
+        }
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
 fn read_or_recover<'a, T>(
     rwlock: &'a StdRwLock<T>,
     label: &str,
@@ -833,6 +946,98 @@ mod tests {
 
         assert_eq!(cached.bytes()[0], 7);
         assert_eq!(cached.bytes()[31], 9);
+    }
+
+    /// kckylechen1/tachi#1093: an availability-aware checkout must not wait
+    /// behind a busy slot while other slots are idle.
+    ///
+    /// Pool size 4, matching the production default. The old selector
+    /// (`next.fetch_add(1) % stores.len()`) assigns slots in strict call
+    /// order: 0, 1, 2, 3, 0, 1, ... A long-held checkout on slot 0 (held open
+    /// via a release gate, not by real work) followed by three quick
+    /// checkouts cycles the counter through slots 1..3 and back to 0 — the
+    /// fifth checkout is then routed by the old selector onto the
+    /// still-occupied slot 0, even though slots 1-3 are idle again. This is
+    /// exactly the reported convoy.
+    ///
+    /// Synchronization is entirely channel-based (an entrance signal proves
+    /// the occupier holds slot 0 before we proceed; a completion signal on a
+    /// second channel is what the final assertion is built on). The 500ms
+    /// bound below is a generous bound to avoid hanging forever, not a
+    /// narrow timing race: the occupier holds its slot until this test
+    /// explicitly releases it, so under the unfixed round-robin selector the
+    /// fifth checkout provably blocks (on a real `Mutex::lock()`) until that
+    /// release fires, which does not happen inside the bound.
+    #[test]
+    fn read_pool_checkout_does_not_wait_behind_the_round_robin_occupied_slot() {
+        let temp = unique_temp_dir("read-pool-convoy");
+        let db_path = temp.join("memory.db");
+        drop(
+            MemoryStore::open_with_label(db_path.to_str().expect("db path utf8"), "seed")
+                .expect("seed db"),
+        );
+        let db_str = db_path.to_str().expect("db path utf8").to_string();
+        let pool = ReadStorePool::open_read_only(&db_str, 4).expect("open pool");
+
+        let release = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+        let (occupier_entered_tx, occupier_entered_rx) = std::sync::mpsc::channel();
+        let occupier_pool = pool.clone();
+        let occupier_release = Arc::clone(&release);
+        let occupier = std::thread::spawn(move || {
+            occupier_pool.with_store("occupier", |_store| {
+                occupier_entered_tx
+                    .send(())
+                    .expect("occupier entrance signal");
+                let (released, wake) = &*occupier_release;
+                let mut released = released.lock().expect("lock release gate");
+                while !*released {
+                    released = wake.wait(released).expect("wait release gate");
+                }
+                Ok(())
+            })
+        });
+        occupier_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("occupier should enter slot 0 before we proceed");
+
+        // Three quick checkouts cycle the round-robin cursor through slots
+        // 1..3, each returning immediately (they never touch slot 0).
+        for i in 1..=3 {
+            pool.with_store("filler", |_store| Ok(()))
+                .unwrap_or_else(|e| panic!("filler checkout {i} failed: {e}"));
+        }
+
+        // The fifth checkout: round-robin would route it back onto slot 0
+        // (still held by `occupier`), even though slots 1-3 are idle again.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let checkout_pool = pool.clone();
+        let checkout = std::thread::spawn(move || {
+            let result = checkout_pool.with_store("checkout", |_store| Ok(()));
+            let _ = done_tx.send(result.is_ok());
+        });
+
+        let completed_promptly = done_rx.recv_timeout(Duration::from_millis(500));
+
+        // Always release the occupier before inspecting the result, so a
+        // failing assertion below never leaves either thread parked.
+        {
+            let (released, wake) = &*release;
+            *released.lock().expect("lock release gate") = true;
+            wake.notify_all();
+        }
+        occupier
+            .join()
+            .expect("occupier thread should join")
+            .expect("occupier checkout should succeed");
+        checkout.join().expect("checkout thread should join");
+
+        assert!(
+            completed_promptly.is_ok(),
+            "checkout into an idle slot (1-3) must not wait behind the round-robin-selected, \
+             still-occupied slot 0"
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
@@ -1126,6 +1331,251 @@ mod tests {
         );
 
         drop(entry0_state_before);
+        let _ = std::fs::remove_dir_all(temp);
+    }
+}
+
+/// Before/after receipt benchmarks for kckylechen1/tachi#1093 (the
+/// `ReadStorePool` convoy fix). These are `#[ignore]`d — they measure
+/// wall-clock behavior, not correctness, and are meant to be run explicitly
+/// on a given SHA (base vs. fixed) to produce a before/after comparison:
+///
+/// ```text
+/// cargo test -p memory-server-runtime --lib bench:: -- --ignored --nocapture
+/// ```
+///
+/// No tracing subscriber is installed here, so results are printed directly;
+/// `memcore::db::lock_retry_backoff_count()` (a plain counter, not a tracing
+/// consumer) supplies the SQLite-retry side of the receipt where relevant.
+/// Every microbenchmark's "operation" closure is a trivial field read
+/// (matching this file's existing test convention), so `operation_wall_time`
+/// here isolates pool/lock overhead rather than real query cost — that
+/// isolation is deliberate: it is exactly what the convoy fix changes.
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    fn percentile(sorted_micros: &[u128], pct: f64) -> u128 {
+        if sorted_micros.is_empty() {
+            return 0;
+        }
+        let rank = (((sorted_micros.len() - 1) as f64) * pct).round() as usize;
+        sorted_micros[rank.min(sorted_micros.len() - 1)]
+    }
+
+    fn report(name: &str, mut checkout_wait_us: Vec<u128>, mut op_wall_us: Vec<u128>) {
+        checkout_wait_us.sort_unstable();
+        op_wall_us.sort_unstable();
+        println!(
+            "[bench:{name}] n={} checkout_wait_us(p50={} p95={}) op_wall_us(p50={} p95={})",
+            checkout_wait_us.len().max(op_wall_us.len()),
+            percentile(&checkout_wait_us, 0.50),
+            percentile(&checkout_wait_us, 0.95),
+            percentile(&op_wall_us, 0.50),
+            percentile(&op_wall_us, 0.95),
+        );
+    }
+
+    #[test]
+    #[ignore = "manual before/after receipt; run with --ignored --nocapture"]
+    fn uncontended_checkout_overhead() {
+        let temp = unique_temp_dir("bench-uncontended");
+        let db_path = temp.join("memory.db");
+        drop(
+            MemoryStore::open_with_label(db_path.to_str().expect("db path utf8"), "seed")
+                .expect("seed db"),
+        );
+        let pool = ReadStorePool::open_read_only(db_path.to_str().expect("db path utf8"), 4)
+            .expect("open pool");
+
+        const ITERATIONS: usize = 500;
+        let mut checkout_wait_us = Vec::with_capacity(ITERATIONS);
+        let mut op_wall_us = Vec::with_capacity(ITERATIONS);
+        for _ in 0..ITERATIONS {
+            let (result, receipt) = pool.with_store_recording("bench", |_store| Ok(()));
+            result.expect("uncontended checkout should succeed");
+            checkout_wait_us.push(receipt.pool_checkout_wait.as_micros());
+            op_wall_us.push(receipt.operation_wall_time.as_micros());
+        }
+        report("uncontended_checkout_overhead", checkout_wait_us, op_wall_us);
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    #[ignore = "manual before/after receipt; run with --ignored --nocapture"]
+    fn one_long_read_with_concurrent_short_reads() {
+        // One reader holds a slot for the whole benchmark (simulating a slow
+        // scan); N short concurrent readers exercise the remaining slots.
+        // This is the exact shape of the reported convoy: on the unfixed
+        // round-robin selector, some fraction of the short readers'
+        // checkout_wait shows large tail latency (whichever ones the
+        // round-robin cursor happens to route onto the long reader's slot);
+        // on the fix, checkout_wait should stay low throughout since idle
+        // slots are always found before waiting. This benchmark's printed
+        // p50/p95 IS the before/after receipt — no separate assertion.
+        let temp = unique_temp_dir("bench-convoy");
+        let db_path = temp.join("memory.db");
+        drop(
+            MemoryStore::open_with_label(db_path.to_str().expect("db path utf8"), "seed")
+                .expect("seed db"),
+        );
+        let pool = ReadStorePool::open_read_only(db_path.to_str().expect("db path utf8"), 4)
+            .expect("open pool");
+
+        let release = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let long_pool = pool.clone();
+        let long_release = Arc::clone(&release);
+        let long_reader = std::thread::spawn(move || {
+            long_pool.with_store("long_read", |_store| {
+                entered_tx.send(()).expect("long reader entrance signal");
+                let (released, wake) = &*long_release;
+                let mut released = released.lock().expect("lock release gate");
+                while !*released {
+                    released = wake.wait(released).expect("wait release gate");
+                }
+                Ok(())
+            })
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("long reader should enter before short readers start");
+
+        const SHORT_READERS: usize = 20;
+        let handles: Vec<_> = (0..SHORT_READERS)
+            .map(|_| {
+                let pool = pool.clone();
+                std::thread::spawn(move || {
+                    let (result, receipt) =
+                        pool.with_store_recording("short_read", |_store| Ok(()));
+                    result.expect("short read should succeed");
+                    receipt
+                })
+            })
+            .collect();
+
+        let receipts: Vec<ReadPoolCheckoutReceipt> = handles
+            .into_iter()
+            .map(|h| h.join().expect("short reader thread should join"))
+            .collect();
+
+        {
+            let (released, wake) = &*release;
+            *released.lock().expect("lock release gate") = true;
+            wake.notify_all();
+        }
+        long_reader
+            .join()
+            .expect("long reader thread should join")
+            .expect("long reader checkout should succeed");
+
+        let checkout_wait_us = receipts
+            .iter()
+            .map(|r| r.pool_checkout_wait.as_micros())
+            .collect();
+        let op_wall_us = receipts
+            .iter()
+            .map(|r| r.operation_wall_time.as_micros())
+            .collect();
+        report(
+            "one_long_read_with_concurrent_short_reads",
+            checkout_wait_us,
+            op_wall_us,
+        );
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    #[ignore = "manual before/after receipt; run with --ignored --nocapture"]
+    fn controlled_write_contention() {
+        // Best-effort, per the contract: this DB runs in WAL mode
+        // (schema/ddl.rs), where readers never block writers and vice versa,
+        // and only concurrent *writers* can contend for the single write
+        // lock. This opens several independent writer connections to the
+        // same DB file and hammers them concurrently. If BUSY/LOCKED never
+        // actually triggers at this contention level, an honest zero retry
+        // count is the correct receipt — the contract forbids inflating
+        // busy_timeout/retry counts/pool size to force a positive number.
+        let temp = unique_temp_dir("bench-write-contention");
+        let db_path = temp.join("memory.db");
+        let db_str = db_path.to_str().expect("db path utf8").to_string();
+        drop(MemoryStore::open_with_label(&db_str, "seed").expect("seed db"));
+
+        let retries_before = memcore::db::lock_retry_backoff_count();
+
+        const WRITERS: usize = 6;
+        const WRITES_PER_WRITER: usize = 20;
+        let handles: Vec<_> = (0..WRITERS)
+            .map(|writer_idx| {
+                let db_str = db_str.clone();
+                std::thread::spawn(move || {
+                    // `open` (not `open_with_label`) disables path-routing
+                    // validation entirely — this benchmark exercises lock
+                    // contention on the write path, not path routing.
+                    let mut store = MemoryStore::open(&db_str).expect("open writer");
+                    let mut local_wall_us = Vec::with_capacity(WRITES_PER_WRITER);
+                    for i in 0..WRITES_PER_WRITER {
+                        let entry = memcore::MemoryEntry {
+                            id: format!("bench-write-contention-{writer_idx}-{i}"),
+                            path: "/bench".to_string(),
+                            summary: "bench write contention".to_string(),
+                            text: "bench write contention".to_string(),
+                            importance: 0.3,
+                            // Fixed valid RFC3339 literal — this benchmark
+                            // exercises write-path lock contention, not
+                            // wall-clock timestamps, and adding a `chrono`
+                            // dependency to this crate just to stamp "now"
+                            // would be an unjustified new dependency.
+                            timestamp: "2026-01-01T00:00:00.000Z".to_string(),
+                            valid_from: String::new(),
+                            valid_until: None,
+                            category: "other".to_string(),
+                            topic: String::new(),
+                            keywords: Vec::new(),
+                            persons: Vec::new(),
+                            entities: Vec::new(),
+                            location: String::new(),
+                            source: "bench".to_string(),
+                            scope: "general".to_string(),
+                            archived: false,
+                            access_count: 0,
+                            last_access: None,
+                            revision: 1,
+                            metadata: serde_json::json!({}),
+                            vector: None,
+                            retention_policy: None,
+                            domain: None,
+                            recall_count: 0,
+                            query_diversity: 0,
+                            tier: "raw".to_string(),
+                        };
+                        let started = Instant::now();
+                        store
+                            .upsert(&entry)
+                            .expect("bench upsert should eventually succeed within retry budget");
+                        local_wall_us.push(started.elapsed().as_micros());
+                    }
+                    local_wall_us
+                })
+            })
+            .collect();
+
+        let mut op_wall_us = Vec::new();
+        for handle in handles {
+            op_wall_us.extend(handle.join().expect("writer thread should join"));
+        }
+
+        let retries_after = memcore::db::lock_retry_backoff_count();
+        report("controlled_write_contention", Vec::new(), op_wall_us);
+        println!(
+            "[bench:controlled_write_contention] explicit_lock_retry_backoffs={} \
+             (application-level thread::sleep backoffs only — SQLite's own opaque \
+             busy_timeout wait is not separately observable, see retry_memory_locked)",
+            retries_after.saturating_sub(retries_before)
+        );
+
         let _ = std::fs::remove_dir_all(temp);
     }
 }
