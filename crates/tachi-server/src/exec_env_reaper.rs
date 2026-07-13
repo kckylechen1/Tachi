@@ -50,6 +50,30 @@
 //! The existing worktree sweep's `_ => false` shape (unknown ⇒ "not active") is
 //! the fail-open we refuse to copy onto a path that deletes 61 GB.
 //!
+//! ## Fresh at the delete, pinned to one object, and fully booked (sol audit)
+//!
+//! Three more holes, all of the same family — *the run decided one thing and then
+//! deleted against another*:
+//!
+//! * **The protected set is recomputed at the delete** ([`run_orphan_reap`]), not
+//!   carried from the scan. A build that claims `--target-dir` *after* the snapshot
+//!   is invisible to it, and the deleter's holder re-probe cannot see a `cargo`
+//!   sitting between two compile units with no fd open. Snapshot + fd-only recheck
+//!   is precisely the window in which a live cache is deleted.
+//! * **The judged object is the deleted object** ([`OrphanCandidate::identity`]).
+//!   `--root` is caller-supplied and may be or contain a symlink; every fence used
+//!   to resolve the *name* independently, so retargeting the link between the
+//!   verdict and `remove_dir_all` redirected the delete. The scan now pins the
+//!   resolved identity and the deleter refuses anything that does not still resolve
+//!   to it.
+//! * **The scan keeps books** ([`UnitClass`], [`ScanAccounting`]). Missing roots,
+//!   failed `read_dir`s, depth truncation and protection prunes were all bare
+//!   `continue`s: invisible in the report, `errors` empty, exit 0. That is not a
+//!   hypothetical route to "the reaper always succeeds and never reclaims anything"
+//!   — it is that bug's exact shape. Every examined unit now terminates in exactly
+//!   one typed bucket, and a run with an unaccounted unit does not exit clean
+//!   ([`reap_exit_status`]).
+//!
 //! ## The ledger is written even for strangers
 //!
 //! An orphan that was never registered (the dead codex target) is *booked* into
@@ -110,7 +134,7 @@
 //! the key the byte report groups on (`safe_merge` / `expired` / `orphan` /
 //! `unmanaged`).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -534,7 +558,23 @@ impl Staleness {
 /// [`decide_reap`].
 #[derive(Debug, Clone)]
 pub(crate) struct OrphanCandidate {
+    /// The path as the scan walked it — the caller's spelling, symlinked scan
+    /// root and all.
     pub(crate) path: PathBuf,
+    /// **The identity the verdict is rendered against (sol audit, BUG 2).**
+    ///
+    /// `path` is a *name*, and a name is not an object: `--root` is caller-supplied
+    /// and may be (or contain) a symlink, and the protection verdict and the
+    /// `remove_dir_all` that follows it each resolve that name independently. Retarget
+    /// the link in between and the run decides about one directory and deletes another.
+    ///
+    /// So the scan resolves the name **once**, here, and the deleter re-resolves it and
+    /// refuses unless it still lands on the same object ([`delete_resource_bytes`]). Not
+    /// `openat`/fd semantics — a genuinely atomic identity would need the fd, and this
+    /// module deliberately stays on paths — but the object the run *judged* and the
+    /// object it *deletes* are now the same pinned resolution, and a mismatch is a
+    /// refusal, not a delete.
+    pub(crate) identity: PathBuf,
     pub(crate) kind: ResourceKind,
     pub(crate) staleness: Staleness,
     /// Measured *only* for candidates that survived every cheap gate — a
@@ -565,88 +605,368 @@ pub(crate) fn classify_orphan_dir_name(name: &str) -> Option<ResourceKind> {
     None
 }
 
+// ── Scan accounting (sol's frozen invariant) ────────────────────────────────
+
+/// > *A maintenance run may report success only when the authorized scope has been
+/// > completely accounted for. Every examined unit must terminate in **exactly one**
+/// > typed result: progressed / expected-exclusion / safety-refusal /
+/// > incomplete-or-error. A safety gate may prune only the scope it can prove
+/// > unsafe.* — sol, frozen
+///
+/// The four classes, and why they are a type and not a comment: the first cut
+/// answered *every* one of these with a bare `continue`. A missing root, a
+/// `read_dir` that failed, a subtree the depth budget cut off, a protected prune —
+/// all of them vanished, `errors` stayed empty, and the run exited 0. "The reaper
+/// always reports success and never reclaims anything" is not a hypothetical
+/// failure mode of that shape; it *is* that shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnitClass {
+    /// The unit moved the run forward: it became a candidate, or it was read and
+    /// its children enqueued.
+    Progressed,
+    /// The unit is outside the scope this run was authorized to reclaim, by
+    /// policy (not by ignorance).
+    ExpectedExclusion,
+    /// A fence refused it — and only the scope the fence can *prove* unsafe.
+    SafetyRefusal,
+    /// The unit could not be examined. This is the class that must never exit
+    /// clean.
+    IncompleteOrError,
+}
+
+impl UnitClass {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            UnitClass::Progressed => "progressed",
+            UnitClass::ExpectedExclusion => "expected-exclusion",
+            UnitClass::SafetyRefusal => "safety-refusal",
+            UnitClass::IncompleteOrError => "incomplete-or-error",
+        }
+    }
+}
+
+/// The terminal result of ONE examined unit (a scan root, or a directory the walk
+/// looked at). Exactly one of these is recorded per unit — that is the whole point
+/// of the type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnitOutcome {
+    /// Progressed — it is a reap candidate (and a leaf: a target is never
+    /// descended into).
+    Candidate,
+    /// Progressed — its name matched no build-artifact shape, so it was read and
+    /// its subdirectories enqueued.
+    Descended,
+    /// Expected exclusion — the walk's depth budget ends the authorized scope here.
+    DepthLimited,
+    /// Safety refusal — it is inside a protected path, or it covers one.
+    ProtectedPruned,
+    /// Incomplete — a named scan root that does not exist / is not a directory.
+    RootMissing,
+    /// Incomplete — `read_dir`/`stat` failed, so everything below it is unexamined.
+    Unreadable,
+}
+
+impl UnitOutcome {
+    pub(crate) fn class(self) -> UnitClass {
+        match self {
+            UnitOutcome::Candidate | UnitOutcome::Descended => UnitClass::Progressed,
+            UnitOutcome::DepthLimited => UnitClass::ExpectedExclusion,
+            UnitOutcome::ProtectedPruned => UnitClass::SafetyRefusal,
+            UnitOutcome::RootMissing | UnitOutcome::Unreadable => UnitClass::IncompleteOrError,
+        }
+    }
+}
+
+/// One bucket per [`UnitOutcome`], and `examined` = the sum of them all.
+///
+/// [`Self::record`] is the ONLY way to increment: it bumps `examined` and exactly
+/// one bucket, in one statement, so conservation cannot drift by forgetting to
+/// count something. [`Self::balances`] is the assertion of that law.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ScanAccounting {
+    /// Every scan root, plus every directory the walk examined.
+    pub(crate) examined: usize,
+    pub(crate) candidates: usize,
+    pub(crate) descended: usize,
+    pub(crate) depth_limited: usize,
+    pub(crate) protected_pruned: usize,
+    pub(crate) roots_missing: usize,
+    pub(crate) unreadable: usize,
+}
+
+impl ScanAccounting {
+    fn record(&mut self, outcome: UnitOutcome) {
+        self.examined += 1;
+        match outcome {
+            UnitOutcome::Candidate => self.candidates += 1,
+            UnitOutcome::Descended => self.descended += 1,
+            UnitOutcome::DepthLimited => self.depth_limited += 1,
+            UnitOutcome::ProtectedPruned => self.protected_pruned += 1,
+            UnitOutcome::RootMissing => self.roots_missing += 1,
+            UnitOutcome::Unreadable => self.unreadable += 1,
+        }
+    }
+
+    /// Conservation: every examined unit is in exactly one bucket.
+    pub(crate) fn balances(&self) -> bool {
+        self.examined
+            == self.candidates
+                + self.descended
+                + self.depth_limited
+                + self.protected_pruned
+                + self.roots_missing
+                + self.unreadable
+    }
+
+    /// Any unit in the `incomplete-or-error` class (or, defensively, a total that
+    /// does not add up) means the authorized scope was NOT fully accounted for —
+    /// and a run that cannot account for its scope may not report success, `--force`
+    /// or not.
+    pub(crate) fn incomplete(&self) -> bool {
+        self.roots_missing > 0 || self.unreadable > 0 || !self.balances()
+    }
+}
+
+/// A unit that did not progress, with the reason it did not — the lines an operator
+/// reads to see *what the run did not look at*. `Progressed` units are not listed
+/// here (they are in `candidates`, or they were walked); everything else is.
+#[derive(Debug, Clone)]
+pub(crate) struct ScanSkip {
+    pub(crate) path: PathBuf,
+    pub(crate) outcome: UnitOutcome,
+    pub(crate) reason: String,
+}
+
+/// What a scan returns: candidates, **and the books**. A bare `Vec<OrphanCandidate>`
+/// is what let every non-candidate unit disappear.
+#[derive(Debug, Default)]
+pub(crate) struct ScanOutcome {
+    pub(crate) candidates: Vec<OrphanCandidate>,
+    pub(crate) accounting: ScanAccounting,
+    pub(crate) skips: Vec<ScanSkip>,
+}
+
+impl ScanOutcome {
+    /// The single funnel every unit passes through — accounting first, then (for a
+    /// non-progressed unit) the operator-visible line.
+    fn record(&mut self, path: &Path, outcome: UnitOutcome, reason: impl Into<String>) {
+        self.accounting.record(outcome);
+        if outcome.class() != UnitClass::Progressed {
+            self.skips.push(ScanSkip {
+                path: path.to_path_buf(),
+                outcome,
+                reason: reason.into(),
+            });
+        }
+    }
+}
+
+/// The walk's decision about ONE directory — a total function, so there is no
+/// `continue` for a unit to fall through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WalkDisposition {
+    /// Read its entries and enqueue its subdirectories.
+    Descend,
+    /// A build artifact by name, outside every fence: a reap candidate, and a leaf.
+    Candidate(ResourceKind),
+    /// Stop here, with the typed reason the scope ends.
+    Prune(PruneReason),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PruneReason {
+    /// Safety refusal: this directory is INSIDE a protected path. The pruned scope
+    /// is exactly the scope proved unsafe — nothing under a live build cache may be
+    /// reclaimed, and there is nothing else in there to find.
+    InsideProtected,
+    /// Safety refusal: a name-matched target that *covers* a protected path.
+    /// `remove_dir_all` on it would take the protected path with it, so it can never
+    /// be a candidate; and a matched target is a leaf by policy (this module never
+    /// descends into a target hunting for nested targets), so the pruned scope is,
+    /// again, exactly the scope proved undeletable.
+    CoversProtected,
+    /// Expected exclusion: the depth budget. Scratch roots are shallow by nature and
+    /// a deep walk of `~/.cache` is not worth the stat storm — but the cut-off scope
+    /// is now *reported* instead of silently dropped.
+    DepthBudget { depth: usize, max_depth: usize },
+}
+
+impl PruneReason {
+    fn outcome(&self) -> UnitOutcome {
+        match self {
+            PruneReason::InsideProtected | PruneReason::CoversProtected => {
+                UnitOutcome::ProtectedPruned
+            }
+            PruneReason::DepthBudget { .. } => UnitOutcome::DepthLimited,
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            PruneReason::InsideProtected => {
+                "inside a protected path (a live build cache); nothing under it is reclaimable"
+                    .to_string()
+            }
+            PruneReason::CoversProtected => {
+                "a name-matched target that contains a protected path: deleting it would take the \
+                 protected path with it"
+                    .to_string()
+            }
+            PruneReason::DepthBudget { depth, max_depth } => {
+                format!(
+                    "depth budget reached ({depth} >= {max_depth}); its subtree was not examined"
+                )
+            }
+        }
+    }
+}
+
+/// Pure: what the walk does with one directory. Every branch is typed; none of them
+/// is "and then quietly move on".
+pub(crate) fn walk_disposition(
+    dir: &Path,
+    depth: usize,
+    protection: &Protection,
+    max_depth: usize,
+) -> WalkDisposition {
+    // Inside a protected path: nothing under a live build cache is ever a
+    // candidate, and there is nothing to find by descending.
+    if protection.contains_dir(dir) {
+        return WalkDisposition::Prune(PruneReason::InsideProtected);
+    }
+    let name = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    // A scan root is never itself a candidate (`depth > 0`) — pointing the reaper at
+    // a root only ever authorizes it to look *inside*, never to delete the root you
+    // handed it.
+    if depth > 0 {
+        if let Some(kind) = classify_orphan_dir_name(name) {
+            // `covers` (bidirectional) gates CANDIDACY: a name-matched dir that
+            // contains a protected path must never be offered up for deletion.
+            if protection.covers(dir) {
+                return WalkDisposition::Prune(PruneReason::CoversProtected);
+            }
+            return WalkDisposition::Candidate(kind);
+        }
+    }
+    if depth >= max_depth {
+        return WalkDisposition::Prune(PruneReason::DepthBudget { depth, max_depth });
+    }
+    WalkDisposition::Descend
+}
+
 /// Scan roots for orphan candidates. Read-only, and **cheap**: name match,
 /// protection, and a short-circuiting staleness walk. It does not measure bytes
 /// and it does not probe holders — those cost a recursive stat storm each and are
 /// spent only on the survivors, in [`run_orphan_reap`].
 ///
-/// A scan root is never itself a candidate (`depth > 0` below) — pointing the
-/// reaper at a root only ever authorizes it to look *inside*, never to delete
-/// the root you handed it.
+/// Returns a [`ScanOutcome`], not a bare `Vec`: see [`UnitClass`] for the invariant
+/// that shape exists to enforce.
 pub(crate) fn scan_orphan_candidates(
     roots: &[PathBuf],
     protection: &Protection,
     now: SystemTime,
     max_age_days: u64,
-) -> Vec<OrphanCandidate> {
+) -> ScanOutcome {
     let cutoff = staleness_cutoff(now, max_age_days);
-    let mut candidates = Vec::new();
+    let mut out = ScanOutcome::default();
     for root in roots {
         if !root.is_dir() {
+            out.record(
+                root,
+                UnitOutcome::RootMissing,
+                "scan root does not exist or is not a directory: nothing under it was examined",
+            );
             continue;
         }
         let mut stack = vec![(root.clone(), 0usize)];
         while let Some((dir, depth)) = stack.pop() {
-            // Inside a protected path: nothing under a live build cache is ever
-            // a candidate, and there is nothing to find by descending.
-            if protection.contains_dir(&dir) {
-                continue;
-            }
-            let name = dir
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default()
-                .to_string();
-            // A matching directory is a leaf: never descend into a target to
-            // find nested "targets".
-            if depth > 0 {
-                // `covers` (bidirectional) still gates CANDIDACY: a name-matched
-                // dir that happens to contain a protected path must never be
-                // offered up for deletion, even though we walked into it.
-                if let Some(kind) = classify_orphan_dir_name(&name).filter(|_| !protection.covers(&dir))
-                {
-                    candidates.push(OrphanCandidate {
+            match walk_disposition(&dir, depth, protection, DEFAULT_MAX_DEPTH) {
+                WalkDisposition::Candidate(kind) => {
+                    out.record(&dir, UnitOutcome::Candidate, String::new());
+                    out.candidates.push(OrphanCandidate {
                         staleness: staleness(&dir, now, cutoff),
+                        // Pin the identity the verdict is about to be rendered
+                        // against (BUG 2); the deleter re-resolves and compares.
+                        identity: canonicalize_expected(&dir).unwrap_or_else(|| dir.clone()),
                         path: dir,
                         kind,
                         bytes: None,
                         holders: None,
                     });
-                    continue;
                 }
-            }
-            if depth >= DEFAULT_MAX_DEPTH {
-                continue;
-            }
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.filter_map(Result::ok) {
-                let path = entry.path();
-                // symlink_metadata: never follow a symlink out of the scan
-                // root (a symlinked "…-target" must not become a delete
-                // candidate for whatever it points at).
-                let Ok(meta) = std::fs::symlink_metadata(&path) else {
-                    continue;
-                };
-                if meta.is_dir() {
-                    stack.push((path, depth + 1));
+                WalkDisposition::Prune(reason) => {
+                    out.record(&dir, reason.outcome(), reason.describe());
+                }
+                WalkDisposition::Descend => {
+                    let entries = match std::fs::read_dir(&dir) {
+                        Ok(entries) => entries,
+                        // The subtree is unexamined and we cannot say what was in
+                        // it: an incomplete unit, not a `continue`.
+                        Err(err) => {
+                            out.record(
+                                &dir,
+                                UnitOutcome::Unreadable,
+                                format!("cannot read {}: {err}", dir.display()),
+                            );
+                            continue;
+                        }
+                    };
+                    out.record(&dir, UnitOutcome::Descended, String::new());
+                    for entry in entries {
+                        let entry = match entry {
+                            Ok(entry) => entry,
+                            Err(err) => {
+                                out.record(
+                                    &dir.join("<unreadable entry>"),
+                                    UnitOutcome::Unreadable,
+                                    format!("cannot read an entry of {}: {err}", dir.display()),
+                                );
+                                continue;
+                            }
+                        };
+                        let path = entry.path();
+                        // symlink_metadata: never follow a symlink out of the scan
+                        // root (a symlinked "…-target" must not become a delete
+                        // candidate for whatever it points at).
+                        let meta = std::fs::symlink_metadata(&path);
+                        match meta {
+                            Ok(meta) if meta.is_dir() => stack.push((path, depth + 1)),
+                            // A file / a symlink: not a unit — the walk examines
+                            // directories, and a symlink is never followed.
+                            Ok(_) => {}
+                            Err(err) => out.record(
+                                &path,
+                                UnitOutcome::Unreadable,
+                                format!("cannot stat {}: {err}", path.display()),
+                            ),
+                        }
+                    }
                 }
             }
         }
     }
     // Stalest first, then path: deterministic without a byte measurement we have
     // deliberately not taken yet.
-    candidates.sort_by(|a, b| {
+    out.candidates.sort_by(|a, b| {
         b.staleness
             .age_days()
             .cmp(&a.staleness.age_days())
             .then_with(|| a.path.cmp(&b.path))
     });
-    candidates
+    out
 }
 
 /// Default scan roots: the scratch volumes where dead build artifacts pile up.
+///
+/// Filtered to the ones that actually exist, and that is a *scope* decision, not a
+/// swallowed error: these are opportunistic defaults (`/private/tmp` is a macOS
+/// path, `~/.cache` an XDG one — neither is universal), so a default root that is
+/// not there was never part of the authorized scope. A root the OPERATOR names and
+/// that does not exist is a different animal: it is `RootMissing`, an incomplete
+/// unit, and it costs the run its clean exit.
 pub(crate) fn default_orphan_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(tmpdir) = std::env::var_os("TMPDIR") {
@@ -659,6 +979,7 @@ pub(crate) fn default_orphan_roots() -> Vec<PathBuf> {
     }
     roots.sort();
     roots.dedup();
+    roots.retain(|root| root.is_dir());
     roots
 }
 
@@ -814,8 +1135,29 @@ pub(crate) struct CandidateReport {
     /// `None` = the staleness walk was partial (see [`Staleness::Unprovable`]).
     pub(crate) age_days: Option<u64>,
     pub(crate) holders: String,
-    /// `reclaim` (eligible) or `skip`.
+    /// The candidate's TERMINAL label, and it must be true at the end of the run,
+    /// not at the moment the gates first spoke:
+    ///
+    /// * `reclaim` — eligible (and, under `--force`, reclaimed),
+    /// * `skip`    — a gate refused it before any expensive work,
+    /// * `refused` — it was eligible and the delete path refused it anyway: the
+    ///   protected set recomputed at delete time now covers it, its pinned identity
+    ///   no longer resolves to the same object, a holder appeared, or the ledger
+    ///   bounced the reclaim. **A late refusal relabels**; leaving `reclaim` on a
+    ///   candidate whose bytes are still on disk is a report that lies.
+    /// * `error`   — the run could not decide (a ledger lookup failed): an
+    ///   `incomplete-or-error` unit, and it costs the run its clean exit.
     pub(crate) decision: &'static str,
+    pub(crate) reason: String,
+}
+
+/// A unit the scan did not progress on — the operator-visible half of
+/// [`ScanAccounting`].
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct ScanSkipReport {
+    pub(crate) path: String,
+    /// One of sol's four classes (see [`UnitClass`]).
+    pub(crate) class: &'static str,
     pub(crate) reason: String,
 }
 
@@ -845,6 +1187,18 @@ pub(crate) struct ReapReport {
     pub(crate) protected: Vec<String>,
     pub(crate) max_age_days: u64,
     pub(crate) dry_run: bool,
+    /// Every unit the scan examined, in exactly one bucket each (sol's frozen
+    /// invariant — see [`UnitClass`]).
+    pub(crate) scan: ScanAccounting,
+    /// The units that did not progress, with the typed reason each did not.
+    pub(crate) unexamined: Vec<ScanSkipReport>,
+    /// **The authorized scope was not completely accounted for.** Set when the scan
+    /// booked an `incomplete-or-error` unit (a missing root, an unreadable subtree)
+    /// or a candidate could not be decided. `emit_reap_report` prints it and
+    /// [`reap_exit_status`] turns it into a non-zero exit: a run that could not look
+    /// at everything it was told to look at does not get to say "success", and
+    /// `--force` does not waive it.
+    pub(crate) incomplete: bool,
     pub(crate) candidates: Vec<CandidateReport>,
     pub(crate) reclaimed: Vec<ReclaimedReport>,
     /// Bytes freed by THIS run.
@@ -889,7 +1243,7 @@ pub(crate) fn run_orphan_reap(
     probe: &HolderProbe,
 ) -> ReapReport {
     let protection = protected_paths();
-    let candidates = scan_orphan_candidates(&opts.roots, &protection, now, opts.max_age_days);
+    let scan = scan_orphan_candidates(&opts.roots, &protection, now, opts.max_age_days);
 
     let mut report = ReapReport {
         action: "reap-orphans",
@@ -901,6 +1255,17 @@ pub(crate) fn run_orphan_reap(
             .collect(),
         max_age_days: opts.max_age_days,
         dry_run: !opts.force,
+        scan: scan.accounting,
+        unexamined: scan
+            .skips
+            .iter()
+            .map(|skip| ScanSkipReport {
+                path: skip.path.display().to_string(),
+                class: skip.outcome.class().as_str(),
+                reason: skip.reason.clone(),
+            })
+            .collect(),
+        incomplete: scan.accounting.incomplete(),
         candidates: Vec::new(),
         reclaimed: Vec::new(),
         reclaimed_bytes: 0,
@@ -912,14 +1277,31 @@ pub(crate) fn run_orphan_reap(
         errors: Vec::new(),
     };
 
-    for mut candidate in candidates {
+    for mut candidate in scan.candidates {
         let path = candidate.path.display().to_string();
+        // An undecidable candidate is an `incomplete-or-error` unit: it gets a
+        // terminal line of its own (`error`) instead of a `continue` that would
+        // erase it from the candidate list entirely.
+        let undecidable = |report: &mut ReapReport, candidate: &OrphanCandidate, reason: String| {
+            report.errors.push(reason.clone());
+            report.candidates.push(CandidateReport {
+                path: candidate.path.display().to_string(),
+                kind: candidate.kind.as_str(),
+                bytes: None,
+                age_days: candidate.staleness.age_days(),
+                holders: "not probed".to_string(),
+                decision: "error",
+                reason,
+            });
+        };
         let existing = match memcore::find_resource_by_path(conn, &path, candidate.kind) {
             Ok(existing) => existing,
             Err(err) => {
-                report
-                    .errors
-                    .push(format!("ledger lookup failed for {path}: {err}"));
+                undecidable(
+                    &mut report,
+                    &candidate,
+                    format!("ledger lookup failed for {path}: {err}"),
+                );
                 continue;
             }
         };
@@ -927,9 +1309,11 @@ pub(crate) fn run_orphan_reap(
             Some(resource) => match memcore::active_binding_count(conn, &resource.resource_id) {
                 Ok(count) => count,
                 Err(err) => {
-                    report
-                        .errors
-                        .push(format!("binding count failed for {path}: {err}"));
+                    undecidable(
+                        &mut report,
+                        &candidate,
+                        format!("binding count failed for {path}: {err}"),
+                    );
                     continue;
                 }
             },
@@ -958,10 +1342,55 @@ pub(crate) fn run_orphan_reap(
             }
         };
 
-        let (decision_label, reason) = match &decision {
+        // The label is provisional until the run is done with this candidate: a
+        // refusal that arrives at delete time rewrites it (see `CandidateReport`).
+        let (mut decision_label, mut reason) = match &decision {
             ReapDecision::Reclaim(reason) => ("reclaim", reason.as_str().to_string()),
             ReapDecision::Skip(skip) => ("skip", skip.describe()),
         };
+
+        if let (ReapDecision::Reclaim(claim), true) = (&decision, opts.force) {
+            // **sol audit fix (BUG 1).** The protected set is recomputed HERE, at the
+            // delete, from a re-read of the environment and a re-scan of the process
+            // table — it is NOT the snapshot the scan took. The snapshot is stale by
+            // construction: a build that claimed `--target-dir` after the scan is
+            // invisible to it, and the holder probe (which the deleter *does* re-run)
+            // proves nothing about a `cargo` sitting between two compile units with no
+            // fd open. Snapshot + fd-only recheck is exactly the window in which a live
+            // build cache gets deleted.
+            let fresh = protected_paths();
+            for warning in &fresh.warnings {
+                if !report.warnings.contains(warning) {
+                    report.warnings.push(warning.clone());
+                }
+            }
+            let refusal = if fresh.covers(&candidate.path) || fresh.covers(&candidate.identity) {
+                Some(format!(
+                    "refused {path}: it is protected as of the delete (a live build claimed it \
+                     after the scan); the run's opening protected set did not cover it"
+                ))
+            } else {
+                match reclaim_candidate(conn, &candidate, *claim, existing.as_ref(), probe, &fresh)
+                {
+                    Ok(reclaimed) => {
+                        report.reclaimed_bytes += reclaimed.reclaimed_bytes;
+                        report.revived_bytes += reclaimed.revived_previous_bytes.unwrap_or(0);
+                        report.reclaimed.push(reclaimed);
+                        None
+                    }
+                    // Every refusal is a warning line with its reason — a reclaim that
+                    // did not happen is never a silent skip, and never keeps the
+                    // `reclaim` label either.
+                    Err(err) => Some(err),
+                }
+            };
+            if let Some(err) = refusal {
+                decision_label = "refused";
+                reason = err.clone();
+                report.warnings.push(err);
+            }
+        }
+
         report.candidates.push(CandidateReport {
             path: path.clone(),
             kind: candidate.kind.as_str(),
@@ -975,33 +1404,6 @@ pub(crate) fn run_orphan_reap(
             decision: decision_label,
             reason,
         });
-
-        let ReapDecision::Reclaim(reason) = decision else {
-            continue;
-        };
-        if !opts.force {
-            // Preview: eligible is reported, nothing is booked and nothing is
-            // deleted.
-            continue;
-        }
-
-        match reclaim_candidate(
-            conn,
-            &candidate,
-            reason,
-            existing.as_ref(),
-            probe,
-            &protection,
-        ) {
-            Ok(reclaimed) => {
-                report.reclaimed_bytes += reclaimed.reclaimed_bytes;
-                report.revived_bytes += reclaimed.revived_previous_bytes.unwrap_or(0);
-                report.reclaimed.push(reclaimed);
-            }
-            // Every refusal is a warning line with its reason — a reclaim that did
-            // not happen is never a silent skip.
-            Err(err) => report.warnings.push(err),
-        }
     }
 
     match reclaimed_bytes_by_reason(conn) {
@@ -1011,7 +1413,33 @@ pub(crate) fn run_orphan_reap(
             .push(format!("byte report by reason unavailable: {err}")),
     }
 
+    // An undecidable candidate is an error unit too, so the scope was not fully
+    // accounted for either.
+    report.incomplete = scan.accounting.incomplete() || !report.errors.is_empty();
     report
+}
+
+/// The run's exit status, and the ONLY place the `clean orphans` CLI derives it.
+///
+/// A reaper that cannot account for its authorized scope must not exit 0 —
+/// "reported success while doing nothing" is the exact failure this module was
+/// audited for, and `--force` waives it no more than it waives any other gate.
+pub(crate) fn reap_exit_status(report: &ReapReport) -> Result<(), String> {
+    if !report.errors.is_empty() {
+        return Err(report.errors.join("; "));
+    }
+    if report.incomplete {
+        return Err(format!(
+            "scan incomplete: {} of {} examined unit(s) could not be accounted for ({} missing \
+             root(s), {} unreadable); refusing to report success on a run that did not see its \
+             whole scope",
+            report.scan.roots_missing + report.scan.unreadable,
+            report.scan.examined,
+            report.scan.roots_missing,
+            report.scan.unreadable,
+        ));
+    }
+    Ok(())
 }
 
 /// Book (or revive) the resource and reclaim it through S2a's single reclaim
@@ -1071,7 +1499,10 @@ fn reclaim_candidate(
 
     let outcome =
         memcore::reclaim_resource(conn, &resource_id, Some(reason.as_str()), |resource| {
-            delete_resource_bytes(resource, probe, protection)
+            // `protection` here is the set recomputed at delete time by the caller,
+            // and `identity` is the object the verdict was rendered against — the
+            // deleter re-resolves the name and refuses anything else (BUG 1 / BUG 2).
+            delete_resource_bytes(resource, probe, protection, &candidate.identity)
         })
         .map_err(|err| format!("reclaim of {path} failed: {err}"))?;
 
@@ -1130,10 +1561,15 @@ fn reclaim_candidate(
 /// committed and OUTSIDE any transaction; must be idempotent (a re-entered
 /// reclaim of an already-deleted path frees 0 bytes, and S2a assigns rather
 /// than accumulates, so 0 cannot corrupt a prior count).
+///
+/// `protection` must be the set computed **at delete time** (BUG 1) and `pinned` the
+/// identity the verdict was rendered against (BUG 2). Both are re-asserted here, on
+/// the last lines before `remove_dir_all`.
 fn delete_resource_bytes(
     resource: &ExecEnvResource,
     probe: &HolderProbe,
     protection: &Protection,
+    pinned: &Path,
 ) -> Result<i64, MemoryError> {
     let path = Path::new(&resource.path);
 
@@ -1167,6 +1603,34 @@ fn delete_resource_bytes(
             "refusing to reclaim non-directory {}",
             resource.path
         )));
+    }
+    // **sol audit fix (BUG 2): the object judged is the object deleted.**
+    //
+    // The name survives the check above; the *identity* is what `remove_dir_all`
+    // acts on. `--root` is caller-supplied and may be or contain a symlink, and
+    // every earlier fence resolved this name at its own moment. Retarget the link
+    // between the verdict and this line and the run deletes a directory nothing ever
+    // judged. So: resolve it again, and refuse unless it is still the same object.
+    // (A name that no longer resolves at all is also a refusal — an identity we
+    // cannot confirm is not an identity we may delete.)
+    match std::fs::canonicalize(path) {
+        Ok(actual) if actual == pinned => {}
+        Ok(actual) => {
+            return Err(MemoryError::InvalidArg(format!(
+                "refusing to reclaim {}: it now resolves to {} but the verdict was rendered \
+                 against {} — a symlink or mount was retargeted between the two",
+                resource.path,
+                actual.display(),
+                pinned.display()
+            )))
+        }
+        Err(err) => {
+            return Err(MemoryError::InvalidArg(format!(
+                "refusing to reclaim {}: its path no longer resolves ({err}), so the identity the \
+                 verdict was rendered against cannot be confirmed",
+                resource.path
+            )))
+        }
     }
     // Defense in depth against the scan→delete window: the row is already
     // `reclaiming`, but the bytes are still there. A process that grabbed the
@@ -1356,6 +1820,27 @@ pub(crate) fn emit_reap_report(report: &ReapReport, output: OutputFormat) -> Res
             for protected in &report.protected {
                 println!("  protected: {protected}");
             }
+            let scan = &report.scan;
+            println!(
+                "  scan: examined={} candidates={} descended={} depth_limited={} \
+                 protected_pruned={} roots_missing={} unreadable={}",
+                scan.examined,
+                scan.candidates,
+                scan.descended,
+                scan.depth_limited,
+                scan.protected_pruned,
+                scan.roots_missing,
+                scan.unreadable
+            );
+            for skip in &report.unexamined {
+                println!("  {} {} — {}", skip.class, skip.path, skip.reason);
+            }
+            if report.incomplete {
+                println!(
+                    "  INCOMPLETE: the authorized scope was not fully accounted for; this run \
+                     does not report success"
+                );
+            }
             for candidate in &report.candidates {
                 println!(
                     "  {} {} kind={} bytes={} age_days={} holders={} — {}",
@@ -1405,6 +1890,7 @@ pub(crate) fn emit_reap_report(report: &ReapReport, output: OutputFormat) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
@@ -1453,6 +1939,7 @@ mod tests {
     fn stale_candidate(holders: Option<HolderCheck>) -> OrphanCandidate {
         OrphanCandidate {
             path: PathBuf::from("/tmp/x-target"),
+            identity: PathBuf::from("/private/tmp/x-target"),
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Stale { age_days: 30 },
             bytes: Some(2048),
@@ -1493,6 +1980,16 @@ mod tests {
             let previous = std::env::var_os(key);
             std::env::set_var(key, value);
             Self { key, previous }
+        }
+
+        /// Remember the current value and restore it on drop — for a test that sets
+        /// the variable itself, *mid-run* (a build claiming a target dir after the
+        /// scan has already looked).
+        fn capture(key: &'static str) -> Self {
+            Self {
+                key,
+                previous: std::env::var_os(key),
+            }
         }
     }
 
@@ -1565,12 +2062,8 @@ mod tests {
             "but the root is not INSIDE it, so the walk must proceed"
         );
 
-        let candidates = scan_orphan_candidates(
-            &[root.clone()],
-            &protection,
-            aged_now(30),
-            7,
-        );
+        let candidates =
+            scan_orphan_candidates(&[root.clone()], &protection, aged_now(30), 7).candidates;
         assert!(
             candidates.iter().any(|c| c.path == dead),
             "the dead sibling must survive the walk: {candidates:?}"
@@ -1813,6 +2306,7 @@ mod tests {
             "an open file handle under the dir must never read as unheld: {check:?}"
         );
         let candidate = OrphanCandidate {
+            identity: std::fs::canonicalize(&target).unwrap(),
             path: target.clone(),
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Stale { age_days: 30 },
@@ -1838,7 +2332,8 @@ mod tests {
         std::fs::create_dir_all(&cargo_home).unwrap();
 
         let candidates =
-            scan_orphan_candidates(&[root.clone()], &Protection::default(), aged_now(30), 7);
+            scan_orphan_candidates(&[root.clone()], &Protection::default(), aged_now(30), 7)
+                .candidates;
         let paths: Vec<_> = candidates.iter().map(|c| c.path.clone()).collect();
 
         assert!(paths.contains(&dead), "stale *-target must be a candidate");
@@ -1869,7 +2364,8 @@ mod tests {
         make_target_dir(&root, "some-target");
 
         let candidates =
-            scan_orphan_candidates(&[root.clone()], &Protection::default(), aged_now(30), 7);
+            scan_orphan_candidates(&[root.clone()], &Protection::default(), aged_now(30), 7)
+                .candidates;
 
         assert_eq!(candidates.len(), 1);
         assert!(
@@ -1930,16 +2426,23 @@ mod tests {
         let root = unique_temp_dir("tachi-reaper-protected");
         let shared = make_target_dir(&root, "sigil-shared-target");
 
-        let candidates = scan_orphan_candidates(
+        let scan = scan_orphan_candidates(
             &[root.clone()],
             &Protection::new([shared.clone()], Vec::new()),
             aged_now(30),
             7,
         );
         assert!(
-            candidates.is_empty(),
-            "the shared cargo target is protected: {candidates:?}"
+            scan.candidates.is_empty(),
+            "the shared cargo target is protected: {:?}",
+            scan.candidates
         );
+        // …and the prune is a SAFETY REFUSAL on the books, not a `continue`.
+        assert_eq!(scan.accounting.protected_pruned, 1, "{:?}", scan.accounting);
+        assert!(scan
+            .skips
+            .iter()
+            .any(|skip| skip.path == shared && skip.outcome == UnitOutcome::ProtectedPruned));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1965,7 +2468,8 @@ mod tests {
         set_mtime(&target.join("debug"), long_ago);
         // …and the only fresh thing is at depth 3, where cargo actually writes.
 
-        let candidates = scan_orphan_candidates(&[root.clone()], &Protection::default(), now, 7);
+        let candidates =
+            scan_orphan_candidates(&[root.clone()], &Protection::default(), now, 7).candidates;
 
         assert_eq!(candidates.len(), 1);
         assert!(
@@ -1996,6 +2500,7 @@ mod tests {
     fn young_dir_is_never_reclaimed() {
         let candidate = OrphanCandidate {
             path: PathBuf::from("/tmp/x-target"),
+            identity: PathBuf::from("/private/tmp/x-target"),
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Fresh { age_days: 2 },
             bytes: None,
@@ -2014,6 +2519,7 @@ mod tests {
     fn an_unprovable_age_is_never_reclaimed() {
         let candidate = OrphanCandidate {
             path: PathBuf::from("/tmp/x-target"),
+            identity: PathBuf::from("/private/tmp/x-target"),
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Unprovable("cannot read /tmp/x-target/deps".to_string()),
             bytes: None,
@@ -2331,6 +2837,9 @@ mod tests {
             &resource,
             &*unheld_probe(),
             &Protection::new([shared.clone()], Vec::new()),
+            // The identity check would pass — the fence under test is the protected
+            // set, re-asserted at the line that deletes.
+            &std::fs::canonicalize(&shared).unwrap(),
         )
         .expect_err("a protected path must never be deleted");
         assert!(
@@ -2338,6 +2847,323 @@ mod tests {
             "error should name the fence: {err}"
         );
         assert!(shared.join("debug/artifact.rlib").exists(), "bytes survive");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── sol audit · BUG 1: the protected set is recomputed AT the delete ─────
+
+    /// **The accident this fence exists for.** The run took ONE snapshot of the
+    /// protected set at the top and never took another; the deleter re-probed only
+    /// for holder *file descriptors*. So: a build claims `--target-dir` (or exports
+    /// `CARGO_TARGET_DIR`) after the scan has looked, and the delete lands in the
+    /// gap between two compile units, when that build holds no fd anywhere under the
+    /// tree. Stale snapshot says "not protected", fd probe says "nobody home", and a
+    /// live build cache is deleted.
+    ///
+    /// The probe here *is* the claim: it fires between the scan and the delete and
+    /// still answers `None`, so nothing but a freshly recomputed protected set can
+    /// save the bytes.
+    #[test]
+    fn a_target_claimed_after_the_scan_is_refused_at_delete_time() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let root = unique_temp_dir("tachi-reaper-late-claim");
+        let contested = make_target_dir(&root, "contested-target");
+        let mut store = open_store(&root);
+
+        // Unset for the scan — the candidate must be genuinely eligible — and set by
+        // the probe, i.e. after the run's opening snapshot was taken.
+        let _env = EnvGuard::capture(CARGO_TARGET_DIR_ENV);
+        std::env::remove_var(CARGO_TARGET_DIR_ENV);
+        let claimed = contested.clone();
+        let claiming_probe = move |_path: &Path| {
+            std::env::set_var(CARGO_TARGET_DIR_ENV, &claimed);
+            // …and it holds nothing open right now: the fd-only recheck is blind to it.
+            HolderCheck::None
+        };
+
+        let report = run_orphan_reap(
+            store.connection_mut(),
+            &opts(&root, true),
+            aged_now(30),
+            &claiming_probe,
+        );
+
+        assert!(
+            contested.join("debug/artifact.rlib").exists(),
+            "a target dir claimed after the scan must survive --force: {report:?}"
+        );
+        assert!(report.reclaimed.is_empty(), "{report:?}");
+        assert_eq!(report.reclaimed_bytes, 0);
+        assert_eq!(report.candidates.len(), 1, "{report:?}");
+        assert_eq!(
+            report.candidates[0].decision, "refused",
+            "the candidate's TERMINAL state is refused, not reclaim: {report:?}"
+        );
+        // Discriminating: `refused` (not `skip`) is only reachable from the delete
+        // path, so this candidate really did pass every gate the run's opening
+        // snapshot had — it was one stale snapshot away from being deleted.
+        assert!(
+            report.candidates[0]
+                .reason
+                .contains("protected as of the delete"),
+            "reason: {}",
+            report.candidates[0].reason
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("protected as of the delete")),
+            "the late refusal is reported: {report:?}"
+        );
+        assert!(
+            memcore::list_resources(store.connection(), None, None)
+                .unwrap()
+                .is_empty(),
+            "a path refused at delete time is not booked either"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── sol audit · BUG 2: the object judged is the object deleted ───────────
+
+    /// `--root` is caller-supplied and `is_dir()` follows symlinks; the protection
+    /// verdict and the `remove_dir_all` each resolved the *name* independently. So a
+    /// retarget of the link between the two makes the run delete a directory nothing
+    /// ever judged.
+    ///
+    /// Discriminating: the decoy holds real bytes and is not protected by anything —
+    /// only the pinned identity stands between it and `remove_dir_all`.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_symlink_retargeted_after_the_verdict_cannot_redirect_the_delete() {
+        let base = unique_temp_dir("tachi-reaper-symlink-root");
+        let judged_root = base.join("judged");
+        let decoy_root = base.join("decoy");
+        std::fs::create_dir_all(&judged_root).unwrap();
+        std::fs::create_dir_all(&decoy_root).unwrap();
+        // Same name under both roots: only the resolved identity tells them apart.
+        let judged = make_target_dir(&judged_root, "lane-target");
+        let decoy = make_target_dir(&decoy_root, "lane-target");
+
+        let link = base.join("root-link");
+        std::os::unix::fs::symlink(&judged_root, &link).unwrap();
+        let mut store = open_store(&base);
+
+        // The retarget lands exactly in the window: the holder probe is the last
+        // thing the run does before it decides to delete.
+        let link_for_probe = link.clone();
+        let decoy_for_probe = decoy_root.clone();
+        let retargeting_probe = move |_path: &Path| {
+            std::fs::remove_file(&link_for_probe).unwrap();
+            std::os::unix::fs::symlink(&decoy_for_probe, &link_for_probe).unwrap();
+            HolderCheck::None
+        };
+
+        let report = run_orphan_reap(
+            store.connection_mut(),
+            &opts(&link, true),
+            aged_now(30),
+            &retargeting_probe,
+        );
+
+        assert!(
+            decoy.join("debug/artifact.rlib").exists(),
+            "the delete must not follow a link retargeted after the verdict: {report:?}"
+        );
+        assert!(
+            judged.join("debug/artifact.rlib").exists(),
+            "and a refusal deletes nothing at all — not even the object it judged: {report:?}"
+        );
+        assert!(report.reclaimed.is_empty(), "{report:?}");
+        assert_eq!(report.candidates.len(), 1, "{report:?}");
+        assert_eq!(report.candidates[0].decision, "refused", "{report:?}");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("verdict was rendered against")),
+            "the refusal names the identity mismatch: {report:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── sol audit · BUG 4: the scan keeps books ─────────────────────────────
+
+    /// **sol's frozen invariant, as a test.** Every unit the scan examines lands in
+    /// exactly one terminal bucket, and the buckets add up to what was examined. The
+    /// first cut answered a missing root, a failed `read_dir`, a depth cut-off and a
+    /// protection prune with the same bare `continue` — nothing in the report, empty
+    /// `errors`, exit 0. All four are injected here at once, beside one real
+    /// candidate, so a reaper that silently examined nothing cannot pass.
+    #[cfg(unix)]
+    #[test]
+    fn every_examined_unit_lands_in_exactly_one_terminal_bucket() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_temp_dir("tachi-reaper-accounting");
+        let dead = make_target_dir(&root, "dead-target"); // progressed: candidate
+        let live = make_target_dir(&root, "live-shared-target"); // safety refusal
+        let locked = root.join("locked-dir"); // incomplete: unreadable
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let deep = root.join("a/b/c"); // expected exclusion: depth budget
+        std::fs::create_dir_all(deep.join("d")).unwrap();
+        let missing = root.join("no-such-root"); // incomplete: missing root
+
+        let scan = scan_orphan_candidates(
+            &[root.clone(), missing.clone()],
+            &Protection::new([live.clone()], Vec::new()),
+            aged_now(30),
+            7,
+        );
+        let books = scan.accounting;
+
+        assert!(
+            books.balances(),
+            "conservation: examined must equal the sum of the buckets: {books:?}"
+        );
+        assert_eq!(books.candidates, 1, "{books:?}");
+        assert_eq!(books.protected_pruned, 1, "{books:?}");
+        assert_eq!(books.depth_limited, 1, "{books:?}");
+        assert_eq!(books.unreadable, 1, "{books:?}");
+        assert_eq!(books.roots_missing, 1, "{books:?}");
+        // root, a, a/b — the three directories that were read and descended.
+        assert_eq!(books.descended, 3, "{books:?}");
+        assert_eq!(books.examined, 8, "{books:?}");
+
+        // Exactly one bucket per unit: no path is booked twice, and no candidate is
+        // also a skip.
+        let mut booked: Vec<&Path> = scan.skips.iter().map(|skip| skip.path.as_path()).collect();
+        booked.extend(scan.candidates.iter().map(|c| c.path.as_path()));
+        let unique: BTreeSet<&Path> = booked.iter().copied().collect();
+        assert_eq!(
+            booked.len(),
+            unique.len(),
+            "a unit may not appear in two buckets: {booked:?}"
+        );
+        assert_eq!(scan.skips.len(), 4, "{:?}", scan.skips);
+        assert!(scan.candidates.iter().any(|c| c.path == dead));
+
+        // …and each skip carries the class it belongs to.
+        let class_of = |path: &Path| {
+            scan.skips
+                .iter()
+                .find(|skip| skip.path == path)
+                .map(|skip| skip.outcome.class())
+        };
+        assert_eq!(class_of(&missing), Some(UnitClass::IncompleteOrError));
+        assert_eq!(class_of(&locked), Some(UnitClass::IncompleteOrError));
+        assert_eq!(class_of(&live), Some(UnitClass::SafetyRefusal));
+        assert_eq!(class_of(&deep), Some(UnitClass::ExpectedExclusion));
+
+        // The run saw units it could not examine ⇒ it did not account for its scope.
+        assert!(books.incomplete(), "{books:?}");
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A run that could not look at everything it was told to look at does not get
+    /// to report success — even when it *did* reclaim something, and even under
+    /// `--force`. Discriminating both ways: the same fixture without the missing root
+    /// exits clean.
+    #[test]
+    fn an_incomplete_forced_scan_does_not_exit_clean() {
+        let root = unique_temp_dir("tachi-reaper-incomplete-exit");
+        let dead = make_target_dir(&root, "dead-target");
+        let mut store = open_store(&root);
+        let missing = root.join("no-such-root");
+
+        let incomplete = run_orphan_reap(
+            store.connection_mut(),
+            &ReapOptions {
+                roots: vec![root.clone(), missing],
+                max_age_days: 7,
+                force: true,
+            },
+            aged_now(30),
+            &*unheld_probe(),
+        );
+
+        // The run really did work — this is not "it failed, so it deleted nothing".
+        assert_eq!(incomplete.reclaimed.len(), 1, "{incomplete:?}");
+        assert!(!dead.exists());
+        assert!(incomplete.errors.is_empty(), "{:?}", incomplete.errors);
+        assert!(
+            incomplete.incomplete,
+            "a scan with an unaccounted unit is incomplete: {incomplete:?}"
+        );
+        let status = reap_exit_status(&incomplete);
+        assert!(
+            status.is_err(),
+            "an incomplete run must not exit clean, force or not: {status:?}"
+        );
+
+        // Same fixture, whole scope examined ⇒ clean exit. Without this half the test
+        // would pass on a reaper that never exits 0 at all.
+        let reborn = make_target_dir(&root, "dead-target");
+        let complete = run_orphan_reap(
+            store.connection_mut(),
+            &opts(&root, true),
+            aged_now(30),
+            &*unheld_probe(),
+        );
+        assert_eq!(complete.reclaimed.len(), 1, "{complete:?}");
+        assert!(!reborn.exists());
+        assert!(!complete.incomplete, "{complete:?}");
+        assert!(
+            reap_exit_status(&complete).is_ok(),
+            "a fully accounted run exits clean: {complete:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The label must be the truth at the END of the run. A candidate the gates
+    /// approved and the deleter then refused (here: a holder appears in the
+    /// scan→delete window) keeps its bytes — so a report that still calls it
+    /// `reclaim` is a report that lies about what happened to them.
+    #[test]
+    fn a_late_refusal_relabels_the_candidate_refused_not_reclaimed() {
+        let root = unique_temp_dir("tachi-reaper-late-refusal-label");
+        let target = make_target_dir(&root, "racy-target");
+        let mut store = open_store(&root);
+
+        let calls = std::cell::Cell::new(0usize);
+        let probe = move |_path: &Path| {
+            let n = calls.get();
+            calls.set(n + 1);
+            if n == 0 {
+                HolderCheck::None // the scan's expensive probe: eligible
+            } else {
+                HolderCheck::Held(vec!["cargo 1".to_string()]) // the deleter's recheck
+            }
+        };
+
+        let report = run_orphan_reap(
+            store.connection_mut(),
+            &opts(&root, true),
+            aged_now(30),
+            &probe,
+        );
+
+        assert_eq!(report.candidates.len(), 1, "{report:?}");
+        assert_eq!(
+            report.candidates[0].decision, "refused",
+            "a candidate whose bytes are still on disk must not keep the `reclaim` label: \
+             {report:?}"
+        );
+        assert!(
+            report.candidates[0].reason.contains("holder appeared"),
+            "and the reason is the late refusal, not the stale one: {}",
+            report.candidates[0].reason
+        );
+        assert!(report.reclaimed.is_empty(), "{report:?}");
+        assert!(target.join("debug/artifact.rlib").exists(), "bytes survive");
 
         let _ = std::fs::remove_dir_all(&root);
     }

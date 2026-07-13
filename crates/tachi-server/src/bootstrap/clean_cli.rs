@@ -393,6 +393,11 @@ fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
 /// warning — this command's entire job is to free bytes *and book them*, and
 /// deleting 61 GB with nowhere to record it is exactly the off-the-books
 /// reclaim #1029 called out.
+///
+/// Exit status comes from [`crate::exec_env_reaper::reap_exit_status`]: a run whose
+/// scan left `incomplete-or-error` units (a named root that is not there, a subtree
+/// `read_dir` could not open) exits non-zero even under `--force`, because it cannot
+/// honestly say the scope it was given was cleaned.
 fn run_orphan_reap_cli(opts: ReapOptions, output: OutputFormat) -> Result<(), String> {
     let global_db = crate::path_utils::tachi_home()
         .join("global")
@@ -413,11 +418,12 @@ fn run_orphan_reap_cli(opts: ReapOptions, output: OutputFormat) -> Result<(), St
         &crate::exec_env_reaper::lsof_holder_probe,
     );
     crate::exec_env_reaper::emit_reap_report(&report, output)?;
-    if report.errors.is_empty() {
-        Ok(())
-    } else {
-        Err(report.errors.join("; "))
-    }
+    // The report is emitted first, THEN the exit status is derived from it — an
+    // incomplete run must still show the operator what it did see. `reap_exit_status`
+    // is the single place that rule lives (sol's frozen accounting invariant: a run
+    // that could not examine its whole authorized scope may not exit 0, `--force`
+    // waives it no more than any other gate).
+    crate::exec_env_reaper::reap_exit_status(&report)
 }
 
 #[cfg(test)]
