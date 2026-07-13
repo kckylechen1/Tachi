@@ -763,7 +763,10 @@ mod tests {
 
         let err = import_vault_bundle(&target_db, &bundle_path, None, true)
             .expect_err("unsupported kdf_params must be rejected even with --allow-unsigned");
-        assert!(err.to_string().contains("unsupported KDF parameters"), "{err}");
+        assert!(
+            err.to_string().contains("unsupported KDF parameters"),
+            "{err}"
+        );
 
         let target = open_cli_store_read_only(&target_db).expect("target read store");
         assert!(
@@ -822,7 +825,10 @@ mod tests {
 
         let err = import_vault_bundle(&target_db, &bundle_path, Some(&[7u8; 32]), false)
             .expect_err("unsupported kdf_params must be rejected before persisting");
-        assert!(err.to_string().contains("unsupported KDF parameters"), "{err}");
+        assert!(
+            err.to_string().contains("unsupported KDF parameters"),
+            "{err}"
+        );
 
         let target = open_cli_store_read_only(&target_db).expect("target read store");
         assert!(
