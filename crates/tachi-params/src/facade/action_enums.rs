@@ -34,6 +34,12 @@ impl TachiVerifyAction {
             Self::Board => "board",
         }
     }
+
+    /// Wire strings derived from [`ALL`](Self::ALL) — the single positive
+    /// inventory for `tachi_verify` (no separate `&[&str]` mirror).
+    pub fn all_wire_strings() -> Vec<&'static str> {
+        Self::ALL.iter().map(Self::as_str).collect()
+    }
 }
 
 impl fmt::Display for TachiVerifyAction {
@@ -150,6 +156,12 @@ impl TachiTaskAction {
             Self::CloseLoop => "close_loop",
         }
     }
+
+    /// Wire strings derived from [`PRIMARY`](Self::PRIMARY) — the single
+    /// positive inventory for `tachi_task` (no separate `&[&str]` mirror).
+    pub fn primary_wire_strings() -> Vec<&'static str> {
+        Self::PRIMARY.iter().map(Self::as_str).collect()
+    }
 }
 
 impl fmt::Display for TachiTaskAction {
@@ -200,34 +212,29 @@ impl FromStr for TachiTaskAction {
 
 #[cfg(test)]
 mod tests {
-    use super::super::action_inventory::{
-        TACHI_TASK_PRIMARY_ACTIONS, TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS, TACHI_VERIFY_ACTIONS,
-    };
+    use super::super::action_inventory::TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS;
     use super::*;
 
     #[test]
     fn f4_verify_action_roundtrip() {
-        assert_eq!(TachiVerifyAction::ALL.len(), TACHI_VERIFY_ACTIONS.len());
-        for &s in TACHI_VERIFY_ACTIONS {
+        for &action in TachiVerifyAction::ALL {
+            let s = action.as_str();
             let parsed: TachiVerifyAction = s.parse().expect("verify action");
-            assert_eq!(parsed.as_str(), s);
+            assert_eq!(parsed, action);
             let wire = serde_json::to_string(&parsed).unwrap();
             assert_eq!(wire, format!("\"{s}\""));
             let back: TachiVerifyAction = serde_json::from_str(&wire).unwrap();
-            assert_eq!(back, parsed);
+            assert_eq!(back, action);
         }
         assert!("nope".parse::<TachiVerifyAction>().is_err());
     }
 
     #[test]
     fn f4_task_action_primary_roundtrip() {
-        assert_eq!(
-            TachiTaskAction::PRIMARY.len(),
-            TACHI_TASK_PRIMARY_ACTIONS.len()
-        );
-        for &s in TACHI_TASK_PRIMARY_ACTIONS {
+        for &action in TachiTaskAction::PRIMARY {
+            let s = action.as_str();
             let parsed: TachiTaskAction = s.parse().expect("task primary");
-            assert_eq!(parsed.as_str(), s);
+            assert_eq!(parsed, action);
             let wire = serde_json::to_string(&parsed).unwrap();
             assert_eq!(wire, format!("\"{s}\""));
         }

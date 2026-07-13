@@ -10,7 +10,7 @@ fn tachi_task_action_schema(
 ) -> rmcp::schemars::Schema {
     // #757: GH PR lifecycle is only on tachi_gh — not accepted by tachi_task.
     string_enum_schema(
-        super::action_inventory::TACHI_TASK_PRIMARY_ACTIONS,
+        &super::action_enums::TachiTaskAction::primary_wire_strings(),
         "Required Tachi task facade action. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'wait'/'board'/'cancel' manage dispatches; action='complete' records eval; action='recommend'/'route_simulate'/'proposals' manage routing; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs).",
         generator,
     )
@@ -20,7 +20,7 @@ fn tachi_task_action_schema(
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiTaskParams {
-    /// Primary actions (F4 enum / `TACHI_TASK_PRIMARY_ACTIONS`): plan, briefing,
+    /// Primary actions (F4 enum): plan, briefing,
     /// doc_index, recommend, dispatch, complete, profiles, profile, card,
     /// route_simulate, proposals, review_proposal, apply_proposals, status,
     /// cancel, board, wait, merge, intake, cycle_status, cycle_plan, ux_matrix,

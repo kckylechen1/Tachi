@@ -182,10 +182,7 @@ fn tachi_task_action_schema_declares_feature_briefing() {
             "tachi_task schema must not advertise removed lifecycle action {removed}"
         );
     }
-    assert_eq!(
-        values.len(),
-        crate::tool_params::TACHI_TASK_PRIMARY_ACTIONS.len()
-    );
+    assert_eq!(values.len(), tachi_params::TachiTaskAction::PRIMARY.len());
 }
 
 #[test]
