@@ -137,9 +137,12 @@ pub(super) async fn run_session_action(
             // value fails loud and versioned here — before `verify_password` —
             // so it is never misread as "Wrong password". The password is
             // zeroed on BOTH the error and success paths (pre-existing discipline).
-            let key_result = match crate::vault_crypto::parse_stored_kdf_params(&config.kdf_params) {
-                Ok(params) => crate::vault_crypto::DerivedVaultKey::derive_with_params(&password, &salt, &params)
-                    .map_err(|e| e.to_string()),
+            let key_result = match crate::vault_crypto::parse_stored_kdf_params(&config.kdf_params)
+            {
+                Ok(params) => crate::vault_crypto::DerivedVaultKey::derive_with_params(
+                    &password, &salt, &params,
+                )
+                .map_err(|e| e.to_string()),
                 Err(err) => Err(err.to_string()),
             };
             let key = match key_result {

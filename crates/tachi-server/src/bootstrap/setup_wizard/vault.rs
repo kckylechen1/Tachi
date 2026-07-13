@@ -155,8 +155,10 @@ fn derive_verified_vault_key_for_wizard(
     // (the match builds the result without early-returning; zero runs after).
     let key_result: Result<crate::vault_crypto::DerivedVaultKey, Box<dyn std::error::Error>> =
         match crate::vault_crypto::parse_stored_kdf_params(&config.kdf_params) {
-            Ok(params) => crate::vault_crypto::DerivedVaultKey::derive_with_params(password, &salt, &params)
-                .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string())),
+            Ok(params) => {
+                crate::vault_crypto::DerivedVaultKey::derive_with_params(password, &salt, &params)
+                    .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))
+            }
             Err(err) => Err(Box::<dyn std::error::Error>::from(err)),
         };
     crate::vault_crypto::zero_string(password);

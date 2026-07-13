@@ -43,8 +43,10 @@ pub(super) async fn run_legacy_env_export(
     // loud and versioned here — before `verify_password` — so it is never
     // misread as "Wrong password".
     let key_result = match crate::vault_crypto::parse_stored_kdf_params(&config.kdf_params) {
-        Ok(params) => crate::vault_crypto::DerivedVaultKey::derive_with_params(&password, &salt, &params)
-            .map_err(|e| e.to_string()),
+        Ok(params) => {
+            crate::vault_crypto::DerivedVaultKey::derive_with_params(&password, &salt, &params)
+                .map_err(|e| e.to_string())
+        }
         Err(err) => Err(err.to_string()),
     };
     let key = key_result?;

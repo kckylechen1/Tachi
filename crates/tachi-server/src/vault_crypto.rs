@@ -80,9 +80,7 @@ impl std::error::Error for KdfParamsFormatError {}
 /// `to_string()` (preserving the exact message); the setup wizard propagates
 /// it un-stringified so its catch-all can downcast and abort instead of
 /// falling through to the plaintext-persistence fallback.
-pub fn parse_stored_kdf_params(
-    config_kdf_params: &str,
-) -> Result<KdfParams, KdfParamsFormatError> {
+pub fn parse_stored_kdf_params(config_kdf_params: &str) -> Result<KdfParams, KdfParamsFormatError> {
     KdfParams::from_stored_json(config_kdf_params).map_err(|err| {
         KdfParamsFormatError::new(format!(
             "vault_config.kdf_params is not a supported KDF parameter format; refusing to derive \
@@ -120,8 +118,8 @@ pub fn derive_verified_key_from_stored_config(
     // it downcastable inside the Box<dyn Error> so a caller can distinguish a
     // stored-format failure from a password mismatch (tachi#1080).
     let params = parse_stored_kdf_params(&config.kdf_params)?;
-    let key = DerivedVaultKey::derive_with_params(password, &salt, &params)
-        .map_err(|e| e.to_string())?;
+    let key =
+        DerivedVaultKey::derive_with_params(password, &salt, &params).map_err(|e| e.to_string())?;
     if !verify_password(key.bytes(), &config.verifier)? {
         return Err("Wrong password".into());
     }

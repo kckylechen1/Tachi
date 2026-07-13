@@ -45,7 +45,8 @@ pub(crate) fn load_keychain_vault_api_key_values(
     // warns with the versioned message; a password mismatch / derivation
     // failure degrades to an empty Vec (the pre-seam contract: a wrong
     // keychain password returned Ok(empty), never an error to the caller).
-    let key = match crate::vault_crypto::derive_verified_key_from_stored_config(&config, &password) {
+    let key = match crate::vault_crypto::derive_verified_key_from_stored_config(&config, &password)
+    {
         Ok(key) => key,
         Err(err) => {
             if err
