@@ -110,11 +110,22 @@ libsimple = "~0.7"
 # crate to the build, only a direct-dependency edge onto data already
 # compiled into every build.
 icu_properties = "2.2"
+# Shared vault crypto + versioned KDF-parameter format (tachi#1080 v1);
+# `vault_crypto.rs` is now a thin re-export of this crate. Plain here (no
+# `test-support`) so real builds use the production Argon2 profile; see the
+# `[dev-dependencies]` entry below for the test-only fast profile.
+vault-kit = { path = "../vault-kit" }
 
 [dev-dependencies]
 tempfile = "3"
 libsimple = "~0.7"
 tachi-llm = { path = "../tachi-llm", features = ["test-support"] }
+# Unifies in vault-kit's lightweight Argon2 test profile (m=64 KiB vs the
+# production m=65536 KiB) for tachi-server's own test binary only — Cargo
+# feature unification for `[dev-dependencies]` only applies when a
+# test/bench/example target is actually built, so `cargo build --release`
+# never sees this feature (see vault-kit's Cargo.toml feature docs).
+vault-kit = { path = "../vault-kit", features = ["test-support"] }
 # `test-util` enables `tokio::time::pause()` / `#[tokio::test(start_paused)]`
 # for the ci_watch backoff test (finding #2): it virtualizes the watcher's
 # real-time sleeps so the backoff schedule is assertable fast. The feature is
