@@ -12,7 +12,12 @@ async fn poke_smoke_suite_writes_report_and_probe_artifacts() {
     let report = run_poke_smoke_suite(temp.path())
         .await
         .expect("poke smoke should pass");
-    assert_eq!(report["status"], json!("passed"));
+    assert_eq!(
+        report["status"],
+        json!("passed"),
+        "poke suite failed; probes={}",
+        report.get("probes").cloned().unwrap_or_else(|| json!([]))
+    );
     assert_eq!(report["summary"]["total"], json!(6));
     let run_dir = PathBuf::from(report["run_dir"].as_str().expect("run_dir"));
     assert!(run_dir.join("report.json").exists());
