@@ -203,6 +203,34 @@ fn narrow_action_enum_property(tool: &mut rmcp::model::Tool, allowed: &[&str]) {
     tool.input_schema = std::sync::Arc::new(schema);
 }
 
+const BOUND_PROJECT_SCHEMA_GUIDANCE: &str = "Bound sessions should omit project. An explicit alias for the same canonical DB is normalized to the immutable bound identity; other-project writes and destructive actions are forbidden. Established read-only cross-project actions remain action-gated.";
+
+/// Add the session-binding contract to every native tool schema that exposes a
+/// `project` property. This is applied at the MCP boundary so folded and legacy
+/// tools cannot drift into contradictory per-struct wording.
+fn annotate_bound_project_schema(tool: &mut rmcp::model::Tool) {
+    let mut schema = (*tool.input_schema).clone();
+    let Some(project) = schema
+        .get_mut("properties")
+        .and_then(|properties| properties.as_object_mut())
+        .and_then(|properties| properties.get_mut("project"))
+        .and_then(|project| project.as_object_mut())
+    else {
+        return;
+    };
+    let description = project
+        .get("description")
+        .and_then(|value| value.as_str())
+        .filter(|description| !description.is_empty())
+        .map(|description| format!("{description} {BOUND_PROJECT_SCHEMA_GUIDANCE}"))
+        .unwrap_or_else(|| BOUND_PROJECT_SCHEMA_GUIDANCE.to_string());
+    project.insert(
+        "description".to_string(),
+        serde_json::Value::String(description),
+    );
+    tool.input_schema = std::sync::Arc::new(schema);
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct HttpSessionIdentity {
     profile: Option<String>,
@@ -327,6 +355,9 @@ impl ServerHandler for MemoryServer {
         async move {
             let all_native = self.tool_router.list_all();
             let mut tools: Vec<rmcp::model::Tool> = all_native;
+            for tool in &mut tools {
+                annotate_bound_project_schema(tool);
+            }
 
             // Add proxy tools from registered MCP servers
             let proxy_snapshot =
@@ -685,6 +716,38 @@ mod tests {
         let ann = tool.annotations.expect("annotations set");
         assert_eq!(ann.read_only_hint, Some(true));
         assert_eq!(ann.destructive_hint, Some(false));
+    }
+
+    #[test]
+    fn native_project_tool_schema_advertises_bound_alias_normalization() {
+        let mut tool: rmcp::model::Tool = serde_json::from_value(json!({
+            "name": "tachi_memory",
+            "description": "memory facade",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": ["string", "null"],
+                        "description": "Optional named project DB."
+                    }
+                }
+            }
+        }))
+        .expect("test tool");
+
+        annotate_bound_project_schema(&mut tool);
+
+        let description = tool
+            .input_schema
+            .get("properties")
+            .and_then(|properties| properties.get("project"))
+            .and_then(|project| project.get("description"))
+            .and_then(|description| description.as_str())
+            .expect("project description");
+        assert!(description.contains("Bound sessions should omit project"));
+        assert!(description.contains("same canonical DB"));
+        assert!(description.contains("normalized to the immutable bound identity"));
+        assert!(description.contains("other-project writes and destructive actions are forbidden"));
     }
 
     #[test]
