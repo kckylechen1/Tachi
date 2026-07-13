@@ -573,7 +573,7 @@ pub enum StalenessReasonV1 {
     /// not vacuously "pass" replay on that axis — an empty axis means
     /// nobody ever verified the repo's state, not that it's unchanged.
     RepoRevisionUnavailable {
-        reason: String,
+        detail: String,
     },
 }
 
@@ -596,7 +596,7 @@ pub fn check_proposal_replay(
 
     if proposal.based_on_repo_revisions.is_empty() {
         reasons.push(StalenessReasonV1::RepoRevisionUnavailable {
-            reason: "proposal has no pinned repo revision at all — replay safety on the \
+            detail: "proposal has no pinned repo revision at all — replay safety on the \
                      repo-HEAD axis was never established, not confirmed unchanged"
                 .to_string(),
         });
