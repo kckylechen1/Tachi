@@ -935,4 +935,203 @@ mod tests {
             None => std::env::remove_var("ENABLE_PIPELINE"),
         }
     }
+
+    struct HostProfileEnvFixture {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        original_cwd: PathBuf,
+        original_host_profile: Option<std::ffi::OsString>,
+        original_fixture_key: Option<std::ffi::OsString>,
+        home: tempfile::TempDir,
+        app_home: tempfile::TempDir,
+        repo: tempfile::TempDir,
+    }
+
+    impl HostProfileEnvFixture {
+        fn new() -> Self {
+            let lock = crate::utils::global_test_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let original_cwd = std::env::current_dir().expect("cwd");
+            let original_host_profile = std::env::var_os(crate::host_profile::HOST_PROFILE_ENV);
+            let original_fixture_key = std::env::var_os("TACHI_TEST_HOST_PROFILE_FIXTURE");
+            let home = tempfile::tempdir().expect("home");
+            let app_home = tempfile::tempdir().expect("app_home");
+            let repo = tempfile::tempdir().expect("repo");
+            std::fs::create_dir_all(home.path().join(".secrets")).expect("secrets dir");
+            std::fs::create_dir_all(home.path().join(".sigil")).expect("legacy home dir");
+            std::fs::create_dir_all(repo.path().join(".tachi")).expect("repo tachi dir");
+            std::fs::create_dir_all(repo.path().join(".sigil")).expect("repo sigil dir");
+            std::env::set_current_dir(repo.path()).expect("set synthetic repo cwd");
+            Self {
+                _lock: lock,
+                original_cwd,
+                original_host_profile,
+                original_fixture_key,
+                home,
+                app_home,
+                repo,
+            }
+        }
+
+        fn write_env(&self, path: PathBuf, body: &str) {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("env parent");
+            }
+            std::fs::write(path, body).expect("write env file");
+        }
+
+        fn seed_elevated_sources(&self) {
+            self.write_env(
+                self.home.path().join(".secrets/master.env"),
+                "TACHI_HOST_PROFILE=home_data\n",
+            );
+            self.write_env(
+                self.home.path().join(".sigil/config.env"),
+                "TACHI_HOST_PROFILE=home_data\n",
+            );
+            self.write_env(
+                self.repo.path().join(".tachi/config.env"),
+                "TACHI_HOST_PROFILE=home_data\nTACHI_TEST_HOST_PROFILE_FIXTURE=repo_local_loaded\n",
+            );
+            self.write_env(
+                self.repo.path().join(".sigil/config.env"),
+                "TACHI_HOST_PROFILE=home_data\n",
+            );
+            self.write_env(
+                self.repo.path().join(".env"),
+                "TACHI_HOST_PROFILE=home_data\n",
+            );
+            std::env::set_var(crate::host_profile::HOST_PROFILE_ENV, "home_data");
+        }
+
+        fn load(&self) {
+            load_env_files(
+                self.home.path(),
+                self.app_home.path(),
+                true,
+                Some(self.repo.path()),
+            );
+        }
+    }
+
+    impl Drop for HostProfileEnvFixture {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original_cwd);
+            match self.original_host_profile.as_ref() {
+                Some(value) => std::env::set_var(crate::host_profile::HOST_PROFILE_ENV, value),
+                None => std::env::remove_var(crate::host_profile::HOST_PROFILE_ENV),
+            }
+            match self.original_fixture_key.as_ref() {
+                Some(value) => std::env::set_var("TACHI_TEST_HOST_PROFILE_FIXTURE", value),
+                None => std::env::remove_var("TACHI_TEST_HOST_PROFILE_FIXTURE"),
+            }
+        }
+    }
+
+    #[test]
+    fn app_home_is_only_host_profile_authority() {
+        let fixture = HostProfileEnvFixture::new();
+        fixture.seed_elevated_sources();
+        fixture.write_env(
+            fixture.app_home.path().join("config.env"),
+            "TACHI_HOST_PROFILE=development\n",
+        );
+
+        fixture.load();
+
+        assert_eq!(
+            std::env::var(crate::host_profile::HOST_PROFILE_ENV).as_deref(),
+            Ok("development")
+        );
+        assert_eq!(
+            crate::host_profile::HostProfile::current().expect("profile"),
+            crate::host_profile::HostProfile::Development
+        );
+
+        fixture.write_env(
+            fixture.app_home.path().join("config.env"),
+            "TACHI_HOST_PROFILE=home_data\n",
+        );
+        std::env::set_var(crate::host_profile::HOST_PROFILE_ENV, "development");
+        fixture.write_env(
+            fixture.repo.path().join(".tachi/config.env"),
+            "TACHI_HOST_PROFILE=development\nTACHI_TEST_HOST_PROFILE_FIXTURE=repo_local_loaded\n",
+        );
+        fixture.load();
+        assert_eq!(
+            std::env::var(crate::host_profile::HOST_PROFILE_ENV).as_deref(),
+            Ok("home_data")
+        );
+        assert_eq!(
+            crate::host_profile::HostProfile::current().expect("profile"),
+            crate::host_profile::HostProfile::HomeData
+        );
+    }
+
+    #[test]
+    fn missing_app_home_profile_rejects_inherited_and_repo_elevation() {
+        let fixture = HostProfileEnvFixture::new();
+        fixture.seed_elevated_sources();
+        fixture.write_env(fixture.app_home.path().join("config.env"), "OTHER=kept\n");
+
+        fixture.load();
+
+        assert!(
+            std::env::var_os(crate::host_profile::HOST_PROFILE_ENV).is_none(),
+            "missing app-home profile must leave the raw key absent"
+        );
+        assert_eq!(
+            crate::host_profile::HostProfile::current().expect("default profile"),
+            crate::host_profile::HostProfile::Development
+        );
+    }
+
+    #[test]
+    fn invalid_app_home_profile_is_not_repaired_by_repo_profile() {
+        let fixture = HostProfileEnvFixture::new();
+        fixture.seed_elevated_sources();
+        fixture.write_env(
+            fixture.app_home.path().join("config.env"),
+            "TACHI_HOST_PROFILE=not-a-real-profile\n",
+        );
+
+        fixture.load();
+
+        assert_eq!(
+            std::env::var(crate::host_profile::HOST_PROFILE_ENV).as_deref(),
+            Ok("not-a-real-profile")
+        );
+        let err = crate::host_profile::HostProfile::current().expect_err("invalid stays invalid");
+        assert!(
+            err.contains("invalid TACHI_HOST_PROFILE"),
+            "expected invalid profile error, got {err}"
+        );
+    }
+
+    #[test]
+    fn project_local_non_host_env_still_loads() {
+        let fixture = HostProfileEnvFixture::new();
+        std::env::remove_var(crate::host_profile::HOST_PROFILE_ENV);
+        std::env::remove_var("TACHI_TEST_HOST_PROFILE_FIXTURE");
+        fixture.write_env(
+            fixture.app_home.path().join("config.env"),
+            "TACHI_HOST_PROFILE=development\n",
+        );
+        fixture.write_env(
+            fixture.repo.path().join(".tachi/config.env"),
+            "TACHI_TEST_HOST_PROFILE_FIXTURE=repo_local_loaded\n",
+        );
+
+        fixture.load();
+
+        assert_eq!(
+            std::env::var("TACHI_TEST_HOST_PROFILE_FIXTURE").as_deref(),
+            Ok("repo_local_loaded"),
+            "project-local non-host keys must still load"
+        );
+        assert_eq!(
+            std::env::var(crate::host_profile::HOST_PROFILE_ENV).as_deref(),
+            Ok("development")
+        );
+    }
 }
