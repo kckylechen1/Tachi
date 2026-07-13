@@ -299,6 +299,7 @@ pub(super) fn injection_to_json(inj: &InjectionResult) -> Value {
         "content_hash": inj.content_hash,
         "loaded": inj.loaded,
         "warning": inj.warning,
+        "failure_class": inj.failure_class,
     })
 }
 

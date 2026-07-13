@@ -1,4 +1,5 @@
 use super::*;
+use crate::MemoryServer;
 
 fn compact_json_params(query: &str) -> TachiMemoryParams {
     let mut params = tachi_memory_params("briefing");
@@ -6,6 +7,145 @@ fn compact_json_params(query: &str) -> TachiMemoryParams {
     params.query = Some(query.to_string());
     params.compact = true;
     params
+}
+
+/// Builds a `tachi_task` facade params value (`TachiTaskParams`) for
+/// `action='briefing'` / `action='doc_index'` with only the fields these
+/// FIX-2/FIX-3 tests care about set; every other field has `#[serde(default)]`
+/// and comes back empty/`None`.
+fn task_briefing_params(
+    action: &str,
+    task: &str,
+    format: Option<&str>,
+    compact: Option<bool>,
+) -> TachiTaskParams {
+    serde_json::from_value(serde_json::json!({
+        "action": action,
+        "task": task,
+        "format": format,
+        "compact": compact,
+        // These tests seed rows into the global store (no workspace project
+        // DB exists in the test harness); include_global=true is required
+        // for the briefing's memory search to look at the global DB at all
+        // (project_only otherwise skips it, see search_memory_rows_with_recall_config).
+        "include_global": true,
+    }))
+    .expect("deserialize tachi_task briefing params")
+}
+
+fn seed_needle_memory_rows(server: &MemoryServer, needle: &str, count: usize) {
+    server
+        .with_global_store(|store| {
+            for i in 0..count {
+                let mut memory = make_entry(&format!("{needle}-row-{i}"));
+                memory.path = format!("/scratch/{needle}/{i}");
+                memory.summary = format!("{needle} distinct memory row {i}");
+                memory.text =
+                    format!("{needle} distinct memory row {i} content, padded to stay unique.");
+                memory.topic = needle.to_string();
+                memory.keywords = vec![needle.to_string()];
+                store.upsert(&memory).map_err(|e| e.to_string())?;
+            }
+            Ok::<(), String>(())
+        })
+        .expect("seed needle memory rows");
+}
+
+fn memory_fragment_count(body: &str) -> usize {
+    let parsed: Value = serde_json::from_str(body).expect("task briefing JSON");
+    parsed["memory_fragments"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0)
+}
+
+/// kckylechen1/tachi#1058 FIX-2: `format="full"` with an omitted `compact`
+/// used to still fall through `params.compact.unwrap_or(true)` and get
+/// silently clipped to the 4-row compact packet. `action='doc_index'` shares
+/// the exact same top_k/compact gate as `action='briefing'`, so both must be
+/// fixed together.
+#[tokio::test]
+async fn task_briefing_format_full_is_not_clipped_to_compact_packet() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let needle = "FullVsCompactNeedle";
+    seed_needle_memory_rows(&server, needle, 6);
+    let query = format!("{needle} distinct memory row");
+
+    let compact_body = crate::copilot_ops::handle_tachi_feature_briefing(
+        &server,
+        &task_briefing_params("briefing", &query, Some("json"), None),
+    )
+    .await
+    .expect("compact task briefing should serialize");
+    let compact_count = memory_fragment_count(&compact_body);
+    assert!(
+        compact_count <= 4,
+        "omitted compact with format=json must stay within the 4-row compact packet, got {compact_count}"
+    );
+
+    let full_body = crate::copilot_ops::handle_tachi_feature_briefing(
+        &server,
+        &task_briefing_params("briefing", &query, Some("full"), None),
+    )
+    .await
+    .expect("full task briefing should serialize");
+    let full_count = memory_fragment_count(&full_body);
+    assert!(
+        full_count > compact_count,
+        "format=full with omitted compact must not be silently clipped to the compact \
+         row count; compact={compact_count} full={full_count}"
+    );
+
+    // doc_index shares the same top_k/compact gate — same bug, same fix.
+    let doc_index_body = crate::copilot_ops::handle_tachi_feature_briefing(
+        &server,
+        &task_briefing_params("doc_index", &query, Some("full"), None),
+    )
+    .await
+    .expect("full doc_index should serialize");
+    let doc_index_count = memory_fragment_count(&doc_index_body);
+    assert!(
+        doc_index_count > compact_count,
+        "doc_index format=full with omitted compact must not be clipped either; \
+         compact={compact_count} doc_index_full={doc_index_count}"
+    );
+}
+
+/// kckylechen1/tachi#1058 FIX-3: an omitted `compact` (which defaults) and an
+/// explicit `compact=false` must produce visibly different output shapes even
+/// when `format` itself is omitted on both calls — the None/false distinction
+/// has to carry weight on its own, not just as a side effect of `format`.
+#[tokio::test]
+async fn task_briefing_omitted_compact_differs_from_explicit_false() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let needle = "OmittedVsExplicitNeedle";
+    seed_needle_memory_rows(&server, needle, 6);
+    let query = format!("{needle} distinct memory row");
+
+    let omitted_body = crate::copilot_ops::handle_tachi_feature_briefing(
+        &server,
+        &task_briefing_params("briefing", &query, None, None),
+    )
+    .await
+    .expect("omitted-compact task briefing should serialize");
+    let omitted_count = memory_fragment_count(&omitted_body);
+    assert!(
+        omitted_count <= 4,
+        "omitted compact (and omitted format) must default to the compact packet, got {omitted_count}"
+    );
+
+    let explicit_false_body = crate::copilot_ops::handle_tachi_feature_briefing(
+        &server,
+        &task_briefing_params("briefing", &query, None, Some(false)),
+    )
+    .await
+    .expect("explicit compact=false task briefing should serialize");
+    let explicit_false_count = memory_fragment_count(&explicit_false_body);
+    assert!(
+        explicit_false_count > omitted_count,
+        "explicit compact=false must restore the full board even with format omitted; \
+         omitted={omitted_count} explicit_false={explicit_false_count}"
+    );
 }
 
 /// #527: agent-facing default is compact. Omitting `compact` (serde default)

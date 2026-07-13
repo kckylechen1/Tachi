@@ -169,6 +169,7 @@ fn build_instruction_includes_required_sections() {
         content_hash: Some("a".repeat(16)),
         loaded: true,
         warning: None,
+        failure_class: None,
     };
     let s = build_instruction_md(
         "flow_x",
@@ -202,6 +203,7 @@ fn ship_instruction_includes_pr_first_release_flow() {
         content_hash: Some("b".repeat(16)),
         loaded: true,
         warning: None,
+        failure_class: None,
     };
     let s = build_instruction_md("flow_x", "ship", "ship it", &inj, None, &[], &[]);
     assert!(s.contains("## Release Flow"));

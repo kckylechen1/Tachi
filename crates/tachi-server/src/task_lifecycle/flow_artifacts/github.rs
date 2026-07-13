@@ -135,9 +135,21 @@ pub(in crate::task_lifecycle) fn intake_briefing_params(
     objective: &str,
     issue: &IssueSnapshot,
 ) -> TachiTaskParams {
+    // kckylechen1/tachi#1058: the outer intake call's `format` (e.g. "full")
+    // is the caller's only signal for wanting the full briefing board — it
+    // gets overwritten to "json" below (the inner briefing call always wants
+    // a machine-readable payload, not markdown). Read that intent BEFORE the
+    // overwrite and, when `compact` itself was left unset, reverse-pressure
+    // it into an explicit `compact = Some(false)` so the inner briefing call
+    // doesn't fall back to its own `compact` default and silently clip a
+    // `format="full"` intake down to the 4-row packet.
+    let wants_full = crate::facade_memory_ops::wants_full_format(params.format.as_deref());
     let mut briefing = params.clone();
     briefing.action = crate::tool_params::TachiTaskAction::Briefing;
     briefing.format = Some("json".to_string());
+    if briefing.compact.is_none() && wants_full {
+        briefing.compact = Some(false);
+    }
     briefing.flow_id = Some(flow_id.to_string());
     briefing.issue_ref = Some(format!("{}#{}", issue.repo, issue.number));
     briefing.task = Some(objective.to_string());

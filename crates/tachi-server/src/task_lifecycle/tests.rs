@@ -93,6 +93,69 @@ fn extract_markdown_paths_only_doc_md() {
     assert!(extract_markdown_paths("README.md changelog.md").is_empty());
 }
 
+/// kckylechen1/tachi#1058: an outer `intake` call's `format="full"` used to
+/// get silently discarded once `intake_briefing_params` overwrote the inner
+/// briefing call's `format` to `"json"` — the inner `compact` stayed `None`
+/// and defaulted to the tight 4-row packet regardless of what the caller
+/// asked for. `intake_briefing_params` must read the *original* `format`
+/// intent before the overwrite and reverse-pressure `compact` explicitly.
+#[test]
+fn intake_briefing_params_reverse_pressures_compact_for_format_full() {
+    let issue = IssueSnapshot {
+        repo: "o/r".to_string(),
+        number: 1,
+        title: "t".to_string(),
+        body: None,
+        labels: Vec::new(),
+        state: Some("open".to_string()),
+        url: "https://github.com/o/r/issues/1".to_string(),
+        doc_paths: Vec::new(),
+        spec_paths: Vec::new(),
+    };
+
+    // Outer intake call requested the full board but never touched `compact`.
+    let outer_full: TachiTaskParams = serde_json::from_value(json!({
+        "action": "intake",
+        "format": "full",
+    }))
+    .expect("deserialize intake params with format=full");
+    let briefing_full = intake_briefing_params(&outer_full, "flow_x", "objective", &issue);
+    assert_eq!(
+        briefing_full.compact,
+        Some(false),
+        "format=full intake must reverse-pressure the inner briefing call to \
+         compact=false, not leave it None to fall back to the compact default"
+    );
+    // format is still forced to json for the machine-readable inner call.
+    assert_eq!(briefing_full.format.as_deref(), Some("json"));
+
+    // An explicit compact still wins outright over format=full.
+    let outer_explicit: TachiTaskParams = serde_json::from_value(json!({
+        "action": "intake",
+        "format": "full",
+        "compact": true,
+    }))
+    .expect("deserialize intake params with explicit compact");
+    let briefing_explicit = intake_briefing_params(&outer_explicit, "flow_x", "objective", &issue);
+    assert_eq!(
+        briefing_explicit.compact,
+        Some(true),
+        "an explicit compact=true must not be overridden by format=full"
+    );
+
+    // format=json (the default) must not force compact=false.
+    let outer_json: TachiTaskParams = serde_json::from_value(json!({
+        "action": "intake",
+        "format": "json",
+    }))
+    .expect("deserialize intake params with format=json");
+    let briefing_json = intake_briefing_params(&outer_json, "flow_x", "objective", &issue);
+    assert_eq!(
+        briefing_json.compact, None,
+        "format=json must leave compact untouched (defaults to compact packet downstream)"
+    );
+}
+
 #[test]
 fn dedupe_strings_keeps_first_occurrence() {
     let mut v = vec![

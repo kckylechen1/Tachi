@@ -116,7 +116,20 @@ pub(super) struct InjectionResult {
     pub(super) content_hash: Option<String>,
     pub(super) loaded: bool,
     pub(super) warning: Option<String>,
+    /// Machine-readable classification of *why* injection did not `loaded`.
+    /// `None` when injection succeeded (or wasn't required for this stage).
+    /// Callers (e.g. the poke shell probe, kckylechen1/tachi#1058) use this to
+    /// tell "host skill roots aren't mounted on this runner" — the one
+    /// tolerated failure mode — apart from real I/O failures that should
+    /// still fail loudly.
+    pub(super) failure_class: Option<&'static str>,
 }
+
+/// `failure_class` value for: the meta-skill file could not be resolved in
+/// any known root (repo root / cwd / `CARGO_MANIFEST_DIR` / central vendored
+/// library). This is the *only* failure mode CI runners without host skill
+/// roots are expected to hit, and the only one callers should tolerate.
+pub(super) const FAILURE_CLASS_MISSING_SOURCE_ROOTS: &str = "missing_source_roots";
 
 pub(super) async fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionResult {
     let rel = match meta_skill_for_stage(stage) {
@@ -130,6 +143,7 @@ pub(super) async fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionR
                 content_hash: None,
                 loaded: false,
                 warning: None,
+                failure_class: None,
             };
         }
     };
@@ -143,6 +157,7 @@ pub(super) async fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionR
             content_hash: None,
             loaded: false,
             warning: Some(format!("create injected dir failed: {e}")),
+            failure_class: Some("create_dir_failed"),
         };
     }
     let resolved = match resolve_meta_skill(rel) {
@@ -159,6 +174,7 @@ pub(super) async fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionR
                     "meta skill file '{}' not found in any known root",
                     rel
                 )),
+                failure_class: Some(FAILURE_CLASS_MISSING_SOURCE_ROOTS),
             };
         }
     };
@@ -173,6 +189,7 @@ pub(super) async fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionR
                 content_hash: None,
                 loaded: false,
                 warning: Some(format!("read meta skill failed: {e}")),
+                failure_class: Some("read_failed"),
             };
         }
     };
@@ -191,6 +208,7 @@ pub(super) async fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionR
             content_hash: Some(digest),
             loaded: false,
             warning: Some(format!("write injected meta skill failed: {e}")),
+            failure_class: Some("write_failed"),
         };
     }
     InjectionResult {
@@ -201,5 +219,6 @@ pub(super) async fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionR
         content_hash: Some(digest),
         loaded: true,
         warning: None,
+        failure_class: None,
     }
 }

@@ -136,8 +136,17 @@ pub(crate) async fn handle_tachi_feature_briefing(
     server: &MemoryServer,
     params: &TachiTaskParams,
 ) -> Result<String, String> {
-    // #527: omitted compact defaults to true (agent packet). Full board is opt-in.
-    let top_k = if params.compact.unwrap_or(true) {
+    // #527: omitted compact defaults to true (agent packet). Full board is
+    // opt-in. `compact` and `format=full` both express the same intent
+    // (kckylechen1/tachi#1058: an omitted `compact` used to always win,
+    // silently clipping a caller's `format="full"` request down to the
+    // 4-row packet) — an explicit `compact` still wins outright, but when
+    // it's omitted, `format="full"` is treated as an implicit `compact=false`
+    // rather than being ignored.
+    let effective_compact = params
+        .compact
+        .unwrap_or_else(|| !crate::facade_memory_ops::wants_full_format(params.format.as_deref()));
+    let top_k = if effective_compact {
         params.top_k.unwrap_or(4).clamp(1, 4)
     } else {
         crate::clamp_facade_top_k(params.top_k.unwrap_or(6))
