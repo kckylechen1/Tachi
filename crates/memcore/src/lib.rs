@@ -51,14 +51,15 @@ pub use db::dispatch_outcomes::{
 #[cfg(feature = "admin")]
 pub use db::exec_env::{
     find_active_exec_env_by_path, get_exec_env, insert_exec_env, list_exec_envs, reclaim_exec_env,
-    ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, ReclaimOutcome,
+    EnvClass, ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, ReclaimOutcome,
 };
 #[cfg(feature = "admin")]
 pub use db::exec_env_resources::{
     active_binding_count, bind_resource, find_resource_by_path, get_resource, insert_resource,
     list_resources, quarantine_resource, reclaim_resource, record_resource_measurement,
-    release_binding, BindOutcome, ExecEnvResource, NewExecEnvResource, QuarantineOutcome,
-    RegisterOutcome, ReleaseBindingOutcome, ResourceKind, ResourceReclaimOutcome, ResourceState,
+    release_binding, release_quarantine, BindOutcome, ExecEnvResource, NewExecEnvResource,
+    QuarantineOutcome, RegisterOutcome, ReleaseBindingOutcome, ReleaseQuarantineOutcome,
+    ResourceKind, ResourceReclaimOutcome, ResourceState,
 };
 #[cfg(feature = "admin")]
 pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};

@@ -1,7 +1,8 @@
 use super::{
-    CardAction, CleanAction, DaemonAction, DistillAction, EnvAction, EvalAction, FoundryAction,
-    HarnessAction, HostAction, HubAction, ManifestAction, McpAction, PokeAction, RepairAction,
-    RescueAction, SkillSurfaceAction, VaultAction, WatcherAction, WikiAction, WorktreeAction,
+    BuildAction, CardAction, CleanAction, DaemonAction, DistillAction, EnvAction, EvalAction,
+    FoundryAction, HarnessAction, HostAction, HubAction, ManifestAction, McpAction, PokeAction,
+    RepairAction, RescueAction, SkillSurfaceAction, VaultAction, WatcherAction, WikiAction,
+    WorktreeAction,
 };
 use clap::Subcommand;
 use std::path::PathBuf;
@@ -77,6 +78,12 @@ pub enum Commands {
     Worktree {
         #[command(subcommand)]
         action: WorktreeAction,
+    },
+    /// Build broker (#894 S2c): submit immutable build tickets and drain them
+    /// through this machine's single serialized executor seat.
+    Build {
+        #[command(subcommand)]
+        action: BuildAction,
     },
     /// Doctor v2 — extension-aware DB classification (read-only by default)
     Doctor {

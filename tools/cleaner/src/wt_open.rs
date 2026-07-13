@@ -25,6 +25,9 @@ pub struct OpenOptions {
     pub dispatch_id: Option<String>,
     /// Directory leaf name under the managed root (generated when omitted).
     pub name: Option<String>,
+    /// What build target this worktree is wired to (#894 S2c). The env class
+    /// decides this; `Unallocated` is the `edit-only` default.
+    pub cargo_target: CargoTargetPolicy,
     pub dry_run: bool,
     pub output: OutputFormat,
 }
@@ -137,12 +140,46 @@ pub fn default_shared_cargo_target_dir() -> Result<PathBuf, String> {
     }
 }
 
-/// Outcome of attempting to provision a shared `cargo` `target-dir` for a
-/// freshly opened managed worktree.
+/// What build target, if any, a freshly opened worktree is wired to (#894 S2c).
+///
+/// Pre-S2c there was one behavior: every managed worktree got a
+/// `.cargo/config.toml` pointing at the machine-shared `CARGO_TARGET_DIR`
+/// (#484 slice 2, to stop each tree growing its own multi-GB `target/`). That
+/// solved disk and created a correctness bug: N *diverged* worktrees driving
+/// one target dir produced phantom compile errors (a symbol you can grep in the
+/// source reported as `not found` by rustc — twice in one night, 2026-07-13).
+///
+/// So target allocation is now a per-env-class decision:
+///
+/// - [`CargoTargetPolicy::Unallocated`] — the `edit-only` default. No
+///   `.cargo/config.toml` at all: this tree is not wired to any shared target,
+///   and builds belong in the broker's serialized executor seat. This is a
+///   *disk + routing* policy, NOT a sandbox: nothing stops a worker with a
+///   shell from running cargo here anyway. What it does guarantee is that if
+///   they do, the damage is a local `target/` dir the sweep can reclaim — they
+///   cannot poison the seat's shared target from a diverged tree.
+/// - [`CargoTargetPolicy::Shared`] — the pre-S2c behavior, kept for callers
+///   that genuinely want the machine-shared target (the executor seat itself).
+/// - [`CargoTargetPolicy::Private`] — an explicitly approved private target dir
+///   (`build-private`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CargoTargetPolicy {
+    /// No build target dir is wired to this worktree.
+    Unallocated,
+    /// Point `.cargo/config.toml` at the machine-shared `CARGO_TARGET_DIR`.
+    Shared,
+    /// Point `.cargo/config.toml` at this specific (private) target dir.
+    Private(PathBuf),
+}
+
+/// Outcome of attempting to provision a `cargo` `target-dir` for a freshly
+/// opened managed worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CargoTargetProvision {
-    /// `.cargo/config.toml` was written pointing at this shared target dir.
+    /// `.cargo/config.toml` was written pointing at this target dir.
     Written(PathBuf),
+    /// The policy allocates no build target ([`CargoTargetPolicy::Unallocated`]).
+    SkippedUnallocated,
     /// Not a Rust repo (no root `Cargo.toml`) — skipped silently.
     SkippedNotRustRepo,
     /// `.cargo/config.toml` already existed — never overwritten.
@@ -150,17 +187,22 @@ pub enum CargoTargetProvision {
 }
 
 /// Write `<worktree_path>/.cargo/config.toml` with `[build] target-dir =
-/// "<shared>"` so every managed worktree shares one `cargo` target dir
-/// instead of growing its own multi-GB local `target/` (#484 slice 2).
+/// "<dir>"` per `policy` (#484 slice 2, generalized by #894 S2c).
 ///
 /// File-based (not env-based) so it survives any child process/lane that
 /// forgets to export `CARGO_TARGET_DIR`. Only applies to Rust repos (a root
 /// `Cargo.toml` must exist in the worktree already, since `git worktree add`
-/// checks out tracked files before this runs) and never overwrites an
-/// existing `.cargo/config.toml`.
-pub fn provision_shared_cargo_target_config(
+/// checks out tracked files before this runs) and never overwrites an existing
+/// `.cargo/config.toml`.
+pub fn provision_cargo_target_config(
     worktree_path: &Path,
+    policy: &CargoTargetPolicy,
 ) -> Result<CargoTargetProvision, String> {
+    // Checked before the Rust-repo probe: "this env gets no target" is a policy
+    // statement, not a fact about the repo, and it holds either way.
+    if matches!(policy, CargoTargetPolicy::Unallocated) {
+        return Ok(CargoTargetProvision::SkippedUnallocated);
+    }
     if !worktree_path.join("Cargo.toml").exists() {
         return Ok(CargoTargetProvision::SkippedNotRustRepo);
     }
@@ -169,21 +211,44 @@ pub fn provision_shared_cargo_target_config(
     if config_path.exists() {
         return Ok(CargoTargetProvision::SkippedExisting);
     }
-    let target_dir = default_shared_cargo_target_dir()?;
+    let (target_dir, provenance) = match policy {
+        CargoTargetPolicy::Unallocated => unreachable!("handled above"),
+        CargoTargetPolicy::Shared => (
+            default_shared_cargo_target_dir()?,
+            format!(
+                "# Written by tachi wt-open (#484): shared cargo target-dir so managed\n\
+                 # worktrees don't each grow their own multi-GB local target/.\n\
+                 # Override via {SHARED_CARGO_TARGET_DIR_ENV} at worktree-open time.\n"
+            ),
+        ),
+        CargoTargetPolicy::Private(dir) => {
+            if !dir.is_absolute() {
+                return Err(format!(
+                    "private cargo target-dir must be an absolute path, got '{}': cargo \
+                     resolves a relative target-dir against the per-invocation cwd, not the \
+                     worktree root",
+                    dir.display()
+                ));
+            }
+            (
+                dir.clone(),
+                "# Written by tachi wt-open (#894 S2c): PRIVATE cargo target-dir for an\n\
+                 # explicitly approved build-private env. Not shared with any other tree.\n"
+                    .to_string(),
+            )
+        }
+    };
     std::fs::create_dir_all(&cargo_dir)
         .map_err(|err| format!("create {}: {err}", cargo_dir.display()))?;
     let contents = format!(
-        "# Written by tachi wt-open (#484): shared cargo target-dir so managed\n\
-         # worktrees don't each grow their own multi-GB local target/.\n\
-         # Override via {SHARED_CARGO_TARGET_DIR_ENV} at worktree-open time.\n\
-         [build]\n\
-         target-dir = \"{}\"\n",
+        "{provenance}[build]\ntarget-dir = \"{}\"\n",
         escape_toml_string(&target_dir.display().to_string())
     );
     std::fs::write(&config_path, contents)
         .map_err(|err| format!("write {}: {err}", config_path.display()))?;
     Ok(CargoTargetProvision::Written(target_dir))
 }
+
 
 /// Minimal TOML basic-string escaping (backslash + double-quote) — paths on
 /// this platform never legitimately need more than that.
@@ -379,24 +444,26 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
     }
     report.opened = true;
 
-    // Shared cargo target-dir (#484 slice 2): file-based so it survives any
-    // child process/lane that forgets to export CARGO_TARGET_DIR. Never
-    // fatal — a failure here does not undo the worktree open.
-    match provision_shared_cargo_target_config(&path) {
+    // Cargo target-dir per the env class's policy (#484 slice 2, #894 S2c):
+    // file-based so it survives any child process/lane that forgets to export
+    // CARGO_TARGET_DIR. Never fatal — a failure here does not undo the worktree
+    // open. An `Unallocated` (edit-only) worktree gets no config at all.
+    match provision_cargo_target_config(&path, &options.cargo_target) {
         Ok(CargoTargetProvision::Written(dir)) => {
             report.cargo_target_dir = Some(dir.display().to_string());
         }
+        Ok(CargoTargetProvision::SkippedUnallocated) => {}
         Ok(CargoTargetProvision::SkippedNotRustRepo) => {}
         Ok(CargoTargetProvision::SkippedExisting) => {
             report.warnings.push(format!(
-                "skipped shared cargo target-dir provisioning: {} already exists",
+                "skipped cargo target-dir provisioning: {} already exists",
                 path.join(".cargo").join("config.toml").display()
             ));
         }
         Err(err) => {
-            report.warnings.push(format!(
-                "shared cargo target-dir provisioning failed: {err}"
-            ));
+            report
+                .warnings
+                .push(format!("cargo target-dir provisioning failed: {err}"));
         }
     }
 
@@ -745,7 +812,9 @@ mod tests {
         let a = short_id();
         let b = short_id();
         assert_eq!(a.len(), 12, "short_id must keep 48 bits (12 hex chars)");
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         assert_ne!(a, b, "consecutive short_ids must not collide");
     }
 
@@ -867,6 +936,7 @@ mod tests {
             role: Some("executor".into()),
             dispatch_id: None,
             name: None,
+            cargo_target: CargoTargetPolicy::Shared,
             dry_run: false,
             output: OutputFormat::Json,
         })
@@ -912,6 +982,7 @@ mod tests {
             role: Some("executor".into()),
             dispatch_id: Some("dispatch-484".into()),
             name: Some("484-executor-test".into()),
+            cargo_target: CargoTargetPolicy::Shared,
             dry_run: false,
             output: OutputFormat::Json,
         })
@@ -980,6 +1051,7 @@ mod tests {
             role: Some("worker".into()),
             dispatch_id: None,
             name: Some("dry-leaf".into()),
+            cargo_target: CargoTargetPolicy::Shared,
             dry_run: true,
             output: OutputFormat::Json,
         })
@@ -1047,6 +1119,7 @@ mod tests {
             role: Some("executor".into()),
             dispatch_id: None,
             name: None,
+            cargo_target: CargoTargetPolicy::Shared,
             dry_run: false,
             output: OutputFormat::Json,
         });
@@ -1081,6 +1154,7 @@ mod tests {
             role: Some("executor".into()),
             dispatch_id: None,
             name: None,
+            cargo_target: CargoTargetPolicy::Shared,
             dry_run: false,
             output: OutputFormat::Json,
         });
@@ -1107,7 +1181,7 @@ mod tests {
         let old = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV);
         std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, &target);
 
-        let outcome = provision_shared_cargo_target_config(&root).expect("provision ok");
+        let outcome = provision_cargo_target_config(&root, &CargoTargetPolicy::Shared).expect("provision ok");
         match &outcome {
             CargoTargetProvision::Written(dir) => assert_eq!(dir, &target),
             other => panic!("expected Written, got {other:?}"),
@@ -1134,7 +1208,7 @@ mod tests {
         let root = unique_temp("tachi-cargo-provision-non-rust");
         // No Cargo.toml.
 
-        let outcome = provision_shared_cargo_target_config(&root).expect("provision ok");
+        let outcome = provision_cargo_target_config(&root, &CargoTargetPolicy::Shared).expect("provision ok");
         assert_eq!(outcome, CargoTargetProvision::SkippedNotRustRepo);
         assert!(
             !root.join(".cargo").exists(),
@@ -1157,7 +1231,7 @@ mod tests {
         let old = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV);
         std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, &target);
 
-        let outcome = provision_shared_cargo_target_config(&root).expect("provision ok");
+        let outcome = provision_cargo_target_config(&root, &CargoTargetPolicy::Shared).expect("provision ok");
         assert_eq!(outcome, CargoTargetProvision::SkippedExisting);
         let contents = std::fs::read_to_string(root.join(".cargo").join("config.toml")).unwrap();
         assert_eq!(contents, custom, "existing config.toml must be untouched");
@@ -1182,7 +1256,7 @@ mod tests {
         let old = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV);
         std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, "relative/shared-target");
 
-        let err = provision_shared_cargo_target_config(&root)
+        let err = provision_cargo_target_config(&root, &CargoTargetPolicy::Shared)
             .expect_err("relative override must be rejected");
         assert!(
             err.contains("must be an absolute path"),
@@ -1214,7 +1288,7 @@ mod tests {
         let old = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV);
         std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, &target);
 
-        let outcome = provision_shared_cargo_target_config(&root).expect("provision ok");
+        let outcome = provision_cargo_target_config(&root, &CargoTargetPolicy::Shared).expect("provision ok");
         assert_eq!(outcome, CargoTargetProvision::Written(target.clone()));
         let contents = std::fs::read_to_string(root.join(".cargo").join("config.toml")).unwrap();
         assert!(
@@ -1274,6 +1348,7 @@ mod tests {
             role: Some("executor".into()),
             dispatch_id: Some("dispatch-484-cargo-relative".into()),
             name: Some("484-executor-cargo-relative".into()),
+            cargo_target: CargoTargetPolicy::Shared,
             dry_run: false,
             output: OutputFormat::Json,
         })
@@ -1372,6 +1447,7 @@ mod tests {
             role: Some("executor".into()),
             dispatch_id: Some("dispatch-484-cargo".into()),
             name: Some("484-executor-cargo".into()),
+            cargo_target: CargoTargetPolicy::Shared,
             dry_run: false,
             output: OutputFormat::Json,
         })
