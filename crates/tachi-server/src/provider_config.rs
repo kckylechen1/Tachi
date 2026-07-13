@@ -30,11 +30,18 @@ pub fn vault_api_key_pools_from_keychain(
     global_db_path: &Path,
 ) -> HashMap<String, Vec<ProviderSecret>> {
     let rotation_prefixes = rotation_prefixes_from_global_db(global_db_path);
-    group_api_key_values_by_configured_rotations(
-        crate::status_ops::status_health::load_keychain_vault_api_key_values(global_db_path)
-            .unwrap_or_default(),
-        &rotation_prefixes,
-    )
+    let values = match crate::status_ops::status_health::load_keychain_vault_api_key_values(
+        global_db_path,
+    ) {
+        Ok(values) => values,
+        Err(err) => {
+            tracing::warn!(
+                "[vault] keychain vault read failed during provider key resolution: {err}"
+            );
+            Vec::new()
+        }
+    };
+    group_api_key_values_by_configured_rotations(values, &rotation_prefixes)
 }
 
 fn resolve_vault_pools(

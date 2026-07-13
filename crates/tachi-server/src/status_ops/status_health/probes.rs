@@ -166,10 +166,15 @@ pub(super) async fn run_rotation_group_probes(
     if rotation_sources.is_empty() {
         return Vec::new();
     }
-    let values = load_keychain_vault_api_key_values(global_db_path)
-        .unwrap_or_default()
-        .into_iter()
-        .collect::<HashMap<_, _>>();
+    let values = match load_keychain_vault_api_key_values(global_db_path) {
+        Ok(values) => values,
+        Err(err) => {
+            tracing::warn!("[vault] keychain vault read failed during rotation probes: {err}");
+            Vec::new()
+        }
+    }
+    .into_iter()
+    .collect::<HashMap<_, _>>();
     let probed_at = chrono::Utc::now().to_rfc3339();
 
     let mut groups = Vec::new();
