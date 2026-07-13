@@ -1,5 +1,70 @@
 //! Orphan build-artifact reaper (#894 S2b) — the bytes nobody is holding.
 //!
+//! # REPORT-ONLY. The destructive path is NOT certified and is REFUSED.
+//!
+//! An adversarial review of the delete path (codex, audit `codex-g6f99`) returned
+//! **NOT-SAFE**, and every defect it found was reproduced. So this module ships with
+//! its knife sheathed: [`run_orphan_reap`] **refuses `--force`** and returns a typed
+//! [`DestructiveRefusal`]; the CLI prints that refusal and exits non-zero. Nothing is
+//! deleted, by any caller, on any path.
+//!
+//! This is the doctrine S2d applies to everything else in #894 — *a capability is
+//! fail-closed until a kill-test certifies it* — and it binds us too, most of all when
+//! the capability deletes 61 GB and the reviewer says it is wrong.
+//!
+//! ## The blocking defects (why the knife stays sheathed) — [`BLOCKING_DEFECTS`]
+//!
+//! * **BUG 1 — a live build cache is invisible to the holder probe.**
+//!   [`live_build_target_dirs`] reads `ps -Awwo command=`, which prints **argv and only
+//!   argv**. Every build seat in this repo does `export CARGO_TARGET_DIR=…` — an
+//!   *environment* variable, on nobody's command line — so a running build's target dir
+//!   never appears in the process table this module reads. `lsof` does not cover for it
+//!   either: `cargo` between two compile units holds no file descriptor under the
+//!   target. A live cache can therefore be unprotected, unheld, and (a week into a long
+//!   lane) stale, all at once. **That is a delete of a live build cache** — the exact
+//!   accident the protected set exists to prevent.
+//! * **BUG 2 — the pinned identity is a pathname, not a file identity.**
+//!   [`OrphanCandidate::identity`] is a `PathBuf`: a *spelling*. Rename the judged
+//!   directory away, drop a live one at the same path, and the deleter's re-resolution
+//!   yields the same string, the staleness and holder verdicts are never recomputed, and
+//!   the replacement is deleted. A real identity is `(dev, ino)` captured at judgement
+//!   and re-`stat`ed at the delete — better, an fd held across the decision.
+//! * **BUG 4 — a partial delete still exits 0.** A `remove_dir_all` that fails halfway
+//!   leaves the resource half-deleted, and the run's exit status does not say so.
+//! * **CONCERN 6 — most of the safety tests do not discriminate.** A large share of them
+//!   pass against a reaper that does nothing at all: they assert "the directory still
+//!   exists" without ever proving the run *would* have deleted a comparable directory
+//!   that was genuinely dead. A safety suite a no-op passes certifies nothing.
+//!
+//! ## Closed in this cut
+//!
+//! They were cheap, and an uncertified reaper must at least not *lie*:
+//!
+//! * **BUG 3 — an incomplete protection set no longer permits anything.** `ps` failing,
+//!   `HOME` unset, a relative `CARGO_TARGET_DIR`: each was a `warning` that did not stop
+//!   the run, did not set `incomplete`, and exited 0 — fail-open dressed as candour. A
+//!   [`Protection`] with any unresolved source is now [`Protection::is_complete`] =
+//!   false, which forces `ReapReport::incomplete` and a non-zero [`reap_exit_status`].
+//! * **CONCERN 5 — the scan's conservation law was a tautology.** `ScanAccounting::record`
+//!   bumped `examined` and exactly one bucket in the same statement, so `balances()`
+//!   could not fail; it asserted that addition works. Enqueue and dequeue are now counted
+//!   independently of the buckets (`enqueued == dequeued == examined == Σ buckets`), so a
+//!   unit taken off the work list that never reaches a bucket — the bare-`continue`
+//!   regression the invariant exists to catch — breaks the law instead of hiding inside
+//!   it. Duplicate `--root`s are deduplicated too, so one subtree is no longer walked,
+//!   counted, and reported twice.
+//!
+//! Re-enabling the destructive path means closing BUGs 1, 2 and 4 and *certifying* them
+//! with a kill-test suite — a mutation that would delete a live cache must turn a test
+//! red. That is a separate knife. Until it lands, everything below is a **report**.
+//!
+//! ## What it is still for
+//!
+//! The dry run answers the question that motivated the ticket — *how many dead GB are on
+//! this machine, and where?* — with the books open: candidates, bytes, ages, holders,
+//! [`ReapReport::reclaimable_bytes`], every unit the scan could not account for, and an
+//! exit code that matches.
+//!
 //! S1 tracks leases (`exec_envs`), S2a tracks the bytes those leases own
 //! (`exec_env_resources`). Neither sees the *orphans*: a build target left
 //! behind by a process that died, owned by no lease, in no ledger. The
@@ -159,6 +224,81 @@ const DEFAULT_MAX_DEPTH: usize = 3;
 
 const SECS_PER_DAY: u64 = 24 * 60 * 60;
 
+// ── Certification (the sheath) ──────────────────────────────────────────────
+
+/// Has the destructive path been certified safe to run? **No.** See the module docs:
+/// the adversarial review (`codex-g6f99`) returned NOT-SAFE, the defects reproduce, and
+/// until they are closed *and kill-tested* this reaper reports and nothing more.
+///
+/// A `const` rather than a config flag, on purpose. A flag is something an operator can
+/// flip at 2 a.m. under disk pressure; the gate between a scan of `~/.cache` and
+/// `remove_dir_all` should cost a code change, a review, and a test suite.
+pub(crate) const DESTRUCTIVE_CERTIFIED: bool = false;
+
+/// The audit that sheathed it.
+pub(crate) const BLOCKING_AUDIT: &str = "codex-g6f99";
+
+/// Why the delete path may not run — verbatim in the refusal, in the report, and on the
+/// CLI's stderr. An operator who types `--force` is told exactly what is broken, not
+/// merely that they were denied.
+pub(crate) const BLOCKING_DEFECTS: &[&str] = &[
+    "the holder probe cannot see a live cache whose CARGO_TARGET_DIR is inherited from the \
+     environment rather than passed on argv (`ps` prints argv only, and `cargo` between compile \
+     units holds no fd for `lsof` to find), so a live build cache can be unprotected, unheld and \
+     stale all at once",
+    "the pinned identity is a pathname, not a file identity (dev+inode): a rename-and-replace at \
+     the same path, between the verdict and the delete, defeats it",
+    "a partial `remove_dir_all` failure still exits 0",
+    "most of the safety tests do not discriminate: a reaper that does nothing at all passes them",
+];
+
+/// The typed refusal a destructive request gets. Not a silent skip, and not an empty
+/// report that reads like a clean run — an `Err` the caller must handle, carrying the
+/// reason back to whoever asked.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct DestructiveRefusal {
+    pub(crate) action: &'static str,
+    /// Always `true`: nothing was scanned, measured, booked or deleted.
+    pub(crate) refused: bool,
+    pub(crate) reason: String,
+    pub(crate) audit: &'static str,
+    pub(crate) blocking_defects: Vec<String>,
+}
+
+impl DestructiveRefusal {
+    fn new() -> Self {
+        Self {
+            action: "reap-orphans",
+            refused: true,
+            reason: format!(
+                "orphan reap is report-only: the destructive path is not certified. Blocking \
+                 defects (adversarial audit `{BLOCKING_AUDIT}`): {}. Re-enable only when those \
+                 are closed and a kill-test suite certifies the destructive path. Run without \
+                 `--force` for the report.",
+                BLOCKING_DEFECTS.join("; ")
+            ),
+            audit: BLOCKING_AUDIT,
+            blocking_defects: BLOCKING_DEFECTS.iter().map(|d| d.to_string()).collect(),
+        }
+    }
+}
+
+impl std::fmt::Display for DestructiveRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+/// The ONE gate between any caller and the delete path. The CLI asks it before it opens
+/// the ledger; [`run_orphan_reap`] asks it again so a future caller cannot route around
+/// the CLI. Today it always says no.
+pub(crate) fn certify_destructive(force: bool) -> Result<(), DestructiveRefusal> {
+    if force && !DESTRUCTIVE_CERTIFIED {
+        return Err(DestructiveRefusal::new());
+    }
+    Ok(())
+}
+
 // ── Holder check ────────────────────────────────────────────────────────────
 
 /// Whether any process holds a file under a candidate directory.
@@ -264,20 +404,42 @@ fn interpret_lsof(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HolderC
 /// cache was one `tachi clean orphans --force` away from deletion.
 const CARGO_TARGET_DIR_ENV: &str = "CARGO_TARGET_DIR";
 
-/// Paths the reaper refuses to consider, and everything that went wrong while
-/// working out what they are.
+/// Paths the reaper refuses to consider, and every protection source it could not
+/// resolve while working them out.
 ///
-/// The warnings are not decoration: an incomplete protected set has to reach the
-/// operator. The first cut collected a `Result` straight into a `Vec`, so "HOME
-/// is unset" quietly became *nothing is protected*.
+/// **The gaps are the point (sol audit, BUG 3).** The first cut collected a `Result`
+/// straight into a `Vec`, so "HOME is unset" quietly became *nothing is protected*. The
+/// second cut surfaced that as a `warning` — and then deleted anyway, exited 0, and left
+/// `incomplete` false. A warning that does not stop the run is fail-open dressed as
+/// candour.
+///
+/// So an unresolved source is a **gap**, and a gap is not a remark: any gap makes
+/// [`Self::is_complete`] false, which forces `ReapReport::incomplete` and a non-zero
+/// [`reap_exit_status`]. Every push into this vec is a fence the reaper *could not
+/// build*.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Protection {
     paths: Vec<PathBuf>,
-    pub(crate) warnings: Vec<String>,
+    /// Protection sources that could not be resolved (`ps` unavailable, `HOME` unset, a
+    /// relative target dir). Non-empty ⇒ the protected set is INCOMPLETE ⇒ the run may
+    /// not report success.
+    gaps: Vec<String>,
 }
 
 impl Protection {
-    pub(crate) fn new(paths: impl IntoIterator<Item = PathBuf>, warnings: Vec<String>) -> Self {
+    /// True only when every protection source resolved. A run over an incomplete
+    /// protected set does not get to say "success" — it does not know what it must not
+    /// touch.
+    pub(crate) fn is_complete(&self) -> bool {
+        self.gaps.is_empty()
+    }
+
+    /// The unresolved sources, as operator-visible lines.
+    pub(crate) fn gaps(&self) -> &[String] {
+        &self.gaps
+    }
+
+    pub(crate) fn new(paths: impl IntoIterator<Item = PathBuf>, gaps: Vec<String>) -> Self {
         let mut all: Vec<PathBuf> = Vec::new();
         for path in paths {
             // Keep the canonical spelling too: `/tmp/x` and `/private/tmp/x` are
@@ -301,10 +463,7 @@ impl Protection {
         }
         all.sort();
         all.dedup();
-        Self {
-            paths: all,
-            warnings,
-        }
+        Self { paths: all, gaps }
     }
 
     pub(crate) fn paths(&self) -> &[PathBuf] {
@@ -463,9 +622,22 @@ pub(crate) fn protected_paths() -> Protection {
 /// is the safe direction here. The cost of protecting one directory too many is
 /// that it survives; the cost of missing one is a deleted build cache.
 ///
-/// A `ps` that will not run is a **warning, not a hard stop**: this is
-/// defense-in-depth on top of the holder probe, which is fail-closed on its own
-/// (no `lsof` ⇒ `Unknown` ⇒ nothing is reclaimed).
+/// # This source is BLINDER THAN IT LOOKS (audit `codex-g6f99`, BUG 1 — OPEN)
+///
+/// `ps -Awwo command=` prints **argv, and nothing but argv**. A build that took its
+/// target dir from the *environment* — `export CARGO_TARGET_DIR=…`, which is how every
+/// build seat in this repo runs — names it on no command line, and this function cannot
+/// see it. The `lsof` gate does not cover the hole: `cargo` between two compile units
+/// holds no fd under the target. So a **live** build cache can be absent from the
+/// protected set, probe as `HolderCheck::None`, and pass the staleness gate.
+///
+/// This is the first reason the destructive path is refused ([`certify_destructive`]).
+/// Closing it means reading each process's *environment* (`/proc/<pid>/environ`, `ps -E`,
+/// or the platform equivalent) — not merely tolerating a `ps` that fails.
+///
+/// A `ps` that will not run is now a **gap**, not a passing warning: it makes the
+/// protected set incomplete, and that costs the run its clean exit
+/// ([`Protection::is_complete`], BUG 3 — closed).
 fn live_build_target_dirs() -> (Vec<PathBuf>, Vec<String>) {
     // -A: every process, not just this terminal's. -ww: never truncate the
     // command line at terminal width — a truncated line silently drops the very
@@ -473,7 +645,8 @@ fn live_build_target_dirs() -> (Vec<PathBuf>, Vec<String>) {
     let unavailable = |why: String| {
         vec![format!(
             "process scan unavailable ({why}): the target dirs of live builds are NOT in the \
-             protected set for this run; the fail-closed holder probe is the only fence left"
+             protected set for this run. A GAP, not a note: the run is incomplete and cannot exit \
+             clean — and the holder probe does not cover for it (BUG 1)"
         )]
     };
     match Command::new("ps").args(["-Awwo", "command="]).output() {
@@ -569,11 +742,21 @@ pub(crate) struct OrphanCandidate {
     /// the link in between and the run decides about one directory and deletes another.
     ///
     /// So the scan resolves the name **once**, here, and the deleter re-resolves it and
-    /// refuses unless it still lands on the same object ([`delete_resource_bytes`]). Not
-    /// `openat`/fd semantics — a genuinely atomic identity would need the fd, and this
-    /// module deliberately stays on paths — but the object the run *judged* and the
-    /// object it *deletes* are now the same pinned resolution, and a mismatch is a
-    /// refusal, not a delete.
+    /// refuses unless it still lands on the same object ([`delete_resource_bytes`]).
+    ///
+    /// # This is NOT a file identity (audit `codex-g6f99`, BUG 2 — OPEN)
+    ///
+    /// A `PathBuf` is a *spelling*, and re-resolving a spelling proves only that the
+    /// spelling still resolves — not that it resolves to **the same object**. Move the
+    /// judged directory aside, drop a live one in its place, and the re-resolution
+    /// matches (same string), the staleness and holder verdicts are never recomputed
+    /// against the new inode, and the replacement is deleted. Retargeting a *symlink* is
+    /// fenced; a rename-and-replace at the same path is not.
+    ///
+    /// A real identity is `(dev, ino)` captured at judgement and re-`stat`ed at the
+    /// delete — better still, an fd held across the decision so the object cannot be
+    /// swapped at all. This module stays on paths, which is one of the reasons its
+    /// destructive path is refused ([`certify_destructive`]).
     pub(crate) identity: PathBuf,
     pub(crate) kind: ResourceKind,
     pub(crate) staleness: Staleness,
@@ -658,6 +841,11 @@ pub(crate) enum UnitOutcome {
     Descended,
     /// Expected exclusion — the walk's depth budget ends the authorized scope here.
     DepthLimited,
+    /// Expected exclusion — a scan root naming a directory an earlier root already names
+    /// (CONCERN 5). It is walked ONCE: the same subtree examined twice inflated every
+    /// count in the report and listed the same dead gigabytes twice, as if there were two
+    /// of them. Excluded by policy, not by ignorance — nothing under it goes unexamined.
+    RootDuplicate,
     /// Safety refusal — it is inside a protected path, or it covers one.
     ProtectedPruned,
     /// Incomplete — a named scan root that does not exist / is not a directory.
@@ -670,58 +858,102 @@ impl UnitOutcome {
     pub(crate) fn class(self) -> UnitClass {
         match self {
             UnitOutcome::Candidate | UnitOutcome::Descended => UnitClass::Progressed,
-            UnitOutcome::DepthLimited => UnitClass::ExpectedExclusion,
+            UnitOutcome::DepthLimited | UnitOutcome::RootDuplicate => UnitClass::ExpectedExclusion,
             UnitOutcome::ProtectedPruned => UnitClass::SafetyRefusal,
             UnitOutcome::RootMissing | UnitOutcome::Unreadable => UnitClass::IncompleteOrError,
         }
     }
 }
 
-/// One bucket per [`UnitOutcome`], and `examined` = the sum of them all.
+/// One bucket per [`UnitOutcome`] — plus the two counters that make the conservation law
+/// mean something.
 ///
-/// [`Self::record`] is the ONLY way to increment: it bumps `examined` and exactly
-/// one bucket, in one statement, so conservation cannot drift by forgetting to
-/// count something. [`Self::balances`] is the assertion of that law.
+/// # The law was a tautology (audit `codex-g6f99`, CONCERN 5 — closed)
+///
+/// The first cut's `balances()` compared `examined` against the sum of the buckets, and
+/// `record()` incremented `examined` and exactly one bucket **in the same statement**.
+/// The equation could not fail. It was not an invariant; it was an assertion that
+/// addition works — and it would have gone on passing while the walk dropped units on the
+/// floor, which is precisely the regression (`continue` with no `record`) it was written
+/// to catch.
+///
+/// So the flow is now counted where it actually happens, in three places that know
+/// nothing about one another:
+///
+/// * `enqueued` — where a unit is *discovered* and pushed onto the work list,
+/// * `dequeued` — at the single `pop`, before the unit is dispatched,
+/// * `examined` + one bucket — in [`Self::record`], at the unit's terminal verdict.
+///
+/// [`Self::balances`] then asserts `enqueued == dequeued == examined == Σ buckets`. Take
+/// a unit off the work list and fall through without recording it and `dequeued >
+/// examined`; discover work and drop it and `enqueued > dequeued`. Either breaks the law,
+/// sets `incomplete`, and costs the run its clean exit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct ScanAccounting {
-    /// Every scan root, plus every directory the walk examined.
+    /// Units discovered and pushed onto the work list: every scan root, every
+    /// subdirectory the walk found, every entry it could not read.
+    pub(crate) enqueued: usize,
+    /// Units taken off the work list to be dispatched. Independent of `examined` on
+    /// purpose — that is the entire point of the pair.
+    pub(crate) dequeued: usize,
+    /// Units that reached a terminal verdict. Equals the sum of the buckets below.
     pub(crate) examined: usize,
     pub(crate) candidates: usize,
     pub(crate) descended: usize,
     pub(crate) depth_limited: usize,
+    pub(crate) roots_duplicate: usize,
     pub(crate) protected_pruned: usize,
     pub(crate) roots_missing: usize,
     pub(crate) unreadable: usize,
 }
 
 impl ScanAccounting {
+    /// A unit was discovered and put on the work list.
+    fn enqueue(&mut self) {
+        self.enqueued += 1;
+    }
+
+    /// A unit was taken off the work list. Every dequeue MUST be followed by exactly one
+    /// [`Self::record`] — that obligation is what [`Self::balances`] audits.
+    fn dequeue(&mut self) {
+        self.dequeued += 1;
+    }
+
     fn record(&mut self, outcome: UnitOutcome) {
         self.examined += 1;
         match outcome {
             UnitOutcome::Candidate => self.candidates += 1,
             UnitOutcome::Descended => self.descended += 1,
             UnitOutcome::DepthLimited => self.depth_limited += 1,
+            UnitOutcome::RootDuplicate => self.roots_duplicate += 1,
             UnitOutcome::ProtectedPruned => self.protected_pruned += 1,
             UnitOutcome::RootMissing => self.roots_missing += 1,
             UnitOutcome::Unreadable => self.unreadable += 1,
         }
     }
 
-    /// Conservation: every examined unit is in exactly one bucket.
-    pub(crate) fn balances(&self) -> bool {
-        self.examined
-            == self.candidates
-                + self.descended
-                + self.depth_limited
-                + self.protected_pruned
-                + self.roots_missing
-                + self.unreadable
+    fn bucket_total(&self) -> usize {
+        self.candidates
+            + self.descended
+            + self.depth_limited
+            + self.roots_duplicate
+            + self.protected_pruned
+            + self.roots_missing
+            + self.unreadable
     }
 
-    /// Any unit in the `incomplete-or-error` class (or, defensively, a total that
-    /// does not add up) means the authorized scope was NOT fully accounted for —
-    /// and a run that cannot account for its scope may not report success, `--force`
-    /// or not.
+    /// Conservation: nothing discovered was dropped (`enqueued == dequeued`), nothing
+    /// dequeued escaped a verdict (`dequeued == examined`), and every verdict landed in
+    /// exactly one bucket (`examined == Σ buckets`).
+    pub(crate) fn balances(&self) -> bool {
+        self.enqueued == self.dequeued
+            && self.dequeued == self.examined
+            && self.examined == self.bucket_total()
+    }
+
+    /// Any unit in the `incomplete-or-error` class — or books that do not balance, which
+    /// means the walk lost track of its own scope — says the authorized scope was NOT
+    /// completely accounted for. Such a run may not report success.
     pub(crate) fn incomplete(&self) -> bool {
         self.roots_missing > 0 || self.unreadable > 0 || !self.balances()
     }
@@ -744,6 +976,9 @@ pub(crate) struct ScanOutcome {
     pub(crate) candidates: Vec<OrphanCandidate>,
     pub(crate) accounting: ScanAccounting,
     pub(crate) skips: Vec<ScanSkip>,
+    /// Scope oddities worth an operator's eye that are not themselves units — today, a
+    /// scan root nested inside another scan root (see [`dedup_scan_roots`]).
+    pub(crate) warnings: Vec<String>,
 }
 
 impl ScanOutcome {
@@ -759,6 +994,90 @@ impl ScanOutcome {
             });
         }
     }
+}
+
+/// One item of work. The walk's stack holds these and nothing else, so everything the
+/// scan discovers is enqueued, dequeued and recorded through the same three counters
+/// (see [`ScanAccounting`]) — there is no side door an unrecorded unit can leave by.
+#[derive(Debug)]
+enum WorkUnit {
+    /// A directory to dispatch through [`walk_disposition`].
+    Dir { path: PathBuf, depth: usize },
+    /// Discovered, but already known to be unexaminable (a `read_dir` entry that would
+    /// not yield, a `symlink_metadata` that failed). It is still a unit — the subtree
+    /// under it went unexamined, and the run may not pretend otherwise — so it rides the
+    /// work list like everything else and comes off it into `Unreadable`, rather than
+    /// being recorded inline where the flow counters could not see it.
+    Unexaminable { path: PathBuf, reason: String },
+}
+
+/// Scan roots, minus the ones naming a directory another root already names.
+///
+/// **CONCERN 5.** `--root /tmp/x --root /tmp/x` — or the same directory under two
+/// spellings (`/tmp/x` and `/private/tmp/x` on macOS, a symlinked scratch root) — walked
+/// the subtree twice: every count in the report doubled, and the same dead gigabytes were
+/// listed twice as though there were two of them.
+///
+/// Deduplication is by resolved identity, first spelling wins, and a dropped root is
+/// *reported* as a [`UnitOutcome::RootDuplicate`] unit rather than silently vanishing: it
+/// is an expected exclusion, examined under the root that named it first.
+///
+/// A root *nested inside* another root is deliberately NOT dropped. The outer walk may
+/// hit its depth budget before it ever reaches the inner one, so dropping it could
+/// silently shrink the authorized scope — the very sin this accounting exists to prevent.
+/// It gets a warning instead, so the overlap in the counts is visible rather than
+/// mysterious.
+fn dedup_scan_roots(roots: &[PathBuf]) -> DedupedRoots {
+    let mut kept: Vec<(PathBuf, PathBuf)> = Vec::new(); // (identity, spelling)
+    let mut duplicates: Vec<DuplicateRoot> = Vec::new();
+    let mut warnings = Vec::new();
+    for root in roots {
+        let identity = canonicalize_expected(root).unwrap_or_else(|| root.clone());
+        if let Some((_, first)) = kept.iter().find(|(kept_id, _)| *kept_id == identity) {
+            duplicates.push(DuplicateRoot {
+                dropped: root.clone(),
+                already_named_by: first.clone(),
+            });
+            continue;
+        }
+        // An overlap is only worth a word if there is a real subtree to double-count: a
+        // root that does not exist gets its own `RootMissing` verdict and needs no note.
+        if root.is_dir() {
+            if let Some((_, outer)) = kept.iter().find(|(kept_id, _)| {
+                identity.starts_with(kept_id) || kept_id.starts_with(&identity)
+            }) {
+                warnings.push(format!(
+                    "scan root {} overlaps scan root {}: the shared subtree is examined under \
+                     both, so the scan counts include the overlap",
+                    root.display(),
+                    outer.display()
+                ));
+            }
+        }
+        kept.push((identity, root.clone()));
+    }
+    DedupedRoots {
+        roots: kept.into_iter().map(|(_, spelling)| spelling).collect(),
+        duplicates,
+        warnings,
+    }
+}
+
+/// A scan root dropped because an earlier root already named the same directory.
+#[derive(Debug)]
+struct DuplicateRoot {
+    dropped: PathBuf,
+    /// The earlier root — the spelling under which the subtree IS examined.
+    already_named_by: PathBuf,
+}
+
+/// The outcome of [`dedup_scan_roots`]: the roots to walk, the ones folded into them,
+/// and the overlaps the operator should know about.
+#[derive(Debug)]
+struct DedupedRoots {
+    roots: Vec<PathBuf>,
+    duplicates: Vec<DuplicateRoot>,
+    warnings: Vec<String>,
 }
 
 /// The walk's decision about ONE directory — a total function, so there is no
@@ -872,24 +1191,61 @@ pub(crate) fn scan_orphan_candidates(
 ) -> ScanOutcome {
     let cutoff = staleness_cutoff(now, max_age_days);
     let mut out = ScanOutcome::default();
-    for root in roots {
-        if !root.is_dir() {
-            out.record(
-                root,
-                UnitOutcome::RootMissing,
-                "scan root does not exist or is not a directory: nothing under it was examined",
-            );
-            continue;
-        }
-        let mut stack = vec![(root.clone(), 0usize)];
-        while let Some((dir, depth)) = stack.pop() {
+
+    // Repeated roots walk the same subtree twice and double every count in the report
+    // (CONCERN 5). Deduplicate first — and *book* each duplicate as a unit, so the
+    // operator sees the root they named and why it was walked only once.
+    let deduped = dedup_scan_roots(roots);
+    out.warnings = deduped.warnings;
+    for duplicate in deduped.duplicates {
+        out.accounting.enqueue();
+        out.accounting.dequeue();
+        out.record(
+            &duplicate.dropped,
+            UnitOutcome::RootDuplicate,
+            format!(
+                "the same directory as scan root {}: walked once, not twice",
+                duplicate.already_named_by.display()
+            ),
+        );
+    }
+
+    for root in &deduped.roots {
+        // Every unit — roots included — is enqueued, dequeued and recorded through the
+        // same three counters, so a unit that escapes its verdict breaks the books
+        // instead of vanishing from them (see `ScanAccounting`).
+        let mut stack = vec![WorkUnit::Dir {
+            path: root.clone(),
+            depth: 0,
+        }];
+        out.accounting.enqueue();
+        while let Some(unit) = stack.pop() {
+            out.accounting.dequeue();
+            let (dir, depth) = match unit {
+                WorkUnit::Dir { path, depth } => (path, depth),
+                WorkUnit::Unexaminable { path, reason } => {
+                    out.record(&path, UnitOutcome::Unreadable, reason);
+                    continue;
+                }
+            };
+            // Only a ROOT can be missing: everything else was `symlink_metadata`-ed into
+            // existence as a directory before it was enqueued.
+            if depth == 0 && !dir.is_dir() {
+                out.record(
+                    &dir,
+                    UnitOutcome::RootMissing,
+                    "scan root does not exist or is not a directory: nothing under it was examined",
+                );
+                continue;
+            }
             match walk_disposition(&dir, depth, protection, DEFAULT_MAX_DEPTH) {
                 WalkDisposition::Candidate(kind) => {
                     out.record(&dir, UnitOutcome::Candidate, String::new());
                     out.candidates.push(OrphanCandidate {
                         staleness: staleness(&dir, now, cutoff),
-                        // Pin the identity the verdict is about to be rendered
-                        // against (BUG 2); the deleter re-resolves and compares.
+                        // Pin the identity the verdict is about to be rendered against —
+                        // a pathname, and NOT a file identity: see
+                        // `OrphanCandidate::identity` (BUG 2, still open).
                         identity: canonicalize_expected(&dir).unwrap_or_else(|| dir.clone()),
                         path: dir,
                         kind,
@@ -919,11 +1275,14 @@ pub(crate) fn scan_orphan_candidates(
                         let entry = match entry {
                             Ok(entry) => entry,
                             Err(err) => {
-                                out.record(
-                                    &dir.join("<unreadable entry>"),
-                                    UnitOutcome::Unreadable,
-                                    format!("cannot read an entry of {}: {err}", dir.display()),
-                                );
+                                stack.push(WorkUnit::Unexaminable {
+                                    path: dir.join("<unreadable entry>"),
+                                    reason: format!(
+                                        "cannot read an entry of {}: {err}",
+                                        dir.display()
+                                    ),
+                                });
+                                out.accounting.enqueue();
                                 continue;
                             }
                         };
@@ -933,15 +1292,21 @@ pub(crate) fn scan_orphan_candidates(
                         // candidate for whatever it points at).
                         let meta = std::fs::symlink_metadata(&path);
                         match meta {
-                            Ok(meta) if meta.is_dir() => stack.push((path, depth + 1)),
+                            Ok(meta) if meta.is_dir() => {
+                                stack.push(WorkUnit::Dir {
+                                    path,
+                                    depth: depth + 1,
+                                });
+                                out.accounting.enqueue();
+                            }
                             // A file / a symlink: not a unit — the walk examines
                             // directories, and a symlink is never followed.
                             Ok(_) => {}
-                            Err(err) => out.record(
-                                &path,
-                                UnitOutcome::Unreadable,
-                                format!("cannot stat {}: {err}", path.display()),
-                            ),
+                            Err(err) => {
+                                let reason = format!("cannot stat {}: {err}", path.display());
+                                stack.push(WorkUnit::Unexaminable { path, reason });
+                                out.accounting.enqueue();
+                            }
                         }
                     }
                 }
@@ -1138,7 +1503,9 @@ pub(crate) struct CandidateReport {
     /// The candidate's TERMINAL label, and it must be true at the end of the run,
     /// not at the moment the gates first spoke:
     ///
-    /// * `reclaim` — eligible (and, under `--force`, reclaimed),
+    /// * `reclaim` — eligible: what a *certified* reaper would delete. Today nothing
+    ///   deletes it (`--force` is refused), and its bytes are what
+    ///   [`ReapReport::reclaimable_bytes`] adds up,
     /// * `skip`    — a gate refused it before any expensive work,
     /// * `refused` — it was eligible and the delete path refused it anyway: the
     ///   protected set recomputed at delete time now covers it, its pinned identity
@@ -1181,10 +1548,24 @@ pub(crate) struct ReclaimedReport {
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct ReapReport {
     pub(crate) action: &'static str,
+    /// **`false`, always, today.** The delete path is refused ([`certify_destructive`]),
+    /// so this is a *preview of what a certified reaper would do* — not a record of what
+    /// a trusted one did. It rides in the report, and in the JSON, because the number
+    /// this report hands an operator ("61 GB reclaimable") is worth exactly as much as
+    /// the fences behind it, and those fences are known-broken ([`BLOCKING_DEFECTS`]).
+    pub(crate) destructive_certified: bool,
+    /// The defects that keep [`Self::destructive_certified`] false — verbatim, in every
+    /// report, so nobody has to go and find the audit to learn why the knife is sheathed.
+    pub(crate) blocking_defects: Vec<String>,
     pub(crate) roots: Vec<String>,
     /// What the run refused to look at, so an operator can *see* that the live
     /// build cache was fenced instead of taking it on faith.
     pub(crate) protected: Vec<String>,
+    /// **Was every protection source resolved?** (BUG 3.) `false` when `ps` would not
+    /// run, `HOME` is unset, or a target dir is relative — i.e. when the protected set
+    /// above is missing entries it should have had. It forces [`Self::incomplete`]: a run
+    /// that cannot work out what it must not touch does not report success.
+    pub(crate) protection_complete: bool,
     pub(crate) max_age_days: u64,
     pub(crate) dry_run: bool,
     /// Every unit the scan examined, in exactly one bucket each (sol's frozen
@@ -1200,6 +1581,12 @@ pub(crate) struct ReapReport {
     /// `--force` does not waive it.
     pub(crate) incomplete: bool,
     pub(crate) candidates: Vec<CandidateReport>,
+    /// **The number the dry run exists to produce**: the bytes under every candidate that
+    /// passed every gate — what a *certified* reaper would free on this machine right
+    /// now. A measurement, not a promise: nothing deletes it today, and the fences that
+    /// concluded "no live build owns this" are the ones the audit broke
+    /// ([`BLOCKING_DEFECTS`]). Read it as "dead bytes, probably" — then go and look.
+    pub(crate) reclaimable_bytes: i64,
     pub(crate) reclaimed: Vec<ReclaimedReport>,
     /// Bytes freed by THIS run.
     pub(crate) reclaimed_bytes: i64,
@@ -1226,17 +1613,52 @@ pub(crate) struct ReapOptions {
     pub(crate) roots: Vec<PathBuf>,
     pub(crate) max_age_days: u64,
     /// `false` (the default) = preview: decide, report, touch nothing.
+    ///
+    /// `true` is **refused** — [`certify_destructive`] turns it into a
+    /// [`DestructiveRefusal`] before anything is scanned. The field survives because the
+    /// request still has to be *rejected*, loudly and with a reason, and because the
+    /// sheathed machinery behind it is pinned by tests against the day it is certified.
+    /// It is not a switch anyone can currently flip.
     pub(crate) force: bool,
 }
 
 // ── Run ─────────────────────────────────────────────────────────────────────
 
-/// Scan → cheap gates → (survivors only) measure + probe → decide → (force only)
-/// reclaim through the S2a state machine.
+/// **The only entry point.** Scan → cheap gates → (survivors only) measure + probe →
+/// decide → report.
 ///
-/// Dry-run is a hard gate above every write: without `force` this function makes
-/// no filesystem change and no ledger row.
+/// A `force` request is REFUSED here, with a [`DestructiveRefusal`] that says why
+/// ([`certify_destructive`]). It is refused *before the scan*, so a rejected run does not
+/// so much as stat a directory — and it is an `Err`, not a quietly downgraded dry run. An
+/// operator who asked to delete 61 GB and got a report instead must not be able to
+/// mistake one for the other: "reclaimed 0 bytes" reads exactly like "there was nothing
+/// to reclaim".
+///
+/// The gate is duplicated in the CLI on purpose (which refuses before even opening the
+/// ledger). Two fences, one source of truth: both call [`certify_destructive`].
 pub(crate) fn run_orphan_reap(
+    conn: &mut rusqlite::Connection,
+    opts: &ReapOptions,
+    now: SystemTime,
+    probe: &HolderProbe,
+) -> Result<ReapReport, DestructiveRefusal> {
+    certify_destructive(opts.force)?;
+    Ok(run_orphan_reap_uncertified(conn, opts, now, probe))
+}
+
+/// The reaper's body — **including the destructive path, which is not certified and is
+/// unreachable from any entry point** ([`run_orphan_reap`] refuses `force` above).
+///
+/// Kept rather than deleted, for one reason: the knife comes back. The delete path's
+/// fences (protection recomputed at delete time, the pinned-identity re-resolution, the
+/// holder re-probe, the ledger's reclaim ordering) stay pinned by tests that call this
+/// function directly, so un-sheathing it is *closing the four defects and kill-testing
+/// them* — not rebuilding the machine from scratch against a suite that rotted while it
+/// was gone.
+///
+/// It is private, and it stays private: `force` reaches it from this module's own tests
+/// and from nowhere else.
+fn run_orphan_reap_uncertified(
     conn: &mut rusqlite::Connection,
     opts: &ReapOptions,
     now: SystemTime,
@@ -1245,14 +1667,22 @@ pub(crate) fn run_orphan_reap(
     let protection = protected_paths();
     let scan = scan_orphan_candidates(&opts.roots, &protection, now, opts.max_age_days);
 
+    // BUG 3, fail-closed: a protected set that could not be fully built does not merely
+    // warn. It makes the run incomplete, and an incomplete run does not exit clean —
+    // "we could not work out what we must not touch" is not a footnote.
+    let protection_complete = protection.is_complete();
+
     let mut report = ReapReport {
         action: "reap-orphans",
+        destructive_certified: DESTRUCTIVE_CERTIFIED,
+        blocking_defects: BLOCKING_DEFECTS.iter().map(|d| d.to_string()).collect(),
         roots: opts.roots.iter().map(|r| r.display().to_string()).collect(),
         protected: protection
             .paths()
             .iter()
             .map(|p| p.display().to_string())
             .collect(),
+        protection_complete,
         max_age_days: opts.max_age_days,
         dry_run: !opts.force,
         scan: scan.accounting,
@@ -1265,15 +1695,21 @@ pub(crate) fn run_orphan_reap(
                 reason: skip.reason.clone(),
             })
             .collect(),
-        incomplete: scan.accounting.incomplete(),
+        incomplete: scan.accounting.incomplete() || !protection_complete,
         candidates: Vec::new(),
+        reclaimable_bytes: 0,
         reclaimed: Vec::new(),
         reclaimed_bytes: 0,
         bytes_by_reason: BTreeMap::new(),
         revived_bytes: 0,
-        // Anything that stopped the protected set from being complete is an
-        // operator-visible warning on every run, force or not.
-        warnings: protection.warnings.clone(),
+        // Every unresolved protection source is an operator-visible line on every run,
+        // plus the scan's own scope oddities (overlapping roots).
+        warnings: protection
+            .gaps()
+            .iter()
+            .cloned()
+            .chain(scan.warnings.iter().cloned())
+            .collect(),
         errors: Vec::new(),
     };
 
@@ -1359,9 +1795,15 @@ pub(crate) fn run_orphan_reap(
             // fd open. Snapshot + fd-only recheck is exactly the window in which a live
             // build cache gets deleted.
             let fresh = protected_paths();
-            for warning in &fresh.warnings {
-                if !report.warnings.contains(warning) {
-                    report.warnings.push(warning.clone());
+            // A gap that appears only at delete time (a `ps` that has started failing)
+            // still costs the run its clean exit.
+            if !fresh.is_complete() {
+                report.protection_complete = false;
+                report.incomplete = true;
+            }
+            for gap in fresh.gaps() {
+                if !report.warnings.contains(gap) {
+                    report.warnings.push(gap.clone());
                 }
             }
             let refusal = if fresh.covers(&candidate.path) || fresh.covers(&candidate.identity) {
@@ -1391,6 +1833,13 @@ pub(crate) fn run_orphan_reap(
             }
         }
 
+        // The headline of a report-only run: bytes that survived every gate. Counted off
+        // the TERMINAL label, so a candidate the delete path later refused is not still
+        // advertised as reclaimable.
+        if decision_label == "reclaim" {
+            report.reclaimable_bytes += clamp_bytes(candidate.bytes.unwrap_or(0));
+        }
+
         report.candidates.push(CandidateReport {
             path: path.clone(),
             kind: candidate.kind.as_str(),
@@ -1413,9 +1862,11 @@ pub(crate) fn run_orphan_reap(
             .push(format!("byte report by reason unavailable: {err}")),
     }
 
-    // An undecidable candidate is an error unit too, so the scope was not fully
-    // accounted for either.
-    report.incomplete = scan.accounting.incomplete() || !report.errors.is_empty();
+    // An undecidable candidate is an error unit too, so the scope was not fully accounted
+    // for either. `protection_complete` is carried, not recomputed: the delete path may
+    // have found a gap the scan did not.
+    report.incomplete =
+        scan.accounting.incomplete() || !report.errors.is_empty() || !report.protection_complete;
     report
 }
 
@@ -1428,15 +1879,27 @@ pub(crate) fn reap_exit_status(report: &ReapReport) -> Result<(), String> {
     if !report.errors.is_empty() {
         return Err(report.errors.join("; "));
     }
+    // BUG 3: an incomplete protected set is its own failure, and it is invisible in the
+    // scan's unit counts — the run may have walked its whole scope perfectly and simply
+    // never known what it was forbidden to touch. Reported first, and by name, because
+    // "0 missing roots, 0 unreadable, and yet incomplete" is otherwise a riddle.
+    if !report.protection_complete {
+        return Err(format!(
+            "protected set incomplete: {}; refusing to report success on a run that could not \
+             work out what it must not touch",
+            report.warnings.join("; ")
+        ));
+    }
     if report.incomplete {
         return Err(format!(
             "scan incomplete: {} of {} examined unit(s) could not be accounted for ({} missing \
-             root(s), {} unreadable); refusing to report success on a run that did not see its \
-             whole scope",
+             root(s), {} unreadable, books balance={}); refusing to report success on a run that \
+             did not see its whole scope",
             report.scan.roots_missing + report.scan.unreadable,
             report.scan.examined,
             report.scan.roots_missing,
             report.scan.unreadable,
+            report.scan.balances(),
         ));
     }
     Ok(())
@@ -1803,6 +2266,34 @@ fn clamp_bytes(bytes: u64) -> i64 {
 
 // ── Emit ────────────────────────────────────────────────────────────────────
 
+/// Print a refused destructive request.
+///
+/// Text mode goes to **stderr**: a refusal is not this command's output, and a caller
+/// piping stdout into `jq` must not find prose where a report belongs. JSON mode emits a
+/// well-formed object with `"refused": true`, so a script gets a parseable answer — and,
+/// with the non-zero exit beside it, cannot read a refusal as a clean run.
+pub(crate) fn emit_destructive_refusal(
+    refusal: &DestructiveRefusal,
+    output: OutputFormat,
+) -> Result<(), String> {
+    match output {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(refusal)
+                .map_err(|err| format!("serialize refusal: {err}"))?
+        ),
+        OutputFormat::Text => {
+            eprintln!("tachi clean orphans: REFUSED --force");
+            eprintln!("  {}", refusal.reason);
+            eprintln!(
+                "  run without --force for the full report of what a certified reaper would \
+                 reclaim."
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn emit_reap_report(report: &ReapReport, output: OutputFormat) -> Result<(), String> {
     match output {
         OutputFormat::Json => println!(
@@ -1813,6 +2304,16 @@ pub(crate) fn emit_reap_report(report: &ReapReport, output: OutputFormat) -> Res
         OutputFormat::Text => {
             let mode = if report.dry_run { "dry-run" } else { "force" };
             println!("tachi clean orphans ({mode})");
+            if !report.destructive_certified {
+                println!(
+                    "  REPORT ONLY — the destructive path is not certified and is refused (audit \
+                     {BLOCKING_AUDIT}). What follows is what a certified reaper WOULD reclaim; \
+                     nothing here has been deleted, and --force is rejected."
+                );
+                for defect in &report.blocking_defects {
+                    println!("  blocking defect: {defect}");
+                }
+            }
             println!("  max_age_days: {}", report.max_age_days);
             for root in &report.roots {
                 println!("  root: {root}");
@@ -1820,17 +2321,28 @@ pub(crate) fn emit_reap_report(report: &ReapReport, output: OutputFormat) -> Res
             for protected in &report.protected {
                 println!("  protected: {protected}");
             }
+            if !report.protection_complete {
+                println!(
+                    "  PROTECTED SET INCOMPLETE: a protection source could not be resolved (see \
+                     the warnings below); this run does not report success"
+                );
+            }
             let scan = &report.scan;
             println!(
-                "  scan: examined={} candidates={} descended={} depth_limited={} \
-                 protected_pruned={} roots_missing={} unreadable={}",
+                "  scan: enqueued={} dequeued={} examined={} candidates={} descended={} \
+                 depth_limited={} roots_duplicate={} protected_pruned={} roots_missing={} \
+                 unreadable={} balances={}",
+                scan.enqueued,
+                scan.dequeued,
                 scan.examined,
                 scan.candidates,
                 scan.descended,
                 scan.depth_limited,
+                scan.roots_duplicate,
                 scan.protected_pruned,
                 scan.roots_missing,
-                scan.unreadable
+                scan.unreadable,
+                scan.balances(),
             );
             for skip in &report.unexamined {
                 println!("  {} {} — {}", skip.class, skip.path, skip.reason);
@@ -1859,6 +2371,11 @@ pub(crate) fn emit_reap_report(report: &ReapReport, output: OutputFormat) -> Res
                     candidate.reason
                 );
             }
+            println!(
+                "  reclaimable_bytes (what a CERTIFIED reaper would free; nothing was \
+                 deleted): {}",
+                report.reclaimable_bytes
+            );
             for reclaimed in &report.reclaimed {
                 println!(
                     "  reclaimed: {} ({} bytes, reason={})",
@@ -1991,6 +2508,15 @@ mod tests {
                 previous: std::env::var_os(key),
             }
         }
+
+        /// Unset the variable for the duration of the test, restoring it on drop — for
+        /// the BUG 3 tests, where a protection source that cannot be resolved must
+        /// fail-CLOSED rather than quietly protect nothing.
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
     }
 
     impl Drop for EnvGuard {
@@ -2096,7 +2622,7 @@ mod tests {
             "and everything under it"
         );
 
-        let report = run_orphan_reap(
+        let report = run_orphan_reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -2257,7 +2783,7 @@ mod tests {
             HolderCheck::Unknown("cannot run lsof: No such file or directory".to_string())
         };
 
-        let report = run_orphan_reap(
+        let report = run_orphan_reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -2398,7 +2924,7 @@ mod tests {
 
         // Real `now`: the fixture was created a moment ago, so the age gate skips
         // it — and the expensive probes must never have run.
-        let report = run_orphan_reap(
+        let report = run_orphan_reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             SystemTime::now(),
@@ -2568,6 +3094,13 @@ mod tests {
     }
 
     // ── run: fixtures through the real ledger ───────────────────────────────
+    //
+    // NOTE ON `run_orphan_reap_uncertified`. The destructive path is refused at the entry
+    // point (`certify_destructive`), so the tests below that exercise a *delete* call the
+    // sheathed driver directly. They are not testing something a user can reach — they
+    // are keeping the delete path's fences honest for the knife that will re-enable it.
+    // The tests that pin the SHIPPING behaviour (the report, and the refusal itself) go
+    // through `run_orphan_reap`, like the CLI does.
 
     #[test]
     fn dry_run_deletes_nothing_and_books_nothing() {
@@ -2575,18 +3108,30 @@ mod tests {
         let dead = make_target_dir(&root, "dead-target");
         let mut store = open_store(&root);
 
+        // The SEALED entry point: this is the path the CLI takes.
         let report = run_orphan_reap(
             store.connection_mut(),
             &opts(&root, false),
             aged_now(30),
             &*unheld_probe(),
-        );
+        )
+        .expect("a report-only run is never refused");
 
         assert!(report.dry_run);
         assert_eq!(report.candidates.len(), 1);
         assert_eq!(report.candidates[0].decision, "reclaim");
         assert!(report.reclaimed.is_empty(), "preview must not reclaim");
         assert_eq!(report.reclaimed_bytes, 0);
+        // The dry run's whole product: the dead bytes, counted and located.
+        assert_eq!(
+            report.reclaimable_bytes,
+            i64::try_from(dir_size(&dead)).unwrap(),
+            "the report must say how many bytes are dead: {report:?}"
+        );
+        assert!(report.reclaimable_bytes > 0);
+        // ...and it must say the knife is sheathed, so nobody reads the number as a deed.
+        assert!(!report.destructive_certified);
+        assert!(!report.blocking_defects.is_empty());
         // The bytes are still on disk...
         assert!(dead.join("debug/artifact.rlib").exists());
         // ...and nothing was written to the ledger.
@@ -2603,7 +3148,7 @@ mod tests {
         let dead = make_target_dir(&root, "codex-bootstrap-target");
         let mut store = open_store(&root);
 
-        let report = run_orphan_reap(
+        let report = run_orphan_reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -2648,7 +3193,7 @@ mod tests {
         let dead = make_target_dir(&root, "lane-target");
         let mut store = open_store(&root);
 
-        let first = run_orphan_reap(
+        let first = run_orphan_reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -2659,7 +3204,7 @@ mod tests {
 
         // The lane runs again, rebuilds the same target, and dies again.
         let reborn = make_target_dir(&root, "lane-target");
-        let second = run_orphan_reap(
+        let second = run_orphan_reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -2720,7 +3265,7 @@ mod tests {
         .unwrap();
         memcore::bind_resource(store.connection_mut(), "env-holder", "res-bound").unwrap();
 
-        let report = run_orphan_reap(
+        let report = run_orphan_reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -2753,7 +3298,7 @@ mod tests {
         let held = make_target_dir(&root, "busy-target");
         let mut store = open_store(&root);
 
-        let report = run_orphan_reap(
+        let report = run_orphan_reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -2791,7 +3336,7 @@ mod tests {
             }
         };
 
-        let report = run_orphan_reap(
+        let report = run_orphan_reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -2882,7 +3427,7 @@ mod tests {
             HolderCheck::None
         };
 
-        let report = run_orphan_reap(
+        let report = run_orphan_reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -2962,7 +3507,7 @@ mod tests {
             HolderCheck::None
         };
 
-        let report = run_orphan_reap(
+        let report = run_orphan_reap_uncertified(
             store.connection_mut(),
             &opts(&link, true),
             aged_now(30),
@@ -3078,7 +3623,7 @@ mod tests {
         let mut store = open_store(&root);
         let missing = root.join("no-such-root");
 
-        let incomplete = run_orphan_reap(
+        let incomplete = run_orphan_reap_uncertified(
             store.connection_mut(),
             &ReapOptions {
                 roots: vec![root.clone(), missing],
@@ -3106,7 +3651,7 @@ mod tests {
         // Same fixture, whole scope examined ⇒ clean exit. Without this half the test
         // would pass on a reaper that never exits 0 at all.
         let reborn = make_target_dir(&root, "dead-target");
-        let complete = run_orphan_reap(
+        let complete = run_orphan_reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -3144,7 +3689,7 @@ mod tests {
             }
         };
 
-        let report = run_orphan_reap(
+        let report = run_orphan_reap_uncertified(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
@@ -3166,5 +3711,295 @@ mod tests {
         assert!(target.join("debug/artifact.rlib").exists(), "bytes survive");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── the sheath: --force is refused (audit codex-g6f99) ───────────────────
+
+    /// The seal, and the proof that it is the seal doing the work.
+    ///
+    /// The second half is the point (CONCERN 6): a test that only asserts "the directory
+    /// still exists after `--force`" passes just as happily against a reaper that does
+    /// nothing at all. So the same fixture, the same options, the same probe are then run
+    /// through the sheathed driver — and the target really is deleted. The bytes survived
+    /// the first call because the gate held, not because there was nothing there to kill.
+    #[test]
+    fn force_is_refused_at_the_entry_point_and_the_fixture_proves_it_was_reapable() {
+        let root = unique_temp_dir("tachi-reaper-sealed");
+        let dead = make_target_dir(&root, "dead-target");
+        let mut store = open_store(&root);
+
+        let refusal = run_orphan_reap(
+            store.connection_mut(),
+            &opts(&root, true),
+            aged_now(30),
+            &*unheld_probe(),
+        )
+        .expect_err("--force must be refused while the destructive path is uncertified");
+
+        assert!(refusal.refused);
+        assert_eq!(refusal.audit, BLOCKING_AUDIT);
+        assert!(
+            refusal.reason.contains("report-only") && refusal.reason.contains("not certified"),
+            "the refusal must say what it is: {}",
+            refusal.reason
+        );
+        assert_eq!(refusal.blocking_defects.len(), BLOCKING_DEFECTS.len());
+        // Not a byte, not a row.
+        assert!(dead.join("debug/artifact.rlib").exists());
+        assert!(memcore::list_resources(store.connection(), None, None)
+            .unwrap()
+            .is_empty());
+
+        // The discriminating half: this fixture is NOT inert.
+        let report = run_orphan_reap_uncertified(
+            store.connection_mut(),
+            &opts(&root, true),
+            aged_now(30),
+            &*unheld_probe(),
+        );
+        assert_eq!(
+            report.reclaimed.len(),
+            1,
+            "the fixture must be genuinely reapable, or the refusal above proved nothing: \
+             {report:?}"
+        );
+        assert!(!dead.exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `certify_destructive` is the single gate, and it only ever refuses the destructive
+    /// request — a report-only run is never blocked by it.
+    #[test]
+    fn only_the_destructive_request_is_refused() {
+        assert!(certify_destructive(false).is_ok());
+        let refusal = certify_destructive(true).expect_err("force is uncertified");
+        // The operator is told what is broken, not merely that they were denied.
+        for defect in BLOCKING_DEFECTS {
+            assert!(
+                refusal.reason.contains(defect),
+                "the refusal must name every blocking defect; missing: {defect}"
+            );
+        }
+        assert!(!DESTRUCTIVE_CERTIFIED, "the day this flips, the seal opens");
+    }
+
+    /// The report says the knife is sheathed, so a reader cannot mistake
+    /// `reclaimable_bytes` for bytes that were freed.
+    #[test]
+    fn the_report_declares_itself_uncertified() {
+        let root = unique_temp_dir("tachi-reaper-declares");
+        make_target_dir(&root, "dead-target");
+        let mut store = open_store(&root);
+
+        let report = run_orphan_reap(
+            store.connection_mut(),
+            &opts(&root, false),
+            aged_now(30),
+            &*unheld_probe(),
+        )
+        .expect("a report-only run is never refused");
+
+        assert!(!report.destructive_certified);
+        assert_eq!(report.blocking_defects.len(), BLOCKING_DEFECTS.len());
+        assert_eq!(report.reclaimed_bytes, 0, "a report frees nothing");
+        assert!(report.reclaimable_bytes > 0, "but it counts what is dead");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── CONCERN 5: the books must be able to FAIL ────────────────────────────
+
+    /// The kill-test for the tautology. Every one of these mutations passed the old
+    /// `balances()` (it compared `examined` with the sum of the buckets, and `record`
+    /// moved both at once, so the equation was arithmetic, not an invariant).
+    #[test]
+    fn a_dequeued_unit_that_never_reaches_a_bucket_breaks_the_books() {
+        // A well-formed unit: discovered, taken, judged.
+        let mut books = ScanAccounting::default();
+        books.enqueue();
+        books.dequeue();
+        books.record(UnitOutcome::Descended);
+        assert!(books.balances(), "{books:?}");
+        assert!(!books.incomplete(), "{books:?}");
+
+        // The regression this invariant exists to catch: a unit comes off the work list
+        // and falls through a `continue` without a verdict.
+        let mut dropped_verdict = books;
+        dropped_verdict.enqueue();
+        dropped_verdict.dequeue();
+        assert!(
+            !dropped_verdict.balances(),
+            "a dequeued unit with no bucket must break conservation: {dropped_verdict:?}"
+        );
+        assert!(
+            dropped_verdict.incomplete(),
+            "and cost the run its clean exit"
+        );
+
+        // The other direction: work discovered and never taken (an early `break`).
+        let mut dropped_work = books;
+        dropped_work.enqueue();
+        assert!(
+            !dropped_work.balances(),
+            "enqueued work that is never dequeued must break conservation: {dropped_work:?}"
+        );
+        assert!(dropped_work.incomplete());
+    }
+
+    /// CONCERN 5: the same directory named twice — once by its own spelling, once through
+    /// a symlink — is one scan root, walked once. Before the dedup it was walked twice:
+    /// the candidate was listed twice and every count in the report was doubled.
+    #[test]
+    fn duplicate_roots_are_walked_once_and_counted_once() {
+        let root = unique_temp_dir("tachi-reaper-duproots");
+        make_target_dir(&root, "dead-target");
+        // A second spelling of the very same directory.
+        let alias = root.with_extension("alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+
+        let protection = Protection::default();
+        let now = aged_now(30);
+
+        let once = scan_orphan_candidates(&[root.clone()], &protection, now, 7);
+        let twice = scan_orphan_candidates(
+            &[root.clone(), root.clone(), alias.clone()],
+            &protection,
+            now,
+            7,
+        );
+
+        assert_eq!(once.candidates.len(), 1, "{:?}", once.candidates);
+        assert_eq!(
+            twice.candidates.len(),
+            1,
+            "a directory named three times is still one directory: {:?}",
+            twice.candidates
+        );
+        // Two duplicate roots, booked as expected exclusions — visible, not vanished.
+        assert_eq!(
+            twice.accounting.roots_duplicate, 2,
+            "{:?}",
+            twice.accounting
+        );
+        assert_eq!(
+            twice.accounting.candidates, once.accounting.candidates,
+            "the subtree is walked once, so the candidate count does not double: {:?}",
+            twice.accounting
+        );
+        assert_eq!(
+            twice.accounting.descended, once.accounting.descended,
+            "nor does the descended count: {:?}",
+            twice.accounting
+        );
+        // The duplicates are the only extra units, and the books still balance.
+        assert_eq!(
+            twice.accounting.examined,
+            once.accounting.examined + 2,
+            "{:?}",
+            twice.accounting
+        );
+        assert!(twice.accounting.balances(), "{:?}", twice.accounting);
+        assert!(
+            !twice.accounting.incomplete(),
+            "a duplicate root is an expected exclusion, not an error: {:?}",
+            twice.accounting
+        );
+        assert!(
+            twice
+                .skips
+                .iter()
+                .any(|skip| skip.outcome == UnitOutcome::RootDuplicate
+                    && skip.reason.contains("walked once")),
+            "the operator must see the root they named: {:?}",
+            twice.skips
+        );
+
+        let _ = std::fs::remove_file(&alias);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── BUG 3: an incomplete protected set is fail-CLOSED ────────────────────
+
+    /// A protection source that cannot be resolved makes the run incomplete and costs it
+    /// a clean exit — it does not merely print a warning and carry on.
+    ///
+    /// `HOME` unset is the reproducible source: it is what `~/.cache/sigil-shared-target`
+    /// (the documented default cache, protected even when no variable names it) is
+    /// resolved from. The first cut called that a warning, deleted anyway, and exited 0.
+    #[test]
+    fn an_incomplete_protection_set_never_exits_clean() {
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let root = unique_temp_dir("tachi-reaper-protection-gap");
+        make_target_dir(&root, "dead-target");
+        let mut store = open_store(&root);
+
+        // The complete half: with the protection sources resolvable, the same run is
+        // clean. (Without this, a reaper that called *every* run incomplete would pass.)
+        let complete = run_orphan_reap(
+            store.connection_mut(),
+            &opts(&root, false),
+            aged_now(30),
+            &*unheld_probe(),
+        )
+        .expect("report-only");
+        assert!(complete.protection_complete, "{:?}", complete.warnings);
+        assert!(!complete.incomplete, "{complete:?}");
+        assert!(reap_exit_status(&complete).is_ok(), "{complete:?}");
+
+        // Now break a protection source.
+        let _home = EnvGuard::remove("HOME");
+        let _userprofile = EnvGuard::remove("USERPROFILE");
+
+        let gapped = run_orphan_reap(
+            store.connection_mut(),
+            &opts(&root, false),
+            aged_now(30),
+            &*unheld_probe(),
+        )
+        .expect("report-only");
+
+        assert!(
+            !gapped.protection_complete,
+            "an unresolvable protection source is a GAP: {gapped:?}"
+        );
+        assert!(
+            gapped.incomplete,
+            "and a gap makes the run incomplete: {gapped:?}"
+        );
+        assert!(
+            gapped.warnings.iter().any(|w| w.contains("HOME")),
+            "the operator is told which fence is missing: {:?}",
+            gapped.warnings
+        );
+        let status = reap_exit_status(&gapped);
+        let err = status.expect_err("an incomplete protected set must not exit clean");
+        assert!(
+            err.contains("protected set incomplete"),
+            "and the exit says why: {err}"
+        );
+        // The scan itself saw everything it was told to see — this failure is NOT a
+        // missing root or an unreadable subtree, which is exactly why it needs its own
+        // signal instead of riding on the unit counts.
+        assert_eq!(gapped.scan.roots_missing, 0, "{:?}", gapped.scan);
+        assert_eq!(gapped.scan.unreadable, 0, "{:?}", gapped.scan);
+        assert!(gapped.scan.balances(), "{:?}", gapped.scan);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The gap is what makes it incomplete — not the mere presence of a note.
+    #[test]
+    fn a_protection_set_with_no_gaps_is_complete() {
+        let complete = Protection::new([PathBuf::from("/tmp/x-target")], Vec::new());
+        assert!(complete.is_complete());
+        assert!(complete.gaps().is_empty());
+
+        let gapped = Protection::new(
+            [PathBuf::from("/tmp/x-target")],
+            vec!["process scan unavailable".to_string()],
+        );
+        assert!(!gapped.is_complete());
+        assert_eq!(gapped.gaps().len(), 1);
     }
 }
