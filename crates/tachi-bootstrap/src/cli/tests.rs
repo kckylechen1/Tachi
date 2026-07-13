@@ -232,6 +232,38 @@ fn clean_sweep_uses_cli_default_max_age() {
 }
 
 #[test]
+fn clean_orphans_defaults_to_preview_and_the_shared_age_gate() {
+    let parsed = Cli::try_parse_from(["tachi", "clean", "orphans"])
+        .expect("clean orphans default should parse");
+    match parsed.command.expect("command") {
+        Commands::Clean {
+            action:
+                CleanAction::Orphans {
+                    root,
+                    max_age_days,
+                    force,
+                    ..
+                },
+        } => {
+            assert!(root.is_empty(), "roots default to the scratch volumes");
+            assert_eq!(max_age_days, DEFAULT_ORPHAN_REAP_MAX_AGE_DAYS);
+            // Deleting gigabytes is opt-in: the default run must be a preview.
+            assert!(!force, "clean orphans must not delete without --force");
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn clean_orphans_rejects_force_with_dry_run() {
+    let parsed = Cli::try_parse_from(["tachi", "clean", "orphans", "--force", "--dry-run"]);
+    assert!(
+        parsed.is_err(),
+        "--force and --dry-run are contradictory and must not both parse"
+    );
+}
+
+#[test]
 fn worktree_open_parses_managed_flags() {
     use crate::cli::WorktreeAction;
     let parsed = Cli::try_parse_from([

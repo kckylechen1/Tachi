@@ -566,6 +566,7 @@ async fn render_one(
     println!("Disk (#484)");
     render_disk_volume(&snapshot.disk.worktrees_root);
     render_disk_volume(&snapshot.disk.shared_target_dir);
+    render_top_consumers(&snapshot.disk.top_consumers);
     println!();
 
     if !snapshot.project_warnings.is_empty() {
@@ -607,6 +608,28 @@ async fn render_one(
     );
 
     Ok(())
+}
+
+/// Top byte consumers from the exec_env resource ledger (#894 S2b) — purely
+/// informational, next to the free-space numbers: "you have N% free, and THIS
+/// is what is eating it". Silent when the ledger has nothing measured.
+fn render_top_consumers(consumers: &[crate::status_ops::disk::ResourceConsumer]) {
+    if consumers.is_empty() {
+        return;
+    }
+    let summary = consumers
+        .iter()
+        .map(|consumer| {
+            format!(
+                "{} ({:.1} GB, {})",
+                consumer.path,
+                consumer.bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+                consumer.kind
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("  top consumers: {summary}");
 }
 
 fn render_disk_volume(volume: &crate::status_ops::disk::DiskVolumeStatus) {

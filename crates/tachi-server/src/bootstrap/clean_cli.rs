@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 use tachi_bootstrap::cli::{CleanAction, WorktreeAction};
+
+use crate::exec_env_reaper::ReapOptions;
 use tachi_clean::sweep::SweepOptions;
 use tachi_clean::tachi_clean::TachiCleanOptions;
 use tachi_clean::target_clean::TargetCleanOptions;
@@ -352,6 +354,24 @@ fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
                 output: output_format(json),
             })
         }
+        CleanAction::Orphans {
+            root,
+            max_age_days,
+            force,
+            dry_run: _,
+            json,
+        } => run_orphan_reap_cli(
+            ReapOptions {
+                roots: if root.is_empty() {
+                    crate::exec_env_reaper::default_orphan_roots()
+                } else {
+                    root
+                },
+                max_age_days,
+                force,
+            },
+            output_format(json),
+        ),
         CleanAction::Tachi {
             home,
             force,
@@ -362,6 +382,41 @@ fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
             force,
             output: output_format(json),
         }),
+    }
+}
+
+/// CLI wrapper for the orphan build-artifact reaper (#894 S2b).
+///
+/// Same `--force` gate as the rest of the `clean` family: without it this is a
+/// pure preview (no delete, no ledger row). Unlike the stale-lease backstop it
+/// rides beside, an unopenable ledger is a hard error here rather than a
+/// warning — this command's entire job is to free bytes *and book them*, and
+/// deleting 61 GB with nowhere to record it is exactly the off-the-books
+/// reclaim #1029 called out.
+fn run_orphan_reap_cli(opts: ReapOptions, output: OutputFormat) -> Result<(), String> {
+    let global_db = crate::path_utils::tachi_home()
+        .join("global")
+        .join("memory.db");
+    if let Some(parent) = global_db.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let db_str = global_db
+        .to_str()
+        .ok_or("global db path is not valid UTF-8")?;
+    let mut store = memcore::MemoryStore::open_with_label(db_str, "global")
+        .map_err(|err| format!("exec_env resource ledger unavailable: {err}"))?;
+
+    let report = crate::exec_env_reaper::run_orphan_reap(
+        store.connection_mut(),
+        &opts,
+        std::time::SystemTime::now(),
+        &crate::exec_env_reaper::lsof_holder_probe,
+    );
+    crate::exec_env_reaper::emit_reap_report(&report, output)?;
+    if report.errors.is_empty() {
+        Ok(())
+    } else {
+        Err(report.errors.join("; "))
     }
 }
 

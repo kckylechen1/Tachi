@@ -100,6 +100,7 @@ mod domain_adapter_ops;
 mod enrichment;
 mod event_ops;
 mod exec_env_ops;
+mod exec_env_reaper;
 mod facade_memory_ops;
 mod facade_save_ops;
 mod facade_search_ops;
