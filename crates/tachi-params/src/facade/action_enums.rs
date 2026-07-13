@@ -97,6 +97,7 @@ pub enum TachiTaskAction {
     UxMatrix,
     BuildReferences,
     CloseLoop,
+    Adjudicate,
 }
 
 impl TachiTaskAction {
@@ -126,6 +127,7 @@ impl TachiTaskAction {
         Self::UxMatrix,
         Self::BuildReferences,
         Self::CloseLoop,
+        Self::Adjudicate,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -154,6 +156,7 @@ impl TachiTaskAction {
             Self::UxMatrix => "ux_matrix",
             Self::BuildReferences => "build_references",
             Self::CloseLoop => "close_loop",
+            Self::Adjudicate => "adjudicate",
         }
     }
 
@@ -199,6 +202,7 @@ impl FromStr for TachiTaskAction {
             "ux_matrix" => Ok(Self::UxMatrix),
             "build_references" => Ok(Self::BuildReferences),
             "close_loop" => Ok(Self::CloseLoop),
+            "adjudicate" => Ok(Self::Adjudicate),
             // #757: these were removed from tachi_task; point callers at tachi_gh.
             "link_pr" | "pr_status" | "pr_handoff" | "release_note" => Err(format!(
                 "Invalid tachi_task action '{s}'. GitHub PR lifecycle actions live on tachi_gh(action='{s}')."

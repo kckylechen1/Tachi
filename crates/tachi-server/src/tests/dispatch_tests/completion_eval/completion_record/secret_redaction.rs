@@ -66,6 +66,7 @@ async fn tachi_complete_scrubs_secretish_eval_metadata() {
             format: None,
             signatures: Vec::new(),
             rulings: Vec::new(),
+            adjudication: None,
         }))
         .await
         .expect("tachi_complete should succeed");
@@ -147,6 +148,7 @@ async fn tachi_complete_scrubs_harness_native_subagent_fields() {
             format: None,
             signatures: Vec::new(),
             rulings: Vec::new(),
+            adjudication: None,
         }))
         .await
         .expect("tachi_complete should succeed");

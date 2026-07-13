@@ -483,6 +483,28 @@ pub fn find_outcome_by_dispatch_id(
         .optional()?)
 }
 
+/// List ALL outcome ids for a `dispatch_id`, ordered by `created_at` then
+/// `outcome_id` (#1035 FIX-2). Unlike [`find_outcome_by_dispatch_id`] (which
+/// silently `LIMIT 1` picks one when a dispatch has several
+/// distinct-`task_type` rows), this returns the full set so the post-hoc
+/// adjudicate caller can fail loud on ambiguity instead of adjudicating the
+/// wrong task's outcome. A dispatch with exactly one outcome row is the
+/// common case; zero means "complete the dispatch first"; more than one
+/// means "pass `outcome_id` directly to disambiguate".
+pub fn list_outcome_ids_for_dispatch(
+    conn: &Connection,
+    dispatch_id: &str,
+) -> Result<Vec<String>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT outcome_id FROM dispatch_outcomes WHERE dispatch_id = ?1 \
+         ORDER BY created_at, outcome_id",
+    )?;
+    let ids = stmt
+        .query_map(params![dispatch_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ids)
+}
+
 /// Insert-or-update the canonical outcome row for `new.dispatch_id`,
 /// reconciling with any existing TERMINAL-PLACEHOLDER row for the same
 /// `dispatch_id` first (#774 idempotency-key parity).

@@ -1,6 +1,6 @@
 use super::{
-    string_enum_schema, CompletionPredicate, DispatchMcpAccessParams, RulingRecordParams,
-    SignatureRecordParams, TachiSubagentEvalParams, TachiTaskAction,
+    string_enum_schema, AdjudicationParams, CompletionPredicate, DispatchMcpAccessParams,
+    RulingRecordParams, SignatureRecordParams, TachiSubagentEvalParams, TachiTaskAction,
 };
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
@@ -11,7 +11,7 @@ fn tachi_task_action_schema(
     // #757: GH PR lifecycle is only on tachi_gh — not accepted by tachi_task.
     string_enum_schema(
         &super::action_enums::TachiTaskAction::primary_wire_strings(),
-        "Required Tachi task facade action. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'wait'/'board'/'cancel' manage dispatches; action='complete' records eval; action='recommend'/'route_simulate'/'proposals' manage routing; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs).",
+        "Required Tachi task facade action. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'wait'/'board'/'cancel' manage dispatches; action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='recommend'/'route_simulate'/'proposals' manage routing; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs).",
         generator,
     )
 }
@@ -21,7 +21,7 @@ fn tachi_task_action_schema(
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiTaskParams {
     /// Primary actions (F4 enum): plan, briefing,
-    /// doc_index, recommend, dispatch, complete, profiles, profile, card,
+    /// doc_index, recommend, dispatch, complete, adjudicate, profiles, profile, card,
     /// route_simulate, proposals, review_proposal, apply_proposals, status,
     /// cancel, board, wait, merge, intake, cycle_status, cycle_plan, ux_matrix,
     /// build_references, close_loop.
@@ -171,6 +171,12 @@ pub struct TachiTaskParams {
     /// with existing callers.
     #[serde(default)]
     pub rulings: Vec<RulingRecordParams>,
+    /// [action=complete|adjudicate] Leader terminal adjudication for a dispatch
+    /// outcome (#1035). On `complete` it writes an append-only row linked to
+    /// the freshly-recorded outcome; on `adjudicate` it writes a post-hoc
+    /// event linked to an already-existing outcome.
+    #[serde(default)]
+    pub adjudication: Option<AdjudicationParams>,
     /// [action=complete] Evidence references for verification.
     #[serde(default)]
     pub evidence_refs: Vec<String>,
@@ -318,6 +324,11 @@ pub struct TachiTaskParams {
     /// [action=complete|wait|status|cancel] Dispatch id linked to this task lifecycle event.
     #[serde(default)]
     pub dispatch_id: Option<String>,
+    /// [action=adjudicate] Direct outcome id to adjudicate. When omitted,
+    /// `dispatch_id` is resolved to an outcome via `find_outcome_by_dispatch_id`.
+    /// Supplying neither → error (do not guess).
+    #[serde(default)]
+    pub outcome_id: Option<String>,
     /// [action=status] When true, include the size-capped content of result.md
     /// from the dispatch run directory in the response. Lets a leader whose FS
     /// access doesn't include ~/.tachi read the lane's report without local

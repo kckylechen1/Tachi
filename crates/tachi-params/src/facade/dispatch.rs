@@ -560,6 +560,70 @@ pub struct TachiCompleteParams {
     /// verdict→principle decomposition lane is a later slice.
     #[serde(default)]
     pub rulings: Vec<RulingRecordParams>,
+
+    /// Leader terminal adjudication for this dispatch outcome (#1035). When
+    /// present, an append-only `dispatch_adjudications` row is written linked
+    /// to the outcome by `outcome_id`. Additive and optional: omitting it
+    /// leaves `complete` byte-compatible with pre-existing callers.
+    #[serde(default)]
+    pub adjudication: Option<AdjudicationParams>,
+}
+
+/// Leader terminal judgment for a dispatch outcome, captured at `complete`
+/// (#1035). Exactly one of `verdict` / `not_required_reason` must be present
+/// — mirroring the DB CHECK constraint on `dispatch_adjudications`. When
+/// `not_required_reason` is present it MUST be a member of
+/// [`memcore::NOT_REQUIRED_REASONS`] (the closed-set gate lives in the
+/// memcore write primitive). Each signature id in the enclosing
+/// `TachiCompleteParams::signatures` must resolve via
+/// `tachi_dispatch::resolve_signature_id` or the entire adjudication is
+/// rejected loudly.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct AdjudicationParams {
+    /// Terminal verdict, e.g. "accepted" | "rejected". Mutually exclusive
+    /// with `not_required_reason`.
+    #[serde(default)]
+    pub verdict: Option<String>,
+
+    /// Closed-set reason code explaining why adjudication was not required.
+    /// Mutually exclusive with `verdict`; must be a member of
+    /// `NOT_REQUIRED_REASONS` when present.
+    #[serde(default)]
+    pub not_required_reason: Option<String>,
+
+    /// Who adjudicated (the leader/seat identity). Required.
+    pub adjudicator: String,
+
+    /// Evidence reference backing this judgment. Defaults to the outcome id
+    /// when absent (the DB column is NOT NULL).
+    #[serde(default)]
+    pub evidence_ref: Option<String>,
+}
+
+impl AdjudicationParams {
+    /// Validate that exactly one of `verdict` / `not_required_reason` is
+    /// present and non-empty. Returns an error message string when invalid.
+    pub fn validate_exactly_one(&self) -> Result<(), String> {
+        let has_verdict = self
+            .verdict
+            .as_deref()
+            .is_some_and(|v| !v.trim().is_empty());
+        let has_reason = self
+            .not_required_reason
+            .as_deref()
+            .is_some_and(|r| !r.trim().is_empty());
+        match (has_verdict, has_reason) {
+            (true, false) | (false, true) => Ok(()),
+            (true, true) => Err(
+                "adjudication verdict and not_required_reason are mutually exclusive; \
+                 supply exactly one"
+                    .to_string(),
+            ),
+            (false, false) => Err(
+                "adjudication requires exactly one of verdict or not_required_reason".to_string(),
+            ),
+        }
+    }
 }
 
 /// One caller-supplied leader adjudication captured at `complete` (#950). Stored
