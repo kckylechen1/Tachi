@@ -227,17 +227,43 @@ fn concurrent_claim_smoke_single_winner_under_load() {
 
     const N: usize = 32;
     let sticky_id = "race-sticky-1";
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(N));
+    let stores = (0..N)
+        .map(|_| MemoryStore::open(&db_path_str))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("open all claim stores before starting workers");
+    let start = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let mut handles = Vec::with_capacity(N);
 
-    for _ in 0..N {
-        let db_path_str = db_path_str.clone();
-        let barrier = barrier.clone();
-        handles.push(std::thread::spawn(move || -> bool {
-            let mut store = MemoryStore::open(&db_path_str).expect("open db in thread");
-            barrier.wait();
+    for mut store in stores {
+        let worker_start = std::sync::Arc::clone(&start);
+        let handle = std::thread::Builder::new().spawn(move || -> bool {
+            let (released, wake) = &*worker_start;
+            let mut released = released.lock().expect("lock claim start gate");
+            while !*released {
+                released = wake.wait(released).expect("wait for claim start gate");
+            }
+            drop(released);
             try_claim_sticky(&mut store, sticky_id, Some("racer")).unwrap_or(false)
-        }));
+        });
+
+        match handle {
+            Ok(handle) => handles.push(handle),
+            Err(error) => {
+                let (released, wake) = &*start;
+                *released.lock().expect("release claim start gate") = true;
+                wake.notify_all();
+                for handle in handles {
+                    let _ = handle.join();
+                }
+                panic!("spawn claim worker: {error}");
+            }
+        }
+    }
+
+    {
+        let (released, wake) = &*start;
+        *released.lock().expect("release claim start gate") = true;
+        wake.notify_all();
     }
 
     let winners: usize = handles
