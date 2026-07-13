@@ -61,7 +61,9 @@ fn load_env_files(
     git_root: Option<&Path>,
 ) {
     let _ = dotenvy::from_path(home.join(".secrets/master.env"));
+    std::env::remove_var(crate::host_profile::HOST_PROFILE_ENV);
     let _ = dotenvy::from_path_override(app_home.join("config.env"));
+    let canonical_host_profile = std::env::var(crate::host_profile::HOST_PROFILE_ENV).ok();
     let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
 
     if load_project_local_env {
@@ -76,6 +78,11 @@ fn load_env_files(
                 }
             }
         }
+    }
+
+    match canonical_host_profile {
+        Some(value) => std::env::set_var(crate::host_profile::HOST_PROFILE_ENV, value),
+        None => std::env::remove_var(crate::host_profile::HOST_PROFILE_ENV),
     }
 }
 
