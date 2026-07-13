@@ -183,10 +183,15 @@ fn collect_api_key_status_inner(
         .collect::<HashMap<_, _>>();
     let config_env = crate::provider_config::collect_config_env_values();
     let vault_values: HashMap<String, String> = if compare_vault_values {
-        load_keychain_vault_api_key_values(global_db_path)
-            .unwrap_or_default()
-            .into_iter()
-            .collect()
+        match load_keychain_vault_api_key_values(global_db_path) {
+            Ok(values) => values.into_iter().collect(),
+            Err(err) => {
+                tracing::warn!(
+                    "[vault] keychain vault read failed during status health check: {err}"
+                );
+                HashMap::new()
+            }
+        }
     } else {
         HashMap::new()
     };

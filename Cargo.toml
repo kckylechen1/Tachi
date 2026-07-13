@@ -23,6 +23,10 @@ members = [
     "crates/tachi-hub",
     "crates/tachi-llm",
     "crates/tachi-merge-ops",
+    # Vault crypto + versioned KDF-parameter format leaf crate, extracted
+    # for cross-product reuse (tachi#1080 v1: crypto+format only, store
+    # stays product-local). Depends on nothing else in this workspace.
+    "crates/vault-kit",
     "tools/cleaner",
 ]
 default-members = [
