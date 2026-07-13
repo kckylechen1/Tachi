@@ -1769,9 +1769,13 @@ mod tests {
         let young = make_target_dir(&root, "fresh-target");
         let mut store = open_store(&root);
 
-        let probes = std::cell::Cell::new(0usize);
-        let counting_probe = |_path: &Path| {
-            probes.set(probes.get() + 1);
+        // `HolderProbe` is `'static`, so the counter must be shared into the
+        // closure rather than borrowed — the assertion below still needs to read
+        // it after the reap has run.
+        let probes = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let counter = std::rc::Rc::clone(&probes);
+        let counting_probe = move |_path: &Path| {
+            counter.set(counter.get() + 1);
             HolderCheck::None
         };
 
