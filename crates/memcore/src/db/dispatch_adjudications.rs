@@ -81,6 +81,28 @@ pub fn append_dispatch_adjudication(
         // harmless rollback.
         return Ok(existing);
     }
+    // FIX-3 (#1035): orphan-verdict guard. The adjudication table carries no
+    // FK to `dispatch_outcomes` (the portable-kernel build creates both
+    // tables without one), so without this check a caller could mint a
+    // judgment against a hallucinated `outcome_id`, producing an orphan row
+    // that aggregation queries then silently inflate. The existence check
+    // runs INSIDE the transaction so a missing parent rolls back the entire
+    // append — the SELECT precedes the INSERT, so on rejection no row is
+    // written and the transaction harmlessly rolls back on drop.
+    let parent_exists: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM dispatch_outcomes WHERE outcome_id = ?1",
+            params![new.outcome_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if parent_exists.is_none() {
+        return Err(MemoryError::InvalidArg(format!(
+            "unknown outcome_id '{}': cannot append an adjudication for an \
+             outcome that has no dispatch_outcomes parent row",
+            new.outcome_id
+        )));
+    }
     let created_at = normalize_utc_iso_or_now("");
     tx.execute(
         "INSERT INTO dispatch_adjudications
@@ -192,7 +214,29 @@ mod tests {
         crate::db::register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
+        // FIX-3 (#1035): append_dispatch_adjudication now rejects an orphan
+        // outcome_id, so the fixture outcome rows the tests adjudicate must
+        // have a parent dispatch_outcomes row. Seed both the verdict-path
+        // outcome ("outcome-1") and the not_required-path outcome
+        // ("outcome-nr") here so every existing test that calls
+        // append_dispatch_adjudication through the shared helpers passes.
+        seed_outcome(&conn, "outcome-1");
+        seed_outcome(&conn, "outcome-nr");
         conn
+    }
+
+    /// Insert a minimal parent `dispatch_outcomes` row so an adjudication
+    /// linked to `outcome_id` is not an orphan (FIX-3 existence check).
+    fn seed_outcome(conn: &Connection, outcome_id: &str) {
+        use crate::db::dispatch_outcomes::{upsert_outcome, NewDispatchOutcome};
+        let new = NewDispatchOutcome {
+            outcome_id: outcome_id.to_string(),
+            dispatch_id: format!("dispatch-{outcome_id}"),
+            execution_outcome: "completed".to_string(),
+            vendor: "codex".to_string(),
+            ..Default::default()
+        };
+        upsert_outcome(conn, &new).unwrap();
     }
 
     fn event(key: &str) -> NewDispatchAdjudication {
@@ -213,7 +257,7 @@ mod tests {
                 DispatchAdjudicationSignature {
                     signature_id: "zero_discriminating_test".to_string(),
                     evidence_ref: Some("review-2".to_string()),
-                    resolved: false,
+                    resolved: true,
                 },
             ],
         }
@@ -250,6 +294,9 @@ mod tests {
         // FIX-4 (#1035): strengthen from row-count to per-signature field
         // assertions — the two signature rows must be independently correct
         // in evidence_ref and resolved, not merely present in the right count.
+        // FIX-5 (#1035): the fixture seeds one resolved and one unresolved
+        // signature — both `false` would let a regression that permanently
+        // clears `resolved` pass undetected.
         let fake_sig = first
             .signatures
             .iter()
@@ -263,7 +310,11 @@ mod tests {
             .find(|s| s.signature_id == "zero_discriminating_test")
             .expect("zero_discriminating_test signature present");
         assert_eq!(zero_sig.evidence_ref.as_deref(), Some("review-2"));
-        assert!(!zero_sig.resolved, "zero_discriminating_test unresolved");
+        assert!(
+            zero_sig.resolved,
+            "zero_discriminating_test resolved — a permanently-false roundtrip \
+             must not pass the discrimination check"
+        );
 
         let mut correction = event("event-2");
         correction.verdict = Some("rejected".to_string());
@@ -414,5 +465,50 @@ mod tests {
         let row = append_dispatch_adjudication(&conn, &clean).unwrap();
         assert_eq!(row.signatures.len(), 1);
         assert_eq!(row.signatures[0].signature_id, "fake_security_fix");
+    }
+
+    /// FIX-3 (#1035): an adjudication for an `outcome_id` that has no
+    /// `dispatch_outcomes` parent row is rejected — the entire append is
+    /// refused and zero rows land. The adjudication table carries no FK, so
+    /// without this check a caller could mint a judgment against a
+    /// hallucinated outcome_id, producing an orphan that aggregation queries
+    /// silently inflate. RED on pre-FIX-3 code: the row is written (no
+    /// existence check existed).
+    #[test]
+    fn unknown_outcome_id_is_rejected_and_writes_zero_rows() {
+        let conn = open_conn();
+        let mut orphan = event("event-orphan");
+        orphan.outcome_id = "outcome-that-does-not-exist".to_string();
+
+        let err = append_dispatch_adjudication(&conn, &orphan)
+            .expect_err("an unknown outcome_id must be rejected");
+        assert!(
+            err.to_string().contains("unknown outcome_id")
+                && err.to_string().contains("outcome-that-does-not-exist"),
+            "error must name the unknown outcome_id: {err}"
+        );
+
+        let parent_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_adjudications \
+                 WHERE outcome_id = 'outcome-that-does-not-exist'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            parent_count, 0,
+            "FIX-3: zero rows written for an unknown outcome_id"
+        );
+
+        let sig_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_adjudication_signatures \
+                 WHERE adjudication_id = 'adjudication-event-orphan'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sig_count, 0, "no orphan signature rows either");
     }
 }
