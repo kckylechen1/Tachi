@@ -133,6 +133,38 @@ mod tests {
             .any(|arg| arg.as_str() == Some("cancel")));
     }
 
+    /// The other input `derive_acpx_session` accepts: the dispatch **profile**.
+    /// `codex_55_review` -> `raven`, sourced `dispatch_profile`.
+    ///
+    /// This used to be covered only end-to-end, by the acpx-session dispatch test.
+    /// Since #894 S2d that lane cannot be dispatched at all (a read-only profile
+    /// over acpx — no sandbox primitive, unattended shell, nobody enforcing the
+    /// read-only claim — is refused pre-spawn by authority invariant 4), so
+    /// `dispatch_acpx_session_mode_derives_raven_for_a_review_lane` now declares
+    /// its review lane with `stage`. Session derivation from a profile is a pure
+    /// function and needs no dispatch: it is pinned here rather than quietly
+    /// dropped.
+    #[test]
+    fn acpx_session_derives_raven_from_a_review_dispatch_profile() {
+        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _cmd = EnvRestore::set("TACHI_ACPX_COMMAND", "python3");
+        let _args = EnvRestore::set("TACHI_ACPX_ARGS", "-m acpx");
+        let _agent = EnvRestore::remove("TACHI_ACPX_AGENT");
+        let _mode = EnvRestore::set("TACHI_ACPX_RUN_MODE", "session");
+        let _legacy_mode = EnvRestore::remove("TACHI_ACPX_SESSION_MODE");
+        let _session = EnvRestore::remove("TACHI_ACPX_SESSION");
+        let mut params = params();
+        params.profile = Some("codex_55_review".to_string());
+        let spec = build_acpx_command_spec(&params, "codex", Path::new("/tmp/run/prompt.md"))
+            .expect("spec should build");
+
+        assert!(spec.args.windows(2).any(|pair| pair == ["-s", "raven"]));
+        assert_eq!(spec.metadata["session"], json!("raven"));
+        assert_eq!(spec.metadata["session_source"], json!("dispatch_profile"));
+    }
+
     #[test]
     fn acpx_rejects_full_permission_profile() {
         let _guard = crate::shell_ops::tachi_run_root_env_lock()

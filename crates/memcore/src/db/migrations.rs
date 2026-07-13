@@ -22,6 +22,9 @@
 //!   numbered after #1007's v12, see #1017)
 //! - v14: `dispatch_outcomes.reported_outcome` column (#773 Layer-2 ②) —
 //!   dual-truth: raw self-report vs machine-resolved verdict.
+//! - v15: `exec_envs.env_class` column (#894 S2c) — provisioning policy class
+//!   (edit-only | build-ticketed | build-private); legacy rows land on the
+//!   fail-safe `edit-only`.
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -33,9 +36,9 @@
 //! written by a newer kernel fails loudly instead of silently proceeding
 //! against data/columns it doesn't understand yet.
 //!
-//! [`EXPECTED_SCHEMA_VERSION`] counts the migration sequence above: 14
-//! sentinel migrations (v1..v14) plus the pre-sentinel baseline schema (v0),
-//! so the current stamp is 14. Bump this const (and add a `vN` doc line
+//! [`EXPECTED_SCHEMA_VERSION`] counts the migration sequence above: 15
+//! sentinel migrations (v1..v15) plus the pre-sentinel baseline schema (v0),
+//! so the current stamp is 15. Bump this const (and add a `vN` doc line
 //! above) whenever a new migration is appended to [`run_data_migrations`].
 //!
 //! ### Compatibility transaction widened to cover `init_schema_inner` (#984 F1 round 3)
@@ -65,12 +68,13 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 14;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 15;
 
 mod basic;
 mod cross_db;
 mod dispatch_outcomes_reported;
 mod domain_retire;
+mod exec_env_class;
 mod hard_state_index;
 mod legacy_columns;
 mod pack_retire;
@@ -81,6 +85,7 @@ use basic::*;
 use cross_db::*;
 use dispatch_outcomes_reported::*;
 use domain_retire::*;
+use exec_env_class::*;
 use hard_state_index::*;
 use legacy_columns::*;
 pub use legacy_columns::{
@@ -111,6 +116,7 @@ pub struct MigrationReport {
     pub session_claims_duplicates_deduped: usize,
     pub hard_state_index_added: usize,
     pub dispatch_outcomes_reported_outcome_added: usize,
+    pub exec_envs_env_class_added: usize,
 }
 
 /// Read the schema version stamp (`PRAGMA user_version`). Absent/fresh DBs
@@ -312,6 +318,13 @@ pub(crate) fn run_data_migrations_in_tx(
         conn,
         "v14_dispatch_outcomes_reported_outcome",
         migrate_v14_dispatch_outcomes_reported_outcome,
+    )?
+    .unwrap_or(0);
+
+    report.exec_envs_env_class_added = apply_versioned_migration(
+        conn,
+        "v15_exec_envs_env_class",
+        migrate_v15_exec_envs_env_class,
     )?
     .unwrap_or(0);
 

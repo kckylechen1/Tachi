@@ -455,6 +455,20 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- (`active` -> `reclaimed`); the reclaim transition is a transactional
         -- state flip written by exactly one reclaim function. `dispatch_id`
         -- links a lease to the dispatch that owns it.
+        --
+        -- `env_class` (#894 S2c) is the provisioning policy class — a closed
+        -- vocabulary of `edit-only` (default) | `build-ticketed` |
+        -- `build-private`. It decides ONE thing at provision time: whether a
+        -- `build_target` resource is allocated and bound to this lease
+        -- (`edit-only` gets none — that is the ~14MB tree). It is NOT a
+        -- security boundary: a worker with a shell and the same UID can run
+        -- cargo in an `edit-only` tree regardless of what this column says
+        -- (owner-ratified 2026-07-13). Its value is disk (no target dir) and
+        -- default routing (builds go to the broker's serialized executor seat
+        -- instead of poisoning a shared target from N diverged trees).
+        -- Retrofitted onto existing DBs by the v15 sentinel migration; legacy
+        -- rows read back `edit-only` because they were never provisioned under
+        -- a class at all and carry no resource bindings (S2a is newer).
         CREATE TABLE IF NOT EXISTS exec_envs (
             env_id         TEXT PRIMARY KEY,
             kind           TEXT NOT NULL DEFAULT 'worktree',
@@ -463,6 +477,7 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             branch         TEXT NOT NULL DEFAULT '',
             base_sha       TEXT NOT NULL DEFAULT '',
             dispatch_id    TEXT,
+            env_class      TEXT NOT NULL DEFAULT 'edit-only',
             state          TEXT NOT NULL DEFAULT 'active',
             reclaim_reason TEXT,
             schema_version INTEGER NOT NULL DEFAULT 1,
@@ -486,15 +501,18 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- (at-least-once, idempotent — `reclaimed_bytes` is assigned, never
         -- accumulated). `reclaim_failed` is a failed delete (retryable);
         -- `quarantined` is "hands off, a human/broker decides" and is entered
-        -- through `quarantine_resource`.
+        -- through `quarantine_resource`; S2c adds `release_quarantine` as the
+        -- one way back out (quarantined -> active), gated on the caller
+        -- verifying or clearing the bytes first.
         --
-        -- `state` has exactly three writers, all in `db::exec_env_resources` and
+        -- `state` has exactly four writers, all in `db::exec_env_resources` and
         -- all taking an IMMEDIATE transaction so their read-then-write is atomic
-        -- against each other: `reclaim_resource`, `quarantine_resource`, and
-        -- `insert_resource`'s re-registration path (a `reclaimed` (path, kind) is
-        -- revived as `active` under a fresh resource_id — the reclaimer churns
-        -- the same worktree dirs, so a path must be registerable more than once
-        -- in the life of the DB). Nothing writes `state` with ad-hoc SQL.
+        -- against each other: `reclaim_resource`, `quarantine_resource`,
+        -- `release_quarantine`, and `insert_resource`'s re-registration path (a
+        -- `reclaimed` (path, kind) is revived as `active` under a fresh
+        -- resource_id — the reclaimer churns the same worktree dirs, so a path
+        -- must be registerable more than once in the life of the DB). Nothing
+        -- writes `state` with ad-hoc SQL.
         --
         -- Bindings are many-to-many on purpose: one shared `build_target`
         -- (CARGO_TARGET_DIR) is bound by every live lease at once. refcount =

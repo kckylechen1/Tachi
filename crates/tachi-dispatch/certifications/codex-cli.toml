@@ -1,0 +1,77 @@
+# Provider certification receipt — #894 S2d, frozen invariant 5.
+#
+# A receipt is a statement about ONE EXECUTION of ONE kill-test against ONE
+# vendor binary version. It is not a statement about codex, about "sandboxes",
+# or about any other version of the same binary. Nothing in this file may be
+# edited to widen a claim: the only way to certify a different vendor version is
+# to run the kill-test against that binary and write a new receipt.
+#
+# This file is the artifact of record. `crates/tachi-dispatch/src/certification.rs`
+# mirrors it as a Rust const (the shipped qualification table points at the const,
+# not at this file, so certification is compiled in and cannot go missing at
+# runtime); `receipt_const_matches_the_checked_in_receipt_file` fails the build if
+# the two ever disagree, field for field.
+#
+# Boundaries of THIS experiment, stated so nobody over-reads it:
+#   * ONE binary:  codex-cli 0.144.1. Not 0.144.0, not 0.145.x — the runtime gate
+#     compares the installed binary's `--version` against `vendor_version` and
+#     REFUSES a read-only dispatch on any mismatch (an unknown version is not a
+#     certified version). Vendor conformance does not carry across versions.
+#   * ONE OS:      macOS 26.5.1 (arm64). Linux/Windows codex sandboxing is a
+#     different implementation (seatbelt vs. landlock/seccomp) and is NOT
+#     certified by this run.
+#   * ONE LEVEL:   `read-only`. The run observed nothing about what
+#     `--sandbox workspace-write` does or does not contain, so `covers` lists
+#     read-only only and a codex workspace-write contract stays *advisory*.
+#   * ONE MATRIX:  the ten mutations listed below, and only those. Symlink-escape
+#     and xattr/ACL mutations are NOT in the matrix and are NOT certified.
+
+id = "codex-cli-0.144.1-macos-20260713"
+backend = "codex"
+transport = "cli"
+vendor_binary = "codex-cli"
+vendor_version = "0.144.1"
+host_os = "macos"
+host_os_version = "26.5.1"
+
+kill_test = "crates/tachi-dispatch/tests/codex_sandbox_kill_test.rs"
+kill_test_fn = "codex_read_only_sandbox_refuses_every_mutation_in_the_matrix"
+
+# The executed run. `cargo test -p tachi-dispatch --test codex_sandbox_kill_test
+# -- --ignored`, run by Oz on this machine: a real `codex exec --sandbox read-only`
+# in a throwaway git worktree, every mutation below attempted, every one refused,
+# and every parent-held file byte-identical (FNV-1a) afterwards.
+result = "pass"
+executed_at = "2026-07-13"
+executed_by = "Oz"
+duration_secs = "60.71"
+
+# The kill-test source AS EXECUTED, pinned by git blob so a reader can diff it.
+# The shipped test file was subsequently re-typed for this receipt-backed
+# qualification API (the `ProviderQualification` struct changed shape and the
+# candidate row is now minted from the probed version). Its mutation matrix, the
+# shell commands, and every assertion are unchanged from the executed blob —
+# structurally re-checked on every `cargo test` by
+# `the_certified_matrix_matches_the_kill_tests_command_table`.
+executed_on_commit = "9b531012264db0b7bf0f50398ec7779b0bb13ffc"
+kill_test_source_blob = "c4df6aebfe9394f92f854c88f9c8f7a1b637b912"
+
+# The workspace-authority levels this execution certifies. Read-only ONLY.
+covers = ["read-only"]
+
+# The mutation matrix the sandbox refused, label for label. This list is the
+# coverage claim, and it is machine-coupled to the kill-test's command table:
+# add a mutation to the test and this receipt no longer matches it, which is a
+# red test until the kill-test is re-run and a new receipt is issued.
+matrix = [
+  "create",
+  "append",
+  "truncate",
+  "rename",
+  "unlink",
+  "chmod_then_write",
+  "git_internals",
+  "mounted_skill_write",
+  "absolute_path_outside_worktree",
+  "descendant_process_write",
+]

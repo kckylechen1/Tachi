@@ -124,6 +124,9 @@ pub(super) async fn run_cli_command(
         Commands::Worktree { .. } => {
             unreachable!("Worktree is handled in async context before generic CLI dispatch")
         }
+        Commands::Build { .. } => {
+            unreachable!("Build is handled in async context before generic CLI dispatch")
+        }
         Commands::Harness { .. } => {
             unreachable!("Harness is handled in async context before generic CLI dispatch")
         }

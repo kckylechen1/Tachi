@@ -77,6 +77,7 @@ mod agent_markdown;
 mod agent_registry;
 mod arena_ops;
 mod bootstrap;
+mod build_broker;
 pub mod build_info;
 mod builtins;
 mod capability_ops;
