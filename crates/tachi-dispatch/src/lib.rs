@@ -6,6 +6,7 @@
 
 pub mod authority;
 pub mod certification;
+pub mod identity;
 mod launcher;
 mod model_registry;
 mod native_skill_ids;
@@ -27,6 +28,11 @@ pub use authority::{
 pub use certification::{
     parse_version_output, probe_backend_version, versions_match, CertificationReceipt,
     CertificationResult, CODEX_CLI_RECEIPT, CODEX_KILL_TEST_MATRIX, RECEIPTS,
+};
+pub use identity::{
+    model_lineage_id, provider_model_parts, DispatchIdentityEffective, DispatchIdentityObserved,
+    DispatchIdentityReceipt, DispatchIdentityRequest, DISPATCH_IDENTITY_CONTRACT_ID,
+    UNKNOWN_IDENTITY,
 };
 pub use launcher::{
     build_claude_launch, build_codex_launch, build_custom_launch, build_grok_launch,
@@ -57,11 +63,12 @@ pub use profiles::{
     profile_projected_weak_against_from_overlay, profile_required_skill_ids,
     profile_required_skill_ids_with_overlay, profile_resolved_model, profile_skill_loadout_json,
     profile_skill_loadout_json_with_overlay, profile_uses_opencode_adapter, profile_weak_against,
-    profile_weak_against_with_overlay, resolve_and_apply_dispatch_profile,
-    resolve_dispatch_profile, DispatchProfileAlias, DispatchProfileDef, ResolvedDispatchProfile,
-    DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES, DISPATCH_PROFILE_ALIASES,
-    MIN_CARD_RISK_EVOLUTION_SAMPLES, MIN_LOADOUT_EVOLUTION_SAMPLES, MIN_ROUTE_POLICY_RULE_SAMPLES,
-    PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
+    profile_weak_against_with_overlay, recommendation_identity_receipt,
+    resolve_and_apply_dispatch_profile, resolve_dispatch_profile, DispatchProfileAlias,
+    DispatchProfileDef, ResolvedDispatchProfile, DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES,
+    DISPATCH_PROFILE_ALIASES, MIN_CARD_RISK_EVOLUTION_SAMPLES, MIN_LOADOUT_EVOLUTION_SAMPLES,
+    MIN_ROUTE_POLICY_RULE_SAMPLES, PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
+    ROUTE_POLICY_RULE_SCORE_BONUS,
 };
 pub use registry::{
     dispatch_agent_help_list, fallback_chain, mcp_inject_supported, normalize_dispatch_agent_name,

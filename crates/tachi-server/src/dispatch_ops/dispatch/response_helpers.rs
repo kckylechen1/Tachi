@@ -128,6 +128,7 @@ pub(super) fn build_dispatch_response(
         },
         "agent": inputs.agent_norm,
         "profile": inputs.profile_payload,
+        "identity_receipt": inputs.resolved_profile.identity_receipt,
         "selected_profile": inputs.resolved_profile.selected_profile,
         "authority": inputs.authority,
         "tool_access": inputs.resolved_profile.mcp_access,

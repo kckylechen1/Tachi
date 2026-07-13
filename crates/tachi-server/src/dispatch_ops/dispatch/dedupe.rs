@@ -11,6 +11,20 @@ pub(super) fn dispatch_runs_root() -> PathBuf {
     crate::path_utils::tachi_home().join("runs")
 }
 
+/// The identity receipt is frozen in status.json at dispatch acceptance. Later
+/// lifecycle operations read this artifact rather than resolving mutable
+/// profile definitions again.
+pub(crate) fn load_dispatch_identity_receipt(
+    dispatch_id: &str,
+) -> Option<tachi_dispatch::DispatchIdentityReceipt> {
+    let status_path = dispatch_runs_root().join(dispatch_id).join("status.json");
+    crate::task_lifecycle::read_json_file(&status_path)
+        .ok()
+        .flatten()
+        .and_then(|status| status.get("identity_receipt").cloned())
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
 pub(super) fn dispatch_status_is_terminal(dispatch_id: &str) -> bool {
     let status_path = dispatch_runs_root().join(dispatch_id).join("status.json");
     let Ok(Some(status)) = crate::task_lifecycle::read_json_file(&status_path) else {

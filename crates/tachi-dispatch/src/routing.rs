@@ -3,9 +3,9 @@ use serde_json::{json, Value};
 
 use crate::eval::{AgentPerformanceMatrixRow, CompletionStatus, EvalRow, SubagentTaskScore};
 use crate::{
-    fallback_chain, profile_matches_agent, resolve_dispatch_profile, DispatchProfileDef,
-    DISPATCH_PROFILES, MIN_ROUTE_POLICY_RULE_SAMPLES, ROUTE_POLICY_RULE_NS,
-    ROUTE_POLICY_RULE_SCORE_BONUS,
+    fallback_chain, profile_matches_agent, profile_resolved_model, recommendation_identity_receipt,
+    resolve_dispatch_profile, DispatchProfileDef, DISPATCH_PROFILES, MIN_ROUTE_POLICY_RULE_SAMPLES,
+    ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -546,7 +546,7 @@ fn score_profile_candidate(
         profile: profile.name.to_string(),
         agent: profile.backend.to_string(),
         role: profile.role.to_string(),
-        model: profile.model.map(str::to_string),
+        model: profile_resolved_model(profile),
         score: round2(score),
         reasons,
         live_samples,
@@ -625,7 +625,8 @@ pub fn build_dispatch_recommendation_response(
         "blocked_profiles": &risk.blocked_profiles,
         "recommended_profile": &best.profile,
         "recommended_agent": &best.agent,
-        "recommended_model": best_profile.model,
+        "recommended_model": profile_resolved_model(best_profile),
+        "identity_receipt": recommendation_identity_receipt(best_profile),
         "recommended_transport": profile_payload.recommended_transport,
         "transport_readiness": profile_payload.transport_readiness,
         "role": &best.role,

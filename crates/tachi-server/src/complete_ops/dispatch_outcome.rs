@@ -61,7 +61,15 @@ pub(crate) fn record_complete_outcome(
         return json!("skipped (no dispatch_id)");
     };
 
-    let (role, vendor, model) = resolve_outcome_lane(params);
+    let receipt = crate::dispatch_ops::load_dispatch_identity_receipt(dispatch_id);
+    let (role, vendor, model) = resolve_outcome_lane(params, receipt.as_ref());
+    let seat = receipt.as_ref().and_then(|receipt| {
+        (receipt.planned.seat != tachi_dispatch::UNKNOWN_IDENTITY)
+            .then(|| receipt.planned.seat.clone())
+    });
+    let identity_receipt = receipt.as_ref().map(|receipt| {
+        serde_json::to_value(receipt).expect("dispatch identity receipt serializes")
+    });
     let outcome_id = uuid::Uuid::new_v4().to_string();
     let new_outcome = memcore::NewDispatchOutcome {
         outcome_id,
@@ -70,10 +78,7 @@ pub(crate) fn record_complete_outcome(
         model,
         vendor,
         role,
-        // seat: no reliable source at the complete seam (the dispatch profile
-        // carries backend/role/model, not a seat identity) — left None rather
-        // than fabricated. Awaiting dispatch-context plumb, same as retry_count.
-        seat: None,
+        seat,
         task_type: params
             .task_type
             .as_deref()
@@ -109,6 +114,7 @@ pub(crate) fn record_complete_outcome(
         verification_present,
         diff_present,
         evidence_refs: json!(evidence_refs),
+        identity_receipt,
     };
 
     let (scope, _) = server.resolve_write_scope(params.scope.as_deref().unwrap_or(""));
@@ -144,6 +150,7 @@ pub(crate) fn record_complete_outcome(
             "dispatch_id": row.dispatch_id,
             "idempotency_key": row.idempotency_key,
             "vendor": row.vendor,
+            "identity_receipt": row.identity_receipt,
             "scope": scope.as_str(),
         }),
         Err(error) => {
@@ -169,7 +176,18 @@ pub(crate) fn record_complete_outcome(
 /// best-guess/absent lane than not written at all), it simply carries
 /// `None`/`"unknown"`. `model` comes from the resolved profile when known
 /// (previously hard-coded `None`, #773 ④).
-fn resolve_outcome_lane(params: &TachiCompleteParams) -> (Option<String>, String, Option<String>) {
+fn resolve_outcome_lane(
+    params: &TachiCompleteParams,
+    receipt: Option<&tachi_dispatch::DispatchIdentityReceipt>,
+) -> (Option<String>, String, Option<String>) {
+    if let Some(receipt) = receipt {
+        let planned = &receipt.planned;
+        return (
+            tachi_dispatch::dispatch_role_class(&planned.role).map(str::to_string),
+            tachi_dispatch::normalize_vendor(&planned.backend, planned.model.as_deref()),
+            planned.model.clone(),
+        );
+    }
     let profile_def = params
         .profile
         .as_deref()
@@ -231,21 +249,46 @@ pub(crate) fn record_terminal_failure_outcome(
     if dispatch_id.is_empty() {
         return;
     }
-    let vendor = agent
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|a| tachi_dispatch::normalize_vendor(a, None))
+    let receipt = crate::dispatch_ops::load_dispatch_identity_receipt(dispatch_id);
+    let vendor = receipt
+        .as_ref()
+        .map(|receipt| {
+            tachi_dispatch::normalize_vendor(
+                &receipt.planned.backend,
+                receipt.planned.model.as_deref(),
+            )
+        })
+        .or_else(|| {
+            agent
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|a| tachi_dispatch::normalize_vendor(a, None))
+        })
         .unwrap_or_else(|| "unknown".to_string());
+    let identity_receipt = receipt.as_ref().map(|receipt| {
+        serde_json::to_value(receipt).expect("dispatch identity receipt serializes")
+    });
     let new_outcome = memcore::NewDispatchOutcome {
         outcome_id: uuid::Uuid::new_v4().to_string(),
         dispatch_id: dispatch_id.to_string(),
         vendor,
+        model: receipt
+            .as_ref()
+            .and_then(|receipt| receipt.planned.model.clone()),
+        role: receipt.as_ref().and_then(|receipt| {
+            tachi_dispatch::dispatch_role_class(&receipt.planned.role).map(str::to_string)
+        }),
+        seat: receipt.as_ref().and_then(|receipt| {
+            (receipt.planned.seat != tachi_dispatch::UNKNOWN_IDENTITY)
+                .then(|| receipt.planned.seat.clone())
+        }),
         // No self-report on a non-complete terminal; machine says failed.
         execution_outcome: "failed".to_string(),
         reported_outcome: None,
         error_class: Some(error_class.to_string()),
         // Keep the evidence_refs array contract (Default would be JSON null).
         evidence_refs: json!([]),
+        identity_receipt,
         ..Default::default()
     };
 
@@ -323,6 +366,21 @@ mod tests {
         let global_db = dir.path().join("global.sqlite");
         let server = MemoryServer::new(global_db, None).expect("server");
         (server, dir)
+    }
+
+    fn with_tachi_home<F: FnOnce(&std::path::Path)>(f: F) {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tachi home");
+        let saved = std::env::var_os("TACHI_HOME");
+        std::env::set_var("TACHI_HOME", home.path());
+        f(home.path());
+        if let Some(value) = saved {
+            std::env::set_var("TACHI_HOME", value);
+        } else {
+            std::env::remove_var("TACHI_HOME");
+        }
     }
 
     #[test]
@@ -435,6 +493,54 @@ mod tests {
     }
 
     #[test]
+    fn completion_persists_frozen_identity_receipt() {
+        with_tachi_home(|home| {
+            let (server, _dir) = test_server();
+            let receipt = serde_json::to_value(tachi_dispatch::recommendation_identity_receipt(
+                tachi_dispatch::resolve_dispatch_profile("glm_impl").expect("glm profile"),
+            ))
+            .expect("receipt json");
+            let run_dir = home.join("runs").join("dispatch-abc");
+            std::fs::create_dir_all(&run_dir).expect("run dir");
+            std::fs::write(
+                run_dir.join("status.json"),
+                serde_json::json!({ "identity_receipt": receipt }).to_string(),
+            )
+            .expect("status receipt");
+
+            let params = base_params();
+            let status = record_complete_outcome(
+                &server,
+                &params,
+                "eval-mem-1",
+                "success",
+                "completed",
+                None,
+                true,
+                true,
+                &[],
+            );
+            let outcome_id = status["outcome_id"].as_str().expect("outcome id");
+            let persisted: String = server
+                .with_global_store_read(|store| {
+                    store
+                        .connection()
+                        .query_row(
+                            "SELECT identity_receipt FROM dispatch_outcomes WHERE outcome_id = ?1",
+                            [outcome_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(|error| error.to_string())
+                })
+                .expect("frozen receipt column");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&persisted).expect("receipt json"),
+                receipt
+            );
+        });
+    }
+
+    #[test]
     fn records_terminal_failure_row_with_error_class_and_null_report() {
         let (server, _dir) = test_server();
 
@@ -462,7 +568,10 @@ mod tests {
             .find(|r| r.dispatch_id == "dispatch-watchdog")
             .expect("terminal row present");
         assert_eq!(row.execution_outcome, "failed");
-        assert_eq!(row.reported_outcome, None, "no self-report on a terminal path");
+        assert_eq!(
+            row.reported_outcome, None,
+            "no self-report on a terminal path"
+        );
         assert_eq!(row.error_class.as_deref(), Some("watchdog"));
 
         // First-writer-wins: a second, coarser classification does not clobber.
@@ -518,7 +627,11 @@ mod tests {
         std::env::remove_var("SIGIL_HOME");
         std::env::remove_var("TACHI_APP_HOME");
 
-        let named_db = tmp.path().join("projects").join(project_name).join("memory.db");
+        let named_db = tmp
+            .path()
+            .join("projects")
+            .join(project_name)
+            .join("memory.db");
         std::fs::create_dir_all(named_db.parent().unwrap()).expect("named project dir");
         std::fs::write(&named_db, b"").expect("named project db placeholder");
 
@@ -558,7 +671,15 @@ mod tests {
             params.dispatch_id = Some("dispatch-scope-sym-a".to_string());
             params.project = Some(project_name.to_string());
             let status = record_complete_outcome(
-                &server, &params, "eval-mem-sym-a", "success", "completed", None, true, true, &[],
+                &server,
+                &params,
+                "eval-mem-sym-a",
+                "success",
+                "completed",
+                None,
+                true,
+                true,
+                &[],
             );
             assert_eq!(status["recorded"], json!(true));
 
@@ -596,7 +717,15 @@ mod tests {
             params.dispatch_id = Some("dispatch-scope-sym-b".to_string());
             params.project = Some(project_name.to_string());
             let status = record_complete_outcome(
-                &server, &params, "eval-mem-sym-b", "success", "completed", None, true, true, &[],
+                &server,
+                &params,
+                "eval-mem-sym-b",
+                "success",
+                "completed",
+                None,
+                true,
+                true,
+                &[],
             );
             assert_eq!(status["recorded"], json!(true));
 

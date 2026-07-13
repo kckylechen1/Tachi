@@ -16,6 +16,7 @@ pub(super) struct FlowSetupInputs<'a> {
     pub(super) capability_bundle_file: &'a str,
     pub(super) evidence_required: &'a [String],
     pub(super) route_explanation: &'a [String],
+    pub(super) identity_receipt: &'a tachi_dispatch::DispatchIdentityReceipt,
 }
 
 pub(super) async fn init_kanban_and_flow(inputs: FlowSetupInputs<'_>) -> Result<(), String> {
@@ -52,6 +53,7 @@ pub(super) async fn init_kanban_and_flow(inputs: FlowSetupInputs<'_>) -> Result<
                 "capability_bundle_file": inputs.capability_bundle_file,
                 "evidence_required": inputs.evidence_required,
                 "route_explanation": inputs.route_explanation,
+                "identity_receipt": inputs.identity_receipt,
                 "suggested_complete": suggested_complete_payload(inputs.dispatch_id, inputs.agent_norm, inputs.params),
             }),
         ) {

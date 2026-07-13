@@ -39,6 +39,9 @@ pub(crate) struct SignatureRecord {
     /// resolved as of `recorded_at`.
     pub resolved: bool,
     pub recorded_at: DateTime<Utc>,
+    /// Frozen dispatch identity when this evidence came from a Tachi dispatch.
+    /// Older/external evidence remains explicitly unattached.
+    pub identity_receipt: Option<Value>,
 }
 
 fn record_to_value(record: &SignatureRecord) -> Value {
@@ -58,6 +61,7 @@ fn record_to_value(record: &SignatureRecord) -> Value {
         "signature": record.signature,
         "severity": severity,
         "evidence_ref": record.evidence_ref,
+        "identity_receipt": record.identity_receipt,
         "recorded_at": record.recorded_at.to_rfc3339(),
     })
 }
@@ -184,6 +188,27 @@ fn resolve_complete_lane(
     params: &TachiCompleteParams,
     sig: &SignatureRecordParams,
 ) -> Option<(String, String)> {
+    if sig
+        .vendor
+        .as_deref()
+        .is_none_or(|vendor| vendor.trim().is_empty())
+        && sig
+            .role
+            .as_deref()
+            .is_none_or(|role| role.trim().is_empty())
+    {
+        if let Some(dispatch_id) = params.dispatch_id.as_deref() {
+            if let Some(receipt) = crate::dispatch_ops::load_dispatch_identity_receipt(dispatch_id)
+            {
+                let role = tachi_dispatch::dispatch_role_class(&receipt.planned.role)?;
+                let vendor = tachi_dispatch::normalize_vendor(
+                    &receipt.planned.backend,
+                    receipt.planned.model.as_deref(),
+                );
+                return (vendor != "unknown").then(|| (role.to_string(), vendor));
+            }
+        }
+    }
     let profile_def = params
         .profile
         .as_deref()
@@ -223,6 +248,13 @@ pub(crate) fn record_complete_signatures(
         return json!("skipped (no signatures)");
     }
     let now = Utc::now();
+    let identity_receipt = params
+        .dispatch_id
+        .as_deref()
+        .and_then(crate::dispatch_ops::load_dispatch_identity_receipt)
+        .map(|receipt| {
+            serde_json::to_value(receipt).expect("dispatch identity receipt serializes")
+        });
     let mut recorded = Vec::new();
     let mut skipped = Vec::new();
     for sig in &params.signatures {
@@ -247,6 +279,7 @@ pub(crate) fn record_complete_signatures(
             evidence_ref: sig.evidence_ref.clone(),
             resolved: sig.resolved,
             recorded_at: now,
+            identity_receipt: identity_receipt.clone(),
         };
         match record_signature(server, &record) {
             Ok(key) => recorded.push(json!({
@@ -292,6 +325,7 @@ pub(crate) fn seed_signature_taxonomy_evidence(server: &MemoryServer) -> Result<
             evidence_ref: Some(evidence_ref.to_string()),
             resolved: false,
             recorded_at: now,
+            identity_receipt: None,
         });
     }
     records.push(SignatureRecord {
@@ -302,6 +336,7 @@ pub(crate) fn seed_signature_taxonomy_evidence(server: &MemoryServer) -> Result<
         evidence_ref: Some("#610".to_string()),
         resolved: false,
         recorded_at: now,
+        identity_receipt: None,
     });
     for _ in 0..3 {
         records.push(SignatureRecord {
@@ -312,6 +347,7 @@ pub(crate) fn seed_signature_taxonomy_evidence(server: &MemoryServer) -> Result<
             evidence_ref: Some("2026-07-05-campaign".to_string()),
             resolved: false,
             recorded_at: now,
+            identity_receipt: None,
         });
     }
 
@@ -329,6 +365,7 @@ pub(crate) fn seed_signature_taxonomy_evidence(server: &MemoryServer) -> Result<
             evidence_ref: Some("2026-07-05-campaign".to_string()),
             resolved: false,
             recorded_at: older,
+            identity_receipt: None,
         });
         records.push(SignatureRecord {
             vendor: "codex".to_string(),
@@ -338,6 +375,7 @@ pub(crate) fn seed_signature_taxonomy_evidence(server: &MemoryServer) -> Result<
             evidence_ref: Some("constitution-remap".to_string()),
             resolved: true,
             recorded_at: resolved_at,
+            identity_receipt: None,
         });
     }
     records.push(SignatureRecord {
@@ -348,6 +386,7 @@ pub(crate) fn seed_signature_taxonomy_evidence(server: &MemoryServer) -> Result<
         evidence_ref: Some("PR #733 BUG-1".to_string()),
         resolved: false,
         recorded_at: now,
+        identity_receipt: None,
     });
 
     for record in &records {

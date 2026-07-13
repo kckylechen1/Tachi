@@ -153,6 +153,7 @@ use self::workspace_setup::prepare_workspace_and_mcp;
 
 #[cfg(test)]
 pub(crate) use self::credentials::apply_unlocked_vault_env;
+pub(crate) use self::dedupe::load_dispatch_identity_receipt;
 pub(crate) use self::dedupe::new_dispatch_id;
 pub(crate) use self::recovery::recover_orphaned_dispatch_runs;
 
@@ -523,6 +524,7 @@ pub(crate) async fn handle_tachi_dispatch(
         capability_bundle_file: &capability_bundle_file,
         evidence_required: &resolved_profile.evidence_required,
         route_explanation: &resolved_profile.route_explanation,
+        identity_receipt: &resolved_profile.identity_receipt,
     })
     .await?;
 

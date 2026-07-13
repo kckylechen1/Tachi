@@ -97,6 +97,7 @@ async fn g2_resolved_only_lane_is_clean_and_critical_never_decays() {
             evidence_ref: Some("seed".to_string()),
             resolved: false,
             recorded_at: now - Duration::days(10),
+            identity_receipt: None,
         },
     )
     .expect("record occurrence");
@@ -110,6 +111,7 @@ async fn g2_resolved_only_lane_is_clean_and_critical_never_decays() {
             evidence_ref: Some("resolved".to_string()),
             resolved: true,
             recorded_at: now - Duration::days(9),
+            identity_receipt: None,
         },
     )
     .expect("record resolution");
@@ -132,6 +134,7 @@ async fn g2_resolved_only_lane_is_clean_and_critical_never_decays() {
             evidence_ref: Some("old".to_string()),
             resolved: false,
             recorded_at: now - Duration::days(400),
+            identity_receipt: None,
         },
     )
     .expect("record stale high");
@@ -145,6 +148,7 @@ async fn g2_resolved_only_lane_is_clean_and_critical_never_decays() {
             evidence_ref: Some("old-critical".to_string()),
             resolved: false,
             recorded_at: now - Duration::days(400),
+            identity_receipt: None,
         },
     )
     .expect("record stale critical");
@@ -264,6 +268,7 @@ async fn g7_convoy_suffixed_stage_gets_vaccinated() {
             evidence_ref: Some("G7".to_string()),
             resolved: false,
             recorded_at: Utc::now(),
+            identity_receipt: None,
         },
     )
     .expect("seed grok implementer signature");

@@ -10,7 +10,9 @@
 //! This table holds mutable execution facts only. Adjudication evidence
 //! (verdict, adjudicator, error signature) lives in the append-only
 //! `dispatch_adjudications` table (#1035) — S2, not built here; a replayed
-//! `complete` may rewrite any column on this row.
+//! `complete` may rewrite its mutable execution columns. The optional
+//! `identity_receipt` is frozen on its first write so a later replay cannot
+//! reinterpret an already-executed dispatch through changed profile metadata.
 //!
 //! ## Truthfulness: reported vs machine-resolved (#773 Layer-2 ②)
 //!
@@ -88,6 +90,9 @@ pub struct NewDispatchOutcome {
     pub diff_present: bool,
     /// JSON array of evidence references (files/issue refs/run artifacts).
     pub evidence_refs: Value,
+    /// The dispatch-time identity receipt, copied verbatim from the run ledger.
+    /// Legacy rows legitimately carry `None`.
+    pub identity_receipt: Option<Value>,
 }
 
 /// A persisted row in `dispatch_outcomes`.
@@ -113,12 +118,13 @@ pub struct DispatchOutcomeRow {
     pub verification_present: bool,
     pub diff_present: bool,
     pub evidence_refs: Value,
+    pub identity_receipt: Option<Value>,
     pub idempotency_key: String,
     pub created_at: String,
     pub updated_at: String,
 }
 
-// `reported_outcome` is appended LAST (index 22) so the pre-existing column
+// `reported_outcome` and `identity_receipt` are appended LAST (indices 22/23) so the pre-existing column
 // indices in `row_to_outcome` stay stable when the truthfulness column (#773)
 // was added — a positional shift of the older columns would have been an easy
 // off-by-one hazard.
@@ -126,12 +132,15 @@ const SELECT_COLUMNS: &str = "outcome_id, dispatch_id, eval_memory_id, model, ve
      task_type, execution_outcome, retry_count, \
      error_class, issue_ref, pr_ref, flow_id, cost_tokens, cost_usd, \
      verification_present, diff_present, evidence_refs, idempotency_key, created_at, updated_at, \
-     reported_outcome";
+      reported_outcome, identity_receipt";
 
 fn row_to_outcome(row: &rusqlite::Row<'_>) -> Result<DispatchOutcomeRow, rusqlite::Error> {
     let evidence_refs_raw: String = row.get(18)?;
     let evidence_refs =
         serde_json::from_str(&evidence_refs_raw).unwrap_or_else(|_| Value::Array(Vec::new()));
+    let identity_receipt = row
+        .get::<_, Option<String>>(23)?
+        .and_then(|raw| serde_json::from_str(&raw).ok());
     let retry_count: i64 = row.get(9)?;
     let cost_tokens: Option<i64> = row.get(14)?;
     Ok(DispatchOutcomeRow {
@@ -155,6 +164,7 @@ fn row_to_outcome(row: &rusqlite::Row<'_>) -> Result<DispatchOutcomeRow, rusqlit
         verification_present: row.get::<_, i64>(16)? != 0,
         diff_present: row.get::<_, i64>(17)? != 0,
         evidence_refs,
+        identity_receipt,
         idempotency_key: row.get(19)?,
         created_at: row.get(20)?,
         updated_at: row.get(21)?,
@@ -188,6 +198,11 @@ fn update_outcome_row(
     let now = normalize_utc_iso_or_now("");
     let evidence_refs_json =
         serde_json::to_string(&new.evidence_refs).unwrap_or_else(|_| "[]".to_string());
+    let identity_receipt_json = new
+        .identity_receipt
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     let retry_count = new.retry_count as i64;
     let cost_tokens = new.cost_tokens.map(|v| v as i64);
     conn.execute(
@@ -196,7 +211,8 @@ fn update_outcome_row(
             task_type = ?7, execution_outcome = ?8, reported_outcome = ?9,
             retry_count = ?10, error_class = ?11, issue_ref = ?12, pr_ref = ?13,
             flow_id = ?14, cost_tokens = ?15, cost_usd = ?16, verification_present = ?17,
-            diff_present = ?18, evidence_refs = ?19, updated_at = ?20
+             diff_present = ?18, evidence_refs = ?19,
+             identity_receipt = COALESCE(identity_receipt, ?20), updated_at = ?21
          WHERE outcome_id = ?1",
         params![
             outcome_id,
@@ -218,6 +234,7 @@ fn update_outcome_row(
             new.verification_present as i64,
             new.diff_present as i64,
             evidence_refs_json,
+            identity_receipt_json,
             now,
         ],
     )?;
@@ -254,6 +271,11 @@ pub fn upsert_outcome(
             let now = normalize_utc_iso_or_now("");
             let evidence_refs_json =
                 serde_json::to_string(&new.evidence_refs).unwrap_or_else(|_| "[]".to_string());
+            let identity_receipt_json = new
+                .identity_receipt
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
             let retry_count = new.retry_count as i64;
             let cost_tokens = new.cost_tokens.map(|v| v as i64);
             conn.execute(
@@ -261,9 +283,9 @@ pub fn upsert_outcome(
                  (outcome_id, dispatch_id, eval_memory_id, model, vendor, role, seat,
                   task_type, execution_outcome, reported_outcome, retry_count, error_class,
                   issue_ref, pr_ref, flow_id, cost_tokens, cost_usd, verification_present,
-                  diff_present, evidence_refs, idempotency_key, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?22)",
+                   diff_present, evidence_refs, identity_receipt, idempotency_key, created_at, updated_at)
+                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                          ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?23)",
                 params![
                     new.outcome_id,
                     new.dispatch_id,
@@ -285,6 +307,7 @@ pub fn upsert_outcome(
                     new.verification_present as i64,
                     new.diff_present as i64,
                     evidence_refs_json,
+                    identity_receipt_json,
                     idempotency_key,
                     now,
                 ],
@@ -463,6 +486,9 @@ mod tests {
             verification_present: true,
             diff_present: true,
             evidence_refs: serde_json::json!(["cargo test", "clippy"]),
+            identity_receipt: Some(
+                serde_json::json!({"contract_id": "dispatch_identity_receipt/v1"}),
+            ),
         }
     }
 
@@ -482,6 +508,10 @@ mod tests {
         assert_eq!(
             inserted.evidence_refs,
             serde_json::json!(["cargo test", "clippy"])
+        );
+        assert_eq!(
+            inserted.identity_receipt,
+            Some(serde_json::json!({"contract_id": "dispatch_identity_receipt/v1"}))
         );
         assert!(!inserted.created_at.is_empty());
         assert_eq!(inserted.created_at, inserted.updated_at);
@@ -506,6 +536,10 @@ mod tests {
         assert_eq!(second.outcome_id, first.outcome_id, "same canonical row");
         assert_eq!(second.execution_outcome, "failure");
         assert_eq!(second.retry_count, 1);
+        assert_eq!(
+            second.identity_receipt, first.identity_receipt,
+            "a replay cannot replace the receipt frozen by the first completion"
+        );
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM dispatch_outcomes", [], |r| r.get(0))

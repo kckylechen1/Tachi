@@ -35,7 +35,7 @@ pub(super) fn migrate_v14_dispatch_outcomes_reported_outcome(
     Ok(1)
 }
 
-fn table_exists(conn: &Connection, table: &str) -> Result<bool, MemoryError> {
+pub(super) fn table_exists(conn: &Connection, table: &str) -> Result<bool, MemoryError> {
     let exists = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",

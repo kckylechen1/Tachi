@@ -581,7 +581,8 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- so those edges can be derived later without a re-migration.
         -- Adjudication evidence lives in the append-only dispatch_adjudications
         -- table (#1035); this table holds mutable execution facts only — a
-        -- replayed complete may rewrite any column here.
+         -- replayed complete may rewrite mutable execution columns here; the
+         -- identity receipt is frozen on its first write.
         --
         -- Truthfulness (#773 Layer-2 ②): `execution_outcome` is the
         -- MACHINE-RESOLVED terminal verdict (after the #878-A completion
@@ -613,9 +614,12 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             cost_tokens      INTEGER,
             cost_usd         REAL,
             verification_present INTEGER NOT NULL DEFAULT 0,
-            diff_present         INTEGER NOT NULL DEFAULT 0,
-            evidence_refs    TEXT NOT NULL DEFAULT '[]',
-            idempotency_key  TEXT NOT NULL,
+             diff_present         INTEGER NOT NULL DEFAULT 0,
+             evidence_refs    TEXT NOT NULL DEFAULT '[]',
+             -- Immutable receipt copied from the accepted run ledger. NULL is
+             -- a valid explicit legacy/unattributed state.
+             identity_receipt TEXT,
+             idempotency_key  TEXT NOT NULL,
             created_at       TEXT NOT NULL DEFAULT '',
             updated_at       TEXT NOT NULL DEFAULT '',
             UNIQUE (idempotency_key)
