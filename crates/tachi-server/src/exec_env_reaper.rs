@@ -4234,6 +4234,7 @@ mod tests {
     #[test]
     fn a_gapped_run_and_a_resolved_run_are_in_flight_together_without_contaminating_each_other() {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
         use std::time::Instant;
 
         let gapped_root = unique_temp_dir("tachi-reaper-parallel-gapped");
@@ -4241,14 +4242,22 @@ mod tests {
         make_target_dir(&gapped_root, "dead-target");
         make_target_dir(&resolved_root, "dead-target");
 
-        let arrived = AtomicUsize::new(0);
-        let rendezvous = |_path: &Path| {
-            arrived.fetch_add(1, Ordering::SeqCst);
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while arrived.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
-                std::thread::yield_now();
+        // `HolderProbe` is `dyn Fn(...) + 'static` (the same signature production code
+        // hands it under), so the closure below cannot BORROW a stack local — even
+        // though `thread::scope` would happily let it borrow the stack for the spawn
+        // itself, the probe's own type signature demands `'static`. So the counter is
+        // owned by the closure via a cloned `Arc`, not borrowed.
+        let arrived = Arc::new(AtomicUsize::new(0));
+        let rendezvous = {
+            let arrived = Arc::clone(&arrived);
+            move |_path: &Path| {
+                arrived.fetch_add(1, Ordering::SeqCst);
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while arrived.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                    std::thread::yield_now();
+                }
+                HolderCheck::None
             }
-            HolderCheck::None
         };
 
         let (gapped, resolved) = std::thread::scope(|scope| {
