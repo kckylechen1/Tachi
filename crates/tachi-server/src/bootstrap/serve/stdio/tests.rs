@@ -1345,9 +1345,9 @@ fn proxy_rejects_explicit_cross_project_write_override() {
 #[test]
 fn proxy_allows_explicit_cross_project_read_override() {
     let temp = tempfile::tempdir().expect("tempdir");
-    with_tachi_home(temp.path(), |tachi_home| {
-        seed_identity_db(tachi_home, "Sigil-test");
-        seed_identity_db(tachi_home, "Quant-test");
+    with_tachi_home(temp.path(), || {
+        seed_identity_db(temp.path(), "Sigil-test");
+        seed_identity_db(temp.path(), "Quant-test");
         for (tool, action) in [
             ("tachi_memory", Some("search")),
             ("tachi_memory", Some("get")),
@@ -1390,9 +1390,9 @@ fn proxy_allows_explicit_cross_project_read_override() {
 #[test]
 fn proxy_allows_explicit_cross_project_direct_read_override() {
     let temp = tempfile::tempdir().expect("tempdir");
-    with_tachi_home(temp.path(), |tachi_home| {
-        seed_identity_db(tachi_home, "Sigil-test");
-        seed_identity_db(tachi_home, "Quant-test");
+    with_tachi_home(temp.path(), || {
+        seed_identity_db(temp.path(), "Sigil-test");
+        seed_identity_db(temp.path(), "Quant-test");
         // #757 removed memory_graph/get_edges from MCP; remaining cross-project
         // direct reads include list_memories / get_memory / tachi_search.
         for tool in ["list_memories", "get_memory", "tachi_search"] {
