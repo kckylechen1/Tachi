@@ -378,8 +378,7 @@ mod tests {
         ];
 
         let err = append_dispatch_adjudication(&conn, &duplicate)
-            .err()
-            .expect("duplicate signature must fail the entire append");
+            .expect_err("duplicate signature must fail the entire append");
         assert!(
             err.to_string().contains("UNIQUE") || err.to_string().contains("constraint"),
             "error should be the PK violation: {err}"
