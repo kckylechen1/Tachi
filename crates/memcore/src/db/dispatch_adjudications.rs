@@ -134,9 +134,14 @@ pub fn list_adjudications_for_outcome(
     conn: &Connection,
     outcome_id: &str,
 ) -> Result<Vec<DispatchAdjudication>, MemoryError> {
+    // Event order = insertion order. `created_at` alone ties when two events
+    // land in the same millisecond, and `adjudication_id` is a random UUID —
+    // a coin-flip tie-break that made "which event came first" flip on ~1/3
+    // of runs (caught by kill-test 5). `rowid` is monotonically assigned on
+    // this append-only table, so it is the honest secondary key.
     let mut statement = conn.prepare(
         "SELECT adjudication_id, outcome_id, event_key, verdict, not_required_reason, actor, evidence_ref, created_at
-         FROM dispatch_adjudications WHERE outcome_id = ?1 ORDER BY created_at, adjudication_id",
+         FROM dispatch_adjudications WHERE outcome_id = ?1 ORDER BY created_at, rowid",
     )?;
     let ids = statement
         .query_map([outcome_id], |row| row.get::<_, String>(0))?
