@@ -209,6 +209,159 @@ pub(crate) fn record_complete_outcome(
     }
 }
 
+/// Record the leader terminal adjudication for this dispatch outcome (#1035).
+///
+/// Called from `handle_tachi_complete` AFTER [`record_complete_outcome`], with
+/// the outcome status JSON that function returned (the source of `outcome_id`).
+/// When `params.adjudication` is `None` this is a skip (the vast majority of
+/// `complete` calls carry no adjudication). When present, it writes an
+/// append-only `dispatch_adjudications` row linked to the outcome by
+/// `outcome_id`, plus one `dispatch_adjudication_signatures` row per resolved
+/// signature id in `params.signatures`.
+///
+/// **Scope symmetry (#774):** mirrors [`record_complete_outcome`]'s two-branch
+/// write target exactly — `params.project` (named project store) takes
+/// priority, otherwise `resolve_write_scope`. Splitting the outcome and its
+/// adjudication across two stores is the #774 historical accident.
+///
+/// **Fail-safe:** every failure (invalid params, unknown signature id, DB
+/// error) is surfaced in the returned status JSON; this never fails the
+/// enclosing `complete` call.
+///
+/// **Signature id gate (#1035 frozen spec):** every `params.signatures[i].id`
+/// must resolve via `tachi_dispatch::resolve_signature_id`. An unknown id
+/// rejects the ENTIRE adjudication loudly (the error message names it) —
+/// never silently dropping it and writing a partial event.
+pub(crate) fn record_complete_adjudication(
+    server: &MemoryServer,
+    params: &TachiCompleteParams,
+    dispatch_outcome_status: &Value,
+) -> Value {
+    let Some(adjudication) = params.adjudication.as_ref() else {
+        return json!("skipped (no adjudication)");
+    };
+
+    // The outcome row must have been recorded — without an outcome_id to
+    // link to, there is nothing to adjudicate.
+    let recorded = dispatch_outcome_status
+        .get("recorded")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !recorded {
+        return json!({
+            "recorded": false,
+            "reason": "dispatch outcome was not recorded; adjudication skipped",
+        });
+    }
+    let outcome_id = dispatch_outcome_status
+        .get("outcome_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if outcome_id.is_empty() {
+        return json!({
+            "recorded": false,
+            "reason": "outcome_id missing from dispatch_outcome status; adjudication skipped",
+        });
+    }
+
+    // Validate exactly-one-of (verdict | not_required_reason).
+    if let Err(error) = adjudication.validate_exactly_one() {
+        return json!({
+            "recorded": false,
+            "outcome_id": outcome_id,
+            "error": error,
+        });
+    }
+
+    // Signature id gate: every id must resolve to a canonical taxonomy entry.
+    // An unknown id rejects the ENTIRE adjudication — the append-only ledger
+    // never accepts an event carrying an unresolvable signature (#1035).
+    let mut signatures = Vec::with_capacity(params.signatures.len());
+    for sig in &params.signatures {
+        match tachi_dispatch::resolve_signature_id(&sig.signature) {
+            Some(canonical) => signatures.push(memcore::DispatchAdjudicationSignature {
+                signature_id: canonical.to_string(),
+                evidence_ref: sig.evidence_ref.clone(),
+                resolved: sig.resolved,
+            }),
+            None => {
+                return json!({
+                    "recorded": false,
+                    "outcome_id": outcome_id,
+                    "error": format!(
+                        "unknown signature id '{}' in adjudication signatures; \
+                         each id must resolve via the error-signature taxonomy",
+                        sig.signature
+                    ),
+                });
+            }
+        }
+    }
+
+    let evidence_ref = adjudication
+        .evidence_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&outcome_id)
+        .to_string();
+    // event_key is deterministic per outcome: a replay of the same complete
+    // produces the same outcome_id, so the same event_key short-circuits
+    // idempotently (the append primitive's get_by_event_key gate). A
+    // different complete produces a new outcome_id → new event_key → a
+    // correction row appended, preserving history.
+    let event_key = format!("complete:{outcome_id}");
+    let new_adjudication = memcore::NewDispatchAdjudication {
+        adjudication_id: uuid::Uuid::new_v4().to_string(),
+        outcome_id: outcome_id.clone(),
+        event_key,
+        verdict: adjudication.verdict.clone(),
+        not_required_reason: adjudication.not_required_reason.clone(),
+        actor: adjudication.adjudicator.clone(),
+        evidence_ref,
+        signatures,
+    };
+
+    let (scope, _) = server.resolve_write_scope(params.scope.as_deref().unwrap_or(""));
+    let write_result = if let Some(project) = params.project.as_deref().filter(|s| !s.is_empty()) {
+        server.with_named_project_store(project, |store| {
+            memcore::append_dispatch_adjudication(store.connection(), &new_adjudication)
+                .map_err(|e| e.to_string())
+        })
+    } else {
+        server.with_store_for_scope(scope, |store| {
+            memcore::append_dispatch_adjudication(store.connection(), &new_adjudication)
+                .map_err(|e| e.to_string())
+        })
+    };
+
+    match write_result {
+        Ok(row) => json!({
+            "recorded": true,
+            "adjudication_id": row.adjudication_id,
+            "outcome_id": row.outcome_id,
+            "event_key": row.event_key,
+            "verdict": row.verdict,
+            "not_required_reason": row.not_required_reason,
+            "signatures": row.signatures.len(),
+            "scope": scope.as_str(),
+        }),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                outcome_id = %outcome_id,
+                "failed to persist dispatch adjudication row"
+            );
+            json!({
+                "recorded": false,
+                "outcome_id": outcome_id,
+                "error": error,
+            })
+        }
+    }
+}
+
 /// Resolve `(role, vendor, model)` for the outcome row from the completion's
 /// own `profile`/`agent` fields — used only when no identity receipt exists
 /// to attribute from (a receipt's own [`tachi_dispatch::DispatchIdentityReceipt::attribution`]
@@ -384,7 +537,7 @@ pub(crate) fn record_terminal_failure_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool_params::TachiCompleteParams;
+    use crate::tool_params::{AdjudicationParams, SignatureRecordParams, TachiCompleteParams};
 
     fn base_params() -> TachiCompleteParams {
         TachiCompleteParams {
@@ -418,6 +571,7 @@ mod tests {
             format: None,
             signatures: Vec::new(),
             rulings: Vec::new(),
+            adjudication: None,
         }
     }
 
@@ -1221,5 +1375,218 @@ mod tests {
                 "the real completion's verdict is preserved, not clobbered by the later stray terminal call"
             );
         });
+    }
+
+    // ─── #1035 adjudication kill-tests ──────────────────────────────────────
+
+    fn signature_rec(id: &str) -> SignatureRecordParams {
+        SignatureRecordParams {
+            signature: id.to_string(),
+            severity: None,
+            evidence_ref: Some("review-1".to_string()),
+            resolved: false,
+            role: None,
+            vendor: None,
+        }
+    }
+
+    fn adjudication_outcome_rows(server: &MemoryServer, outcome_id: &str) -> Vec<memcore::DispatchAdjudication> {
+        server
+            .with_global_store_read(|store| {
+                memcore::list_adjudications_for_outcome(store.connection(), outcome_id)
+                    .map_err(|e| e.to_string())
+            })
+            .expect("read adjudications")
+    }
+
+    /// Kill-test 1: a complete carrying an adjudication writes the
+    /// append-only judgment row linked to the outcome, and a replay of the
+    /// same complete leaves that row byte-for-byte unchanged (the event_key
+    /// short-circuits idempotently).
+    #[test]
+    fn adjudication_with_verdict_lands_and_replay_preserves_original() {
+        let (server, _dir) = test_server();
+        let mut params = base_params();
+        params.adjudication = Some(AdjudicationParams {
+            verdict: Some("accepted".to_string()),
+            not_required_reason: None,
+            adjudicator: "leader".to_string(),
+            evidence_ref: Some("run-adjudication-1".to_string()),
+        });
+        params.signatures = vec![
+            signature_rec("fake_security_fix"),
+            signature_rec("zero_discriminating_test"),
+        ];
+
+        let outcome_status = record_complete_outcome(
+            &server, &params, "eval-1", "success", "completed", None, true, true, &[],
+        );
+        assert_eq!(outcome_status["recorded"], json!(true));
+        let outcome_id = outcome_status["outcome_id"].as_str().unwrap().to_string();
+
+        let adj_status = record_complete_adjudication(&server, &params, &outcome_status);
+        assert_eq!(adj_status["recorded"], json!(true), "adjudication recorded: {adj_status}");
+
+        let rows = adjudication_outcome_rows(&server, &outcome_id);
+        assert_eq!(rows.len(), 1, "exactly one adjudication row");
+        assert_eq!(rows[0].verdict.as_deref(), Some("accepted"));
+        assert_eq!(rows[0].not_required_reason, None);
+        assert_eq!(rows[0].actor, "leader");
+        assert_eq!(rows[0].evidence_ref, "run-adjudication-1");
+        assert_eq!(rows[0].signatures.len(), 2);
+        let is_adj = server
+            .with_global_store_read(|store| {
+                memcore::outcome_is_adjudicated(store.connection(), &outcome_id)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        assert!(is_adj, "outcome_is_adjudicated returns true after a terminal event");
+
+        // Snapshot the first row for byte-for-byte comparison after replay.
+        let first_row = rows.into_iter().next().unwrap();
+
+        // Replay 1: same complete, NO adjudication → original row untouched.
+        let mut replay_no_adj = params.clone();
+        replay_no_adj.adjudication = None;
+        let replay_status = record_complete_outcome(
+            &server, &replay_no_adj, "eval-2", "success", "completed", None, true, true, &[],
+        );
+        assert_eq!(
+            replay_status["outcome_id"], outcome_id,
+            "same canonical outcome row on replay"
+        );
+        let replay_adj = record_complete_adjudication(&server, &replay_no_adj, &replay_status);
+        assert_eq!(replay_adj, json!("skipped (no adjudication)"));
+        let after_skip = adjudication_outcome_rows(&server, &outcome_id);
+        assert_eq!(after_skip.len(), 1, "no new row from a no-adjudication replay");
+        assert_eq!(after_skip[0], first_row, "original row untouched");
+
+        // Replay 2: same complete, DIFFERENT adjudication → idempotent
+        // short-circuit (event_key "complete:{outcome_id}" already exists,
+        // so the original row is returned unchanged, not overwritten).
+        let mut replay_diff_adj = params.clone();
+        replay_diff_adj.adjudication = Some(AdjudicationParams {
+            verdict: Some("rejected".to_string()),
+            not_required_reason: None,
+            adjudicator: "different-leader".to_string(),
+            evidence_ref: Some("run-different".to_string()),
+        });
+        let replay2_status = record_complete_outcome(
+            &server, &replay_diff_adj, "eval-3", "success", "completed", None, true, true, &[],
+        );
+        let replay2_adj = record_complete_adjudication(&server, &replay_diff_adj, &replay2_status);
+        assert_eq!(replay2_adj["recorded"], json!(true), "replay adjudication status");
+        let after_diff = adjudication_outcome_rows(&server, &outcome_id);
+        assert_eq!(after_diff.len(), 1, "replay did not append a new row");
+        assert_eq!(after_diff[0], first_row, "original row byte-for-byte unchanged on replay");
+        assert_eq!(
+            after_diff[0].verdict.as_deref(),
+            Some("accepted"),
+            "the original verdict survived a replay carrying a different one"
+        );
+    }
+
+    /// Kill-test 1b: the not_required path (verdict=None, reason in closed set).
+    #[test]
+    fn adjudication_not_required_with_legal_reason_lands() {
+        let (server, _dir) = test_server();
+        let mut params = base_params();
+        params.adjudication = Some(AdjudicationParams {
+            verdict: None,
+            not_required_reason: Some("superseded".to_string()),
+            adjudicator: "leader".to_string(),
+            evidence_ref: None, // defaults to outcome_id
+        });
+
+        let outcome_status = record_complete_outcome(
+            &server, &params, "eval-nr", "success", "completed", None, true, true, &[],
+        );
+        let outcome_id = outcome_status["outcome_id"].as_str().unwrap().to_string();
+
+        let adj_status = record_complete_adjudication(&server, &params, &outcome_status);
+        assert_eq!(adj_status["recorded"], json!(true));
+
+        let rows = adjudication_outcome_rows(&server, &outcome_id);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].verdict.is_none());
+        assert_eq!(rows[0].not_required_reason.as_deref(), Some("superseded"));
+        // evidence_ref defaulted to outcome_id when caller omitted it.
+        assert_eq!(rows[0].evidence_ref, outcome_id);
+    }
+
+    /// Kill-test 1c: a not_required adjudication with an illegal reason code
+    /// is rejected at the memcore write chokepoint — no row written, error in
+    /// the pipeline JSON.
+    #[test]
+    fn adjudication_not_required_illegal_reason_rejected() {
+        let (server, _dir) = test_server();
+        let mut params = base_params();
+        params.adjudication = Some(AdjudicationParams {
+            verdict: None,
+            not_required_reason: Some("made_up_reason".to_string()),
+            adjudicator: "leader".to_string(),
+            evidence_ref: None,
+        });
+
+        let outcome_status = record_complete_outcome(
+            &server, &params, "eval-bad", "success", "completed", None, true, true, &[],
+        );
+        let adj_status = record_complete_adjudication(&server, &params, &outcome_status);
+        assert_eq!(adj_status["recorded"], json!(false));
+        assert!(
+            adj_status["error"].as_str().unwrap().contains("made_up_reason"),
+            "error must name the illegal reason: {adj_status}"
+        );
+
+        let outcome_id = outcome_status["outcome_id"].as_str().unwrap();
+        let rows = adjudication_outcome_rows(&server, outcome_id);
+        assert!(rows.is_empty(), "no row written for an illegal reason code");
+    }
+
+    /// Kill-test 4: an adjudication carrying an unknown signature id is
+    /// rejected in full — the ENTIRE adjudication write is refused (not a
+    /// partial write dropping the bad id), and the enclosing complete does
+    /// not crash. The pipeline JSON carries an error naming the bad id; the
+    /// DB has zero adjudication rows for this outcome.
+    #[test]
+    fn unknown_signature_id_rejects_entire_adjudication_without_crashing() {
+        let (server, _dir) = test_server();
+        let mut params = base_params();
+        params.adjudication = Some(AdjudicationParams {
+            verdict: Some("accepted".to_string()),
+            not_required_reason: None,
+            adjudicator: "leader".to_string(),
+            evidence_ref: Some("run-1".to_string()),
+        });
+        params.signatures = vec![
+            signature_rec("fake_security_fix"),      // valid
+            signature_rec("totally_made_up_id"),      // unknown → must reject ALL
+        ];
+
+        let outcome_status = record_complete_outcome(
+            &server, &params, "eval-unk", "success", "completed", None, true, true, &[],
+        );
+        assert_eq!(outcome_status["recorded"], json!(true));
+
+        let adj_status = record_complete_adjudication(&server, &params, &outcome_status);
+        // Rejected — but did not crash (complete proceeds).
+        assert_eq!(
+            adj_status["recorded"], json!(false),
+            "unknown signature id must reject the adjudication, not silently accept it"
+        );
+        let err_msg = adj_status["error"].as_str().expect("error message present");
+        assert!(
+            err_msg.contains("totally_made_up_id"),
+            "error must name the unknown id: {err_msg}"
+        );
+
+        // Zero adjudication rows — not even the valid signature's row landed.
+        let outcome_id = outcome_status["outcome_id"].as_str().unwrap();
+        let rows = adjudication_outcome_rows(&server, outcome_id);
+        assert!(
+            rows.is_empty(),
+            "an unknown signature id must prevent the ENTIRE adjudication from landing, \
+             not just the bad signature"
+        );
     }
 }

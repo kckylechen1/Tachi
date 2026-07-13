@@ -1,10 +1,10 @@
-//! v16 (#1035) — append-only adjudication and signature-event tables.
+//! v18 (#1035) — append-only adjudication and signature-event tables.
 
 use rusqlite::Connection;
 
 use crate::error::MemoryError;
 
-pub(super) fn migrate_v16_dispatch_adjudications(conn: &Connection) -> Result<usize, MemoryError> {
+pub(super) fn migrate_v18_dispatch_adjudications(conn: &Connection) -> Result<usize, MemoryError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS dispatch_adjudications (
             adjudication_id TEXT PRIMARY KEY,
@@ -38,10 +38,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v16_creates_adjudication_tables_idempotently() {
+    fn v18_creates_adjudication_tables_idempotently() {
         let conn = Connection::open_in_memory().unwrap();
-        assert_eq!(migrate_v16_dispatch_adjudications(&conn).unwrap(), 1);
-        assert_eq!(migrate_v16_dispatch_adjudications(&conn).unwrap(), 1);
+        assert_eq!(migrate_v18_dispatch_adjudications(&conn).unwrap(), 1);
+        assert_eq!(migrate_v18_dispatch_adjudications(&conn).unwrap(), 1);
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dispatch_adjudications')",

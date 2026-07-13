@@ -160,8 +160,18 @@ pub(crate) async fn handle_tachi_complete(
         &safe_evidence_refs,
     );
 
+    // #1035: when the leader supplies a terminal adjudication, record it
+    // linked to the outcome row just written. Fail-safe — never fails the
+    // enclosing complete; errors surface in the pipeline JSON.
+    let adjudication_status = super::dispatch_outcome::record_complete_adjudication(
+        server,
+        &params,
+        &dispatch_outcome_status,
+    );
+
     let mut pipeline_status = serde_json::json!({
         "dispatch_outcome": dispatch_outcome_status,
+        "adjudication": adjudication_status,
         "kanban_update": "skipped (no dispatch_id)",
         "distill_trajectory": "skipped (no trajectory data)",
         "skill_evolve": "skipped",

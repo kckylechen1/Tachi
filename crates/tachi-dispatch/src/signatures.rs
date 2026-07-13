@@ -109,6 +109,30 @@ pub fn signature_def(id: &str) -> Option<&'static SignatureDef> {
     ERROR_SIGNATURE_TAXONOMY.iter().find(|def| def.id == id)
 }
 
+/// Aliases mapping external/stable shorthand ids to canonical taxonomy ids.
+/// Initially empty — extend this table (not the call sites) when a stable
+/// alias needs to resolve to a canonical signature id (#1035). Each entry is
+/// `(alias, canonical_id)`; the canonical id MUST exist in
+/// [`ERROR_SIGNATURE_TAXONOMY`] (enforced by [`resolve_signature_id`]'s
+/// double-check).
+pub const SIGNATURE_ALIASES: &[(&str, &str)] = &[];
+
+/// Resolve a caller-supplied signature id to its canonical taxonomy id.
+///
+/// First maps through [`SIGNATURE_ALIASES`] (alias → canonical), then
+/// verifies the result (or the raw id if no alias matched) actually exists in
+/// the taxonomy via [`signature_def`]. Returns `None` when neither path
+/// resolves — the caller MUST treat `None` as an unknown id and reject loudly
+/// at the write chokepoint, never silently dropping it (#1035 frozen spec).
+pub fn resolve_signature_id(raw: &str) -> Option<&'static str> {
+    let candidate: &str = SIGNATURE_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == raw)
+        .map(|(_, canonical)| *canonical)
+        .unwrap_or(raw);
+    signature_def(candidate).map(|def| def.id)
+}
+
 // ─── Provisional decay / projection parameters ─────────────────────────────
 // Flat magic numbers are banned; these are named and provisional. Calibrate
 // from telemetry once enough adjudication traces accumulate (#735 decision 4).
@@ -426,8 +450,24 @@ mod tests {
     }
 
     #[test]
-    fn normalize_vendor_maps_families_and_unknown() {
+    fn resolve_signature_id_accepts_canonical_and_rejects_unknown() {
+        // Canonical taxonomy ids resolve to themselves.
+        assert_eq!(resolve_signature_id("fake_security_fix"), Some("fake_security_fix"));
         assert_eq!(
+            resolve_signature_id("falsified_ci_report"),
+            Some("falsified_ci_report")
+        );
+        assert_eq!(
+            resolve_signature_id("assertion_weakening"),
+            Some("assertion_weakening")
+        );
+        // Unknown ids resolve to None — the caller must reject these loudly.
+        assert_eq!(resolve_signature_id("nonsense"), None);
+        assert_eq!(resolve_signature_id(""), None);
+    }
+
+    #[test]
+    fn normalize_vendor_maps_families_and_unknown() {        assert_eq!(
             normalize_vendor("custom", Some("zhipuai-coding-plan/glm-5.1")),
             "glm"
         );

@@ -61,6 +61,7 @@ fn base_complete() -> TachiCompleteParams {
         format: Some("full".to_string()),
         signatures: Vec::new(),
         rulings: Vec::new(),
+        adjudication: None,
     }
 }
 

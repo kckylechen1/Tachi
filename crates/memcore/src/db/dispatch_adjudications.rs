@@ -6,6 +6,19 @@ use crate::error::MemoryError;
 
 use super::common::normalize_utc_iso_or_now;
 
+/// Closed set of legal reason codes for a `not_required` adjudication row
+/// (#1035). A `not_required` verdict's reason MUST be one of these — an open
+/// free-text field would let every caller mint a new code, defeating the
+/// closed-vocabulary contract the append-only ledger relies on for
+/// meaningful aggregation.
+pub const NOT_REQUIRED_REASONS: &[&str] = &[
+    "trivial_change",
+    "superseded",
+    "duplicate",
+    "external_adjudication",
+    "expired",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchAdjudicationSignature {
     pub signature_id: String,
@@ -44,6 +57,15 @@ pub fn append_dispatch_adjudication(
     conn: &Connection,
     new: &NewDispatchAdjudication,
 ) -> Result<DispatchAdjudication, MemoryError> {
+    if let Some(reason) = new.not_required_reason.as_deref() {
+        if !NOT_REQUIRED_REASONS.contains(&reason) {
+            return Err(MemoryError::InvalidArg(format!(
+                "not_required_reason '{reason}' is not in the closed set of legal reason codes {:?}; \
+                 use one of these or supply a verdict instead",
+                NOT_REQUIRED_REASONS
+            )));
+        }
+    }
     if let Some(existing) = get_by_event_key(conn, &new.event_key)? {
         return Ok(existing);
     }
@@ -84,6 +106,18 @@ pub fn list_adjudications_for_outcome(
         .query_map([outcome_id], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     ids.into_iter().map(|id| get_by_id(conn, &id)).collect()
+}
+
+/// Whether any terminal adjudication event exists for `outcome_id`. Row
+/// present = adjudicated; row absent = pending (#1035 frozen spec: the
+/// append-only table keyed on `outcome_id` IS the adjudication state).
+pub fn outcome_is_adjudicated(conn: &Connection, outcome_id: &str) -> Result<bool, MemoryError> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM dispatch_adjudications WHERE outcome_id = ?1)",
+        [outcome_id],
+        |row| row.get(0),
+    )?;
+    Ok(exists)
 }
 
 fn get_by_event_key(
@@ -171,6 +205,19 @@ mod tests {
         }
     }
 
+    fn not_required_event(key: &str, reason: &str) -> NewDispatchAdjudication {
+        NewDispatchAdjudication {
+            adjudication_id: format!("adjudication-{key}"),
+            outcome_id: "outcome-nr".to_string(),
+            event_key: key.to_string(),
+            verdict: None,
+            not_required_reason: Some(reason.to_string()),
+            actor: "leader".to_string(),
+            evidence_ref: "run-nr".to_string(),
+            signatures: Vec::new(),
+        }
+    }
+
     #[test]
     fn replay_is_idempotent_and_correction_preserves_history() {
         let conn = open_conn();
@@ -212,10 +259,61 @@ mod tests {
                 .execute(
                     "INSERT INTO dispatch_adjudications
                      (adjudication_id, outcome_id, event_key, verdict, not_required_reason, actor, evidence_ref, created_at)
-                     VALUES (?1, 'outcome', ?2, ?3, ?4, ?5, 'evidence', 'now')",
+                      VALUES (?1, 'outcome', ?2, ?3, ?4, ?5, 'evidence', 'now')",
                     params![uuid::Uuid::new_v4().to_string(), uuid::Uuid::new_v4().to_string(), verdict, reason, actor],
                 )
                 .is_err());
         }
+    }
+
+    #[test]
+    fn not_required_reason_must_be_in_closed_set() {
+        let conn = open_conn();
+        // Illegal reason codes are rejected at the write chokepoint — the
+        // row never reaches the DB.
+        let illegal = not_required_event("nr-bad", "out_of_scope");
+        let err = append_dispatch_adjudication(&conn, &illegal).unwrap_err();
+        assert!(
+            err.to_string().contains("not_required_reason") && err.to_string().contains("out_of_scope"),
+            "illegal reason must be rejected with a message naming it: {err}"
+        );
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_adjudications WHERE outcome_id = 'outcome-nr'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "no row written for an illegal reason code");
+
+        // All five legal reason codes land successfully.
+        for (i, reason) in NOT_REQUIRED_REASONS.iter().enumerate() {
+            let ev = not_required_event(&format!("nr-{i}"), reason);
+            let row = append_dispatch_adjudication(&conn, &ev).unwrap();
+            assert_eq!(row.not_required_reason.as_deref(), Some(*reason));
+            assert!(row.verdict.is_none());
+        }
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dispatch_adjudications WHERE outcome_id = 'outcome-nr'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 5, "all five legal reason codes landed");
+    }
+
+    #[test]
+    fn outcome_is_adjudicated_reflects_terminal_event_presence() {
+        let conn = open_conn();
+        // No adjudication row for a fresh outcome → not adjudicated.
+        assert!(!outcome_is_adjudicated(&conn, "outcome-fresh").unwrap());
+
+        // Append a terminal verdict event → now adjudicated.
+        append_dispatch_adjudication(&conn, &event("event-adjudicated")).unwrap();
+        assert!(outcome_is_adjudicated(&conn, "outcome-1").unwrap());
+
+        // A different outcome with no events → still not adjudicated.
+        assert!(!outcome_is_adjudicated(&conn, "outcome-other").unwrap());
     }
 }

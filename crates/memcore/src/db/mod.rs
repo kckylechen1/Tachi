@@ -50,8 +50,9 @@ pub use daily_pipeline::{
 };
 #[cfg(feature = "admin")]
 pub use dispatch_adjudications::{
-    append_dispatch_adjudication, list_adjudications_for_outcome, DispatchAdjudication,
-    DispatchAdjudicationSignature, NewDispatchAdjudication,
+    append_dispatch_adjudication, list_adjudications_for_outcome, outcome_is_adjudicated,
+    DispatchAdjudication, DispatchAdjudicationSignature, NewDispatchAdjudication,
+    NOT_REQUIRED_REASONS,
 };
 #[cfg(feature = "admin")]
 pub use dispatch_outcomes::{

@@ -42,6 +42,7 @@ fn base_dual_truth_params(dispatch_id: &str, outcome: &str) -> TachiCompletePara
         format: None,
         signatures: Vec::new(),
         rulings: Vec::new(),
+        adjudication: None,
     }
 }
 

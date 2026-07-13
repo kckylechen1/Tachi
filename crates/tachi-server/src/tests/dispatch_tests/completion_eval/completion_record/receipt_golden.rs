@@ -60,7 +60,7 @@ async fn g4_complete_default_omits_subagent_notes_sentinel() {
             format: None,
             signatures: Vec::new(),
             rulings: Vec::new(),
-        }))
+            adjudication: None,}))
         .await
         .expect("complete");
 
@@ -119,7 +119,7 @@ async fn g4_complete_receipt_with_pr_ref_omits_echo() {
             format: None,
             signatures: Vec::new(),
             rulings: Vec::new(),
-        }))
+            adjudication: None,}))
         .await
         .expect("complete with pr_ref");
 
