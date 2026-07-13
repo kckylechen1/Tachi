@@ -3408,7 +3408,9 @@ mod tests {
         let bound = make_target_dir(&root, "shared-build-target");
         let mut store = open_store(&root);
 
-        // A lease holding this target (the shared-CARGO_TARGET_DIR shape).
+        // A lease holding this target. `BuildPrivate` is the one S2c class that owns a
+        // build target dir of its own — `EditOnly` gets none and `BuildTicketed` builds
+        // in the executor seat's — so it is the only class this fixture can honestly be.
         memcore::insert_exec_env(
             store.connection(),
             &memcore::NewExecEnvLease {
@@ -3419,6 +3421,7 @@ mod tests {
                 branch: "tachi/894/s2b".to_string(),
                 base_sha: "abc123".to_string(),
                 dispatch_id: None,
+                env_class: memcore::EnvClass::BuildPrivate,
                 created_at: String::new(),
             },
         )
