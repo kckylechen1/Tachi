@@ -15,11 +15,28 @@
 //!
 //! [`build_refinery_packet`] is the pure core (validate → parse → resolve
 //! anchors via an injected [`doc_resolver::DocRefResolver`] → compile
-//! evidence → propose disposition) used by BOTH the live
-//! `handle_refine_issues` action (via `doc_resolver::GitRefResolver`, real
-//! git calls) and every fixture test in `refinery_ops::tests` (via a
-//! fixture resolver, zero I/O) — the same production code path is what the
-//! acceptance tests exercise, not a parallel re-implementation.
+//! evidence → propose disposition) used by the live `handle_refine_issues`
+//! action (via `doc_resolver::GitRefResolver`, real git calls).
+//!
+//! R5-2 correction (sol arbitration, codex-r8f4e, archived on issue #1002):
+//! an earlier version of this doc comment claimed "every fixture test ...
+//! via a fixture resolver" exercises `build_refinery_packet` — that was
+//! inaccurate. Two DIFFERENT fixture tiers exist in `refinery_ops::tests`,
+//! and they exercise different amounts of this module:
+//! - `tests::grounding` and `tests::replay_and_safety`'s F1-F3/R4-*-named
+//!   tests DO go through the full `build_refinery_packet` pipeline (via
+//!   `doc_resolver::FixtureDocResolver`, zero I/O) — parse → resolve →
+//!   compile → propose, the same code path the live action runs.
+//! - `tests::disposition_rules`'s per-failure-class and 5-historical-case
+//!   fixtures call `disposition::propose_disposition` DIRECTLY (classifier-
+//!   level replay only) — they construct `RefinerySignalsV1`/evidence by
+//!   hand and never touch `parse`/`compiler`/`doc_resolver` at all. This is
+//!   still a legitimate, real regression replay of the classifier's rules
+//!   (and is what #1002 acceptance criterion 4 actually asks for), but it is
+//!   NOT the same code path as the live action's anchor-resolution/coverage
+//!   machinery — see that module's own doc comment for which of its tests
+//!   (a handful, tagged "through the real pipeline") DO call
+//!   `build_refinery_packet` instead.
 //!
 //! Fail-closed grounding (F1/R4-1, build-seat REQUEST-CHANGES): grounding
 //! degrades to `missing_anchor` — never silently stays `Grounded` — when

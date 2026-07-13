@@ -4,13 +4,19 @@
 //! synthetic per-class fixtures and 5 named historical issues.
 //!
 //! Historical-case honesty note: #979/#947/#987/#997 fixtures below are
-//! reconstructed from facts verifiable in THIS repo's local `git log`
-//! (real merge commits fixing each, found via `git log --all --oneline |
-//! grep '#<n>'` at authoring time — no live GitHub call). #515 has no local
-//! git-log corroboration in this repo's history, so it is represented as a
-//! clearly-labeled SYNTHETIC placeholder for the scope-collision failure
-//! class, not a factual reconstruction — flagged again in the final
-//! delivery report, not just here.
+//! reconstructed from facts verifiable in THIS repo's local `git log` (real
+//! merge commits fixing each, found via `git log --all --oneline | grep
+//! '#<n>'`). #515 (previously a synthetic scope-collision placeholder — no
+//! corroborating evidence at authoring time) was rebuilt this round (R5-1,
+//! sol arbitration codex-r8f4e, archived on issue #1002) from real primary
+//! sources: `gh issue view 515 --repo kckylechen1/tachi --json ...`
+//! (read-only research, not a mutation) plus `git log --all --grep=515`
+//! cross-referenced against the linked PRs — see that test's own doc
+//! comment for the full evidence chain, including an honestly-surfaced
+//! post-close dispute this leaf does not paper over. Per this leaf's own
+//! acceptance criteria, these are fixture-level (classifier) replays via
+//! `propose_disposition` directly — NOT full-pipeline `build_refinery_packet`
+//! runs (see `refinery_ops::mod`'s module doc for which fixtures are which).
 
 use super::super::build_refinery_packet;
 use super::super::disposition::{
@@ -427,19 +433,58 @@ fn historical_997_deflake_already_fixed_is_close_fixed() {
     assert_eq!(proposal.disposition, DispositionV1::CloseFixed);
 }
 
+/// R5-1 (sol arbitration, codex-r8f4e, archived on issue #1002): the prior
+/// round's #515 fixture was a synthetic scope-collision placeholder with no
+/// corroborating evidence — sol ruled that doesn't satisfy AC4's "real
+/// historical evidence basis" bar the other four historical cases meet.
+/// This is a real fact-based rebuild from primary sources fetched
+/// 2026-07-14 via `gh issue view 515 --repo kckylechen1/tachi --json
+/// number,title,state,body,labels,createdAt,updatedAt,closedAt,comments,url`
+/// (read-only research, not a mutation) and `git log --all --grep=515`
+/// cross-referenced against the linked PRs:
+///
+/// - Issue: <https://github.com/kckylechen1/tachi/issues/515> — "tachi mcp
+///   add: one-command MCP registration to converge per-agent MCP config
+///   into Tachi". Opened 2026-07-05, state=CLOSED, closedAt
+///   2026-07-11T14:04:25Z.
+/// - Shipping commits (real, in this repo's `git log --all --oneline`):
+///   `55e07fc3` "Add safe MCP registration front door (#766)" (merged
+///   2026-07-07) and `ba24a9c9` "Reserve seat policy fields for MCP add
+///   (#781)" (merged 2026-07-07).
+/// - The issue's own final CLOSING comment (2026-07-11T14:04:19Z, verbatim):
+///   "已由 #766 的安全 MCP 注册入口完成，并已包含在 v1.9.0。后续 MCP surface
+///   的演进统一在 #745 / #757 跟踪；本叶关闭。" ("Completed by #766's secure
+///   MCP registration entry point, included in v1.9.0. Follow-up MCP
+///   surface evolution tracked under #745/#757; this leaf closed.") — this
+///   is the operative CLOSE_FIXED rationale this fixture models, backed by
+///   the real `shipped_evidence` commit.
+///
+/// HONEST CAVEAT (not hidden — this is exactly the "doesn't cleanly match"
+/// case the dispatch instructions asked to be reported, not forced): a
+/// LATER comment on the SAME issue, ~49 minutes AFTER the close
+/// (2026-07-11T14:53:47Z), is a leader-verified snapshot titled "不可关"
+/// ("must not be closed") that lists 4 concrete residual gaps against the
+/// issue's own acceptance criteria (discovered-tool-name printing not
+/// implemented; the native per-agent context7 config was never actually
+/// converged/removed; the secret-header allowlist stayed hardcoded at 3
+/// entries; `--key <value>` argv exposure was never resolved). The issue
+/// was never reopened after that comment — its real, final, still-current
+/// GitHub state is CLOSED. A maximally rigorous refinery run at that exact
+/// moment could arguably have produced DECISION_REQUIRED (the closure
+/// itself was actively disputed in-thread) rather than a confident
+/// CLOSE_FIXED. This fixture models the historically-operative outcome
+/// (closed, backed by a real shipped commit) while surfacing — not
+/// concealing — that a real, dated, in-thread dispute about that very
+/// closure exists. `related` intentionally does not encode the #745/#757
+/// handoff as a `Related:` signal: that would need this leaf's live
+/// per-relation cross-reference (canon doc §4.1 step 4), which is an
+/// explicitly deferred follow-up slice, not something to fake here.
 #[test]
-fn historical_515_synthetic_scope_collision_placeholder_is_merge_candidate() {
-    // SYNTHETIC: no corroborating commit for #515 was found in this repo's
-    // local `git log` at authoring time. Represented here as a clearly
-    // labeled placeholder for the scope-collision failure class, not a
-    // factual reconstruction of the real issue #515.
+fn historical_515_mcp_registration_front_door_shipped_via_766_is_close_fixed() {
     let signals = RefinerySignalsV1 {
-        scope_collisions: vec![
-            "kckylechen1/tachi#9201".to_string(),
-            "kckylechen1/tachi#9202".to_string(),
-        ],
+        shipped_evidence: Some(repo_revision("55e07fc3")),
         ..Default::default()
     };
     let proposal = propose("kckylechen1/tachi#515", signals);
-    assert_eq!(proposal.disposition, DispositionV1::MergeCandidate);
+    assert_eq!(proposal.disposition, DispositionV1::CloseFixed);
 }
