@@ -25,6 +25,18 @@
 //! `relatime`/`noatime` mounts make it non-deterministic), so it is noise, not
 //! signal.
 //!
+//! ## The walk roots are PINNED by the parent, never re-derived from the tree
+//!
+//! One of the two walk roots — a linked worktree's external `gitdir` — is named
+//! by a **file inside the workspace** (`.git`), i.e. by a file the worker can
+//! rewrite. Re-reading that file after the worker has run would let the worker
+//! choose the parent's walk root (point it at `/` for a denial-of-service hash,
+//! or at a decoy so the real `gitdir` is never re-scanned). So
+//! [`resolve_external_git_dir`] is called **once, by the parent, before the
+//! worker is spawned**, and the resolved path is pinned into the pre-image
+//! ([`WorkspaceManifest::gitdir_root`]). [`capture`] never resolves anything: it
+//! walks exactly the roots it is handed in the [`CaptureSpec`].
+//!
 //! ## Known limitation (stated, not hidden)
 //!
 //! A linked worktree's *commondir* (the main repo's shared `objects/`, `refs/`)
@@ -45,6 +57,12 @@ pub const WORKSPACE_ROOT_LABEL: &str = "workspace";
 /// (the `gitdir:` target of a `.git` *file*). An in-tree `.git` *directory* is
 /// covered by the workspace walk and needs no second root.
 pub const GITDIR_ROOT_LABEL: &str = "gitdir";
+
+/// Build-output directory names a caller may pass as
+/// [`CaptureSpec::unhashed_dir_names`]. Their contents are still walked and
+/// fingerprinted — only the **content hash** is skipped, which is the part that
+/// costs multiple GB of BLAKE2 on a Rust tree with an in-tree `target/`.
+pub const BUILD_ARTIFACT_DIR_NAMES: &[&str] = &["target"];
 
 /// Filesystem entry class as seen through `symlink_metadata` (symlinks are
 /// never followed).
@@ -83,6 +101,9 @@ pub struct EntryFingerprint {
     /// the field that catches mutate-then-restore.
     pub ctime_sec: i64,
     pub ctime_nsec: i64,
+    /// `None` for a non-file, and also for a file under an unhashed root (see
+    /// [`WorkspaceManifest::unhashed_roots`]) — there, detection falls back to
+    /// size/inode/mtime/**ctime**, which an unprivileged worker cannot restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -95,6 +116,9 @@ pub struct EntryFingerprint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceManifest {
     pub workspace_root: String,
+    /// The external `gitdir` walk root **as pinned by the parent before the
+    /// worker was spawned**. The post-image is captured against this value, not
+    /// against a re-read of the worker-writable `.git` file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gitdir_root: Option<String>,
     pub captured_at: String,
@@ -106,6 +130,12 @@ pub struct WorkspaceManifest {
     /// is precisely where a change could hide.
     #[serde(default)]
     pub errors: Vec<String>,
+    /// Manifest keys of directories whose subtrees were walked and fingerprinted
+    /// but **not content-hashed** (opt-in, see [`CaptureSpec`]). Recorded — never
+    /// silent — because a receipt must be able to say exactly which paths carry a
+    /// weaker proof than the rest of the image.
+    #[serde(default)]
+    pub unhashed_roots: Vec<String>,
 }
 
 impl WorkspaceManifest {
@@ -123,13 +153,40 @@ impl WorkspaceManifest {
     }
 }
 
-/// Capture a complete image of `workspace_root` (plus the external git metadata
-/// dir when the workspace is a linked git worktree).
+/// What to walk. Both roots are supplied by the caller: nothing in here is
+/// derived from a file the worker can write.
+#[derive(Debug, Clone)]
+pub struct CaptureSpec<'a> {
+    pub workspace_root: &'a Path,
+    /// The external `gitdir`, **pinned by the parent before the worker was
+    /// spawned** (`None` for a plain repo / in-tree `.git`). Pass the value the
+    /// pre-image recorded — never a fresh [`resolve_external_git_dir`] of a
+    /// workspace the worker has had write access to.
+    pub gitdir_root: Option<&'a Path>,
+    /// Directory names (e.g. `target`) whose subtrees are walked and
+    /// fingerprinted but not content-hashed. Empty = hash everything.
+    pub unhashed_dir_names: &'a [String],
+}
+
+impl<'a> CaptureSpec<'a> {
+    /// Hash everything under `workspace_root`, with the given pinned gitdir.
+    pub fn new(workspace_root: &'a Path, gitdir_root: Option<&'a Path>) -> CaptureSpec<'a> {
+        CaptureSpec {
+            workspace_root,
+            gitdir_root,
+            unhashed_dir_names: &[],
+        }
+    }
+}
+
+/// Capture a complete image of the roots named by `spec`.
 ///
-/// Errors only when the root itself is unusable; per-entry failures are
-/// collected into [`WorkspaceManifest::errors`] so the caller sees a *degraded*
-/// image rather than a silently partial one.
-pub fn capture(workspace_root: &Path) -> Result<WorkspaceManifest, String> {
+/// Errors only when the workspace root itself is unusable; per-entry failures
+/// (including an unreachable pinned `gitdir`) are collected into
+/// [`WorkspaceManifest::errors`] so the caller sees a *degraded* image rather
+/// than a silently partial one, and fails closed on it.
+pub fn capture(spec: &CaptureSpec) -> Result<WorkspaceManifest, String> {
+    let workspace_root = spec.workspace_root;
     let root_meta = std::fs::symlink_metadata(workspace_root)
         .map_err(|e| format!("stat workspace root {}: {e}", workspace_root.display()))?;
     if !root_meta.is_dir() {
@@ -139,24 +196,42 @@ pub fn capture(workspace_root: &Path) -> Result<WorkspaceManifest, String> {
         ));
     }
 
-    let gitdir = resolve_external_git_dir(workspace_root);
     let mut manifest = WorkspaceManifest {
         workspace_root: workspace_root.to_string_lossy().to_string(),
-        gitdir_root: gitdir.as_ref().map(|p| p.to_string_lossy().to_string()),
+        gitdir_root: spec.gitdir_root.map(|p| p.to_string_lossy().to_string()),
         captured_at: chrono::Utc::now().to_rfc3339(),
         entries: BTreeMap::new(),
         errors: Vec::new(),
+        unhashed_roots: Vec::new(),
     };
 
-    walk_root(workspace_root, WORKSPACE_ROOT_LABEL, &mut manifest);
-    if let Some(gitdir) = gitdir.as_ref() {
-        walk_root(gitdir, GITDIR_ROOT_LABEL, &mut manifest);
+    walk_root(
+        workspace_root,
+        WORKSPACE_ROOT_LABEL,
+        spec.unhashed_dir_names,
+        &mut manifest,
+    );
+    if let Some(gitdir) = spec.gitdir_root {
+        walk_root(
+            gitdir,
+            GITDIR_ROOT_LABEL,
+            spec.unhashed_dir_names,
+            &mut manifest,
+        );
     }
+    manifest.unhashed_roots.sort();
     Ok(manifest)
 }
 
 /// Resolve a linked git worktree's external metadata dir. Returns `None` when
 /// `.git` is a directory (already inside the walk) or absent.
+///
+/// # This reads a worker-writable file
+///
+/// `.git` lives *inside the lease workspace*. Call this **only from the parent,
+/// before the worker is spawned**, and pin the answer (that is what
+/// [`WorkspaceManifest::gitdir_root`] is for). Calling it on a workspace a
+/// worker has already touched hands the worker the choice of walk root.
 pub fn resolve_external_git_dir(workspace_root: &Path) -> Option<PathBuf> {
     let dot_git = workspace_root.join(".git");
     let meta = std::fs::symlink_metadata(&dot_git).ok()?;
@@ -185,13 +260,18 @@ pub fn resolve_external_git_dir(workspace_root: &Path) -> Option<PathBuf> {
     }
 }
 
-fn walk_root(root: &Path, label: &str, manifest: &mut WorkspaceManifest) {
+fn walk_root(
+    root: &Path,
+    label: &str,
+    unhashed_dir_names: &[String],
+    manifest: &mut WorkspaceManifest,
+) {
     // The root entry itself is fingerprinted (keyed by the bare label) — an
     // xattr or a chmod applied to the workspace directory is a change to the
     // workspace, and a walk that only covered the children would miss it.
     match std::fs::symlink_metadata(root) {
         Ok(meta) => {
-            let fingerprint = fingerprint_entry(root, &meta, manifest);
+            let fingerprint = fingerprint_entry(root, &meta, true, manifest);
             manifest.entries.insert(label.to_string(), fingerprint);
         }
         Err(e) => manifest
@@ -199,8 +279,9 @@ fn walk_root(root: &Path, label: &str, manifest: &mut WorkspaceManifest) {
             .push(format!("{label}: lstat root {}: {e}", root.display())),
     }
 
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    // `bool` = hash file content in this subtree.
+    let mut stack = vec![(root.to_path_buf(), true)];
+    while let Some((dir, hash_content)) = stack.pop() {
         let read_dir = match std::fs::read_dir(&dir) {
             Ok(rd) => rd,
             Err(e) => {
@@ -237,9 +318,19 @@ fn walk_root(root: &Path, label: &str, manifest: &mut WorkspaceManifest) {
                     continue;
                 }
             };
-            let fingerprint = fingerprint_entry(&path, &meta, manifest);
+            let fingerprint = fingerprint_entry(&path, &meta, hash_content, manifest);
             if fingerprint.kind == EntryKind::Dir {
-                stack.push(path);
+                let is_unhashed_root = hash_content
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            unhashed_dir_names.iter().any(|skip| skip.as_str() == name)
+                        });
+                if is_unhashed_root {
+                    manifest.unhashed_roots.push(key.clone());
+                }
+                stack.push((path, hash_content && !is_unhashed_root));
             }
             manifest.entries.insert(key, fingerprint);
         }
@@ -255,6 +346,7 @@ fn manifest_key(root: &Path, path: &Path, label: &str) -> Option<String> {
 fn fingerprint_entry(
     path: &Path,
     meta: &std::fs::Metadata,
+    hash_content: bool,
     manifest: &mut WorkspaceManifest,
 ) -> EntryFingerprint {
     let file_type = meta.file_type();
@@ -268,7 +360,7 @@ fn fingerprint_entry(
         EntryKind::Other
     };
 
-    let content_hash = if kind == EntryKind::File {
+    let content_hash = if kind == EntryKind::File && hash_content {
         match digest_file(path) {
             Ok(hash) => Some(hash),
             Err(e) => {
@@ -633,21 +725,48 @@ pub struct WorkspaceDelta {
     /// before-and-after to itemize.
     #[serde(default)]
     pub facets: Vec<String>,
+    /// What the entry *is* (`None` when the delta is not about a filesystem
+    /// entry at all, e.g. an unreadable image). Load-bearing: the declared-scope
+    /// forgiveness of directory bookkeeping must apply to directories only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_kind: Option<EntryKind>,
 }
 
+/// The facets a directory bumps purely by *holding one more (or one fewer)
+/// entry*. Which of these actually move is filesystem-specific and was measured,
+/// not assumed:
+///
+/// * classic Unix (ext4, HFS+): `mtime` + `ctime`, and `nlink` when the new
+///   child is itself a directory (its `..` backlink);
+/// * **APFS** (this repo's dev + CI platform): a directory's `nlink` **and**
+///   `size` track its child count, so *every* child — file or directory — bumps
+///   `nlink` and `size` too.
+///
+/// Assuming the classic set is exactly the bug this list fixes: it made a
+/// declared-scope write always reject on macOS, because the workspace root came
+/// back with `nlink`/`size` facets on top of the timestamps.
+pub const DIR_BOOKKEEPING_FACETS: &[&str] = &["mtime ", "ctime ", "size ", "nlink "];
+
 impl WorkspaceDelta {
-    /// Is this delta nothing but a timestamp bump on an entry (no content, no
-    /// mode, no inode, no xattr change)? A directory on the path to a permitted
-    /// write records that write in its own mtime/ctime and in nothing else —
-    /// this predicate is what lets a declared write scope stay usable without
-    /// forgiving any other change class.
-    pub fn is_time_only_metadata(&self) -> bool {
+    /// Is this delta nothing but a directory's own entry-count bookkeeping (see
+    /// [`DIR_BOOKKEEPING_FACETS`])? A directory on the path to a permitted write
+    /// records that write in these fields and in nothing else — this predicate
+    /// is what lets a declared write scope stay usable.
+    ///
+    /// It forgives nothing that could hide a change: `mode`, `inode`, content
+    /// and xattr facets are all outside the list (and a content/xattr/type
+    /// change is not even a [`DeltaKind::MetadataChanged`]), and whatever child
+    /// caused the bookkeeping bump is itself an `Added`/`Removed` delta that the
+    /// contract still has to permit on its own.
+    pub fn is_dir_bookkeeping_metadata(&self) -> bool {
         self.kind == DeltaKind::MetadataChanged
+            && self.entry_kind == Some(EntryKind::Dir)
             && !self.facets.is_empty()
-            && self
-                .facets
-                .iter()
-                .all(|facet| facet.starts_with("mtime ") || facet.starts_with("ctime "))
+            && self.facets.iter().all(|facet| {
+                DIR_BOOKKEEPING_FACETS
+                    .iter()
+                    .any(|allowed| facet.starts_with(allowed))
+            })
     }
 }
 
@@ -663,6 +782,7 @@ pub fn diff(pre: &WorkspaceManifest, post: &WorkspaceManifest) -> Vec<WorkspaceD
                 kind: DeltaKind::Removed,
                 detail: format!("{} present in the pre-image is gone", before.kind.as_str()),
                 facets: Vec::new(),
+                entry_kind: Some(before.kind),
             }),
             Some(after) => {
                 if let Some(delta) = compare_entry(path, before, after) {
@@ -678,6 +798,7 @@ pub fn diff(pre: &WorkspaceManifest, post: &WorkspaceManifest) -> Vec<WorkspaceD
                 kind: DeltaKind::Added,
                 detail: format!("new {} not present in the pre-image", after.kind.as_str()),
                 facets: Vec::new(),
+                entry_kind: Some(after.kind),
             });
         }
     }
@@ -699,6 +820,7 @@ fn compare_entry(
             kind: DeltaKind::TypeChanged,
             detail: format!("{} -> {}", before.kind.as_str(), after.kind.as_str()),
             facets: Vec::new(),
+            entry_kind: Some(after.kind),
         });
     }
 
@@ -769,6 +891,7 @@ fn compare_entry(
         kind,
         detail: facets.join("; "),
         facets,
+        entry_kind: Some(after.kind),
     })
 }
 

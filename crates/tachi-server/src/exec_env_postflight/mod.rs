@@ -2,6 +2,17 @@
 //! 4 (parent-owned postflight manifest/diff gate) and 5 (quarantine/reclaim
 //! only after descendants terminate).
 //!
+//! # ⚠ NOT WIRED YET — see #894 S2 wiring slice
+//!
+//! **This gate is a mechanism with no callers.** Nothing in the dispatch path
+//! calls [`PostflightGate::capture_preimage`], [`PostflightGate::run`] or
+//! [`apply_verdict`] today, so **zero dispatches are currently gated by it** —
+//! landing this module changed the enforcement posture of exactly nothing.
+//! Wiring it into lease provisioning / teardown (capture before spawn, run after
+//! the worker is reaped, release artifacts only on a clean verdict) is the S2c /
+//! dispatch-surface slice. Do not read the tests below as evidence that any live
+//! dispatch is protected.
+//!
 //! # The name is the contract
 //!
 //! Owner ratification (2026-07-13, sol round `codex-e0255`): with an
@@ -50,7 +61,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 pub use liveness::{DescendantLiveness, ProcessGroupLiveness};
-pub use manifest::{DeltaKind, WorkspaceDelta, WorkspaceManifest};
+pub use manifest::{CaptureSpec, DeltaKind, WorkspaceDelta, WorkspaceManifest};
 
 /// The vocabulary this gate is allowed (and forbidden) to describe itself with.
 pub mod naming {
@@ -135,13 +146,15 @@ impl WriteContract {
                 {
                     return true;
                 }
-                // A directory on the path to a declared write records that
-                // write in its own mtime/ctime and in nothing else. Forgiving
-                // exactly that — and only for an ancestor of a declared path —
-                // is what keeps a declared scope usable. A chmod, an xattr, an
-                // inode swap or a content change on the same directory still
-                // rejects.
-                delta.is_time_only_metadata()
+                // A directory on the path to a declared write records that write
+                // in its own entry-count bookkeeping (mtime/ctime, and — on
+                // APFS — nlink/size too) and in nothing else. Forgiving exactly
+                // that, and only on a directory that is an ancestor of a declared
+                // path, is what keeps a declared scope usable. A chmod, an xattr,
+                // an inode swap or a content change on the same directory still
+                // rejects, and the child that caused the bump is itself a delta
+                // that must be permitted on its own.
+                delta.is_dir_bookkeeping_metadata()
                     && paths
                         .iter()
                         .any(|declared| key_is_ancestor_of_declared(&delta.path, declared))
@@ -251,11 +264,35 @@ pub struct GateOutcome {
     pub contract_label: &'static str,
     pub declared_scope: Vec<String>,
     pub liveness_probe: String,
+    /// Manifest keys whose subtrees were fingerprinted but not content-hashed
+    /// (see [`PostflightGate::unhashed_dir_names`]). Empty unless the caller
+    /// opted in. Carried on EVERY surface, including a clean one: "I did not
+    /// hash it" must never be silently read as "it did not change".
+    pub content_unhashed_paths: Vec<String>,
     pub verdict: GateVerdict,
     pub checked_at: String,
 }
 
 impl GateOutcome {
+    /// The honest caveat for a run with unhashed subtrees (`None` when the whole
+    /// image was hashed).
+    pub fn unhashed_caveat(&self) -> Option<String> {
+        if self.content_unhashed_paths.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "content under {} was NOT hashed by this run: {}. Changes there are still detected \
+             via size/inode/nlink/mode/xattr/mtime/ctime (ctime cannot be restored by an \
+             unprivileged worker), but the proof for those paths is metadata-only and no content \
+             digest exists for them.",
+            if self.content_unhashed_paths.len() == 1 {
+                "1 path".to_string()
+            } else {
+                format!("{} paths", self.content_unhashed_paths.len())
+            },
+            self.content_unhashed_paths.join(", ")
+        ))
+    }
     /// May the run's patch / result be handed on? ONLY on a clean verdict.
     pub fn artifacts_released(&self) -> bool {
         matches!(self.verdict, GateVerdict::Clean { .. })
@@ -329,6 +366,9 @@ impl GateOutcome {
                         deltas.len() - MAX_DELTAS_IN_MESSAGE
                     ));
                 }
+                if let Some(caveat) = self.unhashed_caveat() {
+                    lines.push(format!("  ! {caveat}"));
+                }
                 Some(lines.join("\n"))
             }
             GateVerdict::Blocked { reason, detail } => Some(format!(
@@ -385,6 +425,8 @@ impl GateOutcome {
             "reject_reason": reject_reason,
             "block_reason": block_reason,
             "entries_checked": entries_checked,
+            "content_unhashed_paths": self.content_unhashed_paths,
+            "content_unhashed_note": self.unhashed_caveat(),
             "artifacts": artifacts,
             "lease_action": lease_action,
             "prohibited_deltas": self.deltas(),
@@ -419,23 +461,89 @@ pub struct PostflightGate {
     pub env_id: String,
     /// The lease workspace the worker runs in.
     pub workspace_root: PathBuf,
-    /// Where the parent keeps the pre-image. MUST be outside `workspace_root`
-    /// (enforced) — a pre-image the worker can rewrite proves nothing.
+    /// Where the parent keeps the pre-image. MUST be outside **every**
+    /// worker-writable root (enforced) — a pre-image the worker can rewrite
+    /// proves nothing.
     pub preimage_path: PathBuf,
     pub contract: WriteContract,
+    /// Directory names (e.g. [`manifest::BUILD_ARTIFACT_DIR_NAMES`]) whose
+    /// subtrees are walked and fingerprinted but **not content-hashed**.
+    ///
+    /// Empty by default: hash everything. Set it when the lease workspace can
+    /// hold a multi-GB build cache (an in-tree Rust `target/`), where hashing
+    /// every artifact would dominate the capture. Detection is *not* dropped for
+    /// those paths — size, inode, nlink, mode, xattrs, mtime and ctime are still
+    /// fingerprinted, and ctime cannot be restored by an unprivileged worker —
+    /// but the proof there is metadata-only, and every receipt says so by name
+    /// (`content_unhashed_paths`).
+    pub unhashed_dir_names: Vec<String>,
 }
 
 impl PostflightGate {
+    /// The strict default: hash every file in the workspace.
+    pub fn new(
+        env_id: impl Into<String>,
+        workspace_root: impl Into<PathBuf>,
+        preimage_path: impl Into<PathBuf>,
+        contract: WriteContract,
+    ) -> PostflightGate {
+        PostflightGate {
+            env_id: env_id.into(),
+            workspace_root: workspace_root.into(),
+            preimage_path: preimage_path.into(),
+            contract,
+            unhashed_dir_names: Vec::new(),
+        }
+    }
+
+    /// Walk build-output dirs but do not hash their contents (see
+    /// [`PostflightGate::unhashed_dir_names`]).
+    pub fn with_build_artifacts_unhashed(mut self) -> PostflightGate {
+        self.unhashed_dir_names = manifest::BUILD_ARTIFACT_DIR_NAMES
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        self
+    }
+
+    /// The worker-writable roots this gate covers: the lease workspace, plus a
+    /// linked worktree's external git metadata dir. Both are writable by a
+    /// same-UID worker, so both constrain where the pre-image may live.
+    fn worker_writable_roots(&self, gitdir: Option<&Path>) -> Vec<(&'static str, PathBuf)> {
+        let mut roots = vec![("the lease workspace", self.workspace_root.clone())];
+        if let Some(gitdir) = gitdir {
+            roots.push((
+                "the lease's external git metadata dir (gitdir)",
+                gitdir.to_path_buf(),
+            ));
+        }
+        roots
+    }
+
     /// Capture the pre-image. Call this **before the worker is spawned** — a
     /// pre-image taken after the worker starts is worthless.
+    ///
+    /// This is also the ONLY place the external `gitdir` is resolved: `.git` is a
+    /// worker-writable file, so its `gitdir:` target is read here, while the
+    /// workspace is still the parent's alone, and then **pinned** into the
+    /// pre-image. [`PostflightGate::run`] walks the pinned root and never
+    /// re-reads `.git` (see the `manifest` module docs).
     ///
     /// Fails closed on an incomplete image: if the parent cannot read every
     /// entry, it cannot later prove that entry unchanged, so the dispatch must
     /// not start under this contract rather than run and be un-provable at the
     /// end. No pre-image file is written in that case.
     pub fn capture_preimage(&self) -> Result<WorkspaceManifest, String> {
-        ensure_preimage_outside_workspace(&self.workspace_root, &self.preimage_path)?;
-        let manifest = manifest::capture(&self.workspace_root)?;
+        let gitdir = manifest::resolve_external_git_dir(&self.workspace_root);
+        ensure_preimage_outside_worker_writable_roots(
+            &self.worker_writable_roots(gitdir.as_deref()),
+            &self.preimage_path,
+        )?;
+        let manifest = manifest::capture(&CaptureSpec {
+            workspace_root: &self.workspace_root,
+            gitdir_root: gitdir.as_deref(),
+            unhashed_dir_names: &self.unhashed_dir_names,
+        })?;
         if !manifest.is_complete() {
             return Err(format!(
                 "pre-image of {} is INCOMPLETE ({} unreadable entr{}), so a later postflight \
@@ -443,7 +551,11 @@ impl PostflightGate {
                  pre-image that cannot convict:\n  - {}",
                 self.workspace_root.display(),
                 manifest.errors.len(),
-                if manifest.errors.len() == 1 { "y" } else { "ies" },
+                if manifest.errors.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
                 manifest.errors.join("\n  - ")
             ));
         }
@@ -459,31 +571,42 @@ impl PostflightGate {
     /// Order is load-bearing:
     /// 1. **descendants first** — a live process means no decision, no
     ///    quarantine, no reclaim (enforcement point 5);
-    /// 2. then load the parent-held pre-image;
-    /// 3. then re-scan and compare;
+    /// 2. then load the parent-held pre-image (which carries the **pinned** walk
+    ///    roots);
+    /// 3. then re-scan **those roots** and compare;
     /// 4. then apply the contract.
+    ///
+    /// Step 3 never re-derives a walk root from the workspace: the worker has had
+    /// write access to `.git`, so re-reading its `gitdir:` line here would let the
+    /// worker pick what the parent hashes (a decoy root, or `/` as a DoS). The
+    /// rewrite of `.git` itself is still caught — it is a content delta on
+    /// `workspace/.git` like any other file.
     pub fn run(&self, liveness: &dyn DescendantLiveness) -> Result<GateOutcome, String> {
         let checked_at = chrono::Utc::now().to_rfc3339();
-        let base = |verdict: GateVerdict| GateOutcome {
+        let base = |verdict: GateVerdict, unhashed: Vec<String>| GateOutcome {
             env_id: self.env_id.clone(),
             workspace_root: self.workspace_root.to_string_lossy().to_string(),
             contract_label: self.contract.label(),
             declared_scope: self.contract.declared_paths(),
             liveness_probe: liveness.describe(),
+            content_unhashed_paths: unhashed,
             verdict,
             checked_at: checked_at.clone(),
         };
 
         // (1) Never scan or tear down a workspace a live process can still write.
         if liveness.any_alive()? {
-            return Ok(base(GateVerdict::Blocked {
-                reason: BlockReason::DescendantsAlive,
-                detail: format!(
-                    "{} still has at least one live process; terminate the worker tree, then \
-                     re-run the gate",
-                    liveness.describe()
-                ),
-            }));
+            return Ok(base(
+                GateVerdict::Blocked {
+                    reason: BlockReason::DescendantsAlive,
+                    detail: format!(
+                        "{} still has at least one live process; terminate the worker tree, then \
+                         re-run the gate",
+                        liveness.describe()
+                    ),
+                },
+                Vec::new(),
+            ));
         }
 
         // (2) The pre-image is parent-held; a missing or corrupt one is not a
@@ -491,37 +614,53 @@ impl PostflightGate {
         let pre = match self.load_preimage() {
             Ok(pre) => pre,
             Err(e) => {
-                return Ok(base(GateVerdict::Rejected {
-                    reason: RejectReason::UnusableImage,
-                    deltas: vec![WorkspaceDelta {
-                        path: self.preimage_path.to_string_lossy().to_string(),
-                        kind: DeltaKind::Unreadable,
-                        detail: format!("pre-image unusable: {e}"),
-                        facets: Vec::new(),
-                    }],
-                    entries_checked: 0,
-                }))
+                return Ok(base(
+                    GateVerdict::Rejected {
+                        reason: RejectReason::UnusableImage,
+                        deltas: vec![WorkspaceDelta {
+                            path: self.preimage_path.to_string_lossy().to_string(),
+                            kind: DeltaKind::Unreadable,
+                            detail: format!("pre-image unusable: {e}"),
+                            facets: Vec::new(),
+                            entry_kind: None,
+                        }],
+                        entries_checked: 0,
+                    },
+                    Vec::new(),
+                ))
             }
         };
 
-        // (3) Re-scan.
-        let post = match manifest::capture(&self.workspace_root) {
+        // (3) Re-scan — against the roots the PARENT pinned before the spawn.
+        // A pinned gitdir the worker deleted or moved fails closed as an
+        // unreadable (and therefore unprovable) root, not as a clean run.
+        let pinned_gitdir = pre.gitdir_root.as_ref().map(PathBuf::from);
+        let post = match manifest::capture(&CaptureSpec {
+            workspace_root: &self.workspace_root,
+            gitdir_root: pinned_gitdir.as_deref(),
+            unhashed_dir_names: &self.unhashed_dir_names,
+        }) {
             Ok(post) => post,
             Err(e) => {
-                return Ok(base(GateVerdict::Rejected {
-                    reason: RejectReason::UnusableImage,
-                    deltas: vec![WorkspaceDelta {
-                        path: self.workspace_root.to_string_lossy().to_string(),
-                        kind: DeltaKind::Unreadable,
-                        detail: format!("post-image could not be captured: {e}"),
-                        facets: Vec::new(),
-                    }],
-                    entries_checked: 0,
-                }))
+                return Ok(base(
+                    GateVerdict::Rejected {
+                        reason: RejectReason::UnusableImage,
+                        deltas: vec![WorkspaceDelta {
+                            path: self.workspace_root.to_string_lossy().to_string(),
+                            kind: DeltaKind::Unreadable,
+                            detail: format!("post-image could not be captured: {e}"),
+                            facets: Vec::new(),
+                            entry_kind: None,
+                        }],
+                        entries_checked: 0,
+                    },
+                    Vec::new(),
+                ))
             }
         };
 
         let entries_checked = pre.len().max(post.len());
+        let unhashed = merge_unhashed(&pre, &post);
 
         // An incomplete image on either side cannot prove a clean run. (The
         // pre-image side is belt-and-braces: `capture_preimage` already refuses
@@ -542,13 +681,17 @@ impl PostflightGate {
                     kind: DeltaKind::Unreadable,
                     detail: format!("unreadable, so it cannot be proven unchanged: {detail}"),
                     facets: Vec::new(),
+                    entry_kind: None,
                 })
                 .collect();
-            return Ok(base(GateVerdict::Rejected {
-                reason: RejectReason::UnusableImage,
-                deltas,
-                entries_checked,
-            }));
+            return Ok(base(
+                GateVerdict::Rejected {
+                    reason: RejectReason::UnusableImage,
+                    deltas,
+                    entries_checked,
+                },
+                unhashed,
+            ));
         }
 
         // (4) Compare, then apply the contract.
@@ -558,13 +701,16 @@ impl PostflightGate {
             .collect();
 
         if prohibited.is_empty() {
-            Ok(base(GateVerdict::Clean { entries_checked }))
+            Ok(base(GateVerdict::Clean { entries_checked }, unhashed))
         } else {
-            Ok(base(GateVerdict::Rejected {
-                reason: RejectReason::ProhibitedDelta,
-                deltas: prohibited,
-                entries_checked,
-            }))
+            Ok(base(
+                GateVerdict::Rejected {
+                    reason: RejectReason::ProhibitedDelta,
+                    deltas: prohibited,
+                    entries_checked,
+                },
+                unhashed,
+            ))
         }
     }
 
@@ -579,22 +725,45 @@ impl PostflightGate {
     }
 }
 
-/// The pre-image must live where the worker cannot reach it. A pre-image inside
-/// the workspace could be rewritten by the very worker it is meant to convict,
-/// so this is a hard fail, not a warning.
-pub fn ensure_preimage_outside_workspace(
-    workspace_root: &Path,
+/// The union of the two images' unhashed roots, deduped. Taken from BOTH sides:
+/// a `target/` the worker created mid-run appears only in the post-image, and the
+/// receipt must still disclose that its contents were not hashed.
+fn merge_unhashed(pre: &WorkspaceManifest, post: &WorkspaceManifest) -> Vec<String> {
+    let mut all: Vec<String> = pre
+        .unhashed_roots
+        .iter()
+        .chain(post.unhashed_roots.iter())
+        .cloned()
+        .collect();
+    all.sort();
+    all.dedup();
+    all
+}
+
+/// The pre-image must live where the worker cannot reach it — and this module
+/// declares **two** worker-writable roots, not one: the lease workspace *and* a
+/// linked worktree's external git metadata dir (`gitdir`). A pre-image inside
+/// either could be rewritten by the very worker it is meant to convict (the gate
+/// would then compare the worker's own story against itself), so this is a hard
+/// fail, not a warning.
+///
+/// `roots` is `(human label, path)`; every root the caller can name as
+/// worker-writable must be in it.
+pub fn ensure_preimage_outside_worker_writable_roots(
+    roots: &[(&str, PathBuf)],
     preimage_path: &Path,
 ) -> Result<(), String> {
-    let workspace = canonical_or_literal(workspace_root);
     let preimage = canonical_or_literal(preimage_path);
-    if preimage.starts_with(&workspace) {
-        return Err(format!(
-            "pre-image {} is inside the lease workspace {} — the worker could rewrite it; the \
-             pre-image must be held by the parent, outside anything the worker can write",
-            preimage.display(),
-            workspace.display()
-        ));
+    for (label, root) in roots {
+        let root = canonical_or_literal(root);
+        if preimage.starts_with(&root) {
+            return Err(format!(
+                "pre-image {} is inside {label} {} — the worker could rewrite it; the pre-image \
+                 must be held by the parent, outside EVERY root the worker can write",
+                preimage.display(),
+                root.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -662,12 +831,18 @@ impl QuarantineSink for FileQuarantineSink {
 /// this gate actually says in the log, not just in its receipts.
 pub fn rejection_log_message(outcome: &GateOutcome) -> String {
     outcome.failure_message().unwrap_or_else(|| {
-        format!(
+        let mut line = format!(
             "{} postflight gate: lease {} passed ({})",
             naming::POSTURE,
             outcome.env_id,
             naming::PROVES
-        )
+        );
+        // A clean verdict must carry its own asterisk: if a subtree was not
+        // hashed, say so on the pass line, not only in the receipt.
+        if let Some(caveat) = outcome.unhashed_caveat() {
+            line.push_str(&format!(" — {caveat}"));
+        }
+        line
     })
 }
 

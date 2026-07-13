@@ -116,6 +116,10 @@ impl Fixture {
         self.workspace.path()
     }
 
+    fn parent(&self) -> &Path {
+        self.parent.path()
+    }
+
     fn gitdir(&self) -> PathBuf {
         self.parent.path().join("worktrees/lane-a")
     }
@@ -129,12 +133,7 @@ impl Fixture {
     }
 
     fn gate(&self, contract: WriteContract) -> PostflightGate {
-        PostflightGate {
-            env_id: "env-test".to_string(),
-            workspace_root: self.ws().to_path_buf(),
-            preimage_path: self.preimage_path(),
-            contract,
-        }
+        PostflightGate::new("env-test", self.ws(), self.preimage_path(), contract)
     }
 
     /// Capture the pre-image, let the "worker" run `mutate`, then gate it.
@@ -184,7 +183,10 @@ fn clean_run_passes_and_releases_the_patch() {
     });
 
     let GateVerdict::Clean { entries_checked } = &outcome.verdict else {
-        panic!("a read-only worker must pass the gate: {:?}", outcome.verdict);
+        panic!(
+            "a read-only worker must pass the gate: {:?}",
+            outcome.verdict
+        );
     };
     assert!(*entries_checked > 5, "the whole tree is fingerprinted");
     assert!(outcome.artifacts_released());
@@ -249,6 +251,51 @@ fn surface_4b_external_gitdir_write_is_caught() {
     assert_caught(&outcome, "gitdir/HEAD", DeltaKind::ContentChanged);
 }
 
+#[test]
+fn surface_4c_a_worker_cannot_repoint_the_gitdir_walk_root() {
+    // The `.git` FILE that names the second walk root lives INSIDE the workspace,
+    // i.e. the worker can rewrite it. If the postflight re-read it, the worker
+    // would choose what the parent walks: point it at a decoy and the real gitdir
+    // is never re-scanned (the rewrite hides itself); point it at `/` and the
+    // parent hashes the whole disk (DoS). So the root is resolved once, before the
+    // spawn, and pinned in the pre-image.
+    let fx = Fixture::linked_worktree();
+    let gitdir = fx.gitdir();
+    let decoy = fx.parent().join("decoy-gitdir");
+    fs::create_dir_all(&decoy).expect("decoy dir");
+    fs::write(decoy.join("decoy-HEAD"), b"ref: refs/heads/decoy\n").expect("decoy HEAD");
+
+    let outcome = fx.run_worker(WriteContract::DetectAndReject, |ws| {
+        // The worker rewrites BOTH: the real gitdir's HEAD, and the pointer that
+        // is supposed to lead the parent to it.
+        fs::write(gitdir.join("HEAD"), b"ref: refs/heads/attacker\n").expect("rewrite HEAD");
+        fs::write(
+            ws.join(".git"),
+            format!("gitdir: {}\n", decoy.display()).as_bytes(),
+        )
+        .expect("repoint .git");
+    });
+
+    // The pinned root was walked, so the real HEAD rewrite is still convicted...
+    assert_caught(&outcome, "gitdir/HEAD", DeltaKind::ContentChanged);
+    // ...the redirect itself is convicted as an ordinary content delta on the
+    // `.git` file...
+    assert!(
+        outcome
+            .deltas()
+            .iter()
+            .any(|d| d.path == "workspace/.git" && d.kind == DeltaKind::ContentChanged),
+        "rewriting `.git` is itself a prohibited delta: {:#?}",
+        outcome.deltas()
+    );
+    // ...and the parent never followed the worker's pointer.
+    assert!(
+        !outcome.deltas().iter().any(|d| d.path.contains("decoy")),
+        "the postflight walked a root the WORKER chose: {:#?}",
+        outcome.deltas()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn surface_5_symlink_retarget_is_caught() {
@@ -271,9 +318,18 @@ fn surface_6_deletion_is_caught() {
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
 #[test]
-fn surface_7_xattr_change_is_caught() {
+fn surface_7_xattr_change_is_caught_by_the_xattr_fingerprint_itself() {
     // Content, size, mode and mtime are all untouched here — only an extended
     // attribute changed. `git diff` sees nothing at all.
+    //
+    // This test is DISCRIMINATING and must stay that way: `setxattr` also bumps
+    // the inode's ctime, so accepting `XattrChanged || MetadataChanged` would go
+    // green even if the xattr fingerprint were deleted from the manifest — the
+    // one surface of the eight whose test would not hold its own mechanism to
+    // account. So: only `XattrChanged` passes, and the `xattrs …` facet must be
+    // present. This cfg gate matches the cfg gate on `manifest::xattr_digest`'s
+    // real implementation exactly, so wherever the mechanism is claimed, it is
+    // also proven.
     let fx = Fixture::new();
     let outcome = fx.run_worker(WriteContract::DetectAndReject, |ws| {
         set_xattr(
@@ -289,13 +345,23 @@ fn surface_7_xattr_change_is_caught() {
         .iter()
         .find(|d| d.path.ends_with("src/tracked.rs"))
         .unwrap_or_else(|| panic!("no delta for the xattr'd file: {deltas:#?}"));
-    // XattrChanged is the specific class; a ctime-only MetadataChanged would
-    // still catch it on a platform whose xattr API we have not qualified.
-    assert!(
-        delta.kind == DeltaKind::XattrChanged || delta.kind == DeltaKind::MetadataChanged,
-        "xattr write surfaced as {:?}: {}",
+    assert_eq!(
         delta.kind,
+        DeltaKind::XattrChanged,
+        "the xattr fingerprint — not the incidental ctime bump — must be what classifies this: {}",
         delta.detail
+    );
+    assert!(
+        delta.facets.iter().any(|f| f.starts_with("xattrs ")),
+        "the receipt must show the xattr digest changing, or the manifest is not actually \
+         reading xattrs: {:?}",
+        delta.facets
+    );
+    // The content bytes really are untouched — so content is not what caught it.
+    assert!(
+        !delta.facets.iter().any(|f| f.starts_with("content ")),
+        "the fixture changed the file's bytes, so this test would pass for the wrong reason: {:?}",
+        delta.facets
     );
     assert!(!outcome.artifacts_released());
     assert!(outcome.lease_quarantine_required());
@@ -354,6 +420,11 @@ fn surface_8_mutate_then_restore_is_caught_by_ctime_alone() {
 
 #[test]
 fn declared_scope_accepts_in_scope_writes_and_rejects_the_rest() {
+    // Creating `out/` changes the WORKSPACE ROOT directory's own fingerprint, and
+    // on APFS that is not just mtime/ctime: a directory's `nlink` and `size` track
+    // its child count. The ancestor-directory forgiveness therefore has to cover
+    // the whole directory-bookkeeping facet set, or a declared write can never be
+    // accepted at all (which is exactly how this test failed in round 1).
     let fx = Fixture::new();
     let clean = fx.run_worker(
         WriteContract::DeclaredScope {
@@ -389,6 +460,40 @@ fn declared_scope_accepts_in_scope_writes_and_rejects_the_rest() {
             .any(|d| d.path.contains("out/result.json")),
         "the declared write must not be reported as prohibited: {:#?}",
         rejected.deltas()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn declared_scope_forgives_only_bookkeeping_on_an_ancestor_dir_not_a_chmod() {
+    // Guard the fix for the test above: the ancestor-directory forgiveness must
+    // stay narrow. A worker that chmods a directory on the way to its declared
+    // scope changed something the bookkeeping story does not explain, so the
+    // gate must still reject — mode is not a directory-bookkeeping facet.
+    use std::os::unix::fs::PermissionsExt;
+
+    let fx = Fixture::new();
+    let outcome = fx.run_worker(
+        WriteContract::DeclaredScope {
+            paths: vec!["src/out".to_string()],
+        },
+        |ws| {
+            fs::create_dir_all(ws.join("src/out")).expect("mkdir");
+            fs::write(ws.join("src/out/result.json"), b"{}\n").expect("declared write");
+            // ...and, on the way past, widens the ancestor directory.
+            fs::set_permissions(ws.join("src"), fs::Permissions::from_mode(0o777)).expect("chmod");
+        },
+    );
+    assert_caught(&outcome, "workspace/src", DeltaKind::MetadataChanged);
+    let delta = outcome
+        .deltas()
+        .iter()
+        .find(|d| d.path == "workspace/src")
+        .expect("the chmod'd ancestor");
+    assert!(
+        delta.facets.iter().any(|f| f.starts_with("mode ")),
+        "the mode facet is what must defeat the bookkeeping forgiveness: {:?}",
+        delta.facets
     );
 }
 
@@ -494,17 +599,141 @@ fn process_group_liveness_refuses_the_daemons_own_group() {
 #[test]
 fn a_preimage_inside_the_workspace_is_refused() {
     let fx = Fixture::new();
-    let gate = PostflightGate {
-        env_id: "env-test".to_string(),
-        workspace_root: fx.ws().to_path_buf(),
+    let gate = PostflightGate::new(
+        "env-test",
+        fx.ws(),
         // The worker could rewrite this to match whatever it did.
-        preimage_path: fx.ws().join(".tachi-preimage.json"),
-        contract: WriteContract::DetectAndReject,
-    };
+        fx.ws().join(".tachi-preimage.json"),
+        WriteContract::DetectAndReject,
+    );
     let err = gate
         .capture_preimage()
         .expect_err("a worker-writable pre-image proves nothing");
     assert!(err.contains("inside the lease workspace"), "got: {err}");
+}
+
+#[test]
+fn a_preimage_inside_the_external_gitdir_is_refused() {
+    // The workspace is not the only root a same-UID worker can write: this module
+    // declares TWO (the workspace and, for a linked worktree, the external
+    // gitdir). A custody guard that only knows about the first one lets the
+    // pre-image land in the second — where the worker can rewrite it to match
+    // whatever it did, and the whole gate becomes the worker's own testimony.
+    let fx = Fixture::linked_worktree();
+    let gate = PostflightGate::new(
+        "env-test",
+        fx.ws(),
+        fx.gitdir().join("tachi-preimage.json"),
+        WriteContract::DetectAndReject,
+    );
+    let err = gate
+        .capture_preimage()
+        .expect_err("a pre-image inside the gitdir is as worker-writable as one inside the tree");
+    assert!(err.contains("gitdir"), "got: {err}");
+    assert!(
+        err.contains("EVERY root the worker can write"),
+        "got: {err}"
+    );
+    assert!(!fx.gitdir().join("tachi-preimage.json").exists());
+}
+
+// ─── capture cost: unhashed build dirs are disclosed, never assumed unchanged ──
+
+#[test]
+fn unhashed_build_dirs_are_still_detected_and_are_named_on_the_receipt() {
+    // Hashing every file includes an in-tree Rust `target/` — multiple GB of
+    // BLAKE2 per capture, twice per dispatch. Opting that subtree out of HASHING
+    // must not opt it out of DETECTION: it is still walked and fingerprinted
+    // (size/inode/nlink/mode/xattr/mtime/ctime), so a same-size tamper — the
+    // hardest case for a metadata-only proof — is still caught by mtime/ctime.
+    // And the receipt says, by name, which paths carry only that weaker proof.
+    let fx = Fixture::new();
+    fs::create_dir_all(fx.ws().join("target/debug")).expect("target dir");
+    fs::write(fx.ws().join("target/debug/artifact.bin"), b"aaaaaaaa").expect("artifact");
+
+    let gate = fx
+        .gate(WriteContract::DetectAndReject)
+        .with_build_artifacts_unhashed();
+    let pre = gate.capture_preimage().expect("pre-image");
+
+    // The expensive half really was skipped — and ONLY there.
+    assert_eq!(pre.unhashed_roots, vec!["workspace/target".to_string()]);
+    assert!(
+        pre.entries["workspace/target/debug/artifact.bin"]
+            .content_hash
+            .is_none(),
+        "the build artifact must not have been hashed"
+    );
+    assert!(
+        pre.entries["workspace/src/tracked.rs"]
+            .content_hash
+            .is_some(),
+        "everything outside the build dir is still hashed"
+    );
+
+    // A same-size overwrite: no size facet, no content hash to compare — only the
+    // timestamps testify, and ctime cannot be put back by an unprivileged worker.
+    fs::write(fx.ws().join("target/debug/artifact.bin"), b"bbbbbbbb").expect("tamper");
+
+    let outcome = gate.run(&Reaped).expect("gate run");
+    assert_caught(
+        &outcome,
+        "target/debug/artifact.bin",
+        DeltaKind::MetadataChanged,
+    );
+
+    let receipt = outcome.receipt();
+    assert_eq!(receipt["content_unhashed_paths"][0], "workspace/target");
+    let note = receipt["content_unhashed_note"]
+        .as_str()
+        .expect("the receipt must state which paths were not hashed");
+    assert!(note.contains("NOT hashed"), "got: {note}");
+    assert!(note.contains("workspace/target"), "got: {note}");
+}
+
+#[test]
+fn a_clean_verdict_over_unhashed_dirs_carries_the_caveat_on_every_surface() {
+    // "I did not hash it" must never be silently read as "it did not change" —
+    // so a CLEAN run over an unhashed subtree still says so, in the receipt and
+    // on the log line, not only when something goes wrong.
+    let fx = Fixture::new();
+    fs::create_dir_all(fx.ws().join("target")).expect("target dir");
+    fs::write(fx.ws().join("target/artifact.bin"), b"cached").expect("artifact");
+
+    let gate = fx
+        .gate(WriteContract::DetectAndReject)
+        .with_build_artifacts_unhashed();
+    gate.capture_preimage().expect("pre-image");
+    let outcome = gate.run(&Reaped).expect("gate run");
+
+    assert!(outcome.artifacts_released(), "{:?}", outcome.verdict);
+    assert_eq!(
+        outcome.content_unhashed_paths,
+        vec!["workspace/target".to_string()]
+    );
+    let log = rejection_log_message(&outcome);
+    assert!(
+        log.contains("NOT hashed"),
+        "the pass line hides its asterisk: {log}"
+    );
+    assert!(naming::violates_naming_rule(&log).is_none());
+    assert!(outcome.receipt()["content_unhashed_note"].is_string());
+}
+
+#[test]
+fn hashing_everything_is_the_default_and_leaves_no_caveat() {
+    let fx = Fixture::new();
+    let gate = fx.gate(WriteContract::DetectAndReject);
+    let pre = gate.capture_preimage().expect("pre-image");
+    assert!(pre.unhashed_roots.is_empty());
+    assert!(pre.entries["workspace/ignored/build.log"]
+        .content_hash
+        .is_some());
+
+    let outcome = gate.run(&Reaped).expect("gate run");
+    assert!(outcome.content_unhashed_paths.is_empty());
+    assert!(outcome.unhashed_caveat().is_none());
+    assert!(outcome.receipt()["content_unhashed_note"].is_null());
 }
 
 #[cfg(unix)]
@@ -542,7 +771,10 @@ fn a_missing_preimage_fails_closed_it_is_not_a_pass() {
     // No capture_preimage() call at all.
     let outcome = gate.run(&Reaped).expect("gate run");
     let GateVerdict::Rejected { reason, .. } = &outcome.verdict else {
-        panic!("no pre-image means nothing can be proven: {:?}", outcome.verdict);
+        panic!(
+            "no pre-image means nothing can be proven: {:?}",
+            outcome.verdict
+        );
     };
     assert_eq!(*reason, RejectReason::UnusableImage);
     assert!(!outcome.artifacts_released());
@@ -596,8 +828,10 @@ fn rejection_quarantines_the_lease_and_writes_a_forensic_receipt() {
         .as_array()
         .expect("deltas array")
         .iter()
-        .any(|d| d["path"].as_str().unwrap_or("").ends_with("src/tracked.rs")
-            && d["kind"] == "content_changed"));
+        .any(
+            |d| d["path"].as_str().unwrap_or("").ends_with("src/tracked.rs")
+                && d["kind"] == "content_changed"
+        ));
 
     // Quarantine preserves the evidence — it is NOT a reclaim.
     assert!(

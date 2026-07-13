@@ -85,9 +85,11 @@ impl DescendantLiveness for ProcessGroupLiveness {
 
     #[cfg(not(unix))]
     fn any_alive(&self) -> Result<bool, String> {
-        Err("descendant-liveness probing is not implemented on this platform; \
+        Err(
+            "descendant-liveness probing is not implemented on this platform; \
              the postflight gate fails closed rather than assuming the worker tree is gone"
-            .to_string())
+                .to_string(),
+        )
     }
 
     fn describe(&self) -> String {

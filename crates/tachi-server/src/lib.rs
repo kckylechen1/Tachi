@@ -106,6 +106,10 @@ mod exec_env_ops;
 /// workspace, a write contract and a liveness probe, and returns a verdict, a
 /// receipt, and — on any prohibited delta — a loud failure with NO patch.
 /// It proves "no change was accepted"; it is never read-only enforcement.
+///
+/// **NOT WIRED YET — see #894 S2 wiring slice.** This declaration is the module's
+/// only reference in the whole crate: no dispatch path calls it, so no dispatch
+/// is gated by it today.
 pub mod exec_env_postflight;
 mod facade_memory_ops;
 mod facade_save_ops;
