@@ -4,7 +4,9 @@
 use super::super::build_refinery_packet;
 use super::super::doc_resolver::{DocRefResolver, DocResolution, GitRefResolver};
 use super::super::fixtures::{gh_issue_json, minimal_evidence, spec_ref_line, FixtureDocResolver};
-use tachi_params::{check_proposal_replay, CurrentGroundStateV1, GroundingStatusV1, RepoRevisionV1};
+use tachi_params::{
+    check_proposal_replay, CurrentGroundStateV1, GroundingStatusV1, RepoRevisionV1,
+};
 
 const CAPTURED_AT: &str = "2026-07-13T00:00:00Z";
 
@@ -192,9 +194,17 @@ fn model_only_evidence_compiler_never_marks_a_claim_verified_across_fixtures() {
 /// unresolvable-but-well-formed one.
 #[test]
 fn malformed_spec_ref_line_degrades_grounding_instead_of_being_ignored() {
-    let body = "This work has a broken spec pin.\n\nSpec-Ref: not-even-close-to-the-syntax\n"
-        .to_string();
-    let gh_json = gh_issue_json("Malformed spec-ref fixture", &body, "OPEN", &[], None, CAPTURED_AT, &[]);
+    let body =
+        "This work has a broken spec pin.\n\nSpec-Ref: not-even-close-to-the-syntax\n".to_string();
+    let gh_json = gh_issue_json(
+        "Malformed spec-ref fixture",
+        &body,
+        "OPEN",
+        &[],
+        None,
+        CAPTURED_AT,
+        &[],
+    );
     let resolver = FixtureDocResolver::new();
     let (evidence, proposal) =
         build_refinery_packet("owner/repo", 9310, &gh_json, &resolver, CAPTURED_AT)
@@ -257,7 +267,15 @@ fn git_ref_resolver_refuses_a_spec_ref_declaring_a_different_repo() {
 #[test]
 fn live_pipeline_pins_repo_revision_when_the_resolver_supplies_one() {
     let body = "Fixture body with no Spec-Ref at all.".to_string();
-    let gh_json = gh_issue_json("Repo revision fixture", &body, "OPEN", &[], None, CAPTURED_AT, &[]);
+    let gh_json = gh_issue_json(
+        "Repo revision fixture",
+        &body,
+        "OPEN",
+        &[],
+        None,
+        CAPTURED_AT,
+        &[],
+    );
     let resolver = FixtureDocResolver::new().with_repo_revision(RepoRevisionV1 {
         repo: "owner/repo".to_string(),
         git_ref: "origin/main".to_string(),
@@ -278,7 +296,15 @@ fn live_pipeline_pins_repo_revision_when_the_resolver_supplies_one() {
 #[test]
 fn repo_head_drift_after_the_proposal_was_built_rejects_replay_through_the_real_pipeline() {
     let body = "Fixture body with no Spec-Ref at all.".to_string();
-    let gh_json = gh_issue_json("Repo revision drift fixture", &body, "OPEN", &[], None, CAPTURED_AT, &[]);
+    let gh_json = gh_issue_json(
+        "Repo revision drift fixture",
+        &body,
+        "OPEN",
+        &[],
+        None,
+        CAPTURED_AT,
+        &[],
+    );
     let resolver = FixtureDocResolver::new().with_repo_revision(RepoRevisionV1 {
         repo: "owner/repo".to_string(),
         git_ref: "origin/main".to_string(),
@@ -296,7 +322,7 @@ fn repo_head_drift_after_the_proposal_was_built_rejects_replay_through_the_real_
         repo_revisions: drifted_repo_revisions,
         doc_revisions: proposal.based_on_doc_revisions.clone(),
     };
-    let err = check_proposal_replay(&proposal, &current)
-        .expect_err("repo HEAD drift must reject replay");
+    let err =
+        check_proposal_replay(&proposal, &current).expect_err("repo HEAD drift must reject replay");
     assert!(!err.is_empty());
 }
