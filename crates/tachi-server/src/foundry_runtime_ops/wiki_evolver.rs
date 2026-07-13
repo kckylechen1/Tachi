@@ -274,7 +274,7 @@ fn parse_wiki_draft(raw: &str, fallback_topic: &str) -> Result<WikiDraft, String
     let obj: Value = serde_json::from_str(&stripped[start..end]).map_err(|e| {
         format!(
             "parse wiki draft JSON: {e} — raw={}",
-            &raw.chars().take(300).collect::<String>()
+            raw.chars().take(300).collect::<String>()
         )
     })?;
 
