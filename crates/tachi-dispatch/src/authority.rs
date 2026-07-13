@@ -1045,12 +1045,12 @@ mod tests {
     ///
     /// Round 1 sat the `Full -> DangerFullAccess` promotion inside the
     /// `requested_sandbox: None` arm, so an explicit `sandbox` value SHADOWED the
-    /// ceiling check entirely: `codex_55_review` (read-only) + `sandbox=read-only`
-    /// + `permission_profile=full` compiled to `Ok(Enforcement::Bypass)` — a
-    /// contract that *said* read-only while launching codex with
-    /// `--dangerously-bypass-approvals-and-sandbox`. Leg 2 below is that exact
-    /// escalation; it must be an `authority_conflict`, and under no ceiling may a
-    /// bypass ever come back as `Bypass`.
+    /// ceiling check entirely. A `codex_55_review` (read-only) dispatch carrying
+    /// both `sandbox=read-only` and `permission_profile=full` compiled to
+    /// `Ok(Enforcement::Bypass)` — a contract that *said* read-only while
+    /// launching codex with `--dangerously-bypass-approvals-and-sandbox`. Leg 2
+    /// below is that exact escalation; it must be an `authority_conflict`, and
+    /// under no ceiling may a bypass ever come back as `Bypass`.
     ///
     /// (Round 1 also shipped this test asserting `glm_impl + Full => Ok(Bypass)`,
     /// which was self-contradictory — an executor ceiling is `workspace-write`,
