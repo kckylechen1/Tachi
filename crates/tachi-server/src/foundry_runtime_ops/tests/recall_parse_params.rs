@@ -1,25 +1,34 @@
 use super::*;
 #[test]
-fn parse_session_capture_response_accepts_json_array() {
-    let raw = r#"[{"text": "hello"}, {"text": "world"}]"#;
-    let drafts = parse_session_capture_response(raw).unwrap();
-    assert_eq!(drafts.len(), 2);
-    assert_eq!(drafts[0].text, "hello");
-    assert_eq!(drafts[1].text, "world");
-}
-#[test]
-fn parse_session_capture_response_strips_code_fence() {
-    let raw = "```json\n[{\"text\": \"hello\"}]\n```";
-    let drafts = parse_session_capture_response(raw).unwrap();
-    assert_eq!(drafts.len(), 1);
-    assert_eq!(drafts[0].text, "hello");
-}
-#[test]
-fn parse_session_capture_response_ignores_reasoning_prefix() {
-    let raw = "<think>reasoning that should not be parsed</think>\n[{\"text\": \"hello\"}]";
-    let drafts = parse_session_capture_response(raw).unwrap();
-    assert_eq!(drafts.len(), 1);
-    assert_eq!(drafts[0].text, "hello");
+fn parse_session_capture_response_covers_supported_shapes() {
+    let cases: [(&str, &str, &[&str]); 4] = [
+        (
+            "json array",
+            r#"[{"text": "hello"}, {"text": "world"}]"#,
+            &["hello", "world"],
+        ),
+        (
+            "json code fence",
+            "```json\n[{\"text\": \"hello\"}]\n```",
+            &["hello"],
+        ),
+        (
+            "reasoning prefix",
+            "<think>reasoning that should not be parsed</think>\n[{\"text\": \"hello\"}]",
+            &["hello"],
+        ),
+        (
+            "empty drafts filtered",
+            r#"[{"text": ""}, {"text": "valid"}]"#,
+            &["valid"],
+        ),
+    ];
+
+    for (name, raw, expected) in cases {
+        let drafts = parse_session_capture_response(raw).unwrap();
+        let texts: Vec<&str> = drafts.iter().map(|draft| draft.text.as_str()).collect();
+        assert_eq!(texts, expected, "case `{name}`");
+    }
 }
 #[test]
 fn parse_compact_context_response_ignores_reasoning_prefix() {
@@ -55,11 +64,4 @@ fn compact_rollup_params_accepts_string_items() {
 
     assert_eq!(params.items.len(), 1);
     assert_eq!(params.items[0].compacted_text, "already compact text");
-}
-#[test]
-fn parse_session_capture_response_filters_empty_text() {
-    let raw = r#"[{"text": ""}, {"text": "valid"}]"#;
-    let drafts = parse_session_capture_response(raw).unwrap();
-    assert_eq!(drafts.len(), 1);
-    assert_eq!(drafts[0].text, "valid");
 }
