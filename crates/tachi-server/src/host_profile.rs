@@ -7,7 +7,7 @@
 use serde_json::json;
 use tachi_params::ExecutionLevel;
 
-const HOST_PROFILE_ENV: &str = "TACHI_HOST_PROFILE";
+pub(crate) const HOST_PROFILE_ENV: &str = "TACHI_HOST_PROFILE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostProfile {
