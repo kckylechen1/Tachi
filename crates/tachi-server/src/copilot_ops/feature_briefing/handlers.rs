@@ -137,16 +137,18 @@ pub(crate) async fn handle_tachi_feature_briefing(
     params: &TachiTaskParams,
 ) -> Result<String, String> {
     // #527: omitted compact defaults to true (agent packet). Full board is
-    // opt-in. `compact` and `format=full` both express the same intent
-    // (kckylechen1/tachi#1058: an omitted `compact` used to always win,
-    // silently clipping a caller's `format="full"` request down to the
-    // 4-row packet) — an explicit `compact` still wins outright, but when
-    // it's omitted, `format="full"` is treated as an implicit `compact=false`
-    // rather than being ignored.
-    let effective_compact = params
-        .compact
-        .unwrap_or_else(|| !crate::facade_memory_ops::wants_full_format(params.format.as_deref()));
-    let top_k = if effective_compact {
+    // opt-in. `compact` is the only knob this call site honors for that —
+    // `format` here is purely the JSON-vs-markdown response-shape selector
+    // (see `TachiTaskParams::format`'s own doc comment), a separate concern.
+    // kckylechen1/tachi#1058: it's the *outer* `intake` receipt's `format`
+    // that needs reverse-pressuring into the inner briefing call's `compact`
+    // — that's fixed at the construction site in
+    // `task_lifecycle::flow_artifacts::github::intake_briefing_params`,
+    // before the inner call's own `format` gets hardcoded to `"json"`. This
+    // function must not treat `format="full"` as an implicit `compact=false`
+    // — that would silently flip a JSON caller's response into markdown via
+    // `wants_json` below (`format="full"` isn't a recognized JSON token).
+    let top_k = if params.compact.unwrap_or(true) {
         params.top_k.unwrap_or(4).clamp(1, 4)
     } else {
         crate::clamp_facade_top_k(params.top_k.unwrap_or(6))

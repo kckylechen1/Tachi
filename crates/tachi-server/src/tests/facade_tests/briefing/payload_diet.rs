@@ -10,9 +10,8 @@ fn compact_json_params(query: &str) -> TachiMemoryParams {
 }
 
 /// Builds a `tachi_task` facade params value (`TachiTaskParams`) for
-/// `action='briefing'` / `action='doc_index'` with only the fields these
-/// FIX-2/FIX-3 tests care about set; every other field has `#[serde(default)]`
-/// and comes back empty/`None`.
+/// `action='briefing'` with only the fields the FIX-3 test below cares about
+/// set; every other field has `#[serde(default)]` and comes back empty/`None`.
 fn task_briefing_params(
     action: &str,
     task: &str,
@@ -57,58 +56,6 @@ fn memory_fragment_count(body: &str) -> usize {
         .as_array()
         .map(Vec::len)
         .unwrap_or(0)
-}
-
-/// kckylechen1/tachi#1058 FIX-2: `format="full"` with an omitted `compact`
-/// used to still fall through `params.compact.unwrap_or(true)` and get
-/// silently clipped to the 4-row compact packet. `action='doc_index'` shares
-/// the exact same top_k/compact gate as `action='briefing'`, so both must be
-/// fixed together.
-#[tokio::test]
-async fn task_briefing_format_full_is_not_clipped_to_compact_packet() {
-    let (server, _temp_home) = make_server_with_temp_home();
-    let needle = "FullVsCompactNeedle";
-    seed_needle_memory_rows(&server, needle, 6);
-    let query = format!("{needle} distinct memory row");
-
-    let compact_body = crate::copilot_ops::handle_tachi_feature_briefing(
-        &server,
-        &task_briefing_params("briefing", &query, Some("json"), None),
-    )
-    .await
-    .expect("compact task briefing should serialize");
-    let compact_count = memory_fragment_count(&compact_body);
-    assert!(
-        compact_count <= 4,
-        "omitted compact with format=json must stay within the 4-row compact packet, got {compact_count}"
-    );
-
-    let full_body = crate::copilot_ops::handle_tachi_feature_briefing(
-        &server,
-        &task_briefing_params("briefing", &query, Some("full"), None),
-    )
-    .await
-    .expect("full task briefing should serialize");
-    let full_count = memory_fragment_count(&full_body);
-    assert!(
-        full_count > compact_count,
-        "format=full with omitted compact must not be silently clipped to the compact \
-         row count; compact={compact_count} full={full_count}"
-    );
-
-    // doc_index shares the same top_k/compact gate — same bug, same fix.
-    let doc_index_body = crate::copilot_ops::handle_tachi_feature_briefing(
-        &server,
-        &task_briefing_params("doc_index", &query, Some("full"), None),
-    )
-    .await
-    .expect("full doc_index should serialize");
-    let doc_index_count = memory_fragment_count(&doc_index_body);
-    assert!(
-        doc_index_count > compact_count,
-        "doc_index format=full with omitted compact must not be clipped either; \
-         compact={compact_count} doc_index_full={doc_index_count}"
-    );
 }
 
 /// kckylechen1/tachi#1058 FIX-3: an omitted `compact` (which defaults) and an
