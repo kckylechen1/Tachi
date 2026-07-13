@@ -2369,6 +2369,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "blake2",
  "chrono",
  "clap",
  "dialoguer",
