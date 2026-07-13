@@ -38,7 +38,7 @@ impl TachiVerifyAction {
     /// Wire strings derived from [`ALL`](Self::ALL) — the single positive
     /// inventory for `tachi_verify` (no separate `&[&str]` mirror).
     pub fn all_wire_strings() -> Vec<&'static str> {
-        Self::ALL.iter().map(Self::as_str).collect()
+        Self::ALL.iter().map(|action| action.as_str()).collect()
     }
 }
 
@@ -160,7 +160,7 @@ impl TachiTaskAction {
     /// Wire strings derived from [`PRIMARY`](Self::PRIMARY) — the single
     /// positive inventory for `tachi_task` (no separate `&[&str]` mirror).
     pub fn primary_wire_strings() -> Vec<&'static str> {
-        Self::PRIMARY.iter().map(Self::as_str).collect()
+        Self::PRIMARY.iter().map(|action| action.as_str()).collect()
     }
 }
 
