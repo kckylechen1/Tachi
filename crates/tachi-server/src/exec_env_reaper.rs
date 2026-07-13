@@ -59,31 +59,50 @@
 //! reclaimed_bytes` ordering, as bytes freed by `safe_merge`. Nothing is deleted
 //! off the books.
 //!
-//! Booking goes through S2a's `reregister_resource`, not a bare insert:
+//! Booking uses the S2a API as shipped, not the `reregister_resource` this
+//! module was drafted against before S2a landed:
+//!
+//! ```ignore
+//! pub fn insert_resource(
+//!     conn: &mut Connection,
+//!     res: &NewExecEnvResource,
+//! ) -> Result<RegisterOutcome, MemoryError>;
+//!
+//! pub enum RegisterOutcome {
+//!     Registered { resource_id: String },                 // no row for (path, kind): fresh insert
+//!     Revived    { resource_id: String,                   // a `reclaimed` row came back to `active`
+//!                  previous_resource_id: String,
+//!                  previous_reclaimed_bytes: Option<i64> },
+//! }
+//! ```
+//!
+//! `insert_resource` is only safe to call when the (path, kind) row is absent or
+//! `reclaimed` — any other state (`active`/`reclaiming`/`reclaim_failed`/
+//! `quarantined`) bounces off `MemoryError::Duplicate`. There is no `Live` or
+//! `Quarantined` outcome variant: [`cheap_verdict`]'s `ReclaimReason` already
+//! tells this module which case it is in before it ever calls `insert_resource` —
+//! `Unmanaged` means no row or a `reclaimed` tombstone (insert/revive is safe),
+//! `Orphan` means the row is already on the books in a re-enterable state (use
+//! its `resource_id` directly, no insert call). Quarantined rows never reach
+//! [`reclaim_candidate`] at all — `cheap_verdict` skips them upstream.
+//!
 //! `(path, kind)` is UNIQUE, so once a path has been reclaimed its tombstone row
 //! owns that key forever. The population this reaper exists for is precisely the
 //! target that is *reborn under the same name* every time a lane runs, so a
 //! reclaimed row must be revivable — the first cut answered `Skip(already
 //! reclaimed)` and would have skipped every repeat offender forever.
 //!
-//! The one S2a (round-2) symbol this module depends on beyond the original CRUD:
+//! The id in `res` is a *proposal*, used only on the `Registered` branch; on the
+//! `Revived` branch the ledger's own id comes back and is authoritative.
 //!
-//! ```ignore
-//! pub fn reregister_resource(
-//!     conn: &Connection,
-//!     res: &NewExecEnvResource,
-//! ) -> Result<RegisterOutcome, MemoryError>;
-//!
-//! pub enum RegisterOutcome {
-//!     Registered { resource_id: String }, // no row for (path, kind): fresh insert
-//!     Revived    { resource_id: String }, // a `reclaimed` row came back to `active`
-//!     Live       { resource_id: String }, // already re-enterable (active/reclaiming/reclaim_failed)
-//!     Quarantined{ resource_id: String }, // fenced: the caller must not reclaim it
-//! }
-//! ```
-//!
-//! The id in `res` is a *proposal*, used only on the `Registered` branch; on every
-//! other branch the ledger's own id comes back and is authoritative.
+//! **Historical bytes on revive.** `insert_resource`'s revive clears the
+//! tombstone row's `reclaimed_bytes`/`reclaim_reason` and flips it back to
+//! `active` — so the instant a revive commits, those bytes drop out of
+//! [`reclaimed_bytes_by_reason`]'s ledger-wide sum (it only sums rows currently
+//! `reclaimed`). They are not lost: `RegisterOutcome::Revived` hands back
+//! `previous_reclaimed_bytes`, and this module carries it forward on
+//! [`ReclaimedReport::revived_previous_bytes`] / [`ReapReport::revived_bytes`]
+//! rather than letting the ledger-wide grouping silently shrink.
 //!
 //! NOTE on the reclaim reason: `exec_env_resources` has no "managed" column
 //! (S2a's schema is frozen and this knife does not touch it), so
@@ -667,10 +686,10 @@ pub(crate) fn cheap_verdict(
         // A `reclaimed` row is a TOMBSTONE for a path that is back on disk: some
         // later build recreated the same name. It is not "already done" — it is
         // the whole population this reaper exists for, and nobody re-registered
-        // the new bytes, so they are unmanaged again. S2a round-2's
-        // `reregister_resource` revives the row (see `reclaim_candidate`); the
-        // first cut skipped it forever and quietly retired the reaper from every
-        // path it had ever cleaned once.
+        // the new bytes, so they are unmanaged again. `insert_resource` revives
+        // the row (see `reclaim_candidate`); the first cut skipped it forever
+        // and quietly retired the reaper from every path it had ever cleaned
+        // once.
         Some(ResourceState::Reclaimed) | None => ReclaimReason::Unmanaged,
         // active / reclaiming / reclaim_failed: on the books, and all re-enterable.
         Some(_) => ReclaimReason::Orphan,
@@ -730,6 +749,12 @@ pub(crate) struct ReclaimedReport {
     /// Bytes the filesystem actually gave back (S2a stamps this only after the
     /// delete happened).
     pub(crate) reclaimed_bytes: i64,
+    /// Set only when booking this candidate revived a `reclaimed` tombstone row
+    /// (same `(path, kind)` reaped before, reborn, reaped again): the bytes the
+    /// PREVIOUS incarnation freed. `insert_resource`'s revive clears that history
+    /// off the row (state flips back to `active`), so it would otherwise vanish
+    /// from [`ReapReport::bytes_by_reason`] the instant this run commits.
+    pub(crate) revived_previous_bytes: Option<i64>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -747,8 +772,18 @@ pub(crate) struct ReapReport {
     pub(crate) reclaimed_bytes: i64,
     /// Ledger-wide bytes freed per `reclaim_reason`
     /// (`safe_merge` / `expired` / `orphan` / `unmanaged` / …), so the disk
-    /// story reads the same no matter which knife freed the bytes.
+    /// story reads the same no matter which knife freed the bytes. Only rows
+    /// CURRENTLY `reclaimed` count — a row this run revived back to `active` no
+    /// longer contributes here even though it once freed real bytes; see
+    /// `revived_bytes`.
     pub(crate) bytes_by_reason: BTreeMap<String, i64>,
+    /// Sum of `revived_previous_bytes` across everything this run reclaimed —
+    /// bytes a prior reclaim freed at these same paths, which `bytes_by_reason`
+    /// no longer counts because booking this run's orphan revived (and thereby
+    /// cleared) that tombstone row. Kept here so the history is not silently
+    /// dropped, not because `bytes_by_reason` needs correcting: the ledger's
+    /// per-row bookkeeping is working as designed.
+    pub(crate) revived_bytes: i64,
     pub(crate) warnings: Vec<String>,
     pub(crate) errors: Vec<String>,
 }
@@ -791,6 +826,7 @@ pub(crate) fn run_orphan_reap(
         reclaimed: Vec::new(),
         reclaimed_bytes: 0,
         bytes_by_reason: BTreeMap::new(),
+        revived_bytes: 0,
         // Anything that stopped the protected set from being complete is an
         // operator-visible warning on every run, force or not.
         warnings: protection.warnings.clone(),
@@ -870,9 +906,17 @@ pub(crate) fn run_orphan_reap(
             continue;
         }
 
-        match reclaim_candidate(conn, &candidate, reason, probe, &protection) {
+        match reclaim_candidate(
+            conn,
+            &candidate,
+            reason,
+            existing.as_ref(),
+            probe,
+            &protection,
+        ) {
             Ok(reclaimed) => {
                 report.reclaimed_bytes += reclaimed.reclaimed_bytes;
+                report.revived_bytes += reclaimed.revived_previous_bytes.unwrap_or(0);
                 report.reclaimed.push(reclaimed);
             }
             // Every refusal is a warning line with its reason — a reclaim that did
@@ -898,39 +942,51 @@ fn reclaim_candidate(
     conn: &mut rusqlite::Connection,
     candidate: &OrphanCandidate,
     reason: ReclaimReason,
+    existing: Option<&ExecEnvResource>,
     probe: &HolderProbe,
     protection: &Protection,
 ) -> Result<ReclaimedReport, String> {
     let path = candidate.path.display().to_string();
 
-    // `insert_resource` alone cannot serve this call site: `(path, kind)` is
-    // UNIQUE, so after the first reclaim the tombstone row owns that key and the
-    // NEXT dead target at the same path — a lane's target is reborn under the
-    // same name on every run — would collide on insert forever. S2a round-2's
-    // `reregister_resource` is the one writer that inserts a stranger, revives a
-    // `reclaimed` row back to `active`, and refuses a `quarantined` one.
-    let outcome = memcore::reregister_resource(
-        conn,
-        &NewExecEnvResource {
-            resource_id: uuid::Uuid::new_v4().to_string(),
-            kind: candidate.kind,
-            path: path.clone(),
-            bytes: candidate.bytes.map(clamp_bytes),
-            created_at: String::new(),
-        },
-    )
-    .map_err(|err| format!("cannot book orphan {path}: {err}"))?;
-
-    let resource_id = match outcome {
-        // The id we proposed is only used when the row is new; on a revive/live
-        // row the ledger's own id is authoritative.
-        RegisterOutcome::Registered { resource_id }
-        | RegisterOutcome::Revived { resource_id }
-        | RegisterOutcome::Live { resource_id } => resource_id,
-        RegisterOutcome::Quarantined { resource_id } => {
-            return Err(format!(
-                "skipped {path}: resource {resource_id} is quarantined (a human owns it)"
-            ))
+    // `insert_resource` only ever accepts an absent row or a `reclaimed`
+    // tombstone — any other state bounces off `MemoryError::Duplicate`.
+    // `cheap_verdict` already told us which case this is via `reason`:
+    // `Unmanaged` ⇒ no row or a `reclaimed` tombstone (insert/revive is safe);
+    // `Orphan` ⇒ the row is already on the books in a re-enterable state
+    // (active/reclaiming/reclaim_failed) — reuse its id directly, an
+    // `insert_resource` call here would only bounce off `Duplicate`.
+    let (resource_id, revived_previous_bytes) = match reason {
+        ReclaimReason::Orphan => {
+            let resource_id = existing
+                .ok_or_else(|| {
+                    format!("internal: {path} decided Orphan but the ledger lookup found no row")
+                })?
+                .resource_id
+                .clone();
+            (resource_id, None)
+        }
+        ReclaimReason::Unmanaged => {
+            let outcome = memcore::insert_resource(
+                conn,
+                &NewExecEnvResource {
+                    resource_id: uuid::Uuid::new_v4().to_string(),
+                    kind: candidate.kind,
+                    path: path.clone(),
+                    bytes: candidate.bytes.map(clamp_bytes),
+                    created_at: String::new(),
+                },
+            )
+            .map_err(|err| format!("cannot book orphan {path}: {err}"))?;
+            match outcome {
+                // The id we proposed is only used when the row is new; on a
+                // revive the ledger's own (retired) id comes back instead.
+                RegisterOutcome::Registered { resource_id } => (resource_id, None),
+                RegisterOutcome::Revived {
+                    resource_id,
+                    previous_reclaimed_bytes,
+                    ..
+                } => (resource_id, previous_reclaimed_bytes),
+            }
         }
     };
 
@@ -950,6 +1006,7 @@ fn reclaim_candidate(
             kind: candidate.kind.as_str(),
             reason: reason.as_str(),
             reclaimed_bytes,
+            revived_previous_bytes,
         }),
         // The ledger re-checks the binding refcount inside its own transaction;
         // a binding taken between our decision and the reclaim lands here.
@@ -961,10 +1018,28 @@ fn reclaim_candidate(
         ResourceReclaimOutcome::Quarantined { .. } => {
             Err(format!("skipped {path}: resource is quarantined"))
         }
-        // We revived the row moments ago, so this can only be a concurrent
-        // reclaim of the same resource winning the race.
+        // For `Unmanaged` we just booked/revived this row moments ago, so this
+        // can only be a concurrent reclaim of the same resource winning the
+        // race. For `Orphan` the row was already on the books before this call
+        // — same story, a concurrent reclaimer got there first.
         ResourceReclaimOutcome::AlreadyReclaimed { .. } => Err(format!(
             "skipped {path}: another reclaim of this resource finished first"
+        )),
+        // The deleter ran (our bytes really are gone), but by the time the
+        // ledger went to stamp `reclaimed` the row had already moved out from
+        // under it — a concurrent reclaim, a quarantine, or a re-registration
+        // won the race. `freed_bytes` is deliberately NOT folded into this run's
+        // `reclaimed_bytes`: memcore did not write it, so counting it here would
+        // claim bytes no ledger row backs (#1029's whole point). It is only a
+        // warning line, same as every other refusal.
+        ResourceReclaimOutcome::LostRace {
+            observed_state,
+            freed_bytes,
+            ..
+        } => Err(format!(
+            "skipped {path}: lost the reclaim race (now observed as {:?}); this run's deleter \
+             freed {freed_bytes} bytes not recorded in the ledger",
+            observed_state
         )),
         ResourceReclaimOutcome::NotFound => {
             Err(format!("skipped {path}: resource row vanished mid-reclaim"))
@@ -1229,6 +1304,13 @@ pub(crate) fn emit_reap_report(report: &ReapReport, output: OutputFormat) -> Res
             println!("  reclaimed_bytes (this run): {}", report.reclaimed_bytes);
             for (reason, bytes) in &report.bytes_by_reason {
                 println!("  ledger bytes by reason: {reason}={bytes}");
+            }
+            if report.revived_bytes > 0 {
+                println!(
+                    "  revived_bytes (freed by a prior reclaim at a revived path, not counted \
+                     above): {}",
+                    report.revived_bytes
+                );
             }
             for warning in &report.warnings {
                 println!("  warning: {warning}");
@@ -1995,7 +2077,7 @@ mod tests {
         )
         .unwrap();
         memcore::insert_resource(
-            store.connection(),
+            store.connection_mut(),
             &NewExecEnvResource {
                 resource_id: "res-bound".to_string(),
                 kind: ResourceKind::BuildTarget,
@@ -2005,7 +2087,7 @@ mod tests {
             },
         )
         .unwrap();
-        memcore::bind_resource(store.connection(), "env-holder", "res-bound").unwrap();
+        memcore::bind_resource(store.connection_mut(), "env-holder", "res-bound").unwrap();
 
         let report = run_orphan_reap(
             store.connection_mut(),

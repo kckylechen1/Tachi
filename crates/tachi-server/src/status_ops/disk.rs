@@ -335,9 +335,9 @@ mod tests {
         let db = dir.join("memory.db");
         let mut store = memcore::MemoryStore::open(db.to_str().unwrap()).unwrap();
 
-        let insert = |store: &memcore::MemoryStore, id: &str, path: &str, bytes: i64| {
+        let insert = |store: &mut memcore::MemoryStore, id: &str, path: &str, bytes: i64| {
             memcore::insert_resource(
-                store.connection(),
+                store.connection_mut(),
                 &memcore::NewExecEnvResource {
                     resource_id: id.to_string(),
                     kind: memcore::ResourceKind::BuildTarget,
@@ -348,10 +348,10 @@ mod tests {
             )
             .unwrap();
         };
-        insert(&store, "res-small", "/tmp/small-target", 1_000);
-        insert(&store, "res-huge", "/tmp/huge-target", 61_000_000_000);
-        insert(&store, "res-mid", "/tmp/mid-target", 5_000_000);
-        insert(&store, "res-gone", "/tmp/gone-target", 99_000_000_000);
+        insert(&mut store, "res-small", "/tmp/small-target", 1_000);
+        insert(&mut store, "res-huge", "/tmp/huge-target", 61_000_000_000);
+        insert(&mut store, "res-mid", "/tmp/mid-target", 5_000_000);
+        insert(&mut store, "res-gone", "/tmp/gone-target", 99_000_000_000);
         // The biggest row of all is already reclaimed: its bytes are FREE, so it
         // must not be reported as a consumer.
         memcore::reclaim_resource(store.connection_mut(), "res-gone", Some("orphan"), |_res| {
