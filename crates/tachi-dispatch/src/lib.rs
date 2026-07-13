@@ -30,9 +30,10 @@ pub use certification::{
     CertificationResult, CODEX_CLI_RECEIPT, CODEX_KILL_TEST_MATRIX, RECEIPTS,
 };
 pub use identity::{
-    lineages_compatible, model_lineage_id, provider_model_parts, DispatchIdentityEffective,
-    DispatchIdentityObserved, DispatchIdentityReceipt, DispatchIdentityRequest,
-    DISPATCH_IDENTITY_CONTRACT_ID, UNKNOWN_IDENTITY,
+    lineages_compatible, model_lineage_id, provider_model_parts, DispatchAcknowledgement,
+    DispatchIdentityEffective, DispatchIdentityObserved, DispatchIdentityReceipt,
+    DispatchIdentityRequest, IdentityAttributionBasis, DISPATCH_IDENTITY_CONTRACT_ID,
+    UNKNOWN_IDENTITY,
 };
 pub use launcher::{
     build_claude_launch, build_codex_launch, build_custom_launch, build_grok_launch,

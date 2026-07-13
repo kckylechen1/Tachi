@@ -70,15 +70,42 @@ pub(crate) fn record_complete_outcome(
             crate::dispatch_ops::DispatchReceiptLoad::Corrupt => (None, true),
             crate::dispatch_ops::DispatchReceiptLoad::Missing => (None, false),
         };
-    let (role, vendor, model) = if receipt_corrupt {
-        (None, "unknown".to_string(), None)
+    // Evidence basis (#1065 D): a receipt's own attribution basis is
+    // authoritative; a corrupt receipt is explicitly unattributable
+    // ("unknown"); a missing receipt falls back to profile/agent
+    // reconstruction, which is only ever `fallback_unreceipted` when that
+    // fallback actually resolved a real vendor — otherwise it too is
+    // `unknown`.
+    let (role, vendor, model, seat, basis) = if receipt_corrupt {
+        (
+            None,
+            "unknown".to_string(),
+            None,
+            None,
+            tachi_dispatch::IdentityAttributionBasis::Unknown
+                .as_str()
+                .to_string(),
+        )
+    } else if let Some(receipt) = receipt.as_ref() {
+        let (identity, basis) = receipt.attribution();
+        let seat =
+            (identity.seat != tachi_dispatch::UNKNOWN_IDENTITY).then(|| identity.seat.clone());
+        (
+            tachi_dispatch::dispatch_role_class(&identity.role).map(str::to_string),
+            tachi_dispatch::normalize_vendor(&identity.backend, identity.model.as_deref()),
+            identity.model.clone(),
+            seat,
+            basis.as_str().to_string(),
+        )
     } else {
-        resolve_outcome_lane(params, receipt.as_ref())
+        let (role, vendor, model) = resolve_outcome_lane_from_profile(params);
+        let basis = if vendor != "unknown" {
+            tachi_dispatch::IdentityAttributionBasis::FallbackUnreceipted
+        } else {
+            tachi_dispatch::IdentityAttributionBasis::Unknown
+        };
+        (role, vendor, model, None, basis.as_str().to_string())
     };
-    let seat = receipt.as_ref().and_then(|receipt| {
-        let seat = receipt.attribution_identity().seat;
-        (seat != tachi_dispatch::UNKNOWN_IDENTITY).then_some(seat)
-    });
     let identity_receipt = receipt.as_ref().map(|receipt| {
         serde_json::to_value(receipt).expect("dispatch identity receipt serializes")
     });
@@ -127,6 +154,7 @@ pub(crate) fn record_complete_outcome(
         diff_present,
         evidence_refs: json!(evidence_refs),
         identity_receipt,
+        identity_attribution_basis: basis,
     };
 
     let (scope, _) = server.resolve_write_scope(params.scope.as_deref().unwrap_or(""));
@@ -162,6 +190,7 @@ pub(crate) fn record_complete_outcome(
             "dispatch_id": row.dispatch_id,
             "idempotency_key": row.idempotency_key,
             "vendor": row.vendor,
+            "identity_attribution_basis": row.identity_attribution_basis,
             "identity_receipt": row.identity_receipt,
             "scope": scope.as_str(),
         }),
@@ -180,28 +209,20 @@ pub(crate) fn record_complete_outcome(
     }
 }
 
-/// Resolve `(role, vendor, model)` for the outcome row using the same dispatch
-/// profile lookup `signature_evidence::resolve_complete_lane` uses, so the
-/// two writes never disagree about which lane a completion belongs to.
-/// Unlike that function, an unresolved lane is not fatal here — the row is
-/// still written (a canonical outcome record is more valuable with a
-/// best-guess/absent lane than not written at all), it simply carries
-/// `None`/`"unknown"`. `model` comes from the resolved profile when known
-/// (previously hard-coded `None`, #773 ④).
-fn resolve_outcome_lane(
+/// Resolve `(role, vendor, model)` for the outcome row from the completion's
+/// own `profile`/`agent` fields — used only when no identity receipt exists
+/// to attribute from (a receipt's own [`tachi_dispatch::DispatchIdentityReceipt::attribution`]
+/// is authoritative and handled by the caller before falling back here).
+/// Uses the same dispatch profile lookup `signature_evidence::
+/// resolve_complete_lane` uses, so the two writes never disagree about which
+/// lane a completion belongs to. Unlike that function, an unresolved lane is
+/// not fatal here — the row is still written (a canonical outcome record is
+/// more valuable with a best-guess/absent lane than not written at all), it
+/// simply carries `None`/`"unknown"`. `model` comes from the resolved
+/// profile when known (previously hard-coded `None`, #773 ④).
+fn resolve_outcome_lane_from_profile(
     params: &TachiCompleteParams,
-    receipt: Option<&tachi_dispatch::DispatchIdentityReceipt>,
 ) -> (Option<String>, String, Option<String>) {
-    if let Some(receipt) = receipt {
-        // Outcome rows record execution facts: after a carrier acknowledgement
-        // the observed effective identity is the fact, not the planned route.
-        let identity = receipt.attribution_identity();
-        return (
-            tachi_dispatch::dispatch_role_class(&identity.role).map(str::to_string),
-            tachi_dispatch::normalize_vendor(&identity.backend, identity.model.as_deref()),
-            identity.model.clone(),
-        );
-    }
     let profile_def = params
         .profile
         .as_deref()
@@ -273,9 +294,8 @@ pub(crate) fn record_terminal_failure_outcome(
             crate::dispatch_ops::DispatchReceiptLoad::Corrupt => (None, true),
             crate::dispatch_ops::DispatchReceiptLoad::Missing => (None, false),
         };
-    let identity = receipt
-        .as_ref()
-        .map(tachi_dispatch::DispatchIdentityReceipt::attribution_identity);
+    let attribution = receipt.as_ref().map(|receipt| receipt.attribution());
+    let identity = attribution.as_ref().map(|(identity, _)| identity.clone());
     let vendor = identity
         .as_ref()
         .map(|identity| {
@@ -292,6 +312,19 @@ pub(crate) fn record_terminal_failure_outcome(
                 .flatten()
         })
         .unwrap_or_else(|| "unknown".to_string());
+    // Evidence basis (#1065 D): mirrors `record_complete_outcome`'s rule —
+    // receipt basis is authoritative, corrupt is explicitly unknown, and a
+    // profile/agent fallback is only `fallback_unreceipted` when it actually
+    // resolved a real vendor.
+    let basis = if receipt_corrupt {
+        tachi_dispatch::IdentityAttributionBasis::Unknown
+    } else if let Some((_, basis)) = attribution.as_ref() {
+        *basis
+    } else if vendor != "unknown" {
+        tachi_dispatch::IdentityAttributionBasis::FallbackUnreceipted
+    } else {
+        tachi_dispatch::IdentityAttributionBasis::Unknown
+    };
     let identity_receipt = receipt.as_ref().map(|receipt| {
         serde_json::to_value(receipt).expect("dispatch identity receipt serializes")
     });
@@ -315,6 +348,7 @@ pub(crate) fn record_terminal_failure_outcome(
         // Keep the evidence_refs array contract (Default would be JSON null).
         evidence_refs: json!([]),
         identity_receipt,
+        identity_attribution_basis: basis.as_str().to_string(),
         ..Default::default()
     };
 
@@ -566,6 +600,63 @@ mod tests {
         });
     }
 
+    /// #1065 D: a receipt present but never carrier-acknowledged attributes to
+    /// the planned identity with basis `planned_unconfirmed` — not
+    /// `fallback_unreceipted` (that basis is reserved for a MISSING receipt).
+    #[test]
+    fn unconfirmed_receipt_completion_has_planned_unconfirmed_basis() {
+        with_tachi_home(|home| {
+            let (server, _dir) = test_server();
+            let profile =
+                tachi_dispatch::resolve_dispatch_profile("glm_impl").expect("glm profile");
+            let receipt = tachi_dispatch::recommendation_identity_receipt(profile);
+            let run_dir = home.join("runs").join("dispatch-abc");
+            std::fs::create_dir_all(&run_dir).expect("run dir");
+            std::fs::write(
+                run_dir.join("status.json"),
+                serde_json::json!({
+                    "identity_receipt": serde_json::to_value(&receipt).expect("receipt json")
+                })
+                .to_string(),
+            )
+            .expect("status receipt");
+
+            let params = base_params();
+            let status = record_complete_outcome(
+                &server,
+                &params,
+                "eval-mem-1",
+                "success",
+                "completed",
+                None,
+                true,
+                true,
+                &[],
+            );
+            assert_eq!(
+                status["identity_attribution_basis"].as_str(),
+                Some("planned_unconfirmed"),
+                "a present-but-unacknowledged receipt attributes on the planned identity"
+            );
+
+            let outcome_id = status["outcome_id"].as_str().expect("outcome id");
+            let row_basis: String = server
+                .with_global_store_read(|store| {
+                    store
+                        .connection()
+                        .query_row(
+                            "SELECT identity_attribution_basis FROM dispatch_outcomes \
+                             WHERE outcome_id = ?1",
+                            [outcome_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(|error| error.to_string())
+                })
+                .expect("persisted basis column");
+            assert_eq!(row_basis, "planned_unconfirmed");
+        });
+    }
+
     #[test]
     fn completion_replay_preserves_the_first_receipt_byte_for_byte() {
         with_tachi_home(|home| {
@@ -673,7 +764,7 @@ mod tests {
             receipt
                 .acknowledge(
                     observed,
-                    "substituted",
+                    tachi_dispatch::DispatchAcknowledgement::Substituted,
                     "carrier pinned a release".to_string(),
                 )
                 .expect("same-lineage substitution");
@@ -752,6 +843,11 @@ mod tests {
                 status["identity_receipt"].is_null(),
                 "a corrupt receipt is not persisted as if it were valid"
             );
+            assert_eq!(
+                status["identity_attribution_basis"].as_str(),
+                Some("unknown"),
+                "a corrupt receipt's attribution basis is explicitly unknown"
+            );
         });
     }
 
@@ -768,7 +864,7 @@ mod tests {
             receipt
                 .acknowledge(
                     observed,
-                    "substituted",
+                    tachi_dispatch::DispatchAcknowledgement::Substituted,
                     "carrier pinned a release".to_string(),
                 )
                 .expect("same-lineage substitution");
@@ -799,15 +895,15 @@ mod tests {
                 .as_str()
                 .expect("outcome id")
                 .to_string();
-            let (row_model, persisted): (Option<String>, String) = server
+            let (row_model, persisted, basis): (Option<String>, String, String) = server
                 .with_global_store_read(|store| {
                     store
                         .connection()
                         .query_row(
-                            "SELECT model, identity_receipt FROM dispatch_outcomes \
-                             WHERE outcome_id = ?1",
+                            "SELECT model, identity_receipt, identity_attribution_basis \
+                             FROM dispatch_outcomes WHERE outcome_id = ?1",
                             [outcome_id.as_str()],
-                            |row| Ok((row.get(0)?, row.get(1)?)),
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                         )
                         .map_err(|error| error.to_string())
                 })
@@ -816,6 +912,10 @@ mod tests {
                 row_model.as_deref(),
                 Some(format!("{planned_model}@2026-07-13").as_str()),
                 "the outcome row must attribute to the executed model, not the planned claim"
+            );
+            assert_eq!(
+                basis, "observed",
+                "a substituted acknowledgement's attribution basis is carrier-observed"
             );
             // Requested and effective identity stay simultaneously observable
             // in the persisted receipt.
@@ -849,6 +949,7 @@ mod tests {
                     "codex",
                     "1970-01-01T00:00:00Z",
                     None,
+                    memcore::OutcomeEvidenceClass::AnyAttribution,
                 )
                 .map_err(|e| e.to_string())
             })
@@ -863,6 +964,10 @@ mod tests {
             "no self-report on a terminal path"
         );
         assert_eq!(row.error_class.as_deref(), Some("watchdog"));
+        assert_eq!(
+            row.identity_attribution_basis, "fallback_unreceipted",
+            "no receipt existed; vendor came from the agent fallback ('codex')"
+        );
 
         // First-writer-wins: a second, coarser classification does not clobber.
         super::record_terminal_failure_outcome(
@@ -879,6 +984,7 @@ mod tests {
                     "codex",
                     "1970-01-01T00:00:00Z",
                     None,
+                    memcore::OutcomeEvidenceClass::AnyAttribution,
                 )
                 .map_err(|e| e.to_string())
             })
@@ -980,6 +1086,7 @@ mod tests {
                         "codex",
                         "1970-01-01T00:00:00Z",
                         None,
+                        memcore::OutcomeEvidenceClass::AnyAttribution,
                     )
                     .map_err(|e| e.to_string())
                 })
@@ -1037,6 +1144,7 @@ mod tests {
                         "codex",
                         "1970-01-01T00:00:00Z",
                         None,
+                        memcore::OutcomeEvidenceClass::AnyAttribution,
                     )
                     .map_err(|e| e.to_string())
                 })

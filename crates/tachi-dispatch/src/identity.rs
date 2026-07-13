@@ -33,10 +33,63 @@ pub struct DispatchIdentityEffective {
     pub carrier_version: String,
 }
 
+/// Carrier acknowledgement state. A closed vocabulary on purpose: an
+/// unrecognized token in a persisted receipt fails deserialization, which the
+/// loader surfaces as a corrupt (explicitly unattributable) receipt — an
+/// unknown acknowledgement can never fall through to planned attribution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DispatchAcknowledgement {
+    Unconfirmed,
+    Acknowledged,
+    Substituted,
+    Ignored,
+}
+
+/// Evidentiary basis of a flat identity attribution (#1065 option D). Frozen
+/// beside the attribution columns so every reader can tell planned routing
+/// intent from carrier-observed execution fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityAttributionBasis {
+    /// Planned identity; no carrier acknowledgement exists.
+    PlannedUnconfirmed,
+    /// Planned identity overlaid with carrier-reported fields.
+    AcknowledgedOverlay,
+    /// Carrier-observed identity verbatim (substituted or ignored override).
+    Observed,
+    /// No receipt existed; attribution reconstructed from profile/agent.
+    FallbackUnreceipted,
+    /// Explicitly unattributable (e.g. corrupt receipt).
+    Unknown,
+}
+
+impl IdentityAttributionBasis {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IdentityAttributionBasis::PlannedUnconfirmed => "planned_unconfirmed",
+            IdentityAttributionBasis::AcknowledgedOverlay => "acknowledged_overlay",
+            IdentityAttributionBasis::Observed => "observed",
+            IdentityAttributionBasis::FallbackUnreceipted => "fallback_unreceipted",
+            IdentityAttributionBasis::Unknown => "unknown",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "planned_unconfirmed" => Some(IdentityAttributionBasis::PlannedUnconfirmed),
+            "acknowledged_overlay" => Some(IdentityAttributionBasis::AcknowledgedOverlay),
+            "observed" => Some(IdentityAttributionBasis::Observed),
+            "fallback_unreceipted" => Some(IdentityAttributionBasis::FallbackUnreceipted),
+            "unknown" => Some(IdentityAttributionBasis::Unknown),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DispatchIdentityObserved {
-    /// `acknowledged`, `substituted`, `ignored`, or `unconfirmed`.
-    pub acknowledgement: String,
+    pub acknowledgement: DispatchAcknowledgement,
     pub effective: DispatchIdentityEffective,
     pub mismatch: bool,
     pub resolution_reason: String,
@@ -83,7 +136,7 @@ impl DispatchIdentityReceipt {
             requested,
             planned,
             observed: DispatchIdentityObserved {
-                acknowledgement: "unconfirmed".to_string(),
+                acknowledgement: DispatchAcknowledgement::Unconfirmed,
                 effective: observed,
                 mismatch: false,
                 resolution_reason: "carrier acknowledgement unavailable".to_string(),
@@ -101,9 +154,15 @@ impl DispatchIdentityReceipt {
     pub fn acknowledge(
         &mut self,
         observed: DispatchIdentityEffective,
-        acknowledgement: &str,
+        acknowledgement: DispatchAcknowledgement,
         resolution_reason: String,
     ) -> Result<(), String> {
+        if acknowledgement == DispatchAcknowledgement::Unconfirmed {
+            return Err(
+                "'unconfirmed' is the absence of an acknowledgement, not one a carrier can send"
+                    .to_string(),
+            );
+        }
         if observed.model_lineage_id != UNKNOWN_IDENTITY
             && !lineages_compatible(&observed.model_lineage_id, &self.planned.model_lineage_id)
             && !self.cross_lineage_authorized
@@ -115,7 +174,7 @@ impl DispatchIdentityReceipt {
         }
         let mismatch = identity_mismatch(&self.planned, &observed);
         self.observed = DispatchIdentityObserved {
-            acknowledgement: acknowledgement.to_string(),
+            acknowledgement,
             effective: observed,
             mismatch,
             resolution_reason,
@@ -123,24 +182,34 @@ impl DispatchIdentityReceipt {
         Ok(())
     }
 
-    /// The identity attribution must copy — never reconstruct — for outcome
-    /// rows and signature evidence:
+    /// The canonical attribution projection: the identity a consumer must
+    /// copy, PAIRED with the evidentiary basis it rests on. Consumers persist
+    /// both — an attribution without its basis is how planned routing intent
+    /// gets read back as execution fact (#1065 option D).
     ///
-    /// - `unconfirmed` (no acknowledgement): the planned identity, which is
-    ///   resolution output, not the caller's request; the receipt persisted
-    ///   next to the attribution keeps the unconfirmed state explicit.
-    /// - `acknowledged`: the planned identity enriched with every field the
-    ///   carrier positively reported — a partial acknowledgement must not
-    ///   launder known planned identity into `unknown`.
-    /// - `substituted` / `ignored`: the observed identity verbatim. What the
+    /// - `Unconfirmed`: the planned identity (resolution output, not the
+    ///   caller's request) with basis `PlannedUnconfirmed`.
+    /// - `Acknowledged`: the planned identity enriched with every field the
+    ///   carrier positively reported (a partial acknowledgement must not
+    ///   launder known planned identity into `unknown`), basis
+    ///   `AcknowledgedOverlay`.
+    /// - `Substituted` / `Ignored`: the observed identity verbatim — what the
     ///   carrier did not report stays `unknown`; back-filling from the plan
-    ///   would relabel a planned identity as executed, which the contract
-    ///   forbids.
-    pub fn attribution_identity(&self) -> DispatchIdentityEffective {
-        match self.observed.acknowledgement.as_str() {
-            "acknowledged" => merge_known_over(&self.planned, &self.observed.effective),
-            "substituted" | "ignored" => self.observed.effective.clone(),
-            _ => self.planned.clone(),
+    ///   would relabel a planned identity as executed. Basis `Observed`.
+    pub fn attribution(&self) -> (DispatchIdentityEffective, IdentityAttributionBasis) {
+        match self.observed.acknowledgement {
+            DispatchAcknowledgement::Acknowledged => (
+                merge_known_over(&self.planned, &self.observed.effective),
+                IdentityAttributionBasis::AcknowledgedOverlay,
+            ),
+            DispatchAcknowledgement::Substituted | DispatchAcknowledgement::Ignored => (
+                self.observed.effective.clone(),
+                IdentityAttributionBasis::Observed,
+            ),
+            DispatchAcknowledgement::Unconfirmed => (
+                self.planned.clone(),
+                IdentityAttributionBasis::PlannedUnconfirmed,
+            ),
         }
     }
 }

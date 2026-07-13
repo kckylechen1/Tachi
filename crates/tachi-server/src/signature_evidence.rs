@@ -42,6 +42,13 @@ pub(crate) struct SignatureRecord {
     /// Frozen dispatch identity when this evidence came from a Tachi dispatch.
     /// Older/external evidence remains explicitly unattached.
     pub identity_receipt: Option<Value>,
+    /// Evidence basis of `vendor` (#1065 D): `planned_unconfirmed` |
+    /// `acknowledged_overlay` | `observed` | `fallback_unreceipted` |
+    /// `unknown`. See [`resolve_complete_lane`] for how this is derived.
+    pub attribution_basis: String,
+    /// Whether `vendor` came from an explicit caller-supplied fact
+    /// (`SignatureRecordParams::vendor`) rather than being reconstructed.
+    pub vendor_explicit: bool,
 }
 
 fn record_to_value(record: &SignatureRecord) -> Value {
@@ -63,6 +70,8 @@ fn record_to_value(record: &SignatureRecord) -> Value {
         "evidence_ref": record.evidence_ref,
         "identity_receipt": record.identity_receipt,
         "recorded_at": record.recorded_at.to_rfc3339(),
+        "attribution_basis": record.attribution_basis,
+        "vendor_explicit": record.vendor_explicit,
     })
 }
 
@@ -153,7 +162,11 @@ pub(crate) fn rows_for_lane(
         .collect())
 }
 
-/// Rows for a vendor across all roles (self-report trust is vendor-scoped).
+/// Rows for a vendor across all roles — test-only observation helper. NOT the
+/// trust input: see [`trust_rows_for_vendor`] for the filtered variant
+/// self-report trust must use instead. No production reader should consume
+/// unfiltered vendor rows, which is exactly why this is `cfg(test)`.
+#[cfg(test)]
 pub(crate) fn rows_for_vendor(
     server: &MemoryServer,
     vendor: &str,
@@ -165,6 +178,46 @@ pub(crate) fn rows_for_vendor(
         .collect())
 }
 
+/// Rows for a vendor eligible to feed self-report trust (#1065 D exclusion).
+/// A row whose attribution basis is `planned_unconfirmed` AND whose vendor was
+/// never an explicit caller-supplied fact records only what was ROUTED, not
+/// what executed — the carrier never acknowledged anything and no override
+/// pinned the vendor either. Crediting/debiting trust from such a row risks
+/// scoring the wrong vendor if the route changes or the carrier later
+/// substitutes a different one. Rows recorded before this basis/explicit pair
+/// existed (both keys absent) are legacy and still count: their absence
+/// predates the exclusion, it is not itself evidence of planned-only
+/// attribution.
+fn trust_rows_for_vendor(
+    server: &MemoryServer,
+    vendor: &str,
+) -> Result<Vec<SignatureEvidenceRow>, String> {
+    let raw = server.with_global_store_read(|store| {
+        store
+            .list_state(SIGNATURE_EVIDENCE_NS)
+            .map_err(|e| format!("list signature evidence: {e}"))
+    })?;
+    let mut out = Vec::new();
+    for row in raw {
+        let Ok(value) = serde_json::from_str::<Value>(&row.value_json) else {
+            continue;
+        };
+        let Some((v, _role, parsed)) = parse_row(&value) else {
+            continue;
+        };
+        if v != vendor {
+            continue;
+        }
+        let basis = value.get("attribution_basis").and_then(Value::as_str);
+        let vendor_explicit = value.get("vendor_explicit").and_then(Value::as_bool);
+        if basis == Some("planned_unconfirmed") && vendor_explicit != Some(true) {
+            continue;
+        }
+        out.push(parsed);
+    }
+    Ok(out)
+}
+
 /// Vendor-level self-report trust (`Some("low")` or `None`). Never persisted.
 pub(crate) fn self_report_trust_for_vendor(
     server: &MemoryServer,
@@ -173,21 +226,32 @@ pub(crate) fn self_report_trust_for_vendor(
     if vendor == "unknown" {
         return Ok(None);
     }
-    Ok(compute_self_report_trust(&rows_for_vendor(server, vendor)?))
+    Ok(compute_self_report_trust(&trust_rows_for_vendor(
+        server, vendor,
+    )?))
 }
 
 fn parse_severity(raw: &str) -> Option<Severity> {
     serde_json::from_value(Value::String(raw.trim().to_ascii_lowercase())).ok()
 }
 
-/// Resolve the `(role_class, vendor)` lane for a signature recorded at
-/// `complete`, honoring explicit overrides before deriving from the dispatch
-/// profile/agent. `None` when the lane can't be resolved (vendor unknown or role
-/// unrecognized) — the caller reports it as skipped rather than guessing.
+/// Resolve the `(role_class, vendor, attribution_basis, vendor_explicit)`
+/// lane for a signature recorded at `complete`, honoring explicit overrides
+/// before deriving from the dispatch profile/agent. `None` when the lane
+/// can't be resolved (vendor unknown or role unrecognized) — the caller
+/// reports it as skipped rather than guessing.
+///
+/// `attribution_basis` (#1065 D) reflects the RECEIPT state, independent of
+/// which source ultimately won the vendor value: a present receipt's own
+/// [`tachi_dispatch::DispatchIdentityReceipt::attribution`] basis is
+/// authoritative, a corrupt receipt is explicitly `unknown`, and no receipt
+/// at all is `fallback_unreceipted` (the caller's explicit `vendor` override,
+/// if any, is recorded separately via `vendor_explicit` so a trust reader can
+/// tell "caller pinned this" apart from "we reconstructed this").
 fn resolve_complete_lane(
     params: &TachiCompleteParams,
     sig: &SignatureRecordParams,
-) -> Option<(String, String)> {
+) -> Option<(String, String, String, bool)> {
     // Signature evidence attributes to the model that actually executed:
     // explicit per-signature overrides are caller-supplied facts and win, then
     // the frozen receipt's attribution identity (observed effective once the
@@ -195,17 +259,18 @@ fn resolve_complete_lane(
     // blank. Mutable profile definitions are consulted only when no receipt
     // exists for this dispatch — a corrupt receipt is explicitly
     // unattributable, not license to reconstruct from profiles.
-    let (receipt_identity, receipt_corrupt) = match params
+    let (receipt_attribution, receipt_corrupt) = match params
         .dispatch_id
         .as_deref()
         .map(crate::dispatch_ops::load_dispatch_identity_receipt_checked)
     {
         Some(crate::dispatch_ops::DispatchReceiptLoad::Present(receipt)) => {
-            (Some(receipt.attribution_identity()), false)
+            (Some(receipt.attribution()), false)
         }
         Some(crate::dispatch_ops::DispatchReceiptLoad::Corrupt) => (None, true),
         Some(crate::dispatch_ops::DispatchReceiptLoad::Missing) | None => (None, false),
     };
+    let receipt_identity = receipt_attribution.as_ref().map(|(identity, _)| identity);
     let profile_def = if receipt_identity.is_some() || receipt_corrupt {
         None
     } else {
@@ -215,6 +280,12 @@ fn resolve_complete_lane(
             .filter(|s| !s.trim().is_empty())
             .and_then(crate::dispatch_profile::resolve_dispatch_profile)
     };
+    let vendor_explicit = sig
+        .vendor
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some();
     let vendor = sig
         .vendor
         .as_deref()
@@ -222,7 +293,7 @@ fn resolve_complete_lane(
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .or_else(|| {
-            receipt_identity.as_ref().map(|identity| {
+            receipt_identity.map(|identity| {
                 tachi_dispatch::normalize_vendor(&identity.backend, identity.model.as_deref())
             })
         })
@@ -242,12 +313,22 @@ fn resolve_complete_lane(
         .and_then(tachi_dispatch::dispatch_role_class)
         .or_else(|| {
             receipt_identity
-                .as_ref()
                 .and_then(|identity| tachi_dispatch::dispatch_role_class(&identity.role))
         })
         .or_else(|| profile_def.and_then(|p| tachi_dispatch::dispatch_role_class(p.role)))
         .map(str::to_string)?;
-    Some((role, vendor))
+    let attribution_basis = if let Some((_, basis)) = receipt_attribution.as_ref() {
+        basis.as_str().to_string()
+    } else if receipt_corrupt {
+        tachi_dispatch::IdentityAttributionBasis::Unknown
+            .as_str()
+            .to_string()
+    } else {
+        tachi_dispatch::IdentityAttributionBasis::FallbackUnreceipted
+            .as_str()
+            .to_string()
+    };
+    Some((role, vendor, attribution_basis, vendor_explicit))
 }
 
 /// Record the leader-supplied signatures carried on a `complete` call. Returns a
@@ -275,7 +356,9 @@ pub(crate) fn record_complete_signatures(
     let mut recorded = Vec::new();
     let mut skipped = Vec::new();
     for sig in &params.signatures {
-        let Some((role, vendor)) = resolve_complete_lane(params, sig) else {
+        let Some((role, vendor, attribution_basis, vendor_explicit)) =
+            resolve_complete_lane(params, sig)
+        else {
             skipped.push(json!({
                 "signature": sig.signature,
                 "reason": "unresolved (role, vendor) lane; pass role/vendor explicitly",
@@ -297,6 +380,8 @@ pub(crate) fn record_complete_signatures(
             resolved: sig.resolved,
             recorded_at: now,
             identity_receipt: identity_receipt.clone(),
+            attribution_basis,
+            vendor_explicit,
         };
         match record_signature(server, &record) {
             Ok(key) => recorded.push(json!({
@@ -343,6 +428,8 @@ pub(crate) fn seed_signature_taxonomy_evidence(server: &MemoryServer) -> Result<
             resolved: false,
             recorded_at: now,
             identity_receipt: None,
+            attribution_basis: "fallback_unreceipted".to_string(),
+            vendor_explicit: true,
         });
     }
     records.push(SignatureRecord {
@@ -354,6 +441,8 @@ pub(crate) fn seed_signature_taxonomy_evidence(server: &MemoryServer) -> Result<
         resolved: false,
         recorded_at: now,
         identity_receipt: None,
+        attribution_basis: "fallback_unreceipted".to_string(),
+        vendor_explicit: true,
     });
     for _ in 0..3 {
         records.push(SignatureRecord {
@@ -365,6 +454,8 @@ pub(crate) fn seed_signature_taxonomy_evidence(server: &MemoryServer) -> Result<
             resolved: false,
             recorded_at: now,
             identity_receipt: None,
+            attribution_basis: "fallback_unreceipted".to_string(),
+            vendor_explicit: true,
         });
     }
 
@@ -383,6 +474,8 @@ pub(crate) fn seed_signature_taxonomy_evidence(server: &MemoryServer) -> Result<
             resolved: false,
             recorded_at: older,
             identity_receipt: None,
+            attribution_basis: "fallback_unreceipted".to_string(),
+            vendor_explicit: true,
         });
         records.push(SignatureRecord {
             vendor: "codex".to_string(),
@@ -393,6 +486,8 @@ pub(crate) fn seed_signature_taxonomy_evidence(server: &MemoryServer) -> Result<
             resolved: true,
             recorded_at: resolved_at,
             identity_receipt: None,
+            attribution_basis: "fallback_unreceipted".to_string(),
+            vendor_explicit: true,
         });
     }
     records.push(SignatureRecord {
@@ -404,6 +499,8 @@ pub(crate) fn seed_signature_taxonomy_evidence(server: &MemoryServer) -> Result<
         resolved: false,
         recorded_at: now,
         identity_receipt: None,
+        attribution_basis: "fallback_unreceipted".to_string(),
+        vendor_explicit: true,
     });
 
     for record in &records {

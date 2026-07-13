@@ -1519,7 +1519,10 @@ mod tests {
             Some("zhipuai-coding-plan/glm-5.2")
         );
         assert_eq!(receipt.planned.model_lineage_id, "zhipuai-coding-plan/glm");
-        assert_eq!(receipt.observed.acknowledgement, "unconfirmed");
+        assert_eq!(
+            receipt.observed.acknowledgement,
+            crate::DispatchAcknowledgement::Unconfirmed
+        );
         assert_eq!(receipt.observed.effective.backend, crate::UNKNOWN_IDENTITY);
         assert!(resolved.route_explanation.iter().any(|line| {
             line.contains("deprecated dispatch profile alias 'glm_51_impl'")
@@ -1551,7 +1554,7 @@ mod tests {
         );
         assert_eq!(
             resolved.identity_receipt.observed.acknowledgement,
-            "unconfirmed"
+            crate::DispatchAcknowledgement::Unconfirmed
         );
     }
 
@@ -1580,7 +1583,7 @@ mod tests {
         assert!(receipt
             .acknowledge(
                 substitute,
-                "substituted",
+                crate::DispatchAcknowledgement::Substituted,
                 "carrier changed model".to_string(),
             )
             .is_err());
@@ -1598,7 +1601,7 @@ mod tests {
         let profile = resolve_dispatch_profile("glm_impl").expect("profile");
         let mut receipt = recommendation_identity_receipt(profile);
         assert_eq!(
-            receipt.attribution_identity(),
+            receipt.attribution().0,
             receipt.planned,
             "an unconfirmed receipt attributes to the planned identity"
         );
@@ -1612,7 +1615,7 @@ mod tests {
         receipt
             .acknowledge(
                 observed,
-                "acknowledged",
+                crate::DispatchAcknowledgement::Acknowledged,
                 "carrier acknowledged launch".to_string(),
             )
             .expect("matching acknowledgement");
@@ -1620,7 +1623,7 @@ mod tests {
             !receipt.observed.mismatch,
             "provenance-only differences must not flag an identity mismatch"
         );
-        assert_eq!(receipt.attribution_identity(), receipt.observed.effective);
+        assert_eq!(receipt.attribution().0, receipt.observed.effective);
     }
 
     #[test]
@@ -1639,7 +1642,7 @@ mod tests {
         receipt
             .acknowledge(
                 observed,
-                "substituted",
+                crate::DispatchAcknowledgement::Substituted,
                 "carrier pinned a release".to_string(),
             )
             .expect("same-lineage release substitution is allowed");
@@ -1648,7 +1651,7 @@ mod tests {
             "a release substitution must surface as an explicit mismatch"
         );
         assert_eq!(
-            receipt.attribution_identity().model.as_deref(),
+            receipt.attribution().0.model.as_deref(),
             Some("zhipuai-coding-plan/glm-5.2@2026-07-13"),
             "attribution follows what executed, never the planned claim"
         );

@@ -93,6 +93,12 @@ pub struct NewDispatchOutcome {
     /// The dispatch-time identity receipt, copied verbatim from the run ledger.
     /// Legacy rows legitimately carry `None`.
     pub identity_receipt: Option<Value>,
+    /// Evidence class of the flat identity columns (#1065 D):
+    /// `planned_unconfirmed` | `acknowledged_overlay` | `observed` |
+    /// `fallback_unreceipted` | `unknown`. Callers derive it from the receipt
+    /// (`tachi_dispatch::IdentityAttributionBasis::as_str`); memcore stores it
+    /// verbatim and freezes it with the receipt.
+    pub identity_attribution_basis: String,
 }
 
 /// A persisted row in `dispatch_outcomes`.
@@ -119,9 +125,35 @@ pub struct DispatchOutcomeRow {
     pub diff_present: bool,
     pub evidence_refs: Value,
     pub identity_receipt: Option<Value>,
+    pub identity_attribution_basis: String,
     pub idempotency_key: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Evidence-class filter for outcome read surfaces (#1065 D). Readers must
+/// state what attribution evidence is sufficient for their purpose instead of
+/// silently conflating planned routing intent with observed execution fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutcomeEvidenceClass {
+    /// Any attribution, including planned-only and profile fallback.
+    AnyAttribution,
+    /// Only rows whose identity a carrier acknowledged (overlay or observed).
+    CarrierAcknowledged,
+    /// Only rows carrying carrier-observed identity verbatim.
+    ObservedOnly,
+}
+
+impl OutcomeEvidenceClass {
+    fn sql_predicate(&self) -> &'static str {
+        match self {
+            OutcomeEvidenceClass::AnyAttribution => "1=1",
+            OutcomeEvidenceClass::CarrierAcknowledged => {
+                "identity_attribution_basis IN ('acknowledged_overlay', 'observed')"
+            }
+            OutcomeEvidenceClass::ObservedOnly => "identity_attribution_basis = 'observed'",
+        }
+    }
 }
 
 // `reported_outcome` and `identity_receipt` are appended LAST (indices 22/23) so the pre-existing column
@@ -132,7 +164,7 @@ const SELECT_COLUMNS: &str = "outcome_id, dispatch_id, eval_memory_id, model, ve
      task_type, execution_outcome, retry_count, \
      error_class, issue_ref, pr_ref, flow_id, cost_tokens, cost_usd, \
      verification_present, diff_present, evidence_refs, idempotency_key, created_at, updated_at, \
-      reported_outcome, identity_receipt";
+      reported_outcome, identity_receipt, identity_attribution_basis";
 
 fn row_to_outcome(row: &rusqlite::Row<'_>) -> Result<DispatchOutcomeRow, rusqlite::Error> {
     let evidence_refs_raw: String = row.get(18)?;
@@ -165,6 +197,7 @@ fn row_to_outcome(row: &rusqlite::Row<'_>) -> Result<DispatchOutcomeRow, rusqlit
         diff_present: row.get::<_, i64>(17)? != 0,
         evidence_refs,
         identity_receipt,
+        identity_attribution_basis: row.get(24)?,
         idempotency_key: row.get(19)?,
         created_at: row.get(20)?,
         updated_at: row.get(21)?,
@@ -219,6 +252,9 @@ fn update_outcome_row(
             vendor = CASE WHEN identity_receipt IS NOT NULL THEN vendor ELSE ?4 END,
             role   = CASE WHEN identity_receipt IS NOT NULL THEN role   ELSE ?5 END,
             seat   = CASE WHEN identity_receipt IS NOT NULL THEN seat   ELSE ?6 END,
+            identity_attribution_basis =
+                CASE WHEN identity_receipt IS NOT NULL
+                     THEN identity_attribution_basis ELSE ?22 END,
             task_type = ?7, execution_outcome = ?8, reported_outcome = ?9,
             retry_count = ?10, error_class = ?11, issue_ref = ?12, pr_ref = ?13,
             flow_id = ?14, cost_tokens = ?15, cost_usd = ?16, verification_present = ?17,
@@ -247,6 +283,7 @@ fn update_outcome_row(
             evidence_refs_json,
             identity_receipt_json,
             now,
+            new.identity_attribution_basis,
         ],
     )?;
     get_outcome(conn, outcome_id)?.ok_or_else(|| {
@@ -294,9 +331,10 @@ pub fn upsert_outcome(
                  (outcome_id, dispatch_id, eval_memory_id, model, vendor, role, seat,
                   task_type, execution_outcome, reported_outcome, retry_count, error_class,
                   issue_ref, pr_ref, flow_id, cost_tokens, cost_usd, verification_present,
-                   diff_present, evidence_refs, identity_receipt, idempotency_key, created_at, updated_at)
+                   diff_present, evidence_refs, identity_receipt, identity_attribution_basis,
+                   idempotency_key, created_at, updated_at)
                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                          ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?23)",
+                          ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?24)",
                 params![
                     new.outcome_id,
                     new.dispatch_id,
@@ -319,6 +357,7 @@ pub fn upsert_outcome(
                     new.diff_present as i64,
                     evidence_refs_json,
                     identity_receipt_json,
+                    new.identity_attribution_basis,
                     idempotency_key,
                     now,
                 ],
@@ -425,16 +464,24 @@ pub fn upsert_outcome_reconciling_terminal_placeholder(
 /// Read surface 1: outcomes for a vendor within a `created_at` window
 /// (`[since, until)`, both RFC3339). `until = None` means unbounded upper
 /// end. Newest first — the router's real query shape (vendor, ts).
+///
+/// `evidence` is mandatory (#1065 D): the caller states what attribution
+/// evidence suffices for its purpose. A planned-but-unconfirmed vendor and a
+/// carrier-observed vendor share this column; conflating them silently is the
+/// exact failure this parameter exists to prevent.
 pub fn list_outcomes_by_vendor_window(
     conn: &Connection,
     vendor: &str,
     since: &str,
     until: Option<&str>,
+    evidence: OutcomeEvidenceClass,
 ) -> Result<Vec<DispatchOutcomeRow>, MemoryError> {
     let sql = format!(
         "SELECT {SELECT_COLUMNS} FROM dispatch_outcomes \
          WHERE vendor = ?1 AND created_at >= ?2 AND (?3 IS NULL OR created_at < ?3) \
-         ORDER BY created_at DESC"
+         AND {} \
+         ORDER BY created_at DESC",
+        evidence.sql_predicate()
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![vendor, since, until], row_to_outcome)?;
@@ -500,6 +547,7 @@ mod tests {
             identity_receipt: Some(
                 serde_json::json!({"contract_id": "dispatch_identity_receipt/v1"}),
             ),
+            identity_attribution_basis: "planned_unconfirmed".to_string(),
         }
     }
 
@@ -572,6 +620,7 @@ mod tests {
         replay.role = Some("rewritten-role".to_string());
         replay.seat = Some("rewritten-seat".to_string());
         replay.identity_receipt = Some(serde_json::json!({"contract_id": "rewritten"}));
+        replay.identity_attribution_basis = "observed".to_string();
         let second = upsert_outcome(&conn, &replay).unwrap();
 
         assert_eq!(second.outcome_id, first.outcome_id);
@@ -583,6 +632,10 @@ mod tests {
         assert_eq!(second.role, first.role, "role frozen with the receipt");
         assert_eq!(second.seat, first.seat, "seat frozen with the receipt");
         assert_eq!(second.identity_receipt, first.identity_receipt);
+        assert_eq!(
+            second.identity_attribution_basis, first.identity_attribution_basis,
+            "attribution basis frozen with the receipt"
+        );
     }
 
     #[test]
@@ -644,8 +697,14 @@ mod tests {
         other_vendor.vendor = "codex".to_string();
         upsert_outcome(&conn, &other_vendor).unwrap();
 
-        let rows =
-            list_outcomes_by_vendor_window(&conn, "grok", "2026-01-01T00:00:00Z", None).unwrap();
+        let rows = list_outcomes_by_vendor_window(
+            &conn,
+            "grok",
+            "2026-01-01T00:00:00Z",
+            None,
+            OutcomeEvidenceClass::AnyAttribution,
+        )
+        .unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].outcome_id, "o-b", "newest first");
         assert_eq!(rows[1].outcome_id, "o-a");
@@ -655,10 +714,69 @@ mod tests {
             "grok",
             "2026-01-01T00:00:00Z",
             Some("2026-06-01T00:00:00Z"),
+            OutcomeEvidenceClass::AnyAttribution,
         )
         .unwrap();
         assert_eq!(bounded.len(), 1, "upper bound excludes o-b");
         assert_eq!(bounded[0].outcome_id, "o-a");
+    }
+
+    #[test]
+    fn evidence_class_filters_by_attribution_basis() {
+        let conn = open_conn();
+        let mut planned = new_outcome("o-1", "d-1");
+        planned.vendor = "grok".to_string();
+        planned.identity_attribution_basis = "planned_unconfirmed".to_string();
+        upsert_outcome(&conn, &planned).unwrap();
+
+        let mut acknowledged = new_outcome("o-2", "d-2");
+        acknowledged.vendor = "grok".to_string();
+        acknowledged.identity_attribution_basis = "acknowledged_overlay".to_string();
+        upsert_outcome(&conn, &acknowledged).unwrap();
+
+        let mut observed = new_outcome("o-3", "d-3");
+        observed.vendor = "grok".to_string();
+        observed.identity_attribution_basis = "observed".to_string();
+        upsert_outcome(&conn, &observed).unwrap();
+
+        let any = list_outcomes_by_vendor_window(
+            &conn,
+            "grok",
+            "2020-01-01T00:00:00Z",
+            None,
+            OutcomeEvidenceClass::AnyAttribution,
+        )
+        .unwrap();
+        assert_eq!(any.len(), 3, "AnyAttribution includes all three bases");
+
+        let acknowledged_or_better = list_outcomes_by_vendor_window(
+            &conn,
+            "grok",
+            "2020-01-01T00:00:00Z",
+            None,
+            OutcomeEvidenceClass::CarrierAcknowledged,
+        )
+        .unwrap();
+        assert_eq!(
+            acknowledged_or_better.len(),
+            2,
+            "CarrierAcknowledged excludes planned_unconfirmed"
+        );
+
+        let observed_only = list_outcomes_by_vendor_window(
+            &conn,
+            "grok",
+            "2020-01-01T00:00:00Z",
+            None,
+            OutcomeEvidenceClass::ObservedOnly,
+        )
+        .unwrap();
+        assert_eq!(
+            observed_only.len(),
+            1,
+            "ObservedOnly keeps only carrier-observed rows"
+        );
+        assert_eq!(observed_only[0].outcome_id, "o-3");
     }
 
     #[test]

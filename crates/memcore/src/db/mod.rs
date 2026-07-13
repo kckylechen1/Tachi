@@ -51,6 +51,7 @@ pub use dispatch_outcomes::{
     derive_idempotency_key, find_outcome_by_dispatch_id, get_outcome, list_outcomes_by_issue_ref,
     list_outcomes_by_vendor_window, outcome_exists_for_dispatch, upsert_outcome,
     upsert_outcome_reconciling_terminal_placeholder, DispatchOutcomeRow, NewDispatchOutcome,
+    OutcomeEvidenceClass,
 };
 pub use doctor_probe::{
     checkpoint_wal_truncate, count_chunks_rows, count_memories_missing_domain, count_memories_rows,

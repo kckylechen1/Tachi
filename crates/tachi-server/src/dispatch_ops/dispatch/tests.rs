@@ -737,6 +737,7 @@ fn recover_orphaned_dispatch_runs_marks_working_runs_failed() {
                 "claude",
                 "1970-01-01T00:00:00Z",
                 None,
+                memcore::OutcomeEvidenceClass::AnyAttribution,
             )
             .map_err(|e| e.to_string())
         })
@@ -936,6 +937,7 @@ fn recover_orphaned_dispatch_runs_honors_project_from_receipt() {
                 "codex",
                 "1970-01-01T00:00:00Z",
                 None,
+                memcore::OutcomeEvidenceClass::AnyAttribution,
             )
             .map_err(|e| e.to_string())
         })
@@ -954,6 +956,7 @@ fn recover_orphaned_dispatch_runs_honors_project_from_receipt() {
                 "codex",
                 "1970-01-01T00:00:00Z",
                 None,
+                memcore::OutcomeEvidenceClass::AnyAttribution,
             )
             .map_err(|e| e.to_string())
         })
