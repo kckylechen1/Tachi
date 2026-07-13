@@ -52,6 +52,30 @@ fn read_bound_agent_id_from_env() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Parse `TACHI_VAULT_AUTOLOCK_SECS`. Default 1800 (30 min). `0` = never
+/// auto-lock (for long-running daemons). Non-numeric → warn + default.
+fn parse_auto_lock_secs() -> u64 {
+    const DEFAULT: u64 = 1800;
+    match std::env::var("TACHI_VAULT_AUTOLOCK_SECS") {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(0) => {
+                tracing::warn!(
+                    "[vault] TACHI_VAULT_AUTOLOCK_SECS=0 — auto-lock disabled (daemon mode)"
+                );
+                0
+            }
+            Ok(secs) => secs,
+            Err(_) => {
+                tracing::warn!(
+                    "[vault] TACHI_VAULT_AUTOLOCK_SECS='{raw}' is not a valid non-negative integer — using default {DEFAULT}"
+                );
+                DEFAULT
+            }
+        },
+        Err(_) => DEFAULT,
+    }
+}
+
 impl MemoryServer {
     pub(crate) fn new(
         global_db_path: PathBuf,
@@ -184,7 +208,7 @@ impl MemoryServer {
                 key: None,
                 unlock_time: None,
                 failed_attempts: (0, None),
-                auto_lock_after_secs: 1800,
+                auto_lock_after_secs: parse_auto_lock_secs(),
             })),
             rate_limiter: Arc::new(StdMutex::new(RateLimiter {
                 windows: HashMap::new(),
