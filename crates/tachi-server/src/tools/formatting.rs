@@ -47,6 +47,7 @@ pub(super) fn format_facade_response(
     append_known_field(&mut lines, &value, "context_file");
     append_known_field(&mut lines, &value, "message");
     append_known_field(&mut lines, &value, "dispatch_error");
+    append_host_admission_markdown(&mut lines, &value);
 
     if let Some(eval_entry) = value.get("eval_entry") {
         append_known_field(&mut lines, eval_entry, "id");
@@ -149,7 +150,7 @@ pub(super) fn format_facade_response(
         }
     }
 
-    if lines.len() <= 2 {
+    if lines.len() <= 2 || value.get("policies").is_some() {
         lines.push(format!("```json\n{}\n```", value));
     }
     Ok(lines.join("\n"))
@@ -204,6 +205,36 @@ pub(super) fn md_opt_num(value: &Value, field: &str) -> String {
     }
 }
 
+fn append_host_admission_markdown(lines: &mut Vec<String>, value: &Value) {
+    let Some(admission) = value.get("host_admission").and_then(Value::as_object) else {
+        return;
+    };
+    let receipt_value = |field: &str| match admission.get(field) {
+        Some(Value::String(value)) => md_table_cell(value),
+        Some(Value::Bool(value)) => value.to_string(),
+        Some(Value::Null) | None => "-".to_string(),
+        Some(value) => md_table_cell(&value.to_string()),
+    };
+
+    lines.push(String::new());
+    lines.push("host_admission:".to_string());
+    lines.push(
+        "| requested_level | effective_level | max_execution_level | host_profile | profile_source | allowed | reason_code |"
+            .to_string(),
+    );
+    lines.push("| --- | --- | --- | --- | --- | --- | --- |".to_string());
+    lines.push(format!(
+        "| {} | {} | {} | {} | {} | {} | {} |",
+        receipt_value("requested_level"),
+        receipt_value("effective_level"),
+        receipt_value("max_execution_level"),
+        receipt_value("host_profile"),
+        receipt_value("profile_source"),
+        receipt_value("allowed"),
+        receipt_value("reason_code"),
+    ));
+}
+
 /// Render the `recommend` action as a candidates table plus the resolved routing summary.
 pub(super) fn render_recommend_markdown(title: &str, action: &str, value: &Value) -> String {
     let mut lines = vec![format!("## {title}"), format!("action: `{action}`")];
@@ -215,20 +246,13 @@ pub(super) fn render_recommend_markdown(title: &str, action: &str, value: &Value
     {
         lines.push(format!("task: {}", md_table_cell(task)));
     }
-    lines.push(format!(
-        "recommended_profile: `{}`",
-        value
-            .get("recommended_profile")
-            .and_then(Value::as_str)
-            .unwrap_or("-")
-    ));
-    lines.push(format!(
-        "recommended_transport: `{}`",
-        value
-            .get("recommended_transport")
-            .and_then(Value::as_str)
-            .unwrap_or("-")
-    ));
+    append_host_admission_markdown(&mut lines, value);
+    if let Some(profile) = value.get("recommended_profile").and_then(Value::as_str) {
+        lines.push(format!("recommended_profile: `{profile}`"));
+    }
+    if let Some(transport) = value.get("recommended_transport").and_then(Value::as_str) {
+        lines.push(format!("recommended_transport: `{transport}`"));
+    }
     if let Some(chain) = value.get("fallback_chain").and_then(Value::as_array) {
         let chain = chain
             .iter()
@@ -240,10 +264,10 @@ pub(super) fn render_recommend_markdown(title: &str, action: &str, value: &Value
         }
     }
 
-    lines.push(String::new());
-    lines.push("| profile | role | score | useful_rate | top reason |".to_string());
-    lines.push("| --- | --- | --- | --- | --- |".to_string());
     if let Some(candidates) = value.get("candidates").and_then(Value::as_array) {
+        lines.push(String::new());
+        lines.push("| profile | role | score | useful_rate | top reason |".to_string());
+        lines.push("| --- | --- | --- | --- | --- |".to_string());
         for candidate in candidates {
             let profile = md_opt_str(candidate, "profile");
             let role = md_opt_str(candidate, "role");
