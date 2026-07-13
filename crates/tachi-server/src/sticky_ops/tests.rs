@@ -227,17 +227,69 @@ fn concurrent_claim_smoke_single_winner_under_load() {
 
     const N: usize = 32;
     let sticky_id = "race-sticky-1";
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(N));
+    let stores = (0..N)
+        .map(|_| MemoryStore::open(&db_path_str))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("open all claim stores before starting workers");
+    let start = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let ready = std::sync::Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
     let mut handles = Vec::with_capacity(N);
 
-    for _ in 0..N {
-        let db_path_str = db_path_str.clone();
-        let barrier = barrier.clone();
-        handles.push(std::thread::spawn(move || -> bool {
-            let mut store = MemoryStore::open(&db_path_str).expect("open db in thread");
-            barrier.wait();
+    for mut store in stores {
+        let worker_start = std::sync::Arc::clone(&start);
+        let worker_ready = std::sync::Arc::clone(&ready);
+        let handle = std::thread::Builder::new().spawn(move || -> bool {
+            let (released, wake) = &*worker_start;
+            // Acknowledge readiness WHILE HOLDING the start-gate lock, then
+            // wait on the same lock: there is no window in which main can see
+            // "all ready" yet release before this worker is parked at the
+            // gate. Without the acknowledgment, a slowly-spawned worker could
+            // arrive after the release — and after the other racers already
+            // finished — turning the race serial while still passing
+            // `winners == 1` (cold-review finding on #1090).
+            let mut released = released.lock().expect("lock claim start gate");
+            {
+                let (count, ready_wake) = &*worker_ready;
+                let mut count = count.lock().expect("lock claim ready count");
+                *count += 1;
+                ready_wake.notify_all();
+            }
+            while !*released {
+                released = wake.wait(released).expect("wait for claim start gate");
+            }
+            drop(released);
             try_claim_sticky(&mut store, sticky_id, Some("racer")).unwrap_or(false)
-        }));
+        });
+
+        match handle {
+            Ok(handle) => handles.push(handle),
+            Err(error) => {
+                let (released, wake) = &*start;
+                *released.lock().expect("release claim start gate") = true;
+                wake.notify_all();
+                for handle in handles {
+                    let _ = handle.join();
+                }
+                panic!("spawn claim worker: {error}");
+            }
+        }
+    }
+
+    // Release only after every worker has acknowledged it is parked at the
+    // start gate — this is what makes the N-way claim genuinely concurrent.
+    {
+        let (count, ready_wake) = &*ready;
+        let mut count = count.lock().expect("lock claim ready count");
+        while *count < N {
+            count = ready_wake
+                .wait(count)
+                .expect("wait for claim workers ready");
+        }
+    }
+    {
+        let (released, wake) = &*start;
+        *released.lock().expect("release claim start gate") = true;
+        wake.notify_all();
     }
 
     let winners: usize = handles

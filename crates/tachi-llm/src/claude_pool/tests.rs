@@ -110,29 +110,39 @@ fn resolve_claude_binary_reports_invalid_override() {
 }
 
 #[test]
-fn parse_claude_envelope_extracts_result() {
-    let stdout = r#"{"result":"hello world","cost_usd":0.01}"#;
-    assert_eq!(parse_claude_json_envelope(stdout).unwrap(), "hello world");
-}
+fn parse_claude_envelope_covers_supported_shapes_and_empty_error() {
+    let cases = [
+        (
+            "result envelope",
+            r#"{"result":"hello world","cost_usd":0.01}"#,
+            Some("hello world"),
+        ),
+        (
+            "raw text fallback",
+            "raw text output",
+            Some("raw text output"),
+        ),
+        (
+            "content array",
+            r#"{"content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}"#,
+            Some("ab"),
+        ),
+        ("empty output", "   ", None),
+    ];
 
-#[test]
-fn parse_claude_envelope_falls_back_to_raw_text() {
-    let stdout = "raw text output";
-    assert_eq!(
-        parse_claude_json_envelope(stdout).unwrap(),
-        "raw text output"
-    );
-}
-
-#[test]
-fn parse_claude_envelope_handles_content_array() {
-    let stdout = r#"{"content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}"#;
-    assert_eq!(parse_claude_json_envelope(stdout).unwrap(), "ab");
-}
-
-#[test]
-fn parse_claude_envelope_rejects_empty() {
-    assert!(parse_claude_json_envelope("   ").is_err());
+    for (name, stdout, expected) in cases {
+        match expected {
+            Some(expected) => assert_eq!(
+                parse_claude_json_envelope(stdout).unwrap(),
+                expected,
+                "case `{name}`"
+            ),
+            None => assert!(
+                parse_claude_json_envelope(stdout).is_err(),
+                "case `{name}` must remain an error"
+            ),
+        }
+    }
 }
 
 #[test]
