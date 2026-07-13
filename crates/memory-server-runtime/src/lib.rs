@@ -1256,12 +1256,14 @@ mod tests {
         // test — the waiter is guaranteed to reach `wait_while` (the sole
         // slot is provably still held), so a timeout here means our own
         // scaffolding broke, not the fix.
-        parked_rx.recv_timeout(Duration::from_secs(3)).unwrap_or_else(|e| {
-            panic!(
-                "trial {trial}: test infrastructure failure — waiter never reached \
+        parked_rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "trial {trial}: test infrastructure failure — waiter never reached \
                  wait_while (parked-observer channel): {e}"
-            )
-        });
+                )
+            });
 
         // Trigger the panic: the sole slot's only holder panics instead of
         // returning normally. The panicker thread itself is short-lived and
