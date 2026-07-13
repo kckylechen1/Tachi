@@ -22,12 +22,6 @@ use tachi_params::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IssueStateV1 {
-    Open,
-    Closed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RelatedIssueStateV1 {
     Open,
     ClosedShipped,
@@ -45,10 +39,17 @@ pub(crate) struct RelatedSignalV1 {
 /// Structured inputs to the disposition classifier. Every field here is
 /// meant to come from a deterministic parse or an explicit cross-reference
 /// lookup (never a free-text keyword search) — see module docs.
+///
+/// `is_protected_router` deliberately does NOT live here: it used to be a
+/// separately caller-supplied `bool` that a caller could set on `evidence`
+/// (via a "router" label) without also flipping this field, letting a
+/// lower-priority signal (e.g. a scope collision) silently outrank router
+/// protection (#1002 build-seat RED,
+/// `failure_class_protected_router_wins_over_other_signals`). Router
+/// protection is now derived directly from `evidence` inside `classify`
+/// (see [`is_protected_router`]) so the two can never desync again.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RefinerySignalsV1 {
-    pub(crate) issue_state: Option<IssueStateV1>,
-    pub(crate) is_protected_router: bool,
     pub(crate) related: Vec<RelatedSignalV1>,
     pub(crate) scope_collisions: Vec<String>,
     pub(crate) shipped_evidence: Option<RepoRevisionV1>,
@@ -56,31 +57,14 @@ pub(crate) struct RefinerySignalsV1 {
     pub(crate) stale_body_signal: bool,
 }
 
-/// Conservative signal derivation using ONLY the already-compiled evidence
-/// (issue state + labels) — no additional live GH/git cross-reference
-/// lookups. This is what the live `refine_issues` orchestration wires today;
-/// the fuller signal set (child-state drift via related-issue state lookup,
-/// scope collision detection, shipped-evidence cross-check) is implemented
-/// and fixture-tested in `propose_disposition` below but requires extra
-/// live calls per relation that this leaf does not yet make (see
-/// `refinery_ops::handle_refine_issues` doc comment for the tracked gap).
-pub(crate) fn signals_from_evidence_only(evidence: &IssueEvidenceV1) -> RefinerySignalsV1 {
-    let is_protected_router = evidence.issue_snapshot.labels.iter().any(|label| {
+/// Single source of truth for router protection: derived from the issue's
+/// own labels, not a separately maintained signal (see `RefinerySignalsV1`
+/// doc comment for why).
+fn is_protected_router(evidence: &IssueEvidenceV1) -> bool {
+    evidence.issue_snapshot.labels.iter().any(|label| {
         let label = label.to_ascii_lowercase();
         label.contains("router") || label.contains("umbrella") || label.contains("no-close")
-    });
-    let issue_state = Some(
-        if evidence.issue_snapshot.state.eq_ignore_ascii_case("closed") {
-            IssueStateV1::Closed
-        } else {
-            IssueStateV1::Open
-        },
-    );
-    RefinerySignalsV1 {
-        issue_state,
-        is_protected_router,
-        ..Default::default()
-    }
+    })
 }
 
 fn classify(
@@ -92,7 +76,7 @@ fn classify(
     if evidence.grounding_status == GroundingStatusV1::MissingAnchor {
         return (DispositionV1::DecisionRequired, contradictions);
     }
-    if signals.is_protected_router {
+    if is_protected_router(evidence) {
         return (DispositionV1::Router, contradictions);
     }
     if signals.dispatch_packet_complete == Some(false) {
@@ -172,14 +156,26 @@ fn classify(
 /// #1002's delivery scope is "proposal-only apply boundary" (canon doc §10
 /// item 1); there is no live path in this leaf that supplies a real engine
 /// identity receipt.
+///
+/// `missing_anchor_reasons` folds each unresolved-anchor `DocResolution`
+/// reason (see `refinery_ops::doc_resolver`) into a real `ContradictionV1`
+/// instead of being silently discarded — a caller with no unresolved
+/// anchors (the common case) passes an empty slice.
 pub(crate) fn propose_disposition(
     evidence: &IssueEvidenceV1,
     signals: &RefinerySignalsV1,
     based_on_repo_revisions: Vec<RepoRevisionV1>,
     based_on_doc_revisions: Vec<CanonicalDocRefV1>,
+    missing_anchor_reasons: &[String],
     captured_at: &str,
 ) -> Result<IssueDispositionProposalV1, String> {
-    let (disposition, contradictions) = classify(evidence, signals);
+    let (disposition, mut contradictions) = classify(evidence, signals);
+    for reason in missing_anchor_reasons {
+        contradictions.push(ContradictionV1 {
+            description: format!("unresolved canonical doc anchor: {reason}"),
+            evidence_refs: Vec::new(),
+        });
+    }
 
     let mut evidence_refs: Vec<EvidenceRefV1> = vec![EvidenceRefV1 {
         relation: EvidenceRelationV1::DerivedFrom,

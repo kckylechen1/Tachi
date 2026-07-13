@@ -21,14 +21,15 @@
 //! same production code path is what the acceptance tests exercise, not a
 //! parallel re-implementation.
 //!
-//! Known scope gap (tracked here, not hidden): this orchestration derives
-//! disposition signals from the compiled evidence only
-//! (`disposition::signals_from_evidence_only` — issue state + labels). The
-//! richer signal set the classifier already supports and is fixture-tested
-//! against (child-state drift via related-issue state lookup, scope
-//! collision detection, shipped-evidence cross-check) requires additional
-//! live GH calls per relation that this leaf does not make. A follow-up
-//! slice should add those lookups and swap in the fuller signal builder.
+//! Known scope gap (tracked here, not hidden): related-issue state (canon
+//! doc §4.1 input-order step 4) is wired ONLY through each relation line's
+//! own optional `[state]` annotation (see `parse::parse_related_state_suffix`)
+//! — a bounded, zero-extra-IO signal an issue author/dispatch tool can set
+//! explicitly. It is NOT yet a live per-relation GitHub cross-reference
+//! (fetching the target issue's real state/labels); that fuller version,
+//! and scope-collision detection / shipped-evidence cross-check, remain a
+//! follow-up slice. Router protection and grounding are fully live (derived
+//! from the fetched issue's own labels / resolved Spec-Ref anchors).
 
 mod compiler;
 mod disposition;
@@ -130,6 +131,7 @@ pub(crate) fn build_refinery_packet(
     let mut linked_specs: Vec<CanonicalDocRefV1> = Vec::new();
     let mut doc_anchors_by_span: Vec<(SourceSpanV1, CanonicalDocRefV1)> = Vec::new();
     let mut grounding_status = GroundingStatusV1::Grounded;
+    let mut missing_anchor_reasons: Vec<String> = Vec::new();
     for spec_ref in &spec_refs {
         match resolver.resolve(
             &spec_ref.repo,
@@ -143,12 +145,15 @@ pub(crate) fn build_refinery_packet(
                 doc_anchors_by_span.push((spec_ref.span, doc_ref.clone()));
                 linked_specs.push(doc_ref);
             }
-            DocResolution::Unresolved { .. } => {
+            DocResolution::Unresolved { reason } => {
                 // Any requested anchor that fails to resolve degrades the
                 // whole packet (canon doc §4.1) — specs that DID resolve are
                 // still reported, but the packet as a whole is not "high
-                // confidence".
+                // confidence". The reason is not discarded: it becomes a
+                // real contradiction on the proposal (see
+                // `disposition::propose_disposition`), not silently dropped.
                 grounding_status = GroundingStatusV1::MissingAnchor;
+                missing_anchor_reasons.push(reason);
             }
         }
     }
@@ -156,6 +161,19 @@ pub(crate) fn build_refinery_packet(
     let issue_ref_anchors_by_span: Vec<(SourceSpanV1, String)> = relation_lines
         .iter()
         .map(|r| (r.span, r.target_ref.clone()))
+        .collect();
+
+    // Real (non-live-lookup) related-issue-state signals: each relation
+    // line's own optional `[state]` annotation (see
+    // `parse::parse_related_state_suffix`), defaulting to `Unknown` when
+    // absent — `classify` treats `Unknown` as a no-op (fail open).
+    let related_signals: Vec<disposition::RelatedSignalV1> = relation_lines
+        .iter()
+        .map(|r| disposition::RelatedSignalV1 {
+            target_ref: r.target_ref.clone(),
+            kind: r.kind,
+            state: r.state,
+        })
         .collect();
 
     let relations: Vec<IssueRelationV1> = relation_lines
@@ -176,7 +194,10 @@ pub(crate) fn build_refinery_packet(
         &issue_ref_anchors_by_span,
     );
 
-    let signals = disposition::signals_from_evidence_only(&evidence);
+    let signals = disposition::RefinerySignalsV1 {
+        related: related_signals,
+        ..Default::default()
+    };
     let repo_revisions: Vec<RepoRevisionV1> = Vec::new();
     let doc_revisions: Vec<CanonicalDocRefV1> = linked_specs;
     let proposal = disposition::propose_disposition(
@@ -184,6 +205,7 @@ pub(crate) fn build_refinery_packet(
         &signals,
         repo_revisions,
         doc_revisions,
+        &missing_anchor_reasons,
         captured_at,
     )?;
 

@@ -17,7 +17,19 @@
 //! Parent-Of: #12
 //! Related: #34
 //! ```
+//!
+//! A relation line may carry an optional trailing `[state]` annotation
+//! applying to every target on that line — also this leaf's own convention,
+//! not canon-frozen, e.g. `Supersedes: #89 [closed_shipped]`. Recognized
+//! values (case-insensitive): `open`, `closed_shipped`, `closed_unshipped`.
+//! Absent or unrecognized -> `RelatedIssueStateV1::Unknown`, which the
+//! classifier treats as a no-op (fail open, never a false
+//! BLOCKED/DORMANT/NARROW/CLOSE_SUPERSEDED). A live per-relation GitHub
+//! cross-reference (canon doc §4.1 input-order step 4: "related issue/PR
+//! state") is the fuller version of this and remains a follow-up slice —
+//! this annotation is the bounded, zero-extra-IO slice landing now.
 
+use super::disposition::RelatedIssueStateV1;
 use tachi_params::{CommentRevisionV1, IssueRelationKindV1, IssueSnapshotV1, SourceSpanV1};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +96,7 @@ pub(crate) struct RelationLine {
     pub(crate) kind: IssueRelationKindV1,
     pub(crate) target_ref: String,
     pub(crate) span: SourceSpanV1,
+    pub(crate) state: RelatedIssueStateV1,
 }
 
 const RELATION_PREFIXES: &[(&str, IssueRelationKindV1)] = &[
@@ -105,13 +118,15 @@ pub(crate) fn parse_relation_lines(text: &str) -> Vec<RelationLine> {
             end_byte: offset + line.len(),
         };
         if let Some((kind, rest)) = match_relation_prefix(trimmed) {
-            for target in rest.split(',') {
+            let (state, ref_list) = parse_related_state_suffix(rest);
+            for target in ref_list.split(',') {
                 let target = target.trim();
                 if !target.is_empty() {
                     out.push(RelationLine {
                         kind,
                         target_ref: target.to_string(),
                         span,
+                        state,
                     });
                 }
             }
@@ -128,6 +143,27 @@ fn match_relation_prefix(line: &str) -> Option<(IssueRelationKindV1, &str)> {
         }
     }
     None
+}
+
+/// Peel an optional trailing `[state]` annotation off a relation line's
+/// target-ref list (see module docs for the recognized values). Returns the
+/// parsed state (defaulting to `Unknown`) and the remaining text to split on
+/// commas for target refs.
+fn parse_related_state_suffix(rest: &str) -> (RelatedIssueStateV1, &str) {
+    let trimmed = rest.trim_end();
+    if let Some(bracket_start) = trimmed.rfind('[') {
+        if trimmed.ends_with(']') && bracket_start < trimmed.len() - 1 {
+            let inner = &trimmed[bracket_start + 1..trimmed.len() - 1];
+            let state = match inner.trim().to_ascii_lowercase().as_str() {
+                "open" => RelatedIssueStateV1::Open,
+                "closed_shipped" => RelatedIssueStateV1::ClosedShipped,
+                "closed_unshipped" => RelatedIssueStateV1::ClosedUnshipped,
+                _ => RelatedIssueStateV1::Unknown,
+            };
+            return (state, trimmed[..bracket_start].trim_end());
+        }
+    }
+    (RelatedIssueStateV1::Unknown, rest)
 }
 
 fn comment_has_structured_marker(body: &str) -> bool {

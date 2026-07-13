@@ -105,6 +105,11 @@ fn missing_anchor_degrades_grounding_and_forces_decision_required() {
         proposal.proposed_labels.is_empty() && proposal.proposed_doc_deltas.is_empty(),
         "a missing-anchor packet must carry no actionable recommendation"
     );
+    assert!(
+        !proposal.contradictions.is_empty(),
+        "the resolver's unresolved-anchor reason must be surfaced as a real \
+         contradiction, not silently discarded"
+    );
 }
 
 #[test]

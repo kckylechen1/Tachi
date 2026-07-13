@@ -13,9 +13,10 @@
 //! delivery report, not just here.
 
 use super::super::disposition::{
-    propose_disposition, IssueStateV1, RefinerySignalsV1, RelatedIssueStateV1, RelatedSignalV1,
+    propose_disposition, RefinerySignalsV1, RelatedIssueStateV1, RelatedSignalV1,
 };
-use super::super::fixtures::minimal_evidence;
+use super::super::fixtures::{gh_issue_json, minimal_evidence, FixtureDocResolver};
+use super::super::build_refinery_packet;
 use tachi_params::{DispositionV1, IssueRelationKindV1, RepoRevisionV1};
 
 const CAPTURED_AT: &str = "2026-07-13T00:00:00Z";
@@ -34,7 +35,7 @@ fn propose(
     signals: RefinerySignalsV1,
 ) -> tachi_params::IssueDispositionProposalV1 {
     let evidence = minimal_evidence(issue_ref, "OPEN", &[]);
-    propose_disposition(&evidence, &signals, Vec::new(), Vec::new(), CAPTURED_AT)
+    propose_disposition(&evidence, &signals, Vec::new(), Vec::new(), &[], CAPTURED_AT)
         .expect("propose_disposition")
 }
 
@@ -44,7 +45,7 @@ fn propose_with_labels(
     signals: RefinerySignalsV1,
 ) -> tachi_params::IssueDispositionProposalV1 {
     let evidence = minimal_evidence(issue_ref, "OPEN", labels);
-    propose_disposition(&evidence, &signals, Vec::new(), Vec::new(), CAPTURED_AT)
+    propose_disposition(&evidence, &signals, Vec::new(), Vec::new(), &[], CAPTURED_AT)
         .expect("propose_disposition")
 }
 
@@ -57,7 +58,6 @@ fn happy_path_grounded_no_signals_is_keep() {
 #[test]
 fn failure_class_stale_body_is_historical() {
     let signals = RefinerySignalsV1 {
-        issue_state: Some(IssueStateV1::Open),
         stale_body_signal: true,
         ..Default::default()
     };
@@ -277,6 +277,85 @@ fn all_ten_dispositions_are_reachable_by_at_least_one_fixture_in_this_file() {
             "disposition {d} is declared in the closed vocabulary but unreachable from any fixture in this test suite"
         );
     }
+}
+
+// ─── real production wiring for `RelatedIssueStateV1` (BUG-2 regression) ───
+
+/// End-to-end (through `build_refinery_packet`, the exact function the live
+/// `refine_issues` action calls — not the `propose()` bypass helpers above):
+/// a `Supersedes:` relation line's own `[closed_shipped]` annotation (see
+/// `parse::parse_related_state_suffix`) really is parsed and really does
+/// drive `classify()` to CLOSE_SUPERSEDED. This is the production
+/// construction site for `RelatedIssueStateV1::ClosedShipped` (a build-seat
+/// RED previously flagged it as dead code because only the `propose()`
+/// bypass helpers constructed it directly).
+#[test]
+fn relation_line_state_annotation_drives_close_superseded_through_the_real_pipeline() {
+    let body = "This work is superseded by the landed replacement.\n\n\
+                Supersedes: owner/repo#7001 [closed_shipped]\n"
+        .to_string();
+    let gh_json = gh_issue_json(
+        "Superseded-and-shipped fixture",
+        &body,
+        "OPEN",
+        &[],
+        None,
+        CAPTURED_AT,
+        &[],
+    );
+    let resolver = FixtureDocResolver::new();
+    let (evidence, proposal) =
+        build_refinery_packet("owner/repo", 8090, &gh_json, &resolver, CAPTURED_AT)
+            .expect("build_refinery_packet");
+    assert_eq!(evidence.relations.len(), 1);
+    assert_eq!(proposal.disposition, DispositionV1::CloseSuperseded);
+}
+
+/// Same pipeline, `[closed_unshipped]` annotation -> DORMANT with a
+/// contradiction — the production construction site for
+/// `RelatedIssueStateV1::ClosedUnshipped`.
+#[test]
+fn relation_line_state_annotation_drives_dormant_through_the_real_pipeline() {
+    let body = "This work is superseded but the replacement did not land.\n\n\
+                Supersedes: owner/repo#7002 [closed_unshipped]\n"
+        .to_string();
+    let gh_json = gh_issue_json(
+        "Superseded-but-unshipped fixture",
+        &body,
+        "OPEN",
+        &[],
+        None,
+        CAPTURED_AT,
+        &[],
+    );
+    let resolver = FixtureDocResolver::new();
+    let (_evidence, proposal) =
+        build_refinery_packet("owner/repo", 8091, &gh_json, &resolver, CAPTURED_AT)
+            .expect("build_refinery_packet");
+    assert_eq!(proposal.disposition, DispositionV1::Dormant);
+    assert!(!proposal.contradictions.is_empty());
+}
+
+/// Absent annotation -> `Unknown`, and `classify()`'s no-op for `Unknown`
+/// means a bare `Supersedes:` line (no state known) does not force any
+/// closed/dormant disposition by itself.
+#[test]
+fn relation_line_without_state_annotation_is_unknown_and_is_a_classify_no_op() {
+    let body = "This work is related to prior art.\n\nSupersedes: owner/repo#7003\n".to_string();
+    let gh_json = gh_issue_json(
+        "No-annotation fixture",
+        &body,
+        "OPEN",
+        &[],
+        None,
+        CAPTURED_AT,
+        &[],
+    );
+    let resolver = FixtureDocResolver::new();
+    let (_evidence, proposal) =
+        build_refinery_packet("owner/repo", 8092, &gh_json, &resolver, CAPTURED_AT)
+            .expect("build_refinery_packet");
+    assert_eq!(proposal.disposition, DispositionV1::Keep);
 }
 
 // ─── 5 historical-case replays (2026-07-13 manual cleanup) ─────────────────
