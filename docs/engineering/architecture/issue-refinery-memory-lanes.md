@@ -467,14 +467,14 @@ Evaluation is by capability and artifact, not legacy lane name:
 
 1. #1002: immutable source resolver, typed evidence/disposition packets, manual
    reference replay, proposal-only apply boundary.
-2. Recall evidence envelopes and RED corpus: exact #1002 anchor, old-distill
+2. #1071: recall evidence envelopes and RED corpus — exact #1002 anchor, old-distill
    crowding, missing snapshot, same-results-but-wrong-source, provider timeout,
    and truncated synthesis.
-3. Wiki lifecycle/provenance visibility and candidate-review-apply boundary.
-4. #1043-D2 plus the #1059 pilot after #1041.
-5. #950 principle decomposition and establishment/overturn gate.
-6. #1043-D4 re-forge queue.
-7. #950 adjudication recall, then #1043-D5 post-rank decoration.
+3. #1072: wiki lifecycle/provenance visibility and candidate-review-apply boundary.
+4. #1073 plus the #1059 pilot after #1041.
+5. #1076 principle decomposition, then #1077 establishment/overturn gate.
+6. #1074 D4 re-forge queue.
+7. #1078 adjudication recall, then #1075 D5 post-rank decoration.
 8. #1066 `tachi_agent_eval` external/native intake after engine receipts are
    available.
 
