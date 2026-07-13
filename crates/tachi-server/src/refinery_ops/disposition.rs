@@ -171,22 +171,24 @@ fn classify(
 /// item 1); there is no live path in this leaf that supplies a real engine
 /// identity receipt.
 ///
-/// `missing_anchor_reasons` folds each unresolved-anchor `DocResolution`
-/// reason (see `refinery_ops::doc_resolver`) into a real `ContradictionV1`
-/// instead of being silently discarded — a caller with no unresolved
-/// anchors (the common case) passes an empty slice.
+/// `contradiction_reasons` is the caller's pre-formatted list of plain-text
+/// reasons (unresolved anchors, malformed Spec-Ref lines, an unavailable
+/// repo revision, etc. — each already carries its own descriptive prefix,
+/// this function does not add one) folded into real `ContradictionV1`
+/// entries instead of being silently discarded — a caller with nothing to
+/// report passes an empty slice.
 pub(crate) fn propose_disposition(
     evidence: &IssueEvidenceV1,
     signals: &RefinerySignalsV1,
     based_on_repo_revisions: Vec<RepoRevisionV1>,
     based_on_doc_revisions: Vec<CanonicalDocRefV1>,
-    missing_anchor_reasons: &[String],
+    contradiction_reasons: &[String],
     captured_at: &str,
 ) -> Result<IssueDispositionProposalV1, String> {
     let (disposition, mut contradictions) = classify(evidence, signals);
-    for reason in missing_anchor_reasons {
+    for reason in contradiction_reasons {
         contradictions.push(ContradictionV1 {
-            description: format!("unresolved canonical doc anchor: {reason}"),
+            description: reason.clone(),
             evidence_refs: Vec::new(),
         });
     }
@@ -209,18 +211,6 @@ pub(crate) fn propose_disposition(
     let proposed_doc_deltas: Vec<tachi_params::DocDeltaProposalV1> = Vec::new();
     let proposed_comment: Option<String> = None;
 
-    let hash_basis = serde_json::json!({
-        "issue_ref": evidence.issue_ref,
-        "based_on_issue_snapshot_hash": evidence.issue_snapshot_hash,
-        "based_on_repo_revisions": based_on_repo_revisions,
-        "based_on_doc_revisions": based_on_doc_revisions,
-        "disposition": disposition,
-        "contradictions": contradictions,
-        "proposed_labels": proposed_labels,
-        "proposed_doc_deltas": proposed_doc_deltas,
-    });
-    let proposal_hash = tachi_params::canonical_json_sha256(&hash_basis)?;
-
     let source_bundle_basis = serde_json::json!({
         "issue_snapshot_hash": evidence.issue_snapshot_hash,
         "doc_blob_shas": based_on_doc_revisions
@@ -239,9 +229,15 @@ pub(crate) fn propose_disposition(
         evidence.issue_ref, evidence.issue_snapshot_hash
     );
 
-    Ok(IssueDispositionProposalV1 {
+    // R4-4 (build-seat REQUEST-CHANGES): the hash basis is the WHOLE
+    // proposal struct (via `IssueDispositionProposalV1::compute_proposal_hash`,
+    // one serde serialization), not a hand-picked field list that can (and
+    // did) silently drop fields like `evidence_refs`/`proposed_comment`/
+    // `grounding_status`/`preview_only`/`engine_receipt`. Build with a
+    // placeholder hash, compute, then overwrite.
+    let mut proposal = IssueDispositionProposalV1 {
         packet_id,
-        proposal_hash,
+        proposal_hash: String::new(),
         source_bundle_hash,
         issue_ref: evidence.issue_ref.clone(),
         based_on_issue_snapshot_hash: evidence.issue_snapshot_hash.clone(),
@@ -256,5 +252,7 @@ pub(crate) fn propose_disposition(
         proposed_doc_deltas,
         preview_only: true,
         engine_receipt: None,
-    })
+    };
+    proposal.proposal_hash = proposal.compute_proposal_hash()?;
+    Ok(proposal)
 }

@@ -2,10 +2,11 @@
 //! reasoning can never mark a HEAD claim verified).
 
 use super::super::build_refinery_packet;
-use super::super::doc_resolver::{DocRefResolver, DocResolution, GitRefResolver};
+use super::super::doc_resolver::{DocRefResolver, DocResolution, GitRefResolver, NullDocResolver};
 use super::super::fixtures::{gh_issue_json, minimal_evidence, spec_ref_line, FixtureDocResolver};
 use tachi_params::{
     check_proposal_replay, CurrentGroundStateV1, GroundingStatusV1, RepoRevisionV1,
+    StalenessReasonV1,
 };
 
 const CAPTURED_AT: &str = "2026-07-13T00:00:00Z";
@@ -13,8 +14,15 @@ const CAPTURED_AT: &str = "2026-07-13T00:00:00Z";
 #[test]
 fn a_fresh_proposal_replays_cleanly_against_its_own_pinned_state() {
     let body = "Fixture body for replay guard test.".to_string();
-    let gh_json = gh_issue_json("Replay fixture", &body, "OPEN", &[], None, CAPTURED_AT, &[]);
-    let resolver = FixtureDocResolver::new();
+    let gh_json = gh_issue_json(9301, "Replay fixture", &body, "OPEN", &[], None, CAPTURED_AT, &[]);
+    // R4-2: `check_proposal_replay` now rejects an empty repo-revision axis
+    // outright, so a "replays cleanly" fixture must have a real one pinned.
+    let resolver = FixtureDocResolver::new().with_repo_revision(RepoRevisionV1 {
+        repo: "owner/repo".to_string(),
+        git_ref: "origin/main".to_string(),
+        commit_sha: "headsha0".to_string(),
+        verified_at: CAPTURED_AT.to_string(),
+    });
     let (_evidence, proposal) =
         build_refinery_packet("owner/repo", 9301, &gh_json, &resolver, CAPTURED_AT)
             .expect("build_refinery_packet");
@@ -33,6 +41,7 @@ fn an_edited_issue_body_after_the_proposal_was_built_makes_it_stale() {
 
     let original_body = "Original body text before the edit.".to_string();
     let gh_json_v1 = gh_issue_json(
+        9302,
         "Edit-then-replay fixture",
         &original_body,
         "OPEN",
@@ -49,6 +58,7 @@ fn an_edited_issue_body_after_the_proposal_was_built_makes_it_stale() {
     // build now produces a different issue_snapshot_hash.
     let edited_body = "Body text was edited after the proposal was generated.".to_string();
     let gh_json_v2 = gh_issue_json(
+        9302,
         "Edit-then-replay fixture",
         &edited_body,
         "OPEN",
@@ -93,6 +103,7 @@ fn a_doc_blob_sha_drift_after_the_proposal_was_built_makes_it_stale() {
         "Spec-pinned fixture.\n\nSpec-Ref: owner/repo:{DOC_PATH}@{COMMIT_SHA}/deadbeefblobsha0001#3\n"
     );
     let gh_json = gh_issue_json(
+        9303,
         "Doc drift fixture",
         &body,
         "OPEN",
@@ -153,6 +164,7 @@ fn model_only_evidence_compiler_never_marks_a_claim_verified_across_fixtures() {
 
     for (i, body) in bodies.iter().enumerate() {
         let gh_json = gh_issue_json(
+            9400 + i as u64,
             "Verification-safety fixture",
             body,
             "OPEN",
@@ -187,7 +199,7 @@ fn model_only_evidence_compiler_never_marks_a_claim_verified_across_fixtures() {
         .all(|c| !c.verification.is_verified()));
 }
 
-// ─── F1 (build-seat REQUEST-CHANGES): fail-closed grounding ────────────────
+// ─── F1/R4-1 (build-seat REQUEST-CHANGES): fail-closed grounding ───────────
 
 /// A `Spec-Ref:` line present in the body but not matching the frozen
 /// syntax must NOT be silently skipped — it degrades grounding, same as an
@@ -197,6 +209,7 @@ fn malformed_spec_ref_line_degrades_grounding_instead_of_being_ignored() {
     let body =
         "This work has a broken spec pin.\n\nSpec-Ref: not-even-close-to-the-syntax\n".to_string();
     let gh_json = gh_issue_json(
+        9310,
         "Malformed spec-ref fixture",
         &body,
         "OPEN",
@@ -231,6 +244,41 @@ fn truncated_gh_result_degrades_grounding_instead_of_producing_an_empty_grounded
     assert!(!proposal.contradictions.is_empty());
 }
 
+/// R4-1: a well-formed JSON OBJECT whose `number` is wrong-typed (a string,
+/// not a number) must not be treated as Grounded either — type-checking,
+/// not just shape-checking.
+#[test]
+fn wrong_typed_number_field_degrades_grounding() {
+    let result = serde_json::json!({
+        "number": "9312", // string, not a number
+        "title": "Some issue",
+        "state": "OPEN",
+        "body": "Some body",
+    });
+    let resolver = FixtureDocResolver::new();
+    let (evidence, proposal) =
+        build_refinery_packet("owner/repo", 9312, &result, &resolver, CAPTURED_AT)
+            .expect("build_refinery_packet");
+    assert_eq!(evidence.grounding_status, GroundingStatusV1::MissingAnchor);
+    assert!(!proposal.contradictions.is_empty());
+}
+
+/// R4-1: a minimal object with the RIGHT number but a MISMATCHED number is
+/// also rejected — the response must identify the requested issue.
+#[test]
+fn mismatched_number_degrades_grounding() {
+    let result = serde_json::json!({
+        "number": 999999,
+        "title": "A different issue entirely",
+        "state": "OPEN",
+    });
+    let resolver = FixtureDocResolver::new();
+    let (evidence, _proposal) =
+        build_refinery_packet("owner/repo", 9313, &result, &resolver, CAPTURED_AT)
+            .expect("build_refinery_packet");
+    assert_eq!(evidence.grounding_status, GroundingStatusV1::MissingAnchor);
+}
+
 /// `GitRefResolver`'s repo-identity check runs BEFORE any git command, so
 /// this is deterministic without a real git checkout: a `Spec-Ref:` line
 /// declaring a different repo than the resolver's own `known_repo` must
@@ -259,7 +307,28 @@ fn git_ref_resolver_refuses_a_spec_ref_declaring_a_different_repo() {
     }
 }
 
-// ─── F2 (build-seat REQUEST-CHANGES): the repo-revision replay axis ────────
+// ─── R4-3 (build-seat REQUEST-CHANGES, REGRESSION): no ambient-cwd guessing ─
+
+/// `NullDocResolver` (used by `handle_refine_issues` when it cannot
+/// establish a trusted repo root) must fail closed on both trait methods —
+/// never resolve anything, never report a repo revision — rather than
+/// falling back to some default that could be mistaken for a real result.
+#[test]
+fn null_doc_resolver_fails_closed_on_every_method() {
+    let resolver = NullDocResolver {
+        reason: "no reliable repo root found for 'owner/repo'".to_string(),
+    };
+    match resolver.resolve("owner/repo", "docs/x.md", "sha1", "blob1", "1", "origin/main") {
+        DocResolution::Unresolved { reason } => {
+            assert!(reason.contains("no reliable repo root"));
+        }
+        DocResolution::Resolved(_) => panic!("NullDocResolver must never resolve"),
+    }
+    let revision_result = resolver.current_repo_revision("owner/repo", "origin/main");
+    assert!(revision_result.is_err());
+}
+
+// ─── F2/R4-2 (build-seat REQUEST-CHANGES): the repo-revision replay axis ───
 
 /// The live pipeline (`build_refinery_packet`) really does pin
 /// `based_on_repo_revisions` from the resolver when one is available — the
@@ -268,6 +337,7 @@ fn git_ref_resolver_refuses_a_spec_ref_declaring_a_different_repo() {
 fn live_pipeline_pins_repo_revision_when_the_resolver_supplies_one() {
     let body = "Fixture body with no Spec-Ref at all.".to_string();
     let gh_json = gh_issue_json(
+        9320,
         "Repo revision fixture",
         &body,
         "OPEN",
@@ -297,6 +367,7 @@ fn live_pipeline_pins_repo_revision_when_the_resolver_supplies_one() {
 fn repo_head_drift_after_the_proposal_was_built_rejects_replay_through_the_real_pipeline() {
     let body = "Fixture body with no Spec-Ref at all.".to_string();
     let gh_json = gh_issue_json(
+        9321,
         "Repo revision drift fixture",
         &body,
         "OPEN",
@@ -325,4 +396,53 @@ fn repo_head_drift_after_the_proposal_was_built_rejects_replay_through_the_real_
     let err =
         check_proposal_replay(&proposal, &current).expect_err("repo HEAD drift must reject replay");
     assert!(!err.is_empty());
+}
+
+/// R4-2: when the resolver's repo-revision lookup fails (e.g. a real
+/// `git rev-parse` failure), the live pipeline surfaces a real
+/// contradiction — AND the resulting proposal (empty repo-revision axis)
+/// must fail `check_proposal_replay`, not vacuously pass it.
+#[test]
+fn repo_revision_lookup_failure_surfaces_a_contradiction_and_rejects_replay() {
+    let body = "Fixture body with no Spec-Ref at all.".to_string();
+    let gh_json = gh_issue_json(
+        9322,
+        "Repo revision failure fixture",
+        &body,
+        "OPEN",
+        &[],
+        None,
+        CAPTURED_AT,
+        &[],
+    );
+    let resolver = FixtureDocResolver::new()
+        .with_repo_revision_failure("git rev-parse origin/main failed: unknown revision");
+    let (_evidence, proposal) =
+        build_refinery_packet("owner/repo", 9322, &gh_json, &resolver, CAPTURED_AT)
+            .expect("build_refinery_packet");
+
+    assert!(proposal.preview_only, "V1 is always preview-only");
+    assert!(
+        proposal
+            .contradictions
+            .iter()
+            .any(|c| c.description.contains("repo revision unavailable")),
+        "a failed repo-revision lookup must surface a real contradiction, got: {:?}",
+        proposal.contradictions
+    );
+    assert!(
+        proposal.based_on_repo_revisions.is_empty(),
+        "test setup: no repo revision should have been pinned"
+    );
+
+    let current = CurrentGroundStateV1 {
+        issue_snapshot_hash: proposal.based_on_issue_snapshot_hash.clone(),
+        repo_revisions: Vec::new(),
+        doc_revisions: proposal.based_on_doc_revisions.clone(),
+    };
+    let err = check_proposal_replay(&proposal, &current)
+        .expect_err("an empty repo-revision axis must never pass replay");
+    assert!(err
+        .iter()
+        .any(|r| matches!(r, StalenessReasonV1::RepoRevisionUnavailable { .. })));
 }

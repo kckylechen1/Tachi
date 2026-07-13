@@ -13,10 +13,22 @@ use tachi_params::{CanonicalDocRefV1, RepoRevisionV1};
 /// pass even when the fixture's registered repo/blob/section/trusted_ref
 /// didn't actually match what the test body declared). Anything not
 /// exactly registered comes back `Unresolved`.
-#[derive(Default)]
 pub(crate) struct FixtureDocResolver {
     resolved: Vec<CanonicalDocRefV1>,
-    repo_revision: Option<RepoRevisionV1>,
+    /// `Err` by default (R4-2, build-seat REQUEST-CHANGES): a fixture that
+    /// never calls `with_repo_revision` genuinely has no repo-revision pin
+    /// available, same as `GitRefResolver` failing for real — it must not
+    /// silently look like a resolved-but-empty axis.
+    repo_revision: Result<RepoRevisionV1, String>,
+}
+
+impl Default for FixtureDocResolver {
+    fn default() -> Self {
+        Self {
+            resolved: Vec::new(),
+            repo_revision: Err("fixture: no repo revision configured".to_string()),
+        }
+    }
 }
 
 impl FixtureDocResolver {
@@ -47,11 +59,18 @@ impl FixtureDocResolver {
         self
     }
 
-    /// Configure what `current_repo_revision` returns — the fixture
-    /// equivalent of `GitRefResolver`'s real `git rev-parse <trusted_ref>`
-    /// (F2, build-seat REQUEST-CHANGES).
+    /// Configure what `current_repo_revision` returns on success — the
+    /// fixture equivalent of `GitRefResolver`'s real
+    /// `git rev-parse <trusted_ref>` (F2, build-seat REQUEST-CHANGES).
     pub(crate) fn with_repo_revision(mut self, revision: RepoRevisionV1) -> Self {
-        self.repo_revision = Some(revision);
+        self.repo_revision = Ok(revision);
+        self
+    }
+
+    /// Configure `current_repo_revision` to fail with `reason` — the
+    /// fixture equivalent of a real `git rev-parse` failure (R4-2).
+    pub(crate) fn with_repo_revision_failure(mut self, reason: &str) -> Self {
+        self.repo_revision = Err(reason.to_string());
         self
     }
 }
@@ -86,7 +105,11 @@ impl DocRefResolver for FixtureDocResolver {
         }
     }
 
-    fn current_repo_revision(&self, _repo: &str, _trusted_ref: &str) -> Option<RepoRevisionV1> {
+    fn current_repo_revision(
+        &self,
+        _repo: &str,
+        _trusted_ref: &str,
+    ) -> Result<RepoRevisionV1, String> {
         self.repo_revision.clone()
     }
 }
@@ -147,12 +170,15 @@ pub(crate) fn minimal_evidence(
     )
 }
 
-/// Build a `gh issue view --json ...` result payload shape. `comments` is a
-/// list of `(id, author_login, created_at, updated_at, body)` tuples —
-/// `updated_at` is `None` when a fixture wants to exercise the
-/// `updatedAt`-absent fallback-to-`createdAt` path (F5).
+/// Build a `gh issue view --json ...` result payload shape. `number` must
+/// match whatever `number: u64` the test's own `build_refinery_packet` call
+/// uses — `validate_gh_issue_result` (R4-1, build-seat REQUEST-CHANGES) now
+/// checks it. `comments` is a list of `(id, author_login, created_at,
+/// updated_at, body)` tuples — `updated_at` is `None` when a fixture wants
+/// to exercise the `updatedAt`-absent fallback-to-`createdAt` path (F5).
 #[allow(clippy::type_complexity)]
 pub(crate) fn gh_issue_json(
+    number: u64,
     title: &str,
     body: &str,
     state: &str,
@@ -162,6 +188,7 @@ pub(crate) fn gh_issue_json(
     comments: &[(&str, &str, &str, Option<&str>, &str)],
 ) -> serde_json::Value {
     serde_json::json!({
+        "number": number,
         "title": title,
         "body": body,
         "state": state,

@@ -519,6 +519,28 @@ pub struct IssueDispositionProposalV1 {
     pub engine_receipt: Option<EngineReceiptV1>,
 }
 
+impl IssueDispositionProposalV1 {
+    /// SHA-256 over the canonical JSON of this ENTIRE proposal, excluding
+    /// `proposal_hash` itself (R4-4, build-seat REQUEST-CHANGES: the old
+    /// hash basis hand-picked 8 fields and silently missed
+    /// `evidence_refs`/`proposed_comment`/`grounding_status`/
+    /// `preview_only`/`engine_receipt` — a full-struct serialization can't
+    /// drift out of sync with the type's own field list the way a
+    /// hand-picked list can, because adding a new field to this struct
+    /// automatically becomes part of the hash basis with zero extra code).
+    /// Callers construct the proposal with a placeholder `proposal_hash`
+    /// (e.g. `String::new()`), call this once, then overwrite the field
+    /// with the result.
+    pub fn compute_proposal_hash(&self) -> Result<String, String> {
+        let mut value = serde_json::to_value(self)
+            .map_err(|e| format!("serialize proposal for hashing: {e}"))?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("proposal_hash");
+        }
+        canonical_json_sha256(&value)
+    }
+}
+
 // ─── §4.2/§5: anti-replay guard (types + check; apply itself is out of scope) ─
 
 /// The freshly recomputed grounding state a proposal is checked against.
@@ -546,6 +568,13 @@ pub enum StalenessReasonV1 {
         expected_blob_sha: String,
         actual_blob_sha: Option<String>,
     },
+    /// R4-2 (build-seat REQUEST-CHANGES): a proposal that never established
+    /// ANY repo-revision pin at all (empty `based_on_repo_revisions`) must
+    /// not vacuously "pass" replay on that axis — an empty axis means
+    /// nobody ever verified the repo's state, not that it's unchanged.
+    RepoRevisionUnavailable {
+        reason: String,
+    },
 }
 
 /// A stale issue snapshot hash, repo revision, or doc revision makes an
@@ -565,6 +594,13 @@ pub fn check_proposal_replay(
         });
     }
 
+    if proposal.based_on_repo_revisions.is_empty() {
+        reasons.push(StalenessReasonV1::RepoRevisionUnavailable {
+            reason: "proposal has no pinned repo revision at all — replay safety on the \
+                     repo-HEAD axis was never established, not confirmed unchanged"
+                .to_string(),
+        });
+    }
     for repo_rev in &proposal.based_on_repo_revisions {
         // Match by (repo, ref) — not repo alone — so a proposal pinned
         // against one ref can't be silently checked against a different
@@ -893,6 +929,43 @@ mod tests {
         assert!(err
             .iter()
             .any(|r| matches!(r, StalenessReasonV1::RepoRevisionChanged { .. })));
+    }
+
+    /// R4-2 (build-seat REQUEST-CHANGES): an empty `based_on_repo_revisions`
+    /// axis must not vacuously pass replay — it means the repo pin was
+    /// never established, not that it's confirmed unchanged.
+    #[test]
+    fn check_proposal_replay_rejects_a_proposal_with_no_repo_revision_pin_at_all() {
+        let mut proposal = sample_proposal();
+        proposal.based_on_repo_revisions = Vec::new();
+        let current = CurrentGroundStateV1 {
+            issue_snapshot_hash: proposal.based_on_issue_snapshot_hash.clone(),
+            repo_revisions: Vec::new(),
+            doc_revisions: proposal.based_on_doc_revisions.clone(),
+        };
+        let err = check_proposal_replay(&proposal, &current)
+            .expect_err("an empty repo-revision axis must never pass replay");
+        assert!(err
+            .iter()
+            .any(|r| matches!(r, StalenessReasonV1::RepoRevisionUnavailable { .. })));
+    }
+
+    /// R4-4 (build-seat REQUEST-CHANGES): the hash basis is the WHOLE
+    /// proposal struct (minus `proposal_hash` itself), so changing ANY
+    /// field — including ones the old hand-picked field list silently
+    /// missed, like `proposed_comment` — must change the hash.
+    #[test]
+    fn compute_proposal_hash_changes_when_proposed_comment_changes() {
+        let mut proposal = sample_proposal();
+        proposal.proposed_comment = Some("first comment".to_string());
+        let hash1 = proposal
+            .compute_proposal_hash()
+            .expect("compute_proposal_hash");
+        proposal.proposed_comment = Some("a completely different comment".to_string());
+        let hash2 = proposal
+            .compute_proposal_hash()
+            .expect("compute_proposal_hash");
+        assert_ne!(hash1, hash2);
     }
 
     fn sample_proposal() -> IssueDispositionProposalV1 {

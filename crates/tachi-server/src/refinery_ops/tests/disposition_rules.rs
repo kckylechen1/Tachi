@@ -309,6 +309,7 @@ fn relation_line_state_annotation_drives_close_superseded_through_the_real_pipel
                 Supersedes: owner/repo#7001 [closed_shipped]\n"
         .to_string();
     let gh_json = gh_issue_json(
+        8090,
         "Superseded-and-shipped fixture",
         &body,
         "OPEN",
@@ -334,6 +335,7 @@ fn relation_line_state_annotation_drives_dormant_through_the_real_pipeline() {
                 Supersedes: owner/repo#7002 [closed_unshipped]\n"
         .to_string();
     let gh_json = gh_issue_json(
+        8091,
         "Superseded-but-unshipped fixture",
         &body,
         "OPEN",
@@ -357,6 +359,7 @@ fn relation_line_state_annotation_drives_dormant_through_the_real_pipeline() {
 fn relation_line_without_state_annotation_is_unknown_and_is_a_classify_no_op() {
     let body = "This work is related to prior art.\n\nSupersedes: owner/repo#7003\n".to_string();
     let gh_json = gh_issue_json(
+        8092,
         "No-annotation fixture",
         &body,
         "OPEN",

@@ -24,6 +24,7 @@ fn exact_1002_anchor_resolves_snapshot_and_linked_spec() {
          Spec-Ref: kckylechen1/tachi:{ISSUE_1002_DOC_PATH}@{ISSUE_1002_COMMIT_SHA}/{ISSUE_1002_BLOB_SHA}#3\n"
     );
     let gh_json = gh_issue_json(
+        1002,
         "Issue Refinery v1",
         &body,
         "OPEN",
@@ -76,6 +77,7 @@ fn missing_anchor_degrades_grounding_and_forces_decision_required() {
         spec_ref_line("owner/repo")
     );
     let gh_json = gh_issue_json(
+        9001,
         "Dangling spec pin",
         &body,
         "OPEN",
@@ -123,6 +125,7 @@ fn missing_anchor_wins_precedence_even_over_a_protected_router_label() {
         spec_ref_line("owner/repo")
     );
     let gh_json = gh_issue_json(
+        9002,
         "Router umbrella",
         &body,
         "OPEN",
@@ -145,6 +148,7 @@ fn coverage_accounts_for_every_byte_with_a_long_tail_paragraph_and_never_truncat
     let long_tail = "x".repeat(5_000);
     let body = format!("Short lead paragraph.\n\n{long_tail}\n\nTrailing paragraph.");
     let gh_json = gh_issue_json(
+        9003,
         "Long tail issue",
         &body,
         "OPEN",
@@ -188,6 +192,7 @@ fn coverage_accounts_for_every_byte_with_a_long_tail_paragraph_and_never_truncat
 fn coverage_zero_omission_for_a_single_paragraph_body() {
     let body = "One single paragraph with no blank lines at all.".to_string();
     let gh_json = gh_issue_json(
+        9004,
         "Single paragraph",
         &body,
         "OPEN",
@@ -221,6 +226,7 @@ fn coverage_includes_selected_comment_bytes_not_just_the_body() {
     let body = "Original issue body with no relations of its own.".to_string();
     let comment_body = "Additional context in a follow-up comment.\n\nRelated: owner/repo#9999\n";
     let gh_json = gh_issue_json(
+        9005,
         "Comment coverage fixture",
         &body,
         "OPEN",
@@ -275,21 +281,26 @@ fn coverage_includes_selected_comment_bytes_not_just_the_body() {
     );
 }
 
-// ─── F5 (build-seat REQUEST-CHANGES): comment snapshot hash basis ──────────
+// ─── F5/R4-5 (build-seat REQUEST-CHANGES): comment snapshot hash basis ─────
+//
+// codex verified `gh issue view --json comments` only ever exposes
+// `createdAt`, never `updatedAt` — canon doc's comment revision shape
+// `{comment_id, updated_at, body_hash}` load-bears on `body_hash` for edit
+// detection, not `updated_at` (`parse.rs` still prefers `updatedAt` over
+// `createdAt` when present — forward-looking, currently inert against the
+// real gh CLI — see its own doc comment). The real, always-available edit
+// signal is `body_hash`: same `comment_id`, different `body` text, must
+// still change the semantic snapshot hash.
 
-/// A comment whose TEXT is unchanged but whose `updatedAt` changed (a real
-/// edit that happens to preserve text, or any GH-side update timestamp
-/// bump) must still change the semantic snapshot hash — `createdAt` alone
-/// (immutable per-comment) can never detect this.
 #[test]
-fn comment_updated_at_change_with_identical_text_changes_the_snapshot_hash() {
-    let body = "Body with no relations of its own.".to_string();
-    let comment_body = "Comment text.\n\nRelated: owner/repo#8888\n";
+fn comment_body_change_with_same_comment_id_changes_the_snapshot_hash_via_body_hash() {
+    let base_body = "Body with no relations of its own.".to_string();
     let resolver = FixtureDocResolver::new();
 
     let gh_json_v1 = gh_issue_json(
+        9006,
         "Comment hash fixture",
-        &body,
+        &base_body,
         "OPEN",
         &[],
         None,
@@ -298,8 +309,8 @@ fn comment_updated_at_change_with_identical_text_changes_the_snapshot_hash() {
             "c1",
             "someone",
             "2026-07-13T00:00:00Z",
-            Some("2026-07-13T00:00:00Z"),
-            comment_body,
+            None,
+            "Original comment text.\n\nRelated: owner/repo#8888\n",
         )],
     );
     let (evidence_v1, _proposal_v1) =
@@ -307,7 +318,59 @@ fn comment_updated_at_change_with_identical_text_changes_the_snapshot_hash() {
             .expect("build_refinery_packet v1");
 
     let gh_json_v2 = gh_issue_json(
+        9006,
         "Comment hash fixture",
+        &base_body,
+        "OPEN",
+        &[],
+        None,
+        CAPTURED_AT,
+        &[(
+            "c1",
+            "someone",
+            "2026-07-13T00:00:00Z",
+            None,
+            "Edited comment text (same id, createdAt unchanged).\n\nRelated: owner/repo#8888\n",
+        )],
+    );
+    let (evidence_v2, _proposal_v2) =
+        build_refinery_packet("owner/repo", 9006, &gh_json_v2, &resolver, CAPTURED_AT)
+            .expect("build_refinery_packet v2");
+
+    assert_eq!(
+        evidence_v1.issue_snapshot.selected_comment_revisions[0].comment_id,
+        evidence_v2.issue_snapshot.selected_comment_revisions[0].comment_id,
+        "test setup: same comment id across v1/v2 (realistic edit-in-place)"
+    );
+    assert_eq!(
+        evidence_v1.issue_snapshot.selected_comment_revisions[0].updated_at,
+        evidence_v2.issue_snapshot.selected_comment_revisions[0].updated_at,
+        "test setup: createdAt (the only real timestamp gh exposes) is unchanged, \
+         mirroring the real gh CLI constraint"
+    );
+    assert_ne!(
+        evidence_v1.issue_snapshot.selected_comment_revisions[0].body_hash,
+        evidence_v2.issue_snapshot.selected_comment_revisions[0].body_hash,
+        "body_hash must differ when the comment text differs"
+    );
+    assert_ne!(
+        evidence_v1.issue_snapshot_hash, evidence_v2.issue_snapshot_hash,
+        "a comment body edit must change the semantic snapshot hash even when \
+         no usable updatedAt timestamp exists — body_hash is the real signal"
+    );
+}
+
+/// Forward-looking: when `updatedAt` IS present (a future gh CLI version,
+/// or a different source), the parser still prefers it over `createdAt` —
+/// this proves that logic still works, not that it's exercised by the real
+/// `gh` CLI today (see module doc note above).
+#[test]
+fn comment_updated_at_is_preferred_over_created_at_when_present() {
+    let body = "Body with no relations of its own.".to_string();
+    let comment_body = "Comment text.\n\nRelated: owner/repo#7777\n";
+    let gh_json = gh_issue_json(
+        9007,
+        "updatedAt preference fixture",
         &body,
         "OPEN",
         &[],
@@ -317,27 +380,17 @@ fn comment_updated_at_change_with_identical_text_changes_the_snapshot_hash() {
             "c1",
             "someone",
             "2026-07-13T00:00:00Z",
-            Some("2026-07-14T00:00:00Z"),
+            Some("2026-07-20T00:00:00Z"),
             comment_body,
         )],
     );
-    let (evidence_v2, _proposal_v2) =
-        build_refinery_packet("owner/repo", 9006, &gh_json_v2, &resolver, CAPTURED_AT)
-            .expect("build_refinery_packet v2");
-
+    let resolver = FixtureDocResolver::new();
+    let (evidence, _proposal) =
+        build_refinery_packet("owner/repo", 9007, &gh_json, &resolver, CAPTURED_AT)
+            .expect("build_refinery_packet");
     assert_eq!(
-        evidence_v1.issue_snapshot.selected_comment_revisions[0].body,
-        evidence_v2.issue_snapshot.selected_comment_revisions[0].body,
-        "test setup: comment text must be identical across v1/v2"
-    );
-    assert_ne!(
-        evidence_v1.issue_snapshot.selected_comment_revisions[0].updated_at,
-        evidence_v2.issue_snapshot.selected_comment_revisions[0].updated_at,
-        "the parser must prefer updatedAt over createdAt"
-    );
-    assert_ne!(
-        evidence_v1.issue_snapshot_hash, evidence_v2.issue_snapshot_hash,
-        "a comment updatedAt change with identical text must still change the \
-         semantic snapshot hash"
+        evidence.issue_snapshot.selected_comment_revisions[0].updated_at,
+        "2026-07-20T00:00:00Z",
+        "updatedAt must win over createdAt when both are present"
     );
 }
