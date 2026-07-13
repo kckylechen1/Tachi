@@ -20,6 +20,15 @@
 //! one line of history (that is where incremental builds come from) and drops
 //! forks into scratch, so a diverged tree can never write into the resident
 //! target's fingerprints.
+//!
+//! ## One seat per repo, and it only drains its own repo
+//!
+//! `--repo` is resolved to a repo *identity* (`build_broker::repo`, git's common
+//! dir → the main worktree root) before anything else happens. That identity
+//! keys the seat root AND filters the queue, so `build run --repo A` can never
+//! pick up a ticket submitted for repo B and check B's sha out inside A's
+//! checkout. Every linked worktree of one repo resolves to the same identity, so
+//! they share the one seat rather than each spawning their own.
 
 use std::path::{Path, PathBuf};
 
@@ -28,9 +37,10 @@ use tachi_bootstrap::cli::BuildAction;
 
 use crate::build_broker::{
     self,
+    repo::repo_identity,
     runner::ProcessBuildRunner,
     target::GitLineage,
-    ticket::{BuildCommand, BuildTicket, SourceIdentity},
+    ticket::{BuildCommand, BuildTicket, CancelOutcome, SourceIdentity},
     ExecutorSeat,
 };
 
@@ -52,17 +62,21 @@ fn run_build_command_sync(action: BuildAction) -> Result<(), String> {
             command,
             json,
         } => {
-            let repo_root = canonical(&repo)?;
-            let head_sha = resolve_commit(&repo_root, &head)?;
+            // The ticket carries the repo IDENTITY, not the path the caller
+            // typed: it is what the seat filters the queue on, and what the
+            // target-generation check compares repos with.
+            let repo_id = repo_identity(&repo)?;
+            let repo_path = PathBuf::from(&repo_id);
+            let head_sha = resolve_commit(&repo_path, &head)?;
             let base_sha = match &base {
-                Some(base) => resolve_commit(&repo_root, base)?,
+                Some(base) => resolve_commit(&repo_path, base)?,
                 None => head_sha.clone(),
             };
             let command = parse_command(command);
             let ticket = BuildTicket::new(
                 ticket_id.unwrap_or_else(|| format!("bt-{}", uuid::Uuid::new_v4().simple())),
                 SourceIdentity {
-                    repo_root: repo_root.display().to_string(),
+                    repo_root: repo_id.clone(),
                     base_sha,
                     head_sha,
                 },
@@ -72,6 +86,7 @@ fn run_build_command_sync(action: BuildAction) -> Result<(), String> {
             )?;
             let store = open_global_store()?;
             build_broker::ticket::submit_ticket(&store, &ticket)?;
+            let queued = build_broker::pending_tickets(&store, Some(&repo_id))?.len();
 
             if json {
                 println!(
@@ -79,63 +94,78 @@ fn run_build_command_sync(action: BuildAction) -> Result<(), String> {
                     serde_json::json!({
                         "action": "build.submit",
                         "ticket_id": ticket.ticket_id,
+                        "repo": repo_id,
                         "head_sha": ticket.source.head_sha,
-                        "queued": build_broker::pending_tickets(&store)?.len(),
+                        "queued": queued,
                     })
                 );
             } else {
                 println!("submitted build ticket {}", ticket.ticket_id);
+                println!("  repo:    {repo_id}");
                 println!("  source:  {}", ticket.source.head_sha);
                 println!(
                     "  command: {} {}",
                     ticket.command.program,
                     ticket.command.args.join(" ")
                 );
-                println!(
-                    "  queued:  {} ticket(s) pending",
-                    build_broker::pending_tickets(&store)?.len()
-                );
+                println!("  queued:  {queued} ticket(s) pending for this repo");
             }
             Ok(())
         }
 
         BuildAction::Run { repo, max, json } => {
-            let repo_root = canonical(&repo)?;
-            let seat = resolve_seat(&repo_root)?;
-            ensure_seat_checkout(&repo_root, &seat)?;
+            let repo_id = repo_identity(&repo)?;
+            let repo_path = PathBuf::from(&repo_id);
+            let seat = resolve_seat(&repo_id)?;
+            ensure_seat_checkout(&repo_path, &seat)?;
             let mut store = open_global_store()?;
             let runner = ProcessBuildRunner;
             let lineage = GitLineage;
 
             let limit = max.unwrap_or(usize::MAX);
             let mut receipts = Vec::new();
+            let mut failures = Vec::new();
+            let mut slot_busy = false;
             for _ in 0..limit {
-                match build_broker::run_next(&mut store, &seat, &runner, &lineage)? {
+                let step = build_broker::run_next(&mut store, &seat, &repo_id, &runner, &lineage)?;
+                failures.extend(step.failures);
+                slot_busy = step.slot_busy;
+                match step.receipt {
                     Some(receipt) => receipts.push(receipt),
                     None => break,
                 }
             }
+            let pending = build_broker::pending_tickets(&store, Some(&repo_id))?.len();
+            let dead_letters = build_broker::ticket::terminal_tickets(&store, Some(&repo_id))?;
 
             if json {
                 println!(
                     "{}",
                     serde_json::to_string(&serde_json::json!({
                         "action": "build.run",
+                        "repo": repo_id,
                         "ran": receipts.len(),
                         "receipts": receipts,
-                        "pending": build_broker::pending_tickets(&store)?.len(),
+                        "failed_attempts": failures,
+                        "slot_busy": slot_busy,
+                        "pending": pending,
+                        "dead_letters": dead_letters
+                            .iter()
+                            .map(|(t, _)| &t.ticket_id)
+                            .collect::<Vec<_>>(),
                     }))
                     .map_err(|e| e.to_string())?
                 );
-            } else if receipts.is_empty() {
-                match build_broker::slot::current_holder(&store)? {
-                    Some(holder) => println!(
-                        "nothing ran: the executor slot is held by ticket {} (pid {})",
-                        holder.ticket_id, holder.pid
-                    ),
-                    None => println!("nothing to build (queue empty)"),
-                }
             } else {
+                if receipts.is_empty() && failures.is_empty() {
+                    match build_broker::slot::current_holder(&store)? {
+                        Some(holder) => println!(
+                            "nothing ran: the executor slot is held by ticket {} (pid {})",
+                            holder.ticket_id, holder.pid
+                        ),
+                        None => println!("nothing to build (no runnable tickets for this repo)"),
+                    }
+                }
                 for receipt in &receipts {
                     println!(
                         "{}: {:?} (exit {:?}) on {} target {}{}",
@@ -155,16 +185,33 @@ fn run_build_command_sync(action: BuildAction) -> Result<(), String> {
                         println!("     the next build must clear it before reuse");
                     }
                 }
+                // The tickets this drain stepped OVER. Silence here is how a
+                // dead letter goes unnoticed.
+                for failure in &failures {
+                    let verdict = if failure.state.is_terminal() {
+                        "DEAD-LETTERED (terminal; it will never be picked up again)"
+                    } else {
+                        "failed (will retry)"
+                    };
+                    println!(
+                        "{}: {verdict} after {} attempt(s): {}",
+                        failure.ticket_id,
+                        failure.attempts,
+                        failure.last_error.as_deref().unwrap_or("unknown error")
+                    );
+                }
+                println!("pending: {pending} ticket(s) for this repo");
             }
             Ok(())
         }
 
         BuildAction::Status { repo, json } => {
-            let repo_root = canonical(&repo)?;
-            let seat = resolve_seat(&repo_root)?;
+            let repo_id = repo_identity(&repo)?;
+            let seat = resolve_seat(&repo_id)?;
             let store = open_global_store()?;
             let holder = build_broker::slot::current_holder(&store)?;
-            let pending = build_broker::pending_tickets(&store)?;
+            let pending = build_broker::pending_tickets(&store, Some(&repo_id))?;
+            let dead_letters = build_broker::ticket::terminal_tickets(&store, Some(&repo_id))?;
             let resident = build_broker::target::read_generation(
                 &store,
                 &seat.resident_target.display().to_string(),
@@ -179,6 +226,7 @@ fn run_build_command_sync(action: BuildAction) -> Result<(), String> {
                     "{}",
                     serde_json::to_string(&serde_json::json!({
                         "action": "build.status",
+                        "repo": repo_id,
                         "seat": {
                             "checkout": seat.checkout.display().to_string(),
                             "resident_target": seat.resident_target.display().to_string(),
@@ -186,12 +234,22 @@ fn run_build_command_sync(action: BuildAction) -> Result<(), String> {
                         },
                         "holder": holder,
                         "pending": pending.iter().map(|t| &t.ticket_id).collect::<Vec<_>>(),
+                        "dead_letters": dead_letters
+                            .iter()
+                            .map(|(t, s)| serde_json::json!({
+                                "ticket_id": t.ticket_id,
+                                "state": s.state.as_str(),
+                                "attempts": s.attempts,
+                                "last_error": s.last_error,
+                            }))
+                            .collect::<Vec<_>>(),
                         "resident_generation": resident,
                         "scratch_generation": scratch,
                     }))
                     .map_err(|e| e.to_string())?
                 );
             } else {
+                println!("repo: {repo_id}");
                 match &holder {
                     Some(h) => println!(
                         "executor slot: HELD by {} (pid {}, since {})",
@@ -203,8 +261,60 @@ fn run_build_command_sync(action: BuildAction) -> Result<(), String> {
                 for t in &pending {
                     println!("  {} -> {}", t.ticket_id, t.source.head_sha);
                 }
+                if !dead_letters.is_empty() {
+                    println!("dead letters: {} ticket(s)", dead_letters.len());
+                    for (t, status) in &dead_letters {
+                        println!(
+                            "  {} [{}] after {} attempt(s): {}",
+                            t.ticket_id,
+                            status.state.as_str(),
+                            status.attempts,
+                            status.last_error.as_deref().unwrap_or("—")
+                        );
+                    }
+                }
                 print_generation("resident", &seat.resident_target, resident.as_ref());
                 print_generation("scratch", &seat.scratch_target, scratch.as_ref());
+            }
+            Ok(())
+        }
+
+        BuildAction::Cancel {
+            ticket_id,
+            reason,
+            json,
+        } => {
+            let store = open_global_store()?;
+            let outcome = build_broker::cancel_queued_ticket(&store, &ticket_id, &reason)?;
+            let (cancelled, message) = match &outcome {
+                CancelOutcome::Cancelled => (
+                    true,
+                    format!("build ticket {ticket_id} cancelled: it will never be picked up"),
+                ),
+                CancelOutcome::AlreadyTerminal { state } => (
+                    false,
+                    format!(
+                        "build ticket {ticket_id} was already terminal ({}); nothing to do",
+                        state.as_str()
+                    ),
+                ),
+                CancelOutcome::NotFound => (
+                    false,
+                    format!("no build ticket '{ticket_id}' on this machine"),
+                ),
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "action": "build.cancel",
+                        "ticket_id": ticket_id,
+                        "cancelled": cancelled,
+                        "message": message,
+                    })
+                );
+            } else {
+                println!("{message}");
             }
             Ok(())
         }
@@ -287,7 +397,12 @@ fn open_global_store() -> Result<MemoryStore, String> {
 }
 
 /// Where this machine's executor seat lives for a given repo.
-fn resolve_seat(repo_root: &Path) -> Result<ExecutorSeat, String> {
+///
+/// Keyed by the repo *identity* (not the caller's path), so every linked
+/// worktree of one repo resolves to the same seat — one checkout, one resident
+/// target, one scratch target per repo, which is the whole premise.
+fn resolve_seat(repo_identity: &str) -> Result<ExecutorSeat, String> {
+    let repo_root = Path::new(repo_identity);
     let root = match std::env::var_os("TACHI_BUILD_SEAT_ROOT") {
         Some(raw) if !raw.is_empty() => {
             let path = PathBuf::from(raw);
@@ -347,11 +462,6 @@ fn ensure_seat_checkout(repo_root: &Path, seat: &ExecutorSeat) -> Result<(), Str
         ));
     }
     Ok(())
-}
-
-fn canonical(path: &Path) -> Result<PathBuf, String> {
-    path.canonicalize()
-        .map_err(|e| format!("resolve {}: {e}", path.display()))
 }
 
 /// Resolve a ref to its commit object id. The ticket only ever carries object
@@ -420,7 +530,7 @@ mod tests {
     #[test]
     fn the_seat_root_must_be_absolute() {
         std::env::set_var("TACHI_BUILD_SEAT_ROOT", "relative/seat");
-        let err = resolve_seat(Path::new("/repo")).unwrap_err();
+        let err = resolve_seat("/repo").unwrap_err();
         std::env::remove_var("TACHI_BUILD_SEAT_ROOT");
         assert!(err.contains("absolute"), "got: {err}");
     }

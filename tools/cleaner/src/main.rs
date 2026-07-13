@@ -263,6 +263,18 @@ fn run_wt_remove(args: Vec<String>) -> Result<(), String> {
 }
 
 fn run_wt_open(args: Vec<String>) -> Result<(), String> {
+    match parse_wt_open(args)? {
+        // `--help` printed the usage; there is nothing to open.
+        None => Ok(()),
+        Some(options) => wt_open::run_wt_open(options),
+    }
+}
+
+/// Parse `wt-open` flags into the primitive's options. Split out from
+/// [`run_wt_open`] so the *defaults* — above all the cargo-target policy, which
+/// decides whether this tree gets wired to the machine-shared target dir — are
+/// testable without opening a worktree.
+fn parse_wt_open(args: Vec<String>) -> Result<Option<OpenOptions>, String> {
     let mut dry_run = false;
     let mut json = false;
     let mut repo_root: Option<PathBuf> = None;
@@ -273,7 +285,14 @@ fn run_wt_open(args: Vec<String>) -> Result<(), String> {
     let mut role: Option<String> = None;
     let mut dispatch_id: Option<String> = None;
     let mut name: Option<String> = None;
-    let mut cargo_target = CargoTargetPolicy::Shared;
+    // #894 S2c round-2: the DEFAULT is NO target dir wired to the tree — the
+    // same `edit-only` shape the daemon path defaults to. Round-1 left this
+    // binary defaulting to `Shared`, which meant the claim "only build-private
+    // gets a .cargo/config.toml now" was true of `tachi clean wt-open` and false
+    // of `tachi-clean wt-open`: the poison vector (N diverged worktrees, one
+    // shared CARGO_TARGET_DIR) was still one binary away. Wiring the shared
+    // target is now something you have to ASK for, by name.
+    let mut cargo_target = CargoTargetPolicy::Unallocated;
     let mut iter = args.into_iter();
 
     while let Some(arg) = iter.next() {
@@ -329,11 +348,15 @@ fn run_wt_open(args: Vec<String>) -> Result<(), String> {
                 );
             }
             // #894 S2c: the standalone cleaner has no lease/resource ledger, so
-            // it cannot own a class — it offers the raw target-dir policy
-            // instead. Default is the machine-shared target (pre-S2c behavior,
-            // unchanged for this binary); `--no-cargo-target` is the edit-only
-            // shape the daemon path (`tachi clean wt-open`) now defaults to.
+            // it cannot own an env class — it offers the raw target-dir policy
+            // instead. `--no-cargo-target` is the (now default) edit-only shape
+            // and is kept as an explicit no-op for callers that already pass it.
             "--no-cargo-target" => cargo_target = CargoTargetPolicy::Unallocated,
+            // Opt back in to the pre-S2c behavior. The one caller that genuinely
+            // wants it is the executor seat itself — a single checkout that owns
+            // its target dir, which is safe precisely because it is not one of N
+            // diverged trees.
+            "--shared-cargo-target" => cargo_target = CargoTargetPolicy::Shared,
             "--private-cargo-target" => {
                 cargo_target = CargoTargetPolicy::Private(PathBuf::from(
                     iter.next()
@@ -342,14 +365,14 @@ fn run_wt_open(args: Vec<String>) -> Result<(), String> {
             }
             "-h" | "--help" => {
                 print_wt_open_help();
-                return Ok(());
+                return Ok(None);
             }
             _ if arg.starts_with('-') => return Err(format!("unknown option '{arg}'")),
             _ => return Err(format!("unexpected argument '{arg}'")),
         }
     }
 
-    wt_open::run_wt_open(OpenOptions {
+    Ok(Some(OpenOptions {
         repo_root: repo_root.ok_or_else(|| "wt-open requires --repo".to_string())?,
         path,
         branch,
@@ -365,7 +388,7 @@ fn run_wt_open(args: Vec<String>) -> Result<(), String> {
         } else {
             OutputFormat::Text
         },
-    })
+    }))
 }
 
 fn run_wt_list(args: Vec<String>) -> Result<(), String> {
@@ -416,7 +439,7 @@ fn print_help() {
 
 fn print_wt_open_help() {
     println!(
-        "Open a Tachi-managed git worktree outside Desktop/repo (#484).\n\nUsage:\n  tachi-clean wt-open --repo <repo-root> [--branch <name>] [--base <ref>] [--task <id>] [--role <name>] [--name <leaf>] [--path <path>] [--dispatch-id <id>] [--no-cargo-target|--private-cargo-target <dir>] [--dry-run] [--json]\n\nDefault path: $TACHI_WORKTREES_ROOT/<repo-slug>/<task>-<role>-<id>\n  or ~/.cache/tachi/worktrees/<repo-slug>/...\nRefuses Desktop, iCloud, and paths inside the primary repo.\n\nCargo target (#894 S2c):\n  default                      shared CARGO_TARGET_DIR (.cargo/config.toml)\n  --no-cargo-target            no target dir wired to the tree (edit-only shape)\n  --private-cargo-target <dir> a private target dir for this tree\n"
+        "Open a Tachi-managed git worktree outside Desktop/repo (#484).\n\nUsage:\n  tachi-clean wt-open --repo <repo-root> [--branch <name>] [--base <ref>] [--task <id>] [--role <name>] [--name <leaf>] [--path <path>] [--dispatch-id <id>] [--shared-cargo-target|--private-cargo-target <dir>] [--dry-run] [--json]\n\nDefault path: $TACHI_WORKTREES_ROOT/<repo-slug>/<task>-<role>-<id>\n  or ~/.cache/tachi/worktrees/<repo-slug>/...\nRefuses Desktop, iCloud, and paths inside the primary repo.\n\nCargo target (#894 S2c):\n  default (--no-cargo-target)  NO target dir wired to the tree; build through the\n                               broker (tachi build submit) instead of in-tree.\n                               N diverged worktrees driving one shared target dir\n                               is what manufactured phantom compile errors.\n  --shared-cargo-target        opt back in to the machine-shared CARGO_TARGET_DIR\n                               (.cargo/config.toml). Safe for a single fixed\n                               checkout (the executor seat), not for N trees.\n  --private-cargo-target <dir> a private target dir for this tree\n"
     );
 }
 
@@ -454,4 +477,53 @@ fn print_wt_remove_help() {
     println!(
         "Remove a Tachi-managed git worktree safely.\n\nUsage:\n  tachi-clean wt-remove <path> [--dry-run|--force] [--json]\n\nOptions:\n  --dry-run  Preview only (default)\n  --force    Actually remove after safety checks\n  --json     Print machine-readable JSON\n"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(args: &[&str]) -> OpenOptions {
+        parse_wt_open(args.iter().map(|s| s.to_string()).collect())
+            .expect("parses")
+            .expect("not --help")
+    }
+
+    /// #894 S2c round-2. The S2c commit body claimed "pre-S2c every tree got a
+    /// `.cargo/config.toml` → shared target; now only build-private gets a
+    /// config". That was true of the daemon path (`tachi clean wt-open`) and
+    /// FALSE of this binary, which still defaulted to `Shared` — so the poison
+    /// vector (N diverged worktrees, one shared CARGO_TARGET_DIR) survived one
+    /// `tachi-clean wt-open` away. This pins the claim: no target dir is wired to
+    /// a tree unless the caller asks for one BY NAME.
+    #[test]
+    fn wt_open_wires_no_cargo_target_by_default() {
+        assert_eq!(
+            opts(&["--repo", "/tmp/repo"]).cargo_target,
+            CargoTargetPolicy::Unallocated,
+            "the standalone cleaner must not wire a fresh worktree to the machine-shared cargo \
+             target dir by default (#894 S2c)"
+        );
+        // …and the explicit flags still work, including the seat's opt-in.
+        assert_eq!(
+            opts(&["--repo", "/tmp/repo", "--no-cargo-target"]).cargo_target,
+            CargoTargetPolicy::Unallocated
+        );
+        assert_eq!(
+            opts(&["--repo", "/tmp/repo", "--shared-cargo-target"]).cargo_target,
+            CargoTargetPolicy::Shared,
+            "the shared target must remain reachable — the executor seat's one fixed checkout is \
+             a legitimate owner of it"
+        );
+        assert_eq!(
+            opts(&["--repo", "/tmp/repo", "--private-cargo-target", "/t/p"]).cargo_target,
+            CargoTargetPolicy::Private(PathBuf::from("/t/p"))
+        );
+    }
+
+    #[test]
+    fn wt_open_requires_a_repo() {
+        let err = parse_wt_open(vec!["--json".to_string()]).unwrap_err();
+        assert!(err.contains("--repo"), "got: {err}");
+    }
 }

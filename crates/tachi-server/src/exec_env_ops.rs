@@ -12,11 +12,27 @@
 //! Provisioning takes an [`EnvClass`] and that class decides exactly one thing:
 //! **which physical resources get allocated and bound to the lease.**
 //!
-//! | class | worktree | build target |
+//! | class | worktree | build target bound to the lease |
 //! |---|---|---|
 //! | `edit-only` (default) | yes | **none** |
-//! | `build-ticketed` | yes | binds (refcounted) the executor seat's resident target |
-//! | `build-private` | yes | a private target dir — approval + reservation required |
+//! | `build-ticketed` | yes | **none** — the seat owns the target it builds in |
+//! | `build-private` | yes | a private target dir — approval + reservation required, both booked |
+//!
+//! ### Why `build-ticketed` binds no target (round-2 fix)
+//!
+//! It reads like it should: the lease causes builds, so book the target. But the
+//! dir those builds run in is the *executor seat's*, and which one — the resident
+//! target or the fork scratch target — is decided per ticket, at run time, by
+//! `build_broker::target::plan_target` from the ticket's lineage. Provisioning
+//! cannot know. Round-1 bound the lease to a dir resolved from
+//! `default_shared_cargo_target_dir()`, and the only production call site passed
+//! `resident_target_dir: None`, so every ticketed lease ended up refcounting a
+//! path **the broker never touches**: the ledger said the lease held a target,
+//! while the seat built somewhere else entirely.
+//!
+//! The broker books the target it actually uses (registers the row, records it
+//! on the executor slot, stamps its generation, quarantines it on an interrupt).
+//! That is the accounting — one writer, on the dir that really got written.
 //!
 //! `edit-only` is a **disk and routing** policy, not a sandbox. Nothing here
 //! stops a worker with a shell and the same UID from running `cargo` in an
@@ -42,18 +58,63 @@ use memcore::{
     EnvClass, ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, NewExecEnvResource,
     ReclaimOutcome, ResourceKind, ResourceState,
 };
+use serde::{Deserialize, Serialize};
 use tachi_clean::wt_clean::OutputFormat;
 use tachi_clean::wt_open::{open_worktree, CargoTargetPolicy, OpenOptions, OpenReport};
 
 use crate::server_state::MemoryServer;
 
+/// `hard_state` namespace for booked private-target reservations; key = env_id.
+pub(crate) const PRIVATE_RESERVATION_NS: &str = "exec_env_private_target";
+
 /// Explicit approval for a `build-private` env: who signed off, and how much
 /// disk was reserved for the private target dir. Provisioning refuses the class
 /// without one (#894 S2c: "rare; explicit approval + disk reservation").
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PrivateTargetApproval {
     pub approved_by: String,
     pub reserved_bytes: i64,
+}
+
+/// A reservation as it stands **in the ledger** — i.e. the part that survives
+/// the call (#894 S2c round-2).
+///
+/// Round-1 read `PrivateTargetApproval` once, in the validator, and threw it
+/// away: nothing was ever written, so "reserved 40 GB" was a sentence in a CLI
+/// flag and nothing else. Two things record it now, and they answer different
+/// questions:
+///
+/// - the **resource row's `bytes`** is seeded with `reserved_bytes`, so every
+///   consumer of the ledger's byte column counts a reserved target from the
+///   moment it is approved — not from the first time somebody measures it. A
+///   reservation that only shows up once you have already spent the disk is not
+///   a reservation.
+/// - this row keeps the **provenance**: who approved it, how much, for which
+///   dir. `bytes` gets overwritten by the next real measurement; the approval
+///   must not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PrivateTargetReservation {
+    pub env_id: String,
+    pub approved_by: String,
+    pub reserved_bytes: i64,
+    pub target_path: String,
+    pub resource_id: String,
+    pub approved_at: String,
+}
+
+/// Read the booked reservation for a lease, if it has one.
+pub(crate) fn private_target_reservation(
+    conn: &rusqlite::Connection,
+    env_id: &str,
+) -> Result<Option<PrivateTargetReservation>, String> {
+    let row = memcore::db::get_state(conn, PRIVATE_RESERVATION_NS, env_id)
+        .map_err(|e| format!("read private target reservation for {env_id}: {e}"))?;
+    match row {
+        None => Ok(None),
+        Some((json, _version)) => serde_json::from_str(&json)
+            .map(Some)
+            .map_err(|e| format!("decode private target reservation for {env_id}: {e}")),
+    }
 }
 
 /// Options for provisioning a managed execution environment. Mirrors
@@ -78,24 +139,21 @@ pub(crate) struct ProvisionEnvOptions {
     /// Explicit private target dir for `BuildPrivate`. Defaults to
     /// `<worktree>/target` (cargo's own default) when omitted.
     pub private_target_dir: Option<PathBuf>,
-    /// The executor seat's resident target dir — what a `BuildTicketed` env
-    /// binds to (refcounted; it is shared by every ticketed lease on this
-    /// machine). `None` falls back to
-    /// `tachi_clean::wt_open::default_shared_cargo_target_dir()`.
-    pub resident_target_dir: Option<PathBuf>,
     pub dry_run: bool,
 }
 
 impl ProvisionEnvOptions {
-    /// The build target dir this class allocates, if any. `EditOnly` → `None`;
-    /// that is the entire disk story of the default class.
+    /// The build target dir this lease allocates **for itself**, if any.
+    ///
+    /// `BuildPrivate` is the only class that resolves one. `EditOnly` gets none
+    /// (the entire disk story of the default class) and `BuildTicketed` gets
+    /// none either: its builds run in the executor seat's target, which the seat
+    /// picks per ticket and books itself. Handing a ticketed lease a target dir
+    /// here — as round-1 did, defaulting to the machine-shared
+    /// `CARGO_TARGET_DIR` — books a path the broker never builds in.
     pub(crate) fn build_target_dir(&self, worktree_path: &str) -> Result<Option<PathBuf>, String> {
         match self.env_class {
-            EnvClass::EditOnly => Ok(None),
-            EnvClass::BuildTicketed => match &self.resident_target_dir {
-                Some(dir) => Ok(Some(dir.clone())),
-                None => tachi_clean::wt_open::default_shared_cargo_target_dir().map(Some),
-            },
+            EnvClass::EditOnly | EnvClass::BuildTicketed => Ok(None),
             EnvClass::BuildPrivate => Ok(Some(match &self.private_target_dir {
                 Some(dir) => dir.clone(),
                 None => PathBuf::from(worktree_path).join("target"),
@@ -108,11 +166,9 @@ impl ProvisionEnvOptions {
     ///
     /// Note that `BuildTicketed` writes **no** config either: a ticketed env
     /// does not build in its own tree — it submits a ticket and the executor
-    /// seat builds, in the seat's own checkout, against the seat's target. The
-    /// lease still *binds* the resident target (refcount, so it cannot be
-    /// reclaimed out from under an outstanding ticket), but wiring the tree's
-    /// cargo at that same shared dir is precisely the cross-tree poisoning we
-    /// are removing.
+    /// seat builds, in the seat's own checkout, against the seat's target.
+    /// Wiring the tree's cargo at a shared dir is precisely the cross-tree
+    /// poisoning we are removing.
     fn cargo_target_policy(&self, worktree_path: &str) -> Result<CargoTargetPolicy, String> {
         match self.env_class {
             EnvClass::EditOnly | EnvClass::BuildTicketed => Ok(CargoTargetPolicy::Unallocated),
@@ -376,6 +432,7 @@ pub(crate) fn provision_managed_env(
                 opts.env_class,
                 &report.path,
                 build_target.as_deref(),
+                opts.private_target_approval.as_ref(),
             ) {
                 // Non-fatal, but loudly non-silent: the lease exists and the
                 // worktree exists; what's missing is the bytes ledger row, which
@@ -405,24 +462,31 @@ pub(crate) fn provision_managed_env(
 }
 
 /// Register the physical resources a lease owns and bind them to it (#894 S2a
-/// ledger + S2c class policy).
+/// ledger + S2c class policy), booking a `build-private` reservation on the way.
 ///
 /// The class invariant is enforced HERE, not just at the caller: an `EditOnly`
-/// env with a build target is rejected outright rather than quietly bound. A
-/// caller that computes the target dir wrong cannot talk this function into
-/// allocating one — which is what makes the "edit-only allocates no build
-/// target" contract hold at the seam instead of by convention up the stack.
+/// (or `BuildTicketed`) env with a build target is rejected outright rather than
+/// quietly bound. A caller that computes the target dir wrong cannot talk this
+/// function into allocating one — which is what makes "only `build-private` owns
+/// a build target" hold at the seam instead of by convention up the stack.
+///
+/// `approval` is required exactly when the class allocates a private target, and
+/// it is **written down** (#894 S2c round-2): the target row's `bytes` is seeded
+/// with the reservation and a provenance row records who approved it. A
+/// reservation nobody records is not a reservation.
 pub(crate) fn register_env_resources(
     conn: &rusqlite::Connection,
     env_id: &str,
     class: EnvClass,
     worktree_path: &str,
     build_target: Option<&str>,
+    approval: Option<&PrivateTargetApproval>,
 ) -> Result<EnvResources, String> {
     if !class.allocates_build_target() && build_target.is_some() {
         return Err(format!(
-            "env_class '{}' allocates no build target, but a build target dir ('{}') was \
-             supplied — refusing to bind it (#894 S2c)",
+            "env_class '{}' allocates no build target of its own, but a build target dir ('{}') \
+             was supplied — refusing to bind it. A ticketed env's builds run in the executor \
+             seat's target, which the seat books itself (#894 S2c)",
             class.as_str(),
             build_target.unwrap_or_default()
         ));
@@ -430,6 +494,13 @@ pub(crate) fn register_env_resources(
     if class.allocates_build_target() && build_target.is_none() {
         return Err(format!(
             "env_class '{}' requires a build target dir, none was resolved (#894 S2c)",
+            class.as_str()
+        ));
+    }
+    if class.requires_approval() && approval.is_none() {
+        return Err(format!(
+            "env_class '{}' requires an approval (approved_by + reserved_bytes) and none reached \
+             the resource ledger: the reservation must be BOOKED, not just checked (#894 S2c)",
             class.as_str()
         ));
     }
@@ -441,10 +512,12 @@ pub(crate) fn register_env_resources(
         None => None,
         Some(path) => {
             let id = ensure_resource(conn, ResourceKind::BuildTarget, path)?;
-            // Many-to-many by design: the seat's resident target is bound by
-            // every ticketed lease at once, and refcount>0 keeps it from being
-            // reclaimed while any of them is still alive.
+            // Many-to-many by design: the binding table is a refcount, so a
+            // resource cannot be reclaimed while any live lease holds it.
             memcore::bind_resource(conn, env_id, &id).map_err(|e| e.to_string())?;
+            if let Some(approval) = approval {
+                book_private_reservation(conn, env_id, &id, path, approval)?;
+            }
             Some(id)
         }
     };
@@ -455,11 +528,42 @@ pub(crate) fn register_env_resources(
     })
 }
 
+/// Write the reservation down, in the two places that need it (#894 S2c
+/// round-2): the resource row's `bytes` (so disk accounting sees the reserved
+/// target immediately, before a single artifact is built) and a provenance row
+/// (so `bytes` being overwritten by the next real measurement does not erase who
+/// approved what).
+fn book_private_reservation(
+    conn: &rusqlite::Connection,
+    env_id: &str,
+    resource_id: &str,
+    target_path: &str,
+    approval: &PrivateTargetApproval,
+) -> Result<(), String> {
+    memcore::record_resource_measurement(conn, resource_id, approval.reserved_bytes, "")
+        .map_err(|e| format!("book reserved bytes for {target_path}: {e}"))?;
+
+    let reservation = PrivateTargetReservation {
+        env_id: env_id.to_string(),
+        approved_by: approval.approved_by.clone(),
+        reserved_bytes: approval.reserved_bytes,
+        target_path: target_path.to_string(),
+        resource_id: resource_id.to_string(),
+        approved_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let value =
+        serde_json::to_string(&reservation).map_err(|e| format!("serialize reservation: {e}"))?;
+    memcore::db::set_state(conn, PRIVATE_RESERVATION_NS, env_id, &value)
+        .map_err(|e| format!("record private target reservation for {env_id}: {e}"))?;
+    Ok(())
+}
+
 /// The resource ids bound to a freshly provisioned lease.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EnvResources {
     pub worktree_resource_id: String,
-    /// `None` for `edit-only` — the whole point of the default class.
+    /// `None` for every class except `build-private` — an edit-only env owns no
+    /// target, and a ticketed env's target belongs to the executor seat.
     pub build_target_resource_id: Option<String>,
 }
 
@@ -515,6 +619,23 @@ pub(crate) fn ensure_resource(
 /// mid-reclaim (`reclaiming`/`reclaim_failed`) or already reclaimed is not
 /// something to quietly build into — those bytes are being (or have been) freed
 /// under someone else's transaction.
+///
+/// ## Open dependency on S2a round-2 (`reclaimed` ⇒ re-registrable)
+///
+/// A seat target holds no lease binding (that is the round-2 fix: only the
+/// broker books it), so a *stale, unheld* seat target is legitimately
+/// reclaimable by the orphan reaper. When that happens the row goes `reclaimed`
+/// and lands in the `other` arm below: the seat is then wedged on that path
+/// until someone removes the row by hand. Reclaiming an idle target dir should
+/// only ever cost a cold rebuild, never a wedged seat.
+///
+/// The re-registration edge (`reclaimed` path → a fresh `active` row, "those
+/// bytes are gone, so this is a virgin dir again") is S2a round-2's to own —
+/// state transitions are single-writer inside memcore by design, and forging one
+/// from here would break exactly the invariant that makes the ledger
+/// trustworthy. When it lands, this arm takes `ResourceState::Reclaimed` and
+/// re-registers instead of erroring. Until then the failure is loud and manual,
+/// which is the right way round.
 pub(crate) fn ensure_resource_allow_quarantined(
     conn: &rusqlite::Connection,
     target_path: &str,
@@ -526,7 +647,8 @@ pub(crate) fn ensure_resource_allow_quarantined(
             ResourceState::Active | ResourceState::Quarantined => Ok(res.resource_id),
             other => Err(format!(
                 "build target '{target_path}' is '{}': a target that is being reclaimed (or \
-                 already has been) must not be built into (#894 S2a/S2c)",
+                 already has been) must not be built into. If it is 'reclaimed', those bytes are \
+                 gone and the dir needs re-registering (S2a round-2 owns that edge) (#894 S2a/S2c)",
                 other.as_str()
             )),
         },
@@ -751,8 +873,14 @@ mod tests {
             env_class,
             private_target_approval: approval,
             private_target_dir: None,
-            resident_target_dir: Some(PathBuf::from("/seat/target-resident")),
             dry_run: false,
+        }
+    }
+
+    fn approval(bytes: i64) -> PrivateTargetApproval {
+        PrivateTargetApproval {
+            approved_by: "owner".to_string(),
+            reserved_bytes: bytes,
         }
     }
 
@@ -792,8 +920,9 @@ mod tests {
             "edit-only must resolve no build target dir"
         );
 
-        let bound = register_env_resources(conn, "env-edit", EnvClass::EditOnly, "/wt/edit", None)
-            .expect("register");
+        let bound =
+            register_env_resources(conn, "env-edit", EnvClass::EditOnly, "/wt/edit", None, None)
+                .expect("register");
 
         assert!(
             bound.build_target_resource_id.is_none(),
@@ -824,6 +953,7 @@ mod tests {
             EnvClass::EditOnly,
             "/wt/edit",
             Some("/seat/target-resident"),
+            None,
         )
         .unwrap_err();
         assert!(err.contains("allocates no build target"), "got: {err}");
@@ -835,58 +965,57 @@ mod tests {
         );
     }
 
-    /// A ticketed env binds the seat's resident target — and because the binding
-    /// table is many-to-many, N ticketed envs share ONE row with refcount N (so
-    /// the target cannot be reclaimed while any of them is alive).
+    /// ② (round-2) A `build-ticketed` env holds **no build target of its own**.
+    ///
+    /// Round-1 bound it to a "resident target" that, at the only production call
+    /// site (`resident_target_dir: None`), resolved to
+    /// `default_shared_cargo_target_dir()` — a path the broker never builds in.
+    /// The lease's ledger row and the seat's actual target were two different
+    /// dirs. This test fails if a ticketed lease ever books a build target again:
+    /// the dir a ticket lands on (resident vs fork scratch) is the seat's
+    /// run-time decision, and the seat books it.
     #[test]
-    fn build_ticketed_envs_share_one_refcounted_resident_target() {
-        let store = store_with_lease("env-a", EnvClass::BuildTicketed, "/wt/a");
+    fn build_ticketed_env_holds_no_build_target_of_its_own() {
+        let store = store_with_lease("env-t", EnvClass::BuildTicketed, "/wt/t");
         let conn = store.connection();
-        memcore::insert_exec_env(
-            conn,
-            &NewExecEnvLease {
-                env_id: "env-b".to_string(),
-                kind: "worktree".to_string(),
-                path: "/wt/b".to_string(),
-                repo_root: "/repo".to_string(),
-                branch: "b".to_string(),
-                base_sha: "abc1234".to_string(),
-                dispatch_id: None,
-                env_class: EnvClass::BuildTicketed,
-                created_at: String::new(),
-            },
-        )
-        .unwrap();
 
-        let a = register_env_resources(
-            conn,
-            "env-a",
-            EnvClass::BuildTicketed,
-            "/wt/a",
-            Some("/seat/target-resident"),
-        )
-        .unwrap();
-        let b = register_env_resources(
-            conn,
-            "env-b",
-            EnvClass::BuildTicketed,
-            "/wt/b",
-            Some("/seat/target-resident"),
-        )
-        .unwrap();
+        // Provisioning resolves NO target dir for the class...
+        let opts = provision_opts(EnvClass::BuildTicketed, None);
+        assert_eq!(
+            opts.build_target_dir("/wt/t").unwrap(),
+            None,
+            "a ticketed env must not resolve a build target dir at provisioning time — which \
+             target its tickets land on is decided per ticket by the broker"
+        );
+        assert!(!EnvClass::BuildTicketed.allocates_build_target());
 
-        let target_a = a.build_target_resource_id.expect("ticketed binds a target");
-        let target_b = b.build_target_resource_id.expect("ticketed binds a target");
-        assert_eq!(
-            target_a, target_b,
-            "one shared target dir must be ONE ledger row (two rows would split its refcount \
-             and let a live target be deleted)"
+        // ...and the lease binds none.
+        let bound =
+            register_env_resources(conn, "env-t", EnvClass::BuildTicketed, "/wt/t", None, None)
+                .expect("register");
+        assert!(
+            bound.build_target_resource_id.is_none(),
+            "a build-ticketed lease must not hold a build_target resource"
         );
-        assert_eq!(
-            memcore::active_binding_count(conn, &target_a).unwrap(),
-            2,
-            "refcount = live bindings"
+        assert!(
+            memcore::list_resources(conn, None, Some(ResourceKind::BuildTarget))
+                .unwrap()
+                .is_empty(),
+            "provisioning a ticketed env must not create a build_target row at all — the broker \
+             registers the target it actually builds in"
         );
+
+        // And the seam refuses one even if a caller hands it the seat's target.
+        let err = register_env_resources(
+            conn,
+            "env-t",
+            EnvClass::BuildTicketed,
+            "/wt/t",
+            Some("/seat/target-resident"),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("allocates no build target"), "got: {err}");
     }
 
     /// ⑤ `build-private` is the only class that can hand a lease its own
@@ -952,6 +1081,78 @@ mod tests {
         );
     }
 
+    /// ⑥ (round-2) An approved `build-private` reservation is **in the ledger**,
+    /// not just in a validator's local variable.
+    ///
+    /// Round-1 read `reserved_bytes` once in `validate_provision_request` and
+    /// dropped it on the floor — nothing was persisted, so "reserved 40 GB"
+    /// could not be answered by any query, and the disk accounting saw the
+    /// private target as 0 bytes until somebody happened to measure it. Delete
+    /// either write in `book_private_reservation` and this reds.
+    #[test]
+    fn an_approved_private_target_reservation_is_booked_in_the_ledger() {
+        const RESERVED: i64 = 40_000_000_000;
+        let store = store_with_lease("env-p", EnvClass::BuildPrivate, "/wt/p");
+        let conn = store.connection();
+
+        let bound = register_env_resources(
+            conn,
+            "env-p",
+            EnvClass::BuildPrivate,
+            "/wt/p",
+            Some("/wt/p/target"),
+            Some(&approval(RESERVED)),
+        )
+        .expect("register");
+
+        let target_id = bound
+            .build_target_resource_id
+            .expect("build-private binds its private target");
+
+        // 1. The bytes are on the resource row, so disk accounting counts the
+        //    reservation from the moment it is approved.
+        let row = memcore::get_resource(conn, &target_id).unwrap().unwrap();
+        assert_eq!(
+            row.bytes,
+            Some(RESERVED),
+            "the reserved bytes must be booked on the target's ledger row — a reservation the \
+             ledger cannot see is not a reservation (#894 S2c round-2)"
+        );
+        assert_eq!(row.path, "/wt/p/target");
+
+        // 2. The provenance survives a later real measurement overwriting `bytes`.
+        memcore::record_resource_measurement(conn, &target_id, 12_345, "").unwrap();
+        let reservation = private_target_reservation(conn, "env-p")
+            .unwrap()
+            .expect("the approval is queryable");
+        assert_eq!(reservation.approved_by, "owner");
+        assert_eq!(reservation.reserved_bytes, RESERVED);
+        assert_eq!(reservation.target_path, "/wt/p/target");
+        assert_eq!(reservation.resource_id, target_id);
+        assert!(!reservation.approved_at.is_empty());
+    }
+
+    /// The seam refuses to allocate a private target with no approval in hand,
+    /// even if the caller already talked its way past `validate_provision_request`
+    /// — the booking and the check are the same gate.
+    #[test]
+    fn register_env_resources_refuses_build_private_without_an_approval_to_book() {
+        let store = store_with_lease("env-p", EnvClass::BuildPrivate, "/wt/p");
+        let err = register_env_resources(
+            store.connection(),
+            "env-p",
+            EnvClass::BuildPrivate,
+            "/wt/p",
+            Some("/wt/p/target"),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("must be BOOKED"), "got: {err}");
+        assert!(private_target_reservation(store.connection(), "env-p")
+            .unwrap()
+            .is_none());
+    }
+
     #[test]
     fn build_private_defaults_its_target_dir_under_the_worktree() {
         let opts = provision_opts(
@@ -989,10 +1190,10 @@ mod tests {
 
     #[test]
     fn a_quarantined_target_cannot_back_a_new_env() {
-        let store = store_with_lease("env-a", EnvClass::BuildTicketed, "/wt/a");
+        let store = store_with_lease("env-p", EnvClass::BuildPrivate, "/wt/p");
         let conn = store.connection();
-        let target_id = ensure_resource(conn, ResourceKind::BuildTarget, "/seat/target-resident")
-            .expect("register target");
+        let target_id =
+            ensure_resource(conn, ResourceKind::BuildTarget, "/wt/p/target").expect("register");
 
         // An interrupted cargo fenced this dir off.
         let mut store = store;
@@ -1000,15 +1201,23 @@ mod tests {
 
         let err = register_env_resources(
             store.connection(),
-            "env-a",
-            EnvClass::BuildTicketed,
-            "/wt/a",
-            Some("/seat/target-resident"),
+            "env-p",
+            EnvClass::BuildPrivate,
+            "/wt/p",
+            Some("/wt/p/target"),
+            Some(&approval(1_000)),
         )
         .unwrap_err();
         assert!(
             err.contains("quarantined") || err.contains("not 'active'"),
             "a poisoned target must not be handed to a fresh env; got: {err}"
+        );
+        // …and the refused call booked nothing.
+        assert!(
+            private_target_reservation(store.connection(), "env-p")
+                .unwrap()
+                .is_none(),
+            "a refused provision must not leave a reservation behind"
         );
     }
 }

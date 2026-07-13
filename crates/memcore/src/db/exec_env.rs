@@ -81,8 +81,11 @@ pub enum EnvClass {
     #[default]
     EditOnly,
     /// Normal verification path: this lease submits immutable build tickets to
-    /// the serialized executor seat and binds (refcounted) to the seat's
-    /// resident target. It still gets no target dir of its own.
+    /// the serialized executor seat. It owns **no** build target of its own —
+    /// and does not hold one of the seat's either. Which target dir a ticket
+    /// lands on (the seat's resident target, or its fork scratch target) is a
+    /// per-ticket decision the broker makes at run time; a lease-time binding
+    /// would be booking a resource the build may never touch.
     BuildTicketed,
     /// Rare: an explicitly approved private target dir with a disk
     /// reservation. Provisioning refuses this class without an approval.
@@ -113,11 +116,26 @@ impl EnvClass {
         }
     }
 
-    /// Whether provisioning allocates a `build_target` resource for this class.
-    /// `EditOnly` is the only class that gets none — that is the whole point of
-    /// it.
+    /// Whether provisioning allocates a `build_target` resource **to this
+    /// lease**. `BuildPrivate` is the only class that does.
+    ///
+    /// `BuildTicketed` is deliberately `false` (#894 S2c round-2). It looks like
+    /// it should be `true` — the lease does cause builds — but the target those
+    /// builds run in belongs to the *executor seat*, not to the lease:
+    ///
+    /// - the seat picks resident-vs-scratch per ticket, at run time, from the
+    ///   ticket's lineage; provisioning cannot know which dir a future ticket
+    ///   will land on, so any lease-time binding is a guess;
+    /// - the broker already books the target it actually touches (registering
+    ///   the row, recording it on the executor slot, stamping its generation),
+    ///   so a second, lease-side booking is a duplicate claim on a dir that
+    ///   nothing in the broker consults.
+    ///
+    /// The pre-round-2 code bound ticketed leases to a target dir resolved from
+    /// `default_shared_cargo_target_dir()` — a path the broker never builds in.
+    /// The ledger said the lease held a target; the seat used a different one.
     pub fn allocates_build_target(self) -> bool {
-        !matches!(self, EnvClass::EditOnly)
+        matches!(self, EnvClass::BuildPrivate)
     }
 
     /// Whether provisioning requires an explicit approval + disk reservation.
@@ -585,7 +603,10 @@ mod tests {
         insert_exec_env(&conn, &ticketed).unwrap();
         let got = get_exec_env(&conn, "env-c2").unwrap().unwrap();
         assert_eq!(got.env_class, EnvClass::BuildTicketed);
-        assert!(got.env_class.allocates_build_target());
+        // A ticketed lease owns NO build target (#894 S2c round-2): the dir its
+        // builds run in belongs to the executor seat and is chosen per ticket,
+        // so a lease-time binding would book a resource the build may not touch.
+        assert!(!got.env_class.allocates_build_target());
         assert!(!got.env_class.requires_approval());
 
         let mut private = new_lease("env-c3", "/wt/c3");

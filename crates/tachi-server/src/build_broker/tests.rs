@@ -15,14 +15,19 @@ use super::runner::{BuildOutcome, BuildRun, BuildRunner};
 use super::target::{
     plan_target, LineageOracle, TargetGeneration, TargetSlotKind, TargetSlotState,
 };
-use super::ticket::{submit_ticket, BuildCommand, BuildTicket, SourceIdentity};
+use super::ticket::{
+    submit_ticket, BuildCommand, BuildTicket, CancelOutcome, SourceIdentity, TicketState,
+    MAX_TICKET_ATTEMPTS,
+};
 use super::{
-    abandon_stale_slot, execute_ticket, load_receipt, pending_tickets, run_next, slot, ExecutorSeat,
+    abandon_stale_slot, cancel_queued_ticket, execute_ticket, load_receipt, pending_tickets,
+    run_next, slot, ExecutorSeat,
 };
 
 const MAIN_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DESCENDANT_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const FORK_SHA: &str = "cccccccccccccccccccccccccccccccccccccccc";
+const REPO: &str = "/repo";
 
 // ─── fakes ──────────────────────────────────────────────────────────────────
 
@@ -98,6 +103,57 @@ impl FakeRunner {
     }
 }
 
+/// A runner whose checkout step refuses one specific sha — the shape of every
+/// real reason a ticket can never run (a dirty seat, a sha git cannot resolve, a
+/// corrupt object). Everything else builds fine.
+struct RefusingRunner {
+    refuse_sha: String,
+    ran: Mutex<Vec<String>>,
+}
+
+impl RefusingRunner {
+    fn new(refuse_sha: &str) -> Self {
+        RefusingRunner {
+            refuse_sha: refuse_sha.to_string(),
+            ran: Mutex::new(Vec::new()),
+        }
+    }
+    fn ran_tickets(&self) -> Vec<String> {
+        self.ran.lock().unwrap().clone()
+    }
+}
+
+impl BuildRunner for RefusingRunner {
+    fn prepare_checkout(&self, _checkout: &Path, source: &SourceIdentity) -> Result<(), String> {
+        if source.head_sha == self.refuse_sha {
+            return Err(format!(
+                "executor seat checkout is dirty; refusing to check out {} over it",
+                source.head_sha
+            ));
+        }
+        Ok(())
+    }
+
+    fn run(
+        &self,
+        ticket: &BuildTicket,
+        _checkout: &Path,
+        _target_dir: &Path,
+    ) -> Result<BuildRun, String> {
+        self.ran.lock().unwrap().push(ticket.ticket_id.clone());
+        Ok(BuildRun {
+            outcome: BuildOutcome::Success,
+            exit_code: Some(0),
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+        })
+    }
+
+    fn clear_target(&self, _target_dir: &Path) -> Result<i64, String> {
+        Ok(0)
+    }
+}
+
 impl BuildRunner for FakeRunner {
     fn prepare_checkout(&self, _checkout: &Path, _source: &SourceIdentity) -> Result<(), String> {
         Ok(())
@@ -151,17 +207,25 @@ fn seat() -> ExecutorSeat {
 }
 
 fn source(head: &str) -> SourceIdentity {
+    source_in(REPO, head)
+}
+
+fn source_in(repo: &str, head: &str) -> SourceIdentity {
     SourceIdentity {
-        repo_root: "/repo".to_string(),
+        repo_root: repo.to_string(),
         base_sha: MAIN_SHA.to_string(),
         head_sha: head.to_string(),
     }
 }
 
 fn ticket(id: &str, head: &str) -> BuildTicket {
+    ticket_in(REPO, id, head)
+}
+
+fn ticket_in(repo: &str, id: &str, head: &str) -> BuildTicket {
     BuildTicket::new(
         id,
-        source(head),
+        source_in(repo, head),
         BuildCommand {
             program: "cargo".to_string(),
             args: vec!["build".to_string()],
@@ -513,6 +577,260 @@ fn a_submitted_ticket_cannot_be_rewritten() {
     );
 }
 
+/// ⑤ (round-2) THE idempotency bug: `BuildTicket::new` stamps `created_at =
+/// now`, so round-1's whole-struct equality check meant a re-submit of the very
+/// same command could never be equal to the stored ticket. The idempotent branch
+/// was unreachable in production — every retry of `tachi build submit
+/// --ticket-id X ...` hit "already exists with a different payload".
+///
+/// Identity is (ticket_id, source, command). Two tickets built a few
+/// milliseconds apart from the same arguments are the same request.
+#[test]
+fn resubmitting_the_same_request_is_idempotent_across_a_fresh_created_at() {
+    let store = store();
+    let first = ticket("t-idem", MAIN_SHA);
+    submit_ticket(&store, &first).unwrap();
+
+    // A retrying caller (a new process, a re-run of the same command) builds the
+    // ticket fresh — same arguments, new wall clock.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let retry = ticket("t-idem", MAIN_SHA);
+    assert_ne!(
+        retry.created_at, first.created_at,
+        "fixture must actually re-stamp created_at, or this test proves nothing"
+    );
+
+    submit_ticket(&store, &retry).expect(
+        "re-submitting the SAME request must be an idempotent no-op — comparing created_at made \
+         this unreachable (#894 S2c round-2)",
+    );
+
+    // Still one ticket, and it is the original (write-once).
+    assert_eq!(pending_tickets(&store, Some(REPO)).unwrap().len(), 1);
+    let stored = super::ticket::load_ticket(&store, "t-idem")
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.created_at, first.created_at);
+
+    // A different REQUEST under the same id is still refused.
+    let mut different = ticket("t-idem", FORK_SHA);
+    different.created_at = first.created_at.clone();
+    let err = submit_ticket(&store, &different).unwrap_err();
+    assert!(err.contains("DIFFERENT request"), "got: {err}");
+}
+
+/// ③ (round-2) A ticket that can never run must not block the queue behind it.
+///
+/// Round-1's `run_next` always took the oldest pending ticket and propagated any
+/// non-slot-busy error with that ticket still pending — so a ticket the seat
+/// refuses (dirty checkout, unresolvable sha) sat at the head of the FIFO
+/// forever and starved everything behind it. Delete the dead-letter path and
+/// this test hangs on `t-doomed` instead of ever reaching `t-good`.
+#[test]
+fn a_doomed_ticket_is_dead_lettered_and_never_blocks_the_tickets_behind_it() {
+    let mut store = store();
+    let seat = seat();
+    let lineage = FakeLineage::with(&[(MAIN_SHA, MAIN_SHA)]);
+    // FORK_SHA can never be checked out; MAIN_SHA is fine.
+    let runner = RefusingRunner::new(FORK_SHA);
+
+    let doomed = ticket("t-doomed", FORK_SHA);
+    submit_ticket(&store, &doomed).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let good = ticket("t-good", MAIN_SHA);
+    submit_ticket(&store, &good).unwrap();
+
+    // ONE drain step: it must step over the doomed head-of-line ticket and
+    // actually build the one behind it.
+    let step = run_next(&mut store, &seat, REPO, &runner, &lineage).unwrap();
+    let receipt = step
+        .receipt
+        .expect("the ticket behind a doomed one must still get built (#894 S2c round-2)");
+    assert_eq!(receipt.ticket_id, "t-good");
+    assert_eq!(runner.ran_tickets(), vec!["t-good".to_string()]);
+    assert_eq!(step.failures.len(), 1);
+    assert_eq!(step.failures[0].ticket_id, "t-doomed");
+    assert_eq!(step.failures[0].attempts, 1);
+    assert!(
+        step.failures[0]
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("dirty"),
+        "the booked failure must carry WHY: {:?}",
+        step.failures[0].last_error
+    );
+
+    // The doomed ticket is still retryable (bounded), not silently dropped.
+    assert_eq!(
+        super::ticket::ticket_state(&store, "t-doomed").unwrap(),
+        TicketState::Queued
+    );
+
+    // Burn the remaining attempts: each drain re-takes it (nothing else is
+    // runnable), fails it, and books it. At MAX it becomes a dead letter.
+    for _ in 1..MAX_TICKET_ATTEMPTS {
+        let step = run_next(&mut store, &seat, REPO, &runner, &lineage).unwrap();
+        assert!(step.receipt.is_none(), "nothing left to build");
+        assert_eq!(step.failures.len(), 1);
+    }
+    assert_eq!(
+        super::ticket::ticket_state(&store, "t-doomed").unwrap(),
+        TicketState::Failed,
+        "after {MAX_TICKET_ATTEMPTS} failed attempts the ticket must be DEAD-LETTERED"
+    );
+
+    // Terminal = out of the queue for good: it is no longer pending, no longer
+    // attempted, and it shows up in the dead-letter view with its reason.
+    assert!(pending_tickets(&store, Some(REPO)).unwrap().is_empty());
+    let step = run_next(&mut store, &seat, REPO, &runner, &lineage).unwrap();
+    assert!(step.receipt.is_none());
+    assert!(
+        step.failures.is_empty(),
+        "a dead-lettered ticket must not be attempted again"
+    );
+    let dead = super::ticket::terminal_tickets(&store, Some(REPO)).unwrap();
+    assert_eq!(dead.len(), 1);
+    assert_eq!(dead[0].0.ticket_id, "t-doomed");
+    assert_eq!(dead[0].1.attempts, MAX_TICKET_ATTEMPTS);
+}
+
+/// ③b (round-2) Cancel: an operator can take a queued ticket out of the queue,
+/// and cannot use cancel to lie about a build that already ran or is running.
+#[test]
+fn cancel_removes_a_queued_ticket_and_refuses_a_running_or_finished_one() {
+    let mut store = store();
+    let seat = seat();
+    let lineage = FakeLineage::with(&[(MAIN_SHA, MAIN_SHA)]);
+    let runner = FakeRunner::new(BuildOutcome::Success);
+
+    let queued = ticket("t-cancel", MAIN_SHA);
+    submit_ticket(&store, &queued).unwrap();
+    assert_eq!(pending_tickets(&store, Some(REPO)).unwrap().len(), 1);
+
+    assert_eq!(
+        cancel_queued_ticket(&store, "t-cancel", "superseded").unwrap(),
+        CancelOutcome::Cancelled
+    );
+    assert!(
+        pending_tickets(&store, Some(REPO)).unwrap().is_empty(),
+        "a cancelled ticket must leave the queue"
+    );
+    assert!(
+        run_next(&mut store, &seat, REPO, &runner, &lineage)
+            .unwrap()
+            .receipt
+            .is_none(),
+        "the executor must never pick up a cancelled ticket"
+    );
+    // Idempotent.
+    assert_eq!(
+        cancel_queued_ticket(&store, "t-cancel", "again").unwrap(),
+        CancelOutcome::AlreadyTerminal {
+            state: TicketState::Cancelled
+        }
+    );
+    assert_eq!(
+        cancel_queued_ticket(&store, "t-nope", "x").unwrap(),
+        CancelOutcome::NotFound
+    );
+
+    // A ticket that already ran cannot be "cancelled" — that would put a
+    // cancelled marker on a real result.
+    let built = ticket("t-built", MAIN_SHA);
+    submit_ticket(&store, &built).unwrap();
+    execute_ticket(&mut store, &seat, &built, &runner, &lineage).unwrap();
+    let err = cancel_queued_ticket(&store, "t-built", "too late").unwrap_err();
+    assert!(err.contains("already has a receipt"), "got: {err}");
+
+    // Nor can a ticket whose cargo may be alive right now: that is `build
+    // abandon`'s job, and only once the process is dead.
+    let running = ticket("t-running", MAIN_SHA);
+    submit_ticket(&store, &running).unwrap();
+    slot::acquire_slot(&store, "t-running").unwrap();
+    let err = cancel_queued_ticket(&store, "t-running", "kill it").unwrap_err();
+    assert!(err.contains("holding the executor slot"), "got: {err}");
+    assert!(err.contains("build abandon"), "got: {err}");
+}
+
+/// ④ (round-2) A seat only drains ITS OWN repo's tickets.
+///
+/// The queue is machine-wide but the seat is per-repo. Round-1's `run_next` took
+/// the oldest pending ticket regardless of repo and handed it to whichever seat
+/// asked — so repo B's seat would try to check out repo A's sha inside B's
+/// checkout: at best an error, at worst (shared history) a build of the wrong
+/// tree filed against the wrong repo.
+#[test]
+fn a_seat_never_drains_another_repos_ticket() {
+    let mut store = store();
+    let seat = seat();
+    let lineage = FakeLineage::with(&[(MAIN_SHA, MAIN_SHA)]);
+    let runner = FakeRunner::new(BuildOutcome::Success);
+
+    // The OLDEST ticket belongs to another repo — the one a FIFO drain would
+    // grab first if it did not filter.
+    let other = ticket_in("/other/repo", "t-other-repo", MAIN_SHA);
+    submit_ticket(&store, &other).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let mine = ticket("t-mine", MAIN_SHA);
+    submit_ticket(&store, &mine).unwrap();
+
+    // This seat's queue is one ticket long, not two.
+    let queue = pending_tickets(&store, Some(REPO)).unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].ticket_id, "t-mine");
+
+    let receipt = run_next(&mut store, &seat, REPO, &runner, &lineage)
+        .unwrap()
+        .receipt
+        .expect("this repo's ticket ran");
+    assert_eq!(
+        receipt.ticket_id, "t-mine",
+        "a seat must never build another repo's ticket (#894 S2c round-2)"
+    );
+
+    // The other repo's ticket is untouched — still queued, for ITS seat.
+    assert!(load_receipt(&store, "t-other-repo").unwrap().is_none());
+    assert_eq!(
+        super::ticket::ticket_state(&store, "t-other-repo").unwrap(),
+        TicketState::Queued,
+        "the other repo's ticket must not even be attempted (an attempt would book a failure \
+         against a ticket this seat had no business touching)"
+    );
+    let theirs = pending_tickets(&store, Some("/other/repo")).unwrap();
+    assert_eq!(theirs.len(), 1);
+    assert_eq!(theirs[0].ticket_id, "t-other-repo");
+
+    // Unfiltered (the machine-wide view), the other repo's ticket is still there
+    // — `t-mine` has a receipt now, so it is no longer pending.
+    let machine_wide = pending_tickets(&store, None).unwrap();
+    assert_eq!(machine_wide.len(), 1);
+    assert_eq!(machine_wide[0].ticket_id, "t-other-repo");
+}
+
+/// A ticket's repo_root is an identity that git gets invoked with — a relative
+/// path is neither.
+#[test]
+fn a_ticket_repo_root_must_be_absolute() {
+    let err = BuildTicket::new(
+        "t-rel",
+        SourceIdentity {
+            repo_root: "relative/repo".to_string(),
+            base_sha: MAIN_SHA.to_string(),
+            head_sha: MAIN_SHA.to_string(),
+        },
+        BuildCommand {
+            program: "cargo".to_string(),
+            args: vec![],
+            features: vec![],
+        },
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(err.contains("not absolute"), "got: {err}");
+}
+
 #[test]
 fn a_ticket_source_must_be_an_object_id_not_a_ref_or_a_flag() {
     // The seat feeds head_sha to `git checkout --detach <sha>`; a ref name or a
@@ -554,23 +872,26 @@ fn the_queue_drains_oldest_first_and_a_built_ticket_leaves_it() {
     let second = ticket("t-second", MAIN_SHA);
     submit_ticket(&store, &second).unwrap();
 
-    assert_eq!(pending_tickets(&store).unwrap().len(), 2);
+    assert_eq!(pending_tickets(&store, Some(REPO)).unwrap().len(), 2);
 
-    let receipt = run_next(&mut store, &seat, &runner, &lineage)
+    let receipt = run_next(&mut store, &seat, REPO, &runner, &lineage)
         .unwrap()
+        .receipt
         .expect("a ticket ran");
     assert_eq!(
         receipt.ticket_id, "t-first",
         "the queue is FIFO by submission time"
     );
-    assert_eq!(pending_tickets(&store).unwrap().len(), 1);
+    assert_eq!(pending_tickets(&store, Some(REPO)).unwrap().len(), 1);
 
-    run_next(&mut store, &seat, &runner, &lineage)
+    run_next(&mut store, &seat, REPO, &runner, &lineage)
         .unwrap()
+        .receipt
         .expect("second ticket ran");
-    assert!(pending_tickets(&store).unwrap().is_empty());
-    assert!(run_next(&mut store, &seat, &runner, &lineage)
+    assert!(pending_tickets(&store, Some(REPO)).unwrap().is_empty());
+    assert!(run_next(&mut store, &seat, REPO, &runner, &lineage)
         .unwrap()
+        .receipt
         .is_none());
 
     // Both built on the resident target (same lineage), and the generation now

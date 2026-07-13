@@ -23,11 +23,25 @@
 //!
 //! ## The pieces
 //!
-//! - [`ticket`] — the immutable request (write-once in `hard_state`).
+//! - [`ticket`] — the immutable request (write-once in `hard_state`) plus the
+//!   queue's terminal states (dead letter / cancelled).
+//! - [`repo`] — repo identity: the queue is machine-wide, a seat is per-repo, so
+//!   a seat only ever drains its own repo's tickets.
 //! - [`slot`] — the machine-unique executor slot (`INSERT ... ON CONFLICT DO
 //!   NOTHING`, so exactly one winner among any number of concurrent callers).
 //! - [`target`] — generations + the compatibility plan (the poisoning defense).
 //! - [`runner`] — git checkout / subprocess / wipe, behind a trait.
+//!
+//! ## The queue is not a trap
+//!
+//! A ticket the seat cannot run (dirty checkout, sha that does not resolve, git
+//! failure) is **booked as a failed attempt and skipped**, and after
+//! [`ticket::MAX_TICKET_ATTEMPTS`] it is dead-lettered into a terminal state
+//! that [`run_next`] never picks up again. Round-1 propagated such an error with
+//! the ticket still pending, so the next drain took the same doomed ticket, hit
+//! the same error, and every ticket behind it starved forever — a head-of-line
+//! block with no exit and no cancel. Now there are both: the bounded retry, and
+//! [`cancel_queued_ticket`].
 //!
 //! ## Interruption
 //!
@@ -40,6 +54,7 @@
 //! still alive would put two compilers in one target dir — the exact bug, with a
 //! timer as the trigger).
 
+pub(crate) mod repo;
 pub(crate) mod runner;
 pub(crate) mod slot;
 pub(crate) mod target;
@@ -56,7 +71,7 @@ use serde::{Deserialize, Serialize};
 use runner::{BuildOutcome, BuildRunner};
 use slot::SlotOutcome;
 use target::{LineageOracle, TargetGeneration, TargetPlan, TargetSlotState};
-use ticket::BuildTicket;
+use ticket::{BuildTicket, CancelOutcome, TicketState, TicketStatus};
 
 /// `hard_state` namespace for build receipts; key = ticket id.
 pub(crate) const RECEIPT_NS: &str = "build_receipt";
@@ -122,37 +137,159 @@ fn write_receipt(store: &MemoryStore, receipt: &BuildReceipt) -> Result<(), Stri
     Ok(())
 }
 
-/// The queue: submitted tickets with no receipt yet, oldest first.
-pub(crate) fn pending_tickets(store: &MemoryStore) -> Result<Vec<BuildTicket>, String> {
+/// The queue: submitted tickets that are still runnable — no receipt, not
+/// terminal (dead-lettered or cancelled) — oldest first.
+///
+/// `repo` is the seat's repo identity (see [`repo::repo_identity`]); `None`
+/// means "every repo on this machine", which only the machine-wide views want.
+/// A seat MUST pass its own repo: the ticket store is machine-wide, and handing
+/// repo A's ticket to repo B's seat means checking A's sha out inside B's tree
+/// (#894 S2c round-2).
+pub(crate) fn pending_tickets(
+    store: &MemoryStore,
+    repo: Option<&str>,
+) -> Result<Vec<BuildTicket>, String> {
     let mut pending = Vec::new();
-    for ticket in ticket::list_tickets(store)? {
-        if load_receipt(store, &ticket.ticket_id)?.is_none() {
-            pending.push(ticket);
+    for t in ticket::list_tickets(store)? {
+        if !repo::same_repo(&t.source.repo_root, repo) {
+            continue;
         }
+        if load_receipt(store, &t.ticket_id)?.is_some() {
+            continue;
+        }
+        if ticket::ticket_state(store, &t.ticket_id)?.is_terminal() {
+            continue;
+        }
+        pending.push(t);
     }
     Ok(pending)
 }
 
-/// Take the oldest pending ticket and run it, if the executor slot is free.
-/// `Ok(None)` = nothing to do (empty queue) or the slot is busy — both are
-/// normal, neither is an error.
+/// What one drain step did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DrainStep {
+    /// The build that ran, if one did.
+    pub receipt: Option<BuildReceipt>,
+    /// Tickets this step took, failed, and booked — the ones it stepped OVER to
+    /// get to the receipt. A ticket that has now burned its attempts appears
+    /// here with `state == Failed` (a dead letter).
+    pub failures: Vec<TicketStatus>,
+    /// The slot was held by someone else; nothing was attempted.
+    pub slot_busy: bool,
+}
+
+impl DrainStep {
+    fn nothing() -> Self {
+        DrainStep {
+            receipt: None,
+            failures: Vec::new(),
+            slot_busy: false,
+        }
+    }
+}
+
+/// Take the oldest runnable ticket **for this seat's repo** and run it.
+///
+/// Failure handling is the round-2 fix. A ticket that fails for any reason other
+/// than "the slot is busy" — a dirty seat checkout, a sha git cannot resolve, a
+/// target that cannot be cleared — is **booked** (attempt +1, dead-lettered once
+/// it hits [`ticket::MAX_TICKET_ATTEMPTS`]) and this call moves on to the next
+/// ticket. It does not propagate the error with the ticket left at the head of
+/// the queue, which is what made round-1's queue a trap: one bad ticket and no
+/// build on the machine ever ran again.
+///
+/// `slot_busy` is not a failure and is never booked against a ticket: nothing
+/// was attempted, and the caller simply comes back later.
 pub(crate) fn run_next(
     store: &mut MemoryStore,
     seat: &ExecutorSeat,
+    repo: &str,
     runner: &dyn BuildRunner,
     lineage: &dyn LineageOracle,
-) -> Result<Option<BuildReceipt>, String> {
-    let Some(ticket) = pending_tickets(store)?.into_iter().next() else {
-        return Ok(None);
-    };
-    match execute_ticket(store, seat, &ticket, runner, lineage) {
-        Ok(receipt) => Ok(Some(receipt)),
-        Err(err) if err.starts_with(SLOT_BUSY) => {
-            tracing::debug!(error = %err, "build broker: executor slot busy, deferring");
-            Ok(None)
+) -> Result<DrainStep, String> {
+    let mut step = DrainStep::nothing();
+
+    loop {
+        let queue = pending_tickets(store, Some(repo))?;
+        // Skip the ones we already failed in THIS call: their status row is
+        // written, but a ticket below the attempt cap is still `Queued` and would
+        // be handed back to us forever by the line above.
+        let Some(t) = queue
+            .into_iter()
+            .find(|t| !step.failures.iter().any(|f| f.ticket_id == t.ticket_id))
+        else {
+            return Ok(step);
+        };
+
+        match execute_ticket(store, seat, &t, runner, lineage) {
+            Ok(receipt) => {
+                step.receipt = Some(receipt);
+                return Ok(step);
+            }
+            Err(err) if err.starts_with(SLOT_BUSY) => {
+                tracing::debug!(error = %err, "build broker: executor slot busy, deferring");
+                step.slot_busy = true;
+                return Ok(step);
+            }
+            Err(err) => {
+                let status = ticket::record_failed_attempt(store, &t.ticket_id, &err)?;
+                match status.state {
+                    TicketState::Failed => tracing::error!(
+                        ticket = %t.ticket_id,
+                        attempts = status.attempts,
+                        error = %err,
+                        "build broker: ticket DEAD-LETTERED after {} failed attempts; it will \
+                         never be picked up again (tachi build status shows it)",
+                        status.attempts
+                    ),
+                    _ => tracing::warn!(
+                        ticket = %t.ticket_id,
+                        attempts = status.attempts,
+                        error = %err,
+                        "build broker: ticket failed; will retry (bounded)"
+                    ),
+                }
+                step.failures.push(status);
+                // …and on to the next ticket. A doomed ticket must not starve
+                // the queue behind it.
+            }
         }
-        Err(err) => Err(err),
     }
+}
+
+/// Cancel a queued ticket (`tachi build cancel`).
+///
+/// Fail-closed on the two states where "cancel" would be a lie:
+/// - the ticket already has a **receipt** → the build ran; there is nothing to
+///   cancel, and pretending otherwise would leave a cancelled marker on a real
+///   result;
+/// - the ticket is **holding the executor slot** → its cargo may be alive right
+///   now. Cancelling the queue entry would not stop it, and would let the next
+///   ticket into a target dir a live compiler is writing to. Killing that build
+///   is `build abandon`'s job, and only once the process is actually dead.
+pub(crate) fn cancel_queued_ticket(
+    store: &MemoryStore,
+    ticket_id: &str,
+    reason: &str,
+) -> Result<CancelOutcome, String> {
+    if load_receipt(store, ticket_id)?.is_some() {
+        return Err(format!(
+            "build ticket '{ticket_id}' already has a receipt: the build ran, so there is nothing \
+             to cancel (#894 S2c)"
+        ));
+    }
+    if let Some(holder) = slot::current_holder(store)? {
+        if holder.ticket_id == ticket_id {
+            return Err(format!(
+                "build ticket '{ticket_id}' is holding the executor slot (pid {}): its cargo may \
+                 be running right now. Cancelling the queue entry would not stop it. If that \
+                 process is dead, use `tachi build abandon` — it quarantines the target dir the \
+                 dead build was writing into BEFORE freeing the slot (#894 S2c)",
+                holder.pid
+            ));
+        }
+    }
+    ticket::cancel_ticket(store, ticket_id, reason)
 }
 
 const SLOT_BUSY: &str = "executor slot busy";

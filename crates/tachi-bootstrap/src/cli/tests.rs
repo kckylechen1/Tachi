@@ -250,21 +250,13 @@ fn worktree_open_parses_managed_flags() {
     .expect("worktree open should parse");
     match parsed.command.expect("command") {
         Commands::Worktree {
-            action:
-                WorktreeAction::Open {
-                    repo,
-                    task,
-                    role,
-                    dry_run,
-                    json,
-                    ..
-                },
+            action: WorktreeAction::Open(args),
         } => {
-            assert_eq!(repo, std::path::PathBuf::from("/tmp/repo"));
-            assert_eq!(task.as_deref(), Some("484"));
-            assert_eq!(role.as_deref(), Some("executor"));
-            assert!(dry_run);
-            assert!(json);
+            assert_eq!(args.repo, std::path::PathBuf::from("/tmp/repo"));
+            assert_eq!(args.task.as_deref(), Some("484"));
+            assert_eq!(args.role.as_deref(), Some("executor"));
+            assert!(args.dry_run);
+            assert!(args.json);
         }
         other => panic!("unexpected command: {other:?}"),
     }
@@ -280,17 +272,35 @@ fn worktree_open_defaults_to_the_edit_only_class() {
         .expect("worktree open should parse");
     match parsed.command.expect("command") {
         Commands::Worktree {
-            action:
-                WorktreeAction::Open {
-                    env_class,
-                    approve_private_target,
-                    reserve_bytes,
-                    ..
-                },
+            action: WorktreeAction::Open(args),
         } => {
-            assert_eq!(env_class, "edit-only");
-            assert!(approve_private_target.is_none());
-            assert!(reserve_bytes.is_none());
+            assert_eq!(args.env_class, "edit-only");
+            assert!(args.approve_private_target.is_none());
+            assert!(args.reserve_bytes.is_none());
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+/// #894 S2c round-2: `build cancel` exists and is how a queued ticket leaves the
+/// queue. Without it, a ticket the seat cannot run has no exit that is not a
+/// dead letter three failures later.
+#[test]
+fn build_cancel_parses_and_defaults_its_reason() {
+    use crate::cli::BuildAction;
+    let parsed = Cli::try_parse_from(["tachi", "build", "cancel", "--ticket-id", "bt-7"])
+        .expect("build cancel should parse");
+    match parsed.command.expect("command") {
+        Commands::Build {
+            action: BuildAction::Cancel {
+                ticket_id, reason, ..
+            },
+        } => {
+            assert_eq!(ticket_id, "bt-7");
+            assert!(
+                !reason.is_empty(),
+                "a cancellation is always recorded WITH a reason"
+            );
         }
         other => panic!("unexpected command: {other:?}"),
     }

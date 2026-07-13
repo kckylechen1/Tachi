@@ -20,48 +20,38 @@ pub(crate) async fn run_worktree_command(
 
 fn run_worktree_command_sync(action: WorktreeAction) -> Result<(), String> {
     match action {
-        WorktreeAction::Open {
-            repo,
-            path,
-            branch,
-            base,
-            task,
-            role,
-            dispatch_id,
-            name,
-            env_class,
-            approve_private_target,
-            reserve_bytes,
-            dry_run,
-            json,
-        } => {
-            let env_class = memcore::EnvClass::parse(&env_class).map_err(|e| e.to_string())?;
+        // The variant is boxed (the flags are ~260 bytes and the other variants
+        // are ~30); unbox once, here, so the rest is plain field moves.
+        WorktreeAction::Open(args) => {
+            let args = *args;
+            let env_class = memcore::EnvClass::parse(&args.env_class).map_err(|e| e.to_string())?;
             // An approval is only ever constructed from an explicit flag — the
             // gate in `validate_provision_request` refuses `build-private`
-            // without one.
-            let private_target_approval = approve_private_target.map(|approved_by| {
+            // without one, and `register_env_resources` refuses to allocate the
+            // private target without one to BOOK.
+            let reserved_bytes = args.reserve_bytes.unwrap_or(0);
+            let private_target_approval = args.approve_private_target.map(|approved_by| {
                 crate::exec_env_ops::PrivateTargetApproval {
                     approved_by,
-                    reserved_bytes: reserve_bytes.unwrap_or(0),
+                    reserved_bytes,
                 }
             });
             provision_managed_env_cli(
                 crate::exec_env_ops::ProvisionEnvOptions {
-                    repo_root: repo,
-                    path,
-                    branch,
-                    base,
-                    task,
-                    role,
-                    dispatch_id,
-                    name,
+                    repo_root: args.repo,
+                    path: args.path,
+                    branch: args.branch,
+                    base: args.base,
+                    task: args.task,
+                    role: args.role,
+                    dispatch_id: args.dispatch_id,
+                    name: args.name,
                     env_class,
                     private_target_approval,
                     private_target_dir: None,
-                    resident_target_dir: None,
-                    dry_run,
+                    dry_run: args.dry_run,
                 },
-                output_format(json),
+                output_format(args.json),
             )
         }
         WorktreeAction::Close {
@@ -165,10 +155,12 @@ fn provision_managed_env_cli(
             // (lease-less) so the CLI stays usable without a daemon DB.
             //
             // The class policy is NOT relaxed on this path: without a lease
-            // there is nowhere to record a resource binding, so the only class
-            // that can be honored is one that allocates no target dir. A
-            // `build-private` request here would write a private target config
-            // for bytes nothing is tracking — refuse it instead.
+            // there is nowhere to record a resource binding or book a disk
+            // reservation, so the only classes that can be honored are the ones
+            // that allocate no target dir. A `build-private` request here would
+            // write a private target config for bytes nothing is tracking —
+            // refuse it instead. (`edit-only` and `build-ticketed` allocate no
+            // target of their own, so they are safe lease-less.)
             tracing::warn!(
                 error = %err,
                 "exec_env lease store unavailable; opening worktree without a lease"
@@ -176,8 +168,9 @@ fn provision_managed_env_cli(
             if opts.env_class.allocates_build_target() {
                 return Err(format!(
                     "env_class '{}' needs the exec_env lease store to record its build-target \
-                     resource, and the global store could not be opened ({err}); re-run with \
-                     the default 'edit-only' class or fix the store (#894 S2c)",
+                     resource and book its disk reservation, and the global store could not be \
+                     opened ({err}); re-run with the default 'edit-only' class or fix the store \
+                     (#894 S2c)",
                     opts.env_class.as_str()
                 ));
             }

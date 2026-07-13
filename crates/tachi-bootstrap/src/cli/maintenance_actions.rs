@@ -1,4 +1,4 @@
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use std::path::PathBuf;
 
 pub const DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS: u64 = 7;
@@ -59,10 +59,11 @@ pub enum BuildAction {
         json: bool,
     },
     /// Drain the ticket queue through the single executor seat (FIFO, strictly
-    /// serialized). Exits immediately if another build holds the slot.
+    /// serialized, and only tickets for THIS repo). Exits immediately if
+    /// another build holds the slot.
     Run {
-        /// Repository root (used to resolve the seat and answer lineage
-        /// questions).
+        /// Repository root (used to resolve the seat, filter the queue, and
+        /// answer lineage questions).
         #[arg(long, value_name = "PATH")]
         repo: PathBuf,
         /// Run at most this many tickets (default: drain the queue).
@@ -72,11 +73,26 @@ pub enum BuildAction {
         #[arg(long)]
         json: bool,
     },
-    /// Show the executor slot holder, the pending queue, and each target dir's
-    /// generation.
+    /// Show the executor slot holder, this repo's pending queue, its dead
+    /// letters, and each target dir's generation.
     Status {
         #[arg(long, value_name = "PATH")]
         repo: PathBuf,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cancel a queued ticket: it leaves the queue for good (terminal state) and
+    /// the executor never picks it up. Refused for a ticket that already has a
+    /// receipt, or one whose build is currently holding the executor slot (that
+    /// is `build abandon`'s job, and only once its process is actually dead).
+    Cancel {
+        /// The ticket to cancel.
+        #[arg(long, value_name = "ID")]
+        ticket_id: String,
+        /// Why (recorded on the terminal record).
+        #[arg(long, value_name = "REASON", default_value = "cancelled by operator")]
+        reason: String,
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
@@ -94,56 +110,66 @@ pub enum BuildAction {
     },
 }
 
+/// Flags for `tachi worktree open`.
+///
+/// A struct rather than inline variant fields because this one variant carries
+/// ~260 bytes of options while its siblings carry ~30: as inline fields it made
+/// every `WorktreeAction` value (including a bare `List { json }`) pay for the
+/// biggest one, which is `clippy::large_enum_variant`. The variant holds it
+/// boxed, so the enum is pointer-sized again.
+#[derive(Args, Debug, Clone)]
+pub struct WorktreeOpenArgs {
+    /// Primary repository root (main worktree).
+    #[arg(long, value_name = "PATH")]
+    pub repo: PathBuf,
+    /// Explicit worktree path. Defaults to $TACHI_WORKTREES_ROOT/<repo-slug>/...
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<PathBuf>,
+    /// Branch to create (or attach if it already exists and is free).
+    #[arg(long)]
+    pub branch: Option<String>,
+    /// Base ref/SHA for the new branch (default: HEAD of --repo).
+    #[arg(long, value_name = "REF")]
+    pub base: Option<String>,
+    /// Task / issue / flow id used in generated names.
+    #[arg(long)]
+    pub task: Option<String>,
+    /// Role label (executor, reviewer, ...).
+    #[arg(long)]
+    pub role: Option<String>,
+    /// Optional dispatch id stored on the registry record.
+    #[arg(long, value_name = "ID")]
+    pub dispatch_id: Option<String>,
+    /// Directory leaf name under the managed root.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Provisioning class (#894 S2c): edit-only (default; no build target
+    /// dir — builds go through the build broker) | build-ticketed (submits
+    /// tickets to the machine-unique serialized executor seat; still gets no
+    /// target dir of its own) | build-private (rare: a private target dir;
+    /// requires --approve-private-target).
+    #[arg(long, value_name = "CLASS", default_value = "edit-only")]
+    pub env_class: String,
+    /// Approval token for --env-class build-private (who approved the disk
+    /// reservation). Refused without it.
+    #[arg(long, value_name = "APPROVER")]
+    pub approve_private_target: Option<String>,
+    /// Disk to reserve, in bytes, for a build-private target dir.
+    #[arg(long, value_name = "BYTES")]
+    pub reserve_bytes: Option<i64>,
+    /// Plan only; do not create the worktree.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// Managed worktree lifecycle (#484 disk governor open/close).
 #[derive(Subcommand, Debug, Clone)]
 pub enum WorktreeAction {
     /// Open a linked git worktree under the managed cache root (not Desktop/repo).
-    Open {
-        /// Primary repository root (main worktree).
-        #[arg(long, value_name = "PATH")]
-        repo: PathBuf,
-        /// Explicit worktree path. Defaults to $TACHI_WORKTREES_ROOT/<repo-slug>/...
-        #[arg(long, value_name = "PATH")]
-        path: Option<PathBuf>,
-        /// Branch to create (or attach if it already exists and is free).
-        #[arg(long)]
-        branch: Option<String>,
-        /// Base ref/SHA for the new branch (default: HEAD of --repo).
-        #[arg(long, value_name = "REF")]
-        base: Option<String>,
-        /// Task / issue / flow id used in generated names.
-        #[arg(long)]
-        task: Option<String>,
-        /// Role label (executor, reviewer, ...).
-        #[arg(long)]
-        role: Option<String>,
-        /// Optional dispatch id stored on the registry record.
-        #[arg(long, value_name = "ID")]
-        dispatch_id: Option<String>,
-        /// Directory leaf name under the managed root.
-        #[arg(long)]
-        name: Option<String>,
-        /// Provisioning class (#894 S2c): edit-only (default; no build target
-        /// dir — builds go through the build broker) | build-ticketed (submits
-        /// tickets to the machine-unique serialized executor seat) |
-        /// build-private (rare: a private target dir; requires
-        /// --approve-private-target).
-        #[arg(long, value_name = "CLASS", default_value = "edit-only")]
-        env_class: String,
-        /// Approval token for --env-class build-private (who approved the disk
-        /// reservation). Refused without it.
-        #[arg(long, value_name = "APPROVER")]
-        approve_private_target: Option<String>,
-        /// Disk to reserve, in bytes, for a build-private target dir.
-        #[arg(long, value_name = "BYTES")]
-        reserve_bytes: Option<i64>,
-        /// Plan only; do not create the worktree.
-        #[arg(long)]
-        dry_run: bool,
-        /// Emit machine-readable JSON.
-        #[arg(long)]
-        json: bool,
-    },
+    Open(Box<WorktreeOpenArgs>),
     /// Close (remove) a Tachi-managed worktree after safety checks.
     Close {
         /// Worktree path to remove.
