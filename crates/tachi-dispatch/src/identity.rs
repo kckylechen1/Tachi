@@ -142,7 +142,6 @@ pub fn provider_model_parts(model: Option<&str>) -> (String, String, String) {
     };
     let (release, version) = model
         .rsplit_once('@')
-        .map(|(release, version)| (release, version))
         .unwrap_or((model, UNKNOWN_IDENTITY));
     (
         release.to_string(),
