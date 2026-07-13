@@ -249,14 +249,6 @@ pub fn provision_cargo_target_config(
     Ok(CargoTargetProvision::Written(target_dir))
 }
 
-/// Back-compat shim for the pre-#894 call shape: provision the machine-shared
-/// target dir. Equivalent to [`provision_cargo_target_config`] with
-/// [`CargoTargetPolicy::Shared`].
-pub fn provision_shared_cargo_target_config(
-    worktree_path: &Path,
-) -> Result<CargoTargetProvision, String> {
-    provision_cargo_target_config(worktree_path, &CargoTargetPolicy::Shared)
-}
 
 /// Minimal TOML basic-string escaping (backslash + double-quote) — paths on
 /// this platform never legitimately need more than that.
@@ -1189,7 +1181,7 @@ mod tests {
         let old = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV);
         std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, &target);
 
-        let outcome = provision_shared_cargo_target_config(&root).expect("provision ok");
+        let outcome = provision_cargo_target_config(&root, &CargoTargetPolicy::Shared).expect("provision ok");
         match &outcome {
             CargoTargetProvision::Written(dir) => assert_eq!(dir, &target),
             other => panic!("expected Written, got {other:?}"),
@@ -1216,7 +1208,7 @@ mod tests {
         let root = unique_temp("tachi-cargo-provision-non-rust");
         // No Cargo.toml.
 
-        let outcome = provision_shared_cargo_target_config(&root).expect("provision ok");
+        let outcome = provision_cargo_target_config(&root, &CargoTargetPolicy::Shared).expect("provision ok");
         assert_eq!(outcome, CargoTargetProvision::SkippedNotRustRepo);
         assert!(
             !root.join(".cargo").exists(),
@@ -1239,7 +1231,7 @@ mod tests {
         let old = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV);
         std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, &target);
 
-        let outcome = provision_shared_cargo_target_config(&root).expect("provision ok");
+        let outcome = provision_cargo_target_config(&root, &CargoTargetPolicy::Shared).expect("provision ok");
         assert_eq!(outcome, CargoTargetProvision::SkippedExisting);
         let contents = std::fs::read_to_string(root.join(".cargo").join("config.toml")).unwrap();
         assert_eq!(contents, custom, "existing config.toml must be untouched");
@@ -1264,7 +1256,7 @@ mod tests {
         let old = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV);
         std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, "relative/shared-target");
 
-        let err = provision_shared_cargo_target_config(&root)
+        let err = provision_cargo_target_config(&root, &CargoTargetPolicy::Shared)
             .expect_err("relative override must be rejected");
         assert!(
             err.contains("must be an absolute path"),
@@ -1296,7 +1288,7 @@ mod tests {
         let old = std::env::var_os(SHARED_CARGO_TARGET_DIR_ENV);
         std::env::set_var(SHARED_CARGO_TARGET_DIR_ENV, &target);
 
-        let outcome = provision_shared_cargo_target_config(&root).expect("provision ok");
+        let outcome = provision_cargo_target_config(&root, &CargoTargetPolicy::Shared).expect("provision ok");
         assert_eq!(outcome, CargoTargetProvision::Written(target.clone()));
         let contents = std::fs::read_to_string(root.join(".cargo").join("config.toml")).unwrap();
         assert!(
