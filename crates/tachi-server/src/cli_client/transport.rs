@@ -14,8 +14,8 @@ use serde_json::Value;
 use super::detect::DaemonInfo;
 use super::tool_map::remap_daemon_tool;
 use crate::tools::{
-    TASK_CONTROL_TIMEOUT_CAP_SECS, TASK_CONTROL_TIMEOUT_DEFAULT_SECS,
-    TASK_WAIT_TIMEOUT_CAP_SECS, TASK_WAIT_TIMEOUT_DEFAULT_SECS,
+    TASK_CONTROL_TIMEOUT_CAP_SECS, TASK_CONTROL_TIMEOUT_DEFAULT_SECS, TASK_WAIT_TIMEOUT_CAP_SECS,
+    TASK_WAIT_TIMEOUT_DEFAULT_SECS,
 };
 
 const DAEMON_CALL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -83,7 +83,10 @@ pub(super) fn daemon_call_timeout(params: &CallToolRequestParams) -> Duration {
     let Some(arguments) = params.arguments.as_ref() else {
         return DAEMON_CALL_TIMEOUT;
     };
-    let action = arguments.get("action").and_then(Value::as_str).unwrap_or("");
+    let action = arguments
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let (default_secs, cap_secs) = match action {
         "wait" => (TASK_WAIT_TIMEOUT_DEFAULT_SECS, TASK_WAIT_TIMEOUT_CAP_SECS),
         "status" | "cancel" => (

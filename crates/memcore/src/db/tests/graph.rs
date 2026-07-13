@@ -635,7 +635,9 @@ fn rejected_edge_write_appends_no_observation() {
     );
     // Nothing anywhere in the ledger.
     let total: u32 = conn
-        .query_row("SELECT COUNT(*) FROM edge_observations", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM edge_observations", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(total, 0, "ledger must be empty after a rejected write");
 }
@@ -735,8 +737,7 @@ fn component_governance_edge_write_appends_observation() {
         "typed governance write must append one observation under 'owns'"
     );
     assert_eq!(owns[0].relation, "owns");
-    let ignored =
-        list_observations_for_edge(&conn, "cg-obs-src", "cg-obs-tgt", "IGNORED").unwrap();
+    let ignored = list_observations_for_edge(&conn, "cg-obs-src", "cg-obs-tgt", "IGNORED").unwrap();
     assert!(
         ignored.is_empty(),
         "observation must key off the enum relation, not edge.relation"

@@ -362,11 +362,7 @@ async fn merge_into_for_project_cannot_reach_other_lifecycle_actions() {
     // assert both halves: default `get` returns None, and
     // `get_with_options(.., true)` proves the row is archived, not deleted.
     let source_hidden_from_default_get = server
-        .with_global_store_read(|store| {
-            store
-                .get("wrapper-source-1")
-                .map_err(|e| e.to_string())
-        })
+        .with_global_store_read(|store| store.get("wrapper-source-1").map_err(|e| e.to_string()))
         .expect("read source via default get");
     assert!(
         source_hidden_from_default_get.is_none(),

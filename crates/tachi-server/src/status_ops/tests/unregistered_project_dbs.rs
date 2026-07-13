@@ -1,11 +1,7 @@
 use super::*;
 use crate::manifest::{Manifest, MANIFEST_SCHEMA_VERSION};
 
-fn mk_project_db(
-    projects_dir: &std::path::Path,
-    name: &str,
-    write_db: bool,
-) -> std::path::PathBuf {
+fn mk_project_db(projects_dir: &std::path::Path, name: &str, write_db: bool) -> std::path::PathBuf {
     let project_dir = projects_dir.join(name);
     std::fs::create_dir_all(&project_dir).expect("create project dir");
     let db_path = project_dir.join("memory.db");
@@ -85,14 +81,14 @@ fn zero_when_every_project_db_is_registered() {
     let db_a = mk_project_db(&projects_dir, "project-a", true);
     let db_b = mk_project_db(&projects_dir, "project-b", true);
 
-    let manifest = manifest_with_entries(&[
-        ("project:project-a", &db_a),
-        ("project:project-b", &db_b),
-    ]);
+    let manifest =
+        manifest_with_entries(&[("project:project-a", &db_a), ("project:project-b", &db_b)]);
     manifest
         .save(&app_home.path().join("manifest.json"))
-        .expect("persist fixture manifest.json so push_unregistered_project_db_warning's \
-                 own on-disk reload sees the same registrations, not an empty fallback");
+        .expect(
+            "persist fixture manifest.json so push_unregistered_project_db_warning's \
+                 own on-disk reload sees the same registrations, not an empty fallback",
+        );
 
     let count = count_unregistered_project_dbs(&projects_dir, &manifest);
     assert_eq!(count, 0, "all project DBs registered -> zero unregistered");

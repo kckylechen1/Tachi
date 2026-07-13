@@ -298,8 +298,7 @@ pub(crate) async fn handle_tachi_complete(
             new_state,
             reviewed_flag,
             override_reason: predicate_override_reason,
-        } = completion_verdict
-            .expect("completion_verdict is Some when dispatch_id is present");
+        } = completion_verdict.expect("completion_verdict is Some when dispatch_id is present");
 
         pipeline_status["completion_predicate"] = json!({
             "declared": declared,

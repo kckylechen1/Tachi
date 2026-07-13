@@ -446,9 +446,8 @@ pub(crate) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, St
         // forever. `session_claims` is global-store-only (`claims_ops`
         // always writes via `with_global_store`), so this sweep only runs
         // here, not in the project-DB arm below.
-        let claims_gc =
-            memcore::gc_session_claims(store.connection(), chrono::Utc::now(), 7, 30)
-                .map_err(|e| format!("GC session_claims failed on global DB: {e}"))?;
+        let claims_gc = memcore::gc_session_claims(store.connection(), chrono::Utc::now(), 7, 30)
+            .map_err(|e| format!("GC session_claims failed on global DB: {e}"))?;
         if let Some(object) = gc.as_object_mut() {
             object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
             object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));

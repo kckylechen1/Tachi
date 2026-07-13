@@ -1,4 +1,5 @@
 use super::*;
+use crate::MemoryServer;
 
 fn compact_json_params(query: &str) -> TachiMemoryParams {
     let mut params = tachi_memory_params("briefing");
@@ -6,6 +7,147 @@ fn compact_json_params(query: &str) -> TachiMemoryParams {
     params.query = Some(query.to_string());
     params.compact = true;
     params
+}
+
+/// Builds a `tachi_task` facade params value (`TachiTaskParams`) for
+/// `action='briefing'` with only the fields the FIX-3 test below cares about
+/// set; every other field has `#[serde(default)]` and comes back empty/`None`.
+fn task_briefing_params(
+    action: &str,
+    task: &str,
+    format: Option<&str>,
+    compact: Option<bool>,
+) -> TachiTaskParams {
+    serde_json::from_value(serde_json::json!({
+        "action": action,
+        "task": task,
+        "format": format,
+        "compact": compact,
+        // These tests seed rows into the global store (no workspace project
+        // DB exists in the test harness); include_global=true is required
+        // for the briefing's memory search to look at the global DB at all
+        // (project_only otherwise skips it, see search_memory_rows_with_recall_config).
+        "include_global": true,
+    }))
+    .expect("deserialize tachi_task briefing params")
+}
+
+fn seed_needle_memory_rows(server: &MemoryServer, needle: &str, count: usize) {
+    server
+        .with_global_store(|store| {
+            for i in 0..count {
+                let mut memory = make_entry(&format!("{needle}-row-{i}"));
+                memory.path = format!("/scratch/{needle}/{i}");
+                memory.summary = format!("{needle} distinct memory row {i}");
+                memory.text =
+                    format!("{needle} distinct memory row {i} content, padded to stay unique.");
+                memory.topic = needle.to_string();
+                memory.keywords = vec![needle.to_string()];
+                store.upsert(&memory).map_err(|e| e.to_string())?;
+            }
+            Ok::<(), String>(())
+        })
+        .expect("seed needle memory rows");
+}
+
+fn memory_fragment_count(body: &str) -> usize {
+    let parsed: Value = serde_json::from_str(body).expect("task briefing JSON");
+    parsed["memory_fragments"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0)
+}
+
+/// kckylechen1/tachi#1058 FIX-3: an omitted `compact` (which defaults) and an
+/// explicit `compact=false` must produce visibly different output shapes even
+/// when `format` itself is omitted on both calls — the None/false distinction
+/// has to carry weight on its own, not just as a side effect of `format`.
+#[tokio::test]
+async fn task_briefing_omitted_compact_differs_from_explicit_false() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let needle = "OmittedVsExplicitNeedle";
+    seed_needle_memory_rows(&server, needle, 6);
+    let query = format!("{needle} distinct memory row");
+
+    let omitted_body = crate::copilot_ops::handle_tachi_feature_briefing(
+        &server,
+        &task_briefing_params("briefing", &query, None, None),
+    )
+    .await
+    .expect("omitted-compact task briefing should serialize");
+    let omitted_count = memory_fragment_count(&omitted_body);
+    assert!(
+        omitted_count <= 4,
+        "omitted compact (and omitted format) must default to the compact packet, got {omitted_count}"
+    );
+
+    let explicit_false_body = crate::copilot_ops::handle_tachi_feature_briefing(
+        &server,
+        &task_briefing_params("briefing", &query, None, Some(false)),
+    )
+    .await
+    .expect("explicit compact=false task briefing should serialize");
+    let explicit_false_count = memory_fragment_count(&explicit_false_body);
+    assert!(
+        explicit_false_count > omitted_count,
+        "explicit compact=false must restore the full board even with format omitted; \
+         omitted={omitted_count} explicit_false={explicit_false_count}"
+    );
+}
+
+/// #527: agent-facing default is compact. Omitting `compact` (serde default)
+/// must yield the tight packet — full board is opt-in via `compact=false`.
+#[tokio::test]
+async fn omitted_compact_defaults_to_compact_briefing_packet() {
+    // Wire shape agents actually send: action only, no compact field.
+    let params: TachiMemoryParams = serde_json::from_value(serde_json::json!({
+        "action": "briefing",
+        "format": "json",
+        "query": "default compact briefing"
+    }))
+    .expect("deserialize briefing params without compact");
+    assert!(
+        params.compact,
+        "omitted compact must default true (#527 agent default)"
+    );
+
+    let (server, _temp_home) = make_server_with_temp_home();
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect("default briefing should serialize");
+    let briefing: Value = serde_json::from_str(&body).expect("briefing JSON");
+    let object = briefing.as_object().expect("briefing object");
+
+    assert_eq!(
+        object.get("compact"),
+        Some(&Value::Bool(true)),
+        "default briefing response must mark compact=true"
+    );
+    assert!(
+        !object.contains_key("layer_authority"),
+        "default briefing must omit doctrine metadata (compact packet)"
+    );
+    assert!(
+        !object.contains_key("limits"),
+        "default briefing must omit static limit metadata (compact packet)"
+    );
+
+    // Discrimination: explicit full still has the fat fields.
+    let mut full = tachi_memory_params("briefing");
+    full.format = Some("json".to_string());
+    full.query = Some("default compact briefing".to_string());
+    full.compact = false;
+    let full_body = crate::facade_memory_ops::handle_tachi_memory(&server, full)
+        .await
+        .expect("full briefing");
+    let full_val: Value = serde_json::from_str(&full_body).expect("full JSON");
+    assert!(
+        full_val
+            .as_object()
+            .expect("full object")
+            .contains_key("layer_authority"),
+        "compact=false must restore full briefing board"
+    );
 }
 
 #[tokio::test]

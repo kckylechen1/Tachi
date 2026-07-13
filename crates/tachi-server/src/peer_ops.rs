@@ -552,7 +552,10 @@ mod tests {
         assert!(PeerNoun::parse("sticky").is_none());
         assert!(PeerNoun::parse("handoff").is_none());
         assert!(PeerNoun::parse("memories").is_none());
-        assert!(matches!(PeerNoun::parse("presence"), Some(PeerNoun::Presence)));
+        assert!(matches!(
+            PeerNoun::parse("presence"),
+            Some(PeerNoun::Presence)
+        ));
 
         let envelope = denied_envelope(
             "outcomes",
@@ -567,7 +570,10 @@ mod tests {
         );
         assert_eq!(envelope["errors"][0]["code"], "noun_not_whitelisted");
         // No source was consulted for a denied noun.
-        assert!(envelope["snapshot"]["sources"].as_array().unwrap().is_empty());
+        assert!(envelope["snapshot"]["sources"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -627,7 +633,9 @@ mod tests {
         let read = PeerPublicationRead::open_at(db_str).unwrap();
         let now = Utc::now();
 
-        let all = read.read_presence(None, now, now, CLAIM_TTL_SECONDS).unwrap();
+        let all = read
+            .read_presence(None, now, now, CLAIM_TTL_SECONDS)
+            .unwrap();
         assert_eq!(all.board["count"].as_u64().unwrap(), 2, "board sees both");
 
         let one = read

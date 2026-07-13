@@ -60,11 +60,7 @@ pub(crate) struct FoldPair {
 
 /// Drive one `(profile, tool, action)` call through the real MCP `call_tool`
 /// path and classify the authorization outcome.
-pub(crate) async fn reachability(
-    profile: &str,
-    tool: &str,
-    action: Option<&str>,
-) -> Reachability {
+pub(crate) async fn reachability(profile: &str, tool: &str, action: Option<&str>) -> Reachability {
     let server = make_server();
     server.set_tool_profile(Some(
         tachi_hub::parse_tool_profile(profile)

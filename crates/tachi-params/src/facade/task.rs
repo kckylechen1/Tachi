@@ -90,7 +90,11 @@ pub struct TachiTaskParams {
         description = "When true, action='briefing' may include broader global memory fragments. Default false keeps briefing feature/project scoped."
     )]
     pub include_global: bool,
+    // #527: agent-facing default is compact when omitted; set false for full boards.
     #[serde(default)]
+    #[schemars(
+        description = "[action=briefing|doc_index] When true or omitted, use the tight agent packet (smaller top_k). Set false for the full feature board."
+    )]
     pub compact: Option<bool>,
     // dispatch / complete fields
     #[serde(default)]

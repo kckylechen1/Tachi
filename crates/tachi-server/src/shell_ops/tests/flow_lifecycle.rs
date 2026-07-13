@@ -70,6 +70,7 @@ fn advance_stage_writes_status_and_events() {
         content_hash: None,
         loaded: false,
         warning: Some("missing".into()),
+        failure_class: Some("missing_source_roots"),
     };
     advance_stage(&dir, &fid, "plan", "t", &inj, true).unwrap();
     let status = read_status(&dir);

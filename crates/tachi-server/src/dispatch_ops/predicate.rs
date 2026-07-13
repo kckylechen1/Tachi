@@ -249,8 +249,7 @@ mod tests {
         assert_eq!(execution_outcome_for_kanban_state(state), "failed");
 
         // Passing predicate keeps the honest success as 'completed'.
-        let (ok_state, _, ok_reason) =
-            resolve_completion_state("success", &PredicateVerdict::Pass);
+        let (ok_state, _, ok_reason) = resolve_completion_state("success", &PredicateVerdict::Pass);
         assert_eq!(ok_state, "TASK_STATE_COMPLETED");
         assert!(ok_reason.is_none());
         assert_eq!(execution_outcome_for_kanban_state(ok_state), "completed");
