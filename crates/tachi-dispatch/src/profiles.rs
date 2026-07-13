@@ -1692,6 +1692,8 @@ mod tests {
         assert!(crate::lineages_compatible("anthropic/claude", "claude"));
         assert!(crate::lineages_compatible("claude", "claude"));
         assert!(!crate::lineages_compatible("a/b/claude", "claude"));
+        assert!(!crate::lineages_compatible("a/b/c", "a/b/c"));
+        assert!(!crate::lineages_compatible("", ""));
         assert!(!crate::lineages_compatible("", "claude"));
         assert!(!crate::lineages_compatible("/claude", "claude"));
         assert!(!crate::lineages_compatible("openai/gpt", "claude"));

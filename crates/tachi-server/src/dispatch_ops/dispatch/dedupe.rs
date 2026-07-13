@@ -11,18 +11,45 @@ pub(super) fn dispatch_runs_root() -> PathBuf {
     crate::path_utils::tachi_home().join("runs")
 }
 
+/// Outcome of loading a dispatch's frozen identity receipt from its run
+/// artifact. `Corrupt` is a distinct state on purpose: a receipt that exists
+/// but no longer parses must surface as explicitly unattributable, never
+/// silently re-enable identity reconstruction from mutable profiles.
+pub(crate) enum DispatchReceiptLoad {
+    Missing,
+    Corrupt,
+    Present(Box<tachi_dispatch::DispatchIdentityReceipt>),
+}
+
 /// The identity receipt is frozen in status.json at dispatch acceptance. Later
 /// lifecycle operations read this artifact rather than resolving mutable
 /// profile definitions again.
-pub(crate) fn load_dispatch_identity_receipt(
-    dispatch_id: &str,
-) -> Option<tachi_dispatch::DispatchIdentityReceipt> {
+pub(crate) fn load_dispatch_identity_receipt_checked(dispatch_id: &str) -> DispatchReceiptLoad {
     let status_path = dispatch_runs_root().join(dispatch_id).join("status.json");
-    crate::task_lifecycle::read_json_file(&status_path)
+    let Some(value) = crate::task_lifecycle::read_json_file(&status_path)
         .ok()
         .flatten()
         .and_then(|status| status.get("identity_receipt").cloned())
-        .and_then(|value| serde_json::from_value(value).ok())
+    else {
+        return DispatchReceiptLoad::Missing;
+    };
+    if value.is_null() {
+        return DispatchReceiptLoad::Missing;
+    }
+    match serde_json::from_value(value) {
+        Ok(receipt) => DispatchReceiptLoad::Present(Box::new(receipt)),
+        Err(error) => {
+            // Loud by design: a present-but-unparseable receipt is an
+            // integrity failure, and quietly degrading here would read as
+            // "this dispatch never had a receipt".
+            tracing::warn!(
+                dispatch_id = %dispatch_id,
+                error = %error,
+                "dispatch identity receipt present but unparseable; attribution is unknown"
+            );
+            DispatchReceiptLoad::Corrupt
+        }
+    }
 }
 
 pub(super) fn dispatch_status_is_terminal(dispatch_id: &str) -> bool {

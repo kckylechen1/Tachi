@@ -224,11 +224,11 @@ fn identity_mismatch(
 /// Lineages are canonically `provider/family`. A profile that declares no
 /// model resolves its lineage to the bare backend name; that constrains the
 /// model *family*, not the provider, so `anthropic/claude` stays inside
-/// `claude` while `openai/gpt` crosses it. Anything not shaped like a
-/// canonical lineage (empty, extra separators, empty segments) never
-/// matches: malformed input fails closed.
+/// `claude` while `openai/gpt` crosses it. Shape is validated BEFORE any
+/// comparison: two identical malformed values are still malformed, and
+/// malformed input always fails closed.
 pub fn lineages_compatible(candidate: &str, planned: &str) -> bool {
-    if candidate.is_empty() || planned.is_empty() {
+    if !lineage_is_canonical(candidate) || !lineage_is_canonical(planned) {
         return false;
     }
     if candidate == planned {
@@ -242,6 +242,17 @@ pub fn lineages_compatible(candidate: &str, planned: &str) -> bool {
         );
     }
     false
+}
+
+/// A canonical lineage is either a bare non-empty family or exactly
+/// `provider/family` with both segments non-empty.
+fn lineage_is_canonical(lineage: &str) -> bool {
+    let mut segments = lineage.split('/');
+    match (segments.next(), segments.next(), segments.next()) {
+        (Some(family), None, None) => !family.is_empty(),
+        (Some(provider), Some(family), None) => !provider.is_empty() && !family.is_empty(),
+        _ => false,
+    }
 }
 
 pub fn model_lineage_id(model: Option<&str>, fallback: &str) -> String {

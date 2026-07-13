@@ -205,9 +205,20 @@ fn update_outcome_row(
         .transpose()?;
     let retry_count = new.retry_count as i64;
     let cost_tokens = new.cost_tokens.map(|v| v as i64);
+    // Identity block (#1065): once a row carries a frozen identity receipt,
+    // the flat attribution columns derived from it (model/vendor/role/seat)
+    // are frozen WITH it — a replay must not leave the row's columns
+    // disagreeing with the receipt persisted beside them. A row without a
+    // receipt (legacy or placeholder written before one existed) still
+    // accepts better attribution, which is what placeholder reconciliation
+    // needs.
     conn.execute(
         "UPDATE dispatch_outcomes SET
-            eval_memory_id = ?2, model = ?3, vendor = ?4, role = ?5, seat = ?6,
+            eval_memory_id = ?2,
+            model  = CASE WHEN identity_receipt IS NOT NULL THEN model  ELSE ?3 END,
+            vendor = CASE WHEN identity_receipt IS NOT NULL THEN vendor ELSE ?4 END,
+            role   = CASE WHEN identity_receipt IS NOT NULL THEN role   ELSE ?5 END,
+            seat   = CASE WHEN identity_receipt IS NOT NULL THEN seat   ELSE ?6 END,
             task_type = ?7, execution_outcome = ?8, reported_outcome = ?9,
             retry_count = ?10, error_class = ?11, issue_ref = ?12, pr_ref = ?13,
             flow_id = ?14, cost_tokens = ?15, cost_usd = ?16, verification_present = ?17,
@@ -545,6 +556,53 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM dispatch_outcomes", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1, "no duplicate row created");
+    }
+
+    #[test]
+    fn frozen_receipt_freezes_flat_identity_columns_on_replay() {
+        let conn = open_conn();
+        let first = upsert_outcome(&conn, &new_outcome("o-1", "d-1")).unwrap();
+
+        // A replay carrying DIFFERENT identity values (e.g. a rewritten
+        // status.json) must not leave the flat attribution columns
+        // disagreeing with the receipt frozen beside them.
+        let mut replay = new_outcome("o-2", "d-1");
+        replay.model = Some("rewritten-model".to_string());
+        replay.vendor = "rewritten-vendor".to_string();
+        replay.role = Some("rewritten-role".to_string());
+        replay.seat = Some("rewritten-seat".to_string());
+        replay.identity_receipt = Some(serde_json::json!({"contract_id": "rewritten"}));
+        let second = upsert_outcome(&conn, &replay).unwrap();
+
+        assert_eq!(second.outcome_id, first.outcome_id);
+        assert_eq!(second.model, first.model, "model frozen with the receipt");
+        assert_eq!(
+            second.vendor, first.vendor,
+            "vendor frozen with the receipt"
+        );
+        assert_eq!(second.role, first.role, "role frozen with the receipt");
+        assert_eq!(second.seat, first.seat, "seat frozen with the receipt");
+        assert_eq!(second.identity_receipt, first.identity_receipt);
+    }
+
+    #[test]
+    fn row_without_receipt_still_accepts_better_attribution() {
+        let conn = open_conn();
+        let mut placeholder = new_outcome("o-1", "d-1");
+        placeholder.identity_receipt = None;
+        placeholder.model = None;
+        placeholder.vendor = "unknown".to_string();
+        placeholder.role = None;
+        placeholder.seat = None;
+        upsert_outcome(&conn, &placeholder).unwrap();
+
+        // Placeholder reconciliation: a later completion with real identity
+        // (and the receipt it came from) upgrades the receipt-less row.
+        let completion = new_outcome("o-2", "d-1");
+        let reconciled = upsert_outcome(&conn, &completion).unwrap();
+        assert_eq!(reconciled.vendor, "claude");
+        assert_eq!(reconciled.model.as_deref(), Some("claude-sonnet-5"));
+        assert!(reconciled.identity_receipt.is_some());
     }
 
     #[test]

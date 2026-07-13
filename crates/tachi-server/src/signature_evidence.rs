@@ -193,13 +193,20 @@ fn resolve_complete_lane(
     // the frozen receipt's attribution identity (observed effective once the
     // carrier acknowledged, planned otherwise) fills what the caller left
     // blank. Mutable profile definitions are consulted only when no receipt
-    // exists for this dispatch.
-    let receipt_identity = params
+    // exists for this dispatch — a corrupt receipt is explicitly
+    // unattributable, not license to reconstruct from profiles.
+    let (receipt_identity, receipt_corrupt) = match params
         .dispatch_id
         .as_deref()
-        .and_then(crate::dispatch_ops::load_dispatch_identity_receipt)
-        .map(|receipt| receipt.attribution_identity());
-    let profile_def = if receipt_identity.is_some() {
+        .map(crate::dispatch_ops::load_dispatch_identity_receipt_checked)
+    {
+        Some(crate::dispatch_ops::DispatchReceiptLoad::Present(receipt)) => {
+            (Some(receipt.attribution_identity()), false)
+        }
+        Some(crate::dispatch_ops::DispatchReceiptLoad::Corrupt) => (None, true),
+        Some(crate::dispatch_ops::DispatchReceiptLoad::Missing) | None => (None, false),
+    };
+    let profile_def = if receipt_identity.is_some() || receipt_corrupt {
         None
     } else {
         params
@@ -221,6 +228,7 @@ fn resolve_complete_lane(
         })
         .unwrap_or_else(|| match profile_def {
             Some(p) => tachi_dispatch::normalize_vendor(p.backend, p.model),
+            None if receipt_corrupt => "unknown".to_string(),
             None => tachi_dispatch::normalize_vendor(&params.agent, None),
         });
     if vendor == "unknown" {
@@ -255,7 +263,12 @@ pub(crate) fn record_complete_signatures(
     let identity_receipt = params
         .dispatch_id
         .as_deref()
-        .and_then(crate::dispatch_ops::load_dispatch_identity_receipt)
+        .map(crate::dispatch_ops::load_dispatch_identity_receipt_checked)
+        .and_then(|load| match load {
+            crate::dispatch_ops::DispatchReceiptLoad::Present(receipt) => Some(receipt),
+            crate::dispatch_ops::DispatchReceiptLoad::Corrupt
+            | crate::dispatch_ops::DispatchReceiptLoad::Missing => None,
+        })
         .map(|receipt| {
             serde_json::to_value(receipt).expect("dispatch identity receipt serializes")
         });
