@@ -86,22 +86,31 @@ struct ReadPoolInner {
 /// **dropped** — on both the normal-return path and a panicking `f` (`Drop`
 /// runs during unwind too), so a panicking checkout closure can never leave
 /// another thread parked forever in [`ReadStorePool::with_store_recording`]'s
-/// `wait_while` (codex-m56e0 BUG-1: the pre-fix code only bumped/notified
-/// after `f` returned normally — a panic inside `f` skipped it entirely,
-/// since the slot's `MutexGuard` unwinds and releases the slot but nothing
-/// downstream of the skipped call ever ran). This is the single source of
+/// `wait_while` (codex-m56e0 BUG-1). This is the single source of
 /// notification for the pool; nothing else calls `notify_all` on
 /// `release_cv`.
 ///
-/// Ordering note: on the normal-return path, `with_store_recording`
-/// explicitly drops the slot's `MutexGuard` before this guard's scope ends,
-/// so a woken waiter finds the slot already free. On a panicking `f`, Rust's
-/// unwind drops locals in reverse declaration order, so this guard (declared
-/// after the slot guard) fires its notify *before* the slot guard actually
-/// unlocks a few instructions later — a woken waiter can rescan into a
-/// still-locked slot and simply loop back to waiting, an ordinary spurious
-/// wakeup the loop already handles, not a lost one. The property this guard
-/// restores is that a wakeup happens at all.
+/// # Load-bearing ordering invariant (codex-o964f R3-1)
+///
+/// The call site MUST bind this guard's local (e.g. `_release_notify`)
+/// **before** the slot's `MutexGuard` reaches its *final* binding in the
+/// same scope. Rust drops locals in reverse order of when their
+/// `let`-bindings ran (LIFO): "notify guard bound first, slot guard bound
+/// second" means the slot guard drops FIRST (unlocking the slot) and this
+/// guard's notify fires SECOND — on both the normal-return path and a
+/// panicking `f` (unwind drops in that same reverse order).
+///
+/// Getting this backwards — guard bound *after* the slot guard — reopens a
+/// real, if narrow, lost-wakeup window: on a panic, this guard's notify
+/// would fire *before* the slot guard actually unlocks a few instructions
+/// later. A waiter woken by that notify can rescan while the slot is still
+/// (momentarily) locked, see it busy, and re-park on the generation value
+/// this guard's Drop *just* bumped — since nothing bumps it again for that
+/// same release, the waiter is never woken again. (An earlier revision of
+/// this comment called that window "an ordinary spurious wakeup" — that was
+/// wrong; a rescan landing in that window is a genuine permanent stall, not
+/// a benign one.) Do not move this guard's construction after the slot
+/// guard's binding.
 struct ReleaseNotifyGuard<'a> {
     inner: &'a ReadPoolInner,
 }
@@ -176,15 +185,21 @@ impl ReadStorePool {
             // cause a missed wakeup.
             let gen_guard = lock_or_recover(&self.inner.release_signal, label);
             for slot in self.inner.stores.iter() {
-                if let Some(mut store) = try_lock_or_recover(slot, label) {
+                if let Some(candidate) = try_lock_or_recover(slot, label) {
                     drop(gen_guard);
                     let pool_checkout_wait = checkout_started.elapsed();
-                    // Constructed before `f` runs so its `Drop` fires the
-                    // release notification unconditionally — including when
-                    // `f` panics (see the type's doc comment, codex-m56e0
-                    // BUG-1). Single source of notification: don't also call
-                    // anything else that bumps `release_signal` here.
+                    // MUST be bound before `store`'s binding just below —
+                    // see `ReleaseNotifyGuard`'s doc comment (codex-o964f
+                    // R3-1, load-bearing): binding the notify guard first
+                    // and the slot guard second is what makes the slot
+                    // guard drop BEFORE the notify fires (Rust drops locals
+                    // in reverse bind order), on both the normal-return path
+                    // and a panicking `f`'s unwind. Do not reorder these two
+                    // `let`s, and don't call anything else that bumps
+                    // `release_signal` here — this is the single source of
+                    // notification.
                     let _release_notify = ReleaseNotifyGuard { inner: &self.inner };
+                    let mut store = candidate;
                     let op_started = Instant::now();
                     let result = f(&mut store);
                     let operation_wall_time = op_started.elapsed();
@@ -1087,33 +1102,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(temp);
     }
 
-    /// codex-m56e0 BUG-1 regression: a panicking checkout closure must not
-    /// leave another already-in-flight checkout parked forever. Pre-fix,
-    /// `with_store_recording` only bumped the release generation and
-    /// notified waiters *after* `f` returned normally — a panic inside `f`
-    /// unwound straight past that call, so a waiter blocked in `wait_while`
-    /// on the same slot was never woken.
+    /// codex-m56e0 BUG-1 / codex-o964f R3-2: a panicking checkout closure
+    /// must not leave another already-in-flight checkout parked forever.
+    /// Pre-fix (both the original missing-notify-on-panic bug and the
+    /// residual drop-order race R3-1 fixed the same round as this test),
+    /// a waiter blocked in `wait_while` on the same slot could be left
+    /// permanently unwoken.
     ///
-    /// Pool size 1 (deliberately): the only slot is held by the panicking
-    /// checkout, so the waiter has nowhere else to go — it can only proceed
-    /// once the panicking checkout's release notification fires (via
-    /// `ReleaseNotifyGuard`'s `Drop`, which must run during unwind). This
-    /// isolates the panic-path notification specifically, as opposed to the
-    /// multi-slot convoy covered by the test above.
+    /// This is run as `TRIALS` independent trials, not a single shot: the
+    /// R3-1 drop-order race window is narrow (a few instructions between
+    /// this guard's notify and the slot's actual unlock), so on
+    /// *pre-fix-ordering* code a single trial only has a *significant*, not
+    /// guaranteed, probability of landing a waiter's rescan inside that
+    /// window and reproducing the stall. Repeating raises that probability
+    /// close to certainty for catching a regression, while on the (fixed)
+    /// code under test here every trial is expected to pass deterministically
+    /// — there is no window left to land in.
     ///
-    /// Ordering is pinned by two entrance signals, not by sleeping: the
-    /// panicker signals `entered` before it parks on its own release gate
-    /// (so the sole slot is provably held before the waiter is even
-    /// spawned), and the waiter signals `started` immediately before calling
-    /// `with_store` (so the main thread doesn't flip the panicker's gate —
-    /// triggering the panic — until the waiter's checkout is already in
-    /// flight against a slot that is, at that moment, still held). The panic
-    /// is caught with `catch_unwind` inside the panicker thread so it is
-    /// contained and inspectable rather than just failing that thread
-    /// silently.
+    /// "Parked" is proven causally, not by sleeping: pool size 1, so once
+    /// the panicker's `entered` signal confirms it holds the sole slot, and
+    /// the waiter's `started` signal confirms its `with_store` call is
+    /// already in flight against that (still-held) slot, the waiter is
+    /// necessarily either mid-scan or already inside `wait_while` at the
+    /// moment we trigger the panic — both states must resolve to "woken and
+    /// completes" under a correct fix. The panic is caught with
+    /// `catch_unwind` inside the panicker thread so it is contained and
+    /// inspectable rather than just failing that thread silently.
+    ///
+    /// The waiter's result is collected via a bounded `recv_timeout`
+    /// (codex-o964f R3-2) — never a bare `.join()` — because on unfixed
+    /// code the waiter thread can hang forever; a bare join would hang this
+    /// test (and the whole test binary) right along with it. A timeout here
+    /// is treated as the failure signal, not swallowed. The waiter's
+    /// `JoinHandle` is intentionally dropped, not joined, for the same
+    /// reason: on a stalled trial that thread may simply never finish.
     #[test]
     fn panicking_checkout_still_wakes_a_waiter_parked_on_the_same_slot() {
-        let temp = unique_temp_dir("read-pool-panic-wakeup");
+        const TRIALS: usize = 10;
+        for trial in 0..TRIALS {
+            run_panicking_checkout_wakeup_trial(trial);
+        }
+    }
+
+    fn run_panicking_checkout_wakeup_trial(trial: usize) {
+        let temp = unique_temp_dir(&format!("read-pool-panic-wakeup-{trial}"));
         let db_path = temp.join("memory.db");
         drop(
             MemoryStore::open_with_label(db_path.to_str().expect("db path utf8"), "seed")
@@ -1138,7 +1170,7 @@ mod tests {
                 }
                 panic!(
                     "intentional test panic: checkout closure failure \
-                     (codex-m56e0 BUG-1 regression)"
+                     (codex-m56e0 BUG-1 / codex-o964f R3-1 regression, trial {trial})"
                 );
             };
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -1148,22 +1180,33 @@ mod tests {
         });
         panicker_entered_rx
             .recv_timeout(Duration::from_secs(2))
-            .expect("panicker should hold the sole slot before we proceed");
+            .unwrap_or_else(|e| {
+                panic!("trial {trial}: panicker should hold the sole slot before we proceed: {e}")
+            });
 
+        // Not joined (see doc comment): on a stalled trial this thread may
+        // never finish. Its result reaches us only through this channel,
+        // collected below with a bounded `recv_timeout`.
         let (waiter_started_tx, waiter_started_rx) = std::sync::mpsc::channel();
-        let (waiter_done_tx, waiter_done_rx) = std::sync::mpsc::channel();
+        let (waiter_result_tx, waiter_result_rx) = std::sync::mpsc::channel();
         let waiter_pool = pool.clone();
-        let waiter = std::thread::spawn(move || {
+        let _waiter = std::thread::spawn(move || {
             waiter_started_tx.send(()).expect("waiter started signal");
             let result = waiter_pool.with_store("waiter", |_store| Ok(()));
-            let _ = waiter_done_tx.send(result.is_ok());
+            let _ = waiter_result_tx.send(result.is_ok());
         });
         waiter_started_rx
             .recv_timeout(Duration::from_secs(2))
-            .expect("waiter should signal started before we trigger the panic");
+            .unwrap_or_else(|e| {
+                panic!(
+                    "trial {trial}: waiter should signal started before we trigger the panic: {e}"
+                )
+            });
 
         // Trigger the panic: the sole slot's only holder panics instead of
-        // returning normally.
+        // returning normally. The panicker thread itself is short-lived and
+        // deterministic from this point (wake -> panic -> caught), so
+        // joining it below is safe and never blocks on the bug under test.
         {
             let (proceed, wake) = &*panicker_gate;
             *proceed.lock().expect("lock panicker gate") = true;
@@ -1171,17 +1214,18 @@ mod tests {
         }
 
         assert!(
-            panicker.join().expect("panicker thread should join"),
-            "panicker checkout should have panicked as intended"
+            panicker
+                .join()
+                .unwrap_or_else(|e| panic!("trial {trial}: panicker thread should join: {e:?}")),
+            "trial {trial}: panicker checkout should have panicked as intended"
         );
 
-        let waiter_completed = waiter_done_rx.recv_timeout(Duration::from_millis(500));
-        waiter.join().expect("waiter thread should join");
-
+        let waiter_completed = waiter_result_rx.recv_timeout(Duration::from_secs(3));
         assert!(
             waiter_completed.is_ok(),
-            "a panicking checkout closure must still wake a waiter parked on the \
-             same (sole) slot — otherwise the waiter is left blocked forever"
+            "trial {trial}: a panicking checkout closure must still wake a waiter parked on \
+             the same (sole) slot — otherwise the waiter is left blocked forever \
+             (recv_timeout expired waiting for its result)"
         );
 
         let _ = std::fs::remove_dir_all(temp);
@@ -1596,6 +1640,14 @@ mod bench {
         // anything past the bound is reported as an explicit observed
         // timeout rather than hung on — on unfixed code, that count is
         // itself the headline before/after number.
+        //
+        // codex-o964f R3-3: a `recv_timeout` failure is either a genuine
+        // `Timeout` (the worker is still checking out — convoy evidence) or
+        // a `Disconnected` (the worker thread panicked/failed before ever
+        // sending, e.g. its `result.expect(...)` below tripped) — these are
+        // NOT the same thing and must not share one counter. Only `Timeout`
+        // counts as convoy evidence; a `Disconnected` is a worker failure
+        // that taints this run's numbers and is reported as such, loudly.
         let temp = unique_temp_dir("bench-convoy");
         let db_path = temp.join("memory.db");
         drop(
@@ -1639,10 +1691,12 @@ mod bench {
         const PER_ITEM_TIMEOUT: Duration = Duration::from_secs(2);
         let mut receipts = Vec::with_capacity(SHORT_READERS);
         let mut observed_timeouts = 0usize;
+        let mut worker_failures = 0usize;
         for _ in 0..SHORT_READERS {
             match receipt_rx.recv_timeout(PER_ITEM_TIMEOUT) {
                 Ok(receipt) => receipts.push(receipt),
-                Err(_) => observed_timeouts += 1,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => observed_timeouts += 1,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => worker_failures += 1,
             }
         }
 
@@ -1666,9 +1720,19 @@ mod bench {
         );
         println!(
             "[bench:one_long_read_with_concurrent_short_reads] \
-             observed_timeouts={observed_timeouts}/{SHORT_READERS} (a nonzero count here \
-             IS convoy evidence on the pre-fix selector, not a test failure)"
+             observed_timeouts={observed_timeouts}/{SHORT_READERS} \
+             worker_failures={worker_failures}/{SHORT_READERS} (only observed_timeouts is \
+             convoy evidence on the pre-fix selector, not a test failure; worker_failures \
+             means a short-read worker thread failed/panicked before it could send its \
+             receipt at all — that is NOT pool-contention evidence)"
         );
+        if worker_failures > 0 {
+            println!(
+                "[bench:one_long_read_with_concurrent_short_reads] WARNING: \
+                 {worker_failures} worker failure(s) — this run's p50/p95 above are NOT \
+                 reliable evidence; investigate the worker failure before trusting them"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(temp);
     }
