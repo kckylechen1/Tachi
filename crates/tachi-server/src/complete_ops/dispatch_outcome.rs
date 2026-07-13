@@ -787,15 +787,15 @@ mod tests {
                 None,
             );
 
-            let (model, _vendor): (Option<String>, String) = server
+            let (model, _vendor, basis): (Option<String>, String, String) = server
                 .with_global_store_read(|store| {
                     store
                         .connection()
                         .query_row(
-                            "SELECT model, vendor FROM dispatch_outcomes \
-                             WHERE dispatch_id = 'dispatch-terminal'",
+                            "SELECT model, vendor, identity_attribution_basis \
+                             FROM dispatch_outcomes WHERE dispatch_id = 'dispatch-terminal'",
                             [],
-                            |row| Ok((row.get(0)?, row.get(1)?)),
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                         )
                         .map_err(|error| error.to_string())
                 })
@@ -804,6 +804,64 @@ mod tests {
                 model.as_deref(),
                 Some(format!("{planned_model}@2026-07-13").as_str()),
                 "terminal failure must attribute to the executed model, not the planned claim"
+            );
+            assert_eq!(
+                basis, "observed",
+                "a substituted acknowledgement's attribution basis is carrier-observed, \
+                 even on the terminal-failure write path"
+            );
+        });
+    }
+
+    /// #1065 D BUG-3: `record_terminal_failure_outcome` must treat a corrupt
+    /// receipt exactly like `record_complete_outcome` does — explicitly
+    /// unattributable, never reconstructed from the `agent` fallback. Before
+    /// this the terminal path's corrupt case was untested; a regression here
+    /// would silently let a terminal failure's vendor/basis diverge from the
+    /// completion path's verdict on the SAME corrupt receipt.
+    #[test]
+    fn terminal_failure_with_corrupt_receipt_is_unattributable() {
+        with_tachi_home(|home| {
+            let (server, _dir) = test_server();
+            let run_dir = home.join("runs").join("dispatch-terminal-corrupt");
+            std::fs::create_dir_all(&run_dir).expect("run dir");
+            // Present but unparseable: wrong shape for the receipt contract.
+            std::fs::write(
+                run_dir.join("status.json"),
+                serde_json::json!({ "identity_receipt": {"contract_id": 42} }).to_string(),
+            )
+            .expect("corrupt status receipt");
+
+            super::record_terminal_failure_outcome(
+                &server,
+                "dispatch-terminal-corrupt",
+                "watchdog",
+                Some("codex"),
+                None,
+            );
+
+            let (vendor, basis): (String, String) = server
+                .with_global_store_read(|store| {
+                    store
+                        .connection()
+                        .query_row(
+                            "SELECT vendor, identity_attribution_basis FROM dispatch_outcomes \
+                             WHERE dispatch_id = 'dispatch-terminal-corrupt'",
+                            [],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .map_err(|error| error.to_string())
+                })
+                .expect("terminal outcome row");
+            assert_eq!(
+                vendor, "unknown",
+                "a corrupt receipt must not fall back to the agent string, even \
+                 on a terminal-failure path"
+            );
+            assert_eq!(
+                basis, "unknown",
+                "a corrupt receipt's attribution basis is explicitly unknown, \
+                 never reconstructed"
             );
         });
     }

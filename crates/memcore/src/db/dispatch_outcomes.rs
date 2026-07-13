@@ -55,7 +55,7 @@ use super::common::normalize_utc_iso_or_now;
 /// (callers mint a fresh id per logical write attempt); `idempotency_key`
 /// dedupes re-completion of the same dispatch_id+task_type onto one row
 /// regardless of how many `outcome_id`s were attempted.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct NewDispatchOutcome {
     pub outcome_id: String,
     pub dispatch_id: String,
@@ -99,6 +99,41 @@ pub struct NewDispatchOutcome {
     /// (`tachi_dispatch::IdentityAttributionBasis::as_str`); memcore stores it
     /// verbatim and freezes it with the receipt.
     pub identity_attribution_basis: String,
+}
+
+/// Hand-written (#1065 D BUG-2): a derived `Default` would give
+/// `identity_attribution_basis` an empty string, which is not a member of
+/// the closed vocabulary the DDL default (`'unknown'`) and every reader
+/// (`OutcomeEvidenceClass::sql_predicate`, the runtime attribution match)
+/// assume. Every other field keeps its ordinary zero value; only the basis
+/// is special-cased to the vocabulary's own "no evidence" member.
+impl Default for NewDispatchOutcome {
+    fn default() -> Self {
+        Self {
+            outcome_id: Default::default(),
+            dispatch_id: Default::default(),
+            eval_memory_id: Default::default(),
+            model: Default::default(),
+            vendor: Default::default(),
+            role: Default::default(),
+            seat: Default::default(),
+            task_type: Default::default(),
+            execution_outcome: Default::default(),
+            reported_outcome: Default::default(),
+            retry_count: Default::default(),
+            error_class: Default::default(),
+            issue_ref: Default::default(),
+            pr_ref: Default::default(),
+            flow_id: Default::default(),
+            cost_tokens: Default::default(),
+            cost_usd: Default::default(),
+            verification_present: Default::default(),
+            diff_present: Default::default(),
+            evidence_refs: Value::Null,
+            identity_receipt: Default::default(),
+            identity_attribution_basis: "unknown".to_string(),
+        }
+    }
 }
 
 /// A persisted row in `dispatch_outcomes`.
@@ -204,6 +239,25 @@ fn row_to_outcome(row: &rusqlite::Row<'_>) -> Result<DispatchOutcomeRow, rusqlit
     })
 }
 
+/// Closed-vocabulary gate for `identity_attribution_basis` at the write
+/// boundary (#1065 D BUG-2). A caller building `NewDispatchOutcome` by hand
+/// (or via a stale/incomplete construction) can hand this an empty string or
+/// an arbitrary value; the DDL default (`'unknown'`) only protects a column
+/// SQLite never received a value for, not one explicitly bound to garbage.
+/// Every write path binds through this instead of `new.identity_attribution_basis`
+/// directly, so the five-token vocabulary is enforced at the ONE place all
+/// writes funnel through, not re-validated (or missed) at each call site.
+fn normalize_basis(raw: &str) -> &str {
+    match raw {
+        "planned_unconfirmed"
+        | "acknowledged_overlay"
+        | "observed"
+        | "fallback_unreceipted"
+        | "unknown" => raw,
+        _ => "unknown",
+    }
+}
+
 /// Deterministic idempotency key for a (dispatch_id, task_type) pair. Two
 /// `tachi_complete` calls for the same dispatch and task_type collapse onto
 /// one row; an empty/absent `task_type` is normalized to a stable sentinel
@@ -283,7 +337,7 @@ fn update_outcome_row(
             evidence_refs_json,
             identity_receipt_json,
             now,
-            new.identity_attribution_basis,
+            normalize_basis(&new.identity_attribution_basis),
         ],
     )?;
     get_outcome(conn, outcome_id)?.ok_or_else(|| {
@@ -357,7 +411,7 @@ pub fn upsert_outcome(
                     new.diff_present as i64,
                     evidence_refs_json,
                     identity_receipt_json,
-                    new.identity_attribution_basis,
+                    normalize_basis(&new.identity_attribution_basis),
                     idempotency_key,
                     now,
                 ],
@@ -577,6 +631,52 @@ mod tests {
 
         let got = get_outcome(&conn, "o-1").unwrap().expect("row present");
         assert_eq!(got, inserted);
+    }
+
+    /// #1065 D BUG-2: a caller that hands in an empty/garbage
+    /// `identity_attribution_basis` (e.g. a stale `Default::default()` from
+    /// before the closed vocabulary existed, or a plain typo) must not have
+    /// that value land verbatim — the write boundary's `normalize_basis`
+    /// gate rewrites anything outside the five-token vocabulary to
+    /// `"unknown"` on BOTH the insert and update paths.
+    #[test]
+    fn garbage_basis_is_normalized_to_unknown_on_insert_and_update() {
+        let conn = open_conn();
+
+        let mut empty_basis = new_outcome("o-1", "d-1");
+        empty_basis.identity_attribution_basis = String::new();
+        let inserted = upsert_outcome(&conn, &empty_basis).unwrap();
+        assert_eq!(
+            inserted.identity_attribution_basis, "unknown",
+            "an empty-string basis must be normalized on insert"
+        );
+
+        let mut garbage_basis = new_outcome("o-2", "d-2");
+        garbage_basis.identity_attribution_basis = "not-a-real-basis".to_string();
+        let inserted_garbage = upsert_outcome(&conn, &garbage_basis).unwrap();
+        assert_eq!(
+            inserted_garbage.identity_attribution_basis, "unknown",
+            "an unrecognized basis token must be normalized on insert"
+        );
+
+        // A row with NO frozen receipt keeps its attribution columns mutable
+        // (see `update_outcome_row`'s CASE WHEN), so re-completing the SAME
+        // dispatch_id+task_type (same idempotency key → UPDATE, not INSERT)
+        // with a garbage token must ALSO normalize — exercising the other
+        // write path, not just the INSERT one above.
+        let mut placeholder = new_outcome("o-3", "d-3");
+        placeholder.identity_receipt = None;
+        placeholder.identity_attribution_basis = "planned_unconfirmed".to_string();
+        upsert_outcome(&conn, &placeholder).unwrap();
+
+        let mut replay_garbage = new_outcome("o-4", "d-3");
+        replay_garbage.identity_receipt = None;
+        replay_garbage.identity_attribution_basis = "still-garbage".to_string();
+        let updated = upsert_outcome(&conn, &replay_garbage).unwrap();
+        assert_eq!(
+            updated.identity_attribution_basis, "unknown",
+            "an unrecognized basis token must be normalized on update too"
+        );
     }
 
     #[test]
