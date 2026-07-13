@@ -92,41 +92,64 @@ struct ReadPoolInner {
     parked_observers: StdMutex<Vec<std::sync::mpsc::Sender<()>>>,
 }
 
-/// RAII notifier: bumps the release generation and wakes every waiter when
-/// **dropped** — on both the normal-return path and a panicking `f` (`Drop`
-/// runs during unwind too), so a panicking checkout closure can never leave
-/// another thread parked forever in [`ReadStorePool::with_store_recording`]'s
-/// `wait_while` (codex-m56e0 BUG-1). This is the single source of
-/// notification for the pool; nothing else calls `notify_all` on
-/// `release_cv`.
+/// Owns both the checked-out slot's `MutexGuard` and the release
+/// notification for that checkout. The unlock-then-notify order is encoded
+/// in **one** `Drop` impl, as a fixed sequence of two statements in a single
+/// function body — it can no longer be gotten wrong by rearranging local
+/// `let`-bindings at a call site.
 ///
-/// # Load-bearing ordering invariant (codex-o964f R3-1)
+/// # Load-bearing ordering invariant (codex-o964f R3-1, structuralized codex-s305b R5)
 ///
-/// The call site MUST bind this guard's local (e.g. `_release_notify`)
-/// **before** the slot's `MutexGuard` reaches its *final* binding in the
-/// same scope. Rust drops locals in reverse order of when their
-/// `let`-bindings ran (LIFO): "notify guard bound first, slot guard bound
-/// second" means the slot guard drops FIRST (unlocking the slot) and this
-/// guard's notify fires SECOND — on both the normal-return path and a
-/// panicking `f` (unwind drops in that same reverse order).
+/// An earlier version of this fix used two separate locals — a slot
+/// `MutexGuard` and a standalone `ReleaseNotifyGuard` — and relied on
+/// binding the notify guard *before* the slot guard in the same scope
+/// (Rust's reverse-bind-order drop then unlocked the slot before notifying,
+/// on both the normal-return path and a panicking `f`'s unwind). That
+/// worked, but codex-s305b's review pointed out the real problem with it:
+/// **binding order is not auditable by a black-box test.** A test can prove
+/// today's code wakes a waiter correctly; it cannot prove some future
+/// refactor won't silently swap the order of two adjacent `let` statements
+/// and reopen the exact lost-wakeup window R3-1 fixed (notify firing before
+/// the slot actually unlocks, so a waiter's rescan lands on an
+/// already-busy slot and re-parks on a generation value that will never
+/// change again).
 ///
-/// Getting this backwards — guard bound *after* the slot guard — reopens a
-/// real, if narrow, lost-wakeup window: on a panic, this guard's notify
-/// would fire *before* the slot guard actually unlocks a few instructions
-/// later. A waiter woken by that notify can rescan while the slot is still
-/// (momentarily) locked, see it busy, and re-park on the generation value
-/// this guard's Drop *just* bumped — since nothing bumps it again for that
-/// same release, the waiter is never woken again. (An earlier revision of
-/// this comment called that window "an ordinary spurious wakeup" — that was
-/// wrong; a rescan landing in that window is a genuine permanent stall, not
-/// a benign one.) Do not move this guard's construction after the slot
-/// guard's binding.
-struct ReleaseNotifyGuard<'a> {
+/// `SlotCheckout` removes the possibility entirely rather than documenting
+/// around it: there is only one object, one `Drop` impl, and the order is
+/// two sequential statements in that one function — "unlock the slot" then
+/// "bump generation + notify_all". Reordering those two lines is a visible,
+/// one-function diff to `SlotCheckout::drop`, not an invisible fact spread
+/// across whichever call site happens to construct the checkout.
+struct SlotCheckout<'a> {
+    /// `Option` so `Drop` can move the guard out and drop it *explicitly*,
+    /// as the first statement of `Drop::drop`, rather than depending on
+    /// struct field-drop order (which Rust does define, but which is far
+    /// less obviously load-bearing to a future reader than an explicit
+    /// `drop(self.store.take())` line is).
+    store: Option<std::sync::MutexGuard<'a, MemoryStore>>,
     inner: &'a ReadPoolInner,
 }
 
-impl Drop for ReleaseNotifyGuard<'_> {
+impl<'a> SlotCheckout<'a> {
+    fn new(store: std::sync::MutexGuard<'a, MemoryStore>, inner: &'a ReadPoolInner) -> Self {
+        Self {
+            store: Some(store),
+            inner,
+        }
+    }
+}
+
+impl Drop for SlotCheckout<'_> {
     fn drop(&mut self) {
+        // 1. The slot unlocks — dropping the `MutexGuard` releases the real
+        // lock. This runs on both the normal-return path and during a
+        // panicking `f`'s unwind (`Drop` runs during unwind too).
+        drop(self.store.take());
+        // 2. THEN, and only then, bump the release generation and wake
+        // every waiter. A waiter woken by this `notify_all` is therefore
+        // guaranteed the slot is already free — see the struct's doc
+        // comment for why this fixed order is now structural, not a
+        // call-site binding convention.
         let mut generation = lock_or_recover(&self.inner.release_signal, "read_pool_release");
         *generation = generation.wrapping_add(1);
         drop(generation);
@@ -217,32 +240,29 @@ impl ReadStorePool {
         let checkout_started = Instant::now();
         loop {
             // Hold `release_signal` while scanning: any other in-flight
-            // checkout whose `ReleaseNotifyGuard` wants to announce a
-            // release takes the same lock, so a release can never happen
-            // silently in the gap between "we saw every slot busy" and "we
-            // start waiting" — that gap is exactly what would otherwise
-            // cause a missed wakeup.
+            // checkout whose `SlotCheckout` is being dropped (and so wants
+            // to announce a release) takes the same lock, so a release can
+            // never happen silently in the gap between "we saw every slot
+            // busy" and "we start waiting" — that gap is exactly what would
+            // otherwise cause a missed wakeup.
             let gen_guard = lock_or_recover(&self.inner.release_signal, label);
             for slot in self.inner.stores.iter() {
                 if let Some(candidate) = try_lock_or_recover(slot, label) {
                     drop(gen_guard);
                     let pool_checkout_wait = checkout_started.elapsed();
-                    // MUST be bound before `store`'s binding just below —
-                    // see `ReleaseNotifyGuard`'s doc comment (codex-o964f
-                    // R3-1, load-bearing): binding the notify guard first
-                    // and the slot guard second is what makes the slot
-                    // guard drop BEFORE the notify fires (Rust drops locals
-                    // in reverse bind order), on both the normal-return path
-                    // and a panicking `f`'s unwind. Do not reorder these two
-                    // `let`s, and don't call anything else that bumps
-                    // `release_signal` here — this is the single source of
-                    // notification.
-                    let _release_notify = ReleaseNotifyGuard { inner: &self.inner };
-                    let mut store = candidate;
+                    // Structural invariant (codex-s305b R5): `SlotCheckout`'s
+                    // own `Drop` impl encodes "unlock, then notify" as a
+                    // fixed sequence inside one function body — see its doc
+                    // comment. This call site carries no binding-order
+                    // discipline anymore; there is nothing here left to get
+                    // wrong by reordering.
+                    let mut checkout = SlotCheckout::new(candidate, &self.inner);
                     let op_started = Instant::now();
-                    let result = f(&mut store);
+                    let result = f(checkout
+                        .store
+                        .as_mut()
+                        .expect("SlotCheckout store missing before drop"));
                     let operation_wall_time = op_started.elapsed();
-                    drop(store);
                     return (
                         result,
                         ReadPoolCheckoutReceipt {
@@ -1149,15 +1169,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(temp);
     }
 
-    /// codex-m56e0 BUG-1 / codex-o964f R3-1 / codex-qa111 R4-2: a panicking
-    /// checkout closure must not leave another already-parked checkout
-    /// blocked forever. Pre-fix (either the original missing-notify-on-panic
-    /// bug, or the residual drop-order race that fired the notify before the
-    /// slot actually unlocked), a waiter blocked in `wait_while` on the same
-    /// slot could be left permanently unwoken.
+    /// codex-m56e0 BUG-1 / codex-o964f R3-1 / codex-s305b R5 / codex-qa111
+    /// R4-2: a panicking checkout closure must not leave another
+    /// already-parked checkout blocked forever.
     ///
-    /// The causal chain (codex-qa111 R4-2 — no sleeping, no "signals
-    /// probably far enough along" guessing):
+    /// This is a **behavioral-regression safety net, not a discriminator for
+    /// the unlock-before-notify ordering** (codex-s305b R5 retired that role
+    /// for any black-box test, and this comment previously overclaimed it —
+    /// don't reintroduce that claim). The ordering is now structural:
+    /// `SlotCheckout::drop` performs "unlock, then notify" as two fixed
+    /// statements in one function body (see its doc comment), so there is no
+    /// longer any call-site binding order for a dynamic test to catch a
+    /// regression in — that property is now auditable by reading one
+    /// function, not by timing a race. What this test still usefully proves
+    /// is the outward behavior: a panic inside the checked-out closure must
+    /// still wake a waiter parked on the same slot. If some future change
+    /// reintroduced a second, separately-notifying object, or dropped the
+    /// notify call entirely, this test would catch that class of regression
+    /// — it just can no longer speak to *ordering* specifically, and must
+    /// not claim to.
+    ///
+    /// The causal chain below (codex-qa111 R4-2 — no sleeping, no "signals
+    /// probably far enough along" guessing) still governs how the test
+    /// itself is wired, because "is the waiter actually parked before we
+    /// panic?" remains something a black-box test must prove causally rather
+    /// than assume:
     /// 1. Pool size 1. The panicker's `entered` signal proves it holds the
     ///    sole slot before we do anything else.
     /// 2. We register a parked-observer (`observe_next_parked_checkout_for_test`,
@@ -1184,12 +1220,15 @@ mod tests {
     ///    test. The waiter's `JoinHandle` is intentionally dropped, not
     ///    joined, for the same reason.
     ///
-    /// Because step 4 makes "parked" a proven fact rather than a
-    /// probability, a single trial is now a sound discriminator (unlike the
-    /// prior revision's `started`-signal proxy, which only proved the
-    /// checkout was in flight, not that it had reached the wait — R4-2's
-    /// whole point). `TRIALS` repeats are kept only as cheap margin against
-    /// unrelated scheduling flakiness, not to accumulate statistical power.
+    /// Step 4 makes "parked" a proven fact rather than a probability (unlike
+    /// the prior revision's `started`-signal proxy, which only proved the
+    /// checkout was in flight, not that it had reached the wait). `TRIALS`
+    /// repeats are kept as cheap margin against unrelated scheduling
+    /// flakiness in this regression net — not, as an earlier revision of
+    /// this comment claimed, to accumulate statistical power against a race:
+    /// per the note above, there is no longer a race in the production code
+    /// for this test to catch, so there is nothing left to accumulate power
+    /// against.
     #[test]
     fn panicking_checkout_still_wakes_a_waiter_parked_on_the_same_slot() {
         const TRIALS: usize = 3;
