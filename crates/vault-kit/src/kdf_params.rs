@@ -22,7 +22,14 @@ use serde::{Deserialize, Serialize};
 
 /// Argon2id KDF parameters, matching the shape both products already write
 /// to `vault_config.kdf_params` (`{"m":<memory_cost_kib>,"t":<time_cost>,"p":<parallelism>}`).
+///
+/// `deny_unknown_fields`: this is a fail-closed, versioned format, not a
+/// tolerant one. Without it, `{"m":65536,"t":3,"p":4,"algorithm":"scrypt"}`
+/// would silently parse and pass as `KdfParams::PRODUCTION` — an
+/// unrecognized extra field (e.g. a future algorithm switch, or a
+/// corrupted/hand-edited row) must surface as `Malformed`, not be ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KdfParams {
     #[serde(rename = "m")]
     pub memory_cost_kib: u32,
@@ -153,6 +160,20 @@ mod tests {
         assert!(
             matches!(err, KdfParamsError::Malformed { .. }),
             "expected Malformed, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_field_is_rejected_not_silently_ignored() {
+        // Production-shaped params plus an extra field a future format
+        // revision (or a corrupted/hand-edited row) might add — must not
+        // silently parse as `KdfParams::PRODUCTION` and pass validation.
+        let json = r#"{"m":65536,"t":3,"p":4,"algorithm":"scrypt"}"#;
+        let err = KdfParams::from_stored_json(json)
+            .expect_err("an unrecognized field must not be silently ignored");
+        assert!(
+            matches!(err, KdfParamsError::Malformed { .. }),
+            "expected Malformed (deny_unknown_fields), got {err:?}"
         );
     }
 

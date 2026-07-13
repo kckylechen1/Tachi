@@ -33,4 +33,12 @@ thiserror = { workspace = true }
 # plainly in `[dependencies]` (production profile, used for real builds)
 # and once with `features = ["test-support"]` in `[dev-dependencies]`
 # (only unified in when a test/bench/example target is actually built).
+#
+# `test-support` alone is NOT sufficient to gate out the weak profile: it
+# also requires `debug_assertions` (see kdf.rs's cfg conditions). Cargo
+# turns `debug_assertions` off by default in `--release` profiles, so a
+# `--release --all-features` build, or a downstream crate that mistakenly
+# lists `vault-kit` with this feature under plain `[dependencies]` instead
+# of `[dev-dependencies]`, still gets the production Argon2 profile — the
+# feature flag by itself is not a trustworthy production/test switch.
 test-support = []

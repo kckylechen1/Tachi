@@ -12,22 +12,34 @@ use rand::RngCore;
 
 use crate::kdf_params::{KdfParams, KdfParamsError};
 
-#[cfg(not(any(test, feature = "test-support")))]
+// The weak (lightweight) test profile must NEVER be reachable from a
+// release build, no matter what feature flags a downstream consumer or a
+// `--all-features` sweep turns on. `feature = "test-support"` alone is not
+// enough of a guard: `cargo build --release --all-features` (or a
+// downstream crate mistakenly enabling the feature in its own
+// `[dependencies]`, not just `[dev-dependencies]`) would flip it on in a
+// real release binary. Gating on `debug_assertions` too closes that: Cargo
+// disables `debug_assertions` in `--release` profiles by default, so the
+// weak branch is compiled out of every release build regardless of which
+// features are active — `test-support` only has an effect in a `dev`
+// (debug_assertions-on) build, which is the only place it's meant to help
+// (a downstream crate's own `cargo test`).
+#[cfg(not(any(test, all(feature = "test-support", debug_assertions))))]
 const PRODUCTION_KDF_MEMORY_COST: u32 = 65_536;
-#[cfg(not(any(test, feature = "test-support")))]
+#[cfg(not(any(test, all(feature = "test-support", debug_assertions))))]
 const PRODUCTION_KDF_TIME_COST: u32 = 3;
-#[cfg(not(any(test, feature = "test-support")))]
+#[cfg(not(any(test, all(feature = "test-support", debug_assertions))))]
 const PRODUCTION_KDF_PARALLELISM: u32 = 4;
-#[cfg(not(any(test, feature = "test-support")))]
+#[cfg(not(any(test, all(feature = "test-support", debug_assertions))))]
 const PRODUCTION_KDF_PARAMS_JSON: &str = r#"{"m":65536,"t":3,"p":4}"#;
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
 const TEST_KDF_MEMORY_COST: u32 = 64;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
 const TEST_KDF_TIME_COST: u32 = 1;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
 const TEST_KDF_PARALLELISM: u32 = 1;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
 const TEST_KDF_PARAMS_JSON: &str = r#"{"m":64,"t":1,"p":1}"#;
 
 #[derive(Clone, Copy)]
@@ -38,7 +50,7 @@ struct VaultKdfParams {
 }
 
 fn active_kdf_params() -> VaultKdfParams {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     {
         VaultKdfParams {
             memory_cost: TEST_KDF_MEMORY_COST,
@@ -46,7 +58,7 @@ fn active_kdf_params() -> VaultKdfParams {
             parallelism: TEST_KDF_PARALLELISM,
         }
     }
-    #[cfg(not(any(test, feature = "test-support")))]
+    #[cfg(not(any(test, all(feature = "test-support", debug_assertions))))]
     {
         VaultKdfParams {
             memory_cost: PRODUCTION_KDF_MEMORY_COST,
@@ -61,11 +73,11 @@ fn active_kdf_params() -> VaultKdfParams {
 /// never read it back at unlock — see [`crate::kdf_params`] for the
 /// versioned type that closes that gap for new call sites.
 pub fn active_kdf_params_json() -> &'static str {
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
     {
         TEST_KDF_PARAMS_JSON
     }
-    #[cfg(not(any(test, feature = "test-support")))]
+    #[cfg(not(any(test, all(feature = "test-support", debug_assertions))))]
     {
         PRODUCTION_KDF_PARAMS_JSON
     }
@@ -262,5 +274,16 @@ mod tests {
         )
         .expect("production KdfParams must remain derivable");
         assert_eq!(key.bytes().len(), 32);
+    }
+
+    #[test]
+    fn debug_never_formats_the_raw_key_bytes() {
+        // Regression pin for the hand-written `Debug` impl above: if anyone
+        // ever switches this back to `#[derive(Debug)]`, this test fails
+        // instead of silently starting to leak key material into
+        // `{:?}`/`expect_err`/panic output.
+        let key = DerivedVaultKey::derive("regression-pin-password", b"0123456789abcdef")
+            .expect("derive must succeed");
+        assert_eq!(format!("{key:?}"), "DerivedVaultKey([REDACTED; 32])");
     }
 }
