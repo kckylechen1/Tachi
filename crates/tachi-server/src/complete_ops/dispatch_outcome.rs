@@ -64,8 +64,8 @@ pub(crate) fn record_complete_outcome(
     let receipt = crate::dispatch_ops::load_dispatch_identity_receipt(dispatch_id);
     let (role, vendor, model) = resolve_outcome_lane(params, receipt.as_ref());
     let seat = receipt.as_ref().and_then(|receipt| {
-        (receipt.planned.seat != tachi_dispatch::UNKNOWN_IDENTITY)
-            .then(|| receipt.planned.seat.clone())
+        let seat = receipt.attribution_identity().seat;
+        (seat != tachi_dispatch::UNKNOWN_IDENTITY).then_some(seat)
     });
     let identity_receipt = receipt.as_ref().map(|receipt| {
         serde_json::to_value(receipt).expect("dispatch identity receipt serializes")
@@ -252,13 +252,16 @@ pub(crate) fn record_terminal_failure_outcome(
         return;
     }
     let receipt = crate::dispatch_ops::load_dispatch_identity_receipt(dispatch_id);
-    let vendor = receipt
+    // Terminal failures attribute exactly like completions: the frozen
+    // receipt's attribution identity, never the mutable profile and never the
+    // planned route once a carrier acknowledged something else.
+    let identity = receipt
         .as_ref()
-        .map(|receipt| {
-            tachi_dispatch::normalize_vendor(
-                &receipt.planned.backend,
-                receipt.planned.model.as_deref(),
-            )
+        .map(tachi_dispatch::DispatchIdentityReceipt::attribution_identity);
+    let vendor = identity
+        .as_ref()
+        .map(|identity| {
+            tachi_dispatch::normalize_vendor(&identity.backend, identity.model.as_deref())
         })
         .or_else(|| {
             agent
@@ -274,15 +277,14 @@ pub(crate) fn record_terminal_failure_outcome(
         outcome_id: uuid::Uuid::new_v4().to_string(),
         dispatch_id: dispatch_id.to_string(),
         vendor,
-        model: receipt
+        model: identity
             .as_ref()
-            .and_then(|receipt| receipt.planned.model.clone()),
-        role: receipt.as_ref().and_then(|receipt| {
-            tachi_dispatch::dispatch_role_class(&receipt.planned.role).map(str::to_string)
+            .and_then(|identity| identity.model.clone()),
+        role: identity.as_ref().and_then(|identity| {
+            tachi_dispatch::dispatch_role_class(&identity.role).map(str::to_string)
         }),
-        seat: receipt.as_ref().and_then(|receipt| {
-            (receipt.planned.seat != tachi_dispatch::UNKNOWN_IDENTITY)
-                .then(|| receipt.planned.seat.clone())
+        seat: identity.as_ref().and_then(|identity| {
+            (identity.seat != tachi_dispatch::UNKNOWN_IDENTITY).then(|| identity.seat.clone())
         }),
         // No self-report on a non-complete terminal; machine says failed.
         execution_outcome: "failed".to_string(),
@@ -539,6 +541,162 @@ mod tests {
                 serde_json::from_str::<serde_json::Value>(&persisted).expect("receipt json"),
                 receipt
             );
+        });
+    }
+
+    #[test]
+    fn completion_replay_preserves_the_first_receipt_byte_for_byte() {
+        with_tachi_home(|home| {
+            let (server, _dir) = test_server();
+            let profile =
+                tachi_dispatch::resolve_dispatch_profile("glm_impl").expect("glm profile");
+            let first =
+                serde_json::to_value(tachi_dispatch::recommendation_identity_receipt(profile))
+                    .expect("receipt json");
+            let run_dir = home.join("runs").join("dispatch-abc");
+            std::fs::create_dir_all(&run_dir).expect("run dir");
+            std::fs::write(
+                run_dir.join("status.json"),
+                serde_json::json!({ "identity_receipt": first }).to_string(),
+            )
+            .expect("status receipt");
+
+            let params = base_params();
+            let status = record_complete_outcome(
+                &server,
+                &params,
+                "eval-mem-1",
+                "success",
+                "completed",
+                None,
+                true,
+                true,
+                &[],
+            );
+            let outcome_id = status["outcome_id"]
+                .as_str()
+                .expect("outcome id")
+                .to_string();
+
+            // A replay arrives with a DIFFERENT receipt on disk (e.g. a
+            // rewritten status.json). The persisted receipt must stay the
+            // first one, byte for byte.
+            let mut mutated =
+                serde_json::from_value::<tachi_dispatch::DispatchIdentityReceipt>(first.clone())
+                    .expect("receipt decodes");
+            mutated.planned.model = Some("zhipuai-coding-plan/glm-99".to_string());
+            let second = serde_json::to_value(&mutated).expect("mutated json");
+            std::fs::write(
+                run_dir.join("status.json"),
+                serde_json::json!({ "identity_receipt": second }).to_string(),
+            )
+            .expect("mutated status receipt");
+            record_complete_outcome(
+                &server,
+                &params,
+                "eval-mem-1",
+                "success",
+                "completed",
+                None,
+                true,
+                true,
+                &[],
+            );
+
+            let persisted: String = server
+                .with_global_store_read(|store| {
+                    store
+                        .connection()
+                        .query_row(
+                            "SELECT identity_receipt FROM dispatch_outcomes WHERE outcome_id = ?1",
+                            [outcome_id.as_str()],
+                            |row| row.get(0),
+                        )
+                        .map_err(|error| error.to_string())
+                })
+                .expect("frozen receipt column");
+            let persisted_value =
+                serde_json::from_str::<serde_json::Value>(&persisted).expect("receipt json");
+            assert_eq!(persisted_value, first, "replay must keep the first receipt");
+            assert_ne!(
+                persisted_value, second,
+                "replay must not adopt a rewritten receipt"
+            );
+        });
+    }
+
+    #[test]
+    fn substituted_receipt_attributes_outcome_to_executed_not_planned() {
+        with_tachi_home(|home| {
+            let (server, _dir) = test_server();
+            let profile =
+                tachi_dispatch::resolve_dispatch_profile("glm_impl").expect("glm profile");
+            let mut receipt = tachi_dispatch::recommendation_identity_receipt(profile);
+            let planned_model = receipt.planned.model.clone().expect("planned model");
+            let mut observed = receipt.planned.clone();
+            observed.model = Some(format!("{planned_model}@2026-07-13"));
+            receipt
+                .acknowledge(
+                    observed,
+                    "substituted",
+                    "carrier pinned a release".to_string(),
+                )
+                .expect("same-lineage substitution");
+            let run_dir = home.join("runs").join("dispatch-abc");
+            std::fs::create_dir_all(&run_dir).expect("run dir");
+            std::fs::write(
+                run_dir.join("status.json"),
+                serde_json::json!({
+                    "identity_receipt": serde_json::to_value(&receipt).expect("receipt json")
+                })
+                .to_string(),
+            )
+            .expect("status receipt");
+
+            let params = base_params();
+            let status = record_complete_outcome(
+                &server,
+                &params,
+                "eval-mem-1",
+                "success",
+                "completed",
+                None,
+                true,
+                true,
+                &[],
+            );
+            let outcome_id = status["outcome_id"]
+                .as_str()
+                .expect("outcome id")
+                .to_string();
+            let (row_model, persisted): (Option<String>, String) = server
+                .with_global_store_read(|store| {
+                    store
+                        .connection()
+                        .query_row(
+                            "SELECT model, identity_receipt FROM dispatch_outcomes \
+                             WHERE outcome_id = ?1",
+                            [outcome_id.as_str()],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .map_err(|error| error.to_string())
+                })
+                .expect("outcome row");
+            assert_eq!(
+                row_model.as_deref(),
+                Some(format!("{planned_model}@2026-07-13").as_str()),
+                "the outcome row must attribute to the executed model, not the planned claim"
+            );
+            // Requested and effective identity stay simultaneously observable
+            // in the persisted receipt.
+            let persisted_receipt =
+                serde_json::from_str::<tachi_dispatch::DispatchIdentityReceipt>(&persisted)
+                    .expect("receipt decodes");
+            assert_eq!(
+                persisted_receipt.planned.model.as_deref(),
+                Some(planned_model.as_str())
+            );
+            assert!(persisted_receipt.observed.mismatch);
         });
     }
 

@@ -222,8 +222,14 @@ pub(crate) fn table_has_column(
 ) -> Result<bool, MemoryError> {
     let table = quote_sql_identifier(table)?;
     let sql = format!("SELECT 1 FROM pragma_table_info({table}) WHERE name = ?1 LIMIT 1");
-    let exists = conn.query_row(&sql, [column], |_| Ok(())).is_ok();
-    Ok(exists)
+    // Only "no rows" means absent; a real probe error must propagate, or a
+    // column-adding migration would silently skip itself and the version
+    // stamp would keep it from ever running again.
+    match conn.query_row(&sql, [column], |_| Ok(())) {
+        Ok(()) => Ok(true),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn quote_sql_identifier(identifier: &str) -> Result<String, MemoryError> {

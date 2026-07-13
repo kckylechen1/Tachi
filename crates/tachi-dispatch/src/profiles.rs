@@ -30,6 +30,10 @@ pub struct DispatchProfileDef {
     pub stage: Option<&'static str>,
     pub model: Option<&'static str>,
     pub model_alias: Option<&'static str>,
+    /// Explicit profile authorization for a carrier to substitute a model
+    /// from a different lineage (#1065). Off everywhere today; a receipt
+    /// freezes this at resolution, so nothing downstream can widen it.
+    pub allow_cross_lineage_override: bool,
     pub tool_profile: &'static str,
     pub inject_tachi_mcp: bool,
     pub inject_hub_mcps: bool,
@@ -57,6 +61,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("plan"),
         model: None,
         model_alias: None,
+        allow_cross_lineage_override: false,
         tool_profile: "delegate",
         inject_tachi_mcp: true,
         inject_hub_mcps: false,
@@ -91,6 +96,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("execute"),
         model: None,
         model_alias: Some(crate::GLM_CODING_MODEL_ALIAS),
+        allow_cross_lineage_override: false,
         tool_profile: "delegate",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -116,6 +122,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("execute"),
         model: None,
         model_alias: Some(crate::GLM_CODING_MODEL_ALIAS),
+        allow_cross_lineage_override: false,
         tool_profile: "delegate",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -145,6 +152,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("review"),
         model: None,
         model_alias: None,
+        allow_cross_lineage_override: false,
         tool_profile: "standard",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -184,6 +192,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("review_light"),
         model: None,
         model_alias: None,
+        allow_cross_lineage_override: false,
         tool_profile: "observe",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -209,6 +218,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("plan_review"),
         model: None,
         model_alias: None,
+        allow_cross_lineage_override: false,
         tool_profile: "observe",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -234,6 +244,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("explore"),
         model: Some("deepseek/deepseek-v4-flash"),
         model_alias: None,
+        allow_cross_lineage_override: false,
         tool_profile: "observe",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -259,6 +270,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("review_light"),
         model: None,
         model_alias: None,
+        allow_cross_lineage_override: false,
         tool_profile: "observe",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -440,6 +452,7 @@ pub fn recommendation_identity_receipt(
             carrier_version: crate::UNKNOWN_IDENTITY.to_string(),
         },
         "recommendation resolved from static dispatch profile".to_string(),
+        profile.allow_cross_lineage_override,
     )
 }
 
@@ -689,6 +702,7 @@ where
             carrier_version: crate::UNKNOWN_IDENTITY.to_string(),
         },
         route_explanation.join("; "),
+        profile.is_some_and(|p| p.allow_cross_lineage_override),
     );
 
     Ok(ResolvedDispatchProfile {
@@ -1568,7 +1582,6 @@ mod tests {
                 substitute,
                 "substituted",
                 "carrier changed model".to_string(),
-                false
             )
             .is_err());
 
@@ -1586,7 +1599,7 @@ mod tests {
         let mut receipt = recommendation_identity_receipt(profile);
         assert_eq!(
             receipt.attribution_identity(),
-            &receipt.planned,
+            receipt.planned,
             "an unconfirmed receipt attributes to the planned identity"
         );
 
@@ -1601,14 +1614,13 @@ mod tests {
                 observed,
                 "acknowledged",
                 "carrier acknowledged launch".to_string(),
-                false,
             )
             .expect("matching acknowledgement");
         assert!(
             !receipt.observed.mismatch,
             "provenance-only differences must not flag an identity mismatch"
         );
-        assert_eq!(receipt.attribution_identity(), &receipt.observed.effective);
+        assert_eq!(receipt.attribution_identity(), receipt.observed.effective);
     }
 
     #[test]
@@ -1629,7 +1641,6 @@ mod tests {
                 observed,
                 "substituted",
                 "carrier pinned a release".to_string(),
-                false,
             )
             .expect("same-lineage release substitution is allowed");
         assert!(
@@ -1674,6 +1685,17 @@ mod tests {
         )
         .expect_err("cross-family override must fail closed");
         assert!(error.contains("without explicit profile authorization"));
+    }
+
+    #[test]
+    fn malformed_lineages_fail_closed() {
+        assert!(crate::lineages_compatible("anthropic/claude", "claude"));
+        assert!(crate::lineages_compatible("claude", "claude"));
+        assert!(!crate::lineages_compatible("a/b/claude", "claude"));
+        assert!(!crate::lineages_compatible("", "claude"));
+        assert!(!crate::lineages_compatible("/claude", "claude"));
+        assert!(!crate::lineages_compatible("openai/gpt", "claude"));
+        assert!(!crate::lineages_compatible("anthropic/claude", ""));
     }
 
     #[test]

@@ -49,6 +49,11 @@ pub struct DispatchIdentityReceipt {
     pub planned: DispatchIdentityEffective,
     pub observed: DispatchIdentityObserved,
     pub resolution_reason: String,
+    /// Frozen at resolution from the selected profile's declaration; a later
+    /// acknowledgement cannot widen it. No caller-supplied flag exists: the
+    /// profile is the only authority for a cross-lineage exception.
+    #[serde(default)]
+    pub cross_lineage_authorized: bool,
 }
 
 impl DispatchIdentityReceipt {
@@ -56,6 +61,7 @@ impl DispatchIdentityReceipt {
         requested: DispatchIdentityRequest,
         planned: DispatchIdentityEffective,
         resolution_reason: String,
+        cross_lineage_authorized: bool,
     ) -> Self {
         let observed = DispatchIdentityEffective {
             profile: None,
@@ -83,22 +89,24 @@ impl DispatchIdentityReceipt {
                 resolution_reason: "carrier acknowledgement unavailable".to_string(),
             },
             resolution_reason,
+            cross_lineage_authorized,
         }
     }
 
     /// Applies an adapter acknowledgement without ever relabeling a requested
     /// identity as observed. A cross-lineage substitution is rejected unless the
-    /// selected profile explicitly permitted it at resolution time.
+    /// selected profile explicitly permitted it at resolution time — the
+    /// authorization was frozen into the receipt then, so no acknowledgement
+    /// caller can grant itself the exception.
     pub fn acknowledge(
         &mut self,
         observed: DispatchIdentityEffective,
         acknowledgement: &str,
         resolution_reason: String,
-        cross_lineage_authorized: bool,
     ) -> Result<(), String> {
         if observed.model_lineage_id != UNKNOWN_IDENTITY
             && !lineages_compatible(&observed.model_lineage_id, &self.planned.model_lineage_id)
-            && !cross_lineage_authorized
+            && !self.cross_lineage_authorized
         {
             return Err(format!(
                 "cross-lineage carrier override '{}' -> '{}' is not authorized by the profile",
@@ -115,16 +123,60 @@ impl DispatchIdentityReceipt {
         Ok(())
     }
 
-    /// The identity attribution must copy: the carrier-acknowledged effective
-    /// identity once an acknowledgement exists, otherwise the planned identity.
-    /// After a substitution the planned identity is NOT what executed, so
-    /// consumers reading through this accessor can never report a requested or
-    /// planned identity as the effective one.
-    pub fn attribution_identity(&self) -> &DispatchIdentityEffective {
+    /// The identity attribution must copy — never reconstruct — for outcome
+    /// rows and signature evidence:
+    ///
+    /// - `unconfirmed` (no acknowledgement): the planned identity, which is
+    ///   resolution output, not the caller's request; the receipt persisted
+    ///   next to the attribution keeps the unconfirmed state explicit.
+    /// - `acknowledged`: the planned identity enriched with every field the
+    ///   carrier positively reported — a partial acknowledgement must not
+    ///   launder known planned identity into `unknown`.
+    /// - `substituted` / `ignored`: the observed identity verbatim. What the
+    ///   carrier did not report stays `unknown`; back-filling from the plan
+    ///   would relabel a planned identity as executed, which the contract
+    ///   forbids.
+    pub fn attribution_identity(&self) -> DispatchIdentityEffective {
         match self.observed.acknowledgement.as_str() {
-            "acknowledged" | "substituted" | "ignored" => &self.observed.effective,
-            _ => &self.planned,
+            "acknowledged" => merge_known_over(&self.planned, &self.observed.effective),
+            "substituted" | "ignored" => self.observed.effective.clone(),
+            _ => self.planned.clone(),
         }
+    }
+}
+
+/// `base` overlaid with every field of `overlay` that carries a known value.
+fn merge_known_over(
+    base: &DispatchIdentityEffective,
+    overlay: &DispatchIdentityEffective,
+) -> DispatchIdentityEffective {
+    fn pick(base: &str, overlay: &str) -> String {
+        if overlay == UNKNOWN_IDENTITY {
+            base.to_string()
+        } else {
+            overlay.to_string()
+        }
+    }
+    DispatchIdentityEffective {
+        profile: overlay.profile.clone().or_else(|| base.profile.clone()),
+        model: overlay.model.clone().or_else(|| base.model.clone()),
+        backend: pick(&base.backend, &overlay.backend),
+        harness: pick(&base.harness, &overlay.harness),
+        model_lineage_id: pick(&base.model_lineage_id, &overlay.model_lineage_id),
+        concrete_model_release: pick(
+            &base.concrete_model_release,
+            &overlay.concrete_model_release,
+        ),
+        provider_model: pick(&base.provider_model, &overlay.provider_model),
+        provider_model_version: pick(
+            &base.provider_model_version,
+            &overlay.provider_model_version,
+        ),
+        role: pick(&base.role, &overlay.role),
+        seat: pick(&base.seat, &overlay.seat),
+        transport: pick(&base.transport, &overlay.transport),
+        adapter_version: pick(&base.adapter_version, &overlay.adapter_version),
+        carrier_version: pick(&base.carrier_version, &overlay.carrier_version),
     }
 }
 
@@ -147,7 +199,12 @@ fn identity_mismatch(
         (planned.model.as_deref(), observed.model.as_deref()),
         (Some(p), Some(o)) if p != o
     );
+    let profile_disagrees = matches!(
+        (planned.profile.as_deref(), observed.profile.as_deref()),
+        (Some(p), Some(o)) if p != o
+    );
     model_disagrees
+        || profile_disagrees
         || known_fields_disagree(&planned.backend, &observed.backend)
         || known_fields_disagree(&planned.harness, &observed.harness)
         || known_fields_disagree(&planned.model_lineage_id, &observed.model_lineage_id)
@@ -167,16 +224,22 @@ fn identity_mismatch(
 /// Lineages are canonically `provider/family`. A profile that declares no
 /// model resolves its lineage to the bare backend name; that constrains the
 /// model *family*, not the provider, so `anthropic/claude` stays inside
-/// `claude` while `openai/gpt` crosses it.
+/// `claude` while `openai/gpt` crosses it. Anything not shaped like a
+/// canonical lineage (empty, extra separators, empty segments) never
+/// matches: malformed input fails closed.
 pub fn lineages_compatible(candidate: &str, planned: &str) -> bool {
+    if candidate.is_empty() || planned.is_empty() {
+        return false;
+    }
     if candidate == planned {
         return true;
     }
     if !planned.contains('/') {
-        return candidate
-            .rsplit('/')
-            .next()
-            .is_some_and(|family| family == planned);
+        let mut segments = candidate.split('/');
+        return matches!(
+            (segments.next(), segments.next(), segments.next()),
+            (Some(provider), Some(family), None) if !provider.is_empty() && family == planned
+        );
     }
     false
 }

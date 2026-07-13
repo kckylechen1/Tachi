@@ -188,40 +188,37 @@ fn resolve_complete_lane(
     params: &TachiCompleteParams,
     sig: &SignatureRecordParams,
 ) -> Option<(String, String)> {
-    if sig
-        .vendor
+    // Signature evidence attributes to the model that actually executed:
+    // explicit per-signature overrides are caller-supplied facts and win, then
+    // the frozen receipt's attribution identity (observed effective once the
+    // carrier acknowledged, planned otherwise) fills what the caller left
+    // blank. Mutable profile definitions are consulted only when no receipt
+    // exists for this dispatch.
+    let receipt_identity = params
+        .dispatch_id
         .as_deref()
-        .is_none_or(|vendor| vendor.trim().is_empty())
-        && sig
-            .role
+        .and_then(crate::dispatch_ops::load_dispatch_identity_receipt)
+        .map(|receipt| receipt.attribution_identity());
+    let profile_def = if receipt_identity.is_some() {
+        None
+    } else {
+        params
+            .profile
             .as_deref()
-            .is_none_or(|role| role.trim().is_empty())
-    {
-        if let Some(dispatch_id) = params.dispatch_id.as_deref() {
-            if let Some(receipt) = crate::dispatch_ops::load_dispatch_identity_receipt(dispatch_id)
-            {
-                // Signature evidence attributes to the model that actually
-                // executed: the acknowledged effective identity when the
-                // carrier reported one, otherwise the planned identity.
-                let identity = receipt.attribution_identity();
-                let role = tachi_dispatch::dispatch_role_class(&identity.role)?;
-                let vendor =
-                    tachi_dispatch::normalize_vendor(&identity.backend, identity.model.as_deref());
-                return (vendor != "unknown").then(|| (role.to_string(), vendor));
-            }
-        }
-    }
-    let profile_def = params
-        .profile
-        .as_deref()
-        .filter(|s| !s.trim().is_empty())
-        .and_then(crate::dispatch_profile::resolve_dispatch_profile);
+            .filter(|s| !s.trim().is_empty())
+            .and_then(crate::dispatch_profile::resolve_dispatch_profile)
+    };
     let vendor = sig
         .vendor
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+        .or_else(|| {
+            receipt_identity.as_ref().map(|identity| {
+                tachi_dispatch::normalize_vendor(&identity.backend, identity.model.as_deref())
+            })
+        })
         .unwrap_or_else(|| match profile_def {
             Some(p) => tachi_dispatch::normalize_vendor(p.backend, p.model),
             None => tachi_dispatch::normalize_vendor(&params.agent, None),
@@ -235,6 +232,11 @@ fn resolve_complete_lane(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .and_then(tachi_dispatch::dispatch_role_class)
+        .or_else(|| {
+            receipt_identity
+                .as_ref()
+                .and_then(|identity| tachi_dispatch::dispatch_role_class(&identity.role))
+        })
         .or_else(|| profile_def.and_then(|p| tachi_dispatch::dispatch_role_class(p.role)))
         .map(str::to_string)?;
     Some((role, vendor))
