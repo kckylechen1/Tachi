@@ -42,10 +42,14 @@ pub struct TachiTaskParams {
         description = "[action=plan|recommend|dispatch|route_simulate|complete|intake|ux_matrix] Task description / prompt text."
     )]
     pub task: Option<String>,
-    /// [action=dispatch] Declared side-effect level: L0 source/metadata read,
-    /// L1 temporary local state, L2 product-data diagnostics, or L3 product
-    /// data/resident runtime side effects. Omitted dispatches default to L1.
+    /// [action=dispatch|recommend|route_simulate] Declared side-effect level:
+    /// L0 source/metadata read, L1 temporary local state, L2 product-data
+    /// diagnostics, or L3 product data/resident runtime side effects. Omitted
+    /// values resolve to L1 for host-profile admission without task-text inference.
     #[serde(default)]
+    #[schemars(
+        description = "[action=dispatch|recommend|route_simulate] Declared side-effect level L0–L3. Omitted → L1 for host admission."
+    )]
     pub execution_level: Option<super::ExecutionLevel>,
     #[serde(default)]
     #[schemars(description = "[action=plan|recommend|dispatch] Requesting agent id.")]

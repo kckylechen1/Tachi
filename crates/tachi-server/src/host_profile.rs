@@ -9,6 +9,48 @@ use tachi_params::ExecutionLevel;
 
 pub(crate) const HOST_PROFILE_ENV: &str = "TACHI_HOST_PROFILE";
 
+#[cfg(test)]
+thread_local! {
+    // Some(None) = force missing/empty; Some(Some(v)) = force raw value; None = read process env.
+    static HOST_PROFILE_TEST_OVERRIDE: std::cell::RefCell<Option<Option<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct HostProfileTestOverride {
+    previous: Option<Option<String>>,
+}
+
+#[cfg(test)]
+impl HostProfileTestOverride {
+    pub(crate) fn set(raw: Option<&str>) -> Self {
+        let previous = HOST_PROFILE_TEST_OVERRIDE.with(|slot| slot.borrow().clone());
+        HOST_PROFILE_TEST_OVERRIDE.with(|slot| {
+            *slot.borrow_mut() = Some(raw.map(str::to_string));
+        });
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for HostProfileTestOverride {
+    fn drop(&mut self) {
+        HOST_PROFILE_TEST_OVERRIDE.with(|slot| {
+            *slot.borrow_mut() = self.previous.clone();
+        });
+    }
+}
+
+fn host_profile_raw() -> Option<String> {
+    #[cfg(test)]
+    {
+        if let Some(overridden) = HOST_PROFILE_TEST_OVERRIDE.with(|slot| slot.borrow().clone()) {
+            return overridden;
+        }
+    }
+    std::env::var(HOST_PROFILE_ENV).ok()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostProfile {
     Development,
@@ -75,6 +117,74 @@ pub(crate) fn authorize_dispatch(
         ));
     }
     Ok((profile, level))
+}
+
+/// Structured host-profile admission for recommend / route_simulate (#1067).
+/// Never silently downgrades the requested level; only allow or structured decline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HostAdmission {
+    pub requested_level: Option<ExecutionLevel>,
+    pub effective_level: ExecutionLevel,
+    pub max_execution_level: Option<ExecutionLevel>,
+    pub host_profile: String,
+    pub profile_source: &'static str,
+    pub allowed: bool,
+    pub reason_code: &'static str,
+}
+
+impl HostAdmission {
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        json!({
+            "requested_level": self.requested_level.map(ExecutionLevel::as_str),
+            "effective_level": self.effective_level.as_str(),
+            "max_execution_level": self.max_execution_level.map(ExecutionLevel::as_str),
+            "host_profile": self.host_profile,
+            "profile_source": self.profile_source,
+            "allowed": self.allowed,
+            "reason_code": self.reason_code,
+        })
+    }
+}
+
+pub(crate) fn admit_execution_level(requested: Option<ExecutionLevel>) -> HostAdmission {
+    let effective_level = resolved_execution_level(requested);
+    let raw = host_profile_raw();
+    let (parsed, profile_source) = match raw.as_deref() {
+        None => (Ok(HostProfile::Development), "default_development"),
+        Some(value) if value.trim().is_empty() => {
+            (Ok(HostProfile::Development), "default_development")
+        }
+        Some(value) => (HostProfile::parse(value), "app_home_config_env"),
+    };
+
+    match parsed {
+        Err(_) => HostAdmission {
+            requested_level: requested,
+            effective_level,
+            max_execution_level: None,
+            host_profile: "invalid".to_string(),
+            profile_source: "app_home_config_env",
+            allowed: false,
+            reason_code: "host_profile_invalid",
+        },
+        Ok(profile) => {
+            let max = profile.max_execution_level();
+            let allowed = permits(profile, effective_level);
+            HostAdmission {
+                requested_level: requested,
+                effective_level,
+                max_execution_level: Some(max),
+                host_profile: profile.name().to_string(),
+                profile_source,
+                allowed,
+                reason_code: if allowed {
+                    "host_profile_allows"
+                } else {
+                    "host_profile_mismatch"
+                },
+            }
+        }
+    }
 }
 
 pub(crate) fn runtime_json() -> serde_json::Value {
@@ -216,5 +326,30 @@ mod tests {
             std::fs::read_to_string(&path).expect("read config"),
             "OTHER=value\nTACHI_HOST_PROFILE=home_data\n"
         );
+    }
+
+    #[test]
+    fn admit_execution_level_emits_closed_reason_codes() {
+        let _missing = HostProfileTestOverride::set(None);
+        let missing = admit_execution_level(None);
+        assert!(missing.allowed);
+        assert_eq!(missing.reason_code, "host_profile_allows");
+        assert_eq!(missing.profile_source, "default_development");
+        assert_eq!(missing.requested_level, None);
+        assert_eq!(missing.effective_level, ExecutionLevel::L1);
+        drop(_missing);
+
+        let _dev = HostProfileTestOverride::set(Some("development"));
+        let mismatch = admit_execution_level(Some(ExecutionLevel::L2));
+        assert!(!mismatch.allowed);
+        assert_eq!(mismatch.reason_code, "host_profile_mismatch");
+        assert_eq!(mismatch.profile_source, "app_home_config_env");
+        drop(_dev);
+
+        let _bad = HostProfileTestOverride::set(Some("bogus"));
+        let invalid = admit_execution_level(Some(ExecutionLevel::L1));
+        assert!(!invalid.allowed);
+        assert_eq!(invalid.reason_code, "host_profile_invalid");
+        assert_eq!(invalid.host_profile, "invalid");
     }
 }

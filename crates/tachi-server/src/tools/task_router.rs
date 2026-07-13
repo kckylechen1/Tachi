@@ -184,24 +184,43 @@ pub(super) async fn handle_tachi_task_facade(
                 .ok_or_else(|| "task is required when action='recommend'".to_string())?;
             let mut file_paths = params.doc_paths.clone();
             file_paths.extend(params.spec_paths.clone());
-            crate::dispatch_profile::handle_dispatch_recommendation(
-                server,
-                &task,
-                params.risk.as_deref(),
-                params.limit.unwrap_or(500),
-                &file_paths,
-            )
+            let admission = crate::host_profile::admit_execution_level(params.execution_level);
+            if !admission.allowed {
+                serde_json::to_string(&serde_json::json!({
+                    "host_admission": admission.to_json(),
+                }))
+                .map_err(|e| format!("serialize host admission decline: {e}"))
+            } else {
+                let raw = crate::dispatch_profile::handle_dispatch_recommendation(
+                    server,
+                    &task,
+                    params.risk.as_deref(),
+                    params.limit.unwrap_or(500),
+                    &file_paths,
+                )?;
+                attach_host_admission(raw, &admission)
+            }
         }
         TachiTaskAction::RouteSimulate => {
             let mut file_paths = params.doc_paths.clone();
             file_paths.extend(params.spec_paths.clone());
-            crate::dispatch_profile::handle_route_simulation(
-                server,
-                params.limit.unwrap_or(500),
-                params.task.as_deref(),
-                params.risk.as_deref(),
-                &file_paths,
-            )
+            let admission = crate::host_profile::admit_execution_level(params.execution_level);
+            if !admission.allowed {
+                serde_json::to_string(&serde_json::json!({
+                    "action": "route_simulate",
+                    "host_admission": admission.to_json(),
+                }))
+                .map_err(|e| format!("serialize host admission decline: {e}"))
+            } else {
+                let raw = crate::dispatch_profile::handle_route_simulation(
+                    server,
+                    params.limit.unwrap_or(500),
+                    params.task.as_deref(),
+                    params.risk.as_deref(),
+                    &file_paths,
+                )?;
+                attach_host_admission(raw, &admission)
+            }
         }
         TachiTaskAction::Proposals => crate::dispatch_profile::handle_route_policy_proposals(
             server,
@@ -303,6 +322,19 @@ pub(super) async fn handle_tachi_task_facade(
     )
 }
 
+fn attach_host_admission(
+    raw: String,
+    admission: &crate::host_profile::HostAdmission,
+) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse recommend/route payload: {e}"))?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        "attach host admission: expected recommend/route payload to be a JSON object".to_string()
+    })?;
+    object.insert("host_admission".to_string(), admission.to_json());
+    serde_json::to_string(&value).map_err(|e| format!("serialize host admission attach: {e}"))
+}
+
 /// Defense-in-depth for the task facade; primary gate is F3
 /// `facade_action_allowed` in `call_tool` (covers the MCP path). Direct
 /// internal calls to `handle_tachi_task_facade` still hit this — same
@@ -316,4 +348,25 @@ fn reject_delegate_task_action(server: &MemoryServer, action: &str) -> Result<()
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod host_admission_tests {
+    use super::attach_host_admission;
+
+    #[test]
+    fn attach_host_admission_rejects_non_object_producer_payloads() {
+        let _profile = crate::host_profile::HostProfileTestOverride::set(Some("development"));
+        let admission =
+            crate::host_profile::admit_execution_level(Some(tachi_params::ExecutionLevel::L0));
+
+        for raw in ["[]", "null", r#""scalar""#] {
+            let error = attach_host_admission(raw.to_string(), &admission)
+                .expect_err("non-object producer payload must fail closed");
+            assert_eq!(
+                error,
+                "attach host admission: expected recommend/route payload to be a JSON object"
+            );
+        }
+    }
 }
