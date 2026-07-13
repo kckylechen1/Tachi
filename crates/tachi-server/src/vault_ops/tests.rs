@@ -260,10 +260,7 @@ async fn vault_lock_clears_key_and_provider_secrets() {
     {
         let v = server.vault_read();
         assert!(v.key.is_none(), "vault lock must clear the master key");
-        assert!(
-            v.unlock_time.is_none(),
-            "vault lock must clear unlock_time"
-        );
+        assert!(v.unlock_time.is_none(), "vault lock must clear unlock_time");
     }
     assert_eq!(
         server
@@ -295,7 +292,8 @@ async fn autolock_disabled_when_env_zero() {
     let server = MemoryServer::new(db_path, None).expect("create test server");
 
     assert_eq!(
-        server.vault_read().auto_lock_after_secs, 0,
+        server.vault_read().auto_lock_after_secs,
+        0,
         "TACHI_VAULT_AUTOLOCK_SECS=0 must set auto_lock_after_secs to 0"
     );
 
@@ -311,7 +309,10 @@ async fn autolock_disabled_when_env_zero() {
     // With auto-lock disabled, the key is still valid even though unlock_time
     // is far in the past.
     let result = with_vault_key(&server, |k| {
-        assert_eq!(k, &key, "key must still be accessible with auto-lock disabled");
+        assert_eq!(
+            k, &key,
+            "key must still be accessible with auto-lock disabled"
+        );
         Ok(())
     });
     result.expect("vault key should be available with auto-lock disabled");
@@ -355,7 +356,8 @@ async fn autolock_disabled_reports_unlocked_in_runtime_status() {
     let server = MemoryServer::new(db_path.clone(), None).expect("create test server");
 
     assert_eq!(
-        server.vault_read().auto_lock_after_secs, 0,
+        server.vault_read().auto_lock_after_secs,
+        0,
         "TACHI_VAULT_AUTOLOCK_SECS=0 must set auto_lock_after_secs to 0"
     );
 
