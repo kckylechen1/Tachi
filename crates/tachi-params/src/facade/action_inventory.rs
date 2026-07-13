@@ -1,36 +1,11 @@
 //! F0 facade action inventory (#913 / #495).
 //!
-//! Machine-checkable lists of primary MCP facade actions so action-count
-//! regressions are visible. GitHub PR lifecycle actions live only on
-//! `tachi_gh` (canonical); they were removed from `tachi_task` in #757.
-
-/// Primary `tachi_task` actions advertised in the MCP schema.
-pub const TACHI_TASK_PRIMARY_ACTIONS: &[&str] = &[
-    "plan",
-    "briefing",
-    "doc_index",
-    "recommend",
-    "dispatch",
-    "complete",
-    "profiles",
-    "profile",
-    "card",
-    "route_simulate",
-    "proposals",
-    "review_proposal",
-    "apply_proposals",
-    "status",
-    "cancel",
-    "board",
-    "wait",
-    "merge",
-    "intake",
-    "cycle_status",
-    "cycle_plan",
-    "ux_matrix",
-    "build_references",
-    "close_loop",
-];
+//! Machine-checkable lists of MCP facade actions so action-count regressions
+//! are visible. `tachi_task` primary actions and `tachi_verify` actions are
+//! derived from their typed enums (`action_enums::TachiTaskAction::PRIMARY`,
+//! `TachiVerifyAction::ALL`) — no duplicated `&[&str]` mirrors (#1085).
+//! GitHub PR lifecycle actions live only on `tachi_gh` (canonical); they were
+//! removed from `tachi_task` in #757.
 
 /// GH PR lifecycle actions removed from `tachi_task` (#757). Canonical surface
 /// is `tachi_gh`. Kept as a machine-checkable deny-list for schema/router tests.
@@ -91,9 +66,6 @@ pub const TACHI_MEMORY_ACTIONS: &[&str] = &[
     "sticky_check",
 ];
 
-/// `tachi_verify` actions.
-pub const TACHI_VERIFY_ACTIONS: &[&str] = &["start", "record", "status", "board"];
-
 /// Soft ceilings for F0 monitoring (primary schema actions only).
 pub const TACHI_TASK_PRIMARY_ACTION_SOFT_MAX: usize = 28;
 pub const TACHI_MEMORY_ACTION_SOFT_MAX: usize = 25;
@@ -101,18 +73,20 @@ pub const TACHI_GH_ACTION_SOFT_MAX: usize = 20;
 
 #[cfg(test)]
 mod tests {
+    use super::super::action_enums::{TachiTaskAction, TachiVerifyAction};
     use super::*;
 
     #[test]
     fn f0_task_primary_does_not_advertise_gh_lifecycle() {
+        let primary = TachiTaskAction::primary_wire_strings();
         for action in TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS {
             assert!(
-                !TACHI_TASK_PRIMARY_ACTIONS.contains(action),
+                !primary.contains(action),
                 "primary task schema must not advertise {action}; use tachi_gh"
             );
         }
-        assert_eq!(TACHI_TASK_PRIMARY_ACTIONS.len(), 24);
-        assert!(TACHI_TASK_PRIMARY_ACTIONS.len() <= TACHI_TASK_PRIMARY_ACTION_SOFT_MAX);
+        assert_eq!(primary.len(), 24);
+        assert!(primary.len() <= TACHI_TASK_PRIMARY_ACTION_SOFT_MAX);
     }
 
     #[test]
@@ -137,6 +111,6 @@ mod tests {
         // should move, not just this exact-count tripwire.
         assert_eq!(TACHI_MEMORY_ACTIONS.len(), 25);
         assert!(TACHI_MEMORY_ACTIONS.len() <= TACHI_MEMORY_ACTION_SOFT_MAX);
-        assert_eq!(TACHI_VERIFY_ACTIONS.len(), 4);
+        assert_eq!(TachiVerifyAction::ALL.len(), 4);
     }
 }

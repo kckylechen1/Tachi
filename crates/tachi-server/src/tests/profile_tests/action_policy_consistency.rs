@@ -33,7 +33,10 @@ fn assert_all_classified(tool_name: &str, actions: &[&str]) {
 
 #[test]
 fn f919_tachi_task_primary_actions_are_all_classified() {
-    assert_all_classified("tachi_task", tachi_params::TACHI_TASK_PRIMARY_ACTIONS);
+    assert_all_classified(
+        "tachi_task",
+        &tachi_params::TachiTaskAction::primary_wire_strings(),
+    );
 }
 
 #[test]
@@ -64,5 +67,8 @@ fn f919_tachi_memory_actions_are_all_classified() {
 
 #[test]
 fn f919_tachi_verify_actions_are_all_classified() {
-    assert_all_classified("tachi_verify", tachi_params::TACHI_VERIFY_ACTIONS);
+    assert_all_classified(
+        "tachi_verify",
+        &tachi_params::TachiVerifyAction::all_wire_strings(),
+    );
 }

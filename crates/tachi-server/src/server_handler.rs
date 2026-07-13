@@ -153,7 +153,7 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
 /// session intersect the advertised `action` enum with what the SAME gate
 /// (single source of truth — no separate hardcoded list to drift) actually
 /// allows. Read-only: only narrows the schema, never widens it beyond what
-/// `TACHI_TASK_PRIMARY_ACTIONS` already declares.
+/// `TachiTaskAction::PRIMARY` already declares.
 fn narrow_gated_action_schemas(
     tools: &mut [rmcp::model::Tool],
     profile: Option<tachi_hub::ToolProfile>,
@@ -166,7 +166,7 @@ fn narrow_gated_action_schemas(
         if tool.name.as_ref() != "tachi_task" {
             continue;
         }
-        let allowed: Vec<&str> = tachi_params::TACHI_TASK_PRIMARY_ACTIONS
+        let allowed: Vec<&str> = tachi_params::TachiTaskAction::primary_wire_strings()
             .iter()
             .copied()
             .filter(|action| {

@@ -18,7 +18,7 @@ fn tachi_verify_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
-        super::action_inventory::TACHI_VERIFY_ACTIONS,
+        &super::action_enums::TachiVerifyAction::all_wire_strings(),
         "Required Tachi verification ledger action (start/record/status/board).",
         generator,
     )
