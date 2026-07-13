@@ -12,7 +12,7 @@
 //! `codex --sandbox read-only` parsing successfully proves nothing. Only this
 //! test does.
 //!
-//! # Why it is `#[ignore]`d
+//! # Why it is `#[ignore]`d — and what that costs
 //!
 //! It spawns the real `codex` CLI, which needs a working codex install +
 //! credentials + a model round-trip. That cannot run unattended in CI, and a
@@ -20,24 +20,60 @@
 //! than no kill-test at all — so the missing-binary path here PANICS with
 //! instructions rather than returning green.
 //!
-//! # How to run it (manual re-certification)
+//! Because it is `#[ignore]`d, it has **never been executed**, so the shipped
+//! `PROVIDER_QUALIFICATIONS` row for codex/cli is `Certification::Unverified`
+//! and **every shell-capable read-only dispatch is refused pre-spawn today**
+//! (invariant 5: refusing beats pretending). This test is the way out of that.
+//!
+//! # How to certify (the only way read-only lanes come back)
 //!
 //! ```text
 //! export CARGO_TARGET_DIR=$HOME/.cache/sigil-shared-target
 //! cargo test -p tachi-dispatch --test codex_sandbox_kill_test -- --ignored --nocapture
 //! ```
 //!
-//! Re-run it whenever the codex CLI is upgraded. If it fails, the codex row in
-//! `PROVIDER_QUALIFICATIONS` must be narrowed (`VersionScope::AtLeast`) or
-//! removed — which makes every read-only dispatch fail closed, by design.
+//! If — and only if — every mutation in the matrix was refused:
+//!
+//! 1. drop the `#[ignore]` below, so the ordinary suite keeps re-certifying it;
+//! 2. flip the codex row in `PROVIDER_QUALIFICATIONS` to
+//!    `Certification::KillTested { test: "crates/tachi-dispatch/tests/codex_sandbox_kill_test.rs" }`.
+//!
+//! Doing (2) without (1) is refused by the unit test
+//! `authority::tests::certification_is_coupled_to_the_kill_tests_execution_state`:
+//! a certification nobody ran is a claim, not evidence.
+//!
+//! Re-run it whenever the codex CLI is upgraded. If it fails, the codex row must
+//! be narrowed (`VersionScope::AtLeast`) or dropped back to `Unverified` — which
+//! makes every read-only dispatch fail closed, by design.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tachi_dispatch::{
-    build_codex_launch, compile_effective_contract, ContractInputs, DispatchLaunchParams,
-    PermissionProfile, WorkspaceAuthority, PROVIDER_QUALIFICATIONS,
+    build_codex_launch, compile_effective_contract, Certification, ContractInputs,
+    DispatchLaunchParams, PermissionProfile, ProviderQualification, TransportKind, VersionScope,
+    WorkspaceAuthority,
 };
+
+/// The row this test is trying to certify. The *shipped* table cannot be used to
+/// compile the contract here: its codex row is `Unverified` (this test has never
+/// run), so `compile_effective_contract` would refuse the very read-only dispatch
+/// we need in order to certify it — a bootstrap deadlock. So the candidate row is
+/// stated here, the argv is built from it, and the kill-test decides whether the
+/// claim survives contact with a real binary. Only a human, after reading a green
+/// run, promotes the shipped row to match.
+const CANDIDATE_ROW: &[ProviderQualification] = &[ProviderQualification {
+    backend: "codex",
+    transport: TransportKind::Cli,
+    versions: VersionScope::Any,
+    covers: &[
+        WorkspaceAuthority::ReadOnly,
+        WorkspaceAuthority::WorkspaceWrite,
+    ],
+    certification: Certification::KillTested {
+        test: "crates/tachi-dispatch/tests/codex_sandbox_kill_test.rs",
+    },
+}];
 
 /// The mutation matrix the sandbox must refuse, every one of them, at
 /// `read-only`. Each entry is (label, shell command run from the worktree root).
@@ -121,9 +157,9 @@ fn codex_read_only_sandbox_refuses_every_mutation_in_the_matrix() {
         skills: &[],
         mcp_write_actions: None,
         mcp_github_read: None,
-        qualifications: PROVIDER_QUALIFICATIONS,
+        qualifications: CANDIDATE_ROW,
     })
-    .expect("review contract compiles");
+    .expect("review contract compiles against the candidate row");
     assert_eq!(
         contract.workspace_authority,
         WorkspaceAuthority::ReadOnly,

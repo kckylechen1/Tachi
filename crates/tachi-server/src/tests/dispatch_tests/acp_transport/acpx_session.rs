@@ -32,7 +32,13 @@ print(json.dumps({"event": "end_turn", "final_response": "raven done"}))
     params.harness_transport = Some("acpx".to_string());
     params.cwd = Some(temp_home.path().to_string_lossy().to_string());
     params.unmanaged_cwd = Some(true);
-    params.profile = Some("codex_55_review".to_string());
+    // Deliberately profile-less. This test's subject is acpx session plumbing
+    // (mode/session/controls/result), and since #894 S2d a *read-only* profile
+    // such as `codex_55_review` cannot be dispatched over acpx at all: acpx has
+    // no sandbox primitive, codex runs shell unattended, and a read-only claim
+    // nobody enforces is refused pre-spawn (authority invariant 4). Pinning that
+    // refusal is `authority::tests`' job; keeping this lane dispatchable is this
+    // test's.
     params.timeout_secs = 5;
 
     let response = crate::dispatch_ops::handle_tachi_dispatch(&server, params)

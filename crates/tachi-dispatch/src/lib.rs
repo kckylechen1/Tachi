@@ -17,10 +17,11 @@ pub mod signatures;
 pub mod eval;
 pub use authority::{
     compile_effective_contract, native_skill_requires_workspace_write,
-    provider_has_sandbox_primitive, qualify_provider, transport_kind, ContractError,
+    provider_has_sandbox_primitive, qualify_provider, transport_kind, Certification, ContractError,
     ContractInputs, EffectiveContract, Enforcement, ExcludedSkill, NetworkAuthority,
     ProviderQualification, SkillRequest, ToolAuthority, TransportKind, VersionScope,
-    WorkspaceAuthority, PROVIDER_QUALIFICATIONS, SANDBOX_PRIMITIVE_PROVIDERS,
+    WorkspaceAuthority, CALLER_SANDBOX, CEILING_PROFILE, OPERATOR_BYPASS, PROVIDER_QUALIFICATIONS,
+    SANDBOX_PRIMITIVE_PROVIDERS,
 };
 pub use launcher::{
     build_claude_launch, build_codex_launch, build_custom_launch, build_grok_launch,

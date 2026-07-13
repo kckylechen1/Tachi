@@ -13,7 +13,13 @@
 //!   through to codex's `workspace-write` default);
 //! - a read-only level that no kill-test-certified provider can enforce is
 //!   refused here, with a receipt — not after a run directory and a set of
-//!   materialized credentials already exist on disk;
+//!   materialized credentials already exist on disk. **As shipped that means
+//!   every shell-capable read-only dispatch is refused**: the codex/cli row is
+//!   `Unverified` until somebody runs the kill-test (`tachi_dispatch::authority`
+//!   invariant 5). Refusing beats pretending;
+//! - the operator bypass (`permission_profile=full|verify`) is reconciled with
+//!   the profile ceiling here too — it claims `danger-full-access`, so it cannot
+//!   be smuggled past a review profile by also passing an explicit `sandbox`;
 //! - the compiled level, not a vendor default, is what the launcher receives:
 //!   `params.sandbox` is *overwritten* with the compiled value;
 //! - skills that need workspace writes are dropped from `params.skills` under a
@@ -27,7 +33,7 @@
 use super::*;
 use tachi_dispatch::{
     compile_effective_contract, ContractInputs, DispatchLaunchParams, EffectiveContract,
-    SkillRequest, PROVIDER_QUALIFICATIONS,
+    ProviderQualification, SkillRequest,
 };
 
 /// Compile the dispatch's effective authority contract and apply it to
@@ -38,17 +44,25 @@ use tachi_dispatch::{
 /// sandbox primitive — never a vendor default), and `skills` becomes the
 /// mounted subset.
 ///
-/// Provider version is passed as `None`: the shipped qualification table's only
-/// row (codex/cli) is `VersionScope::Any`, so no version probe is needed. If a
-/// future row is narrowed to `VersionScope::AtLeast(..)`, an unknown version
-/// fails CLOSED (`qualify_provider` refuses), which is the correct direction —
-/// it will surface immediately as a refused dispatch, not as a silent downgrade,
-/// and a `codex --version` probe can be added here at that point.
+/// `qualifications` is a parameter rather than the const so the tests can pin
+/// both worlds explicitly: the shipped table (whose only row, codex/cli, is
+/// `Unverified` because its kill-test has never been executed — so every
+/// shell-capable read-only dispatch is refused today) and a certified table (the
+/// world the moment someone runs it). The production caller passes
+/// [`tachi_dispatch::PROVIDER_QUALIFICATIONS`].
+///
+/// Provider version is passed as `None`: the shipped table's only row is
+/// `VersionScope::Any`, so no version probe is needed. If a future row is
+/// narrowed to `VersionScope::AtLeast(..)`, an unknown version fails CLOSED
+/// (`qualify_provider` refuses), which is the correct direction — it will surface
+/// immediately as a refused dispatch, not as a silent downgrade, and a
+/// `codex --version` probe can be added here at that point.
 pub(super) fn compile_dispatch_contract(
     params: &mut TachiDispatchParams,
     agent_norm: &str,
     harness_transport: &str,
     resolved_profile: &ResolvedDispatchProfile,
+    qualifications: &[ProviderQualification],
 ) -> Result<EffectiveContract, String> {
     let permission_profile = tachi_dispatch::resolve_permission_profile(&DispatchLaunchParams {
         cwd: params.cwd.clone(),
@@ -92,7 +106,7 @@ pub(super) fn compile_dispatch_contract(
         skills: &skills,
         mcp_write_actions: resolved_profile.mcp_access.write_actions,
         mcp_github_read: resolved_profile.mcp_access.github_read,
-        qualifications: PROVIDER_QUALIFICATIONS,
+        qualifications,
     })
     .map_err(|err| err.to_string())?;
 
@@ -112,6 +126,54 @@ mod tests {
     use super::*;
     use crate::dispatch_profile::resolve_and_apply_dispatch_profile;
     use serde_json::json;
+    use tachi_dispatch::{
+        Certification, TransportKind, VersionScope, WorkspaceAuthority, PROVIDER_QUALIFICATIONS,
+    };
+
+    /// The world once somebody actually runs the kill-test. The shipped table's
+    /// codex row is `Unverified` (the kill-test is `#[ignore]`d and has never
+    /// been executed), so a shell-capable read-only dispatch is refused today —
+    /// see `read_only_review_lane_is_refused_while_codex_is_uncertified`. The
+    /// tests that assert what a read-only contract *compiles to* therefore pin
+    /// this certified table explicitly, instead of quietly depending on a
+    /// certification nobody has.
+    const CERTIFIED_CODEX: &[ProviderQualification] = &[ProviderQualification {
+        backend: "codex",
+        transport: TransportKind::Cli,
+        versions: VersionScope::Any,
+        covers: &[
+            WorkspaceAuthority::ReadOnly,
+            WorkspaceAuthority::WorkspaceWrite,
+        ],
+        certification: Certification::KillTested {
+            test: "crates/tachi-dispatch/tests/codex_sandbox_kill_test.rs",
+        },
+    }];
+
+    /// The #878-B operator opt-in, scoped to one test (the sibling `tests`
+    /// module's `EnvGuard` is private to it).
+    struct FullPermissionOptIn {
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl FullPermissionOptIn {
+        const KEY: &'static str = "TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE";
+
+        fn set() -> Self {
+            let original = std::env::var_os(Self::KEY);
+            std::env::set_var(Self::KEY, "true");
+            Self { original }
+        }
+    }
+
+    impl Drop for FullPermissionOptIn {
+        fn drop(&mut self) {
+            match self.original.as_ref() {
+                Some(value) => std::env::set_var(Self::KEY, value),
+                None => std::env::remove_var(Self::KEY),
+            }
+        }
+    }
 
     /// Build params + run the same profile resolution the entry point runs, so
     /// these tests exercise the real (profile -> contract -> params -> launcher)
@@ -138,8 +200,9 @@ mod tests {
         }));
         assert_eq!(params.sandbox, None, "the caller omitted sandbox");
 
-        let contract = compile_dispatch_contract(&mut params, "codex", "cli", &resolved)
-            .expect("review contract compiles");
+        let contract =
+            compile_dispatch_contract(&mut params, "codex", "cli", &resolved, CERTIFIED_CODEX)
+                .expect("review contract compiles");
 
         assert_eq!(
             params.sandbox.as_deref(),
@@ -187,11 +250,49 @@ mod tests {
             "profile": "codex_55_review",
             "sandbox": "workspace-write",
         }));
-        let err = compile_dispatch_contract(&mut params, "codex", "cli", &resolved)
-            .expect_err("widening a read-only profile must be refused");
+        let err =
+            compile_dispatch_contract(&mut params, "codex", "cli", &resolved, CERTIFIED_CODEX)
+                .expect_err("widening a read-only profile must be refused");
         assert!(err.contains("authority conflict"), "{err}");
         assert!(err.contains("codex_55_review"), "{err}");
         assert!(err.contains("never widened"), "{err}");
+    }
+
+    /// **Round-2 regression (the authority-escalation BUG), at the entry point.**
+    /// An explicit `sandbox` value must not shadow the `permission_profile=full`
+    /// bypass check: round 1 compiled this exact dispatch to a "read-only"
+    /// contract and then launched codex with
+    /// `--dangerously-bypass-approvals-and-sandbox`. It must be refused, and
+    /// `params.sandbox` must not have been rewritten on the way out.
+    #[test]
+    fn explicit_sandbox_cannot_shadow_the_operator_bypass_check_at_the_entry_point() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // The operator opt-in is what makes `full` resolvable at all (#878-B).
+        let _full = FullPermissionOptIn::set();
+
+        let (mut params, resolved) = resolve(json!({
+            "task": "review the diff",
+            "profile": "codex_55_review",
+            "sandbox": "read-only",
+            "permission_profile": "full",
+        }));
+
+        let err =
+            compile_dispatch_contract(&mut params, "codex", "cli", &resolved, CERTIFIED_CODEX)
+                .expect_err("a read-only profile must never compile to a sandbox bypass");
+        assert!(err.contains("authority conflict"), "{err}");
+        assert!(
+            err.contains("danger-full-access"),
+            "the receipt must name what the bypass actually claims: {err}"
+        );
+        assert!(err.contains("never widened"), "{err}");
+        assert_eq!(
+            params.sandbox.as_deref(),
+            Some("read-only"),
+            "a refused dispatch must not have had its params rewritten on the way out"
+        );
     }
 
     /// Discriminating test ②: a skill that declares workspace-write intent is
@@ -216,8 +317,9 @@ mod tests {
             ],
         }));
 
-        let contract = compile_dispatch_contract(&mut params, "codex", "cli", &resolved)
-            .expect("review contract compiles");
+        let contract =
+            compile_dispatch_contract(&mut params, "codex", "cli", &resolved, CERTIFIED_CODEX)
+                .expect("review contract compiles");
 
         assert_eq!(
             params.skills,
@@ -248,19 +350,30 @@ mod tests {
                 "skill:waza-write",
             ],
         }));
-        let exec_contract =
-            compile_dispatch_contract(&mut exec_params, "custom", "cli", &exec_resolved)
-                .expect("executor contract compiles");
+        let exec_contract = compile_dispatch_contract(
+            &mut exec_params,
+            "custom",
+            "cli",
+            &exec_resolved,
+            CERTIFIED_CODEX,
+        )
+        .expect("executor contract compiles");
         assert!(exec_contract.excluded_skills.is_empty());
         assert_eq!(exec_params.skills.len(), 3);
     }
 
-    /// A provider with no sandbox primitive gets NO fabricated vendor flag, and
-    /// its (profile-derived) read-only level is recorded as advisory — stated
-    /// out loud in the receipt instead of being passed off as isolation.
+    /// **Round-2 fix (invariant 4 was decorative).** A read-only *explore* lane on
+    /// opencode/custom runs shell unattended and nothing enforces its read-only
+    /// claim — round 1 let it through as "advisory". A read-only claim with no
+    /// enforcer and an unattended shell behind it is not a weaker isolation
+    /// story, it is no isolation story: refused pre-spawn, with a receipt.
+    ///
+    /// This is a deliberate behavior change with product blast radius — it is the
+    /// owner-frozen invariant 4 + 5 posture ("refusing beats pretending"), and it
+    /// is what forces the kill-test to actually be run.
     #[test]
-    fn primitive_less_backend_gets_no_sandbox_flag_and_an_advisory_receipt() {
-        // `deepseek_explore` also resolves through the OpenCode adapter.
+    fn shell_capable_read_only_lane_on_an_uncertified_backend_is_refused() {
+        // `deepseek_explore` resolves through the OpenCode adapter.
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -268,8 +381,68 @@ mod tests {
             "task": "map the repo",
             "profile": "deepseek_explore",
         }));
-        let contract = compile_dispatch_contract(&mut params, "custom", "cli", &resolved)
-            .expect("explore contract compiles");
+        let err = compile_dispatch_contract(
+            &mut params,
+            "custom",
+            "cli",
+            &resolved,
+            PROVIDER_QUALIFICATIONS,
+        )
+        .expect_err("an unattended read-only lane needs a certified enforcer");
+        assert!(err.contains("not kill-test certified"), "{err}");
+        assert!(err.contains("read-only"), "{err}");
+        assert!(err.contains("fail-closed"), "{err}");
+    }
+
+    /// Today's shipped reality, pinned so nobody discovers it by surprise in
+    /// production: codex/cli is `Unverified` (its kill-test is `#[ignore]`d and
+    /// has never run), so even the codex review lane — the one backend with a
+    /// real sandbox primitive — is refused. Certify it (run the kill-test, drop
+    /// the `#[ignore]`, flip the row) and the lane comes back; see
+    /// `omitted_sandbox_on_review_profile_reaches_codex_as_read_only`, which pins
+    /// the certified world.
+    #[test]
+    fn read_only_review_lane_is_refused_while_codex_is_uncertified() {
+        let (mut params, resolved) = resolve(json!({
+            "task": "review the diff",
+            "profile": "codex_55_review",
+        }));
+        let err = compile_dispatch_contract(
+            &mut params,
+            "codex",
+            "cli",
+            &resolved,
+            PROVIDER_QUALIFICATIONS,
+        )
+        .expect_err("the shipped table certifies nobody");
+        assert!(err.contains("not kill-test certified"), "{err}");
+        assert!(
+            err.contains("has never been executed"),
+            "the receipt must say why: {err}"
+        );
+    }
+
+    /// A write-level dispatch on a provider with no sandbox primitive still gets
+    /// NO fabricated vendor flag, and its enforcement is recorded as advisory —
+    /// stated out loud in the receipt instead of being passed off as isolation.
+    /// (Write levels make no isolation claim, so they are not refused.)
+    #[test]
+    fn primitive_less_backend_gets_no_sandbox_flag_and_an_advisory_receipt() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (mut params, resolved) = resolve(json!({
+            "task": "land the patch",
+            "profile": "opencode_builder",
+        }));
+        let contract = compile_dispatch_contract(
+            &mut params,
+            "custom",
+            "cli",
+            &resolved,
+            PROVIDER_QUALIFICATIONS,
+        )
+        .expect("builder contract compiles");
 
         assert_eq!(
             params.sandbox, None,
@@ -277,7 +450,7 @@ mod tests {
         );
         assert_eq!(
             contract.workspace_authority,
-            tachi_dispatch::WorkspaceAuthority::ReadOnly
+            tachi_dispatch::WorkspaceAuthority::WorkspaceWrite
         );
         let receipt = contract_receipt(&contract);
         assert_eq!(receipt["enforcement"]["mode"], json!("advisory"));

@@ -14,22 +14,37 @@
 //! The frozen invariants this module implements:
 //!
 //! 1. **Authority is monotone.** Profile, skills, MCP loadout, memory,
-//!    credentials, caller override and fallback routing may only *preserve or
-//!    narrow* the compiled authority — never widen it.
-//! 2. A read-only profile plus an explicit `workspace-write` request is a
-//!    **type conflict** ([`ContractError::AuthorityConflict`]), not a
-//!    compatible override.
+//!    credentials, caller override, *operator bypass* and fallback routing may
+//!    only *preserve or narrow* the compiled authority — never widen it. Every
+//!    party that has a say files a **claim**; the compiler takes the meet (min)
+//!    of the claims against the profile's ceiling, on **every** path.
+//! 2. A claim that sits above the running ceiling is a **type conflict**
+//!    ([`ContractError::AuthorityConflict`]), not a compatible override. That
+//!    covers a read-only profile plus an explicit `workspace-write` request —
+//!    and equally the `permission_profile=full|verify` **bypass**, which is a
+//!    claim for `danger-full-access` on every backend (codex
+//!    `--dangerously-bypass-approvals-and-sandbox`, claude
+//!    `--dangerously-skip-permissions`, grok `bypassPermissions`, kimi `-y`) and
+//!    is therefore reconciled with the ceiling whether or not the caller also
+//!    passed an explicit `sandbox` value.
 //! 3. An **omitted** sandbox resolves from the *effective profile* (before the
 //!    backend is chosen), not from a backend default — `codex_55_review` with
 //!    no `sandbox` argument compiles to `read-only`, where before #894 S2d it
 //!    silently fell through to codex's `workspace-write` default.
-//! 4. A shell-capable read-only dispatch may only start on a **qualified**
+//! 4. A read-only dispatch that can run **shell unattended**
+//!    ([`ToolAuthority::unattended_shell`]) may only start on a **certified**
 //!    provider; unknown/uncertified providers are refused **pre-spawn** (no run
 //!    directory, no credential materialization), not left to fail after spawn.
-//! 5. **Vendor flag validation is not provider qualification.** `codex
-//!    --sandbox read-only` being a *valid flag* ([`crate::validate_codex_sandbox`])
-//!    says nothing about enforcement; only [`PROVIDER_QUALIFICATIONS`], whose
-//!    entries are backed by a real-process kill-test, does.
+//!    This gate runs on every path — explicit request, profile-derived default,
+//!    or fallback — not only when the caller typed a sandbox value.
+//! 5. **Vendor flag validation is not provider qualification, and a named
+//!    kill-test is not an executed one.** `codex --sandbox read-only` being a
+//!    *valid flag* ([`crate::validate_codex_sandbox`]) says nothing about
+//!    enforcement; neither does a [`ProviderQualification`] row that merely
+//!    *points at* a kill-test. Only [`Certification::KillTested`] — a row whose
+//!    kill-test actually runs in the suite — certifies anything. Today the codex
+//!    kill-test is `#[ignore]`d, so the shipped table certifies **nobody** and
+//!    read-only dispatches fail closed. Refusing beats pretending.
 //! 6. **A mounted skill is an input, not a permission.** A skill that declares
 //!    workspace-write intent cannot widen a read-only contract — it is
 //!    *excluded* from the mount, with a reason in the receipt.
@@ -161,12 +176,19 @@ pub enum Enforcement {
     },
     /// Nothing machine-enforces this level on this provider: the contract is
     /// prompt/permission-level only. Stated out loud in the receipt rather than
-    /// implied by silence — an advisory read-only lane is NOT isolation.
+    /// implied by silence — an advisory read-only lane is NOT isolation. Only
+    /// reachable for a level whose enforcement is not load-bearing (a write
+    /// level), or for a read-only lane that cannot run shell unattended;
+    /// otherwise invariant 4 refuses the dispatch instead.
     Advisory { reason: String },
     /// Operator escape hatch: `permission_profile=full|verify` with the env
-    /// opt-in bypasses the vendor sandbox entirely (pre-existing #878-B
-    /// behavior). Never reachable from a read-only profile — that combination
-    /// is an [`ContractError::AuthorityConflict`].
+    /// opt-in launches the backend with its bypass flag, so nothing enforces
+    /// anything (pre-existing #878-B behavior). Only reachable when the
+    /// dispatch's ceiling *is* `danger-full-access` — i.e. a profile-less
+    /// dispatch that also asked for no narrower sandbox. Any profile (review or
+    /// executor) or any explicit narrower `sandbox` value caps the ceiling below
+    /// `danger-full-access`, and the bypass claim is then an
+    /// [`ContractError::AuthorityConflict`].
     Bypass { reason: String },
 }
 
@@ -230,10 +252,16 @@ pub struct EffectiveContract {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContractError {
-    /// Something tried to *widen* the profile's authority. Invariant 1/2.
+    /// A claim tried to *widen* the running ceiling. Invariant 1/2.
     AuthorityConflict {
         profile: String,
-        profile_authority: WorkspaceAuthority,
+        /// The ceiling the claim ran into. It starts at the profile's grant and
+        /// is narrowed further by any explicit caller `sandbox` — so a later
+        /// claim (the operator bypass) is checked against the *narrowed* value,
+        /// not just against the profile.
+        ceiling: WorkspaceAuthority,
+        /// Which input set that ceiling ([`CEILING_PROFILE`] / [`CALLER_SANDBOX`]).
+        ceiling_source: &'static str,
         requested: WorkspaceAuthority,
         source: &'static str,
     },
@@ -271,13 +299,14 @@ impl fmt::Display for ContractError {
         match self {
             Self::AuthorityConflict {
                 profile,
-                profile_authority,
+                ceiling,
+                ceiling_source,
                 requested,
                 source,
             } => write!(
                 f,
-                "authority conflict: profile '{profile}' compiles to workspace authority '{}', but {source} asks for '{}'; authority may only be preserved or narrowed, never widened — this is a type conflict, not a compatible override (fail-closed, #894 S2d)",
-                profile_authority.as_str(),
+                "authority conflict: profile '{profile}' dispatch has an effective workspace-authority ceiling of '{}' (from {ceiling_source}), but {source} asks for '{}'; authority may only be preserved or narrowed, never widened — this is a type conflict, not a compatible override (fail-closed, #894 S2d)",
+                ceiling.as_str(),
                 requested.as_str()
             ),
             Self::InvalidSandbox(msg) | Self::UnsupportedSandbox(msg) => write!(f, "{msg}"),
@@ -288,7 +317,7 @@ impl fmt::Display for ContractError {
                 reason,
             } => write!(
                 f,
-                "permission receipt: provider '{provider}'{} is not kill-test certified to enforce workspace authority '{}' ({reason}); a valid vendor flag is not provider qualification — refusing before spawn rather than pretending to isolate (fail-closed, #894 S2d)",
+                "permission receipt: provider '{provider}'{} is not kill-test certified to enforce workspace authority '{}' ({reason}); a valid vendor flag is not provider qualification, and a shell-capable read-only dispatch may only start on a certified provider — refusing before spawn rather than pretending to isolate (fail-closed, #894 S2d)",
                 version
                     .as_deref()
                     .map(|v| format!(" version '{v}'"))
@@ -332,38 +361,85 @@ pub enum VersionScope {
     AtLeast(&'static str),
 }
 
-/// One certified provider: this `backend x transport x version` was observed,
-/// by a real-process kill-test, to actually refuse every mutation at the listed
-/// levels.
+/// Why we believe — or explicitly do not believe — that a row enforces its
+/// levels. Certification is a statement about an **execution**, not about a
+/// flag and not about a *reference* to a test (invariant 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Certification {
+    /// A real-process kill-test ran and observed this provider refuse every
+    /// mutation in its matrix. `test` is a repo-relative path, and it must be a
+    /// test the ordinary suite actually executes — see
+    /// `certification_is_coupled_to_the_kill_tests_execution_state`, which fails
+    /// if a `KillTested` row points at an `#[ignore]`d test.
+    KillTested { test: &'static str },
+    /// The row exists (the provider has the flag, and we know which levels a
+    /// kill-test *would* cover) but nobody has watched it refuse anything.
+    /// Fails closed: `qualify_provider` never returns an `Unverified` row, so a
+    /// shell-capable read-only dispatch to it is refused pre-spawn.
+    Unverified { reason: &'static str },
+}
+
+impl Certification {
+    /// The certifying kill-test, or `None` when the row is not certified.
+    pub fn kill_test(self) -> Option<&'static str> {
+        match self {
+            Self::KillTested { test } => Some(test),
+            Self::Unverified { .. } => None,
+        }
+    }
+}
+
+/// One row of the qualification table: `backend x transport x version`, the
+/// levels its kill-test matrix covers, and whether that kill-test has actually
+/// been executed.
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderQualification {
     pub backend: &'static str,
     pub transport: TransportKind,
     pub versions: VersionScope,
-    pub enforces: &'static [WorkspaceAuthority],
-    /// The kill-test that certifies this row. Re-run it to re-certify.
-    pub certified_by: &'static str,
+    /// The levels this row's kill-test matrix covers. A level that is not listed
+    /// is never certified — and the levels that *are* listed only count when
+    /// `certification` is [`Certification::KillTested`].
+    pub covers: &'static [WorkspaceAuthority],
+    pub certification: Certification,
 }
 
 /// The qualification table. **codex CLI is the only entry** — it is the only
 /// backend Tachi dispatches that ships a real sandbox primitive (owner-ratified,
-/// sol codex-e0255). Every other backend/transport is uncertified by definition,
-/// so a read-only *request* to it is refused pre-spawn.
+/// sol codex-e0255) — and that entry is **`Unverified`**: its kill-test
+/// (`crates/tachi-dispatch/tests/codex_sandbox_kill_test.rs`) is `#[ignore]`d
+/// and has never been executed against a real `codex` binary.
 ///
-/// `certified_by` points at the real-binary kill-test
-/// (`crates/tachi-dispatch/tests/codex_sandbox_kill_test.rs`), which is
-/// `#[ignore]`d because it needs a real `codex` binary on PATH and writes to a
-/// throwaway worktree — CI cannot run it unattended. Re-certification is a
-/// manual step, documented on the test itself.
+/// So today this table certifies **nobody**, and every shell-capable read-only
+/// dispatch — codex included — is refused pre-spawn with a receipt saying the
+/// provider is not kill-test certified. That is the intended fail-closed posture
+/// (owner-frozen invariant 5: *refusing beats pretending*), and it is the
+/// forcing function for certification.
+///
+/// **To certify codex/cli** (the only way to make read-only lanes dispatchable
+/// again):
+///
+/// 1. run the kill-test against a real binary —
+///    `cargo test -p tachi-dispatch --test codex_sandbox_kill_test -- --ignored --nocapture`;
+/// 2. if (and only if) every mutation in the matrix was refused, drop the
+///    `#[ignore]` from the test so the ordinary suite keeps re-certifying it, and
+/// 3. flip this row to
+///    `Certification::KillTested { test: "crates/tachi-dispatch/tests/codex_sandbox_kill_test.rs" }`.
+///
+/// Doing (3) without (2) is a lie the unit test
+/// `certification_is_coupled_to_the_kill_tests_execution_state` refuses to let
+/// you tell.
 pub const PROVIDER_QUALIFICATIONS: &[ProviderQualification] = &[ProviderQualification {
     backend: "codex",
     transport: TransportKind::Cli,
     versions: VersionScope::Any,
-    enforces: &[
+    covers: &[
         WorkspaceAuthority::ReadOnly,
         WorkspaceAuthority::WorkspaceWrite,
     ],
-    certified_by: "crates/tachi-dispatch/tests/codex_sandbox_kill_test.rs",
+    certification: Certification::Unverified {
+        reason: "its kill-test (crates/tachi-dispatch/tests/codex_sandbox_kill_test.rs) is #[ignore]d and has never been executed against a real codex binary — nobody has yet watched this provider refuse a single write",
+    },
 }];
 
 /// Parse a dotted version into comparable numeric components. String ordering
@@ -371,9 +447,7 @@ pub const PROVIDER_QUALIFICATIONS: &[ProviderQualification] = &[ProviderQualific
 /// numerically on purpose.
 fn version_components(raw: &str) -> Option<Vec<u64>> {
     let cleaned = raw.trim().trim_start_matches('v');
-    let head = cleaned
-        .split(|c: char| c == '-' || c == '+' || c == ' ')
-        .next()?;
+    let head = cleaned.split(['-', '+', ' ']).next()?;
     let parts = head
         .split('.')
         .map(|part| part.parse::<u64>().ok())
@@ -406,6 +480,10 @@ fn version_at_least(actual: &str, minimum: &str) -> bool {
 /// Look up whether `backend x transport x version` is certified to enforce
 /// `level`. `table` is a parameter (not the const) so the qualification policy
 /// itself is testable against synthetic tables.
+///
+/// Never returns a [`Certification::Unverified`] row: an uncertified row is a
+/// row nobody has watched enforce anything, which is the same thing as no row at
+/// all — only with a better receipt.
 pub fn qualify_provider<'a>(
     table: &'a [ProviderQualification],
     backend: &str,
@@ -440,15 +518,24 @@ pub fn qualify_provider<'a>(
                 Some(_) => {}
             },
         }
-        if !entry.enforces.contains(&level) {
+        if !entry.covers.contains(&level) {
             last_reason = format!(
-                "certified for [{}], not '{}'",
+                "the kill-test matrix for this provider covers [{}], not '{}'",
                 entry
-                    .enforces
+                    .covers
                     .iter()
                     .map(|l| l.as_str())
                     .collect::<Vec<_>>()
                     .join(", "),
+                level.as_str()
+            );
+            continue;
+        }
+        // Invariant 5: the row existing is not the row being certified.
+        if let Certification::Unverified { reason } = entry.certification {
+            last_reason = format!(
+                "a qualification row exists for '{backend}/{}' and its matrix covers '{}', but the row is NOT certified: {reason}",
+                transport.as_str(),
                 level.as_str()
             );
             continue;
@@ -536,6 +623,12 @@ fn unattended_shell(
     }
 }
 
+/// Ceiling/claim sources, named once so the receipt wording and the tests cannot
+/// drift apart.
+pub const CEILING_PROFILE: &str = "the profile's declared authority";
+pub const CALLER_SANDBOX: &str = "the caller's explicit sandbox request";
+pub const OPERATOR_BYPASS: &str = "the permission_profile 'full'/'verify' sandbox bypass";
+
 /// Compile profile + requested sandbox + skills + MCP loadout into one typed
 /// contract, or a typed error. Pure: no filesystem, no environment, no spawn.
 pub fn compile_effective_contract(
@@ -568,47 +661,87 @@ pub fn compile_effective_contract(
         )));
     }
 
-    // 2. Resolve the requested authority. Explicit request > operator bypass >
-    //    profile-derived default. Only the first two can conflict with the
-    //    ceiling; the derived default is clamped by construction.
-    let (requested, request_source): (WorkspaceAuthority, Option<&'static str>) =
-        match inputs.requested_sandbox {
-            Some(raw) => (
-                WorkspaceAuthority::parse_request(raw)?,
-                Some("caller sandbox override"),
-            ),
-            None if has_primitive && inputs.permission_profile == PermissionProfile::Full => (
-                WorkspaceAuthority::DangerFullAccess,
-                Some("permission_profile 'full'/'verify' sandbox bypass"),
-            ),
-            None => (default, None),
-        };
+    // 2. Compile the workspace authority. Every party that has a say files a
+    //    CLAIM against a running CEILING that starts at the profile's grant and
+    //    only ever narrows; a claim above the ceiling is a typed conflict, and
+    //    the compiled level is the meet (min) of the claims. Ordering is
+    //    ceiling-first, claims-second, min-last — deliberately, so no claim can
+    //    reach the launcher without having been reconciled with the ceiling.
+    //
+    //    Round 1 shipped an escalation here: the `permission_profile=full` →
+    //    danger-full-access promotion lived inside the `requested_sandbox: None`
+    //    arm, so an explicit `sandbox` value SHADOWED it and the bypass was never
+    //    checked against the ceiling at all. `codex_55_review` (read-only) +
+    //    `sandbox=read-only` + `permission_profile=full` compiled to a contract
+    //    that *said* read-only while launching codex with
+    //    `--dangerously-bypass-approvals-and-sandbox`. The bypass is now a claim
+    //    like any other, checked on EVERY path, and it is not gated on
+    //    `has_primitive` either: `full` bypasses permissions on every backend
+    //    (claude `--dangerously-skip-permissions`, grok `bypassPermissions`,
+    //    kimi `-y`), not just on the one with a sandbox flag.
+    let bypass_claimed = inputs.permission_profile == PermissionProfile::Full;
+    let mut ceiling = ceiling;
+    let mut ceiling_source: &'static str = CEILING_PROFILE;
+    let mut claimed: Option<WorkspaceAuthority> = None;
 
-    if let Some(source) = request_source {
-        if requested > ceiling {
+    if let Some(raw) = inputs.requested_sandbox {
+        let level = WorkspaceAuthority::parse_request(raw)?;
+        if level > ceiling {
             return Err(ContractError::AuthorityConflict {
                 profile: profile_name,
-                profile_authority: ceiling,
-                requested,
-                source,
+                ceiling,
+                ceiling_source,
+                requested: level,
+                source: CALLER_SANDBOX,
             });
         }
         explanation.push(format!(
-            "{source} requested '{}' (profile '{profile_name}' ceiling '{}')",
-            requested.as_str(),
+            "{CALLER_SANDBOX} claims '{}' (profile '{profile_name}' ceiling '{}')",
+            level.as_str(),
             ceiling.as_str()
         ));
-    } else {
-        explanation.push(format!(
-            "sandbox omitted; resolved from effective profile '{profile_name}' to '{}' (not the backend default) (#894 S2d)",
-            requested.as_str()
-        ));
+        // A caller who asks for LESS authority has narrowed the contract: that
+        // request is now the ceiling for every later claim (the operator bypass
+        // included). Nothing downstream may hand back what the caller declined.
+        ceiling = level;
+        ceiling_source = CALLER_SANDBOX;
+        claimed = Some(level);
     }
 
-    // Monotonicity is belt-and-braces here: `requested` is already <= ceiling on
-    // every path above. Clamping again makes the invariant unconditional rather
-    // than a property of the branches.
-    let workspace_authority = requested.min(ceiling);
+    if bypass_claimed {
+        // The bypass launches the backend with its "skip every check" flag: the
+        // authority it claims is danger-full-access, whatever else was asked for.
+        let level = WorkspaceAuthority::DangerFullAccess;
+        if level > ceiling {
+            return Err(ContractError::AuthorityConflict {
+                profile: profile_name,
+                ceiling,
+                ceiling_source,
+                requested: level,
+                source: OPERATOR_BYPASS,
+            });
+        }
+        explanation.push(format!(
+            "{OPERATOR_BYPASS} claims '{}', which the ceiling '{}' (from {ceiling_source}) permits",
+            level.as_str(),
+            ceiling.as_str()
+        ));
+        claimed = Some(level);
+    }
+
+    let workspace_authority = match claimed {
+        // Belt-and-braces: every claim above is already <= ceiling. The min makes
+        // monotonicity unconditional rather than a property of the branches.
+        Some(level) => level.min(ceiling),
+        None => {
+            let level = default.min(ceiling);
+            explanation.push(format!(
+                "sandbox omitted; resolved from effective profile '{profile_name}' to '{}' (not the backend default) (#894 S2d)",
+                level.as_str()
+            ));
+            level
+        }
+    };
 
     // 3. Tool authority (narrowing AND of profile and MCP loadout).
     let profile_write_actions = inputs.profile.map(|p| p.write_actions).unwrap_or(true);
@@ -623,56 +756,80 @@ pub fn compile_effective_contract(
         write_actions: profile_write_actions && inputs.mcp_write_actions.unwrap_or(true),
     };
 
-    // 4. Enforcement: who actually stops a write?
-    let enforcement = if has_primitive {
-        if inputs.permission_profile == PermissionProfile::Full {
-            // The env-gated operator escape hatch (#878-B): codex is launched
-            // with --dangerously-bypass-approvals-and-sandbox, so no sandbox
-            // enforces anything. Unreachable from a read-only profile — the
-            // ceiling check above already rejected that combination.
-            Enforcement::Bypass {
-                reason: format!(
-                    "permission_profile '{}' bypasses the codex sandbox entirely (requires the TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE / TACHI_DISPATCH_VERIFY_HEADLESS operator opt-in, #878-B)",
-                    inputs.permission_profile.as_str()
-                ),
-            }
-        } else {
-            let entry = qualify_provider(
-                inputs.qualifications,
-                inputs.backend,
-                transport,
-                inputs.backend_version,
-                workspace_authority,
-            )
-            .map_err(|reason| ContractError::ProviderNotQualified {
-                provider: format!("{provider_label}/{}", transport.as_str()),
-                version: inputs.backend_version.map(str::to_string),
-                level: workspace_authority,
-                reason,
-            })?;
-            explanation.push(format!(
-                "provider '{provider_label}/{}' is certified to enforce '{}' by {}",
-                transport.as_str(),
-                workspace_authority.as_str(),
-                entry.certified_by
-            ));
-            Enforcement::Enforced {
-                provider: format!("{provider_label}/{}", transport.as_str()),
-                certified_by: entry.certified_by,
-            }
+    // 4. Enforcement: who actually stops a write? The qualification gate runs on
+    //    EVERY path that reaches here — explicit request, operator bypass, or a
+    //    profile-derived default. Round 1 only ran it for providers with a
+    //    sandbox primitive, so an omitted `sandbox` that compiled to read-only on
+    //    an uncertified provider sailed through as "advisory" and invariant 4 was
+    //    decorative.
+    let provider_id = format!("{provider_label}/{}", transport.as_str());
+    let enforcement = if bypass_claimed {
+        // The env-gated operator escape hatch (#878-B): the backend is launched
+        // with its bypass flag, so nothing enforces anything. Only reachable when
+        // the ceiling *is* danger-full-access — the claim check above rejected
+        // every narrower ceiling.
+        Enforcement::Bypass {
+            reason: format!(
+                "permission_profile '{}' bypasses the backend's own permission/sandbox enforcement entirely (requires the TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE / TACHI_DISPATCH_VERIFY_HEADLESS operator opt-in, #878-B); nothing machine-enforces workspace authority '{}'",
+                inputs.permission_profile.as_str(),
+                workspace_authority.as_str()
+            ),
         }
     } else {
-        // No primitive at all. An explicit request already failed above; what is
-        // left is a profile-DERIVED level on a provider that cannot enforce it.
-        // We do not silently claim isolation: the contract is advisory and says
-        // so in the receipt.
-        let reason = format!(
-            "provider '{provider_label}/{}' has no sandbox primitive; workspace authority '{}' is advisory (prompt/permission-level) and is NOT machine-enforced (#894 S2d)",
-            transport.as_str(),
-            workspace_authority.as_str()
-        );
-        explanation.push(reason.clone());
-        Enforcement::Advisory { reason }
+        match qualify_provider(
+            inputs.qualifications,
+            inputs.backend,
+            transport,
+            inputs.backend_version,
+            workspace_authority,
+        ) {
+            Ok(entry) => {
+                let certified_by = entry
+                    .certification
+                    .kill_test()
+                    .expect("qualify_provider never returns an uncertified row");
+                explanation.push(format!(
+                    "provider '{provider_id}' is kill-test certified to enforce '{}' by {certified_by}",
+                    workspace_authority.as_str()
+                ));
+                Enforcement::Enforced {
+                    provider: provider_id.clone(),
+                    certified_by,
+                }
+            }
+            Err(reason) => {
+                // Invariant 4: read-only is the one level whose entire value IS
+                // its enforcement, and an agent that can run shell unattended is
+                // the one that will actually test it. That combination on an
+                // uncertified provider is refused pre-spawn — no run directory,
+                // no credentials, no pretending.
+                if workspace_authority == WorkspaceAuthority::ReadOnly
+                    && tool_authority.unattended_shell
+                {
+                    return Err(ContractError::ProviderNotQualified {
+                        provider: provider_id,
+                        version: inputs.backend_version.map(str::to_string),
+                        level: workspace_authority,
+                        reason,
+                    });
+                }
+                // Everything else (a write level, or a read-only lane that cannot
+                // run shell unattended) is allowed to proceed — but we do not
+                // silently claim isolation we do not have: the contract is
+                // advisory and says so in the receipt.
+                let reason = format!(
+                    "provider '{provider_id}' is not kill-test certified to enforce workspace authority '{}' ({reason}); the contract is advisory (prompt/permission-level) and is NOT machine-enforced{} (#894 S2d)",
+                    workspace_authority.as_str(),
+                    if has_primitive {
+                        " — the vendor sandbox flag is still passed, as defense in depth, but nobody has watched it hold"
+                    } else {
+                        " (this provider has no sandbox primitive at all)"
+                    }
+                );
+                explanation.push(reason.clone());
+                Enforcement::Advisory { reason }
+            }
+        }
     };
 
     let network = match (&enforcement, workspace_authority) {
@@ -714,8 +871,10 @@ pub fn compile_effective_contract(
     }
 
     // 6. The vendor flag: only providers with a primitive get one, and it is
-    //    always the COMPILED level — never an omitted-argument vendor default.
-    let sandbox_arg = if has_primitive && inputs.permission_profile != PermissionProfile::Full {
+    //    always the COMPILED level — never an omitted-argument vendor default. A
+    //    bypassed launch gets none (the launcher passes the bypass flag instead;
+    //    passing both would be incoherent).
+    let sandbox_arg = if has_primitive && !bypass_claimed {
         Some(workspace_authority.as_codex_sandbox().to_string())
     } else {
         None
@@ -738,6 +897,33 @@ mod tests {
     use super::*;
     use crate::profiles::resolve_dispatch_profile;
 
+    /// The kill-test's own source, read at compile time. The certification
+    /// ratchet (`certification_is_coupled_to_the_kill_tests_execution_state`)
+    /// reads the `#[ignore]` attribute out of it, so "is this provider certified"
+    /// is answered by the test's *execution state*, not by a `&'static str` that
+    /// merely points at it.
+    const KILL_TEST_SOURCE: &str = include_str!("../tests/codex_sandbox_kill_test.rs");
+    const KILL_TEST_PATH: &str = "crates/tachi-dispatch/tests/codex_sandbox_kill_test.rs";
+
+    /// A synthetic table that certifies codex/cli — i.e. exactly what
+    /// [`PROVIDER_QUALIFICATIONS`] becomes on the day somebody actually runs the
+    /// kill-test. The shipped table is `Unverified`, so every read-only case
+    /// below has to declare which world it is testing: `CERTIFIED_CODEX` is the
+    /// post-certification world, `PROVIDER_QUALIFICATIONS` is today's
+    /// fail-closed reality.
+    const CERTIFIED_CODEX: &[ProviderQualification] = &[ProviderQualification {
+        backend: "codex",
+        transport: TransportKind::Cli,
+        versions: VersionScope::Any,
+        covers: &[
+            WorkspaceAuthority::ReadOnly,
+            WorkspaceAuthority::WorkspaceWrite,
+        ],
+        certification: Certification::KillTested {
+            test: KILL_TEST_PATH,
+        },
+    }];
+
     fn inputs<'a>(
         backend: &'a str,
         profile: Option<&'a DispatchProfileDef>,
@@ -758,13 +944,28 @@ mod tests {
         }
     }
 
+    /// Same, but in the post-certification world: codex/cli is kill-tested, so
+    /// read-only lanes compile instead of failing closed.
+    fn certified_inputs<'a>(
+        backend: &'a str,
+        profile: Option<&'a DispatchProfileDef>,
+        skills: &'a [SkillRequest],
+    ) -> ContractInputs<'a> {
+        ContractInputs {
+            qualifications: CERTIFIED_CODEX,
+            ..inputs(backend, profile, skills)
+        }
+    }
+
+    // ── Invariant 1/2: authority is monotone on EVERY path ───────────────────
+
     /// Discriminating test ①: read-only profile + explicit workspace-write is a
     /// TYPE CONFLICT, not a compatible override.
     #[test]
     fn read_only_profile_plus_explicit_workspace_write_is_a_typed_conflict() {
         let profile = resolve_dispatch_profile("codex_55_review").expect("profile");
         let skills = Vec::new();
-        let mut input = inputs("codex", Some(profile), &skills);
+        let mut input = certified_inputs("codex", Some(profile), &skills);
         input.requested_sandbox = Some("workspace-write");
 
         let err = compile_effective_contract(&input)
@@ -773,13 +974,16 @@ mod tests {
         match &err {
             ContractError::AuthorityConflict {
                 profile,
-                profile_authority,
+                ceiling,
+                ceiling_source,
                 requested,
-                ..
+                source,
             } => {
                 assert_eq!(profile, "codex_55_review");
-                assert_eq!(*profile_authority, WorkspaceAuthority::ReadOnly);
+                assert_eq!(*ceiling, WorkspaceAuthority::ReadOnly);
+                assert_eq!(*ceiling_source, CEILING_PROFILE);
                 assert_eq!(*requested, WorkspaceAuthority::WorkspaceWrite);
+                assert_eq!(*source, CALLER_SANDBOX);
             }
             other => panic!("wrong error variant: {other:?}"),
         }
@@ -787,12 +991,150 @@ mod tests {
         assert!(text.contains("never widened"), "{text}");
     }
 
+    /// **Round-2 regression, the reason this slice exists.** The operator bypass
+    /// (`permission_profile=full|verify`) is a claim for `danger-full-access`, and
+    /// it must be reconciled with the ceiling on EVERY path.
+    ///
+    /// Round 1 sat the `Full -> DangerFullAccess` promotion inside the
+    /// `requested_sandbox: None` arm, so an explicit `sandbox` value SHADOWED the
+    /// ceiling check entirely: `codex_55_review` (read-only) + `sandbox=read-only`
+    /// + `permission_profile=full` compiled to `Ok(Enforcement::Bypass)` — a
+    /// contract that *said* read-only while launching codex with
+    /// `--dangerously-bypass-approvals-and-sandbox`. Leg 2 below is that exact
+    /// escalation; it must be an `authority_conflict`, and under no ceiling may a
+    /// bypass ever come back as `Bypass`.
+    ///
+    /// (Round 1 also shipped this test asserting `glm_impl + Full => Ok(Bypass)`,
+    /// which was self-contradictory — an executor ceiling is `workspace-write`,
+    /// and a bypass claims more than that — and consequently RED. Leg 3 is the
+    /// corrected assertion.)
+    #[test]
+    fn operator_bypass_cannot_widen_any_profile_ceiling_on_any_path() {
+        let review = resolve_dispatch_profile("codex_55_review").expect("profile");
+        let executor = resolve_dispatch_profile("glm_impl").expect("profile");
+        let skills = Vec::new();
+
+        // Leg 1: read-only profile, sandbox omitted (the only path round 1 checked).
+        let mut omitted = certified_inputs("codex", Some(review), &skills);
+        omitted.permission_profile = PermissionProfile::Full;
+
+        // Leg 2: read-only profile + an EXPLICIT sandbox value — round 1's
+        // escalation. The explicit value must not shadow the bypass check.
+        let mut shadowed = certified_inputs("codex", Some(review), &skills);
+        shadowed.permission_profile = PermissionProfile::Full;
+        shadowed.requested_sandbox = Some("read-only");
+
+        // Leg 3: executor profile. Its ceiling is workspace-write; a bypass claims
+        // danger-full-access, which is still widening.
+        let mut executor_bypass = certified_inputs("codex", Some(executor), &skills);
+        executor_bypass.permission_profile = PermissionProfile::Full;
+
+        for (leg, input, ceiling) in [
+            (
+                "read-only profile, sandbox omitted",
+                omitted,
+                WorkspaceAuthority::ReadOnly,
+            ),
+            (
+                "read-only profile + explicit sandbox=read-only",
+                shadowed,
+                WorkspaceAuthority::ReadOnly,
+            ),
+            (
+                "executor profile, sandbox omitted",
+                executor_bypass,
+                WorkspaceAuthority::WorkspaceWrite,
+            ),
+        ] {
+            let err = match compile_effective_contract(&input) {
+                Ok(contract) => panic!(
+                    "[{leg}] the bypass claims danger-full-access above a '{}' ceiling and must not compile, got {:?}",
+                    ceiling.as_str(),
+                    contract.enforcement
+                ),
+                Err(err) => err,
+            };
+            assert_eq!(err.code(), "authority_conflict", "[{leg}] {err}");
+            match &err {
+                ContractError::AuthorityConflict {
+                    ceiling: got,
+                    requested,
+                    source,
+                    ..
+                } => {
+                    assert_eq!(*got, ceiling, "[{leg}]");
+                    assert_eq!(
+                        *requested,
+                        WorkspaceAuthority::DangerFullAccess,
+                        "[{leg}] the bypass claims danger-full-access, whatever else was asked for"
+                    );
+                    assert_eq!(*source, OPERATOR_BYPASS, "[{leg}]");
+                }
+                other => panic!("[{leg}] wrong error variant: {other:?}"),
+            }
+        }
+    }
+
+    /// The caller's own narrowing request is a ceiling too: a dispatch that asks
+    /// for `read-only` cannot be handed a bypass that gives it everything, even
+    /// with no profile in play.
+    #[test]
+    fn operator_bypass_cannot_widen_an_explicit_caller_narrowing() {
+        let skills = Vec::new();
+        let mut input = certified_inputs("codex", None, &skills);
+        input.requested_sandbox = Some("read-only");
+        input.permission_profile = PermissionProfile::Full;
+
+        let err = compile_effective_contract(&input)
+            .expect_err("a bypass may not widen the caller's own narrowing");
+        assert_eq!(err.code(), "authority_conflict");
+        match &err {
+            ContractError::AuthorityConflict {
+                ceiling,
+                ceiling_source,
+                source,
+                ..
+            } => {
+                assert_eq!(*ceiling, WorkspaceAuthority::ReadOnly);
+                assert_eq!(
+                    *ceiling_source, CALLER_SANDBOX,
+                    "the ceiling here came from the caller, not from a profile"
+                );
+                assert_eq!(*source, OPERATOR_BYPASS);
+            }
+            other => panic!("wrong error variant: {other:?}"),
+        }
+    }
+
+    /// The #878-B escape hatch still exists — but only where nothing has declared
+    /// a narrower intent: a profile-less dispatch that asked for no sandbox. That
+    /// is the ONLY shape whose ceiling is `danger-full-access`.
+    #[test]
+    fn profile_less_operator_bypass_is_still_the_878b_escape_hatch() {
+        let skills = Vec::new();
+        let mut input = certified_inputs("codex", None, &skills);
+        input.permission_profile = PermissionProfile::Full;
+
+        let contract = compile_effective_contract(&input).expect("the operator hatch still opens");
+        assert_eq!(
+            contract.workspace_authority,
+            WorkspaceAuthority::DangerFullAccess,
+            "a bypassed launch has full access — the receipt must say so, not claim the level the caller wished for"
+        );
+        assert!(matches!(contract.enforcement, Enforcement::Bypass { .. }));
+        assert_eq!(
+            contract.sandbox_arg, None,
+            "a bypassed launch must not also carry a --sandbox flag"
+        );
+        assert_eq!(contract.network, NetworkAuthority::ProviderDefault);
+    }
+
     /// Narrowing is always allowed: a write profile may ask for read-only.
     #[test]
     fn narrowing_below_the_profile_ceiling_is_allowed() {
         let profile = resolve_dispatch_profile("glm_impl").expect("profile");
         let skills = Vec::new();
-        let mut input = inputs("codex", Some(profile), &skills);
+        let mut input = certified_inputs("codex", Some(profile), &skills);
         input.requested_sandbox = Some("read-only");
         let contract = compile_effective_contract(&input).expect("narrowing must be allowed");
         assert_eq!(
@@ -803,13 +1145,28 @@ mod tests {
         assert_eq!(contract.sandbox_arg.as_deref(), Some("read-only"));
     }
 
+    #[test]
+    fn danger_full_access_request_cannot_exceed_a_profile_ceiling() {
+        let profile = resolve_dispatch_profile("glm_impl").expect("profile");
+        let skills = Vec::new();
+        let mut input = certified_inputs("codex", Some(profile), &skills);
+        input.requested_sandbox = Some("danger-full-access");
+        let err = compile_effective_contract(&input).expect_err("no profile grants full access");
+        assert_eq!(err.code(), "authority_conflict");
+    }
+
+    // ── Invariant 3: an omitted sandbox resolves from the profile ────────────
+
     /// Discriminating test ④: an omitted sandbox on a review profile compiles to
     /// read-only — NOT codex's workspace-write default (the #894 S2d gap).
+    /// Stated in the post-certification world, because today the same dispatch is
+    /// refused outright (see
+    /// `read_only_lane_is_refused_while_the_shipped_table_certifies_nobody`).
     #[test]
     fn omitted_sandbox_on_review_profile_resolves_to_read_only() {
         let profile = resolve_dispatch_profile("codex_55_review").expect("profile");
         let skills = Vec::new();
-        let input = inputs("codex", Some(profile), &skills);
+        let input = certified_inputs("codex", Some(profile), &skills);
 
         let contract = compile_effective_contract(&input).expect("review contract compiles");
         assert_eq!(
@@ -827,7 +1184,9 @@ mod tests {
     }
 
     /// An executor profile still gets workspace-write when sandbox is omitted —
-    /// the fix narrows review lanes, it does not break implementers.
+    /// the fix narrows review lanes, it does not break implementers. It is also
+    /// NOT refused by the uncertified shipped table: a write level makes no
+    /// isolation claim worth certifying, so it compiles as advisory.
     #[test]
     fn omitted_sandbox_on_executor_profile_stays_workspace_write() {
         let profile = resolve_dispatch_profile("glm_impl").expect("profile");
@@ -837,6 +1196,12 @@ mod tests {
         assert_eq!(
             contract.workspace_authority,
             WorkspaceAuthority::WorkspaceWrite
+        );
+        assert_eq!(contract.sandbox_arg.as_deref(), Some("workspace-write"));
+        assert!(
+            matches!(contract.enforcement, Enforcement::Advisory { .. }),
+            "the shipped table certifies nobody, so nothing is claimed to be enforced: {:?}",
+            contract.enforcement
         );
     }
 
@@ -854,6 +1219,314 @@ mod tests {
         assert_eq!(contract.sandbox_arg.as_deref(), Some("workspace-write"));
     }
 
+    // ── Invariant 4: a shell-capable read-only lane needs a certified provider ─
+
+    /// **Round-2 fix (invariant 4 was decorative).** The provider-qualification
+    /// gate must fire on the DERIVED path too, not only when the caller typed a
+    /// sandbox value. codex over acpx/native-ACP has no primitive (the transport,
+    /// not the backend name, decides) — and codex `exec` always runs shell
+    /// unattended, so its profile-derived read-only level is refused pre-spawn
+    /// rather than quietly downgraded to "advisory", which is what round 1 did.
+    #[test]
+    fn derived_read_only_on_an_uncertified_provider_is_refused_not_downgraded() {
+        let profile = resolve_dispatch_profile("codex_55_review").expect("profile");
+        let skills = Vec::new();
+
+        // Explicit request → refused, labelled by transport (#894 S0 wording).
+        let mut explicit = certified_inputs("codex", Some(profile), &skills);
+        explicit.transport = "acpx";
+        explicit.requested_sandbox = Some("read-only");
+        let err = compile_effective_contract(&explicit)
+            .expect_err("acpx has no sandbox primitive")
+            .to_string();
+        assert!(err.contains("acpx"), "{err}");
+
+        // Derived level, nothing typed by the caller → STILL refused: same claim,
+        // same missing enforcer.
+        let mut derived = certified_inputs("codex", Some(profile), &skills);
+        derived.transport = "acpx";
+        let err = compile_effective_contract(&derived)
+            .expect_err("a derived read-only level on an uncertified provider must be refused");
+        assert_eq!(err.code(), "provider_not_qualified");
+        let text = err.to_string();
+        assert!(text.contains("acpx"), "{text}");
+        assert!(text.contains("not kill-test certified"), "{text}");
+        assert!(text.contains("shell-capable"), "{text}");
+    }
+
+    /// The scope of invariant 4 is exactly "can this agent run shell unattended".
+    /// A read-only lane that cannot (claude with the default permission profile:
+    /// every tool call goes through an approval gate) is allowed to run advisory —
+    /// and the receipt says out loud that nothing machine-enforces it. Flip the
+    /// same profile to an allowlist containing `Bash` and it becomes a
+    /// shell-capable read-only lane on an uncertified provider: refused.
+    #[test]
+    fn advisory_read_only_is_only_for_lanes_that_cannot_run_shell_unattended() {
+        let profile = resolve_dispatch_profile("claude_plan").expect("profile");
+        let skills = Vec::new();
+
+        let gated = inputs("claude", Some(profile), &skills);
+        let contract = compile_effective_contract(&gated).expect("a gated read-only lane compiles");
+        assert_eq!(contract.workspace_authority, WorkspaceAuthority::ReadOnly);
+        assert!(!contract.tool_authority.unattended_shell);
+        match &contract.enforcement {
+            Enforcement::Advisory { reason } => {
+                assert!(reason.contains("NOT machine-enforced"), "{reason}");
+                assert!(reason.contains("no sandbox primitive"), "{reason}");
+            }
+            other => panic!("expected an advisory receipt, got {other:?}"),
+        }
+        assert_eq!(contract.sandbox_arg, None, "no flag may be fabricated");
+
+        let tools = vec!["Bash".to_string()];
+        let mut shell_capable = inputs("claude", Some(profile), &skills);
+        shell_capable.permission_profile = PermissionProfile::Allowlist;
+        shell_capable.allowed_tools = &tools;
+        let err = compile_effective_contract(&shell_capable).expect_err(
+            "a read-only lane that can run shell unattended needs a certified enforcer",
+        );
+        assert_eq!(err.code(), "provider_not_qualified");
+    }
+
+    /// A read-only REQUEST to a backend with no sandbox primitive is refused
+    /// pre-spawn, keeping the #894 S0 receipt wording and adding the missing
+    /// qualification.
+    #[test]
+    fn read_only_request_to_primitive_less_backend_is_refused() {
+        for backend in ["claude", "grok", "kimi", "custom"] {
+            let skills = Vec::new();
+            let mut input = inputs(backend, None, &skills);
+            input.requested_sandbox = Some("read-only");
+            let err = compile_effective_contract(&input).unwrap_err().to_string();
+            assert!(err.contains(backend), "receipt must name backend: {err}");
+            assert!(err.contains("has no sandbox concept"), "{err}");
+            assert!(err.contains("fail-closed"), "{err}");
+            assert!(
+                err.contains("no kill-test-certified sandbox enforcement"),
+                "{err}"
+            );
+        }
+    }
+
+    // ── Invariant 5: certification means kill-tested ─────────────────────────
+
+    /// Discriminating test ③: a provider that HAS the vendor flag but is not
+    /// kill-test certified must be refused — whether the table has no row for it
+    /// at all, or has a row that merely *names* a kill-test nobody ran. Vendor
+    /// flag validation is not provider qualification, and a named test is not an
+    /// executed one.
+    #[test]
+    fn a_valid_vendor_flag_is_not_a_certification() {
+        // The flag itself is valid...
+        assert!(validate_codex_sandbox("read-only").is_ok());
+        // ...and codex/cli does have a primitive...
+        assert!(provider_has_sandbox_primitive("codex", TransportKind::Cli));
+
+        let profile = resolve_dispatch_profile("codex_55_review").expect("profile");
+        let skills = Vec::new();
+        for (world, table) in [
+            (
+                "an empty table certifies nobody",
+                &[] as &[ProviderQualification],
+            ),
+            (
+                "the SHIPPED table's codex row is Unverified — its kill-test has never run",
+                PROVIDER_QUALIFICATIONS,
+            ),
+        ] {
+            let mut input = inputs("codex", Some(profile), &skills);
+            input.qualifications = table;
+
+            let err = match compile_effective_contract(&input) {
+                Ok(contract) => panic!(
+                    "[{world}] an uncertified provider must be refused pre-spawn, got {:?}",
+                    contract.enforcement
+                ),
+                Err(err) => err,
+            };
+            assert_eq!(err.code(), "provider_not_qualified", "[{world}]");
+            let text = err.to_string();
+            assert!(
+                text.contains("not kill-test certified") && text.contains("read-only"),
+                "[{world}] {text}"
+            );
+        }
+    }
+
+    /// Today's reality, asserted so nobody has to guess: with the shipped table
+    /// the review lane does not run at all. Refusing beats pretending — and this
+    /// is the forcing function for actually running the kill-test.
+    #[test]
+    fn read_only_lane_is_refused_while_the_shipped_table_certifies_nobody() {
+        let profile = resolve_dispatch_profile("codex_55_review").expect("profile");
+        let skills = Vec::new();
+        let err = compile_effective_contract(&inputs("codex", Some(profile), &skills))
+            .expect_err("codex/cli is Unverified today");
+        assert_eq!(err.code(), "provider_not_qualified");
+        assert!(
+            err.to_string().contains("has never been executed"),
+            "the receipt must say WHY the provider is uncertified: {err}"
+        );
+    }
+
+    /// The ratchet: a `KillTested` row may only name a kill-test the ordinary
+    /// suite actually executes. Flip a row to `KillTested` while its test is
+    /// still `#[ignore]`d — i.e. claim a certification nobody ran — and this
+    /// fails. Un-ignore the test and it passes, because then the suite itself is
+    /// the certification.
+    #[test]
+    fn certification_is_coupled_to_the_kill_tests_execution_state() {
+        fn is_ignored(source: &str) -> bool {
+            source
+                .lines()
+                .any(|line| line.trim_start().starts_with("#[ignore"))
+        }
+
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+
+        for entry in PROVIDER_QUALIFICATIONS {
+            let Certification::KillTested { test } = entry.certification else {
+                continue;
+            };
+            let path = repo_root.join(test);
+            assert!(
+                path.exists(),
+                "'{}/{}' claims certification by '{test}', which does not exist",
+                entry.backend,
+                entry.transport.as_str()
+            );
+            let source = std::fs::read_to_string(&path).expect("kill-test source");
+            assert!(
+                !is_ignored(&source),
+                "'{}/{}' is marked KillTested, but '{test}' is #[ignore]d — it has never run, so the certification is a claim, not evidence (invariant 5)",
+                entry.backend,
+                entry.transport.as_str()
+            );
+        }
+
+        // And the state of the world today: the codex kill-test IS ignored, so
+        // NOTHING in the shipped table may be certified.
+        if is_ignored(KILL_TEST_SOURCE) {
+            assert!(
+                PROVIDER_QUALIFICATIONS
+                    .iter()
+                    .all(|entry| entry.certification.kill_test().is_none()),
+                "the codex kill-test is #[ignore]d; no shipped row may claim KillTested"
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_qualification_table_has_one_uncertified_codex_row() {
+        assert_eq!(PROVIDER_QUALIFICATIONS.len(), 1);
+        let entry = &PROVIDER_QUALIFICATIONS[0];
+        assert_eq!(entry.backend, "codex");
+        assert_eq!(entry.transport, TransportKind::Cli);
+        assert!(
+            matches!(entry.certification, Certification::Unverified { .. }),
+            "the kill-test has never run: the row must not claim certification"
+        );
+        assert_eq!(entry.certification.kill_test(), None);
+
+        // Nobody — codex included — qualifies out of the shipped table.
+        for backend in ["codex", "claude", "grok", "kimi", "custom", "opencode"] {
+            assert!(
+                qualify_provider(
+                    PROVIDER_QUALIFICATIONS,
+                    backend,
+                    TransportKind::Cli,
+                    None,
+                    WorkspaceAuthority::ReadOnly
+                )
+                .is_err(),
+                "'{backend}' must not be certified to enforce read-only"
+            );
+        }
+    }
+
+    #[test]
+    fn version_scoped_qualification_fails_closed_on_unknown_versions() {
+        const TABLE: &[ProviderQualification] = &[ProviderQualification {
+            backend: "codex",
+            transport: TransportKind::Cli,
+            versions: VersionScope::AtLeast("0.50.0"),
+            covers: &[WorkspaceAuthority::ReadOnly],
+            certification: Certification::KillTested { test: "synthetic" },
+        }];
+
+        // Unknown version → refused (an unknown version is not an old-enough one).
+        let err = qualify_provider(
+            TABLE,
+            "codex",
+            TransportKind::Cli,
+            None,
+            WorkspaceAuthority::ReadOnly,
+        )
+        .expect_err("unknown version must fail closed");
+        assert!(err.contains("could not be determined"), "{err}");
+
+        // Too old → refused. Note 0.9.0 < 0.50.0 numerically even though it is
+        // greater as a string — the comparison must not be lexicographic.
+        assert!(qualify_provider(
+            TABLE,
+            "codex",
+            TransportKind::Cli,
+            Some("0.9.0"),
+            WorkspaceAuthority::ReadOnly
+        )
+        .is_err());
+
+        // New enough → certified.
+        assert!(qualify_provider(
+            TABLE,
+            "codex",
+            TransportKind::Cli,
+            Some("0.50.1"),
+            WorkspaceAuthority::ReadOnly
+        )
+        .is_ok());
+
+        // Covered for read-only only.
+        assert!(qualify_provider(
+            TABLE,
+            "codex",
+            TransportKind::Cli,
+            Some("0.51.0"),
+            WorkspaceAuthority::WorkspaceWrite
+        )
+        .is_err());
+    }
+
+    /// An `Unverified` row is never handed back, no matter how well it matches:
+    /// same backend, same transport, same version scope, level covered — and
+    /// still refused, because nobody has watched it enforce anything.
+    #[test]
+    fn an_unverified_row_never_qualifies() {
+        const TABLE: &[ProviderQualification] = &[ProviderQualification {
+            backend: "codex",
+            transport: TransportKind::Cli,
+            versions: VersionScope::Any,
+            covers: &[WorkspaceAuthority::ReadOnly],
+            certification: Certification::Unverified {
+                reason: "synthetic: the kill-test was never executed",
+            },
+        }];
+        let err = qualify_provider(
+            TABLE,
+            "codex",
+            TransportKind::Cli,
+            Some("9.9.9"),
+            WorkspaceAuthority::ReadOnly,
+        )
+        .expect_err("an uncertified row must not qualify");
+        assert!(err.contains("NOT certified"), "{err}");
+        assert!(err.contains("never executed"), "{err}");
+    }
+
+    // ── Invariant 6: a mounted skill is an input, not a permission ───────────
+
     /// Discriminating test ②: a skill that needs writes is EXCLUDED (with a
     /// reason) under a read-only contract — it cannot widen it.
     #[test]
@@ -864,7 +1537,7 @@ mod tests {
             SkillRequest::new(crate::native_skill_ids::SUPERPOWER_EXECUTING_PLANS),
             SkillRequest::new(crate::native_skill_ids::WAZA_WRITE),
         ];
-        let input = inputs("codex", Some(profile), &skills);
+        let input = certified_inputs("codex", Some(profile), &skills);
 
         let contract = compile_effective_contract(&input).expect("contract compiles");
         assert_eq!(contract.workspace_authority, WorkspaceAuthority::ReadOnly);
@@ -895,120 +1568,13 @@ mod tests {
         // The same skills stay mounted when the contract permits writes.
         let exec_profile = resolve_dispatch_profile("glm_impl").expect("profile");
         let write_contract =
-            compile_effective_contract(&inputs("codex", Some(exec_profile), &skills))
+            compile_effective_contract(&certified_inputs("codex", Some(exec_profile), &skills))
                 .expect("contract compiles");
         assert_eq!(write_contract.mounted_skills.len(), 3);
         assert!(write_contract.excluded_skills.is_empty());
     }
 
-    /// Discriminating test ③ (pure half): a provider that HAS the vendor flag
-    /// but is not kill-test certified must be refused. Vendor flag validation is
-    /// not provider qualification (invariant 5).
-    #[test]
-    fn uncertified_provider_with_a_valid_vendor_flag_is_refused() {
-        // The flag itself is valid...
-        assert!(validate_codex_sandbox("read-only").is_ok());
-        // ...and codex/cli does have a primitive...
-        assert!(provider_has_sandbox_primitive("codex", TransportKind::Cli));
-        // ...but an empty qualification table certifies nobody.
-        let profile = resolve_dispatch_profile("codex_55_review").expect("profile");
-        let skills = Vec::new();
-        let mut input = inputs("codex", Some(profile), &skills);
-        input.qualifications = &[];
-
-        let err = compile_effective_contract(&input)
-            .expect_err("an uncertified provider must be refused pre-spawn");
-        assert_eq!(err.code(), "provider_not_qualified");
-        let text = err.to_string();
-        assert!(
-            text.contains("not kill-test certified") && text.contains("read-only"),
-            "{text}"
-        );
-    }
-
-    /// A read-only REQUEST to a backend with no sandbox primitive is refused
-    /// pre-spawn, keeping the #894 S0 receipt wording and adding the missing
-    /// qualification.
-    #[test]
-    fn read_only_request_to_primitive_less_backend_is_refused() {
-        for backend in ["claude", "grok", "kimi", "custom"] {
-            let skills = Vec::new();
-            let mut input = inputs(backend, None, &skills);
-            input.requested_sandbox = Some("read-only");
-            let err = compile_effective_contract(&input).unwrap_err().to_string();
-            assert!(err.contains(backend), "receipt must name backend: {err}");
-            assert!(err.contains("has no sandbox concept"), "{err}");
-            assert!(err.contains("fail-closed"), "{err}");
-            assert!(
-                err.contains("no kill-test-certified sandbox enforcement"),
-                "{err}"
-            );
-        }
-    }
-
-    /// codex over acpx/native-ACP has no primitive either: the transport, not
-    /// the backend name, decides.
-    #[test]
-    fn codex_over_acp_transport_has_no_primitive_and_is_advisory_when_derived() {
-        let profile = resolve_dispatch_profile("codex_55_review").expect("profile");
-        let skills = Vec::new();
-        let mut input = inputs("codex", Some(profile), &skills);
-        input.transport = "acpx";
-
-        // Explicit request → refused, labelled by transport.
-        let mut explicit = ContractInputs {
-            requested_sandbox: Some("read-only"),
-            ..inputs("codex", Some(profile), &skills)
-        };
-        explicit.transport = "acpx";
-        let err = compile_effective_contract(&explicit)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("acpx"), "{err}");
-
-        // Derived level → advisory, and NO vendor flag is fabricated.
-        let contract = compile_effective_contract(&input).expect("derived contract compiles");
-        assert_eq!(contract.workspace_authority, WorkspaceAuthority::ReadOnly);
-        assert!(matches!(contract.enforcement, Enforcement::Advisory { .. }));
-        assert_eq!(contract.sandbox_arg, None);
-        assert_eq!(contract.network, NetworkAuthority::ProviderDefault);
-    }
-
-    /// The operator escape hatch (`permission_profile=full|verify`) can never be
-    /// used to widen a read-only profile.
-    #[test]
-    fn full_permission_profile_cannot_widen_a_read_only_profile() {
-        let profile = resolve_dispatch_profile("codex_55_review").expect("profile");
-        let skills = Vec::new();
-        let mut input = inputs("codex", Some(profile), &skills);
-        input.permission_profile = PermissionProfile::Full;
-
-        let err = compile_effective_contract(&input)
-            .expect_err("a read-only profile must not be bypassable");
-        assert_eq!(err.code(), "authority_conflict");
-
-        // On an executor profile the hatch still works (pre-existing #878-B
-        // verification lane), and is recorded as a bypass, not as enforcement.
-        let exec = resolve_dispatch_profile("glm_impl").expect("profile");
-        let mut ok = inputs("codex", Some(exec), &skills);
-        ok.permission_profile = PermissionProfile::Full;
-        let contract = compile_effective_contract(&ok).expect("executor bypass still allowed");
-        assert!(matches!(contract.enforcement, Enforcement::Bypass { .. }));
-        assert_eq!(
-            contract.sandbox_arg, None,
-            "a bypassed launch must not also carry a --sandbox flag"
-        );
-    }
-
-    #[test]
-    fn danger_full_access_request_cannot_exceed_a_profile_ceiling() {
-        let profile = resolve_dispatch_profile("glm_impl").expect("profile");
-        let skills = Vec::new();
-        let mut input = inputs("codex", Some(profile), &skills);
-        input.requested_sandbox = Some("danger-full-access");
-        let err = compile_effective_contract(&input).expect_err("no profile grants full access");
-        assert_eq!(err.code(), "authority_conflict");
-    }
+    // ── Plumbing ────────────────────────────────────────────────────────────
 
     #[test]
     fn blank_and_unknown_sandbox_values_are_typed_errors() {
@@ -1062,81 +1628,6 @@ mod tests {
                 profile_ceiling(Some(profile)),
                 expected,
                 "profile '{name}' ceiling"
-            );
-        }
-    }
-
-    #[test]
-    fn version_scoped_qualification_fails_closed_on_unknown_versions() {
-        const TABLE: &[ProviderQualification] = &[ProviderQualification {
-            backend: "codex",
-            transport: TransportKind::Cli,
-            versions: VersionScope::AtLeast("0.50.0"),
-            enforces: &[WorkspaceAuthority::ReadOnly],
-            certified_by: "synthetic",
-        }];
-
-        // Unknown version → refused (an unknown version is not an old-enough one).
-        let err = qualify_provider(
-            TABLE,
-            "codex",
-            TransportKind::Cli,
-            None,
-            WorkspaceAuthority::ReadOnly,
-        )
-        .expect_err("unknown version must fail closed");
-        assert!(err.contains("could not be determined"), "{err}");
-
-        // Too old → refused. Note 0.9.0 < 0.50.0 numerically even though it is
-        // greater as a string — the comparison must not be lexicographic.
-        assert!(qualify_provider(
-            TABLE,
-            "codex",
-            TransportKind::Cli,
-            Some("0.9.0"),
-            WorkspaceAuthority::ReadOnly
-        )
-        .is_err());
-
-        // New enough → certified.
-        assert!(qualify_provider(
-            TABLE,
-            "codex",
-            TransportKind::Cli,
-            Some("0.50.1"),
-            WorkspaceAuthority::ReadOnly
-        )
-        .is_ok());
-
-        // Certified for read-only only.
-        assert!(qualify_provider(
-            TABLE,
-            "codex",
-            TransportKind::Cli,
-            Some("0.51.0"),
-            WorkspaceAuthority::WorkspaceWrite
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn shipped_qualification_table_certifies_only_codex_cli() {
-        assert_eq!(PROVIDER_QUALIFICATIONS.len(), 1);
-        let entry = &PROVIDER_QUALIFICATIONS[0];
-        assert_eq!(entry.backend, "codex");
-        assert_eq!(entry.transport, TransportKind::Cli);
-        assert!(entry.certified_by.contains("codex_sandbox_kill_test"));
-        for backend in ["claude", "grok", "kimi", "custom", "opencode"] {
-            assert!(
-                qualify_provider(
-                    PROVIDER_QUALIFICATIONS,
-                    backend,
-                    TransportKind::Cli,
-                    None,
-                    WorkspaceAuthority::ReadOnly
-                )
-                .is_err(),
-                "'{backend}' must not be certified to enforce read-only"
             );
         }
     }

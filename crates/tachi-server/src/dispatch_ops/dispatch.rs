@@ -274,12 +274,19 @@ pub(crate) async fn handle_tachi_dispatch(
     // dropped from a read-only mount. The per-builder `reject_unsupported_sandbox`
     // / `validate_codex_sandbox` calls stay as defense-in-depth for any future
     // caller that reaches a builder without passing through this entry point.
+    //
+    // Fail-closed reality as shipped: the only row in `PROVIDER_QUALIFICATIONS`
+    // (codex/cli) is `Unverified` — its kill-test is `#[ignore]`d and has never
+    // been executed — so a dispatch that compiles to read-only AND can run shell
+    // unattended is refused right here, on every backend. Run the kill-test and
+    // certify the row to bring those lanes back (see `tachi_dispatch::authority`).
     let harness_transport = effective_harness_transport(&params, &agent_norm);
     let effective_contract = compile_dispatch_contract(
         &mut params,
         &agent_norm,
         &harness_transport,
         &resolved_profile,
+        tachi_dispatch::PROVIDER_QUALIFICATIONS,
     )?;
     let authority_receipt = contract_receipt(&effective_contract);
 
