@@ -248,15 +248,16 @@ impl ReadStorePool {
             let gen_guard = lock_or_recover(&self.inner.release_signal, label);
             for slot in self.inner.stores.iter() {
                 if let Some(candidate) = try_lock_or_recover(slot, label) {
+                    // The ONLY statement between acquiring the guard and
+                    // wrapping it in `SlotCheckout` is this MutexGuard drop,
+                    // which cannot panic — so no unwind can release the slot
+                    // outside SlotCheckout::drop (codex-tdf83 item b). The
+                    // wrap must NOT move before this drop: constructing
+                    // SlotCheckout while holding `release_signal` would
+                    // self-deadlock on unwind (its Drop takes the same lock).
                     drop(gen_guard);
-                    let pool_checkout_wait = checkout_started.elapsed();
-                    // Structural invariant (codex-s305b R5): `SlotCheckout`'s
-                    // own `Drop` impl encodes "unlock, then notify" as a
-                    // fixed sequence inside one function body — see its doc
-                    // comment. This call site carries no binding-order
-                    // discipline anymore; there is nothing here left to get
-                    // wrong by reordering.
                     let mut checkout = SlotCheckout::new(candidate, &self.inner);
+                    let pool_checkout_wait = checkout_started.elapsed();
                     let op_started = Instant::now();
                     let result = f(checkout
                         .store
