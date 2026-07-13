@@ -22,6 +22,7 @@ pub(crate) use dispatch::handle_tachi_dispatch;
 #[cfg(test)]
 pub(crate) use dispatch::new_dispatch_id;
 pub(crate) use dispatch::recover_orphaned_dispatch_runs;
+pub(crate) use dispatch::{load_dispatch_identity_receipt_checked, DispatchReceiptLoad};
 pub(crate) use harness::{
     harness_server_attach_ready, probe_harness_server_status, probe_harness_server_status_with_env,
 };

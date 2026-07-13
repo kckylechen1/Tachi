@@ -63,6 +63,7 @@ async fn reported_outcome_preserves_case_and_whitespace_trim_only() {
                 "codex",
                 "1970-01-01T00:00:00Z",
                 None,
+                memcore::OutcomeEvidenceClass::AnyAttribution,
             )
             .map_err(|e| e.to_string())
         })
@@ -103,6 +104,7 @@ async fn reported_outcome_matches_verbatim_for_canonical_success() {
                 "codex",
                 "1970-01-01T00:00:00Z",
                 None,
+                memcore::OutcomeEvidenceClass::AnyAttribution,
             )
             .map_err(|e| e.to_string())
         })

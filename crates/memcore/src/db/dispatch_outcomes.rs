@@ -10,7 +10,9 @@
 //! This table holds mutable execution facts only. Adjudication evidence
 //! (verdict, adjudicator, error signature) lives in the append-only
 //! `dispatch_adjudications` table (#1035) — S2, not built here; a replayed
-//! `complete` may rewrite any column on this row.
+//! `complete` may rewrite its mutable execution columns. The optional
+//! `identity_receipt` is frozen on its first write so a later replay cannot
+//! reinterpret an already-executed dispatch through changed profile metadata.
 //!
 //! ## Truthfulness: reported vs machine-resolved (#773 Layer-2 ②)
 //!
@@ -53,7 +55,7 @@ use super::common::normalize_utc_iso_or_now;
 /// (callers mint a fresh id per logical write attempt); `idempotency_key`
 /// dedupes re-completion of the same dispatch_id+task_type onto one row
 /// regardless of how many `outcome_id`s were attempted.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct NewDispatchOutcome {
     pub outcome_id: String,
     pub dispatch_id: String,
@@ -88,6 +90,50 @@ pub struct NewDispatchOutcome {
     pub diff_present: bool,
     /// JSON array of evidence references (files/issue refs/run artifacts).
     pub evidence_refs: Value,
+    /// The dispatch-time identity receipt, copied verbatim from the run ledger.
+    /// Legacy rows legitimately carry `None`.
+    pub identity_receipt: Option<Value>,
+    /// Evidence class of the flat identity columns (#1065 D):
+    /// `planned_unconfirmed` | `acknowledged_overlay` | `observed` |
+    /// `fallback_unreceipted` | `unknown`. Callers derive it from the receipt
+    /// (`tachi_dispatch::IdentityAttributionBasis::as_str`); memcore stores it
+    /// verbatim and freezes it with the receipt.
+    pub identity_attribution_basis: String,
+}
+
+/// Hand-written (#1065 D BUG-2): a derived `Default` would give
+/// `identity_attribution_basis` an empty string, which is not a member of
+/// the closed vocabulary the DDL default (`'unknown'`) and every reader
+/// (`OutcomeEvidenceClass::sql_predicate`, the runtime attribution match)
+/// assume. Every other field keeps its ordinary zero value; only the basis
+/// is special-cased to the vocabulary's own "no evidence" member.
+impl Default for NewDispatchOutcome {
+    fn default() -> Self {
+        Self {
+            outcome_id: Default::default(),
+            dispatch_id: Default::default(),
+            eval_memory_id: Default::default(),
+            model: Default::default(),
+            vendor: Default::default(),
+            role: Default::default(),
+            seat: Default::default(),
+            task_type: Default::default(),
+            execution_outcome: Default::default(),
+            reported_outcome: Default::default(),
+            retry_count: Default::default(),
+            error_class: Default::default(),
+            issue_ref: Default::default(),
+            pr_ref: Default::default(),
+            flow_id: Default::default(),
+            cost_tokens: Default::default(),
+            cost_usd: Default::default(),
+            verification_present: Default::default(),
+            diff_present: Default::default(),
+            evidence_refs: Value::Null,
+            identity_receipt: Default::default(),
+            identity_attribution_basis: "unknown".to_string(),
+        }
+    }
 }
 
 /// A persisted row in `dispatch_outcomes`.
@@ -113,12 +159,39 @@ pub struct DispatchOutcomeRow {
     pub verification_present: bool,
     pub diff_present: bool,
     pub evidence_refs: Value,
+    pub identity_receipt: Option<Value>,
+    pub identity_attribution_basis: String,
     pub idempotency_key: String,
     pub created_at: String,
     pub updated_at: String,
 }
 
-// `reported_outcome` is appended LAST (index 22) so the pre-existing column
+/// Evidence-class filter for outcome read surfaces (#1065 D). Readers must
+/// state what attribution evidence is sufficient for their purpose instead of
+/// silently conflating planned routing intent with observed execution fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutcomeEvidenceClass {
+    /// Any attribution, including planned-only and profile fallback.
+    AnyAttribution,
+    /// Only rows whose identity a carrier acknowledged (overlay or observed).
+    CarrierAcknowledged,
+    /// Only rows carrying carrier-observed identity verbatim.
+    ObservedOnly,
+}
+
+impl OutcomeEvidenceClass {
+    fn sql_predicate(&self) -> &'static str {
+        match self {
+            OutcomeEvidenceClass::AnyAttribution => "1=1",
+            OutcomeEvidenceClass::CarrierAcknowledged => {
+                "identity_attribution_basis IN ('acknowledged_overlay', 'observed')"
+            }
+            OutcomeEvidenceClass::ObservedOnly => "identity_attribution_basis = 'observed'",
+        }
+    }
+}
+
+// `reported_outcome` and `identity_receipt` are appended LAST (indices 22/23) so the pre-existing column
 // indices in `row_to_outcome` stay stable when the truthfulness column (#773)
 // was added — a positional shift of the older columns would have been an easy
 // off-by-one hazard.
@@ -126,12 +199,15 @@ const SELECT_COLUMNS: &str = "outcome_id, dispatch_id, eval_memory_id, model, ve
      task_type, execution_outcome, retry_count, \
      error_class, issue_ref, pr_ref, flow_id, cost_tokens, cost_usd, \
      verification_present, diff_present, evidence_refs, idempotency_key, created_at, updated_at, \
-     reported_outcome";
+      reported_outcome, identity_receipt, identity_attribution_basis";
 
 fn row_to_outcome(row: &rusqlite::Row<'_>) -> Result<DispatchOutcomeRow, rusqlite::Error> {
     let evidence_refs_raw: String = row.get(18)?;
     let evidence_refs =
         serde_json::from_str(&evidence_refs_raw).unwrap_or_else(|_| Value::Array(Vec::new()));
+    let identity_receipt = row
+        .get::<_, Option<String>>(23)?
+        .and_then(|raw| serde_json::from_str(&raw).ok());
     let retry_count: i64 = row.get(9)?;
     let cost_tokens: Option<i64> = row.get(14)?;
     Ok(DispatchOutcomeRow {
@@ -155,10 +231,31 @@ fn row_to_outcome(row: &rusqlite::Row<'_>) -> Result<DispatchOutcomeRow, rusqlit
         verification_present: row.get::<_, i64>(16)? != 0,
         diff_present: row.get::<_, i64>(17)? != 0,
         evidence_refs,
+        identity_receipt,
+        identity_attribution_basis: row.get(24)?,
         idempotency_key: row.get(19)?,
         created_at: row.get(20)?,
         updated_at: row.get(21)?,
     })
+}
+
+/// Closed-vocabulary gate for `identity_attribution_basis` at the write
+/// boundary (#1065 D BUG-2). A caller building `NewDispatchOutcome` by hand
+/// (or via a stale/incomplete construction) can hand this an empty string or
+/// an arbitrary value; the DDL default (`'unknown'`) only protects a column
+/// SQLite never received a value for, not one explicitly bound to garbage.
+/// Every write path binds through this instead of `new.identity_attribution_basis`
+/// directly, so the five-token vocabulary is enforced at the ONE place all
+/// writes funnel through, not re-validated (or missed) at each call site.
+fn normalize_basis(raw: &str) -> &str {
+    match raw {
+        "planned_unconfirmed"
+        | "acknowledged_overlay"
+        | "observed"
+        | "fallback_unreceipted"
+        | "unknown" => raw,
+        _ => "unknown",
+    }
 }
 
 /// Deterministic idempotency key for a (dispatch_id, task_type) pair. Two
@@ -188,15 +285,35 @@ fn update_outcome_row(
     let now = normalize_utc_iso_or_now("");
     let evidence_refs_json =
         serde_json::to_string(&new.evidence_refs).unwrap_or_else(|_| "[]".to_string());
+    let identity_receipt_json = new
+        .identity_receipt
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     let retry_count = new.retry_count as i64;
     let cost_tokens = new.cost_tokens.map(|v| v as i64);
+    // Identity block (#1065): once a row carries a frozen identity receipt,
+    // the flat attribution columns derived from it (model/vendor/role/seat)
+    // are frozen WITH it — a replay must not leave the row's columns
+    // disagreeing with the receipt persisted beside them. A row without a
+    // receipt (legacy or placeholder written before one existed) still
+    // accepts better attribution, which is what placeholder reconciliation
+    // needs.
     conn.execute(
         "UPDATE dispatch_outcomes SET
-            eval_memory_id = ?2, model = ?3, vendor = ?4, role = ?5, seat = ?6,
+            eval_memory_id = ?2,
+            model  = CASE WHEN identity_receipt IS NOT NULL THEN model  ELSE ?3 END,
+            vendor = CASE WHEN identity_receipt IS NOT NULL THEN vendor ELSE ?4 END,
+            role   = CASE WHEN identity_receipt IS NOT NULL THEN role   ELSE ?5 END,
+            seat   = CASE WHEN identity_receipt IS NOT NULL THEN seat   ELSE ?6 END,
+            identity_attribution_basis =
+                CASE WHEN identity_receipt IS NOT NULL
+                     THEN identity_attribution_basis ELSE ?22 END,
             task_type = ?7, execution_outcome = ?8, reported_outcome = ?9,
             retry_count = ?10, error_class = ?11, issue_ref = ?12, pr_ref = ?13,
             flow_id = ?14, cost_tokens = ?15, cost_usd = ?16, verification_present = ?17,
-            diff_present = ?18, evidence_refs = ?19, updated_at = ?20
+             diff_present = ?18, evidence_refs = ?19,
+             identity_receipt = COALESCE(identity_receipt, ?20), updated_at = ?21
          WHERE outcome_id = ?1",
         params![
             outcome_id,
@@ -218,7 +335,9 @@ fn update_outcome_row(
             new.verification_present as i64,
             new.diff_present as i64,
             evidence_refs_json,
+            identity_receipt_json,
             now,
+            normalize_basis(&new.identity_attribution_basis),
         ],
     )?;
     get_outcome(conn, outcome_id)?.ok_or_else(|| {
@@ -254,6 +373,11 @@ pub fn upsert_outcome(
             let now = normalize_utc_iso_or_now("");
             let evidence_refs_json =
                 serde_json::to_string(&new.evidence_refs).unwrap_or_else(|_| "[]".to_string());
+            let identity_receipt_json = new
+                .identity_receipt
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
             let retry_count = new.retry_count as i64;
             let cost_tokens = new.cost_tokens.map(|v| v as i64);
             conn.execute(
@@ -261,9 +385,10 @@ pub fn upsert_outcome(
                  (outcome_id, dispatch_id, eval_memory_id, model, vendor, role, seat,
                   task_type, execution_outcome, reported_outcome, retry_count, error_class,
                   issue_ref, pr_ref, flow_id, cost_tokens, cost_usd, verification_present,
-                  diff_present, evidence_refs, idempotency_key, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                         ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?22)",
+                   diff_present, evidence_refs, identity_receipt, identity_attribution_basis,
+                   idempotency_key, created_at, updated_at)
+                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                          ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?24)",
                 params![
                     new.outcome_id,
                     new.dispatch_id,
@@ -285,6 +410,8 @@ pub fn upsert_outcome(
                     new.verification_present as i64,
                     new.diff_present as i64,
                     evidence_refs_json,
+                    identity_receipt_json,
+                    normalize_basis(&new.identity_attribution_basis),
                     idempotency_key,
                     now,
                 ],
@@ -391,16 +518,24 @@ pub fn upsert_outcome_reconciling_terminal_placeholder(
 /// Read surface 1: outcomes for a vendor within a `created_at` window
 /// (`[since, until)`, both RFC3339). `until = None` means unbounded upper
 /// end. Newest first — the router's real query shape (vendor, ts).
+///
+/// `evidence` is mandatory (#1065 D): the caller states what attribution
+/// evidence suffices for its purpose. A planned-but-unconfirmed vendor and a
+/// carrier-observed vendor share this column; conflating them silently is the
+/// exact failure this parameter exists to prevent.
 pub fn list_outcomes_by_vendor_window(
     conn: &Connection,
     vendor: &str,
     since: &str,
     until: Option<&str>,
+    evidence: OutcomeEvidenceClass,
 ) -> Result<Vec<DispatchOutcomeRow>, MemoryError> {
     let sql = format!(
         "SELECT {SELECT_COLUMNS} FROM dispatch_outcomes \
          WHERE vendor = ?1 AND created_at >= ?2 AND (?3 IS NULL OR created_at < ?3) \
-         ORDER BY created_at DESC"
+         AND {} \
+         ORDER BY created_at DESC",
+        evidence.sql_predicate()
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![vendor, since, until], row_to_outcome)?;
@@ -463,6 +598,10 @@ mod tests {
             verification_present: true,
             diff_present: true,
             evidence_refs: serde_json::json!(["cargo test", "clippy"]),
+            identity_receipt: Some(
+                serde_json::json!({"contract_id": "dispatch_identity_receipt/v1"}),
+            ),
+            identity_attribution_basis: "planned_unconfirmed".to_string(),
         }
     }
 
@@ -483,11 +622,61 @@ mod tests {
             inserted.evidence_refs,
             serde_json::json!(["cargo test", "clippy"])
         );
+        assert_eq!(
+            inserted.identity_receipt,
+            Some(serde_json::json!({"contract_id": "dispatch_identity_receipt/v1"}))
+        );
         assert!(!inserted.created_at.is_empty());
         assert_eq!(inserted.created_at, inserted.updated_at);
 
         let got = get_outcome(&conn, "o-1").unwrap().expect("row present");
         assert_eq!(got, inserted);
+    }
+
+    /// #1065 D BUG-2: a caller that hands in an empty/garbage
+    /// `identity_attribution_basis` (e.g. a stale `Default::default()` from
+    /// before the closed vocabulary existed, or a plain typo) must not have
+    /// that value land verbatim — the write boundary's `normalize_basis`
+    /// gate rewrites anything outside the five-token vocabulary to
+    /// `"unknown"` on BOTH the insert and update paths.
+    #[test]
+    fn garbage_basis_is_normalized_to_unknown_on_insert_and_update() {
+        let conn = open_conn();
+
+        let mut empty_basis = new_outcome("o-1", "d-1");
+        empty_basis.identity_attribution_basis = String::new();
+        let inserted = upsert_outcome(&conn, &empty_basis).unwrap();
+        assert_eq!(
+            inserted.identity_attribution_basis, "unknown",
+            "an empty-string basis must be normalized on insert"
+        );
+
+        let mut garbage_basis = new_outcome("o-2", "d-2");
+        garbage_basis.identity_attribution_basis = "not-a-real-basis".to_string();
+        let inserted_garbage = upsert_outcome(&conn, &garbage_basis).unwrap();
+        assert_eq!(
+            inserted_garbage.identity_attribution_basis, "unknown",
+            "an unrecognized basis token must be normalized on insert"
+        );
+
+        // A row with NO frozen receipt keeps its attribution columns mutable
+        // (see `update_outcome_row`'s CASE WHEN), so re-completing the SAME
+        // dispatch_id+task_type (same idempotency key → UPDATE, not INSERT)
+        // with a garbage token must ALSO normalize — exercising the other
+        // write path, not just the INSERT one above.
+        let mut placeholder = new_outcome("o-3", "d-3");
+        placeholder.identity_receipt = None;
+        placeholder.identity_attribution_basis = "planned_unconfirmed".to_string();
+        upsert_outcome(&conn, &placeholder).unwrap();
+
+        let mut replay_garbage = new_outcome("o-4", "d-3");
+        replay_garbage.identity_receipt = None;
+        replay_garbage.identity_attribution_basis = "still-garbage".to_string();
+        let updated = upsert_outcome(&conn, &replay_garbage).unwrap();
+        assert_eq!(
+            updated.identity_attribution_basis, "unknown",
+            "an unrecognized basis token must be normalized on update too"
+        );
     }
 
     #[test]
@@ -506,11 +695,67 @@ mod tests {
         assert_eq!(second.outcome_id, first.outcome_id, "same canonical row");
         assert_eq!(second.execution_outcome, "failure");
         assert_eq!(second.retry_count, 1);
+        assert_eq!(
+            second.identity_receipt, first.identity_receipt,
+            "a replay cannot replace the receipt frozen by the first completion"
+        );
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM dispatch_outcomes", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1, "no duplicate row created");
+    }
+
+    #[test]
+    fn frozen_receipt_freezes_flat_identity_columns_on_replay() {
+        let conn = open_conn();
+        let first = upsert_outcome(&conn, &new_outcome("o-1", "d-1")).unwrap();
+
+        // A replay carrying DIFFERENT identity values (e.g. a rewritten
+        // status.json) must not leave the flat attribution columns
+        // disagreeing with the receipt frozen beside them.
+        let mut replay = new_outcome("o-2", "d-1");
+        replay.model = Some("rewritten-model".to_string());
+        replay.vendor = "rewritten-vendor".to_string();
+        replay.role = Some("rewritten-role".to_string());
+        replay.seat = Some("rewritten-seat".to_string());
+        replay.identity_receipt = Some(serde_json::json!({"contract_id": "rewritten"}));
+        replay.identity_attribution_basis = "observed".to_string();
+        let second = upsert_outcome(&conn, &replay).unwrap();
+
+        assert_eq!(second.outcome_id, first.outcome_id);
+        assert_eq!(second.model, first.model, "model frozen with the receipt");
+        assert_eq!(
+            second.vendor, first.vendor,
+            "vendor frozen with the receipt"
+        );
+        assert_eq!(second.role, first.role, "role frozen with the receipt");
+        assert_eq!(second.seat, first.seat, "seat frozen with the receipt");
+        assert_eq!(second.identity_receipt, first.identity_receipt);
+        assert_eq!(
+            second.identity_attribution_basis, first.identity_attribution_basis,
+            "attribution basis frozen with the receipt"
+        );
+    }
+
+    #[test]
+    fn row_without_receipt_still_accepts_better_attribution() {
+        let conn = open_conn();
+        let mut placeholder = new_outcome("o-1", "d-1");
+        placeholder.identity_receipt = None;
+        placeholder.model = None;
+        placeholder.vendor = "unknown".to_string();
+        placeholder.role = None;
+        placeholder.seat = None;
+        upsert_outcome(&conn, &placeholder).unwrap();
+
+        // Placeholder reconciliation: a later completion with real identity
+        // (and the receipt it came from) upgrades the receipt-less row.
+        let completion = new_outcome("o-2", "d-1");
+        let reconciled = upsert_outcome(&conn, &completion).unwrap();
+        assert_eq!(reconciled.vendor, "claude");
+        assert_eq!(reconciled.model.as_deref(), Some("claude-sonnet-5"));
+        assert!(reconciled.identity_receipt.is_some());
     }
 
     #[test]
@@ -552,8 +797,14 @@ mod tests {
         other_vendor.vendor = "codex".to_string();
         upsert_outcome(&conn, &other_vendor).unwrap();
 
-        let rows =
-            list_outcomes_by_vendor_window(&conn, "grok", "2026-01-01T00:00:00Z", None).unwrap();
+        let rows = list_outcomes_by_vendor_window(
+            &conn,
+            "grok",
+            "2026-01-01T00:00:00Z",
+            None,
+            OutcomeEvidenceClass::AnyAttribution,
+        )
+        .unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].outcome_id, "o-b", "newest first");
         assert_eq!(rows[1].outcome_id, "o-a");
@@ -563,10 +814,69 @@ mod tests {
             "grok",
             "2026-01-01T00:00:00Z",
             Some("2026-06-01T00:00:00Z"),
+            OutcomeEvidenceClass::AnyAttribution,
         )
         .unwrap();
         assert_eq!(bounded.len(), 1, "upper bound excludes o-b");
         assert_eq!(bounded[0].outcome_id, "o-a");
+    }
+
+    #[test]
+    fn evidence_class_filters_by_attribution_basis() {
+        let conn = open_conn();
+        let mut planned = new_outcome("o-1", "d-1");
+        planned.vendor = "grok".to_string();
+        planned.identity_attribution_basis = "planned_unconfirmed".to_string();
+        upsert_outcome(&conn, &planned).unwrap();
+
+        let mut acknowledged = new_outcome("o-2", "d-2");
+        acknowledged.vendor = "grok".to_string();
+        acknowledged.identity_attribution_basis = "acknowledged_overlay".to_string();
+        upsert_outcome(&conn, &acknowledged).unwrap();
+
+        let mut observed = new_outcome("o-3", "d-3");
+        observed.vendor = "grok".to_string();
+        observed.identity_attribution_basis = "observed".to_string();
+        upsert_outcome(&conn, &observed).unwrap();
+
+        let any = list_outcomes_by_vendor_window(
+            &conn,
+            "grok",
+            "2020-01-01T00:00:00Z",
+            None,
+            OutcomeEvidenceClass::AnyAttribution,
+        )
+        .unwrap();
+        assert_eq!(any.len(), 3, "AnyAttribution includes all three bases");
+
+        let acknowledged_or_better = list_outcomes_by_vendor_window(
+            &conn,
+            "grok",
+            "2020-01-01T00:00:00Z",
+            None,
+            OutcomeEvidenceClass::CarrierAcknowledged,
+        )
+        .unwrap();
+        assert_eq!(
+            acknowledged_or_better.len(),
+            2,
+            "CarrierAcknowledged excludes planned_unconfirmed"
+        );
+
+        let observed_only = list_outcomes_by_vendor_window(
+            &conn,
+            "grok",
+            "2020-01-01T00:00:00Z",
+            None,
+            OutcomeEvidenceClass::ObservedOnly,
+        )
+        .unwrap();
+        assert_eq!(
+            observed_only.len(),
+            1,
+            "ObservedOnly keeps only carrier-observed rows"
+        );
+        assert_eq!(observed_only[0].outcome_id, "o-3");
     }
 
     #[test]

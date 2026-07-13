@@ -154,6 +154,7 @@ use self::workspace_setup::prepare_workspace_and_mcp;
 #[cfg(test)]
 pub(crate) use self::credentials::apply_unlocked_vault_env;
 pub(crate) use self::dedupe::new_dispatch_id;
+pub(crate) use self::dedupe::{load_dispatch_identity_receipt_checked, DispatchReceiptLoad};
 pub(crate) use self::recovery::recover_orphaned_dispatch_runs;
 
 // ─── Main dispatch handler ───────────────────────────────────────────────────
@@ -390,6 +391,7 @@ pub(crate) async fn handle_tachi_dispatch(
             // bypass), and which skills were excluded for asking for more than
             // the contract grants.
             "authority": authority_receipt.clone(),
+            "identity_receipt": resolved_profile.identity_receipt,
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
             // machine-verify self-reported / exit-0 success against a contract.
@@ -481,6 +483,7 @@ pub(crate) async fn handle_tachi_dispatch(
             // #894 S2d: same authority receipt as the receipt-first seed above
             // (this write's `extra` is a fresh object, not a merge).
             "authority": authority_receipt.clone(),
+            "identity_receipt": resolved_profile.identity_receipt,
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
             // machine-verify self-reported / exit-0 success against a contract.
@@ -523,6 +526,7 @@ pub(crate) async fn handle_tachi_dispatch(
         capability_bundle_file: &capability_bundle_file,
         evidence_required: &resolved_profile.evidence_required,
         route_explanation: &resolved_profile.route_explanation,
+        identity_receipt: &resolved_profile.identity_receipt,
     })
     .await?;
 

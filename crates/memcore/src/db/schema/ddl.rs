@@ -581,7 +581,8 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- so those edges can be derived later without a re-migration.
         -- Adjudication evidence lives in the append-only dispatch_adjudications
         -- table (#1035); this table holds mutable execution facts only — a
-        -- replayed complete may rewrite any column here.
+         -- replayed complete may rewrite mutable execution columns here; the
+         -- identity receipt is frozen on its first write.
         --
         -- Truthfulness (#773 Layer-2 ②): `execution_outcome` is the
         -- MACHINE-RESOLVED terminal verdict (after the #878-A completion
@@ -613,9 +614,19 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             cost_tokens      INTEGER,
             cost_usd         REAL,
             verification_present INTEGER NOT NULL DEFAULT 0,
-            diff_present         INTEGER NOT NULL DEFAULT 0,
-            evidence_refs    TEXT NOT NULL DEFAULT '[]',
-            idempotency_key  TEXT NOT NULL,
+             diff_present         INTEGER NOT NULL DEFAULT 0,
+             evidence_refs    TEXT NOT NULL DEFAULT '[]',
+             -- Immutable receipt copied from the accepted run ledger. NULL is
+             -- a valid explicit legacy/unattributed state.
+             identity_receipt TEXT,
+             -- Evidentiary basis of the flat identity columns above
+             -- (planned_unconfirmed | acknowledged_overlay | observed |
+             -- fallback_unreceipted | unknown). Frozen with the receipt so a
+             -- reader can always tell planned routing intent from
+             -- carrier-observed execution fact (#1065 option D). Back-filled
+             -- onto existing DBs by the v17 sentinel migration.
+             identity_attribution_basis TEXT NOT NULL DEFAULT 'unknown',
+             idempotency_key  TEXT NOT NULL,
             created_at       TEXT NOT NULL DEFAULT '',
             updated_at       TEXT NOT NULL DEFAULT '',
             UNIQUE (idempotency_key)

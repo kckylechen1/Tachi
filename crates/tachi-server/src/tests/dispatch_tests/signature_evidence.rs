@@ -9,7 +9,7 @@ use super::super::make_server;
 use super::{dispatch_params, task_params};
 use crate::signature_evidence::{
     record_signature, rows_for_lane, rows_for_vendor, seed_signature_taxonomy_evidence,
-    SignatureRecord,
+    self_report_trust_for_vendor, SignatureRecord,
 };
 use crate::tool_params::SignatureRecordParams;
 use chrono::{Duration, Utc};
@@ -97,6 +97,9 @@ async fn g2_resolved_only_lane_is_clean_and_critical_never_decays() {
             evidence_ref: Some("seed".to_string()),
             resolved: false,
             recorded_at: now - Duration::days(10),
+            identity_receipt: None,
+            attribution_basis: "fallback_unreceipted".to_string(),
+            vendor_explicit: true,
         },
     )
     .expect("record occurrence");
@@ -110,6 +113,9 @@ async fn g2_resolved_only_lane_is_clean_and_critical_never_decays() {
             evidence_ref: Some("resolved".to_string()),
             resolved: true,
             recorded_at: now - Duration::days(9),
+            identity_receipt: None,
+            attribution_basis: "fallback_unreceipted".to_string(),
+            vendor_explicit: true,
         },
     )
     .expect("record resolution");
@@ -132,6 +138,9 @@ async fn g2_resolved_only_lane_is_clean_and_critical_never_decays() {
             evidence_ref: Some("old".to_string()),
             resolved: false,
             recorded_at: now - Duration::days(400),
+            identity_receipt: None,
+            attribution_basis: "fallback_unreceipted".to_string(),
+            vendor_explicit: true,
         },
     )
     .expect("record stale high");
@@ -145,6 +154,9 @@ async fn g2_resolved_only_lane_is_clean_and_critical_never_decays() {
             evidence_ref: Some("old-critical".to_string()),
             resolved: false,
             recorded_at: now - Duration::days(400),
+            identity_receipt: None,
+            attribution_basis: "fallback_unreceipted".to_string(),
+            vendor_explicit: true,
         },
     )
     .expect("record stale critical");
@@ -264,6 +276,9 @@ async fn g7_convoy_suffixed_stage_gets_vaccinated() {
             evidence_ref: Some("G7".to_string()),
             resolved: false,
             recorded_at: Utc::now(),
+            identity_receipt: None,
+            attribution_basis: "fallback_unreceipted".to_string(),
+            vendor_explicit: true,
         },
     )
     .expect("seed grok implementer signature");
@@ -306,5 +321,67 @@ async fn g8_seed_is_idempotent_across_restarts() {
     assert_eq!(
         codex_after_first, codex_after_second,
         "no duplicate codex rows"
+    );
+}
+
+// ─── #1065 D: planned_unconfirmed exclusion from self-report trust ─────────
+
+#[tokio::test]
+async fn planned_unconfirmed_auto_derived_row_is_excluded_from_self_report_trust() {
+    let server = make_server();
+
+    // An auto-derived row: the carrier never acknowledged anything (basis
+    // stays `planned_unconfirmed`) AND the vendor was never an explicit
+    // caller-supplied fact — this only records what was ROUTED, not what
+    // executed, and must not feed the vendor's trust score.
+    record_signature(
+        &server,
+        &SignatureRecord {
+            vendor: "probe-vendor".to_string(),
+            role: "implementer".to_string(),
+            signature: "falsified_ci_report".to_string(),
+            severity: Some(Severity::Critical),
+            evidence_ref: Some("auto-derived".to_string()),
+            resolved: false,
+            recorded_at: Utc::now(),
+            identity_receipt: None,
+            attribution_basis: "planned_unconfirmed".to_string(),
+            vendor_explicit: false,
+        },
+    )
+    .expect("record auto-derived signature");
+
+    assert_eq!(
+        self_report_trust_for_vendor(&server, "probe-vendor").expect("trust lookup"),
+        None,
+        "an auto-derived planned_unconfirmed row (no carrier ack, no explicit \
+         vendor) must not feed self-report trust"
+    );
+
+    // A row under the SAME still-unconfirmed basis, but this time the caller
+    // explicitly pinned the vendor — it's a fact, not a reconstruction, and
+    // must count.
+    record_signature(
+        &server,
+        &SignatureRecord {
+            vendor: "probe-vendor".to_string(),
+            role: "implementer".to_string(),
+            signature: "falsified_ci_report".to_string(),
+            severity: Some(Severity::Critical),
+            evidence_ref: Some("explicit-vendor".to_string()),
+            resolved: false,
+            recorded_at: Utc::now(),
+            identity_receipt: None,
+            attribution_basis: "planned_unconfirmed".to_string(),
+            vendor_explicit: true,
+        },
+    )
+    .expect("record caller-pinned signature");
+
+    assert_eq!(
+        self_report_trust_for_vendor(&server, "probe-vendor").expect("trust lookup"),
+        Some("low"),
+        "a caller-pinned vendor (vendor_explicit=true) must still feed self-report \
+         trust even under a planned_unconfirmed basis"
     );
 }

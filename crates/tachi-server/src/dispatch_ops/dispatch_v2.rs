@@ -248,7 +248,7 @@ pub(super) fn write_status_json(
     // state but must not erase that admission decision from the receipt.
     if let Ok(previous) = std::fs::read_to_string(&path) {
         if let Ok(Value::Object(previous)) = serde_json::from_str::<Value>(&previous) {
-            for key in ["host_profile", "execution_level"] {
+            for key in ["host_profile", "execution_level", "identity_receipt"] {
                 if !obj.contains_key(key) {
                     if let Some(value) = previous.get(key) {
                         obj.insert(key.to_string(), value.clone());

@@ -30,6 +30,10 @@ pub struct DispatchProfileDef {
     pub stage: Option<&'static str>,
     pub model: Option<&'static str>,
     pub model_alias: Option<&'static str>,
+    /// Explicit profile authorization for a carrier to substitute a model
+    /// from a different lineage (#1065). Off everywhere today; a receipt
+    /// freezes this at resolution, so nothing downstream can widen it.
+    pub allow_cross_lineage_override: bool,
     pub tool_profile: &'static str,
     pub inject_tachi_mcp: bool,
     pub inject_hub_mcps: bool,
@@ -57,6 +61,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("plan"),
         model: None,
         model_alias: None,
+        allow_cross_lineage_override: false,
         tool_profile: "delegate",
         inject_tachi_mcp: true,
         inject_hub_mcps: false,
@@ -91,6 +96,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("execute"),
         model: None,
         model_alias: Some(crate::GLM_CODING_MODEL_ALIAS),
+        allow_cross_lineage_override: false,
         tool_profile: "delegate",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -116,6 +122,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("execute"),
         model: None,
         model_alias: Some(crate::GLM_CODING_MODEL_ALIAS),
+        allow_cross_lineage_override: false,
         tool_profile: "delegate",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -145,6 +152,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("review"),
         model: None,
         model_alias: None,
+        allow_cross_lineage_override: false,
         tool_profile: "standard",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -184,6 +192,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("review_light"),
         model: None,
         model_alias: None,
+        allow_cross_lineage_override: false,
         tool_profile: "observe",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -209,6 +218,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("plan_review"),
         model: None,
         model_alias: None,
+        allow_cross_lineage_override: false,
         tool_profile: "observe",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -234,6 +244,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("explore"),
         model: Some("deepseek/deepseek-v4-flash"),
         model_alias: None,
+        allow_cross_lineage_override: false,
         tool_profile: "observe",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -259,6 +270,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("review_light"),
         model: None,
         model_alias: None,
+        allow_cross_lineage_override: false,
         tool_profile: "observe",
         inject_tachi_mcp: false,
         inject_hub_mcps: false,
@@ -327,6 +339,9 @@ pub struct ResolvedDispatchProfile {
     pub route_explanation: Vec<String>,
     pub host_adapter: Option<String>,
     pub mbit_card: Option<Value>,
+    /// Frozen at resolution; runtime consumers copy this receipt instead of
+    /// reconstructing identity from profiles that may later change.
+    pub identity_receipt: crate::DispatchIdentityReceipt,
 }
 
 pub fn resolve_dispatch_profile(raw: &str) -> Option<&'static DispatchProfileDef> {
@@ -371,6 +386,15 @@ pub fn profile_resolved_model(profile: &DispatchProfileDef) -> Option<String> {
         .or_else(|| profile.model.map(str::to_string))
 }
 
+/// One canonical lineage encoding everywhere (`provider/family`, or the bare
+/// backend when no model is declared). An alias is a routing name, not a
+/// lineage: it must resolve to its concrete model first, or the receipt's
+/// planned lineage could never match a carrier-acknowledged lineage computed
+/// from the real model string.
+fn profile_model_lineage_id(profile: &DispatchProfileDef) -> String {
+    crate::model_lineage_id(profile_resolved_model(profile).as_deref(), profile.backend)
+}
+
 pub fn profile_host_adapter(profile: &DispatchProfileDef) -> Option<&'static str> {
     match profile.backend {
         "opencode" => Some("opencode"),
@@ -393,6 +417,45 @@ pub fn profile_matches_agent(profile: &DispatchProfileDef, agent: &str) -> bool 
         )
 }
 
+/// Recommendation is a planned route, not carrier acknowledgement. It exposes
+/// the same receipt shape dispatch will freeze, with observed identity explicit
+/// as unconfirmed.
+pub fn recommendation_identity_receipt(
+    profile: &DispatchProfileDef,
+) -> crate::DispatchIdentityReceipt {
+    let model = profile_resolved_model(profile);
+    let (concrete_model_release, provider_model, provider_model_version) =
+        crate::provider_model_parts(model.as_deref());
+    let harness = profile_host_adapter(profile)
+        .unwrap_or(profile.backend)
+        .to_string();
+    crate::DispatchIdentityReceipt::planned(
+        crate::DispatchIdentityRequest {
+            profile: Some(profile.name.to_string()),
+            model: model.clone(),
+            agent: Some(profile.backend.to_string()),
+            harness: Some(harness.clone()),
+        },
+        crate::DispatchIdentityEffective {
+            profile: Some(profile.name.to_string()),
+            model: model.clone(),
+            backend: profile.backend.to_string(),
+            harness,
+            model_lineage_id: profile_model_lineage_id(profile),
+            concrete_model_release,
+            provider_model,
+            provider_model_version,
+            role: profile.role.to_string(),
+            seat: crate::UNKNOWN_IDENTITY.to_string(),
+            transport: "planned".to_string(),
+            adapter_version: crate::UNKNOWN_IDENTITY.to_string(),
+            carrier_version: crate::UNKNOWN_IDENTITY.to_string(),
+        },
+        "recommendation resolved from static dispatch profile".to_string(),
+        profile.allow_cross_lineage_override,
+    )
+}
+
 pub fn resolve_and_apply_dispatch_profile<F, S, E, C>(
     params: &mut TachiDispatchParams,
     mut profile_required_skills: S,
@@ -407,6 +470,12 @@ where
     C: FnMut(&DispatchProfileDef) -> Result<Value, String>,
 {
     let mut route_explanation = Vec::new();
+    let identity_requested = crate::DispatchIdentityRequest {
+        profile: params.profile.clone(),
+        model: params.model.clone(),
+        agent: params.agent.clone(),
+        harness: params.harness_transport.clone(),
+    };
     let requested_agent = params.agent.clone().filter(|s| !s.trim().is_empty());
     let requested_profile = params.profile.clone().filter(|s| !s.trim().is_empty());
     let alias = requested_profile
@@ -455,7 +524,22 @@ where
         if params.stage.is_none() {
             params.stage = profile.stage.map(str::to_string);
         }
-        if params.model.is_none() {
+        if let Some(requested_model) = params.model.as_deref() {
+            let profile_model = profile_resolved_model(profile);
+            let requested_lineage = crate::model_lineage_id(Some(requested_model), profile.backend);
+            let profile_lineage =
+                crate::model_lineage_id(profile_model.as_deref(), profile.backend);
+            if !crate::lineages_compatible(&requested_lineage, &profile_lineage) {
+                return Err(format!(
+                    "model override '{}' crosses profile '{}' lineage '{}' -> '{}' without explicit profile authorization",
+                    requested_model, profile.name, profile_lineage, requested_lineage
+                ));
+            }
+            route_explanation.push(format!(
+                "explicit model '{}' overrides profile model within lineage '{}'",
+                requested_model, profile_lineage
+            ));
+        } else {
             params.model = profile_resolved_model(profile);
         }
         if profile_uses_opencode_adapter(profile) && params.command.is_empty() {
@@ -586,9 +670,43 @@ where
         .filter(|profile| !profile.is_empty())
         .collect::<Vec<_>>();
     dedupe_preserve_order(&mut credential_profiles);
+    let selected_profile = profile.map(|p| p.name.to_string());
+    let planned_model = params.model.clone();
+    let (concrete_model_release, provider_model, provider_model_version) =
+        crate::provider_model_parts(planned_model.as_deref());
+    let planned_backend = agent_norm.clone();
+    let planned_harness = profile
+        .and_then(profile_host_adapter)
+        .unwrap_or(planned_backend.as_str())
+        .to_string();
+    let identity_receipt = crate::DispatchIdentityReceipt::planned(
+        identity_requested,
+        crate::DispatchIdentityEffective {
+            profile: selected_profile.clone(),
+            model: planned_model.clone(),
+            model_lineage_id: profile.map(profile_model_lineage_id).unwrap_or_else(|| {
+                crate::model_lineage_id(planned_model.as_deref(), &planned_backend)
+            }),
+            concrete_model_release,
+            provider_model,
+            provider_model_version,
+            backend: planned_backend,
+            harness: planned_harness,
+            role: profile.map(|p| p.role).unwrap_or("unknown").to_string(),
+            seat: crate::UNKNOWN_IDENTITY.to_string(),
+            transport: params
+                .harness_transport
+                .clone()
+                .unwrap_or_else(|| "cli".to_string()),
+            adapter_version: crate::UNKNOWN_IDENTITY.to_string(),
+            carrier_version: crate::UNKNOWN_IDENTITY.to_string(),
+        },
+        route_explanation.join("; "),
+        profile.is_some_and(|p| p.allow_cross_lineage_override),
+    );
 
     Ok(ResolvedDispatchProfile {
-        selected_profile: profile.map(|p| p.name.to_string()),
+        selected_profile,
         agent: agent_norm,
         role: profile.map(|p| p.role.to_string()),
         tool_profile: params.tool_profile.clone(),
@@ -600,6 +718,7 @@ where
         route_explanation,
         host_adapter: profile.and_then(profile_host_adapter).map(str::to_string),
         mbit_card: profile.map(profile_mbit_card).transpose()?,
+        identity_receipt,
     })
 }
 
@@ -612,7 +731,11 @@ fn apply_opencode_profile_command<F>(
 where
     F: FnMut(&str) -> bool,
 {
-    let model = profile_resolved_model(profile)
+    let model = params
+        .model
+        .clone()
+        .filter(|model| !model.trim().is_empty())
+        .or_else(|| profile_resolved_model(profile))
         .ok_or_else(|| format!("profile '{}' uses OpenCode but has no model", profile.name))?;
     let transport = params
         .harness_transport
@@ -1211,6 +1334,7 @@ pub fn dedupe_preserve_order(items: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::sync::{Mutex, OnceLock};
 
     struct EnvGuard {
@@ -1291,6 +1415,32 @@ mod tests {
         }
     }
 
+    fn resolve_for_identity_test(params: &mut TachiDispatchParams) -> ResolvedDispatchProfile {
+        resolve_and_apply_dispatch_profile(
+            params,
+            |profile| Ok(profile_required_skill_ids(profile)),
+            |profile| Ok(profile_evidence_required(profile)),
+            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
+            |_| false,
+        )
+        .expect("route resolves")
+    }
+
+    fn receipt_key_paths(value: &Value, prefix: &str, out: &mut BTreeSet<String>) {
+        let Some(object) = value.as_object() else {
+            return;
+        };
+        for (key, value) in object {
+            let path = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            out.insert(path.clone());
+            receipt_key_paths(value, &path, out);
+        }
+    }
+
     #[test]
     fn overlay_projection_preserves_profile_card_payload_shape() {
         let profile = resolve_dispatch_profile("opencode_builder").expect("profile");
@@ -1361,10 +1511,256 @@ mod tests {
         assert_eq!(params.profile.as_deref(), Some("glm_impl"));
         assert_eq!(params.model.as_deref(), Some("zhipuai-coding-plan/glm-5.2"));
         assert_eq!(resolved.selected_profile.as_deref(), Some("glm_impl"));
+        let receipt = &resolved.identity_receipt;
+        assert_eq!(receipt.requested.profile.as_deref(), Some("glm_51_impl"));
+        assert_eq!(receipt.planned.profile.as_deref(), Some("glm_impl"));
+        assert_eq!(
+            receipt.planned.model.as_deref(),
+            Some("zhipuai-coding-plan/glm-5.2")
+        );
+        assert_eq!(receipt.planned.model_lineage_id, "zhipuai-coding-plan/glm");
+        assert_eq!(
+            receipt.observed.acknowledgement,
+            crate::DispatchAcknowledgement::Unconfirmed
+        );
+        assert_eq!(receipt.observed.effective.backend, crate::UNKNOWN_IDENTITY);
         assert!(resolved.route_explanation.iter().any(|line| {
             line.contains("deprecated dispatch profile alias 'glm_51_impl'")
                 && line.contains("glm_impl")
         }));
+    }
+
+    #[test]
+    fn same_lineage_override_is_planned_but_not_relabelled_as_observed() {
+        let _lock = env_lock();
+        let _env = EnvGuard::remove("TACHI_DISPATCH_GLM_CODING_MODEL");
+        let mut params = params("glm_impl");
+        params.model = Some("zhipuai-coding-plan/glm-5.2@2026-07-13".to_string());
+        let resolved = resolve_and_apply_dispatch_profile(
+            &mut params,
+            |profile| Ok(profile_required_skill_ids(profile)),
+            |profile| Ok(profile_evidence_required(profile)),
+            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
+            |_| false,
+        )
+        .expect("same-lineage override");
+        assert_eq!(
+            resolved.identity_receipt.requested.model.as_deref(),
+            Some("zhipuai-coding-plan/glm-5.2@2026-07-13")
+        );
+        assert_eq!(
+            resolved.identity_receipt.planned.model,
+            resolved.identity_receipt.requested.model
+        );
+        assert_eq!(
+            resolved.identity_receipt.observed.acknowledgement,
+            crate::DispatchAcknowledgement::Unconfirmed
+        );
+    }
+
+    #[test]
+    fn cross_lineage_model_override_fails_closed() {
+        let mut params = params("glm_impl");
+        params.model = Some("openai/gpt-5.6".to_string());
+        let error = resolve_and_apply_dispatch_profile(
+            &mut params,
+            |profile| Ok(profile_required_skill_ids(profile)),
+            |profile| Ok(profile_evidence_required(profile)),
+            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
+            |_| false,
+        )
+        .expect_err("cross-lineage override must fail closed");
+        assert!(error.contains("without explicit profile authorization"));
+    }
+
+    #[test]
+    fn receipt_rejects_unauthorized_substitution_and_survives_replay() {
+        let profile = resolve_dispatch_profile("glm_impl").expect("profile");
+        let mut receipt = recommendation_identity_receipt(profile);
+        let mut substitute = receipt.planned.clone();
+        substitute.model_lineage_id = "openai".to_string();
+        substitute.model = Some("openai/gpt-5.6".to_string());
+        assert!(receipt
+            .acknowledge(
+                substitute,
+                crate::DispatchAcknowledgement::Substituted,
+                "carrier changed model".to_string(),
+            )
+            .is_err());
+
+        let replay: crate::DispatchIdentityReceipt =
+            serde_json::from_value(serde_json::to_value(&receipt).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(replay, receipt, "replay must preserve the frozen receipt");
+    }
+
+    #[test]
+    fn matching_acknowledgement_is_not_a_mismatch_and_wins_attribution() {
+        let _lock = env_lock();
+        let _env = EnvGuard::remove("TACHI_DISPATCH_GLM_CODING_MODEL");
+        let profile = resolve_dispatch_profile("glm_impl").expect("profile");
+        let mut receipt = recommendation_identity_receipt(profile);
+        assert_eq!(
+            receipt.attribution().0,
+            receipt.planned,
+            "an unconfirmed receipt attributes to the planned identity"
+        );
+
+        let mut observed = receipt.planned.clone();
+        // A real carrier fills in provenance the planner could not know.
+        observed.seat = "worker-3".to_string();
+        observed.transport = "acp".to_string();
+        observed.adapter_version = "1.2.3".to_string();
+        observed.carrier_version = "0.9.0".to_string();
+        receipt
+            .acknowledge(
+                observed,
+                crate::DispatchAcknowledgement::Acknowledged,
+                "carrier acknowledged launch".to_string(),
+            )
+            .expect("matching acknowledgement");
+        assert!(
+            !receipt.observed.mismatch,
+            "provenance-only differences must not flag an identity mismatch"
+        );
+        assert_eq!(receipt.attribution().0, receipt.observed.effective);
+    }
+
+    #[test]
+    fn same_lineage_release_substitution_is_an_explicit_mismatch() {
+        let _lock = env_lock();
+        let _env = EnvGuard::remove("TACHI_DISPATCH_GLM_CODING_MODEL");
+        let profile = resolve_dispatch_profile("glm_impl").expect("profile");
+        let mut receipt = recommendation_identity_receipt(profile);
+        let mut observed = receipt.planned.clone();
+        observed.model = Some("zhipuai-coding-plan/glm-5.2@2026-07-13".to_string());
+        let (release, provider_model, version) =
+            crate::provider_model_parts(observed.model.as_deref());
+        observed.concrete_model_release = release;
+        observed.provider_model = provider_model;
+        observed.provider_model_version = version;
+        receipt
+            .acknowledge(
+                observed,
+                crate::DispatchAcknowledgement::Substituted,
+                "carrier pinned a release".to_string(),
+            )
+            .expect("same-lineage release substitution is allowed");
+        assert!(
+            receipt.observed.mismatch,
+            "a release substitution must surface as an explicit mismatch"
+        );
+        assert_eq!(
+            receipt.attribution().0.model.as_deref(),
+            Some("zhipuai-coding-plan/glm-5.2@2026-07-13"),
+            "attribution follows what executed, never the planned claim"
+        );
+    }
+
+    #[test]
+    fn profile_without_model_accepts_same_family_override() {
+        let mut params = params("claude_plan");
+        params.model = Some("anthropic/claude-sonnet-5".to_string());
+        let resolved = resolve_and_apply_dispatch_profile(
+            &mut params,
+            |profile| Ok(profile_required_skill_ids(profile)),
+            |profile| Ok(profile_evidence_required(profile)),
+            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
+            |_| false,
+        )
+        .expect("same-family override on a model-less profile must be allowed");
+        assert_eq!(
+            resolved.identity_receipt.planned.model.as_deref(),
+            Some("anthropic/claude-sonnet-5")
+        );
+    }
+
+    #[test]
+    fn profile_without_model_rejects_cross_family_override() {
+        let mut params = params("claude_plan");
+        params.model = Some("openai/gpt-5.6".to_string());
+        let error = resolve_and_apply_dispatch_profile(
+            &mut params,
+            |profile| Ok(profile_required_skill_ids(profile)),
+            |profile| Ok(profile_evidence_required(profile)),
+            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
+            |_| false,
+        )
+        .expect_err("cross-family override must fail closed");
+        assert!(error.contains("without explicit profile authorization"));
+    }
+
+    #[test]
+    fn malformed_lineages_fail_closed() {
+        assert!(crate::lineages_compatible("anthropic/claude", "claude"));
+        assert!(crate::lineages_compatible("claude", "claude"));
+        assert!(!crate::lineages_compatible("a/b/claude", "claude"));
+        assert!(!crate::lineages_compatible("a/b/c", "a/b/c"));
+        assert!(!crate::lineages_compatible("", ""));
+        assert!(!crate::lineages_compatible("", "claude"));
+        assert!(!crate::lineages_compatible("/claude", "claude"));
+        assert!(!crate::lineages_compatible("openai/gpt", "claude"));
+        assert!(!crate::lineages_compatible("anthropic/claude", ""));
+    }
+
+    #[test]
+    fn provider_model_parts_separates_provider_release_and_version() {
+        assert_eq!(
+            crate::provider_model_parts(Some("zhipuai-coding-plan/glm-5.2@2026-07-13")),
+            (
+                "zhipuai-coding-plan/glm-5.2".to_string(),
+                "glm-5.2".to_string(),
+                "2026-07-13".to_string()
+            )
+        );
+        assert_eq!(
+            crate::provider_model_parts(Some("glm-5.2")),
+            (
+                "glm-5.2".to_string(),
+                "glm-5.2".to_string(),
+                crate::UNKNOWN_IDENTITY.to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn every_resolution_entry_route_emits_the_full_identity_receipt_shape() {
+        let mut profile = params("glm_impl");
+        let mut profile_and_agent = params("glm_impl");
+        profile_and_agent.agent = Some("opencode".to_string());
+        let mut direct = params("glm_impl");
+        direct.profile = None;
+        direct.agent = Some("codex".to_string());
+        direct.model = Some("openai/gpt-5.6".to_string());
+        let mut custom = params("glm_impl");
+        custom.profile = None;
+        custom.agent = Some("custom".to_string());
+        custom.model = Some("example/custom-1".to_string());
+        let mut host_adapter = params("opencode_builder");
+
+        let mut expected = None;
+        for receipt in [
+            resolve_for_identity_test(&mut profile).identity_receipt,
+            resolve_for_identity_test(&mut profile_and_agent).identity_receipt,
+            resolve_for_identity_test(&mut direct).identity_receipt,
+            resolve_for_identity_test(&mut custom).identity_receipt,
+            resolve_for_identity_test(&mut host_adapter).identity_receipt,
+        ] {
+            let mut keys = BTreeSet::new();
+            receipt_key_paths(
+                &serde_json::to_value(receipt).expect("receipt serializes"),
+                "",
+                &mut keys,
+            );
+            if let Some(expected) = &expected {
+                assert_eq!(
+                    &keys, expected,
+                    "every entry route must expose every receipt key"
+                );
+            } else {
+                expected = Some(keys);
+            }
+        }
     }
 
     #[test]

@@ -35,15 +35,19 @@ pub(super) fn migrate_v14_dispatch_outcomes_reported_outcome(
     Ok(1)
 }
 
-fn table_exists(conn: &Connection, table: &str) -> Result<bool, MemoryError> {
-    let exists = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
-            [table],
-            |_| Ok(()),
-        )
-        .is_ok();
-    Ok(exists)
+pub(super) fn table_exists(conn: &Connection, table: &str) -> Result<bool, MemoryError> {
+    // Only "no rows" means absent. Any other probe error must propagate:
+    // swallowing it would report a real table as missing, skip the migration,
+    // and the version stamp would then keep it from ever running again.
+    match conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
+        [table],
+        |_| Ok(()),
+    ) {
+        Ok(()) => Ok(true),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]
