@@ -13,9 +13,139 @@
 
 use super::make_server;
 use crate::claims_ops::{
-    auto_register_or_heartbeat_claim, briefing_claims_board, list_live_claims_for_briefing,
-    presence_briefing_section, ClaimHookInput,
+    auto_register_or_heartbeat_claim, briefing_claims_board, emit_terminal_receipt,
+    list_live_claims_for_briefing, presence_briefing_section, ClaimHookInput,
 };
+
+#[tokio::test]
+async fn no_issue_dispatch_preserves_initiating_session_and_terminal_inbox_is_recipient_isolated() {
+    let server_a = make_server();
+    let db_path = server_a.global_db_path_buf();
+    let server_b = crate::server_state::MemoryServer::new(db_path, None).expect("second server");
+    server_a.set_session_identity(Some("initiator-seat".to_string()), None, None);
+    auto_register_or_heartbeat_claim(
+        &server_a,
+        &ClaimHookInput {
+            issue_ref: None,
+            flow_id: None,
+            dispatch_id: Some("dispatch-no-issue".to_string()),
+            branch: None,
+            declared_file_scope: None,
+        },
+    );
+    let claim = server_a
+        .with_global_store_read(|store| {
+            memcore::get_claim_for_dispatch(store.connection(), "dispatch-no-issue")
+                .map_err(|e| e.to_string())
+        })
+        .expect("claim read")
+        .expect("dispatch claim");
+    assert_eq!(claim.session_client.as_deref(), Some("initiator-seat"));
+    assert!(claim.issue_ref.is_none());
+    assert!(
+        claim.flow_id.is_none(),
+        "a no-flow dispatch must retain no flow_id"
+    );
+    assert_eq!(claim.dispatch_id.as_deref(), Some("dispatch-no-issue"));
+
+    auto_register_or_heartbeat_claim(
+        &server_a,
+        &ClaimHookInput {
+            issue_ref: None,
+            flow_id: None,
+            dispatch_id: Some("dispatch-no-issue-two".to_string()),
+            branch: None,
+            declared_file_scope: None,
+        },
+    );
+    let second_claim = server_a
+        .with_global_store_read(|store| {
+            memcore::get_claim_for_dispatch(store.connection(), "dispatch-no-issue-two")
+                .map_err(|e| e.to_string())
+        })
+        .expect("second claim read")
+        .expect("second dispatch claim");
+    assert_eq!(
+        second_claim.session_client.as_deref(),
+        Some("initiator-seat")
+    );
+    assert!(second_claim.flow_id.is_none());
+
+    emit_terminal_receipt(
+        &server_a,
+        "dispatch-no-issue",
+        "TASK_STATE_FAILED",
+        "safe terminal summary",
+        None,
+    );
+    emit_terminal_receipt(
+        &server_a,
+        "dispatch-no-issue-two",
+        "TASK_STATE_COMPLETED",
+        "second safe terminal summary",
+        None,
+    );
+    let a_list = crate::facade_memory_ops::handle_terminal_inbox(
+        &server_a,
+        crate::tool_params::TerminalInboxParams {
+            action: "list".to_string(),
+            dispatch_id: None,
+            include_acknowledged: false,
+            limit: 10,
+        },
+    )
+    .expect("initiator list");
+    assert!(a_list.contains("dispatch-no-issue"));
+    assert!(a_list.contains("dispatch-no-issue-two"));
+    server_b.set_session_identity(Some("other-seat".to_string()), None, None);
+    let b_list = crate::facade_memory_ops::handle_terminal_inbox(
+        &server_b,
+        crate::tool_params::TerminalInboxParams {
+            action: "list".to_string(),
+            dispatch_id: None,
+            include_acknowledged: false,
+            limit: 10,
+        },
+    )
+    .expect("other list");
+    assert!(
+        !b_list.contains("dispatch-no-issue"),
+        "other sessions must not list another recipient's receipt"
+    );
+
+    let briefing: crate::tool_params::TachiMemoryParams =
+        serde_json::from_value(serde_json::json!({
+            "action": "briefing", "format": "json"
+        }))
+        .expect("briefing params");
+    let briefing = crate::facade_memory_ops::handle_tachi_memory(&server_a, briefing)
+        .await
+        .expect("briefing");
+    assert!(briefing.contains("terminal_inbox") && briefing.contains("dispatch-no-issue"));
+    let ack = crate::facade_memory_ops::handle_terminal_inbox(
+        &server_a,
+        crate::tool_params::TerminalInboxParams {
+            action: "ack".to_string(),
+            dispatch_id: Some("dispatch-no-issue".to_string()),
+            include_acknowledged: false,
+            limit: 10,
+        },
+    )
+    .expect("ack");
+    assert!(ack.contains("\"acknowledged\":true"));
+    let after_ack = crate::facade_memory_ops::handle_terminal_inbox(
+        &server_a,
+        crate::tool_params::TerminalInboxParams {
+            action: "list".to_string(),
+            dispatch_id: None,
+            include_acknowledged: false,
+            limit: 10,
+        },
+    )
+    .expect("unacked list");
+    assert!(!after_ack.contains("\"dispatch_id\":\"dispatch-no-issue\""));
+    assert!(after_ack.contains("\"dispatch_id\":\"dispatch-no-issue-two\""));
+}
 
 /// Drop the `session_claims` table on the test server's global store,
 /// simulating a corrupted/missing-table DB (an old DB predating #1001, or a
@@ -221,10 +351,7 @@ async fn briefing_surfaces_file_scope_collision_using_the_calling_sessions_own_d
     // `_` (which round 4 replaced with a space, breaking this exact
     // assertion — this is the discriminating fix: pre-fix the substring
     // check below would have failed against `claims ops.rs`).
-    assert!(warnings[0]
-        .as_str()
-        .unwrap()
-        .contains("claims\\_ops.rs"));
+    assert!(warnings[0].as_str().unwrap().contains("claims\\_ops.rs"));
 
     // And session A's own briefing symmetrically surfaces the same overlap
     // against B.
@@ -297,5 +424,129 @@ async fn presence_board_caps_at_five_and_reports_overflow() {
     assert_eq!(
         board["overflow"], 1,
         "overflow must report exactly the cut-off count: {board:?}"
+    );
+}
+
+/// Discrimination for `emit_terminal_receipt`'s non-propagation contract: an
+/// actual receipt-write failure must NOT prevent the caller's terminal
+/// transition from completing. The function's signature is `-> ()` so it
+/// structurally cannot propagate an error; this test proves that by inducing a
+/// REAL receipt-INSERT failure (a SQLite BEFORE INSERT trigger with
+/// RAISE(ABORT) on `terminal_dispatch_inbox`) and showing:
+///   1. `emit_terminal_receipt` returns normally (no panic),
+///   2. the caller's immediately-following `release_claim_for_dispatch`
+///      still succeeds (the terminal transition is usable),
+///   3. no receipt is listed as delivered.
+/// If `emit_terminal_receipt` were ever changed to return `Result` and the
+/// callers propagated it with `?`, the release below would be skipped — this
+/// test would fail at the claim-state assertion.
+#[tokio::test]
+async fn emit_terminal_receipt_failure_remains_non_propagating_and_caller_continues() {
+    let server = make_server();
+    server.set_session_identity(Some("receipt-fault-seat".to_string()), None, None);
+    let dispatch_id = "dispatch-receipt-write-fault";
+
+    // Register a claim so emit_terminal_receipt has a recipient.
+    auto_register_or_heartbeat_claim(
+        &server,
+        &ClaimHookInput {
+            issue_ref: None,
+            flow_id: None,
+            dispatch_id: Some(dispatch_id.to_string()),
+            branch: None,
+            declared_file_scope: None,
+        },
+    );
+    let claim_before = server
+        .with_global_store_read(|store| {
+            memcore::get_claim_for_dispatch(store.connection(), dispatch_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("claim read")
+        .expect("claim seeded");
+    assert_eq!(claim_before.state, memcore::ClaimState::Active);
+
+    // Induce a REAL receipt-INSERT failure via a BEFORE INSERT trigger.
+    server
+        .with_global_store(|store| {
+            store
+                .connection_mut()
+                .execute_batch(
+                    "CREATE TRIGGER test_block_receipt_insert BEFORE INSERT ON terminal_dispatch_inbox \
+                     BEGIN SELECT RAISE(ABORT, 'test-induced receipt write failure'); END;",
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("create receipt-blocking trigger");
+
+    // Prove the trigger is live: a direct insert must fail.
+    let blocked = server.with_global_store(|store| {
+        memcore::insert_terminal_receipt(
+            store.connection(),
+            &memcore::NewTerminalReceipt {
+                dispatch_id: "probe-blocked".to_string(),
+                recipient_session_client: "receipt-fault-seat".to_string(),
+                terminal_state: "TASK_STATE_FAILED".to_string(),
+                safe_summary: "probe".to_string(),
+                reference: None,
+                created_at: String::new(),
+            },
+        )
+        .map_err(|e| e.to_string())
+    });
+    assert!(
+        blocked.is_err(),
+        "trigger must genuinely block receipt inserts, got: {blocked:?}"
+    );
+
+    // The action under test: emit_terminal_receipt must not propagate the
+    // write failure. It returns `-> ()`, so the caller always continues.
+    emit_terminal_receipt(
+        &server,
+        dispatch_id,
+        "TASK_STATE_FAILED",
+        "safe summary for fault test",
+        None,
+    );
+
+    // PROOF 1 — the caller's terminal transition remains usable: the claim
+    // release (which every terminal caller invokes right after emit) still
+    // succeeds despite the receipt write failure.
+    crate::claims_ops::release_claim_for_dispatch(&server, dispatch_id, "test_terminal");
+    let claim_after = server
+        .with_global_store_read(|store| {
+            memcore::get_claim_for_dispatch(store.connection(), dispatch_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("claim read after")
+        .expect("claim row retained");
+    assert_eq!(
+        claim_after.state,
+        memcore::ClaimState::Released,
+        "claim release must succeed despite receipt write failure — the terminal transition is still usable"
+    );
+
+    // PROOF 2 — no receipt is listed as delivered for this dispatch.
+    let receipt = server
+        .with_global_store_read(|store| {
+            memcore::get_terminal_receipt(store.connection(), dispatch_id)
+                .map_err(|e| e.to_string())
+        })
+        .expect("receipt read");
+    assert!(
+        receipt.is_none(),
+        "no receipt must be reported delivered when the write genuinely failed"
+    );
+
+    // PROOF 3 — list_terminal_receipts for the recipient returns empty.
+    let listed = server
+        .with_global_store_read(|store| {
+            memcore::list_terminal_receipts(store.connection(), "receipt-fault-seat", true, 10)
+                .map_err(|e| e.to_string())
+        })
+        .expect("list receipts");
+    assert!(
+        listed.iter().all(|r| r.dispatch_id != dispatch_id),
+        "failed receipt must not appear in the recipient's delivered list"
     );
 }

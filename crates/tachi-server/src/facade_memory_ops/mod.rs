@@ -13,6 +13,7 @@ mod progress_ops;
 mod readiness_ops;
 mod recall_proposal_ops;
 mod recall_simulate_ops;
+mod terminal_inbox_ops;
 
 use crate::facade_save_ops::finalize_tachi_save_response;
 use crate::facade_save_ops::handle_tachi_save;
@@ -24,6 +25,7 @@ pub(crate) use evidence_format::{
 };
 pub(crate) use recall_simulate_ops::build_recall_simulation_report;
 use serde_json::json;
+pub(crate) use terminal_inbox_ops::handle_terminal_inbox;
 
 pub(crate) async fn handle_tachi_memory(
     server: &MemoryServer,

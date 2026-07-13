@@ -285,6 +285,14 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         d_id, kanban_state, error
                     );
                 }
+                crate::claims_ops::emit_terminal_receipt(
+                    &server_clone,
+                    &d_id,
+                    kanban_state,
+                    "Dispatch watchdog observed terminal subprocess completion.",
+                    None,
+                );
+                crate::claims_ops::release_claim_for_dispatch(&server_clone, &d_id, "watchdog");
             } else {
                 // Crash / timeout / error: record a failure eval so the
                 // failure is still visible in the ledger, but tag it as
@@ -370,6 +378,14 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         d_id, error
                     );
                 }
+                crate::claims_ops::emit_terminal_receipt(
+                    &server_clone,
+                    &d_id,
+                    "TASK_STATE_FAILED",
+                    "Dispatch watchdog observed a backend failure.",
+                    Some(&eval_id),
+                );
+                crate::claims_ops::release_claim_for_dispatch(&server_clone, &d_id, "watchdog");
             }
         }
 

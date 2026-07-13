@@ -10,7 +10,7 @@ use crate::memory_search_ops::{handle_find_similar_memory, handle_remember, hand
 use crate::project_db_ops::handle_tachi_init_project_db;
 use crate::tool_params::{
     ArchiveMemoryParams, FindSimilarMemoryParams, GetMemoryParams, InitProjectDbParams,
-    ListMemoriesParams, RememberParams, SaveMemoryParams, SearchMemoryParams,
+    ListMemoriesParams, RememberParams, SaveMemoryParams, SearchMemoryParams, TerminalInboxParams,
 };
 use crate::MemoryServer;
 
@@ -149,6 +149,16 @@ impl MemoryServer {
             visible_tools.len(),
             rows.join("\n")
         ))
+    }
+
+    #[tool(
+        description = "List or acknowledge durable terminal dispatch receipts for the current server-resolved session. action='list' never acknowledges; action='ack' acknowledges one of your own dispatch receipts."
+    )]
+    pub(crate) async fn tachi_terminal_inbox(
+        &self,
+        Parameters(params): Parameters<TerminalInboxParams>,
+    ) -> Result<String, String> {
+        crate::facade_memory_ops::handle_terminal_inbox(self, params)
     }
 
     #[tool(

@@ -239,6 +239,15 @@ pub(crate) async fn handle_memory_briefing(
     };
     let cross_project = json!(cross_project_result?);
     let stickies = json!(sticky_result?);
+    // Terminal receipts are deliberately read-only here: briefing recovery is
+    // reliable only when merely viewing a receipt never consumes it.
+    let terminal_receipts = crate::claims_ops::resolve_session_client(server);
+    let terminal_receipts = server
+        .with_global_store_read(|store| {
+            memcore::list_terminal_receipts(store.connection(), &terminal_receipts, false, 20)
+                .map_err(|e| e.to_string())
+        })
+        .unwrap_or_default();
 
     let (warnings_res, board_res, checkpoints_res, wiki_counts_res) = tokio::join!(
         async {
@@ -393,6 +402,11 @@ pub(crate) async fn handle_memory_briefing(
             response.insert("binding".to_string(), binding);
             response.insert("health".to_string(), health_summary);
             insert_non_empty_compact_section(&mut response, "stickies", stickies.clone());
+            insert_non_empty_compact_section(
+                &mut response,
+                "terminal_inbox",
+                json!(terminal_receipts),
+            );
             insert_non_empty_compact_section(&mut response, "memories", memories);
             insert_non_empty_compact_section(&mut response, "wiki", wiki);
             insert_non_empty_compact_section(&mut response, "cross_project", cross_project);
@@ -431,6 +445,7 @@ pub(crate) async fn handle_memory_briefing(
             "available_projects": available_projects,
             "binding": binding,
             "stickies": stickies,
+            "terminal_inbox": terminal_receipts,
             "memories": memories,
             "wiki": wiki,
             "cross_project": cross_project,
@@ -487,6 +502,18 @@ pub(crate) async fn handle_memory_briefing(
         &presence_for_markdown,
         compact,
     );
+    if !terminal_receipts.is_empty() {
+        markdown.push_str("\n## Unacknowledged terminal dispatch receipts\n");
+        for receipt in &terminal_receipts {
+            let dispatch_id = receipt.dispatch_id.replace('`', "'");
+            let state = receipt.terminal_state.replace('`', "'");
+            let summary = receipt.safe_summary.replace(['\n', '\r'], " ");
+            markdown.push_str(&format!("- `{dispatch_id}` — `{state}`: {summary}\n"));
+        }
+        markdown.push_str(
+            "Use `tachi_terminal_inbox(action='ack', dispatch_id=...)` to acknowledge a receipt.\n",
+        );
+    }
     // Insert binding receipt after the project-focus line so unscoped sessions are obvious.
     let binding_md = crate::memory_search_ops::format_binding_markdown(&binding);
     if let Some(idx) = markdown.find('\n') {

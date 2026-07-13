@@ -179,15 +179,15 @@ pub(super) async fn handle_tachi_task_cancel(
         .and_then(Value::as_str)
         .unwrap_or("unknown");
 
-    // #1001 round 2 item 1: release the presence claim this dispatch
-    // registered (auto_register_or_heartbeat_claim keys it on dispatch_id).
-    // Fires unconditionally — including the already-terminal early-return
-    // branch below — so a claim never stays `active` for a dispatch that is
-    // being cancelled (or was already terminal but never released). Fail-safe
-    // — degrades to a warn, never fails cancel.
-    crate::claims_ops::release_claim_for_dispatch(server, &dispatch_id, "cancel");
-
     if is_terminal_task_state(state) {
+        crate::claims_ops::emit_terminal_receipt(
+            server,
+            &dispatch_id,
+            state,
+            "Dispatch cancellation observed an already-terminal state.",
+            None,
+        );
+        crate::claims_ops::release_claim_for_dispatch(server, &dispatch_id, "cancel");
         return serde_json::to_string(&json!({
             "status": "already_terminal",
             "dispatch_id": dispatch_id,
@@ -197,6 +197,10 @@ pub(super) async fn handle_tachi_task_cancel(
         }))
         .map_err(|e| format!("serialize cancel response: {e}"));
     }
+    // Cancellation is not itself terminal: the child may hang after this
+    // request. Release the advisory presence claim now so it cannot remain
+    // falsely live until a watchdog eventually observes a terminal state.
+    crate::claims_ops::release_claim_for_dispatch(server, &dispatch_id, "cancel_requested");
     let timeout = StdDuration::from_secs(
         params
             .timeout_secs
@@ -392,6 +396,104 @@ mod tests {
         assert_eq!(
             response["result"]["full_size_chars"], 500,
             "char count should be 500, got: {response}"
+        );
+    }
+
+    /// Discrimination for the NONTERMINAL branch of `handle_tachi_task_cancel`.
+    /// A dispatch still in TASK_STATE_WORKING must:
+    ///   1. release the advisory presence claim (before the acpx call), and
+    ///   2. NOT write a terminal receipt (cancellation is not itself terminal).
+    /// The acpx control call fails because the fake run has no acpx backend,
+    /// which causes `handle_tachi_task_cancel` to return Err — but the claim
+    /// release happens *before* that call and is therefore already durable.
+    /// If the release were moved after the acpx `?` or a receipt were emitted
+    /// in this branch, this test would fail.
+    #[tokio::test]
+    async fn cancel_nonterminal_releases_claim_and_does_not_write_receipt() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "cancel-nonterminal-probe";
+
+        // Write a run in non-terminal WORKING state.
+        let run_dir = runs_dir.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+        let status = json!({
+            "dispatch_id": dispatch_id,
+            "agent": "claude",
+            "state": "TASK_STATE_WORKING",
+            "exit_code": null,
+            "updated_at": Utc::now().to_rfc3339(),
+        });
+        std::fs::write(run_dir.join("status.json"), status.to_string()).expect("write status.json");
+
+        // Register a live presence claim for this dispatch.
+        server.set_session_identity(Some("cancel-seat".to_string()), None, None);
+        crate::claims_ops::auto_register_or_heartbeat_claim(
+            &server,
+            &crate::claims_ops::ClaimHookInput {
+                issue_ref: None,
+                flow_id: None,
+                dispatch_id: Some(dispatch_id.to_string()),
+                branch: None,
+                declared_file_scope: None,
+            },
+        );
+        // Confirm the claim started active.
+        let claim_before = server
+            .with_global_store_read(|store| {
+                memcore::get_claim_for_dispatch(store.connection(), dispatch_id)
+                    .map_err(|e| e.to_string())
+            })
+            .expect("claim read")
+            .expect("claim seeded");
+        assert_eq!(claim_before.state, memcore::ClaimState::Active);
+
+        // Also confirm no receipt exists yet.
+        let receipt_before = server
+            .with_global_store_read(|store| {
+                memcore::get_terminal_receipt(store.connection(), dispatch_id)
+                    .map_err(|e| e.to_string())
+            })
+            .expect("receipt read");
+        assert!(receipt_before.is_none());
+
+        // Call cancel. This returns Err because the run has no acpx backend
+        // — that is expected and irrelevant: the claim release happens BEFORE
+        // the acpx call.
+        let params: TachiTaskParams = serde_json::from_str(&format!(
+            r#"{{"action":"cancel","dispatch_id":"{dispatch_id}"}}"#
+        ))
+        .expect("deserialize cancel params");
+        let result = handle_tachi_task_cancel(&server, &params).await;
+        assert!(
+            result.is_err(),
+            "cancel must propagate the acpx-backend-missing error; got: {result:?}"
+        );
+
+        // PROOF 1 — claim was released (before the acpx failure).
+        let claim_after = server
+            .with_global_store_read(|store| {
+                memcore::get_claim_for_dispatch(store.connection(), dispatch_id)
+                    .map_err(|e| e.to_string())
+            })
+            .expect("claim read after")
+            .expect("claim row retained");
+        assert_eq!(
+            claim_after.state,
+            memcore::ClaimState::Released,
+            "nonterminal cancel must release the advisory claim"
+        );
+
+        // PROOF 2 — no receipt was written (cancellation is not terminal).
+        let receipt_after = server
+            .with_global_store_read(|store| {
+                memcore::get_terminal_receipt(store.connection(), dispatch_id)
+                    .map_err(|e| e.to_string())
+            })
+            .expect("receipt read after");
+        assert!(
+            receipt_after.is_none(),
+            "nonterminal cancel must NOT emit a terminal receipt"
         );
     }
 }

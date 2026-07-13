@@ -29,6 +29,8 @@ mod sqlite_vec;
 mod state;
 mod stats_gc;
 #[cfg(feature = "admin")]
+pub mod terminal_inbox;
+#[cfg(feature = "admin")]
 mod vault_db;
 #[cfg(feature = "admin")]
 mod virtual_capability;
@@ -104,6 +106,11 @@ pub use state::{
     save_derived, save_derived_with_id, set_state, set_state_if_version, StateRow,
 };
 pub use stats_gc::{archive_stale_memories, gc_tables, stats};
+#[cfg(feature = "admin")]
+pub use terminal_inbox::{
+    acknowledge_terminal_receipt, get_terminal_receipt, insert_terminal_receipt,
+    list_terminal_receipts, NewTerminalReceipt, TerminalReceipt,
+};
 #[cfg(feature = "admin")]
 pub use vault_db::{
     vault_count_entries, vault_delete_entry, vault_entry_exists, vault_get_config, vault_get_entry,

@@ -97,6 +97,15 @@ fn apply_connection_pragmas(conn: &Connection) -> Result<(), MemoryError> {
 
 fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     execute_batch_retry(conn, ddl::BASE_SCHEMA_SQL)?;
+    // #1036 terminal inbox: the historic identity triple collapses concurrent
+    // no-issue/no-flow dispatches from one initiating session. Rebuild this
+    // index with an internal dispatch discriminator only for that otherwise
+    // anonymous shape; user-facing flow_id remains NULL.
+    execute_batch_retry(conn, "DROP INDEX IF EXISTS idx_session_claims_identity_active; \
+        CREATE UNIQUE INDEX idx_session_claims_identity_active ON session_claims(\
+          COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, ''),\
+          COALESCE(CASE WHEN issue_ref IS NULL AND flow_id IS NULL THEN dispatch_id ELSE '' END, '')\
+        ) WHERE state = 'active';")?;
 
     // Forward-compatible migrations for existing DB files created before
     // archived/created_at/updated_at columns existed.

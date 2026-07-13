@@ -62,13 +62,18 @@ pub use db::foundry_jobs::{
     JobStatusHistogram, PersistedFoundryJob, RequeueOutcome,
 };
 pub use db::row_to_entry;
-pub use db::{anchor_id, anchor_path, AnchorKind};
 #[cfg(feature = "admin")]
 pub use db::session_claims::{
-    get_claim, heartbeat_claim, insert_claim, is_claim_stale, list_active_claims, list_claims,
-    release_claim, upsert_or_heartbeat_claim, ClaimSelector, ClaimState, NewSessionClaim,
-    ReleaseOutcome, SessionClaim,
+    get_claim, get_claim_for_dispatch, heartbeat_claim, insert_claim, is_claim_stale,
+    list_active_claims, list_claims, release_claim, upsert_or_heartbeat_claim, ClaimSelector,
+    ClaimState, NewSessionClaim, ReleaseOutcome, SessionClaim,
 };
+#[cfg(feature = "admin")]
+pub use db::terminal_inbox::{
+    acknowledge_terminal_receipt, get_terminal_receipt, insert_terminal_receipt,
+    list_terminal_receipts, NewTerminalReceipt, TerminalReceipt,
+};
+pub use db::{anchor_id, anchor_path, AnchorKind};
 pub use db::{CategoryPathPrefixMemoryRow, FoundryJobStatusCounts, PathPrefixMemoryRow};
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use error::MemoryError;

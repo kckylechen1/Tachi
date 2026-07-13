@@ -258,11 +258,11 @@ pub(crate) struct ClaimHookInput {
 /// swallowed after a `tracing::warn!`, matching the non-fatal
 /// lease-insert-failure precedent in `exec_env_ops::provision_managed_env`.
 ///
-/// A no-op when both `issue_ref` and `flow_id` are absent — there is nothing
-/// identifiable to claim (matches nothing in the briefing/collision surfaces
-/// either).
+/// A dispatch remains identifiable even without an issue/flow: its durable
+/// `dispatch_id` and initiating session are a real ownership fact. Use that
+/// identity rather than inferring a recipient from a broad tool profile.
 pub(crate) fn auto_register_or_heartbeat_claim(server: &MemoryServer, input: &ClaimHookInput) {
-    if input.issue_ref.is_none() && input.flow_id.is_none() {
+    if input.issue_ref.is_none() && input.flow_id.is_none() && input.dispatch_id.is_none() {
         return;
     }
     let session_client = resolve_session_client(server);
@@ -270,6 +270,9 @@ pub(crate) fn auto_register_or_heartbeat_claim(server: &MemoryServer, input: &Cl
         claim_id: generate_claim_id(),
         session_client: Some(session_client),
         issue_ref: input.issue_ref.clone(),
+        // Preserve a caller's no-flow state. The dispatch id has its own
+        // durable column and is the ownership/delivery key; inventing a flow
+        // token would make a no-flow dispatch appear flow-bound.
         flow_id: input.flow_id.clone(),
         dispatch_id: input.dispatch_id.clone(),
         branch: input.branch.clone().unwrap_or_default(),
@@ -287,6 +290,57 @@ pub(crate) fn auto_register_or_heartbeat_claim(server: &MemoryServer, input: &Cl
         tracing::warn!(
             "presence claim auto-register/heartbeat degraded to no-op (#1001 fail-safe): {err}"
         );
+    }
+}
+
+/// Best-effort, idempotent terminal receipt emission. Receipt persistence is
+/// intentionally downstream of lifecycle state: a DB failure is observable in
+/// logs but must never prevent the terminal transition. No claim means no
+/// recipient is guessed and no partial receipt is reported delivered.
+pub(crate) fn emit_terminal_receipt(
+    server: &MemoryServer,
+    dispatch_id: &str,
+    terminal_state: &str,
+    safe_summary: &str,
+    reference: Option<&str>,
+) {
+    let result: Result<Option<bool>, String> = server.with_global_store(|store| {
+        let Some(claim) = memcore::get_claim_for_dispatch(store.connection(), dispatch_id)
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        let Some(recipient) = claim.session_client.filter(|s| !s.trim().is_empty()) else {
+            return Ok(None);
+        };
+        memcore::insert_terminal_receipt(
+            store.connection(),
+            &memcore::NewTerminalReceipt {
+                dispatch_id: dispatch_id.to_string(),
+                recipient_session_client: recipient,
+                terminal_state: terminal_state.to_string(),
+                safe_summary: safe_summary.to_string(),
+                reference: reference.map(str::to_string),
+                created_at: String::new(),
+            },
+        )
+        .map(Some)
+        .map_err(|e| e.to_string())
+    });
+    match result {
+        Ok(Some(true)) => tracing::debug!(
+            dispatch_id,
+            terminal_state,
+            "terminal inbox receipt persisted"
+        ),
+        Ok(Some(false)) => tracing::debug!(dispatch_id, "terminal inbox receipt already persisted"),
+        Ok(None) => tracing::warn!(
+            dispatch_id,
+            "terminal inbox receipt skipped: no dispatch-owned recipient claim"
+        ),
+        Err(error) => {
+            tracing::warn!(dispatch_id, %error, "terminal inbox receipt persistence failed; terminal state remains authoritative")
+        }
     }
 }
 
@@ -1143,7 +1197,11 @@ mod tests {
             // `**` must be an even (self-escaping) count — never odd, which
             // is what would eat one of the two closing `*` characters.
             let before_close = rendered.split("** →").next().unwrap();
-            let trailing_backslashes = before_close.chars().rev().take_while(|&c| c == '\\').count();
+            let trailing_backslashes = before_close
+                .chars()
+                .rev()
+                .take_while(|&c| c == '\\')
+                .count();
             assert_eq!(
                 trailing_backslashes % 2,
                 0,

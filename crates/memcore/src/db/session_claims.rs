@@ -189,6 +189,21 @@ pub fn get_claim(conn: &Connection, claim_id: &str) -> Result<Option<SessionClai
     Ok(claim)
 }
 
+/// Fetch the newest claim recorded for a dispatch, including released claims.
+/// Terminal delivery resolves its recipient from this dispatch-owned fact, not
+/// from a broad tool/profile guess.
+pub fn get_claim_for_dispatch(
+    conn: &Connection,
+    dispatch_id: &str,
+) -> Result<Option<SessionClaim>, MemoryError> {
+    let sql = format!(
+        "SELECT {SELECT_COLUMNS} FROM session_claims WHERE dispatch_id = ?1 ORDER BY created_at DESC LIMIT 1"
+    );
+    Ok(conn
+        .query_row(&sql, params![dispatch_id], row_to_claim)
+        .optional()?)
+}
+
 /// List claims, optionally filtered by state. Newest first. Used by the
 /// briefing 工位表 section and manual `claim`/`release` bookkeeping.
 pub fn list_claims(
@@ -305,11 +320,12 @@ pub fn upsert_or_heartbeat_claim(
          (claim_id, session_client, issue_ref, flow_id, dispatch_id, branch,
           declared_file_scope, state, release_reason, created_at, heartbeat_at, released_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', NULL, ?8, ?8, NULL)
-         ON CONFLICT (COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, '')) \
+          ON CONFLICT (COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, ''), \
+              COALESCE(CASE WHEN issue_ref IS NULL AND flow_id IS NULL THEN dispatch_id ELSE '' END, '')) \
              WHERE state = 'active'
          DO UPDATE SET \
              heartbeat_at = ?8, \
-             dispatch_id = COALESCE(excluded.dispatch_id, session_claims.dispatch_id), \
+             dispatch_id = COALESCE(session_claims.dispatch_id, excluded.dispatch_id), \
              branch = CASE WHEN excluded.branch = '' THEN session_claims.branch ELSE excluded.branch END, \
              declared_file_scope = COALESCE(excluded.declared_file_scope, session_claims.declared_file_scope)
          RETURNING claim_id",
@@ -764,6 +780,78 @@ mod tests {
             all.len(),
             2,
             "distinct issue/flow identities get distinct rows"
+        );
+    }
+
+    /// Regression: two issue-bound dispatches from one session sharing an
+    /// issue/flow identity must NOT clobber each other's `dispatch_id`. The
+    /// conflict-update in `upsert_or_heartbeat_claim` used
+    /// `COALESCE(excluded.dispatch_id, session_claims.dispatch_id)`, which
+    /// overwrote the existing dispatch_id whenever a later heartbeat from a
+    /// DIFFERENT dispatch (same session/issue/flow) supplied its own non-null
+    /// dispatch_id. Once clobbered, `get_claim_for_dispatch(original_id)`
+    /// returned `None`, so the original dispatch's terminal receipt could not
+    /// resolve its recipient and `release_claim_for_dispatch` could not
+    /// release its claim.
+    ///
+    /// Fix: `dispatch_id` is immutable once set. The conflict-update now
+    /// preserves the existing value via
+    /// `COALESCE(session_claims.dispatch_id, excluded.dispatch_id)`.
+    #[test]
+    fn heartbeat_does_not_clobber_existing_dispatch_id_for_issue_bound_dispatches() {
+        let mut conn = open_conn();
+
+        // First dispatch registers the claim.
+        let mut first = new_claim("claim-issue-first", "org/repo#bug");
+        first.dispatch_id = Some("dispatch-original".to_string());
+        let id_first = upsert_or_heartbeat_claim(&mut conn, &first).unwrap();
+
+        // Second dispatch — same session/issue/flow, DIFFERENT dispatch_id —
+        // heartbeats the existing claim rather than inserting a new row.
+        let mut second = new_claim("claim-issue-second", "org/repo#bug");
+        second.dispatch_id = Some("dispatch-clobberer".to_string());
+        let id_second = upsert_or_heartbeat_claim(&mut conn, &second).unwrap();
+
+        // Both resolved to the same claim row (heartbeat, not duplicate).
+        assert_eq!(
+            id_first, id_second,
+            "same session/issue/flow identity must heartbeat, not duplicate"
+        );
+
+        // The original dispatch_id must survive — NOT overwritten by the
+        // second heartbeat.
+        let claim = get_claim(&conn, &id_first).unwrap().unwrap();
+        assert_eq!(
+            claim.dispatch_id.as_deref(),
+            Some("dispatch-original"),
+            "dispatch_id must be immutable once set; a later heartbeat from a \
+             different dispatch must not clobber it, got: {:?}",
+            claim.dispatch_id
+        );
+
+        // The original dispatch can still find its claim by dispatch_id —
+        // this is the lookup `emit_terminal_receipt` and
+        // `release_claim_for_dispatch` rely on. If the dispatch_id had been
+        // clobbered, this would return None.
+        let by_original = get_claim_for_dispatch(&conn, "dispatch-original").unwrap();
+        assert!(
+            by_original.is_some(),
+            "get_claim_for_dispatch(original_id) must find the claim after a \
+             second dispatch heartbeats it"
+        );
+        assert_eq!(
+            by_original.unwrap().claim_id,
+            id_first,
+            "the claim found by original dispatch_id must be the heartbeat-resolved claim"
+        );
+
+        // The clobberer dispatch_id must NOT have replaced the original —
+        // looking it up returns None (it never got its own row).
+        let by_clobberer = get_claim_for_dispatch(&conn, "dispatch-clobberer").unwrap();
+        assert!(
+            by_clobberer.is_none(),
+            "the second dispatch_id must not be findable — it heartbeated onto \
+             the existing claim whose dispatch_id is immutable"
         );
     }
 

@@ -201,14 +201,9 @@ pub(crate) async fn handle_tachi_complete(
 
     // --- Kanban Hook: auto-update task board ---
     if let Some(ref did) = params.dispatch_id {
-        // #1001 round 2 item 1: release the presence claim this dispatch
-        // registered (auto_register_or_heartbeat_claim keys it on
-        // dispatch_id). Fires unconditionally for a completed dispatch,
-        // ahead of the predicate/kanban logic below, so a claim never stays
-        // `active` because a later step in this function returned early or
-        // erred. Fail-safe — degrades to a warn, never fails completion.
-        crate::claims_ops::release_claim_for_dispatch(server, did, "complete");
-
+        // Completion derives the authoritative terminal state first. The
+        // subsequent receipt emission and presence release are best-effort,
+        // downstream lifecycle bookkeeping and never block that transition.
         // #878-A: gate the COMPLETED/reviewed write behind a machine-checkable
         // completion predicate declared at dispatch time. A self-reported
         // outcome="success" only earns a *reviewed* COMPLETED when the declared
@@ -233,6 +228,17 @@ pub(crate) async fn handle_tachi_complete(
         );
         let (new_state, reviewed_flag, predicate_override_reason) =
             crate::dispatch_ops::resolve_completion_state(params.outcome.as_str(), &verdict);
+
+        // One shared terminal receipt path. It is best-effort by contract: a
+        // receipt DB failure cannot prevent this explicit lifecycle close.
+        crate::claims_ops::emit_terminal_receipt(
+            server,
+            did,
+            new_state,
+            "Dispatch reached a terminal state through explicit completion.",
+            Some(&eval_memory_id),
+        );
+        crate::claims_ops::release_claim_for_dispatch(server, did, "complete");
 
         pipeline_status["completion_predicate"] = json!({
             "declared": declared_predicate.is_some(),

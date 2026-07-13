@@ -523,8 +523,25 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- `migrations/session_claims_identity.rs` for the full rationale and
         -- the migration that retrofits this onto pre-existing DBs).
         CREATE UNIQUE INDEX IF NOT EXISTS idx_session_claims_identity_active
-            ON session_claims(COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, ''))
+            ON session_claims(
+                COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, ''),
+                COALESCE(CASE WHEN issue_ref IS NULL AND flow_id IS NULL THEN dispatch_id ELSE '' END, '')
+            )
             WHERE state = 'active';
+
+        -- One durable terminal receipt per dispatch. This is not a handoff
+        -- memory: the primary key is the lifecycle identity, not free text.
+        CREATE TABLE IF NOT EXISTS terminal_dispatch_inbox (
+            dispatch_id              TEXT PRIMARY KEY,
+            recipient_session_client TEXT NOT NULL,
+            terminal_state           TEXT NOT NULL,
+            safe_summary             TEXT NOT NULL DEFAULT '',
+            reference                TEXT,
+            created_at               TEXT NOT NULL,
+            acknowledged_at          TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_terminal_dispatch_inbox_recipient_unacked
+            ON terminal_dispatch_inbox(recipient_session_client, acknowledged_at, created_at DESC);
 "#;
 
 pub(super) const MIGRATED_INDEXES_SQL: &str = r#"

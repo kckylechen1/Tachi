@@ -253,4 +253,184 @@ pub(crate) async fn close_kanban_row_on_early_exit(
             dispatch_id, context, kanban_err
         );
     }
+    // This attempted terminal transition has independent durable delivery and
+    // lease cleanup obligations. A failed kanban projection must not leave a
+    // receipt un-emitted or a hung backend's presence claim active.
+    crate::claims_ops::emit_terminal_receipt(
+        server,
+        dispatch_id,
+        "TASK_STATE_FAILED",
+        "Dispatch ended during backend setup before execution.",
+        None,
+    );
+    crate::claims_ops::release_claim_for_dispatch(server, dispatch_id, "early_backend_failure");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::claims_ops::{auto_register_or_heartbeat_claim, ClaimHookInput};
+    use chrono::Utc;
+    use memcore::{ClaimState, MemoryEntry, RetentionPolicy};
+    use serde_json::json;
+
+    /// Build a dispatch card mirroring how `init_kanban_task` writes them, so
+    /// `get_kanban_state`/`update_kanban_state` find it via `list_by_path`.
+    fn kanban_card(dispatch_id: &str, a2a_state: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: format!("kanban-{dispatch_id}"),
+            path: format!("/kanban/tasks/{dispatch_id}"),
+            summary: format!("Kanban: {dispatch_id}"),
+            text: "Dispatch Task".to_string(),
+            importance: 0.7,
+            timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: "kanban".to_string(),
+            keywords: vec!["kanban".to_string()],
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "test".to_string(),
+            scope: "project".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            vector: None,
+            metadata: json!({
+                "type": "a2a_task",
+                "dispatch_id": dispatch_id,
+                "a2a_state": a2a_state,
+            }),
+            retention_policy: Some(RetentionPolicy::Pinned.as_str().to_string()),
+            domain: Some("system".to_string()),
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    /// Discrimination for the unconditional receipt+release invariant in
+    /// `close_kanban_row_on_early_exit`: even when `update_kanban_state`
+    /// genuinely fails (a real DB write fault induced via SQLite triggers),
+    /// the post-attempt `emit_terminal_receipt` and
+    /// `release_claim_for_dispatch` calls must still execute. If those two
+    /// calls were ever moved inside the error-handler `if let Err` branch,
+    /// or guarded by a success check, this test would fail: the receipt would
+    /// be absent and the claim would remain `active`.
+    #[tokio::test]
+    async fn close_kanban_row_on_early_exit_emits_receipt_and_releases_claim_when_kanban_update_genuinely_fails(
+    ) {
+        let server = crate::tests::make_server();
+        server.set_session_identity(Some("early-exit-seat".to_string()), None, None);
+
+        let dispatch_id = "dispatch-early-exit-kanban-write-fault";
+
+        // Seed a kanban row in WORKING (non-terminal) state. This mirrors
+        // what `init_kanban_task` does before any fallible post-init stage.
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&kanban_card(dispatch_id, "TASK_STATE_WORKING"))
+                    .map_err(|e| e.to_string())
+            })
+            .expect("seed kanban WORKING row");
+
+        // The row must read back as WORKING so `close_kanban_row_on_early_exit`
+        // does NOT short-circuit on the is-terminal guard.
+        assert_eq!(
+            get_kanban_state(&server, dispatch_id).await.as_deref(),
+            Some("TASK_STATE_WORKING"),
+        );
+
+        // Register a claim so `emit_terminal_receipt` resolves a recipient
+        // and `release_claim_for_dispatch` has a live target.
+        auto_register_or_heartbeat_claim(
+            &server,
+            &ClaimHookInput {
+                issue_ref: None,
+                flow_id: None,
+                dispatch_id: Some(dispatch_id.to_string()),
+                branch: None,
+                declared_file_scope: None,
+            },
+        );
+        let claim_before = server
+            .with_global_store_read(|store| {
+                memcore::get_claim_for_dispatch(store.connection(), dispatch_id)
+                    .map_err(|e| e.to_string())
+            })
+            .expect("claim read")
+            .expect("claim seeded");
+        assert_eq!(claim_before.state, ClaimState::Active);
+
+        // Induce a REAL `update_kanban_state` failure: block all future
+        // writes to the `memories` table via BEFORE INSERT/UPDATE triggers.
+        // The seeded row survives (written before the triggers), so reads
+        // still work; but `update_kanban_state`'s internal `handle_save_memory`
+        // upsert hits RAISE(ABORT) and returns Err. This is a genuine DB-layer
+        // write fault, not a wrapper-that-calls-delegate mock.
+        server
+            .with_global_store(|store| {
+                store
+                    .connection_mut()
+                    .execute_batch(
+                        "CREATE TRIGGER test_block_mem_insert BEFORE INSERT ON memories \
+                         BEGIN SELECT RAISE(ABORT, 'test-induced memories write failure'); END; \
+                         CREATE TRIGGER test_block_mem_update BEFORE UPDATE ON memories \
+                         BEGIN SELECT RAISE(ABORT, 'test-induced memories write failure'); END;",
+                    )
+                    .map_err(|e| e.to_string())
+            })
+            .expect("create write-blocking triggers");
+
+        // Prove the trigger is live: a fresh upsert must now fail.
+        let blocked = server.with_global_store(|store| {
+            store
+                .upsert(&kanban_card("probe-blocked", "TASK_STATE_WORKING"))
+                .map_err(|e| e.to_string())
+        });
+        assert!(
+            blocked.is_err(),
+            "trigger must genuinely block memories writes, got: {blocked:?}"
+        );
+
+        // The action under test: `close_kanban_row_on_early_exit` attempts
+        // `update_kanban_state` (which fails) and then must unconditionally
+        // emit the receipt and release the claim.
+        close_kanban_row_on_early_exit(&server, dispatch_id, "test early exit").await;
+
+        // PROOF 1 — receipt was emitted despite the kanban write failure.
+        let receipt = server
+            .with_global_store_read(|store| {
+                memcore::get_terminal_receipt(store.connection(), dispatch_id)
+                    .map_err(|e| e.to_string())
+            })
+            .expect("receipt read");
+        assert!(
+            receipt.is_some(),
+            "receipt must be emitted even when update_kanban_state genuinely fails"
+        );
+        assert_eq!(
+            receipt.unwrap().terminal_state,
+            "TASK_STATE_FAILED",
+            "receipt must carry the FAILED state the closer attempted"
+        );
+
+        // PROOF 2 — claim was released despite the kanban write failure.
+        let claim_after = server
+            .with_global_store_read(|store| {
+                memcore::get_claim_for_dispatch(store.connection(), dispatch_id)
+                    .map_err(|e| e.to_string())
+            })
+            .expect("claim read after")
+            .expect("claim row retained for audit");
+        assert_eq!(
+            claim_after.state,
+            ClaimState::Released,
+            "claim must be released even when update_kanban_state genuinely fails"
+        );
+    }
 }
