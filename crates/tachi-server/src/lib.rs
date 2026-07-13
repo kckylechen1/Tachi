@@ -142,6 +142,7 @@ mod project_db_ops;
 mod prompts;
 mod provenance;
 mod provider_config;
+mod refinery_ops;
 mod repair;
 mod research_ops;
 mod sandbox_ops;

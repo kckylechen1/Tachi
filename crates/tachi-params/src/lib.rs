@@ -8,6 +8,7 @@ mod hub;
 mod memory;
 mod peer;
 mod project_db;
+mod refinery;
 mod sandbox;
 
 pub use agent::*;
@@ -19,6 +20,7 @@ pub use hub::*;
 pub use memory::*;
 pub use peer::*;
 pub use project_db::*;
+pub use refinery::*;
 pub use sandbox::*;
 
 /// Public value-level coercion helpers shared with callers outside this

@@ -11,7 +11,7 @@ pub(in crate::gh_ops) async fn handle_gh_issue_read(
         .args(["--repo", &params.repo])
         .args([
             "--json",
-            "number,title,state,body,author,labels,assignees,createdAt,updatedAt,comments",
+            "number,title,state,body,author,labels,assignees,createdAt,updatedAt,comments,milestone",
         ]);
 
     let output = run_gh(cmd, &token)?;
