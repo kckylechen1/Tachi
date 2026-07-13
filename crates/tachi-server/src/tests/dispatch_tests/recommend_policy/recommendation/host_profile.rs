@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 use tachi_params::ExecutionLevel;
 
 fn assert_host_admission_fields(
@@ -11,6 +12,27 @@ fn assert_host_admission_fields(
     expected_allowed: bool,
     expected_reason: &str,
 ) {
+    let actual_keys = admission
+        .as_object()
+        .expect("host_admission must be an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected_keys = [
+        "requested_level",
+        "effective_level",
+        "max_execution_level",
+        "host_profile",
+        "profile_source",
+        "allowed",
+        "reason_code",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual_keys, expected_keys,
+        "host_admission receipt key set drifted"
+    );
     assert_eq!(
         admission["requested_level"],
         match expected_requested {
@@ -83,6 +105,7 @@ async fn tachi_task_recommend_host_profile_mismatch_declines_l2_on_development()
     params.task = Some("inspect product data diagnostics".to_string());
     params.execution_level = Some(ExecutionLevel::L2);
     params.limit = Some(10);
+    params.format = None;
 
     let raw = server
         .tachi_task(Parameters(params))
@@ -110,6 +133,65 @@ async fn tachi_task_recommend_host_profile_mismatch_declines_l2_on_development()
         rec.get("candidates").is_none(),
         "mismatch must not emit candidates: {rec:#}"
     );
+    assert_eq!(rec["action"], json!("recommend"));
+    assert_eq!(rec["status"], json!("completed"));
+
+    let mut markdown_params = task_params("recommend");
+    markdown_params.task = Some("inspect product data diagnostics".to_string());
+    markdown_params.execution_level = Some(ExecutionLevel::L2);
+    markdown_params.limit = Some(10);
+    markdown_params.format = Some("markdown".to_string());
+    let markdown = server
+        .tachi_task(Parameters(markdown_params))
+        .await
+        .expect("structured decline should format as markdown");
+    assert!(
+        markdown.starts_with("## Tachi task recommend"),
+        "{markdown}"
+    );
+    assert!(markdown.contains("action: `recommend`"), "{markdown}");
+    assert!(markdown.contains("host_admission:"), "{markdown}");
+    assert!(
+        markdown.contains("| requested_level | effective_level | max_execution_level | host_profile | profile_source | allowed | reason_code |"),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains(
+            "| L2 | L2 | L1 | development | app_home_config_env | false | host_profile_mismatch |"
+        ),
+        "{markdown}"
+    );
+    assert!(!markdown.contains("recommended_profile:"), "{markdown}");
+    assert!(!markdown.contains("recommended_transport:"), "{markdown}");
+    assert!(!markdown.contains("| profile | role |"), "{markdown}");
+    assert!(!markdown.contains("```json"), "{markdown}");
+}
+
+#[tokio::test]
+async fn tachi_task_recommend_host_profile_allows_l0_below_development_ceiling() {
+    let _env = crate::host_profile::HostProfileTestOverride::set(Some("development"));
+    let server = make_server();
+    let mut params = task_params("recommend");
+    params.task = Some("inspect source metadata without side effects".to_string());
+    params.execution_level = Some(ExecutionLevel::L0);
+    params.limit = Some(10);
+
+    let raw = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("development must permit L0 below its L1 ceiling");
+    let rec: serde_json::Value = serde_json::from_str(&raw).expect("recommend JSON");
+    assert_host_admission_fields(
+        rec.get("host_admission").expect("receipt"),
+        Some("L0"),
+        "L0",
+        Some("L1"),
+        "development",
+        "app_home_config_env",
+        true,
+        "host_profile_allows",
+    );
+    assert!(rec.get("recommended_profile").is_some());
 }
 
 #[tokio::test]
@@ -262,6 +344,7 @@ async fn tachi_task_route_simulate_host_profile_allows_and_emits_receipt() {
         .expect("route_simulate allowed");
     let sim: serde_json::Value = serde_json::from_str(&raw).expect("route_simulate JSON");
     assert_eq!(sim["action"], json!("route_simulate"));
+    assert_eq!(sim["status"], json!("completed"));
     assert_host_admission_fields(
         sim.get("host_admission").expect("receipt"),
         Some("L1"),
@@ -286,6 +369,7 @@ async fn tachi_task_route_simulate_host_profile_without_task_and_mismatch() {
     params.task = None;
     params.execution_level = Some(ExecutionLevel::L2);
     params.limit = Some(10);
+    params.format = None;
 
     let raw = server
         .tachi_task(Parameters(params))
@@ -293,6 +377,7 @@ async fn tachi_task_route_simulate_host_profile_without_task_and_mismatch() {
         .expect("route_simulate without task still admits");
     let sim: serde_json::Value = serde_json::from_str(&raw).expect("route_simulate JSON");
     assert_eq!(sim["action"], json!("route_simulate"));
+    assert_eq!(sim["status"], json!("completed"));
     assert_host_admission_fields(
         sim.get("host_admission").expect("receipt"),
         Some("L2"),
@@ -307,30 +392,31 @@ async fn tachi_task_route_simulate_host_profile_without_task_and_mismatch() {
         sim.get("policies").is_none(),
         "declined route_simulate must not emit policies: {sim:#}"
     );
-}
 
-#[tokio::test]
-async fn tachi_task_recommend_host_profile_repo_local_elevation_stays_ineffective() {
-    let _env = crate::host_profile::HostProfileTestOverride::set(Some("development"));
-    let server = make_server();
-    let mut params = task_params("recommend");
-    params.task = Some("repo-local home_data must not raise ceiling after #1018".to_string());
-    params.execution_level = Some(ExecutionLevel::L2);
-    params.limit = Some(10);
-
-    let raw = server
-        .tachi_task(Parameters(params))
+    let mut markdown_params = task_params("route_simulate");
+    markdown_params.task = None;
+    markdown_params.execution_level = Some(ExecutionLevel::L2);
+    markdown_params.limit = Some(10);
+    markdown_params.format = Some("markdown".to_string());
+    let markdown = server
+        .tachi_task(Parameters(markdown_params))
         .await
-        .expect("structured decline");
-    let rec: serde_json::Value = serde_json::from_str(&raw).expect("recommend JSON");
-    assert_host_admission_fields(
-        rec.get("host_admission").expect("receipt"),
-        Some("L2"),
-        "L2",
-        Some("L1"),
-        "development",
-        "app_home_config_env",
-        false,
-        "host_profile_mismatch",
+        .expect("structured decline should format as markdown");
+    assert!(
+        markdown.starts_with("## Tachi task route_simulate"),
+        "{markdown}"
     );
+    assert!(markdown.contains("action: `route_simulate`"), "{markdown}");
+    assert!(markdown.contains("host_admission:"), "{markdown}");
+    assert!(
+        markdown.contains("| requested_level | effective_level | max_execution_level | host_profile | profile_source | allowed | reason_code |"),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains(
+            "| L2 | L2 | L1 | development | app_home_config_env | false | host_profile_mismatch |"
+        ),
+        "{markdown}"
+    );
+    assert!(!markdown.contains("```json"), "{markdown}");
 }
