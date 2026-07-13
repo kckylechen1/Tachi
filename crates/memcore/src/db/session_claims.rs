@@ -867,29 +867,37 @@ mod tests {
             let _ = open_file_conn(&path);
         }
 
+        // Prepare both connections before either worker reaches the rendezvous.
+        // `open_file_conn` runs schema initialization, which is fallible and
+        // must not happen inside one side of a two-party barrier: if it panics,
+        // the peer can otherwise wait forever and hide the original failure.
+        let db_path = path.to_str().expect("temporary DB path must be UTF-8");
+        let mut conn_a = crate::db::open_read_write(db_path).expect("open racing connection A");
+        let mut conn_b = crate::db::open_read_write(db_path).expect("open racing connection B");
+
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let path_a = path.clone();
+        let mut claim_a = new_claim("race-claim-a", "org/repo#900");
+        claim_a.dispatch_id = Some("dispatch-a".to_string());
         let barrier_a = barrier.clone();
         let handle_a = std::thread::spawn(move || {
-            let mut conn = open_file_conn(&path_a);
-            let mut claim = new_claim("race-claim-a", "org/repo#900");
-            claim.dispatch_id = Some("dispatch-a".to_string());
             barrier_a.wait();
-            upsert_or_heartbeat_claim(&mut conn, &claim)
+            upsert_or_heartbeat_claim(&mut conn_a, &claim_a)
         });
 
-        let path_b = path.clone();
+        let mut claim_b = new_claim("race-claim-b", "org/repo#900");
+        claim_b.dispatch_id = Some("dispatch-b".to_string());
         let barrier_b = barrier;
         let handle_b = std::thread::spawn(move || {
-            let mut conn = open_file_conn(&path_b);
-            let mut claim = new_claim("race-claim-b", "org/repo#900");
-            claim.dispatch_id = Some("dispatch-b".to_string());
             barrier_b.wait();
-            upsert_or_heartbeat_claim(&mut conn, &claim)
+            upsert_or_heartbeat_claim(&mut conn_b, &claim_b)
         });
 
-        let result_a = handle_a.join().expect("thread a must not panic");
-        let result_b = handle_b.join().expect("thread b must not panic");
+        // Reap both workers before surfacing either panic so one failure cannot
+        // detach the other worker from the test harness.
+        let join_a = handle_a.join();
+        let join_b = handle_b.join();
+        let result_a = join_a.expect("thread a must not panic");
+        let result_b = join_b.expect("thread b must not panic");
 
         assert!(
             result_a.is_ok(),

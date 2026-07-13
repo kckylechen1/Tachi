@@ -32,6 +32,19 @@ fn drop_claims_table(server: &crate::server_state::MemoryServer) {
         .expect("drop session_claims table for fail-safe test setup");
 }
 
+#[test]
+fn auto_register_hook_with_no_identity_writes_nothing() {
+    let server = make_server();
+    assert!(list_live_claims_for_briefing(&server).is_empty());
+
+    auto_register_or_heartbeat_claim(&server, &ClaimHookInput::default());
+
+    assert!(
+        list_live_claims_for_briefing(&server).is_empty(),
+        "a hook call without issue_ref or flow_id must not create a claim"
+    );
+}
+
 #[tokio::test]
 async fn auto_register_hook_degrades_to_no_op_when_claims_table_is_missing() {
     let server = make_server();
@@ -221,10 +234,7 @@ async fn briefing_surfaces_file_scope_collision_using_the_calling_sessions_own_d
     // `_` (which round 4 replaced with a space, breaking this exact
     // assertion — this is the discriminating fix: pre-fix the substring
     // check below would have failed against `claims ops.rs`).
-    assert!(warnings[0]
-        .as_str()
-        .unwrap()
-        .contains("claims\\_ops.rs"));
+    assert!(warnings[0].as_str().unwrap().contains("claims\\_ops.rs"));
 
     // And session A's own briefing symmetrically surfaces the same overlap
     // against B.
