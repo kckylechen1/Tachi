@@ -8,11 +8,10 @@ use super::session::{native_acp_session_key, resolve_native_acp_session};
 use super::{NativeAcpRunMode, NativeAcpRunSpec, ACP_STREAM_FILE};
 use crate::tool_params::TachiDispatchParams;
 
+/// Single-sourced from `tachi_dispatch::transport_kind` (#894 S2d) — same
+/// rationale as `is_acpx_transport`.
 pub(in crate::dispatch_ops) fn is_native_acp_transport(transport: &str) -> bool {
-    matches!(
-        transport.trim().to_ascii_lowercase().as_str(),
-        "acp-native" | "acp_native" | "native-acp" | "native_acp" | "acp-rs" | "acp_rs"
-    )
+    tachi_dispatch::transport_kind(transport) == tachi_dispatch::TransportKind::AcpNative
 }
 
 pub(in crate::dispatch_ops) fn build_native_acp_run_spec(

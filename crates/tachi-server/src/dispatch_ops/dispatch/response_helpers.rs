@@ -94,6 +94,8 @@ pub(super) struct DispatchResponseInputs<'a> {
     pub(super) agent_norm: &'a str,
     pub(super) profile_payload: &'a Value,
     pub(super) resolved_profile: &'a ResolvedDispatchProfile,
+    /// #894 S2d effective-authority receipt (compiled contract + enforcement).
+    pub(super) authority: &'a Value,
     pub(super) credential_reports_json: &'a [Value],
     pub(super) capability_bundle_card: &'a Value,
     pub(super) capability_bundle_file: &'a str,
@@ -127,6 +129,7 @@ pub(super) fn build_dispatch_response(
         "agent": inputs.agent_norm,
         "profile": inputs.profile_payload,
         "selected_profile": inputs.resolved_profile.selected_profile,
+        "authority": inputs.authority,
         "tool_access": inputs.resolved_profile.mcp_access,
         "dispatch_profile": inputs.resolved_profile.mbit_card,
         "credentials": inputs.credential_reports_json,
