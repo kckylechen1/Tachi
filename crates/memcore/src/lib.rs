@@ -54,6 +54,13 @@ pub use db::exec_env::{
     ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, ReclaimOutcome,
 };
 #[cfg(feature = "admin")]
+pub use db::exec_env_resources::{
+    active_binding_count, bind_resource, find_resource_by_path, get_resource, insert_resource,
+    list_resources, quarantine_resource, reclaim_resource, record_resource_measurement,
+    release_binding, BindOutcome, ExecEnvResource, NewExecEnvResource, QuarantineOutcome,
+    RegisterOutcome, ReleaseBindingOutcome, ResourceKind, ResourceReclaimOutcome, ResourceState,
+};
+#[cfg(feature = "admin")]
 pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};
 #[cfg(feature = "admin")]
 pub use db::foundry_jobs::{
@@ -63,13 +70,13 @@ pub use db::foundry_jobs::{
     JobStatusHistogram, PersistedFoundryJob, RequeueOutcome,
 };
 pub use db::row_to_entry;
-pub use db::{anchor_id, anchor_path, AnchorKind};
 #[cfg(feature = "admin")]
 pub use db::session_claims::{
     gc_session_claims, get_claim, heartbeat_claim, insert_claim, is_claim_stale,
     list_active_claims, list_claims, release_claim, upsert_or_heartbeat_claim, ClaimSelector,
     ClaimState, NewSessionClaim, ReleaseOutcome, SessionClaim, SessionClaimsGc,
 };
+pub use db::{anchor_id, anchor_path, AnchorKind};
 pub use db::{CategoryPathPrefixMemoryRow, FoundryJobStatusCounts, PathPrefixMemoryRow};
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use error::MemoryError;
