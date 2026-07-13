@@ -54,6 +54,13 @@ pub use db::exec_env::{
     ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, ReclaimOutcome,
 };
 #[cfg(feature = "admin")]
+pub use db::exec_env_resources::{
+    active_binding_count, bind_resource, find_resource_by_path, get_resource, insert_resource,
+    list_resources, reclaim_resource, record_resource_measurement, release_binding, BindOutcome,
+    ExecEnvResource, NewExecEnvResource, ReleaseBindingOutcome, ResourceKind,
+    ResourceReclaimOutcome, ResourceState,
+};
+#[cfg(feature = "admin")]
 pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};
 #[cfg(feature = "admin")]
 pub use db::foundry_jobs::{

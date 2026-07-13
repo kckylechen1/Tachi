@@ -473,6 +473,70 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_exec_envs_path ON exec_envs(path);
         CREATE INDEX IF NOT EXISTS idx_exec_envs_dispatch ON exec_envs(dispatch_id);
 
+        -- Execution-environment RESOURCE ledger (#894 S2a). `exec_envs` tracks
+        -- the *lease*; these two tables track the BYTES that lease owns —
+        -- because a `reclaimed` lease row turned out to be SQLite-only
+        -- bookkeeping (#1029): the row flipped, the disk stayed full. One row
+        -- here = one physical resource (a worktree dir, a shared cargo target,
+        -- a scratch dir, a project DB), and `state = 'reclaimed'` means the
+        -- bytes are ACTUALLY gone. The single writer (`reclaim_resource`)
+        -- stamps `reclaiming`, the CALLER deletes from the filesystem (memcore
+        -- never touches the FS), then the writer records `reclaimed_bytes` and
+        -- flips `reclaimed`. A crash in between leaves the row in `reclaiming`,
+        -- which is re-enterable (at-least-once, idempotent — `reclaimed_bytes`
+        -- is assigned, never accumulated). `reclaim_failed` is a failed delete
+        -- (retryable); `quarantined` is "hands off, a human/broker decides".
+        --
+        -- Bindings are many-to-many on purpose: one shared `build_target`
+        -- (CARGO_TARGET_DIR) is bound by every live lease at once. refcount =
+        -- bindings with `released_at IS NULL`; a resource with refcount > 0 is
+        -- NOT reclaimable (`reclaim_resource` returns a typed
+        -- `BlockedByBinding`, never a silent skip), so a shared target is freed
+        -- only when the LAST binding is released. `UNIQUE (env_id, resource_id)`
+        -- makes a re-bind of the same pair a re-activation of that one row, not
+        -- a second binding, so refcount can't be inflated by a retry.
+        --
+        -- Added as pure additive CREATE TABLE IF NOT EXISTS with no
+        -- schema-version bump — the same in-place-on-BASE_SCHEMA convention
+        -- exec_envs / dispatch_outcomes / session_claims / edge_observations
+        -- entered by.
+        CREATE TABLE IF NOT EXISTS exec_env_resources (
+            resource_id     TEXT PRIMARY KEY,
+            -- closed vocabulary: worktree | build_target | scratch_dir | project_db
+            kind            TEXT NOT NULL,
+            -- canonicalized absolute path
+            path            TEXT NOT NULL,
+            -- most recent measurement (caller-measured; memcore only stores it)
+            bytes           INTEGER,
+            measured_at     TEXT,
+            -- active | reclaiming | reclaimed | reclaim_failed | quarantined
+            state           TEXT NOT NULL DEFAULT 'active',
+            reclaim_reason  TEXT,
+            reclaimed_at    TEXT,
+            -- bytes actually freed from the filesystem, stamped after the delete
+            reclaimed_bytes INTEGER,
+            created_at      TEXT NOT NULL DEFAULT '',
+            updated_at      TEXT NOT NULL DEFAULT '',
+            UNIQUE (path, kind)
+        );
+        CREATE INDEX IF NOT EXISTS idx_exec_env_resources_state
+            ON exec_env_resources(state);
+        CREATE INDEX IF NOT EXISTS idx_exec_env_resources_kind
+            ON exec_env_resources(kind);
+
+        CREATE TABLE IF NOT EXISTS exec_env_resource_bindings (
+            binding_id  TEXT PRIMARY KEY,
+            env_id      TEXT NOT NULL,
+            resource_id TEXT NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT '',
+            released_at TEXT,
+            UNIQUE (env_id, resource_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_exec_env_resource_bindings_env
+            ON exec_env_resource_bindings(env_id);
+        CREATE INDEX IF NOT EXISTS idx_exec_env_resource_bindings_resource
+            ON exec_env_resource_bindings(resource_id);
+
         -- Canonical dispatch outcome ledger (#773 v4 sol carve). Append-only:
         -- one row per (dispatch_id, task_type) completion, written FIRST by
         -- the `tachi_complete` seam before any derived row (eval memory,
