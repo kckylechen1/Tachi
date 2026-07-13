@@ -335,6 +335,21 @@ fn attach_host_admission(
     serde_json::to_string(&value).map_err(|e| format!("serialize host admission attach: {e}"))
 }
 
+/// Defense-in-depth for the task facade; primary gate is F3
+/// `facade_action_allowed` in `call_tool` (covers the MCP path). Direct
+/// internal calls to `handle_tachi_task_facade` still hit this — same
+/// pattern as `skill_facade::reject_delegate_skill_action` (#919 concern:
+/// `tachi_task` previously forwarded straight to the router with no
+/// handler-level re-check).
+fn reject_delegate_task_action(server: &MemoryServer, action: &str) -> Result<(), String> {
+    if !tachi_hub::facade_action_allowed("tachi_task", Some(action), server.active_tool_profile()) {
+        return Err(format!(
+            "tachi_task(action='{action}') is not available to the active tool profile; delegate workers may use 'plan', 'complete', 'status', 'board', 'wait', 'briefing', or 'doc_index'."
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod host_admission_tests {
     use super::attach_host_admission;
@@ -354,19 +369,4 @@ mod host_admission_tests {
             );
         }
     }
-}
-
-/// Defense-in-depth for the task facade; primary gate is F3
-/// `facade_action_allowed` in `call_tool` (covers the MCP path). Direct
-/// internal calls to `handle_tachi_task_facade` still hit this — same
-/// pattern as `skill_facade::reject_delegate_skill_action` (#919 concern:
-/// `tachi_task` previously forwarded straight to the router with no
-/// handler-level re-check).
-fn reject_delegate_task_action(server: &MemoryServer, action: &str) -> Result<(), String> {
-    if !tachi_hub::facade_action_allowed("tachi_task", Some(action), server.active_tool_profile()) {
-        return Err(format!(
-            "tachi_task(action='{action}') is not available to the active tool profile; delegate workers may use 'plan', 'complete', 'status', 'board', 'wait', 'briefing', or 'doc_index'."
-        ));
-    }
-    Ok(())
 }
