@@ -1019,7 +1019,7 @@ mod tests {
     use std::thread;
 
     use super::*;
-    use crate::db::exec_env::{insert_exec_env, NewExecEnvLease};
+    use crate::db::exec_env::{insert_exec_env, EnvClass, NewExecEnvLease};
 
     fn open_conn() -> Connection {
         // Same raw-connection fixture as `exec_env`'s tests: schema init
@@ -1055,6 +1055,7 @@ mod tests {
                 branch: "tachi/894/w".to_string(),
                 base_sha: "abc123".to_string(),
                 dispatch_id: None,
+                env_class: EnvClass::default(),
                 created_at: String::new(),
             },
         )
