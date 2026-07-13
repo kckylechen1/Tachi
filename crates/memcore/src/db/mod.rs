@@ -98,6 +98,10 @@ pub use memory_crud::{
     set_keyword_enrichment_status, supersede_memory, try_claim_event, update_enrichment_fields,
     update_with_revision, upsert,
 };
+/// Public: benchmarks/diagnostics outside this crate read the process-wide
+/// lock-retry backoff counter without needing a tracing subscriber (see
+/// `open::lock_retry_backoff_count`'s doc comment).
+pub use open::lock_retry_backoff_count;
 pub(crate) use open::{
     acquire_startup_lock, configure_connection, open_read_only, open_read_write,
     retry_memory_locked, sqlite_error_is_locked,

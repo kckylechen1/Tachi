@@ -1,4 +1,5 @@
 use rusqlite::{Connection, OpenFlags};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -22,6 +23,22 @@ const READ_CACHE_SIZE_KIB: i64 = -16_000;
 const READ_MMAP_SIZE_BYTES: i64 = 256 * 1024 * 1024;
 
 static SQLITE_STARTUP_LOCK: Mutex<()> = Mutex::new(());
+
+/// Process-wide count of explicit application-level lock-retry backoffs —
+/// i.e. how many times `retry_memory_locked` observed a BUSY/LOCKED error and
+/// slept before retrying. This is NOT time spent inside SQLite's own opaque
+/// `busy_timeout` handler (see that function's doc comment); it is a plain
+/// counter for benchmarks/diagnostics that want a retry count without wiring
+/// up a tracing subscriber. It counts across every store in the process, not
+/// scoped to one DB — callers isolating one workload's retries should
+/// snapshot this before and after and diff.
+static LOCK_RETRY_BACKOFF_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Read the process-wide lock-retry backoff counter (see
+/// `LOCK_RETRY_BACKOFF_COUNT`'s doc comment).
+pub fn lock_retry_backoff_count() -> u64 {
+    LOCK_RETRY_BACKOFF_COUNT.load(Ordering::Relaxed)
+}
 
 /// Serialize in-process SQLite open+schema initialization.
 ///
@@ -66,26 +83,74 @@ fn configure_read_only_connection(conn: &Connection) -> Result<(), MemoryError> 
     Ok(())
 }
 
+/// Retry a write operation through SQLite BUSY/LOCKED with explicit
+/// application-level backoff. `op` (e.g. "upsert", "gc_tables") and
+/// `db_label` (the store's manifest label, e.g. "global"/"project" — never a
+/// filesystem path) are structured diagnostic tags only: no DB path, query
+/// text, memory content, or credential ever appears in the emitted events
+/// (kckylechen1/tachi#1093).
+///
+/// The `explicit_backoff_ms` field this reports is ONLY the time this loop
+/// spent in its own `std::thread::sleep(backoff)` calls between attempts. It
+/// deliberately does NOT include time spent blocked inside SQLite's own
+/// `busy_timeout` handler (configured in `configure_connection`, up to
+/// `BUSY_TIMEOUT_MS` per `operation()` call) — that time is opaque to
+/// rusqlite (no callback hook is installed to observe it) and is not
+/// reported here rather than mislabeled as something we measured.
 pub(crate) fn retry_memory_locked<T>(
+    op: &str,
+    db_label: &str,
     mut operation: impl FnMut() -> Result<T, MemoryError>,
 ) -> Result<T, MemoryError> {
     let started_at = std::time::Instant::now();
     let mut backoff = Duration::from_millis(LOCK_RETRY_INITIAL_BACKOFF_MS);
     let max_backoff = Duration::from_millis(LOCK_RETRY_MAX_BACKOFF_MS);
     let max_elapsed = Duration::from_millis(LOCK_RETRY_MAX_ELAPSED_MS);
+    let mut explicit_backoff = Duration::ZERO;
 
     for attempt in 1..=LOCK_RETRY_ATTEMPTS {
         match operation() {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                if attempt > 1 {
+                    tracing::debug!(
+                        op,
+                        db_label,
+                        attempts = attempt,
+                        explicit_backoff_ms = explicit_backoff.as_millis() as u64,
+                        "memcore lock retry: recovered from database busy/locked"
+                    );
+                }
+                return Ok(value);
+            }
             Err(error)
                 if memory_error_is_locked(&error)
                     && attempt < LOCK_RETRY_ATTEMPTS
                     && started_at.elapsed().saturating_add(backoff) < max_elapsed =>
             {
+                tracing::debug!(
+                    op,
+                    db_label,
+                    attempt,
+                    backoff_ms = backoff.as_millis() as u64,
+                    "memcore lock retry: database busy/locked, backing off"
+                );
+                LOCK_RETRY_BACKOFF_COUNT.fetch_add(1, Ordering::Relaxed);
                 std::thread::sleep(backoff);
+                explicit_backoff += backoff;
                 backoff = (backoff * 2).min(max_backoff);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                if attempt > 1 {
+                    tracing::debug!(
+                        op,
+                        db_label,
+                        attempts = attempt,
+                        explicit_backoff_ms = explicit_backoff.as_millis() as u64,
+                        "memcore lock retry: giving up after retries"
+                    );
+                }
+                return Err(error);
+            }
         }
     }
 
