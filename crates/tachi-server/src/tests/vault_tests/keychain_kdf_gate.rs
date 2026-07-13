@@ -21,29 +21,78 @@
 //! before `verify_password`, so the function returns the loud, versioned error.
 
 use super::*;
+// Needed to rebuild an `OsString` from the raw password bytes captured by
+// `security ... -w` so restore is byte-exact (the module is macOS-only, so the
+// unix ffi ext is always available here).
+use std::os::unix::ffi::OsStringExt;
 
 /// RAII guard that installs a `tachi-vault`/`default` Keychain entry for the
 /// test, capturing any pre-existing credential and restoring it (or removing
 /// the entry) on drop so the developer's real Keychain is never clobbered.
+///
+/// SAFETY DISCIPLINE (tachi#1080 review):
+/// - Capture is FAIL-CLOSED. If the pre-existing state cannot be determined
+///   with certainty (keychain locked, permission error, anything that is not
+///   "found" or "confirmed not-found"), `install` returns `None` and the test
+///   is SKIPPED rather than risk overwriting/deleting a real credential.
+/// - The captured password is stored and restored as RAW BYTES (via
+///   `OsString::from_vec`), not `from_utf8_lossy().trim()` — that combo would
+///   silently mangle a password containing non-UTF-8 bytes or leading/trailing
+///   whitespace. Only the single trailing newline `security -w` appends is
+///   stripped before restore.
+/// - Restore/delete exit status is CHECKED; a failed cleanup panics loudly
+///   instead of leaving a corrupted developer Keychain behind.
 struct ScopedKeychainEntry {
-    /// The pre-existing password, if any. Restored verbatim on drop.
-    saved: Option<String>,
+    /// Raw bytes of the pre-existing password (one trailing newline already
+    /// stripped), restored verbatim on drop. `None` ONLY when capture
+    /// confirmed no prior entry exists.
+    saved: Option<Vec<u8>>,
 }
 
 impl ScopedKeychainEntry {
-    fn install(password: &str) -> Self {
-        // Capture any existing entry so it can be restored (never clobber a
-        // developer's real tachi-vault credential).
-        let saved = match std::process::Command::new("security")
+    /// Install the test entry. Returns `None` when the keychain's prior state
+    /// is ambiguous and the test should skip (caller returns without asserting
+    /// — never clobbers).
+    fn install(password: &str) -> Option<Self> {
+        // Capture any existing entry so it can be restored. FAIL-CLOSED: only
+        // proceed when the old state is UNAMBIGUOUS.
+        let find = std::process::Command::new("security")
             .args(["find-generic-password", "-s", "tachi-vault", "-a", "default", "-w"])
             .output()
-        {
-            Ok(out) if out.status.success() => {
-                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .expect("security find-generic-password should run");
+        let saved = if find.status.success() {
+            // Capture raw bytes; strip ONLY the trailing newline that
+            // `security -w` appends (NOT trim() — would alter a password with
+            // leading/trailing spaces).
+            let mut bytes = find.stdout;
+            if bytes.last() == Some(&b'\n') {
+                bytes.pop();
             }
-            _ => None,
+            Some(bytes)
+        } else {
+            // Distinguish "confirmed not found" from an ambiguous failure
+            // (locked keychain, auth, IO). `security` reports errSecItemNotFound
+            // (-25300) when the item does not exist; anything else is ambiguous.
+            let stderr = String::from_utf8_lossy(&find.stderr);
+            let confirmed_not_found = stderr.contains("-25300")
+                || stderr.contains("errSecItemNotFound")
+                || stderr.contains("could not be found");
+            if !confirmed_not_found {
+                eprintln!(
+                    "[keychain_kdf_gate] SKIP: keychain lookup for tachi-vault/default failed \
+                     ambiguously (not a confirmed not-found); refusing to run a test that could \
+                     clobber a real credential. stderr: {stderr}"
+                );
+                return None;
+            }
+            None
         };
 
+        // Install the test entry. RESIDUAL RISK: `security add-generic-password
+        // -w <password>` passes the password on the argv, where it is briefly
+        // visible via `ps`. The macOS `security` CLI exposes no non-argv channel
+        // for the password here. This is an ACCEPTED residual risk for this
+        // synthetic test password ("correct-keychain-pw", not a real secret).
         let add = std::process::Command::new("security")
             .args([
                 "add-generic-password",
@@ -63,31 +112,32 @@ impl ScopedKeychainEntry {
             String::from_utf8_lossy(&add.stderr)
         );
 
-        Self { saved }
+        Some(Self { saved })
     }
 }
 
 impl Drop for ScopedKeychainEntry {
     fn drop(&mut self) {
-        match &self.saved {
-            Some(pw) => {
-                // Restore the original credential verbatim.
-                let _ = std::process::Command::new("security")
-                    .args([
-                        "add-generic-password",
-                        "-s",
-                        "tachi-vault",
-                        "-a",
-                        "default",
-                        "-w",
-                        pw,
-                        "-U",
-                    ])
-                    .output();
+        let outcome: std::io::Result<std::process::Output> = match self.saved.as_ref() {
+            Some(raw_bytes) => {
+                // Restore the original credential's EXACT bytes via an OsString
+                // built from raw bytes (handles non-UTF-8; avoids the
+                // utf8_lossy+trim corruption). RESIDUAL RISK: -w on argv again
+                // (see install); accepted for a restore path that only runs in
+                // this ignored test.
+                let pw = OsString::from_vec(raw_bytes.clone());
+                std::process::Command::new("security")
+                    .arg("add-generic-password")
+                    .args(["-s", "tachi-vault"])
+                    .args(["-a", "default"])
+                    .arg("-w")
+                    .arg(pw)
+                    .arg("-U")
+                    .output()
             }
             None => {
-                // No prior entry; remove the one we added (best-effort).
-                let _ = std::process::Command::new("security")
+                // No prior entry; remove the one we added.
+                std::process::Command::new("security")
                     .args([
                         "delete-generic-password",
                         "-s",
@@ -95,7 +145,29 @@ impl Drop for ScopedKeychainEntry {
                         "-a",
                         "default",
                     ])
-                    .output();
+                    .output()
+            }
+        };
+        match outcome {
+            Ok(out) if out.status.success() => { /* clean */ }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                eprintln!(
+                    "[keychain_kdf_gate] GUARD CLEANUP FAILED — the developer Keychain may be in \
+                     a corrupted state for tachi-vault/default; manual inspection required: \
+                     {stderr}"
+                );
+                panic!(
+                    "ScopedKeychainEntry cleanup (restore/delete) failed; refusing to silently \
+                     leave a corrupted developer Keychain. stderr: {stderr}"
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[keychain_kdf_gate] GUARD CLEANUP FAILED — could not run security command: \
+                     {e}; manual Keychain inspection required."
+                );
+                panic!("ScopedKeychainEntry cleanup could not run security: {e}");
             }
         }
     }
@@ -143,7 +215,11 @@ async fn keychain_auto_unlock_rejects_unsupported_kdf_params() {
     // The #[cfg(test)] gate in auto_unlock_vault_from_keychain only runs the
     // real keychain path when this env var is present.
     let _env = ScopedEnv::set("TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK", "1");
-    let _kc = ScopedKeychainEntry::install("correct-keychain-pw");
+    // Skip (do not clobber) if the prior keychain state is ambiguous.
+    let _kc = match ScopedKeychainEntry::install("correct-keychain-pw") {
+        Some(g) => g,
+        None => return,
+    };
 
     let server = make_server();
     server
@@ -193,7 +269,11 @@ async fn keychain_auto_unlock_rejects_unsupported_kdf_params() {
 #[tokio::test]
 #[ignore = "touches the real macOS Keychain; run with `cargo test --ignored --test-threads=1`"]
 async fn status_health_keychain_loader_rejects_unsupported_kdf_params() {
-    let _kc = ScopedKeychainEntry::install("correct-keychain-pw");
+    // Skip (do not clobber) if the prior keychain state is ambiguous.
+    let _kc = match ScopedKeychainEntry::install("correct-keychain-pw") {
+        Some(g) => g,
+        None => return,
+    };
 
     let db_path = std::env::temp_dir().join(format!(
         "memory-server-status-health-kdf-gate-{}.sqlite",

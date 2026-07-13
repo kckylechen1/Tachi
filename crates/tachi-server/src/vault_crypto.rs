@@ -28,6 +28,34 @@ use vault_kit::generate_nonce;
 
 const AES_GCM_TAG_LEN: usize = 16;
 
+/// A stored `vault_config.kdf_params` value that could not be parsed into a
+/// supported `KdfParams`. This is a **typed** error (not a bare `String`) so an
+/// outer catch-all can `downcast_ref::<KdfParamsFormatError>()` and refuse to
+/// degrade — e.g. the setup wizard must NOT swallow a stored-format failure
+/// into a plaintext-config.env fallback (tachi#1080). The `Display` form is the
+/// loud, versioned message used everywhere else; it names both the stored value
+/// and the supported set, and is deliberately NOT phrased as a password error.
+#[derive(Debug, Clone)]
+pub struct KdfParamsFormatError {
+    message: String,
+}
+
+impl KdfParamsFormatError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for KdfParamsFormatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for KdfParamsFormatError {}
+
 /// Parse the `vault_config.kdf_params` JSON column into a validated
 /// `KdfParams` (fail-closed). Called by every unlock/verify path that derives
 /// a key from a *stored* config (tachi#1080): as of the full wiring this is the
@@ -36,8 +64,9 @@ const AES_GCM_TAG_LEN: usize = 16;
 /// (`vault_cli::derive_verified_vault_key_from_password`), the in-process
 /// Keychain auto-unlock (`provider_config::auto_unlock_vault_from_keychain`),
 /// the status-health Keychain loader (`status_health::vault`), the setup-wizard
-/// change-password verifier, both `env_cmd` unlock entry points (materialize +
-/// legacy), and the stateless `vault_cli` session verifier. Malformed JSON or
+/// unlock-existing-vault verifier (stores freshly collected API keys into an
+/// already-initialized vault), both `env_cmd` unlock entry points (materialize
+/// + legacy), and the stateless `vault_cli` session verifier. Malformed JSON or
 /// an unsupported parameter combination surfaces as a loud, versioned error
 /// naming both the stored value and the supported set.
 ///
@@ -45,15 +74,23 @@ const AES_GCM_TAG_LEN: usize = 16;
 /// must never be misread as "wrong password" (and so must never count against
 /// the brute-force lockout counter; callers return this error before reaching
 /// `verify_password`). Never silently falls back to a compile-time default.
-pub fn parse_stored_kdf_params(config_kdf_params: &str) -> Result<KdfParams, String> {
+///
+/// Returns a TYPED `KdfParamsFormatError` (not `String`) so outer catch-alls
+/// can downcast and refuse to degrade. Most call sites stringify it via
+/// `to_string()` (preserving the exact message); the setup wizard propagates
+/// it un-stringified so its catch-all can downcast and abort instead of
+/// falling through to the plaintext-persistence fallback.
+pub fn parse_stored_kdf_params(
+    config_kdf_params: &str,
+) -> Result<KdfParams, KdfParamsFormatError> {
     KdfParams::from_stored_json(config_kdf_params).map_err(|err| {
-        format!(
+        KdfParamsFormatError::new(format!(
             "vault_config.kdf_params is not a supported KDF parameter format; refusing to derive \
              (this is not a password error). stored kdf_params={stored:?}; \
              supported={supported:?}; classified as: {err}",
             stored = config_kdf_params,
             supported = KdfParams::supported(),
-        )
+        ))
     })
 }
 

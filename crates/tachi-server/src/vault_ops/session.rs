@@ -47,15 +47,31 @@ pub(super) fn maybe_auto_lock_vault(server: &MemoryServer) -> bool {
     locked
 }
 
-fn try_keychain_auto_unlock_after_locked_access(server: &MemoryServer, reason: &str) -> bool {
+/// Attempt a Keychain auto-unlock after a locked-access was observed.
+///
+/// Returns `Ok(true)` if the vault was auto-unlocked (caller should retry),
+/// `Ok(false)` for a benign miss (no keychain entry / vault not initialized /
+/// transient keychain failure — indistinguishable from "still locked" is
+/// acceptable here), or `Err(_)` for a REAL failure surfaced by
+/// `auto_unlock_vault_from_keychain` (e.g. a stored kdf_params format error
+/// or "keychain password does not match vault") so the caller can propagate a
+/// distinguishable message instead of masking it as "Vault is locked"
+/// (tachi#1080). Real failures are logged at `warn!` (not `debug!`) with the
+/// full message.
+fn try_keychain_auto_unlock_after_locked_access(
+    server: &MemoryServer,
+    reason: &str,
+) -> Result<bool, String> {
     match crate::provider_config::auto_unlock_vault_from_keychain(server) {
-        Ok(true) => true,
-        Ok(false) => false,
+        Ok(true) => Ok(true),
+        Ok(false) => Ok(false),
         Err(err) => {
-            tracing::debug!(
-                "[vault] keychain auto-unlock after locked access skipped ({reason}): {err}"
+            tracing::warn!(
+                "[vault] keychain auto-unlock after locked access FAILED — not a transient miss \
+                 ({reason}); surfacing the real error instead of masking it as 'Vault is locked': \
+                 {err}"
             );
-            false
+            Err(err)
         }
     }
 }
@@ -90,14 +106,23 @@ pub(super) fn with_vault_key<T>(
             Ok(key) => break Ok(key),
             Err(reason) if !attempted_auto_unlock => {
                 attempted_auto_unlock = true;
-                if try_keychain_auto_unlock_after_locked_access(server, &reason) {
-                    continue;
+                match try_keychain_auto_unlock_after_locked_access(server, &reason) {
+                    Ok(true) => continue,
+                    Ok(false) => {
+                        if reason.starts_with("Vault auto-locked") {
+                            server.llm.clear_provider_secrets();
+                            crate::provider_config::re_materialize_provider_secrets_after_auto_lock(
+                                server,
+                            );
+                        }
+                        break Err(reason);
+                    }
+                    // A real auto-unlock failure (e.g. stored kdf_params
+                    // format error, or "keychain password does not match
+                    // vault") — propagate the distinguishable message instead
+                    // of masking it as "Vault is locked" (tachi#1080).
+                    Err(auto_err) => break Err(auto_err),
                 }
-                if reason.starts_with("Vault auto-locked") {
-                    server.llm.clear_provider_secrets();
-                    crate::provider_config::re_materialize_provider_secrets_after_auto_lock(server);
-                }
-                break Err(reason);
             }
             Err(reason) => {
                 if reason.starts_with("Vault auto-locked") {

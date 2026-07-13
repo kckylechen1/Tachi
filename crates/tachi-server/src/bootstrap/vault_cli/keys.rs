@@ -58,7 +58,7 @@ pub(super) fn derive_verified_vault_key_from_password(
             crate::vault_crypto::DerivedVaultKey::derive_with_params(password, &salt, &params)
                 .map_err(|e| e.to_string())
         }
-        Err(err) => Err(err),
+        Err(err) => Err(err.to_string()),
     };
     crate::vault_crypto::zero_string(password);
     let key = key_result?;

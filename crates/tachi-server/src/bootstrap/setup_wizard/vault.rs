@@ -146,11 +146,19 @@ fn derive_verified_vault_key_for_wizard(
     // compile-time constant (mirrors vault_cli::derive_verified_vault_key_from_password).
     // A malformed or unsupported stored value fails loud and versioned before
     // `verify_password`, so it is never misread as "Wrong password".
-    let key_result = match crate::vault_crypto::parse_stored_kdf_params(&config.kdf_params) {
-        Ok(params) => crate::vault_crypto::DerivedVaultKey::derive_with_params(password, &salt, &params)
-            .map_err(|e| e.to_string()),
-        Err(err) => Err(err),
-    };
+    //
+    // The parse error is propagated as a TYPED `KdfParamsFormatError` (NOT
+    // stringified) so the wizard's outer catch-all in wizard.rs can
+    // `downcast_ref` and abort instead of falling through to the
+    // plaintext-config.env fallback. The derive error stays stringified (its
+    // existing behavior). `zero_string(password)` still runs on BOTH paths
+    // (the match builds the result without early-returning; zero runs after).
+    let key_result: Result<crate::vault_crypto::DerivedVaultKey, Box<dyn std::error::Error>> =
+        match crate::vault_crypto::parse_stored_kdf_params(&config.kdf_params) {
+            Ok(params) => crate::vault_crypto::DerivedVaultKey::derive_with_params(password, &salt, &params)
+                .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string())),
+            Err(err) => Err(Box::<dyn std::error::Error>::from(err)),
+        };
     crate::vault_crypto::zero_string(password);
     let key = key_result?;
     if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {

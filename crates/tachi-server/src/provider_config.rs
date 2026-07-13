@@ -224,7 +224,7 @@ pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, St
     let key = match crate::vault_crypto::parse_stored_kdf_params(&config.kdf_params) {
         Ok(params) => crate::vault_crypto::DerivedVaultKey::derive_with_params(&password, &salt, &params)
             .map_err(|e| format!("vault key derivation failed: {e}")),
-        Err(err) => Err(err),
+        Err(err) => Err(err.to_string()),
     }?;
     if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)
         .map_err(|e| format!("vault verifier check failed: {e}"))?

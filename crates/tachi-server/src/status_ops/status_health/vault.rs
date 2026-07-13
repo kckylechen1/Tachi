@@ -51,7 +51,7 @@ pub(crate) fn load_keychain_vault_api_key_values(
     let key_result = match crate::vault_crypto::parse_stored_kdf_params(&config.kdf_params) {
         Ok(params) => crate::vault_crypto::DerivedVaultKey::derive_with_params(&password, &salt, &params)
             .map_err(|e| e.to_string()),
-        Err(err) => Err(err),
+        Err(err) => Err(err.to_string()),
     };
     let key = key_result?;
     if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
