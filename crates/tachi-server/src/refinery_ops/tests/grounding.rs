@@ -32,16 +32,12 @@ fn exact_1002_anchor_resolves_snapshot_and_linked_spec() {
         "2026-07-13T00:00:00Z",
         &[],
     );
-    let resolver = FixtureDocResolver::new().with_resolved(ISSUE_1002_COMMIT_SHA, ISSUE_1002_DOC_PATH);
+    let resolver =
+        FixtureDocResolver::new().with_resolved(ISSUE_1002_COMMIT_SHA, ISSUE_1002_DOC_PATH);
 
-    let (evidence, proposal) = build_refinery_packet(
-        "kckylechen1/tachi",
-        1002,
-        &gh_json,
-        &resolver,
-        CAPTURED_AT,
-    )
-    .expect("build_refinery_packet");
+    let (evidence, proposal) =
+        build_refinery_packet("kckylechen1/tachi", 1002, &gh_json, &resolver, CAPTURED_AT)
+            .expect("build_refinery_packet");
 
     assert_eq!(evidence.issue_ref, "kckylechen1/tachi#1002");
     assert_eq!(evidence.grounding_status, GroundingStatusV1::Grounded);
@@ -166,7 +162,10 @@ fn coverage_accounts_for_every_byte_with_a_long_tail_paragraph_and_never_truncat
         .iter()
         .map(|s| s.len())
         .sum();
-    assert_eq!(evidence.coverage.covered_bytes + omitted_bytes, evidence.coverage.source_bytes);
+    assert_eq!(
+        evidence.coverage.covered_bytes + omitted_bytes,
+        evidence.coverage.source_bytes
+    );
 
     // The long-tail paragraph must appear whole in exactly one claim — not
     // truncated, not tail-dropped.
@@ -197,6 +196,9 @@ fn coverage_zero_omission_for_a_single_paragraph_body() {
             .expect("build_refinery_packet");
     assert_eq!(evidence.claims.len(), 1);
     assert!(evidence.coverage.omitted_spans.is_empty());
-    assert_eq!(evidence.coverage.covered_bytes, evidence.coverage.source_bytes);
+    assert_eq!(
+        evidence.coverage.covered_bytes,
+        evidence.coverage.source_bytes
+    );
     assert_eq!(evidence.claims[0].text, body);
 }

@@ -101,7 +101,6 @@ mod domain_adapter_ops;
 mod enrichment;
 mod event_ops;
 mod exec_env_ops;
-mod exec_env_reaper;
 /// #894 S2e — the parent-owned `detect-and-reject` postflight gate (ordered
 /// enforcement points 4 and 5). Public because it is the mechanism the
 /// effective-authority compiler (a separate slice) composes: it takes a lease
@@ -113,6 +112,7 @@ mod exec_env_reaper;
 /// only reference in the whole crate: no dispatch path calls it, so no dispatch
 /// is gated by it today.
 pub mod exec_env_postflight;
+mod exec_env_reaper;
 mod facade_memory_ops;
 mod facade_save_ops;
 mod facade_search_ops;

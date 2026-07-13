@@ -57,17 +57,29 @@ pub enum EvidenceRelationV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImmutableRevisionV1 {
-    IssueSnapshotHash { value: String },
-    IssueBodyHash { value: String },
+    IssueSnapshotHash {
+        value: String,
+    },
+    IssueBodyHash {
+        value: String,
+    },
     Comment {
         comment_id: String,
         updated_at: String,
         body_hash: String,
     },
-    PrSnapshotHash { value: String },
-    PrHeadSha { value: String },
-    BlobSha { value: String },
-    MemoryRevision { value: String },
+    PrSnapshotHash {
+        value: String,
+    },
+    PrHeadSha {
+        value: String,
+    },
+    BlobSha {
+        value: String,
+    },
+    MemoryRevision {
+        value: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -583,8 +595,8 @@ pub fn canonicalize_json(value: &serde_json::Value) -> serde_json::Value {
 
 /// SHA-256 over the canonical JSON serialization of `value`.
 pub fn canonical_json_sha256<T: Serialize>(value: &T) -> Result<String, String> {
-    let raw = serde_json::to_value(value)
-        .map_err(|e| format!("canonical_json_sha256 serialize: {e}"))?;
+    let raw =
+        serde_json::to_value(value).map_err(|e| format!("canonical_json_sha256 serialize: {e}"))?;
     let canonical = canonicalize_json(&raw);
     let text = serde_json::to_string(&canonical)
         .map_err(|e| format!("canonical_json_sha256 stringify: {e}"))?;

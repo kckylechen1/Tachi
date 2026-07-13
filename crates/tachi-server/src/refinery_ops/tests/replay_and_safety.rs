@@ -82,7 +82,15 @@ fn a_doc_blob_sha_drift_after_the_proposal_was_built_makes_it_stale() {
     let body = format!(
         "Spec-pinned fixture.\n\nSpec-Ref: owner/repo:{DOC_PATH}@{COMMIT_SHA}/deadbeefblobsha0001#3\n"
     );
-    let gh_json = gh_issue_json("Doc drift fixture", &body, "OPEN", &[], None, CAPTURED_AT, &[]);
+    let gh_json = gh_issue_json(
+        "Doc drift fixture",
+        &body,
+        "OPEN",
+        &[],
+        None,
+        CAPTURED_AT,
+        &[],
+    );
     let (_evidence, proposal) =
         build_refinery_packet("owner/repo", 9303, &gh_json, &resolver, CAPTURED_AT)
             .expect("build_refinery_packet");
@@ -148,7 +156,10 @@ fn model_only_evidence_compiler_never_marks_a_claim_verified_across_fixtures() {
         )
         .unwrap_or_else(|e| panic!("build_refinery_packet fixture {i}: {e}"));
         assert!(
-            evidence.claims.iter().all(|c| !c.verification.is_verified()),
+            evidence
+                .claims
+                .iter()
+                .all(|c| !c.verification.is_verified()),
             "fixture {i}: model-only evidence compiler must never mark a claim verified"
         );
     }

@@ -12,11 +12,11 @@
 //! class, not a factual reconstruction — flagged again in the final
 //! delivery report, not just here.
 
+use super::super::build_refinery_packet;
 use super::super::disposition::{
     propose_disposition, RefinerySignalsV1, RelatedIssueStateV1, RelatedSignalV1,
 };
 use super::super::fixtures::{gh_issue_json, minimal_evidence, FixtureDocResolver};
-use super::super::build_refinery_packet;
 use tachi_params::{DispositionV1, IssueRelationKindV1, RepoRevisionV1};
 
 const CAPTURED_AT: &str = "2026-07-13T00:00:00Z";
@@ -35,8 +35,15 @@ fn propose(
     signals: RefinerySignalsV1,
 ) -> tachi_params::IssueDispositionProposalV1 {
     let evidence = minimal_evidence(issue_ref, "OPEN", &[]);
-    propose_disposition(&evidence, &signals, Vec::new(), Vec::new(), &[], CAPTURED_AT)
-        .expect("propose_disposition")
+    propose_disposition(
+        &evidence,
+        &signals,
+        Vec::new(),
+        Vec::new(),
+        &[],
+        CAPTURED_AT,
+    )
+    .expect("propose_disposition")
 }
 
 fn propose_with_labels(
@@ -45,8 +52,15 @@ fn propose_with_labels(
     signals: RefinerySignalsV1,
 ) -> tachi_params::IssueDispositionProposalV1 {
     let evidence = minimal_evidence(issue_ref, "OPEN", labels);
-    propose_disposition(&evidence, &signals, Vec::new(), Vec::new(), &[], CAPTURED_AT)
-        .expect("propose_disposition")
+    propose_disposition(
+        &evidence,
+        &signals,
+        Vec::new(),
+        Vec::new(),
+        &[],
+        CAPTURED_AT,
+    )
+    .expect("propose_disposition")
 }
 
 #[test]
