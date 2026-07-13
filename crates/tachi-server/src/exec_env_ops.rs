@@ -103,6 +103,20 @@ pub(crate) struct PrivateTargetReservation {
 }
 
 /// Read the booked reservation for a lease, if it has one.
+///
+/// **Deliberately unread in production, and this is the honest note about it.**
+/// The write side is live (`provision_env` books the row above); nothing reads
+/// it back yet, so the linter is correct to call this dead. It is kept, rather
+/// than deleted, because the consumer is already named and already needed: the
+/// orphan build-artifact reaper (#894 S2b) currently decides whether a target
+/// dir is live by reading the process table, which cannot see a holder that
+/// declared itself anywhere but `argv`. The ledger is the surface where a
+/// holder *can* declare itself, and this row is a `BuildPrivate` lease doing
+/// exactly that — an approved, sized, attributed claim on a directory. Wiring
+/// the reaper to consult it is the ledger-based holder discovery that the
+/// reaper's destructive path is blocked on; deleting this reader now would only
+/// mean writing it again there.
+#[allow(dead_code)]
 pub(crate) fn private_target_reservation(
     conn: &rusqlite::Connection,
     env_id: &str,
