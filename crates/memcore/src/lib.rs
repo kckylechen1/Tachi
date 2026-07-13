@@ -43,6 +43,11 @@ pub use agent_profile::{
     RenderedAgentProfile, AGENT_PROFILE_PACK_SCHEMA_VERSION,
 };
 #[cfg(feature = "admin")]
+pub use db::dispatch_adjudications::{
+    append_dispatch_adjudication, list_adjudications_for_outcome, DispatchAdjudication,
+    DispatchAdjudicationSignature, NewDispatchAdjudication,
+};
+#[cfg(feature = "admin")]
 pub use db::dispatch_outcomes::{
     derive_idempotency_key, find_outcome_by_dispatch_id, get_outcome, list_outcomes_by_issue_ref,
     list_outcomes_by_vendor_window, outcome_exists_for_dispatch, upsert_outcome,

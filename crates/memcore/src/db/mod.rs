@@ -4,6 +4,8 @@ mod audit;
 mod common;
 mod daily_pipeline;
 #[cfg(feature = "admin")]
+pub mod dispatch_adjudications;
+#[cfg(feature = "admin")]
 pub mod dispatch_outcomes;
 mod doctor_probe;
 mod event_ledger;
@@ -45,6 +47,11 @@ pub use daily_pipeline::{
     count_distinct_access_days, list_eval_evidence, list_memory_ids_needing_embedding,
     list_promotion_candidate_ids, promote_memory_to_durable, CategorySourceGroup,
     DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow,
+};
+#[cfg(feature = "admin")]
+pub use dispatch_adjudications::{
+    append_dispatch_adjudication, list_adjudications_for_outcome, DispatchAdjudication,
+    DispatchAdjudicationSignature, NewDispatchAdjudication,
 };
 #[cfg(feature = "admin")]
 pub use dispatch_outcomes::{
