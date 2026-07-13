@@ -270,6 +270,70 @@ fn worktree_open_parses_managed_flags() {
     }
 }
 
+/// #894 S2c: the DEFAULT provisioning class is `edit-only` — a worktree that
+/// gets no build target dir. If this flips to a build class by default, every
+/// dispatched lane silently starts allocating target dirs again.
+#[test]
+fn worktree_open_defaults_to_the_edit_only_class() {
+    use crate::cli::WorktreeAction;
+    let parsed = Cli::try_parse_from(["tachi", "worktree", "open", "--repo", "/tmp/repo"])
+        .expect("worktree open should parse");
+    match parsed.command.expect("command") {
+        Commands::Worktree {
+            action:
+                WorktreeAction::Open {
+                    env_class,
+                    approve_private_target,
+                    reserve_bytes,
+                    ..
+                },
+        } => {
+            assert_eq!(env_class, "edit-only");
+            assert!(approve_private_target.is_none());
+            assert!(reserve_bytes.is_none());
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
+fn build_submit_parses_a_trailing_command_and_defaults_head_to_head() {
+    use crate::cli::BuildAction;
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "build",
+        "submit",
+        "--repo",
+        "/tmp/repo",
+        "--env-id",
+        "env-7",
+        "--",
+        "cargo",
+        "test",
+        "-p",
+        "memcore",
+    ])
+    .expect("build submit should parse");
+    match parsed.command.expect("command") {
+        Commands::Build {
+            action:
+                BuildAction::Submit {
+                    repo,
+                    head,
+                    env_id,
+                    command,
+                    ..
+                },
+        } => {
+            assert_eq!(repo, std::path::PathBuf::from("/tmp/repo"));
+            assert_eq!(head, "HEAD");
+            assert_eq!(env_id.as_deref(), Some("env-7"));
+            assert_eq!(command, vec!["cargo", "test", "-p", "memcore"]);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
 #[test]
 fn vault_sync_help_names_offline_guessing_risk() {
     let mut export_cmd = Cli::command();

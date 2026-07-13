@@ -58,6 +58,80 @@ impl ExecEnvState {
     }
 }
 
+/// Provisioning policy class for a lease (#894 S2c). Closed vocabulary.
+///
+/// ## What this is, and what it is NOT (owner-ratified 2026-07-13)
+///
+/// It is **not a security boundary**. A worker with a shell and the same UID
+/// can run `cargo` inside an `EditOnly` tree no matter what this enum says —
+/// PATH/tool-table fences are bypassable by anyone who can spawn a process.
+/// Do not build an authority decision on it.
+///
+/// What it *is*:
+/// - **disk**: `EditOnly` allocates no `build_target` resource, so the tree
+///   stays ~14MB instead of dragging a multi-GB target dir behind it;
+/// - **default routing**: builds are meant to go to the broker's
+///   machine-unique serialized executor seat instead of N diverged worktrees
+///   all hammering one shared `CARGO_TARGET_DIR` — which is what produced
+///   phantom "symbol not found" compile errors on this machine twice in one
+///   night (2026-07-13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EnvClass {
+    /// Default. No build target allocated; builds belong in the broker.
+    #[default]
+    EditOnly,
+    /// Normal verification path: this lease submits immutable build tickets to
+    /// the serialized executor seat and binds (refcounted) to the seat's
+    /// resident target. It still gets no target dir of its own.
+    BuildTicketed,
+    /// Rare: an explicitly approved private target dir with a disk
+    /// reservation. Provisioning refuses this class without an approval.
+    BuildPrivate,
+}
+
+impl EnvClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EnvClass::EditOnly => "edit-only",
+            EnvClass::BuildTicketed => "build-ticketed",
+            EnvClass::BuildPrivate => "build-private",
+        }
+    }
+
+    /// Parse a persisted class. Unknown values are an error (fail-closed): a
+    /// corrupted class must never silently masquerade as one that allocates
+    /// disk, nor as one that doesn't.
+    pub fn parse(raw: &str) -> Result<Self, MemoryError> {
+        match raw {
+            "edit-only" => Ok(EnvClass::EditOnly),
+            "build-ticketed" => Ok(EnvClass::BuildTicketed),
+            "build-private" => Ok(EnvClass::BuildPrivate),
+            other => Err(MemoryError::InvalidArg(format!(
+                "unknown exec_env class '{other}' (expected one of \
+                 edit-only/build-ticketed/build-private)"
+            ))),
+        }
+    }
+
+    /// Whether provisioning allocates a `build_target` resource for this class.
+    /// `EditOnly` is the only class that gets none — that is the whole point of
+    /// it.
+    pub fn allocates_build_target(self) -> bool {
+        !matches!(self, EnvClass::EditOnly)
+    }
+
+    /// Whether provisioning requires an explicit approval + disk reservation.
+    pub fn requires_approval(self) -> bool {
+        matches!(self, EnvClass::BuildPrivate)
+    }
+
+    /// Whether the build target this class binds is the *private* one (its own
+    /// dir) rather than the executor seat's shared resident target.
+    pub fn wants_private_target(self) -> bool {
+        matches!(self, EnvClass::BuildPrivate)
+    }
+}
+
 /// A row in `exec_envs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecEnvLease {
@@ -68,6 +142,7 @@ pub struct ExecEnvLease {
     pub branch: String,
     pub base_sha: String,
     pub dispatch_id: Option<String>,
+    pub env_class: EnvClass,
     pub state: ExecEnvState,
     pub reclaim_reason: Option<String>,
     pub schema_version: i64,
@@ -86,6 +161,7 @@ pub struct NewExecEnvLease {
     pub branch: String,
     pub base_sha: String,
     pub dispatch_id: Option<String>,
+    pub env_class: EnvClass,
     pub created_at: String,
 }
 
@@ -111,20 +187,24 @@ pub enum ReclaimOutcome {
 }
 
 const SELECT_COLUMNS: &str = "env_id, kind, path, repo_root, branch, base_sha, dispatch_id, \
-     state, reclaim_reason, schema_version, created_at, reclaimed_at";
+     env_class, state, reclaim_reason, schema_version, created_at, reclaimed_at";
+
+fn conv_err(idx: usize, e: MemoryError) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        idx,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            e.to_string(),
+        )),
+    )
+}
 
 fn row_to_lease(row: &rusqlite::Row<'_>) -> Result<ExecEnvLease, rusqlite::Error> {
-    let state_raw: String = row.get(7)?;
-    let state = ExecEnvState::parse(&state_raw).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(
-            7,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                e.to_string(),
-            )),
-        )
-    })?;
+    let class_raw: String = row.get(7)?;
+    let env_class = EnvClass::parse(&class_raw).map_err(|e| conv_err(7, e))?;
+    let state_raw: String = row.get(8)?;
+    let state = ExecEnvState::parse(&state_raw).map_err(|e| conv_err(8, e))?;
     Ok(ExecEnvLease {
         env_id: row.get(0)?,
         kind: row.get(1)?,
@@ -133,11 +213,12 @@ fn row_to_lease(row: &rusqlite::Row<'_>) -> Result<ExecEnvLease, rusqlite::Error
         branch: row.get(4)?,
         base_sha: row.get(5)?,
         dispatch_id: row.get(6)?,
+        env_class,
         state,
-        reclaim_reason: row.get(8)?,
-        schema_version: row.get(9)?,
-        created_at: row.get(10)?,
-        reclaimed_at: row.get(11)?,
+        reclaim_reason: row.get(9)?,
+        schema_version: row.get(10)?,
+        created_at: row.get(11)?,
+        reclaimed_at: row.get(12)?,
     })
 }
 
@@ -152,8 +233,8 @@ pub fn insert_exec_env(conn: &Connection, lease: &NewExecEnvLease) -> Result<(),
     conn.execute(
         "INSERT INTO exec_envs
          (env_id, kind, path, repo_root, branch, base_sha, dispatch_id,
-          state, reclaim_reason, schema_version, created_at, reclaimed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', NULL, 1, ?8, NULL)",
+          env_class, state, reclaim_reason, schema_version, created_at, reclaimed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', NULL, 1, ?9, NULL)",
         params![
             lease.env_id,
             lease.kind,
@@ -162,6 +243,7 @@ pub fn insert_exec_env(conn: &Connection, lease: &NewExecEnvLease) -> Result<(),
             lease.branch,
             lease.base_sha,
             lease.dispatch_id,
+            lease.env_class.as_str(),
             created_at,
         ],
     )?;
@@ -300,6 +382,7 @@ mod tests {
             branch: "tachi/894/w".to_string(),
             base_sha: "abc123".to_string(),
             dispatch_id: Some("dispatch-1".to_string()),
+            env_class: EnvClass::EditOnly,
             created_at: String::new(),
         }
     }
@@ -485,5 +568,41 @@ mod tests {
             ExecEnvState::parse("reclaimed").unwrap(),
             ExecEnvState::Reclaimed
         );
+    }
+
+    #[test]
+    fn env_class_defaults_to_edit_only_and_round_trips() {
+        let conn = open_conn();
+        // The DDL default is the fail-safe one: a lease that never declared a
+        // class does not get a build target.
+        insert_exec_env(&conn, &new_lease("env-c1", "/wt/c1")).unwrap();
+        let got = get_exec_env(&conn, "env-c1").unwrap().unwrap();
+        assert_eq!(got.env_class, EnvClass::EditOnly);
+        assert!(!got.env_class.allocates_build_target());
+
+        let mut ticketed = new_lease("env-c2", "/wt/c2");
+        ticketed.env_class = EnvClass::BuildTicketed;
+        insert_exec_env(&conn, &ticketed).unwrap();
+        let got = get_exec_env(&conn, "env-c2").unwrap().unwrap();
+        assert_eq!(got.env_class, EnvClass::BuildTicketed);
+        assert!(got.env_class.allocates_build_target());
+        assert!(!got.env_class.requires_approval());
+
+        let mut private = new_lease("env-c3", "/wt/c3");
+        private.env_class = EnvClass::BuildPrivate;
+        insert_exec_env(&conn, &private).unwrap();
+        let got = get_exec_env(&conn, "env-c3").unwrap().unwrap();
+        assert_eq!(got.env_class, EnvClass::BuildPrivate);
+        assert!(got.env_class.allocates_build_target());
+        assert!(got.env_class.requires_approval());
+        assert!(got.env_class.wants_private_target());
+    }
+
+    #[test]
+    fn env_class_parse_rejects_unknown() {
+        assert!(EnvClass::parse("build_ticketed").is_err());
+        assert!(EnvClass::parse("").is_err());
+        assert_eq!(EnvClass::parse("edit-only").unwrap(), EnvClass::EditOnly);
+        assert_eq!(EnvClass::default(), EnvClass::EditOnly);
     }
 }

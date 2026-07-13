@@ -4,7 +4,7 @@ use tachi_clean::sweep::SweepOptions;
 use tachi_clean::tachi_clean::TachiCleanOptions;
 use tachi_clean::target_clean::TargetCleanOptions;
 use tachi_clean::wt_clean::{OutputFormat, WtRemoveOptions};
-use tachi_clean::wt_open::{self, OpenOptions};
+use tachi_clean::wt_open::{self, CargoTargetPolicy, OpenOptions};
 
 pub(crate) async fn run_clean_command(
     action: CleanAction,
@@ -29,22 +29,41 @@ fn run_worktree_command_sync(action: WorktreeAction) -> Result<(), String> {
             role,
             dispatch_id,
             name,
+            env_class,
+            approve_private_target,
+            reserve_bytes,
             dry_run,
             json,
-        } => provision_managed_env_cli(
-            crate::exec_env_ops::ProvisionEnvOptions {
-                repo_root: repo,
-                path,
-                branch,
-                base,
-                task,
-                role,
-                dispatch_id,
-                name,
-                dry_run,
-            },
-            output_format(json),
-        ),
+        } => {
+            let env_class = memcore::EnvClass::parse(&env_class).map_err(|e| e.to_string())?;
+            // An approval is only ever constructed from an explicit flag — the
+            // gate in `validate_provision_request` refuses `build-private`
+            // without one.
+            let private_target_approval = approve_private_target.map(|approved_by| {
+                crate::exec_env_ops::PrivateTargetApproval {
+                    approved_by,
+                    reserved_bytes: reserve_bytes.unwrap_or(0),
+                }
+            });
+            provision_managed_env_cli(
+                crate::exec_env_ops::ProvisionEnvOptions {
+                    repo_root: repo,
+                    path,
+                    branch,
+                    base,
+                    task,
+                    role,
+                    dispatch_id,
+                    name,
+                    env_class,
+                    private_target_approval,
+                    private_target_dir: None,
+                    resident_target_dir: None,
+                    dry_run,
+                },
+                output_format(json),
+            )
+        }
         WorktreeAction::Close {
             path,
             force,
@@ -144,10 +163,24 @@ fn provision_managed_env_cli(
         Err(err) => {
             // Fail-open on the lease record only: still provision the worktree
             // (lease-less) so the CLI stays usable without a daemon DB.
+            //
+            // The class policy is NOT relaxed on this path: without a lease
+            // there is nowhere to record a resource binding, so the only class
+            // that can be honored is one that allocates no target dir. A
+            // `build-private` request here would write a private target config
+            // for bytes nothing is tracking — refuse it instead.
             tracing::warn!(
                 error = %err,
                 "exec_env lease store unavailable; opening worktree without a lease"
             );
+            if opts.env_class.allocates_build_target() {
+                return Err(format!(
+                    "env_class '{}' needs the exec_env lease store to record its build-target \
+                     resource, and the global store could not be opened ({err}); re-run with \
+                     the default 'edit-only' class or fix the store (#894 S2c)",
+                    opts.env_class.as_str()
+                ));
+            }
             wt_open::run_wt_open_with_emit(OpenOptions {
                 repo_root: opts.repo_root,
                 path: opts.path,
@@ -157,6 +190,7 @@ fn provision_managed_env_cli(
                 role: opts.role,
                 dispatch_id: opts.dispatch_id,
                 name: opts.name,
+                cargo_target: CargoTargetPolicy::Unallocated,
                 dry_run: opts.dry_run,
                 output,
             })
@@ -428,6 +462,7 @@ mod tests {
                 branch: "tachi/1029/w".to_string(),
                 base_sha: "abc123".to_string(),
                 dispatch_id: None,
+                env_class: memcore::EnvClass::EditOnly,
                 created_at: String::new(),
             },
         )

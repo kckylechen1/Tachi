@@ -12,7 +12,7 @@ use sweep::{SweepOptions, DEFAULT_SWEEP_MAX_AGE_DAYS};
 use tachi_clean::TachiCleanOptions;
 use target_clean::TargetCleanOptions;
 use wt_clean::{OutputFormat, WtRemoveOptions};
-use wt_open::OpenOptions;
+use wt_open::{CargoTargetPolicy, OpenOptions};
 
 fn main() {
     let code = match run() {
@@ -273,6 +273,7 @@ fn run_wt_open(args: Vec<String>) -> Result<(), String> {
     let mut role: Option<String> = None;
     let mut dispatch_id: Option<String> = None;
     let mut name: Option<String> = None;
+    let mut cargo_target = CargoTargetPolicy::Shared;
     let mut iter = args.into_iter();
 
     while let Some(arg) = iter.next() {
@@ -327,6 +328,18 @@ fn run_wt_open(args: Vec<String>) -> Result<(), String> {
                         .ok_or_else(|| "--name requires a value".to_string())?,
                 );
             }
+            // #894 S2c: the standalone cleaner has no lease/resource ledger, so
+            // it cannot own a class — it offers the raw target-dir policy
+            // instead. Default is the machine-shared target (pre-S2c behavior,
+            // unchanged for this binary); `--no-cargo-target` is the edit-only
+            // shape the daemon path (`tachi clean wt-open`) now defaults to.
+            "--no-cargo-target" => cargo_target = CargoTargetPolicy::Unallocated,
+            "--private-cargo-target" => {
+                cargo_target = CargoTargetPolicy::Private(PathBuf::from(
+                    iter.next()
+                        .ok_or_else(|| "--private-cargo-target requires a value".to_string())?,
+                ));
+            }
             "-h" | "--help" => {
                 print_wt_open_help();
                 return Ok(());
@@ -343,6 +356,7 @@ fn run_wt_open(args: Vec<String>) -> Result<(), String> {
         base,
         task,
         role,
+        cargo_target,
         dispatch_id,
         name,
         dry_run,
@@ -402,7 +416,7 @@ fn print_help() {
 
 fn print_wt_open_help() {
     println!(
-        "Open a Tachi-managed git worktree outside Desktop/repo (#484).\n\nUsage:\n  tachi-clean wt-open --repo <repo-root> [--branch <name>] [--base <ref>] [--task <id>] [--role <name>] [--name <leaf>] [--path <path>] [--dispatch-id <id>] [--dry-run] [--json]\n\nDefault path: $TACHI_WORKTREES_ROOT/<repo-slug>/<task>-<role>-<id>\n  or ~/.cache/tachi/worktrees/<repo-slug>/...\nRefuses Desktop, iCloud, and paths inside the primary repo.\n"
+        "Open a Tachi-managed git worktree outside Desktop/repo (#484).\n\nUsage:\n  tachi-clean wt-open --repo <repo-root> [--branch <name>] [--base <ref>] [--task <id>] [--role <name>] [--name <leaf>] [--path <path>] [--dispatch-id <id>] [--no-cargo-target|--private-cargo-target <dir>] [--dry-run] [--json]\n\nDefault path: $TACHI_WORKTREES_ROOT/<repo-slug>/<task>-<role>-<id>\n  or ~/.cache/tachi/worktrees/<repo-slug>/...\nRefuses Desktop, iCloud, and paths inside the primary repo.\n\nCargo target (#894 S2c):\n  default                      shared CARGO_TARGET_DIR (.cargo/config.toml)\n  --no-cargo-target            no target dir wired to the tree (edit-only shape)\n  --private-cargo-target <dir> a private target dir for this tree\n"
     );
 }
 

@@ -23,6 +23,77 @@ pub enum HostAction {
     },
 }
 
+/// The build broker (#894 S2c): this machine runs exactly ONE cargo at a time,
+/// in one fixed executor-seat checkout, and never against a target dir whose
+/// generation has diverged from the source being built.
+#[derive(Subcommand, Debug, Clone)]
+pub enum BuildAction {
+    /// Submit an immutable build ticket for the serialized executor seat.
+    Submit {
+        /// Repository root (the repo identity the ticket is scoped to).
+        #[arg(long, value_name = "PATH")]
+        repo: PathBuf,
+        /// Commit to build. A ref (branch/tag/HEAD) is resolved to its object id
+        /// here; the ticket itself only ever carries the object id.
+        #[arg(long, value_name = "REF", default_value = "HEAD")]
+        head: String,
+        /// Base the source claims to branch from (default: same as --head).
+        #[arg(long, value_name = "REF")]
+        base: Option<String>,
+        /// The exec_env lease this build's result is attributed to.
+        #[arg(long, value_name = "ID")]
+        env_id: Option<String>,
+        /// The dispatch this build belongs to.
+        #[arg(long, value_name = "ID")]
+        dispatch_id: Option<String>,
+        /// Explicit ticket id (default: a fresh uuid). Tickets are immutable —
+        /// reusing an id with a different payload is refused.
+        #[arg(long, value_name = "ID")]
+        ticket_id: Option<String>,
+        /// The command to run in the seat, e.g. `-- cargo test -p memcore`.
+        /// Defaults to `cargo build --workspace`.
+        #[arg(last = true, value_name = "CMD")]
+        command: Vec<String>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Drain the ticket queue through the single executor seat (FIFO, strictly
+    /// serialized). Exits immediately if another build holds the slot.
+    Run {
+        /// Repository root (used to resolve the seat and answer lineage
+        /// questions).
+        #[arg(long, value_name = "PATH")]
+        repo: PathBuf,
+        /// Run at most this many tickets (default: drain the queue).
+        #[arg(long, value_name = "N")]
+        max: Option<usize>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the executor slot holder, the pending queue, and each target dir's
+    /// generation.
+    Status {
+        #[arg(long, value_name = "PATH")]
+        repo: PathBuf,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Crash recovery: the slot is held by a build that is no longer running.
+    /// Quarantines that build's target dir FIRST, then frees the slot. Never
+    /// run this while the holder's cargo is actually alive.
+    Abandon {
+        /// Why the slot is being forced open (recorded on the quarantine).
+        #[arg(long, value_name = "REASON")]
+        reason: String,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// Managed worktree lifecycle (#484 disk governor open/close).
 #[derive(Subcommand, Debug, Clone)]
 pub enum WorktreeAction {
@@ -52,6 +123,20 @@ pub enum WorktreeAction {
         /// Directory leaf name under the managed root.
         #[arg(long)]
         name: Option<String>,
+        /// Provisioning class (#894 S2c): edit-only (default; no build target
+        /// dir — builds go through the build broker) | build-ticketed (submits
+        /// tickets to the machine-unique serialized executor seat) |
+        /// build-private (rare: a private target dir; requires
+        /// --approve-private-target).
+        #[arg(long, value_name = "CLASS", default_value = "edit-only")]
+        env_class: String,
+        /// Approval token for --env-class build-private (who approved the disk
+        /// reservation). Refused without it.
+        #[arg(long, value_name = "APPROVER")]
+        approve_private_target: Option<String>,
+        /// Disk to reserve, in bytes, for a build-private target dir.
+        #[arg(long, value_name = "BYTES")]
+        reserve_bytes: Option<i64>,
         /// Plan only; do not create the worktree.
         #[arg(long)]
         dry_run: bool,

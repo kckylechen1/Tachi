@@ -581,6 +581,161 @@ where
     })
 }
 
+/// Result of [`quarantine_resource`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuarantineOutcome {
+    /// The resource is now quarantined.
+    Quarantined { resource_id: String },
+    /// It was already quarantined; nothing changed (idempotent).
+    AlreadyQuarantined { resource_id: String },
+    /// Refused: the bytes are already gone (`reclaimed`), so there is nothing
+    /// to fence off. Typed rather than silently "succeeding" — a caller that
+    /// believes it quarantined a live target when it actually pointed at a
+    /// reclaimed row would go on to reuse a path that no longer exists.
+    AlreadyReclaimed { resource_id: String },
+    /// No such resource.
+    NotFound,
+}
+
+/// Fence a resource off from automatic reclaim AND from reuse (#894 S2c item
+/// 4): the *only* writer of `state = 'quarantined'`.
+///
+/// The build broker calls this when a `cargo` invocation was interrupted (a
+/// signal / kill / daemon crash mid-build): the target dir it was writing into
+/// is now in an unknown state — half-written fingerprints, truncated rlibs —
+/// and reusing it is exactly how a "phantom compile error" (symbol greppable in
+/// the source, reported as `not found` by rustc) gets manufactured. Quarantined
+/// resources are refused by [`reclaim_resource`] and are unbindable by
+/// [`bind_resource`] (only `active` resources bind), so a quarantined target
+/// cannot be silently picked up by the next build; the only way out is
+/// [`release_quarantine`], which forces the caller to verify or clear the bytes
+/// first.
+///
+/// `reclaim_resource` remains the only path to `reclaiming`/`reclaimed`; this
+/// function and [`release_quarantine`] own the quarantine edge and nothing
+/// else. Splitting the edges (rather than exposing a generic state setter) is
+/// what keeps "single writer per transition" true.
+pub fn quarantine_resource(
+    conn: &mut Connection,
+    resource_id: &str,
+    reason: &str,
+) -> Result<QuarantineOutcome, MemoryError> {
+    let tx = conn.transaction()?;
+    let existing: Option<(String, String)> = tx
+        .query_row(
+            "SELECT resource_id, state FROM exec_env_resources WHERE resource_id = ?1",
+            params![resource_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+
+    let outcome = match existing {
+        None => QuarantineOutcome::NotFound,
+        Some((resource_id, state_raw)) => match ResourceState::parse(&state_raw)? {
+            ResourceState::Quarantined => QuarantineOutcome::AlreadyQuarantined { resource_id },
+            ResourceState::Reclaimed => QuarantineOutcome::AlreadyReclaimed { resource_id },
+            // active / reclaiming / reclaim_failed all fence off: an
+            // interrupted reclaim leaves bytes in an unknown state too.
+            ResourceState::Active | ResourceState::Reclaiming | ResourceState::ReclaimFailed => {
+                let now = normalize_utc_iso_or_now("");
+                tx.execute(
+                    "UPDATE exec_env_resources \
+                     SET state = 'quarantined', reclaim_reason = ?2, updated_at = ?3 \
+                     WHERE resource_id = ?1",
+                    params![resource_id, reason, now],
+                )?;
+                QuarantineOutcome::Quarantined { resource_id }
+            }
+        },
+    };
+    tx.commit()?;
+    Ok(outcome)
+}
+
+/// Result of [`release_quarantine`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleaseQuarantineOutcome {
+    /// The caller's verify/clear closure ran and the resource is `active` again.
+    Released {
+        resource_id: String,
+        cleared_bytes: i64,
+    },
+    /// The resource was not quarantined; the closure did NOT run and no state
+    /// changed. A caller must not be able to "release" its way out of a state
+    /// it never entered.
+    NotQuarantined {
+        resource_id: String,
+        state: ResourceState,
+    },
+    /// No such resource.
+    NotFound,
+}
+
+/// The only exit from `quarantined`, and the only writer of the
+/// quarantined -> active edge (#894 S2c item 4: "an interrupted target must be
+/// verified or cleared before a retry may touch it").
+///
+/// `verify_or_clear` is the caller's filesystem work — wipe the target dir (and
+/// return the bytes freed), or verify it in place (and return 0). Taking it as
+/// a closure is the same trick [`reclaim_resource`] uses: the ordering cannot
+/// be gotten wrong at a call site, because there is no way to reach `active`
+/// without having run it. If it errors, the resource STAYS quarantined and the
+/// error propagates — a failed clear must never hand the next build a poisoned
+/// target.
+///
+/// When the closure reports it freed bytes, the stored measurement is reset to
+/// `0` (the dir is empty now); a verify-in-place (0 freed) leaves the last
+/// measurement alone rather than fabricating one.
+pub fn release_quarantine<F>(
+    conn: &mut Connection,
+    resource_id: &str,
+    verify_or_clear: F,
+) -> Result<ReleaseQuarantineOutcome, MemoryError>
+where
+    F: FnOnce(&ExecEnvResource) -> Result<i64, MemoryError>,
+{
+    let sql = format!("SELECT {SELECT_COLUMNS} FROM exec_env_resources WHERE resource_id = ?1");
+    let resource: Option<ExecEnvResource> = conn
+        .query_row(&sql, params![resource_id], row_to_resource)
+        .optional()?;
+
+    let Some(resource) = resource else {
+        return Ok(ReleaseQuarantineOutcome::NotFound);
+    };
+    if resource.state != ResourceState::Quarantined {
+        return Ok(ReleaseQuarantineOutcome::NotQuarantined {
+            resource_id: resource.resource_id,
+            state: resource.state,
+        });
+    }
+
+    // Filesystem work first, outside any transaction: an error here must leave
+    // the row quarantined, which is exactly what "do nothing" gives us.
+    let cleared = verify_or_clear(&resource)?;
+
+    let now = normalize_utc_iso_or_now("");
+    if cleared > 0 {
+        conn.execute(
+            "UPDATE exec_env_resources \
+             SET state = 'active', reclaim_reason = NULL, bytes = 0, measured_at = ?2, \
+                 updated_at = ?2 \
+             WHERE resource_id = ?1 AND state = 'quarantined'",
+            params![resource_id, now],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE exec_env_resources \
+             SET state = 'active', reclaim_reason = NULL, updated_at = ?2 \
+             WHERE resource_id = ?1 AND state = 'quarantined'",
+            params![resource_id, now],
+        )?;
+    }
+    Ok(ReleaseQuarantineOutcome::Released {
+        resource_id: resource.resource_id,
+        cleared_bytes: cleared,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -609,6 +764,7 @@ mod tests {
                 branch: "tachi/894/w".to_string(),
                 base_sha: "abc123".to_string(),
                 dispatch_id: None,
+                env_class: crate::db::exec_env::EnvClass::EditOnly,
                 created_at: String::new(),
             },
         )
@@ -1181,6 +1337,154 @@ mod tests {
         assert_eq!(
             ResourceKind::parse("build_target").unwrap(),
             ResourceKind::BuildTarget
+        );
+    }
+
+    // ─── quarantine edge (#894 S2c item 4) ──────────────────────────────────
+
+    #[test]
+    fn quarantined_target_is_unbindable_and_unreclaimable() {
+        let mut conn = open_conn();
+        seed_env(&conn, "env-q");
+        insert_resource(
+            &conn,
+            &new_resource("res-q", ResourceKind::BuildTarget, "/target/shared"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            quarantine_resource(&mut conn, "res-q", "interrupted cargo").unwrap(),
+            QuarantineOutcome::Quarantined {
+                resource_id: "res-q".to_string()
+            }
+        );
+        let got = get_resource(&conn, "res-q").unwrap().unwrap();
+        assert_eq!(got.state, ResourceState::Quarantined);
+        assert_eq!(got.reclaim_reason.as_deref(), Some("interrupted cargo"));
+
+        // A quarantined target cannot be handed to a new lease...
+        assert!(
+            bind_resource(&conn, "env-q", "res-q").is_err(),
+            "a quarantined target must not be bindable — that is how the next \
+             build would silently reuse a poisoned target dir"
+        );
+        // ...and automatic reclaim refuses it too (a human/broker owns it).
+        let calls = Cell::new(0);
+        assert_eq!(
+            reclaim_resource(&mut conn, "res-q", None, counting_deleter(&calls, 9)).unwrap(),
+            ResourceReclaimOutcome::Quarantined {
+                resource_id: "res-q".to_string()
+            }
+        );
+        assert_eq!(calls.get(), 0, "deleter must not run on a quarantined row");
+    }
+
+    #[test]
+    fn quarantine_is_idempotent_and_refuses_a_reclaimed_row() {
+        let mut conn = open_conn();
+        insert_resource(
+            &conn,
+            &new_resource("res-1", ResourceKind::BuildTarget, "/target/a"),
+        )
+        .unwrap();
+        quarantine_resource(&mut conn, "res-1", "first").unwrap();
+        assert_eq!(
+            quarantine_resource(&mut conn, "res-1", "second").unwrap(),
+            QuarantineOutcome::AlreadyQuarantined {
+                resource_id: "res-1".to_string()
+            }
+        );
+        // The idempotent no-op must not overwrite the original reason.
+        let got = get_resource(&conn, "res-1").unwrap().unwrap();
+        assert_eq!(got.reclaim_reason.as_deref(), Some("first"));
+
+        // Already-reclaimed bytes cannot be "quarantined" — there is nothing there.
+        insert_resource(
+            &conn,
+            &new_resource("res-2", ResourceKind::ScratchDir, "/scratch/b"),
+        )
+        .unwrap();
+        let calls = Cell::new(0);
+        reclaim_resource(&mut conn, "res-2", None, counting_deleter(&calls, 4)).unwrap();
+        assert_eq!(
+            quarantine_resource(&mut conn, "res-2", "late").unwrap(),
+            QuarantineOutcome::AlreadyReclaimed {
+                resource_id: "res-2".to_string()
+            }
+        );
+
+        assert_eq!(
+            quarantine_resource(&mut conn, "ghost", "x").unwrap(),
+            QuarantineOutcome::NotFound
+        );
+    }
+
+    #[test]
+    fn release_quarantine_requires_the_clear_to_succeed() {
+        let mut conn = open_conn();
+        insert_resource(
+            &conn,
+            &new_resource("res-q", ResourceKind::BuildTarget, "/target/shared"),
+        )
+        .unwrap();
+        record_resource_measurement(&conn, "res-q", 4_000_000_000, "").unwrap();
+        quarantine_resource(&mut conn, "res-q", "interrupted").unwrap();
+
+        // A failing clear leaves the resource quarantined — the poisoned target
+        // must never become reusable because the wipe half-worked.
+        let err = release_quarantine(&mut conn, "res-q", |_res| {
+            Err(MemoryError::InvalidArg("rm -rf failed".to_string()))
+        });
+        assert!(err.is_err());
+        assert_eq!(
+            get_resource(&conn, "res-q").unwrap().unwrap().state,
+            ResourceState::Quarantined,
+            "a failed clear must not release the quarantine"
+        );
+
+        // A successful clear releases it and resets the measurement to 0.
+        let out = release_quarantine(&mut conn, "res-q", |res| {
+            assert_eq!(res.path, "/target/shared");
+            Ok(4_000_000_000)
+        })
+        .unwrap();
+        assert_eq!(
+            out,
+            ReleaseQuarantineOutcome::Released {
+                resource_id: "res-q".to_string(),
+                cleared_bytes: 4_000_000_000,
+            }
+        );
+        let got = get_resource(&conn, "res-q").unwrap().unwrap();
+        assert_eq!(got.state, ResourceState::Active);
+        assert_eq!(got.bytes, Some(0), "a cleared target measures 0 bytes");
+        assert!(got.reclaim_reason.is_none());
+    }
+
+    #[test]
+    fn release_quarantine_does_not_run_the_closure_on_a_healthy_resource() {
+        let mut conn = open_conn();
+        insert_resource(
+            &conn,
+            &new_resource("res-ok", ResourceKind::BuildTarget, "/target/ok"),
+        )
+        .unwrap();
+        let ran = Cell::new(false);
+        let out = release_quarantine(&mut conn, "res-ok", |_res| {
+            ran.set(true);
+            Ok(1)
+        })
+        .unwrap();
+        assert_eq!(
+            out,
+            ReleaseQuarantineOutcome::NotQuarantined {
+                resource_id: "res-ok".to_string(),
+                state: ResourceState::Active,
+            }
+        );
+        assert!(
+            !ran.get(),
+            "no filesystem work for a resource that was never quarantined"
         );
     }
 }

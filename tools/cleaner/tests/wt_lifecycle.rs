@@ -19,7 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tachi_clean::registry;
 use tachi_clean::sweep::{self, SweepOptions};
 use tachi_clean::wt_clean::{self, OutputFormat, WtRemoveOptions};
-use tachi_clean::wt_open::{self, OpenOptions};
+use tachi_clean::wt_open::{self, CargoTargetPolicy, OpenOptions};
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -121,6 +121,7 @@ fn open_close_list_round_trip() {
         role: Some("worker".into()),
         dispatch_id: None,
         name: Some("roundtrip-leaf".into()),
+        cargo_target: CargoTargetPolicy::Shared,
         dry_run: false,
         output: OutputFormat::Json,
     })
@@ -185,6 +186,7 @@ fn direct_close_refuses_dirty_worktree() {
         role: Some("worker".into()),
         dispatch_id: None,
         name: Some("close-dirty-leaf".into()),
+        cargo_target: CargoTargetPolicy::Shared,
         dry_run: false,
         output: OutputFormat::Json,
     })
@@ -252,6 +254,7 @@ fn sweep_never_removes_dirty_worktree() {
         role: Some("worker".into()),
         dispatch_id: None,
         name: Some("sweep-dirty-leaf".into()),
+        cargo_target: CargoTargetPolicy::Shared,
         dry_run: false,
         output: OutputFormat::Json,
     })
@@ -324,6 +327,7 @@ fn open_rejects_path_outside_managed_root() {
         role: Some("worker".into()),
         dispatch_id: None,
         name: None,
+        cargo_target: CargoTargetPolicy::Shared,
         dry_run: false,
         output: OutputFormat::Json,
     })
@@ -369,6 +373,7 @@ fn open_rejects_path_traversal() {
         role: Some("worker".into()),
         dispatch_id: None,
         name: None,
+        cargo_target: CargoTargetPolicy::Shared,
         dry_run: false,
         output: OutputFormat::Json,
     })

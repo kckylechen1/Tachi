@@ -69,6 +69,10 @@ pub(super) async fn run_pre_serve_command(
             super::super::clean_cli::run_worktree_command(action.clone()).await?;
             Ok(true)
         }
+        Commands::Build { action } => {
+            super::super::build_cli::run_build_command(action.clone()).await?;
+            Ok(true)
+        }
         Commands::Harness { action } => {
             super::super::harness_cli::run_harness_command(action.clone()).await?;
             Ok(true)
