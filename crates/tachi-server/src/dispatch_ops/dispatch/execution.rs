@@ -444,6 +444,14 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             .as_ref()
             .and_then(|v| v.get("cwd").cloned())
             .unwrap_or(Value::Null);
+        // #894 S2d: the effective-authority receipt is a dispatch-time fact —
+        // it must survive the terminal rewrite, or "who was actually stopping
+        // this agent from writing?" becomes unanswerable the moment the run
+        // finishes, which is exactly when someone asks.
+        let preserved_authority = prev_status
+            .as_ref()
+            .and_then(|v| v.get("authority").cloned())
+            .unwrap_or(Value::Null);
 
         write_status_json(
             &workspace_dir_for_spawn,
@@ -468,6 +476,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "result_written": true,
                 "completion_predicate": preserved_predicate,
                 "cwd": preserved_cwd,
+                "authority": preserved_authority,
                 "harness_transport": harness_transport_for_spawn.clone(),
                 "harness_server_url": harness_server_url_for_spawn.clone(),
                 "host_adapter": host_adapter_for_spawn.clone(),
