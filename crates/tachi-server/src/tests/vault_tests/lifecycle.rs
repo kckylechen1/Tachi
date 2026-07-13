@@ -5,3 +5,4 @@ mod corrupted_verifier;
 mod lockout_preservation;
 mod lockout_reset;
 mod roundtrip;
+mod unsupported_kdf_params;

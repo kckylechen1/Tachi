@@ -16,7 +16,7 @@
 
 pub use vault_kit::{
     active_kdf_params_json, create_verifier, decrypt, encrypt, generate_salt, verify_password,
-    zero_key, zero_string, DerivedVaultKey, AES_GCM_NONCE_LEN,
+    zero_key, zero_string, DerivedVaultKey, KdfParams, KdfParamsError, AES_GCM_NONCE_LEN,
 };
 
 use aes_gcm::{
@@ -27,6 +27,28 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use vault_kit::generate_nonce;
 
 const AES_GCM_TAG_LEN: usize = 16;
+
+/// Parse the `vault_config.kdf_params` JSON column into a validated
+/// `KdfParams` (fail-closed). Called by every unlock/verify path that derives
+/// a key from a *stored* config (tachi#1080): malformed JSON or an
+/// unsupported parameter combination surfaces as a loud, versioned error
+/// naming both the stored value and the supported set.
+///
+/// Deliberately NOT phrased as a password error — a stored-parameter mismatch
+/// must never be misread as "wrong password" (and so must never count against
+/// the brute-force lockout counter; callers return this error before reaching
+/// `verify_password`). Never silently falls back to a compile-time default.
+pub fn parse_stored_kdf_params(config_kdf_params: &str) -> Result<KdfParams, String> {
+    KdfParams::from_stored_json(config_kdf_params).map_err(|err| {
+        format!(
+            "vault_config.kdf_params is not a supported KDF parameter format; refusing to derive \
+             (this is not a password error). stored kdf_params={stored:?}; \
+             supported={supported:?}; classified as: {err}",
+            stored = config_kdf_params,
+            supported = KdfParams::supported(),
+        )
+    })
+}
 
 /// Authenticate associated data with AES-256-GCM detached tag and no ciphertext.
 ///
