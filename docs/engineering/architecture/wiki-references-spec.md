@@ -1,15 +1,15 @@
 # Wiki References Spec
 
 **Issue:** [#149](https://github.com/kckylechen1/tachi/issues/149)  
-**Status:** Draft → Ready for implementation  
+**Status:** Implemented reference-format slice; authority and lifecycle semantics are superseded by [`issue-refinery-memory-lanes.md`](./issue-refinery-memory-lanes.md)
 **Date:** 2026-06-03  
-**Scope:** `crates/tachi-server` — Wiki write tools  
+**Scope:** `crates/tachi-server` — Wiki reference syntax and rendering only
 
 ---
 
 ## 1. Goal
 
-Add a first-class `references` parameter to Wiki write tools so agents and users can attach external links, absolute file paths, and GitHub issue shorthands to wiki entries. References are validated at write time and rendered in Obsidian export.
+Add a first-class `references` parameter to Wiki write tools so agents and users can attach external links, absolute file paths, repo-relative `docs/` or `skill/` paths, and GitHub issue shorthands to wiki entries. References are validated at write time and rendered in Obsidian export.
 
 ---
 
@@ -96,6 +96,12 @@ fn validate_reference_format(reference: &str) -> Result<(), String> {
         return Ok(());
     }
 
+    // Accepted repo-relative documentation/skill references. These remain
+    // literal strings; this slice does not resolve or bind them to a blob SHA.
+    if trimmed.starts_with("docs/") || trimmed.starts_with("skill/") {
+        return Ok(());
+    }
+
     // GitHub shorthand: #69, repo#69, owner/repo#69
     static GH_SHORTHAND_RE: OnceLock<Regex> = OnceLock::new();
     let gh_re = GH_SHORTHAND_RE.get_or_init(|| {
@@ -106,7 +112,7 @@ fn validate_reference_format(reference: &str) -> Result<(), String> {
     }
 
     Err(format!(
-        "Invalid reference format: '{}'. Expected URL (http/https/file), absolute path, or GitHub shorthand (#N, repo#N, owner/repo#N)",
+        "Invalid reference format: '{}'. Expected URL (http/https/file), absolute path, repo-relative docs/ or skill/ path, or GitHub shorthand (#N, repo#N, owner/repo#N)",
         trimmed
     ))
 }
@@ -225,7 +231,7 @@ The `tachi_wiki_write` tool's JSON schema should expose `references` as an optio
       "references": {
         "type": "array",
         "items": { "type": "string" },
-        "description": "External references: URLs, absolute paths, or GitHub shorthands (#N, repo#N, owner/repo#N)"
+        "description": "External references: URLs, absolute paths, repo-relative docs/ or skill/ paths, or GitHub shorthands (#N, repo#N, owner/repo#N)"
       }
     }
   }
@@ -245,6 +251,8 @@ fn test_valid_references() {
     assert!(validate_reference_format("file:///path/to/file.md").is_ok());
     assert!(validate_reference_format("/Users/foo/project/README.md").is_ok());
     assert!(validate_reference_format("C:\\Users\\foo\\file.txt").is_ok());
+    assert!(validate_reference_format("docs/engineering/architecture/example.md").is_ok());
+    assert!(validate_reference_format("skill/example/SKILL.md").is_ok());
     assert!(validate_reference_format("#69").is_ok());
     assert!(validate_reference_format("repo#69").is_ok());
     assert!(validate_reference_format("owner/repo#69").is_ok());
@@ -254,7 +262,7 @@ fn test_valid_references() {
 fn test_invalid_references() {
     assert!(validate_reference_format("").is_err());
     assert!(validate_reference_format("  ").is_err());
-    assert!(validate_reference_format("relative/path.md").is_err());  // relative path
+    assert!(validate_reference_format("relative/path.md").is_err());  // unsupported relative root
     assert!(validate_reference_format("ftp://example.com").is_err());  // unsupported protocol
     assert!(validate_reference_format("just some text").is_err());
 }
@@ -340,7 +348,7 @@ Text:
 
 | Question | Default | Decision |
 |----------|---------|----------|
-| Relative paths (`docs/foo.md`) — reject or resolve against workspace root? | **Reject** for now (strict absolute only) | — |
+| Relative paths (`docs/foo.md`) — reject or resolve against workspace root? | Accept repo-relative `docs/` and `skill/` paths literally | Implemented syntax only; workspace resolution and blob binding are not implemented |
 | Duplicate references in same entry — allow or dedup? | **Allow** (simplest) | — |
 | Max reference count per entry? | **None** (unlimited) | — |
 | Reference description/label (e.g. `[label](url)`)? | **Out of scope** (just raw strings) | — |

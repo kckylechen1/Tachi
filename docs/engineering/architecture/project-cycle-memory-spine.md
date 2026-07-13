@@ -6,6 +6,7 @@
 - [`tachi-continuity-memory-architecture.md`](./tachi-continuity-memory-architecture.md)
 - [`pattern-timeline-bonding-memory.md`](./pattern-timeline-bonding-memory.md)
 - [`host-adapter-lifecycle-v1.md`](./host-adapter-lifecycle-v1.md)
+- [`issue-refinery-memory-lanes.md`](./issue-refinery-memory-lanes.md)
 
 ## Intent
 
@@ -77,6 +78,9 @@ The `cycle_status` response is JSON-first and read-only:
 - `linked_docs`
 - `linked_specs`
 - `contract_refs`
+- **target extension (not implemented yet):** `issue_body_hash`,
+  `issue_snapshot_hash`, `linked_specs[].commit_sha`,
+  `linked_specs[].blob_sha`, and `linked_specs[].section`
 - `github`
 - `verification`
 - `artifacts`
@@ -117,6 +121,14 @@ This makes Project Cycle the bridge between GitHub work management and long-term
 memory distillation. The memory system should distill durable lessons after
 `close_loop`, but `cycle_status` keeps the current operational truth anchored in
 the flow artifacts.
+
+Issue refinement uses the same authority order but requires immutable snapshots.
+The current read model stores raw issue/doc refs; adding body hashes and blob/section
+anchors is a target extension. Once that extension lands, an `issue_ref` without
+an issue body hash is `ref_only`, and a doc path without a blob SHA is advisory.
+Neither may be promoted to a high-confidence current-work answer by memory or wiki
+similarity. See
+[`issue-refinery-memory-lanes.md`](./issue-refinery-memory-lanes.md).
 
 ## Non-Goals
 
