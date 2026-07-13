@@ -1680,8 +1680,7 @@ mod bench {
             let pool = pool.clone();
             let receipt_tx = receipt_tx.clone();
             std::thread::spawn(move || {
-                let (result, receipt) =
-                    pool.with_store_recording("short_read", |_store| Ok(()));
+                let (result, receipt) = pool.with_store_recording("short_read", |_store| Ok(()));
                 result.expect("short read should succeed");
                 let _ = receipt_tx.send(receipt);
             });
