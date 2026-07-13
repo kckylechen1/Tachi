@@ -348,7 +348,7 @@ Text:
 
 | Question | Default | Decision |
 |----------|---------|----------|
-| Relative paths (`docs/foo.md`) — reject or resolve against workspace root? | Accept repo-relative `docs/` paths literally | Implemented syntax only; workspace resolution and blob binding are not implemented |
+| Relative paths (`docs/foo.md`) — reject or resolve against workspace root? | Accept repo-relative `docs/` and `skill/` paths literally | Implemented syntax only; workspace resolution and blob binding are not implemented |
 | Duplicate references in same entry — allow or dedup? | **Allow** (simplest) | — |
 | Max reference count per entry? | **None** (unlimited) | — |
 | Reference description/label (e.g. `[label](url)`)? | **Out of scope** (just raw strings) | — |

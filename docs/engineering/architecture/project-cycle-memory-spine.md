@@ -78,8 +78,9 @@ The `cycle_status` response is JSON-first and read-only:
 - `linked_docs`
 - `linked_specs`
 - `contract_refs`
-- **target extension (not implemented yet):** immutable issue body hash and linked
-  doc/spec blob SHA + section anchors
+- **target extension (not implemented yet):** `issue_body_hash`,
+  `issue_snapshot_hash`, `linked_specs[].commit_sha`,
+  `linked_specs[].blob_sha`, and `linked_specs[].section`
 - `github`
 - `verification`
 - `artifacts`

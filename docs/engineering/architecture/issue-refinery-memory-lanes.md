@@ -87,10 +87,13 @@ All `V1` shapes in this document are target contracts, not callable runtime
 schemas, until their named leaf lands.
 
 ```text
+SourceKindV1 = issue | comment | pr | commit | canonical_doc |
+               episodic_memory | wiki | guide | precedent | eval | runtime
+
 EvidenceEnvelopeV1<T> {
   schema_version
   packet_id
-  kind
+  payload_kind
   authority_class: current_work | canonical | verification | advisory | playbook | precedent
   adjudication_status: observation | proposal | approved | established
   evidence_refs: EvidenceRefV1[]
@@ -104,7 +107,7 @@ EvidenceEnvelopeV1<T> {
 
 EvidenceRefV1 {
   relation: derived_from | supports | contradicts | supersedes | applies_to
-  target_kind: issue | comment | pr | commit | doc | memory | wiki | eval | runtime
+  target_kind: SourceKindV1
   ref
   immutable_revision:
     issue_snapshot_hash | issue_body_hash |
@@ -139,9 +142,23 @@ ApprovalReceiptV1 {
   approver
   decision
   decided_at
-  apply_preconditions: source_snapshot_hashes[] + repo_revisions[]
+  source_snapshot_hashes: String[]
+  repo_revisions: RepoRevisionV1[]
+}
+
+FreezeReceiptV1 {
+  issue_ref
+  issue_body_hash
+  issue_snapshot_hash
+  canonical_doc_ref: CanonicalDocRefV1
+  derived_source_revisions: EvidenceRefV1[]
+  captured_at
 }
 ```
+
+`SourceKindV1` is the one source-artifact vocabulary used by refs and recall.
+`authority_class` is deliberately separate: it describes what a source may
+decide, not what kind of source it is.
 
 Current-work snapshot hashes cover semantic state, not only prose or code:
 `IssueSnapshotV1` includes body, state, labels, milestone, dependency refs,
@@ -192,14 +209,14 @@ IssueEvidenceV1 {
   issue_body_hash
   issue_snapshot_hash
   issue_updated_at
-  claims[] { claim_id, text, source_span, anchors[], verification }
-  relations[] {
+  claims: ClaimV1[] { claim_id, text, source_span, anchors: AnchorV1[], verification }
+  relations: IssueRelationV1[] {
     kind: blocks | depends_on | duplicate_of | supersedes | parent_of | related
     target_ref
-    evidence_refs[]
+    evidence_refs: EvidenceRefV1[]
   }
   linked_specs: CanonicalDocRefV1[]
-  coverage { source_bytes, covered_bytes, omitted_spans[] }
+  coverage { source_bytes, covered_bytes, omitted_spans: SourceSpanV1[] }
 }
 
 IssueDispositionProposalV1 {
@@ -207,11 +224,11 @@ IssueDispositionProposalV1 {
   based_on_repo_revisions: RepoRevisionV1[]
   based_on_issue_snapshot_hash
   disposition
-  evidence_refs[]
-  contradictions[]
+  evidence_refs: EvidenceRefV1[]
+  contradictions: ContradictionV1[]
   proposed_comment?
-  proposed_labels[]
-  proposed_doc_deltas[] { path, blob_sha, section, reason, summary }
+  proposed_labels: String[]
+  proposed_doc_deltas: DocDeltaProposalV1[] { path, blob_sha, section, reason, summary }
 }
 ```
 
@@ -314,7 +331,7 @@ confidence.
 
 ```text
 RecallEvidenceV1 {
-  kind: current_work | canonical_doc | wiki | episodic | precedent | eval | runtime
+  kind: SourceKindV1
   authority
   lifecycle
   source_ref
@@ -322,7 +339,7 @@ RecallEvidenceV1 {
   valid_at
   retrieval_score
   claim_coverage
-  contradictions[]
+  contradictions: ContradictionV1[]
 }
 ```
 
@@ -430,13 +447,13 @@ EvalPacketV1 {
   frozen_contract_ref
   execution_origin
   native_child_id?
-  artifacts[]
-  tests_run[]
+  artifacts: ArtifactRefV1[]
+  tests_run: TestRunV1[]
   producer_engine_receipt?
   verifier_engine_receipt?
-  claims[]
-  verdicts[]
-  not_checked[]
+  claims: ClaimV1[]
+  verdicts: VerdictV1[]
+  not_checked: NotCheckedV1[]
 }
 ```
 
