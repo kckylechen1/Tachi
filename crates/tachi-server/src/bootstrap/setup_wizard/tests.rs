@@ -98,6 +98,16 @@ fn mcp_server_instructions_requires_end_of_task_save() {
         text.contains("HTTP direct-connect"),
         "instructions must mention HTTP direct-connect (#732)"
     );
+    assert!(
+        text.contains("Bound sessions should omit project")
+            && text.contains("same-DB alias")
+            && text.contains("other-project writes and destructive actions remain forbidden"),
+        "instructions must explain #1061 normalization without weakening write isolation: {text}"
+    );
+    assert!(
+        !text.contains("project='<git-project>'"),
+        "bound-session example must prefer omission: {text}"
+    );
 }
 
 #[test]

@@ -216,6 +216,46 @@ fn seed_project_db(tachi_home: &Path, project_db_path: &Path) {
     .expect("seed project db schema");
 }
 
+fn seed_identity_db(tachi_home: &Path, project_name: &str) {
+    let db_path = tachi_home
+        .join("projects")
+        .join(project_name)
+        .join("memory.db");
+    std::fs::create_dir_all(db_path.parent().expect("identity db parent"))
+        .expect("identity db parent");
+    std::fs::write(db_path, project_name.as_bytes()).expect("identity db fixture");
+}
+
+fn write_repo_project_manifest(tachi_home: &Path, db_paths: &[&Path]) {
+    let entries = db_paths
+        .iter()
+        .map(|db_path| {
+            serde_json::json!({
+                "path": db_path.to_string_lossy(),
+                "role": "project",
+                "owner": "project:test",
+                "schema_kind": "tachi",
+                "vec_enabled": false,
+                "allow_write": true,
+                "last_doctor_at": "1970-01-01T00:00:00Z",
+                "last_classification": "healthy",
+                "scope_hint": "test"
+            })
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        tachi_home.join("manifest.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "generated_at": "1970-01-01T00:00:00Z",
+            "_comment": "endpoint alias test",
+            "dbs": entries
+        }))
+        .expect("serialize manifest"),
+    )
+    .expect("write manifest");
+}
+
 #[test]
 fn ensure_stdio_proxy_accepts_global_only_daemon_for_project_client() {
     let _guard = crate::utils::global_test_lock()
@@ -341,6 +381,99 @@ fn stdio_proxy_call_writes_bound_project_via_global_only_daemon() {
     let saved_text = "stdio proxy e2e writes only the bound project db";
     assert_eq!(memory_text_count(&project, saved_text), 1);
     assert_eq!(memory_text_count(&global, saved_text), 0);
+
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
+    restore_env("TACHI_HOME", saved_home);
+    restore_env("SIGIL_HOME", saved_sigil);
+    restore_env("TACHI_APP_HOME", saved_app);
+}
+
+#[test]
+fn stdio_proxy_same_db_alias_write_normalizes_to_bound_identity() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let saved_home = std::env::var_os("TACHI_HOME");
+    let saved_sigil = std::env::var_os("SIGIL_HOME");
+    let saved_app = std::env::var_os("TACHI_APP_HOME");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    let repo = temp.path().join("repos/Sigil");
+    let project = repo.join(".tachi/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    std::env::set_var("TACHI_HOME", &tachi_home);
+    std::env::remove_var("SIGIL_HOME");
+    std::env::remove_var("TACHI_APP_HOME");
+    seed_project_db(&tachi_home, &project);
+    write_repo_project_manifest(&tachi_home, &[&project]);
+    let bound_name = crate::path_utils::plan_c_dir_name_from_root(&repo).expect("hashed name");
+    let requested_alias =
+        crate::path_utils::plan_c_legacy_dir_name_from_root(&repo).expect("legacy alias");
+
+    let mapped = prepare_proxy_tool_call(
+        rmcp::model::CallToolRequestParams::new("tachi_memory").with_arguments(
+            serde_json::Map::from_iter([
+                ("action".to_string(), serde_json::json!("save")),
+                ("project".to_string(), serde_json::json!(&requested_alias)),
+            ]),
+        ),
+        Some(bound_name.as_str()),
+    )
+    .expect("same-DB legacy alias should pass the stdio gate");
+    assert_eq!(
+        mapped.arguments.expect("normalized args")["project"],
+        serde_json::json!(&bound_name),
+        "effective identity must remain the hashed session binding"
+    );
+
+    let saved_text = "stdio same-DB alias writes once to the bound repo DB";
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let proxy = StdioProxyServer {
+            daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
+            app_home: tachi_home.clone(),
+            global_db_path: global.clone(),
+            project_db_path: Some(project.clone()),
+            client_project: Some(bound_name.clone()),
+        };
+        let result = call_tool_via_stdio_proxy(
+            proxy,
+            "tachi_memory",
+            serde_json::Map::from_iter([
+                ("action".to_string(), serde_json::json!("save")),
+                ("project".to_string(), serde_json::json!(&requested_alias)),
+                ("text".to_string(), serde_json::json!(saved_text)),
+                ("summary".to_string(), serde_json::json!("same DB alias")),
+                (
+                    "path".to_string(),
+                    serde_json::json!("/tests/stdio-same-db-alias"),
+                ),
+                ("category".to_string(), serde_json::json!("fact")),
+                ("scope".to_string(), serde_json::json!("project")),
+                ("force".to_string(), serde_json::json!(true)),
+            ]),
+        )
+        .await
+        .expect("same-DB alias write through stdio");
+        assert_tool_ok(&result);
+        (ct, daemon_task)
+    });
+
+    assert_eq!(memory_text_count(&project, saved_text), 1);
+    assert_eq!(memory_text_count(&global, saved_text), 0);
+    assert!(
+        !tachi_home.join("projects").join(&bound_name).exists(),
+        "validation must not create the hashed Plan C alias"
+    );
+    assert!(
+        !tachi_home.join("projects").join(&requested_alias).exists(),
+        "validation must not create the legacy Plan C alias"
+    );
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
@@ -1211,60 +1344,75 @@ fn proxy_rejects_explicit_cross_project_write_override() {
 
 #[test]
 fn proxy_allows_explicit_cross_project_read_override() {
-    for (tool, action) in [
-        ("tachi_memory", Some("search")),
-        ("tachi_memory", Some("get")),
-        ("tachi_memory", Some("briefing")),
-        ("tachi_memory", Some("consolidate")),
-        ("tachi_memory", Some("recall_simulate")),
-        ("tachi_memory", Some("readiness")),
-        ("tachi_search", None),
-        ("search_memory", None),
-        ("find_similar_memory", None),
-        ("get_memory", None),
-        ("list_memories", None),
-        ("tachi_wiki", Some("search")),
-        ("tachi_wiki", Some("browse")),
-        ("tachi_wiki", Some("read")),
-        ("tachi_event", Some("query")),
-        ("tachi_event", Some("metrics")),
-    ] {
-        let mut args =
-            serde_json::Map::from_iter([("project".to_string(), serde_json::json!("Quant-test"))]);
-        if let Some(action) = action {
-            args.insert("action".to_string(), serde_json::json!(action));
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        seed_identity_db(temp.path(), "Sigil-test");
+        seed_identity_db(temp.path(), "Quant-test");
+        for (tool, action) in [
+            ("tachi_memory", Some("search")),
+            ("tachi_memory", Some("get")),
+            ("tachi_memory", Some("briefing")),
+            ("tachi_memory", Some("consolidate")),
+            ("tachi_memory", Some("recall_simulate")),
+            ("tachi_memory", Some("readiness")),
+            ("tachi_search", None),
+            ("search_memory", None),
+            ("find_similar_memory", None),
+            ("get_memory", None),
+            ("list_memories", None),
+            ("tachi_wiki", Some("search")),
+            ("tachi_wiki", Some("browse")),
+            ("tachi_wiki", Some("read")),
+            ("tachi_event", Some("query")),
+            ("tachi_event", Some("metrics")),
+        ] {
+            let mut args = serde_json::Map::from_iter([(
+                "project".to_string(),
+                serde_json::json!("Quant-test"),
+            )]);
+            if let Some(action) = action {
+                args.insert("action".to_string(), serde_json::json!(action));
+            }
+            let request = rmcp::model::CallToolRequestParams::new(tool).with_arguments(args);
+
+            let mapped = prepare_proxy_tool_call(request, Some("Sigil-test"))
+                .unwrap_or_else(|err| panic!("{tool}/{action:?} should be forwarded: {err}"));
+
+            assert_eq!(
+                mapped.arguments.expect("args")["project"],
+                serde_json::json!("Quant-test"),
+                "{tool}/{action:?} should preserve explicit project"
+            );
         }
-        let request = rmcp::model::CallToolRequestParams::new(tool).with_arguments(args);
-
-        let mapped = prepare_proxy_tool_call(request, Some("Sigil-test"))
-            .unwrap_or_else(|err| panic!("{tool}/{action:?} should be forwarded: {err}"));
-
-        assert_eq!(
-            mapped.arguments.expect("args")["project"],
-            serde_json::json!("Quant-test"),
-            "{tool}/{action:?} should preserve explicit project"
-        );
-    }
+    });
 }
 
 #[test]
 fn proxy_allows_explicit_cross_project_direct_read_override() {
-    // #757 removed memory_graph/get_edges from MCP; remaining cross-project
-    // direct reads include list_memories / get_memory / tachi_search.
-    for tool in ["list_memories", "get_memory", "tachi_search"] {
-        let request = rmcp::model::CallToolRequestParams::new(tool).with_arguments(
-            serde_json::Map::from_iter([("project".to_string(), serde_json::json!("Quant-test"))]),
-        );
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        seed_identity_db(temp.path(), "Sigil-test");
+        seed_identity_db(temp.path(), "Quant-test");
+        // #757 removed memory_graph/get_edges from MCP; remaining cross-project
+        // direct reads include list_memories / get_memory / tachi_search.
+        for tool in ["list_memories", "get_memory", "tachi_search"] {
+            let request = rmcp::model::CallToolRequestParams::new(tool).with_arguments(
+                serde_json::Map::from_iter([(
+                    "project".to_string(),
+                    serde_json::json!("Quant-test"),
+                )]),
+            );
 
-        let mapped = prepare_proxy_tool_call(request, Some("Sigil-test"))
-            .unwrap_or_else(|err| panic!("{tool} direct read should be forwarded: {err}"));
+            let mapped = prepare_proxy_tool_call(request, Some("Sigil-test"))
+                .unwrap_or_else(|err| panic!("{tool} direct read should be forwarded: {err}"));
 
-        assert_eq!(
-            mapped.arguments.expect("args")["project"],
-            serde_json::json!("Quant-test"),
-            "{tool} should preserve explicit project"
-        );
-    }
+            assert_eq!(
+                mapped.arguments.expect("args")["project"],
+                serde_json::json!("Quant-test"),
+                "{tool} should preserve explicit project"
+            );
+        }
+    });
 }
 
 #[test]
@@ -1777,6 +1925,110 @@ fn http_direct_connect_initialize_advertises_http_guidance() {
         );
         (ct, daemon_task)
     });
+
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
+    restore_env("TACHI_HOME", saved_home);
+    restore_env("SIGIL_HOME", saved_sigil);
+    restore_env("TACHI_APP_HOME", saved_app);
+}
+
+/// #1061: HTTP direct-connect applies the same canonical alias equivalence as stdio.
+#[test]
+fn http_direct_connect_same_db_alias_write_normalizes_to_bound_identity() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let saved_home = std::env::var_os("TACHI_HOME");
+    let saved_sigil = std::env::var_os("SIGIL_HOME");
+    let saved_app = std::env::var_os("TACHI_APP_HOME");
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    let repo = temp.path().join("repos/Sigil");
+    let project = repo.join(".tachi/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    std::env::set_var("TACHI_HOME", &tachi_home);
+    std::env::remove_var("SIGIL_HOME");
+    std::env::remove_var("TACHI_APP_HOME");
+    seed_project_db(&tachi_home, &project);
+    write_repo_project_manifest(&tachi_home, &[&project]);
+    let requested_alias =
+        crate::path_utils::plan_c_dir_name_from_root(&repo).expect("hashed alias");
+    let bound_name =
+        crate::path_utils::plan_c_legacy_dir_name_from_root(&repo).expect("legacy binding");
+    let saved_text = "HTTP same-DB alias writes once to the bound repo DB";
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+        let headers =
+            http_headers(&[(crate::session_identity::HEADER_PROJECT, bound_name.as_str())]);
+        let (client, session_headers, init) = http_mcp_initialize(&daemon.url, headers, None).await;
+        assert!(init.get("error").is_none(), "initialize failed: {init:#}");
+        http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
+
+        let save = http_mcp_call_tool(
+            &client,
+            &daemon.url,
+            session_headers.clone(),
+            2,
+            "tachi_memory",
+            serde_json::Map::from_iter([
+                ("action".to_string(), serde_json::json!("save")),
+                ("project".to_string(), serde_json::json!(&requested_alias)),
+                (
+                    "id".to_string(),
+                    serde_json::json!("http-same-db-alias-write"),
+                ),
+                ("text".to_string(), serde_json::json!(saved_text)),
+                ("summary".to_string(), serde_json::json!("same DB alias")),
+                (
+                    "path".to_string(),
+                    serde_json::json!("/tests/http-same-db-alias"),
+                ),
+                ("category".to_string(), serde_json::json!("fact")),
+                ("scope".to_string(), serde_json::json!("project")),
+                ("force".to_string(), serde_json::json!(true)),
+            ]),
+        )
+        .await;
+        assert!(
+            save.get("error").is_none() && save["result"]["isError"] != serde_json::json!(true),
+            "same-DB alias write failed: {save:#}"
+        );
+
+        let runtime = http_mcp_call_tool(
+            &client,
+            &daemon.url,
+            session_headers,
+            3,
+            "runtime_info",
+            serde_json::Map::new(),
+        )
+        .await;
+        let runtime_json: serde_json::Value =
+            serde_json::from_str(&http_tool_text(&runtime)).expect("runtime_info JSON");
+        assert_eq!(
+            runtime_json["runtime"]["session_project"],
+            serde_json::json!(&bound_name),
+            "immutable HTTP binding must remain the legacy identity"
+        );
+        (ct, daemon_task)
+    });
+
+    assert_eq!(memory_text_count(&project, saved_text), 1);
+    assert_eq!(memory_text_count(&global, saved_text), 0);
+    assert!(
+        !tachi_home.join("projects").join(&bound_name).exists(),
+        "validation must not create the legacy Plan C alias"
+    );
+    assert!(
+        !tachi_home.join("projects").join(&requested_alias).exists(),
+        "validation must not create the hashed Plan C alias"
+    );
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
