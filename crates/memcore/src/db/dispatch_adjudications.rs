@@ -71,7 +71,7 @@ pub fn append_dispatch_adjudication(
     // FIX-1 (#1035): the parent INSERT and every signature INSERT MUST be in
     // one transaction. A unique-constraint violation on a signature row
     // previously left a parentless half-event that the event_key short-circuit
-    // then permanently固化 — the next replay returned the orphan. An
+    // then permanently entrenched — the next replay returned the orphan. An
     // unchecked_transaction on &Connection auto-rolls-back on drop (any `?`
     // propagation), so a mid-append failure atomically disappears the entire
     // event, parent row included.
@@ -435,7 +435,7 @@ mod tests {
     /// must roll back the ENTIRE event — parent row included. Before the
     /// transaction wrapper the parent INSERT committed independently, leaving
     /// a signatureless half-event that the event_key short-circuit then
-    /// permanently固化 (a replay returned the orphan row forever). This test
+    /// permanently entrenched (a replay returned the orphan row forever). This test
     /// is RED on pre-FIX-1 code: the second signature's PK violation fails
     /// AFTER the parent row is already committed, so the parent row count is
     /// 1 instead of 0.
