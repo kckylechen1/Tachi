@@ -16,7 +16,7 @@
 
 pub use vault_kit::{
     active_kdf_params_json, create_verifier, decrypt, encrypt, generate_salt, verify_password,
-    zero_key, zero_string, DerivedVaultKey, KdfParams, KdfParamsError, AES_GCM_NONCE_LEN,
+    zero_key, zero_string, DerivedVaultKey, KdfParams, AES_GCM_NONCE_LEN,
 };
 
 use aes_gcm::{
@@ -65,8 +65,8 @@ impl std::error::Error for KdfParamsFormatError {}
 /// Keychain auto-unlock (`provider_config::auto_unlock_vault_from_keychain`),
 /// the status-health Keychain loader (`status_health::vault`), the setup-wizard
 /// unlock-existing-vault verifier (stores freshly collected API keys into an
-/// already-initialized vault), both `env_cmd` unlock entry points (materialize
-/// + legacy), and the stateless `vault_cli` session verifier. Malformed JSON or
+/// already-initialized vault), both `env_cmd` unlock entry points (materialize + legacy),
+/// and the stateless `vault_cli` session verifier. Malformed JSON or
 /// an unsupported parameter combination surfaces as a loud, versioned error
 /// naming both the stored value and the supported set.
 ///
@@ -106,6 +106,7 @@ pub fn parse_stored_kdf_params(
 ///   [`KdfParamsFormatError`] (kept un-stringified inside the `Box<dyn Error>`);
 /// - a password mismatch surfaces as a boxed `String` ("Wrong password");
 /// - a salt/derivation failure surfaces as a boxed `String`.
+///
 /// A caller must never confuse a stored-format failure for a wrong password
 /// (and vice versa) — the [`KdfParamsFormatError`] downcast is the discriminator.
 pub fn derive_verified_key_from_stored_config(
