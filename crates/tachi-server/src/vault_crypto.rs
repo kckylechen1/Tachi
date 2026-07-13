@@ -30,8 +30,15 @@ const AES_GCM_TAG_LEN: usize = 16;
 
 /// Parse the `vault_config.kdf_params` JSON column into a validated
 /// `KdfParams` (fail-closed). Called by every unlock/verify path that derives
-/// a key from a *stored* config (tachi#1080): malformed JSON or an
-/// unsupported parameter combination surfaces as a loud, versioned error
+/// a key from a *stored* config (tachi#1080): as of the full wiring this is the
+/// 8 call sites that read a stored `VaultConfig` and derive before verifying —
+/// the MCP `handle_vault_unlock` handler, the CLI central verifier
+/// (`vault_cli::derive_verified_vault_key_from_password`), the in-process
+/// Keychain auto-unlock (`provider_config::auto_unlock_vault_from_keychain`),
+/// the status-health Keychain loader (`status_health::vault`), the setup-wizard
+/// change-password verifier, both `env_cmd` unlock entry points (materialize +
+/// legacy), and the stateless `vault_cli` session verifier. Malformed JSON or
+/// an unsupported parameter combination surfaces as a loud, versioned error
 /// naming both the stored value and the supported set.
 ///
 /// Deliberately NOT phrased as a password error — a stored-parameter mismatch

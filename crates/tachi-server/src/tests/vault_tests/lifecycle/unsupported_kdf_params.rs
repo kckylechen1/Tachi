@@ -160,13 +160,17 @@ async fn vault_unlock_rejects_malformed_kdf_params_json_with_versioned_error() {
         "malformed kdf_params is a format error, not a wrong password: {err}"
     );
     assert!(
-        err.contains("kdf_params"),
-        "the versioned error must reference the stored kdf_params field: {err}"
+        err.contains("kdf_params") && err.contains("supported"),
+        "the versioned error must name the stored kdf_params and the supported set: {err}"
     );
 
     let state = server.vault_read().failed_attempts;
     assert_eq!(
         state.0, 0,
         "a malformed kdf_params must not count against the brute-force lockout counter"
+    );
+    assert!(
+        state.1.is_none(),
+        "a format error alone must not install a lockout window"
     );
 }

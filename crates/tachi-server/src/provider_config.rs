@@ -216,8 +216,16 @@ pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, St
     let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("invalid vault salt: {e}"))?;
-    let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)
-        .map_err(|e| format!("vault key derivation failed: {e}"))?;
+    // tachi#1080: derive using the STORED `vault_config.kdf_params`, not a
+    // compile-time constant. A malformed or unsupported stored value fails
+    // loud and versioned here — before `verify_password` — so a stored-format
+    // mismatch is never misread as "keychain password does not match vault"
+    // and never silently unlocks with a compile-time-derived key.
+    let key = match crate::vault_crypto::parse_stored_kdf_params(&config.kdf_params) {
+        Ok(params) => crate::vault_crypto::DerivedVaultKey::derive_with_params(&password, &salt, &params)
+            .map_err(|e| format!("vault key derivation failed: {e}")),
+        Err(err) => Err(err),
+    }?;
     if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)
         .map_err(|e| format!("vault verifier check failed: {e}"))?
     {

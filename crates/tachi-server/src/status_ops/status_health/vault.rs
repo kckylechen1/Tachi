@@ -43,7 +43,17 @@ pub(crate) fn load_keychain_vault_api_key_values(
     };
 
     let salt = B64.decode(&config.salt)?;
-    let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
+    // tachi#1080: derive using the STORED `vault_config.kdf_params`, not a
+    // compile-time constant. A malformed or unsupported stored value fails
+    // loud and versioned here — before `verify_password` — instead of silently
+    // degrading to an empty Vec (the pre-fix path masked a stored-format
+    // mismatch as "no provider keys").
+    let key_result = match crate::vault_crypto::parse_stored_kdf_params(&config.kdf_params) {
+        Ok(params) => crate::vault_crypto::DerivedVaultKey::derive_with_params(&password, &salt, &params)
+            .map_err(|e| e.to_string()),
+        Err(err) => Err(err),
+    };
+    let key = key_result?;
     if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
         return Ok(Vec::new());
     }
