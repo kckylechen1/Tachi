@@ -30,22 +30,6 @@ fn facade_response_markdown_parse_failure_is_visible() {
 }
 
 #[test]
-fn attach_host_admission_rejects_non_object_producer_payloads() {
-    let _profile = crate::host_profile::HostProfileTestOverride::set(Some("development"));
-    let admission =
-        crate::host_profile::admit_execution_level(Some(tachi_params::ExecutionLevel::L0));
-
-    for raw in ["[]", "null", r#""scalar""#] {
-        let error = attach_host_admission(raw.to_string(), &admission)
-            .expect_err("non-object producer payload must fail closed");
-        assert_eq!(
-            error,
-            "attach host admission: expected recommend/route payload to be a JSON object"
-        );
-    }
-}
-
-#[test]
 fn facade_response_renders_recommend_and_profiles_as_markdown_tables() {
     let recommend_raw = r#"{
         "task": "harden the search path",

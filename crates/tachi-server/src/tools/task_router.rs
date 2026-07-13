@@ -322,7 +322,7 @@ pub(super) async fn handle_tachi_task_facade(
     )
 }
 
-pub(super) fn attach_host_admission(
+fn attach_host_admission(
     raw: String,
     admission: &crate::host_profile::HostAdmission,
 ) -> Result<String, String> {
@@ -333,6 +333,27 @@ pub(super) fn attach_host_admission(
     })?;
     object.insert("host_admission".to_string(), admission.to_json());
     serde_json::to_string(&value).map_err(|e| format!("serialize host admission attach: {e}"))
+}
+
+#[cfg(test)]
+mod host_admission_tests {
+    use super::attach_host_admission;
+
+    #[test]
+    fn attach_host_admission_rejects_non_object_producer_payloads() {
+        let _profile = crate::host_profile::HostProfileTestOverride::set(Some("development"));
+        let admission =
+            crate::host_profile::admit_execution_level(Some(tachi_params::ExecutionLevel::L0));
+
+        for raw in ["[]", "null", r#""scalar""#] {
+            let error = attach_host_admission(raw.to_string(), &admission)
+                .expect_err("non-object producer payload must fail closed");
+            assert_eq!(
+                error,
+                "attach host admission: expected recommend/route payload to be a JSON object"
+            );
+        }
+    }
 }
 
 /// Defense-in-depth for the task facade; primary gate is F3
