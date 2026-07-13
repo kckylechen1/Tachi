@@ -901,7 +901,7 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn unique_temp_dir(name: &str) -> PathBuf {
+    pub(crate) fn unique_temp_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time")
@@ -1355,6 +1355,7 @@ mod tests {
 /// isolation is deliberate: it is exactly what the convoy fix changes.
 #[cfg(test)]
 mod bench {
+    use super::tests::unique_temp_dir;
     use super::*;
 
     fn percentile(sorted_micros: &[u128], pct: f64) -> u128 {
