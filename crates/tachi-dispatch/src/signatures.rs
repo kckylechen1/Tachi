@@ -452,7 +452,10 @@ mod tests {
     #[test]
     fn resolve_signature_id_accepts_canonical_and_rejects_unknown() {
         // Canonical taxonomy ids resolve to themselves.
-        assert_eq!(resolve_signature_id("fake_security_fix"), Some("fake_security_fix"));
+        assert_eq!(
+            resolve_signature_id("fake_security_fix"),
+            Some("fake_security_fix")
+        );
         assert_eq!(
             resolve_signature_id("falsified_ci_report"),
             Some("falsified_ci_report")
@@ -467,7 +470,8 @@ mod tests {
     }
 
     #[test]
-    fn normalize_vendor_maps_families_and_unknown() {        assert_eq!(
+    fn normalize_vendor_maps_families_and_unknown() {
+        assert_eq!(
             normalize_vendor("custom", Some("zhipuai-coding-plan/glm-5.1")),
             "glm"
         );

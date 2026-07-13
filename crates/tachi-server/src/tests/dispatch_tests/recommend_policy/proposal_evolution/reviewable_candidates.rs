@@ -43,7 +43,8 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
                 format: None,
                 signatures: Vec::new(),
                 rulings: Vec::new(),
-                adjudication: None,}))
+                adjudication: None,
+            }))
             .await
             .expect("seed loadout eval row");
     }

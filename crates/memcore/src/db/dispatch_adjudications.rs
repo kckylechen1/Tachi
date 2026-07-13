@@ -274,7 +274,8 @@ mod tests {
         let illegal = not_required_event("nr-bad", "out_of_scope");
         let err = append_dispatch_adjudication(&conn, &illegal).unwrap_err();
         assert!(
-            err.to_string().contains("not_required_reason") && err.to_string().contains("out_of_scope"),
+            err.to_string().contains("not_required_reason")
+                && err.to_string().contains("out_of_scope"),
             "illegal reason must be rejected with a message naming it: {err}"
         );
         let count: i64 = conn

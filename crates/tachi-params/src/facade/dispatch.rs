@@ -607,11 +607,11 @@ impl AdjudicationParams {
         let has_verdict = self
             .verdict
             .as_deref()
-            .map_or(false, |v| !v.trim().is_empty());
+            .is_some_and(|v| !v.trim().is_empty());
         let has_reason = self
             .not_required_reason
             .as_deref()
-            .map_or(false, |r| !r.trim().is_empty());
+            .is_some_and(|r| !r.trim().is_empty());
         match (has_verdict, has_reason) {
             (true, false) | (false, true) => Ok(()),
             (true, true) => Err(
@@ -620,8 +620,7 @@ impl AdjudicationParams {
                     .to_string(),
             ),
             (false, false) => Err(
-                "adjudication requires exactly one of verdict or not_required_reason"
-                    .to_string(),
+                "adjudication requires exactly one of verdict or not_required_reason".to_string(),
             ),
         }
     }

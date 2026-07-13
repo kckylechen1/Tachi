@@ -58,7 +58,8 @@ async fn tachi_task_recommend_does_not_apply_same_backend_wrong_role_subagent_ev
             format: None,
             signatures: Vec::new(),
             rulings: Vec::new(),
-            adjudication: None,}))
+            adjudication: None,
+        }))
         .await
         .expect("seed eval row");
 

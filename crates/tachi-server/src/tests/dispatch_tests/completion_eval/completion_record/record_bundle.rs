@@ -60,7 +60,8 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             format: None,
             signatures: Vec::new(),
             rulings: Vec::new(),
-            adjudication: None,}))
+            adjudication: None,
+        }))
         .await
         .expect("tachi_complete should succeed");
 
@@ -376,7 +377,8 @@ async fn tachi_complete_accepts_stringified_trajectory_array() {
             format: None,
             signatures: Vec::new(),
             rulings: Vec::new(),
-            adjudication: None,}))
+            adjudication: None,
+        }))
         .await
         .expect("tachi_complete should accept stringified trajectory");
     let bundle: Value = serde_json::from_str(&resp).expect("complete response JSON");

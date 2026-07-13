@@ -408,7 +408,8 @@ async fn tachi_complete_records_pattern_hit_from_evidence_ref() {
             format: None,
             signatures: Vec::new(),
             rulings: Vec::new(),
-            adjudication: None,}))
+            adjudication: None,
+        }))
         .await
         .expect("complete with pattern ref");
     let parsed: Value = serde_json::from_str(&response).expect("complete response json");

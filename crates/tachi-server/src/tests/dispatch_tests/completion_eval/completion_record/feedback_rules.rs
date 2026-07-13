@@ -36,7 +36,8 @@ async fn tachi_complete_records_applied_feedback_rules_for_eval_aggregation() {
             format: None,
             signatures: Vec::new(),
             rulings: Vec::new(),
-            adjudication: None,}))
+            adjudication: None,
+        }))
         .await
         .expect("completion should succeed");
     let completed: Value = serde_json::from_str(&raw).expect("complete JSON");

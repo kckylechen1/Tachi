@@ -1390,7 +1390,10 @@ mod tests {
         }
     }
 
-    fn adjudication_outcome_rows(server: &MemoryServer, outcome_id: &str) -> Vec<memcore::DispatchAdjudication> {
+    fn adjudication_outcome_rows(
+        server: &MemoryServer,
+        outcome_id: &str,
+    ) -> Vec<memcore::DispatchAdjudication> {
         server
             .with_global_store_read(|store| {
                 memcore::list_adjudications_for_outcome(store.connection(), outcome_id)
@@ -1419,13 +1422,25 @@ mod tests {
         ];
 
         let outcome_status = record_complete_outcome(
-            &server, &params, "eval-1", "success", "completed", None, true, true, &[],
+            &server,
+            &params,
+            "eval-1",
+            "success",
+            "completed",
+            None,
+            true,
+            true,
+            &[],
         );
         assert_eq!(outcome_status["recorded"], json!(true));
         let outcome_id = outcome_status["outcome_id"].as_str().unwrap().to_string();
 
         let adj_status = record_complete_adjudication(&server, &params, &outcome_status);
-        assert_eq!(adj_status["recorded"], json!(true), "adjudication recorded: {adj_status}");
+        assert_eq!(
+            adj_status["recorded"],
+            json!(true),
+            "adjudication recorded: {adj_status}"
+        );
 
         let rows = adjudication_outcome_rows(&server, &outcome_id);
         assert_eq!(rows.len(), 1, "exactly one adjudication row");
@@ -1440,7 +1455,10 @@ mod tests {
                     .map_err(|e| e.to_string())
             })
             .unwrap();
-        assert!(is_adj, "outcome_is_adjudicated returns true after a terminal event");
+        assert!(
+            is_adj,
+            "outcome_is_adjudicated returns true after a terminal event"
+        );
 
         // Snapshot the first row for byte-for-byte comparison after replay.
         let first_row = rows.into_iter().next().unwrap();
@@ -1449,7 +1467,15 @@ mod tests {
         let mut replay_no_adj = params.clone();
         replay_no_adj.adjudication = None;
         let replay_status = record_complete_outcome(
-            &server, &replay_no_adj, "eval-2", "success", "completed", None, true, true, &[],
+            &server,
+            &replay_no_adj,
+            "eval-2",
+            "success",
+            "completed",
+            None,
+            true,
+            true,
+            &[],
         );
         assert_eq!(
             replay_status["outcome_id"], outcome_id,
@@ -1458,7 +1484,11 @@ mod tests {
         let replay_adj = record_complete_adjudication(&server, &replay_no_adj, &replay_status);
         assert_eq!(replay_adj, json!("skipped (no adjudication)"));
         let after_skip = adjudication_outcome_rows(&server, &outcome_id);
-        assert_eq!(after_skip.len(), 1, "no new row from a no-adjudication replay");
+        assert_eq!(
+            after_skip.len(),
+            1,
+            "no new row from a no-adjudication replay"
+        );
         assert_eq!(after_skip[0], first_row, "original row untouched");
 
         // Replay 2: same complete, DIFFERENT adjudication → idempotent
@@ -1472,13 +1502,28 @@ mod tests {
             evidence_ref: Some("run-different".to_string()),
         });
         let replay2_status = record_complete_outcome(
-            &server, &replay_diff_adj, "eval-3", "success", "completed", None, true, true, &[],
+            &server,
+            &replay_diff_adj,
+            "eval-3",
+            "success",
+            "completed",
+            None,
+            true,
+            true,
+            &[],
         );
         let replay2_adj = record_complete_adjudication(&server, &replay_diff_adj, &replay2_status);
-        assert_eq!(replay2_adj["recorded"], json!(true), "replay adjudication status");
+        assert_eq!(
+            replay2_adj["recorded"],
+            json!(true),
+            "replay adjudication status"
+        );
         let after_diff = adjudication_outcome_rows(&server, &outcome_id);
         assert_eq!(after_diff.len(), 1, "replay did not append a new row");
-        assert_eq!(after_diff[0], first_row, "original row byte-for-byte unchanged on replay");
+        assert_eq!(
+            after_diff[0], first_row,
+            "original row byte-for-byte unchanged on replay"
+        );
         assert_eq!(
             after_diff[0].verdict.as_deref(),
             Some("accepted"),
@@ -1499,7 +1544,15 @@ mod tests {
         });
 
         let outcome_status = record_complete_outcome(
-            &server, &params, "eval-nr", "success", "completed", None, true, true, &[],
+            &server,
+            &params,
+            "eval-nr",
+            "success",
+            "completed",
+            None,
+            true,
+            true,
+            &[],
         );
         let outcome_id = outcome_status["outcome_id"].as_str().unwrap().to_string();
 
@@ -1529,12 +1582,23 @@ mod tests {
         });
 
         let outcome_status = record_complete_outcome(
-            &server, &params, "eval-bad", "success", "completed", None, true, true, &[],
+            &server,
+            &params,
+            "eval-bad",
+            "success",
+            "completed",
+            None,
+            true,
+            true,
+            &[],
         );
         let adj_status = record_complete_adjudication(&server, &params, &outcome_status);
         assert_eq!(adj_status["recorded"], json!(false));
         assert!(
-            adj_status["error"].as_str().unwrap().contains("made_up_reason"),
+            adj_status["error"]
+                .as_str()
+                .unwrap()
+                .contains("made_up_reason"),
             "error must name the illegal reason: {adj_status}"
         );
 
@@ -1559,19 +1623,28 @@ mod tests {
             evidence_ref: Some("run-1".to_string()),
         });
         params.signatures = vec![
-            signature_rec("fake_security_fix"),      // valid
-            signature_rec("totally_made_up_id"),      // unknown → must reject ALL
+            signature_rec("fake_security_fix"),  // valid
+            signature_rec("totally_made_up_id"), // unknown → must reject ALL
         ];
 
         let outcome_status = record_complete_outcome(
-            &server, &params, "eval-unk", "success", "completed", None, true, true, &[],
+            &server,
+            &params,
+            "eval-unk",
+            "success",
+            "completed",
+            None,
+            true,
+            true,
+            &[],
         );
         assert_eq!(outcome_status["recorded"], json!(true));
 
         let adj_status = record_complete_adjudication(&server, &params, &outcome_status);
         // Rejected — but did not crash (complete proceeds).
         assert_eq!(
-            adj_status["recorded"], json!(false),
+            adj_status["recorded"],
+            json!(false),
             "unknown signature id must reject the adjudication, not silently accept it"
         );
         let err_msg = adj_status["error"].as_str().expect("error message present");

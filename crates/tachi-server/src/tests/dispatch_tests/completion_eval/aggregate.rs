@@ -36,7 +36,8 @@ async fn aggregate_live_filters_auto_synthesized_watchdog_rows() {
             format: None,
             signatures: Vec::new(),
             rulings: Vec::new(),
-            adjudication: None,}))
+            adjudication: None,
+        }))
         .await
         .expect("real eval should save");
 
@@ -188,7 +189,8 @@ async fn aggregate_live_uses_harness_native_mirror_eval_without_owning_lifecycle
             format: None,
             signatures: Vec::new(),
             rulings: Vec::new(),
-            adjudication: None,}))
+            adjudication: None,
+        }))
         .await
         .expect("mirror eval should save without dispatch_id");
     let completed: serde_json::Value = serde_json::from_str(&completed).expect("completion JSON");
