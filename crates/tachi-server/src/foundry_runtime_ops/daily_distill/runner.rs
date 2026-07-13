@@ -71,7 +71,14 @@ pub async fn run_daily_batch_distill_with_options(
         }
         report.projects_scanned += 1;
         // Best-effort per project: a failure on one must not abort the rest.
-        distill_one_project(server, Some(&name), name.clone(), run_consolidate, &mut report).await;
+        distill_one_project(
+            server,
+            Some(&name),
+            name.clone(),
+            run_consolidate,
+            &mut report,
+        )
+        .await;
     }
 
     // Opportunistically prune stale foundry-runs subdirs once per run.
@@ -104,8 +111,7 @@ async fn distill_one_project(
     }
 
     if run_consolidate {
-        report.consolidated +=
-            consolidate_duplicate_candidates(server, project, &mut candidates);
+        report.consolidated += consolidate_duplicate_candidates(server, project, &mut candidates);
     }
 
     let batch_run_id = format!(

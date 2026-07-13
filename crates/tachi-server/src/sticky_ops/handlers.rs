@@ -57,7 +57,10 @@ pub(crate) async fn handle_sticky_leave(
     // pass u32::MAX and get a sticky that never expires. Clamp to a sane
     // window (1-30 days) — the archive TTL is meant to bound unread-note
     // lifetime, not opt out of it.
-    let ttl_days = input.ttl_days.unwrap_or(DEFAULT_TTL_DAYS).clamp(1, MAX_TTL_DAYS);
+    let ttl_days = input
+        .ttl_days
+        .unwrap_or(DEFAULT_TTL_DAYS)
+        .clamp(1, MAX_TTL_DAYS);
 
     // CP4 (security): scrub before persisting — sticky bodies are stored
     // verbatim in the global DB and rendered verbatim into the leader

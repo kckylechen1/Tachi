@@ -143,10 +143,7 @@ pub(crate) fn find_alias(legacy_name: &str) -> Option<&'static AliasEntry> {
 /// ignored) into an ordered tuple for comparison. Returns `None` if the string
 /// is not at least `major.minor.patch` of integers.
 pub(crate) fn parse_release(version: &str) -> Option<(u64, u64, u64)> {
-    let core = version
-        .split(['-', '+'])
-        .next()
-        .unwrap_or(version);
+    let core = version.split(['-', '+']).next().unwrap_or(version);
     let mut parts = core.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;

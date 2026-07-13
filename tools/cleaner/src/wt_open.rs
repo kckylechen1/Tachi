@@ -745,7 +745,9 @@ mod tests {
         let a = short_id();
         let b = short_id();
         assert_eq!(a.len(), 12, "short_id must keep 48 bits (12 hex chars)");
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         assert_ne!(a, b, "consecutive short_ids must not collide");
     }
 

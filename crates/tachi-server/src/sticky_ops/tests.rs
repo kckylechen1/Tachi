@@ -1056,10 +1056,8 @@ async fn sticky_leave_accepts_explicit_agent_id_for_one_shot_channels() {
 // paths use).
 #[tokio::test]
 async fn sticky_leave_clamps_ttl_days_to_thirty_day_ceiling() {
-    let db_path = std::env::temp_dir().join(format!(
-        "sticky-ttl-clamp-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path =
+        std::env::temp_dir().join(format!("sticky-ttl-clamp-{}.sqlite", uuid::Uuid::new_v4()));
     let server = test_server(db_path.clone());
 
     let result = handle_sticky_leave(

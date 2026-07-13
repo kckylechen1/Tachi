@@ -290,8 +290,7 @@ async fn different_ruling_content_gets_a_different_precedent_path() {
         RulingRecordParams {
             case: "first distinct case: worktree isolation boundary ruling".to_string(),
             options_considered: None,
-            ruling: "first ruling text: dispatched lanes never touch the main checkout"
-                .to_string(),
+            ruling: "first ruling text: dispatched lanes never touch the main checkout".to_string(),
             principles_cited: vec!["precedent:1027-distinct-a".to_string()],
             outcome: Some("validated".to_string()),
             overturned_by: None,

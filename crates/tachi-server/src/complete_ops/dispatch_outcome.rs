@@ -462,7 +462,10 @@ mod tests {
             .find(|r| r.dispatch_id == "dispatch-watchdog")
             .expect("terminal row present");
         assert_eq!(row.execution_outcome, "failed");
-        assert_eq!(row.reported_outcome, None, "no self-report on a terminal path");
+        assert_eq!(
+            row.reported_outcome, None,
+            "no self-report on a terminal path"
+        );
         assert_eq!(row.error_class.as_deref(), Some("watchdog"));
 
         // First-writer-wins: a second, coarser classification does not clobber.
@@ -518,7 +521,11 @@ mod tests {
         std::env::remove_var("SIGIL_HOME");
         std::env::remove_var("TACHI_APP_HOME");
 
-        let named_db = tmp.path().join("projects").join(project_name).join("memory.db");
+        let named_db = tmp
+            .path()
+            .join("projects")
+            .join(project_name)
+            .join("memory.db");
         std::fs::create_dir_all(named_db.parent().unwrap()).expect("named project dir");
         std::fs::write(&named_db, b"").expect("named project db placeholder");
 
@@ -558,7 +565,15 @@ mod tests {
             params.dispatch_id = Some("dispatch-scope-sym-a".to_string());
             params.project = Some(project_name.to_string());
             let status = record_complete_outcome(
-                &server, &params, "eval-mem-sym-a", "success", "completed", None, true, true, &[],
+                &server,
+                &params,
+                "eval-mem-sym-a",
+                "success",
+                "completed",
+                None,
+                true,
+                true,
+                &[],
             );
             assert_eq!(status["recorded"], json!(true));
 
@@ -596,7 +611,15 @@ mod tests {
             params.dispatch_id = Some("dispatch-scope-sym-b".to_string());
             params.project = Some(project_name.to_string());
             let status = record_complete_outcome(
-                &server, &params, "eval-mem-sym-b", "success", "completed", None, true, true, &[],
+                &server,
+                &params,
+                "eval-mem-sym-b",
+                "success",
+                "completed",
+                None,
+                true,
+                true,
+                &[],
             );
             assert_eq!(status["recorded"], json!(true));
 

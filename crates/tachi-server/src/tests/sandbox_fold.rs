@@ -3,9 +3,7 @@
 //! (`fold_contract` harness), old↔new output goldens for the pure-read actions,
 //! and the two alias-manifest tripwires (version-past-removal, zombie-alias).
 
-use super::fold_contract::{
-    assert_admin_only, assert_fold_matrix_equivalence, FoldPair,
-};
+use super::fold_contract::{assert_admin_only, assert_fold_matrix_equivalence, FoldPair};
 use super::{call_tool_on_server, call_tool_via_server, make_server};
 use crate::tools::alias_manifest::{
     all_aliases, find_alias, parse_release, release_at_or_past, AliasKind, CURRENT_RELEASE,
@@ -43,10 +41,7 @@ fn router_descriptions() -> BTreeMap<String, String> {
 }
 
 /// Run one admin `tachi_sandbox`/legacy call and return its text payload.
-async fn admin_call_text(
-    tool: &str,
-    args: serde_json::Map<String, serde_json::Value>,
-) -> String {
+async fn admin_call_text(tool: &str, args: serde_json::Map<String, serde_json::Value>) -> String {
     let server = make_server();
     server.set_tool_profile(Some(
         tachi_hub::parse_tool_profile("admin").expect("admin profile parses"),
@@ -130,7 +125,10 @@ async fn list_policies_golden_matches_between_alias_and_verb() {
     let legacy = admin_call_text("sandbox_list_policies", legacy_args).await;
     let verb = admin_call_text("tachi_sandbox", verb_args).await;
 
-    assert!(!legacy.is_empty(), "legacy list_policies produced no payload");
+    assert!(
+        !legacy.is_empty(),
+        "legacy list_policies produced no payload"
+    );
     assert_eq!(
         legacy, verb,
         "sandbox_list_policies alias and tachi_sandbox(action='list_policies') must return identical output"
@@ -232,7 +230,10 @@ async fn set_rule_golden_matches_response_and_state_before_and_after() {
     let (legacy_before, legacy_write, legacy_after) = drive_set_rule("sandbox_set_rule").await;
     let (verb_before, verb_write, verb_after) = drive_set_rule("tachi_sandbox").await;
 
-    assert!(!legacy_before.is_empty(), "legacy pre-write check produced no payload");
+    assert!(
+        !legacy_before.is_empty(),
+        "legacy pre-write check produced no payload"
+    );
     assert_eq!(
         legacy_before, verb_before,
         "pre-write sandbox_check state must be identical on both fresh servers (no rule yet)"
@@ -242,13 +243,19 @@ async fn set_rule_golden_matches_response_and_state_before_and_after() {
         "sanity: default access (no rule) should be allowed=true before the write, got: {legacy_before}"
     );
 
-    assert!(!legacy_write.is_empty(), "legacy set_rule produced no payload");
+    assert!(
+        !legacy_write.is_empty(),
+        "legacy set_rule produced no payload"
+    );
     assert_eq!(
         legacy_write, verb_write,
         "sandbox_set_rule alias and tachi_sandbox(action='set_rule') must return identical output"
     );
 
-    assert!(!legacy_after.is_empty(), "legacy post-write check produced no payload");
+    assert!(
+        !legacy_after.is_empty(),
+        "legacy post-write check produced no payload"
+    );
     assert_eq!(
         legacy_after, verb_after,
         "post-write sandbox_check state must be identical between alias and verb paths — \
@@ -275,7 +282,10 @@ fn normalize_policy_state(text: &str) -> serde_json::Value {
 /// Drive `get_policy` on `server` and return its text payload.
 async fn get_policy_text(server: crate::MemoryServer, capability_id: &str) -> String {
     let mut args = serde_json::Map::new();
-    args.insert("capability_id".to_string(), serde_json::json!(capability_id));
+    args.insert(
+        "capability_id".to_string(),
+        serde_json::json!(capability_id),
+    );
     let result = call_tool_on_server(server, "sandbox_get_policy", Some(args))
         .await
         .expect("sandbox_get_policy probe call should yield a tool result");
@@ -295,11 +305,20 @@ async fn drive_set_policy(set_policy_tool: &str) -> (String, String, String) {
     let before = get_policy_text(harness.clone(), capability_id).await;
 
     let mut write_args = serde_json::Map::new();
-    write_args.insert("capability_id".to_string(), serde_json::json!(capability_id));
+    write_args.insert(
+        "capability_id".to_string(),
+        serde_json::json!(capability_id),
+    );
     write_args.insert("runtime_type".to_string(), serde_json::json!("wasm"));
-    write_args.insert("env_allowlist".to_string(), serde_json::json!(["PATH", "HOME"]));
+    write_args.insert(
+        "env_allowlist".to_string(),
+        serde_json::json!(["PATH", "HOME"]),
+    );
     write_args.insert("fs_read_roots".to_string(), serde_json::json!(["/project"]));
-    write_args.insert("fs_write_roots".to_string(), serde_json::json!(["/project/out"]));
+    write_args.insert(
+        "fs_write_roots".to_string(),
+        serde_json::json!(["/project/out"]),
+    );
     write_args.insert("cwd_roots".to_string(), serde_json::json!(["/project"]));
     write_args.insert("max_startup_ms".to_string(), serde_json::json!(15_000));
     write_args.insert("max_tool_ms".to_string(), serde_json::json!(20_000));
@@ -323,7 +342,10 @@ async fn set_policy_golden_matches_response_and_state_before_and_after() {
     let (legacy_before, legacy_write, legacy_after) = drive_set_policy("sandbox_set_policy").await;
     let (verb_before, verb_write, verb_after) = drive_set_policy("tachi_sandbox").await;
 
-    assert!(!legacy_before.is_empty(), "legacy pre-write get_policy produced no payload");
+    assert!(
+        !legacy_before.is_empty(),
+        "legacy pre-write get_policy produced no payload"
+    );
     assert_eq!(
         legacy_before, verb_before,
         "pre-write get_policy state must be identical on both fresh servers (no policy yet)"
@@ -333,13 +355,19 @@ async fn set_policy_golden_matches_response_and_state_before_and_after() {
         "sanity: get_policy should report not-found before the write, got: {legacy_before}"
     );
 
-    assert!(!legacy_write.is_empty(), "legacy set_policy produced no payload");
+    assert!(
+        !legacy_write.is_empty(),
+        "legacy set_policy produced no payload"
+    );
     assert_eq!(
         legacy_write, verb_write,
         "sandbox_set_policy alias and tachi_sandbox(action='set_policy') must return identical output"
     );
 
-    assert!(!legacy_after.is_empty(), "legacy post-write get_policy produced no payload");
+    assert!(
+        !legacy_after.is_empty(),
+        "legacy post-write get_policy produced no payload"
+    );
     assert_eq!(
         normalize_policy_state(&legacy_after),
         normalize_policy_state(&verb_after),
@@ -356,9 +384,7 @@ async fn set_policy_golden_matches_response_and_state_before_and_after() {
 /// removal was forgotten. Turn it red at that point.
 #[test]
 fn no_alias_is_routed_past_its_removal_release() {
-    let routed: std::collections::BTreeSet<String> = router_descriptions()
-        .into_keys()
-        .collect();
+    let routed: std::collections::BTreeSet<String> = router_descriptions().into_keys().collect();
 
     for entry in all_aliases() {
         if release_at_or_past(CURRENT_RELEASE, entry.remove_in_release) {
@@ -496,8 +522,7 @@ fn manifest_entries_have_consistent_lifecycle_and_destructive_fields() {
         // the source the S2+ action-level destructive_hint direction (see
         // server_handler::annotate_tool) will eventually read from, so it
         // must stay accurate even though today's MCP hint is tool-level.
-        let expected_destructive =
-            matches!(entry.canonical_action, "set_rule" | "set_policy");
+        let expected_destructive = matches!(entry.canonical_action, "set_rule" | "set_policy");
         assert_eq!(
             entry.destructive, expected_destructive,
             "manifest entry '{}' (canonical_action='{}') declares destructive={}, \

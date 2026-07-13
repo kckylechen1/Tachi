@@ -221,10 +221,7 @@ async fn briefing_surfaces_file_scope_collision_using_the_calling_sessions_own_d
     // `_` (which round 4 replaced with a space, breaking this exact
     // assertion — this is the discriminating fix: pre-fix the substring
     // check below would have failed against `claims ops.rs`).
-    assert!(warnings[0]
-        .as_str()
-        .unwrap()
-        .contains("claims\\_ops.rs"));
+    assert!(warnings[0].as_str().unwrap().contains("claims\\_ops.rs"));
 
     // And session A's own briefing symmetrically surfaces the same overlap
     // against B.

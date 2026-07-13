@@ -1241,7 +1241,11 @@ mod tests {
             // `**` must be an even (self-escaping) count — never odd, which
             // is what would eat one of the two closing `*` characters.
             let before_close = rendered.split("** →").next().unwrap();
-            let trailing_backslashes = before_close.chars().rev().take_while(|&c| c == '\\').count();
+            let trailing_backslashes = before_close
+                .chars()
+                .rev()
+                .take_while(|&c| c == '\\')
+                .count();
             assert_eq!(
                 trailing_backslashes % 2,
                 0,

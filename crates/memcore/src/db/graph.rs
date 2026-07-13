@@ -87,12 +87,7 @@ pub fn add_component_governance_edge(
     edge: &MemoryEdge,
     relation: ComponentGovernanceRelation,
 ) -> Result<(), MemoryError> {
-    add_component_governance_edge_with_provenance(
-        conn,
-        edge,
-        relation,
-        &EdgeProvenance::default(),
-    )
+    add_component_governance_edge_with_provenance(conn, edge, relation, &EdgeProvenance::default())
 }
 
 /// [`add_component_governance_edge`] plus explicit provenance for the appended
