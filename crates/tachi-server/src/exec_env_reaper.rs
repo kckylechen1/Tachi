@@ -110,7 +110,8 @@
 //! the key the byte report groups on (`safe_merge` / `expired` / `orphan` /
 //! `unmanaged`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -258,8 +259,19 @@ impl Protection {
             // Keep the canonical spelling too: `/tmp/x` and `/private/tmp/x` are
             // the same directory on macOS, and a prefix test that only knows one
             // of the two protects neither.
-            if let Ok(real) = std::fs::canonicalize(&path) {
-                all.push(real);
+            //
+            // **sol audit fix (BUG 3).** The first cut only stored the canonical
+            // spelling when `canonicalize` *succeeded* — i.e. when the path already
+            // existed. The single most protection-critical path in this module is a
+            // build cache that does not exist yet (`CARGO_TARGET_DIR` is named
+            // before the first build creates it), and for exactly that path the set
+            // held nothing but the caller's literal spelling. `/tmp/x-target` and
+            // `/private/tmp/x-target` are then two unrelated strings and the alias
+            // protects neither. [`canonicalize_expected`] resolves the deepest
+            // ancestor that *does* exist and re-joins the missing tail, so a
+            // not-yet-created protected target is matched under both spellings.
+            if let Some(expected) = canonicalize_expected(&path) {
+                all.push(expected);
             }
             all.push(path);
         }
@@ -285,7 +297,11 @@ impl Protection {
     /// protected path takes the protected path with it, so an ancestor is just
     /// as untouchable as a descendant. This is the fence the deleter asks.
     pub(crate) fn covers(&self, dir: &Path) -> bool {
-        let real = std::fs::canonicalize(dir).ok();
+        // `canonicalize_expected`, not `canonicalize`: the queried path may not
+        // exist either (a candidate deleted out from under us, a protected target
+        // named before its first build), and an unresolvable query must still be
+        // matched against the alias spellings of the protected set (BUG 3).
+        let real = canonicalize_expected(dir);
         self.paths.iter().any(|protected| {
             overlaps(dir, protected)
                 || real
@@ -307,7 +323,7 @@ impl Protection {
     /// which is exactly what `covers` keeps enforcing at candidacy and at the
     /// deleter.
     pub(crate) fn contains_dir(&self, dir: &Path) -> bool {
-        let real = std::fs::canonicalize(dir).ok();
+        let real = canonicalize_expected(dir);
         self.paths.iter().any(|protected| {
             dir.starts_with(protected)
                 || real
@@ -320,6 +336,38 @@ impl Protection {
 /// Prefix relation in *either* direction (see [`Protection::covers`]).
 fn overlaps(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
+}
+
+/// The canonical spelling a path *would* have — even when it does not exist yet.
+///
+/// `std::fs::canonicalize` resolves nothing for a missing path, which is precisely
+/// the case that matters here: `CARGO_TARGET_DIR` names the build cache before the
+/// first build creates it, and a protected path stored only as the caller's literal
+/// spelling loses every alias (`/tmp` vs `/private/tmp`, a symlinked scratch root).
+///
+/// So: canonicalize the deepest ancestor that *does* exist, then re-join the tail
+/// that does not. `None` only when nothing in the chain resolves (no such root, or
+/// a component that is not a name — `..` is not resolved by hand, deliberately: a
+/// wrong guess here would *widen* a fence, and a fence we cannot compute is
+/// reported as a literal-only match rather than a fabricated canonical one).
+fn canonicalize_expected(path: &Path) -> Option<PathBuf> {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return Some(real);
+    }
+    let mut tail: Vec<OsString> = Vec::new();
+    let mut cursor = path;
+    loop {
+        let parent = cursor.parent()?;
+        tail.push(cursor.file_name()?.to_os_string());
+        if let Ok(real_parent) = std::fs::canonicalize(parent) {
+            let mut expected = real_parent;
+            for component in tail.iter().rev() {
+                expected.push(component);
+            }
+            return Some(expected);
+        }
+        cursor = parent;
+    }
 }
 
 /// Everything the reaper must never touch, from every source that knows where a
