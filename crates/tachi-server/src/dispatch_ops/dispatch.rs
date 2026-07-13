@@ -391,6 +391,7 @@ pub(crate) async fn handle_tachi_dispatch(
             // bypass), and which skills were excluded for asking for more than
             // the contract grants.
             "authority": authority_receipt.clone(),
+            "identity_receipt": resolved_profile.identity_receipt,
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
             // machine-verify self-reported / exit-0 success against a contract.
@@ -482,6 +483,7 @@ pub(crate) async fn handle_tachi_dispatch(
             // #894 S2d: same authority receipt as the receipt-first seed above
             // (this write's `extra` is a fresh object, not a merge).
             "authority": authority_receipt.clone(),
+            "identity_receipt": resolved_profile.identity_receipt,
             // #878-A: persist the working directory + completion predicate so
             // the complete gate (handler.rs) and the watchdog (execution.rs) can
             // machine-verify self-reported / exit-0 success against a contract.

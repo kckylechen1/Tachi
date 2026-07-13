@@ -342,6 +342,11 @@ async fn opencode_serve_dispatch_fails_fast_when_probe_auth_fails() {
     assert_eq!(status["host_profile"], json!("development"));
     assert_eq!(status["execution_level"], json!("L1"));
     assert_eq!(
+        status["identity_receipt"]["contract_id"],
+        json!(tachi_dispatch::DISPATCH_IDENTITY_CONTRACT_ID),
+        "receipt-first status seed must retain the dispatch identity through preflight failure"
+    );
+    assert_eq!(
         status["harness_server_status"]["doc_error"],
         json!("OpenCode /doc returned HTTP 401")
     );
