@@ -96,8 +96,8 @@ impl DispatchIdentityReceipt {
         resolution_reason: String,
         cross_lineage_authorized: bool,
     ) -> Result<(), String> {
-        if observed.model_lineage_id != self.planned.model_lineage_id
-            && observed.model_lineage_id != UNKNOWN_IDENTITY
+        if observed.model_lineage_id != UNKNOWN_IDENTITY
+            && !lineages_compatible(&observed.model_lineage_id, &self.planned.model_lineage_id)
             && !cross_lineage_authorized
         {
             return Err(format!(
@@ -105,7 +105,7 @@ impl DispatchIdentityReceipt {
                 self.planned.model_lineage_id, observed.model_lineage_id
             ));
         }
-        let mismatch = observed != self.planned;
+        let mismatch = identity_mismatch(&self.planned, &observed);
         self.observed = DispatchIdentityObserved {
             acknowledgement: acknowledgement.to_string(),
             effective: observed,
@@ -114,6 +114,71 @@ impl DispatchIdentityReceipt {
         };
         Ok(())
     }
+
+    /// The identity attribution must copy: the carrier-acknowledged effective
+    /// identity once an acknowledgement exists, otherwise the planned identity.
+    /// After a substitution the planned identity is NOT what executed, so
+    /// consumers reading through this accessor can never report a requested or
+    /// planned identity as the effective one.
+    pub fn attribution_identity(&self) -> &DispatchIdentityEffective {
+        match self.observed.acknowledgement.as_str() {
+            "acknowledged" | "substituted" | "ignored" => &self.observed.effective,
+            _ => &self.planned,
+        }
+    }
+}
+
+/// A field the planner could not know at resolution time is recorded as
+/// [`UNKNOWN_IDENTITY`]; absence of information is an explicit unknown state,
+/// never evidence of substitution. Only two *known* values can disagree.
+fn known_fields_disagree(planned: &str, observed: &str) -> bool {
+    planned != UNKNOWN_IDENTITY && observed != UNKNOWN_IDENTITY && planned != observed
+}
+
+/// True when an identity-bearing field the planner committed to differs from
+/// the observed value. Environment provenance (seat, transport, adapter and
+/// carrier versions) is recorded on the receipt but is not identity, so it can
+/// never flag a mismatch on its own.
+fn identity_mismatch(
+    planned: &DispatchIdentityEffective,
+    observed: &DispatchIdentityEffective,
+) -> bool {
+    let model_disagrees = matches!(
+        (planned.model.as_deref(), observed.model.as_deref()),
+        (Some(p), Some(o)) if p != o
+    );
+    model_disagrees
+        || known_fields_disagree(&planned.backend, &observed.backend)
+        || known_fields_disagree(&planned.harness, &observed.harness)
+        || known_fields_disagree(&planned.model_lineage_id, &observed.model_lineage_id)
+        || known_fields_disagree(
+            &planned.concrete_model_release,
+            &observed.concrete_model_release,
+        )
+        || known_fields_disagree(&planned.provider_model, &observed.provider_model)
+        || known_fields_disagree(
+            &planned.provider_model_version,
+            &observed.provider_model_version,
+        )
+        || known_fields_disagree(&planned.role, &observed.role)
+}
+
+/// Whether a requested/observed lineage stays inside a planned lineage.
+/// Lineages are canonically `provider/family`. A profile that declares no
+/// model resolves its lineage to the bare backend name; that constrains the
+/// model *family*, not the provider, so `anthropic/claude` stays inside
+/// `claude` while `openai/gpt` crosses it.
+pub fn lineages_compatible(candidate: &str, planned: &str) -> bool {
+    if candidate == planned {
+        return true;
+    }
+    if !planned.contains('/') {
+        return candidate
+            .rsplit('/')
+            .next()
+            .is_some_and(|family| family == planned);
+    }
+    false
 }
 
 pub fn model_lineage_id(model: Option<&str>, fallback: &str) -> String {
@@ -140,12 +205,14 @@ pub fn provider_model_parts(model: Option<&str>) -> (String, String, String) {
             UNKNOWN_IDENTITY.to_string(),
         );
     };
-    let (release, version) = model
-        .rsplit_once('@')
-        .unwrap_or((model, UNKNOWN_IDENTITY));
+    let (release, version) = model.rsplit_once('@').unwrap_or((model, UNKNOWN_IDENTITY));
+    let provider_model = release
+        .split_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(release);
     (
         release.to_string(),
-        release.to_string(),
+        provider_model.to_string(),
         version.to_string(),
     )
 }

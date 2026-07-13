@@ -181,11 +181,13 @@ fn resolve_outcome_lane(
     receipt: Option<&tachi_dispatch::DispatchIdentityReceipt>,
 ) -> (Option<String>, String, Option<String>) {
     if let Some(receipt) = receipt {
-        let planned = &receipt.planned;
+        // Outcome rows record execution facts: after a carrier acknowledgement
+        // the observed effective identity is the fact, not the planned route.
+        let identity = receipt.attribution_identity();
         return (
-            tachi_dispatch::dispatch_role_class(&planned.role).map(str::to_string),
-            tachi_dispatch::normalize_vendor(&planned.backend, planned.model.as_deref()),
-            planned.model.clone(),
+            tachi_dispatch::dispatch_role_class(&identity.role).map(str::to_string),
+            tachi_dispatch::normalize_vendor(&identity.backend, identity.model.as_deref()),
+            identity.model.clone(),
         );
     }
     let profile_def = params

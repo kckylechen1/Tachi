@@ -200,11 +200,13 @@ fn resolve_complete_lane(
         if let Some(dispatch_id) = params.dispatch_id.as_deref() {
             if let Some(receipt) = crate::dispatch_ops::load_dispatch_identity_receipt(dispatch_id)
             {
-                let role = tachi_dispatch::dispatch_role_class(&receipt.planned.role)?;
-                let vendor = tachi_dispatch::normalize_vendor(
-                    &receipt.planned.backend,
-                    receipt.planned.model.as_deref(),
-                );
+                // Signature evidence attributes to the model that actually
+                // executed: the acknowledged effective identity when the
+                // carrier reported one, otherwise the planned identity.
+                let identity = receipt.attribution_identity();
+                let role = tachi_dispatch::dispatch_role_class(&identity.role)?;
+                let vendor =
+                    tachi_dispatch::normalize_vendor(&identity.backend, identity.model.as_deref());
                 return (vendor != "unknown").then(|| (role.to_string(), vendor));
             }
         }

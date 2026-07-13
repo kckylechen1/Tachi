@@ -374,10 +374,13 @@ pub fn profile_resolved_model(profile: &DispatchProfileDef) -> Option<String> {
         .or_else(|| profile.model.map(str::to_string))
 }
 
+/// One canonical lineage encoding everywhere (`provider/family`, or the bare
+/// backend when no model is declared). An alias is a routing name, not a
+/// lineage: it must resolve to its concrete model first, or the receipt's
+/// planned lineage could never match a carrier-acknowledged lineage computed
+/// from the real model string.
 fn profile_model_lineage_id(profile: &DispatchProfileDef) -> String {
-    profile.model_alias.map(str::to_string).unwrap_or_else(|| {
-        crate::model_lineage_id(profile_resolved_model(profile).as_deref(), profile.backend)
-    })
+    crate::model_lineage_id(profile_resolved_model(profile).as_deref(), profile.backend)
 }
 
 pub fn profile_host_adapter(profile: &DispatchProfileDef) -> Option<&'static str> {
@@ -513,7 +516,7 @@ where
             let requested_lineage = crate::model_lineage_id(Some(requested_model), profile.backend);
             let profile_lineage =
                 crate::model_lineage_id(profile_model.as_deref(), profile.backend);
-            if requested_lineage != profile_lineage {
+            if !crate::lineages_compatible(&requested_lineage, &profile_lineage) {
                 return Err(format!(
                     "model override '{}' crosses profile '{}' lineage '{}' -> '{}' without explicit profile authorization",
                     requested_model, profile.name, profile_lineage, requested_lineage
@@ -1501,7 +1504,7 @@ mod tests {
             receipt.planned.model.as_deref(),
             Some("zhipuai-coding-plan/glm-5.2")
         );
-        assert_eq!(receipt.planned.model_lineage_id, "glm_coding");
+        assert_eq!(receipt.planned.model_lineage_id, "zhipuai-coding-plan/glm");
         assert_eq!(receipt.observed.acknowledgement, "unconfirmed");
         assert_eq!(receipt.observed.effective.backend, crate::UNKNOWN_IDENTITY);
         assert!(resolved.route_explanation.iter().any(|line| {
@@ -1573,6 +1576,124 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&receipt).expect("serialize"))
                 .expect("deserialize");
         assert_eq!(replay, receipt, "replay must preserve the frozen receipt");
+    }
+
+    #[test]
+    fn matching_acknowledgement_is_not_a_mismatch_and_wins_attribution() {
+        let _lock = env_lock();
+        let _env = EnvGuard::remove("TACHI_DISPATCH_GLM_CODING_MODEL");
+        let profile = resolve_dispatch_profile("glm_impl").expect("profile");
+        let mut receipt = recommendation_identity_receipt(profile);
+        assert_eq!(
+            receipt.attribution_identity(),
+            &receipt.planned,
+            "an unconfirmed receipt attributes to the planned identity"
+        );
+
+        let mut observed = receipt.planned.clone();
+        // A real carrier fills in provenance the planner could not know.
+        observed.seat = "worker-3".to_string();
+        observed.transport = "acp".to_string();
+        observed.adapter_version = "1.2.3".to_string();
+        observed.carrier_version = "0.9.0".to_string();
+        receipt
+            .acknowledge(
+                observed,
+                "acknowledged",
+                "carrier acknowledged launch".to_string(),
+                false,
+            )
+            .expect("matching acknowledgement");
+        assert!(
+            !receipt.observed.mismatch,
+            "provenance-only differences must not flag an identity mismatch"
+        );
+        assert_eq!(receipt.attribution_identity(), &receipt.observed.effective);
+    }
+
+    #[test]
+    fn same_lineage_release_substitution_is_an_explicit_mismatch() {
+        let _lock = env_lock();
+        let _env = EnvGuard::remove("TACHI_DISPATCH_GLM_CODING_MODEL");
+        let profile = resolve_dispatch_profile("glm_impl").expect("profile");
+        let mut receipt = recommendation_identity_receipt(profile);
+        let mut observed = receipt.planned.clone();
+        observed.model = Some("zhipuai-coding-plan/glm-5.2@2026-07-13".to_string());
+        let (release, provider_model, version) =
+            crate::provider_model_parts(observed.model.as_deref());
+        observed.concrete_model_release = release;
+        observed.provider_model = provider_model;
+        observed.provider_model_version = version;
+        receipt
+            .acknowledge(
+                observed,
+                "substituted",
+                "carrier pinned a release".to_string(),
+                false,
+            )
+            .expect("same-lineage release substitution is allowed");
+        assert!(
+            receipt.observed.mismatch,
+            "a release substitution must surface as an explicit mismatch"
+        );
+        assert_eq!(
+            receipt.attribution_identity().model.as_deref(),
+            Some("zhipuai-coding-plan/glm-5.2@2026-07-13"),
+            "attribution follows what executed, never the planned claim"
+        );
+    }
+
+    #[test]
+    fn profile_without_model_accepts_same_family_override() {
+        let mut params = params("claude_plan");
+        params.model = Some("anthropic/claude-sonnet-5".to_string());
+        let resolved = resolve_and_apply_dispatch_profile(
+            &mut params,
+            |profile| Ok(profile_required_skill_ids(profile)),
+            |profile| Ok(profile_evidence_required(profile)),
+            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
+            |_| false,
+        )
+        .expect("same-family override on a model-less profile must be allowed");
+        assert_eq!(
+            resolved.identity_receipt.planned.model.as_deref(),
+            Some("anthropic/claude-sonnet-5")
+        );
+    }
+
+    #[test]
+    fn profile_without_model_rejects_cross_family_override() {
+        let mut params = params("claude_plan");
+        params.model = Some("openai/gpt-5.6".to_string());
+        let error = resolve_and_apply_dispatch_profile(
+            &mut params,
+            |profile| Ok(profile_required_skill_ids(profile)),
+            |profile| Ok(profile_evidence_required(profile)),
+            |profile| Ok(profile_json(profile)["mbit_card"].clone()),
+            |_| false,
+        )
+        .expect_err("cross-family override must fail closed");
+        assert!(error.contains("without explicit profile authorization"));
+    }
+
+    #[test]
+    fn provider_model_parts_separates_provider_release_and_version() {
+        assert_eq!(
+            crate::provider_model_parts(Some("zhipuai-coding-plan/glm-5.2@2026-07-13")),
+            (
+                "zhipuai-coding-plan/glm-5.2".to_string(),
+                "glm-5.2".to_string(),
+                "2026-07-13".to_string()
+            )
+        );
+        assert_eq!(
+            crate::provider_model_parts(Some("glm-5.2")),
+            (
+                "glm-5.2".to_string(),
+                "glm-5.2".to_string(),
+                crate::UNKNOWN_IDENTITY.to_string()
+            )
+        );
     }
 
     #[test]
