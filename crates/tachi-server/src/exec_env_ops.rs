@@ -364,7 +364,7 @@ pub(crate) fn validate_provision_request(opts: &ProvisionEnvOptions) -> Result<(
 /// is left to the age-based `clean sweep` (there is no lease for the stale-lease
 /// backstop to reclaim in this case).
 pub(crate) fn provision_managed_env(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     opts: &ProvisionEnvOptions,
 ) -> Result<ProvisionedEnv, String> {
     // Fail-closed BEFORE any filesystem work: a refused class must not leave a
@@ -475,7 +475,7 @@ pub(crate) fn provision_managed_env(
 /// with the reservation and a provenance row records who approved it. A
 /// reservation nobody records is not a reservation.
 pub(crate) fn register_env_resources(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     env_id: &str,
     class: EnvClass,
     worktree_path: &str,
@@ -534,7 +534,7 @@ pub(crate) fn register_env_resources(
 /// (so `bytes` being overwritten by the next real measurement does not erase who
 /// approved what).
 fn book_private_reservation(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     env_id: &str,
     resource_id: &str,
     target_path: &str,
@@ -577,7 +577,7 @@ pub(crate) struct EnvResources {
 /// particular is the "interrupted cargo poisoned this dir" state — the broker
 /// clears it via `release_quarantine`, and until it does, nothing may bind it.
 pub(crate) fn ensure_resource(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     kind: ResourceKind,
     path: &str,
 ) -> Result<String, String> {
@@ -616,42 +616,63 @@ pub(crate) fn ensure_resource(
 /// (`build_broker::clear_target_for_reuse` -> `memcore::release_quarantine`).
 ///
 /// Still fail-closed on the states nobody can safely proceed from: a target
-/// mid-reclaim (`reclaiming`/`reclaim_failed`) or already reclaimed is not
-/// something to quietly build into — those bytes are being (or have been) freed
-/// under someone else's transaction.
+/// mid-reclaim (`reclaiming`/`reclaim_failed`) is not something to quietly
+/// build into — those bytes are being (or have been) freed under someone
+/// else's transaction.
 ///
-/// ## Open dependency on S2a round-2 (`reclaimed` ⇒ re-registrable)
+/// ## `reclaimed` ⇒ re-registrable (was an open S2a round-2 dependency; now
+/// resolved)
 ///
 /// A seat target holds no lease binding (that is the round-2 fix: only the
 /// broker books it), so a *stale, unheld* seat target is legitimately
-/// reclaimable by the orphan reaper. When that happens the row goes `reclaimed`
-/// and lands in the `other` arm below: the seat is then wedged on that path
-/// until someone removes the row by hand. Reclaiming an idle target dir should
-/// only ever cost a cold rebuild, never a wedged seat.
-///
-/// The re-registration edge (`reclaimed` path → a fresh `active` row, "those
-/// bytes are gone, so this is a virgin dir again") is S2a round-2's to own —
-/// state transitions are single-writer inside memcore by design, and forging one
-/// from here would break exactly the invariant that makes the ledger
-/// trustworthy. When it lands, this arm takes `ResourceState::Reclaimed` and
-/// re-registers instead of erroring. Until then the failure is loud and manual,
-/// which is the right way round.
+/// reclaimable by the orphan reaper. When that happens the row goes
+/// `reclaimed` — and `memcore::insert_resource`'s revive semantics (#894 S2a)
+/// now cover exactly this case: registering over a `reclaimed` `(path, kind)`
+/// resurrects that row in place under a fresh `resource_id`, `state` back to
+/// `active`. So a seat whose target got swept is not wedged: its next ticket
+/// calls this function, sees `Reclaimed`, and re-registers the same path as a
+/// virgin dir — same as the `None` (never-seen) arm below, just through the
+/// revive path instead of a plain insert. Reclaiming an idle target dir costs
+/// a cold rebuild, never a wedged seat.
 pub(crate) fn ensure_resource_allow_quarantined(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     target_path: &str,
 ) -> Result<String, String> {
     let existing = memcore::find_resource_by_path(conn, target_path, ResourceKind::BuildTarget)
         .map_err(|e| e.to_string())?;
     match existing {
-        Some(res) => match res.state {
-            ResourceState::Active | ResourceState::Quarantined => Ok(res.resource_id),
-            other => Err(format!(
-                "build target '{target_path}' is '{}': a target that is being reclaimed (or \
-                 already has been) must not be built into. If it is 'reclaimed', those bytes are \
-                 gone and the dir needs re-registering (S2a round-2 owns that edge) (#894 S2a/S2c)",
-                other.as_str()
-            )),
-        },
+        Some(res)
+            if matches!(
+                res.state,
+                ResourceState::Active | ResourceState::Quarantined
+            ) =>
+        {
+            Ok(res.resource_id)
+        }
+        Some(res) if res.state == ResourceState::Reclaimed => {
+            // Revived, not a plain insert: `insert_resource` resurrects the
+            // `(path, kind)` row under a fresh id rather than erroring, so the
+            // seat's next ticket gets a virgin-looking target instead of
+            // wedging on the swept row.
+            let resource_id = uuid::Uuid::new_v4().to_string();
+            memcore::insert_resource(
+                conn,
+                &NewExecEnvResource {
+                    resource_id: resource_id.clone(),
+                    kind: ResourceKind::BuildTarget,
+                    path: target_path.to_string(),
+                    bytes: None,
+                    created_at: String::new(),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(resource_id)
+        }
+        Some(res) => Err(format!(
+            "build target '{target_path}' is '{}': a target mid-reclaim must not be built into \
+             until that resolves (#894 S2a/S2c)",
+            res.state.as_str()
+        )),
         None => {
             let resource_id = uuid::Uuid::new_v4().to_string();
             memcore::insert_resource(
@@ -910,8 +931,8 @@ mod tests {
     /// pre-S2c code did for every worktree), this reds.
     #[test]
     fn edit_only_env_binds_no_build_target_resource() {
-        let store = store_with_lease("env-edit", EnvClass::EditOnly, "/wt/edit");
-        let conn = store.connection();
+        let mut store = store_with_lease("env-edit", EnvClass::EditOnly, "/wt/edit");
+        let conn = store.connection_mut();
 
         let opts = provision_opts(EnvClass::EditOnly, None);
         assert_eq!(
@@ -946,9 +967,9 @@ mod tests {
     /// function into binding it.
     #[test]
     fn register_env_resources_refuses_a_build_target_for_edit_only() {
-        let store = store_with_lease("env-edit", EnvClass::EditOnly, "/wt/edit");
+        let mut store = store_with_lease("env-edit", EnvClass::EditOnly, "/wt/edit");
         let err = register_env_resources(
-            store.connection(),
+            store.connection_mut(),
             "env-edit",
             EnvClass::EditOnly,
             "/wt/edit",
@@ -976,8 +997,8 @@ mod tests {
     /// run-time decision, and the seat books it.
     #[test]
     fn build_ticketed_env_holds_no_build_target_of_its_own() {
-        let store = store_with_lease("env-t", EnvClass::BuildTicketed, "/wt/t");
-        let conn = store.connection();
+        let mut store = store_with_lease("env-t", EnvClass::BuildTicketed, "/wt/t");
+        let conn = store.connection_mut();
 
         // Provisioning resolves NO target dir for the class...
         let opts = provision_opts(EnvClass::BuildTicketed, None);
@@ -1092,8 +1113,8 @@ mod tests {
     #[test]
     fn an_approved_private_target_reservation_is_booked_in_the_ledger() {
         const RESERVED: i64 = 40_000_000_000;
-        let store = store_with_lease("env-p", EnvClass::BuildPrivate, "/wt/p");
-        let conn = store.connection();
+        let mut store = store_with_lease("env-p", EnvClass::BuildPrivate, "/wt/p");
+        let conn = store.connection_mut();
 
         let bound = register_env_resources(
             conn,
@@ -1137,9 +1158,9 @@ mod tests {
     /// — the booking and the check are the same gate.
     #[test]
     fn register_env_resources_refuses_build_private_without_an_approval_to_book() {
-        let store = store_with_lease("env-p", EnvClass::BuildPrivate, "/wt/p");
+        let mut store = store_with_lease("env-p", EnvClass::BuildPrivate, "/wt/p");
         let err = register_env_resources(
-            store.connection(),
+            store.connection_mut(),
             "env-p",
             EnvClass::BuildPrivate,
             "/wt/p",
@@ -1190,17 +1211,19 @@ mod tests {
 
     #[test]
     fn a_quarantined_target_cannot_back_a_new_env() {
-        let store = store_with_lease("env-p", EnvClass::BuildPrivate, "/wt/p");
-        let conn = store.connection();
-        let target_id =
-            ensure_resource(conn, ResourceKind::BuildTarget, "/wt/p/target").expect("register");
+        let mut store = store_with_lease("env-p", EnvClass::BuildPrivate, "/wt/p");
+        let target_id = ensure_resource(
+            store.connection_mut(),
+            ResourceKind::BuildTarget,
+            "/wt/p/target",
+        )
+        .expect("register");
 
         // An interrupted cargo fenced this dir off.
-        let mut store = store;
         memcore::quarantine_resource(store.connection_mut(), &target_id, "interrupted").unwrap();
 
         let err = register_env_resources(
-            store.connection(),
+            store.connection_mut(),
             "env-p",
             EnvClass::BuildPrivate,
             "/wt/p",
@@ -1219,5 +1242,53 @@ mod tests {
                 .is_none(),
             "a refused provision must not leave a reservation behind"
         );
+    }
+
+    /// A seat's build target holds no lease binding (round-2 fix: only the
+    /// broker books it), so an idle seat target is legitimately reclaimable by
+    /// the orphan reaper — the row can go `reclaimed` out from under a seat
+    /// that still thinks it owns that path. `insert_resource`'s revive
+    /// semantics (#894 S2a) are what keep the seat from wedging on that: the
+    /// next ticket's `ensure_resource_allow_quarantined` call on the same path
+    /// must come back `Ok` with a fresh, `active` resource_id — not an error
+    /// that leaves the seat stuck on the swept row (the open dependency this
+    /// module used to carry against S2a round-2).
+    #[test]
+    fn a_reclaimed_seat_target_is_revived_not_wedged() {
+        let mut store = memcore::MemoryStore::open_in_memory().expect("in-memory store");
+        let conn = store.connection_mut();
+
+        let first_id =
+            ensure_resource_allow_quarantined(conn, "/seat/target").expect("first registration");
+
+        // The orphan reaper sweeps the idle target: nobody held a binding on
+        // it, so the reclaim goes through clean.
+        let outcome =
+            memcore::reclaim_resource(conn, &first_id, Some("orphan sweep"), |_res| Ok(0))
+                .expect("reclaim");
+        assert!(matches!(
+            outcome,
+            memcore::ResourceReclaimOutcome::Reclaimed { .. }
+        ));
+        assert_eq!(
+            memcore::get_resource(conn, &first_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            ResourceState::Reclaimed
+        );
+
+        // The seat's next ticket asks for the same path again — it must NOT
+        // error or wedge; it must come back as a fresh, active resource, and
+        // the build proceeds instead of stalling.
+        let second_id = ensure_resource_allow_quarantined(conn, "/seat/target")
+            .expect("a swept seat target must revive, not wedge the seat (#894 S2a/S2c)");
+        assert_ne!(
+            second_id, first_id,
+            "revive mints a fresh resource_id (S2a's RegisterOutcome::Revived contract)"
+        );
+        let revived = memcore::get_resource(conn, &second_id).unwrap().unwrap();
+        assert_eq!(revived.state, ResourceState::Active);
+        assert_eq!(revived.path, "/seat/target");
     }
 }

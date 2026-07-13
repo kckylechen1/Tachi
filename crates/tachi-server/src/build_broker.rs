@@ -370,7 +370,7 @@ fn execute_holding_slot(
     // The target dir is a tracked resource: register it if this is the first
     // time the seat used it.
     let target_resource_id =
-        crate::exec_env_ops::ensure_resource_allow_quarantined(store.connection(), &plan.path)?;
+        crate::exec_env_ops::ensure_resource_allow_quarantined(store.connection_mut(), &plan.path)?;
 
     if plan.clear_first {
         clear_target_for_reuse(store, &target_resource_id, &plan, runner)?;
@@ -466,8 +466,12 @@ fn clear_target_for_reuse(
     } else {
         let freed = runner.clear_target(&path)?;
         if freed > 0 {
-            let _ =
-                memcore::record_resource_measurement(store.connection(), target_resource_id, 0, "");
+            let _ = memcore::record_resource_measurement(
+                store.connection_mut(),
+                target_resource_id,
+                0,
+                "",
+            );
         }
     }
     // The dir is empty: it is virgin again, and must not keep claiming the
@@ -507,7 +511,7 @@ pub(crate) fn abandon_stale_slot(store: &mut MemoryStore, reason: &str) -> Resul
 
     if let Some(target_path) = &holder.target_path {
         let resource_id = crate::exec_env_ops::ensure_resource_allow_quarantined(
-            store.connection(),
+            store.connection_mut(),
             target_path,
         )?;
         memcore::quarantine_resource(

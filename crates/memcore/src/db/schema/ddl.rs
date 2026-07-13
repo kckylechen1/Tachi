@@ -494,20 +494,35 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- bookkeeping (#1029): the row flipped, the disk stayed full. One row
         -- here = one physical resource (a worktree dir, a shared cargo target,
         -- a scratch dir, a project DB), and `state = 'reclaimed'` means the
-        -- bytes are ACTUALLY gone. The single writer (`reclaim_resource`)
-        -- stamps `reclaiming`, the CALLER deletes from the filesystem (memcore
-        -- never touches the FS), then the writer records `reclaimed_bytes` and
-        -- flips `reclaimed`. A crash in between leaves the row in `reclaiming`,
-        -- which is re-enterable (at-least-once, idempotent — `reclaimed_bytes`
-        -- is assigned, never accumulated). `reclaim_failed` is a failed delete
-        -- (retryable); `quarantined` is "hands off, a human/broker decides".
+        -- bytes are ACTUALLY gone. `reclaim_resource` stamps `reclaiming`, the
+        -- CALLER deletes from the filesystem (memcore never touches the FS),
+        -- then it records `reclaimed_bytes` and flips `reclaimed`. A crash in
+        -- between leaves the row in `reclaiming`, which is re-enterable
+        -- (at-least-once, idempotent — `reclaimed_bytes` is assigned, never
+        -- accumulated). `reclaim_failed` is a failed delete (retryable);
+        -- `quarantined` is "hands off, a human/broker decides" and is entered
+        -- through `quarantine_resource`; S2c adds `release_quarantine` as the
+        -- one way back out (quarantined -> active), gated on the caller
+        -- verifying or clearing the bytes first.
+        --
+        -- `state` has exactly four writers, all in `db::exec_env_resources` and
+        -- all taking an IMMEDIATE transaction so their read-then-write is atomic
+        -- against each other: `reclaim_resource`, `quarantine_resource`,
+        -- `release_quarantine`, and `insert_resource`'s re-registration path (a
+        -- `reclaimed` (path, kind) is revived as `active` under a fresh
+        -- resource_id — the reclaimer churns the same worktree dirs, so a path
+        -- must be registerable more than once in the life of the DB). Nothing
+        -- writes `state` with ad-hoc SQL.
         --
         -- Bindings are many-to-many on purpose: one shared `build_target`
         -- (CARGO_TARGET_DIR) is bound by every live lease at once. refcount =
         -- bindings with `released_at IS NULL`; a resource with refcount > 0 is
         -- NOT reclaimable (`reclaim_resource` returns a typed
         -- `BlockedByBinding`, never a silent skip), so a shared target is freed
-        -- only when the LAST binding is released. `UNIQUE (env_id, resource_id)`
+        -- only when the LAST binding is released. `bind_resource` re-reads the
+        -- resource state inside its own IMMEDIATE transaction, so a bind and a
+        -- reclaim of the same resource can never both commit (which would leave a
+        -- live binding pointing at deleted bytes). `UNIQUE (env_id, resource_id)`
         -- makes a re-bind of the same pair a re-activation of that one row, not
         -- a second binding, so refcount can't be inflated by a retry.
         --

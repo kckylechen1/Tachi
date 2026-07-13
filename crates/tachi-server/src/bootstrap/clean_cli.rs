@@ -123,9 +123,9 @@ fn provision_managed_env_cli(
         .ok_or("global db path is not valid UTF-8")?;
 
     match memcore::MemoryStore::open_with_label(db_str, "global") {
-        Ok(store) => {
+        Ok(mut store) => {
             let provisioned =
-                crate::exec_env_ops::provision_managed_env(store.connection(), &opts)?;
+                crate::exec_env_ops::provision_managed_env(store.connection_mut(), &opts)?;
             wt_open::emit_open_report(&provisioned.report, output)?;
             // Surface the lease id (#894 S1) so callers learn what to pass as
             // `env_id` on a later dispatch. `emit_open_report` only knows the
