@@ -236,20 +236,6 @@ pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, St
     Ok(true)
 }
 
-/// Re-load provider secrets after the in-process vault session expires. Falls back to
-/// Keychain when the cached unlock key is gone so vector/embed lanes stay alive headlessly.
-pub fn re_materialize_provider_secrets_after_auto_lock(server: &MemoryServer) {
-    match server.refresh_llm_provider_secrets_from_vault() {
-        Ok(n) if n > 0 => {
-            tracing::info!("[provider] re-materialized {n} provider key(s) after vault auto-lock")
-        }
-        Ok(_) => tracing::debug!("[provider] no provider keys available after vault auto-lock"),
-        Err(err) => {
-            tracing::warn!("[provider] provider key refresh failed after vault auto-lock: {err}")
-        }
-    }
-}
-
 /// Keychain auto-unlock (best effort) + provider secret materialization for any
 /// short-lived server instance (CLI one-shots, MCP stdio, daemon startup).
 pub fn bootstrap_provider_runtime(server: &MemoryServer) {
@@ -442,29 +428,5 @@ mod tests {
         assert!(err.contains("secret is missing or Vault is locked"));
         assert!(err.contains("vault_unlock"));
         assert!(err.contains("vault_set"));
-    }
-
-    #[test]
-    fn re_materialize_after_auto_lock_restores_env_fallback_keys() {
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = EnvGuard::set("VOYAGE_API_KEY", "env-voyage-key");
-        let db_path = std::env::temp_dir().join(format!(
-            "memory-server-auto-lock-remat-{}.sqlite",
-            uuid::Uuid::new_v4()
-        ));
-        let server = crate::MemoryServer::new(db_path, None).expect("server");
-        server.llm.clear_provider_secrets();
-
-        crate::provider_config::re_materialize_provider_secrets_after_auto_lock(&server);
-
-        assert_eq!(
-            server
-                .llm
-                .provider_secret_for_tests(&["VOYAGE_API_KEY"])
-                .as_deref(),
-            Some("env-voyage-key")
-        );
     }
 }
