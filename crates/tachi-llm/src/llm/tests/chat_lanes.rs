@@ -1,3 +1,4 @@
+use super::super::{ChatLaneConfig, ProviderRuntimeConfig};
 use super::*;
 
 #[test]
@@ -135,12 +136,9 @@ async fn chat_lane_reports_response_body_read_errors() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn chat_lane_waits_for_temporarily_unavailable_pool_key() {
     use axum::{extract::State, routing::post, Json, Router};
     use std::sync::{Arc, Mutex};
-
-    let _guard = crate::test_support::global_test_lock().lock();
 
     let seen = Arc::new(Mutex::new(0usize));
     let app = Router::new()
@@ -171,12 +169,33 @@ async fn chat_lane_waits_for_temporarily_unavailable_pool_key() {
         axum::serve(listener, app).await.expect("mock provider");
     });
 
-    let _base_guard = EnvRestore::set(
-        "EXTRACT_BASE_URL",
-        format!("http://127.0.0.1:{port}/chat/completions"),
-    );
-    let _model_guard = EnvRestore::set("EXTRACT_MODEL", "mock-model");
-    let client = LlmClient::new().expect("client should initialize");
+    let config = ProviderRuntimeConfig {
+        extract: ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+            model: "mock-model".to_string(),
+            api_key_envs: vec!["EXTRACT_API_KEY"],
+        },
+        summary: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        reasoning: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        distill: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("client should initialize");
     client.set_provider_secret_pool(
         "EXTRACT_API_KEY",
         vec![ProviderSecret {
@@ -392,7 +411,6 @@ async fn chat_lane_marks_insufficient_balance_as_exhausted() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn chat_lane_retries_with_next_pool_key_after_429() {
     use axum::{
         extract::State,
@@ -402,8 +420,6 @@ async fn chat_lane_retries_with_next_pool_key_after_429() {
         Json, Router,
     };
     use std::sync::{Arc, Mutex};
-
-    let _guard = crate::test_support::global_test_lock().lock();
 
     let seen_auth = Arc::new(Mutex::new(Vec::<String>::new()));
     let app = Router::new()
@@ -455,12 +471,33 @@ async fn chat_lane_retries_with_next_pool_key_after_429() {
         axum::serve(listener, app).await.expect("mock provider");
     });
 
-    let _base_guard = EnvRestore::set(
-        "EXTRACT_BASE_URL",
-        format!("http://127.0.0.1:{port}/chat/completions"),
-    );
-    let _model_guard = EnvRestore::set("EXTRACT_MODEL", "mock-model");
-    let client = LlmClient::new().expect("client should initialize");
+    let config = ProviderRuntimeConfig {
+        extract: ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+            model: "mock-model".to_string(),
+            api_key_envs: vec!["EXTRACT_API_KEY"],
+        },
+        summary: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        reasoning: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        distill: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("client should initialize");
     client.set_provider_secret_pool(
         "EXTRACT_API_KEY",
         vec![
@@ -528,4 +565,109 @@ fn sanitize_llm_keyword_bounds_and_rejects_noise() {
     let long = "z".repeat(80);
     let got = LlmClient::sanitize_llm_keyword(&long).expect("truncate");
     assert_eq!(got.chars().count(), 64);
+}
+
+// ── #1096 seam: construction-time config injection ──────────────────────────
+
+/// RED before seam: `new_with_config` and `ProviderRuntimeConfig` did not
+/// exist. Uses pure literals — no env, no global_test_lock — and asserts
+/// `lane()` / `rerank_config()` return exactly the injected values.
+#[test]
+fn new_with_config_injects_literal_config_without_env() {
+    let config = ProviderRuntimeConfig {
+        extract: ChatLaneConfig {
+            base_url: "https://extract.test/v1/chat/completions".to_string(),
+            model: "extract-test-model".to_string(),
+            api_key_envs: vec!["EXTRACT_API_KEY"],
+        },
+        summary: ChatLaneConfig {
+            base_url: "https://summary.test/v1/chat/completions".to_string(),
+            model: "summary-test-model".to_string(),
+            api_key_envs: vec!["SUMMARY_API_KEY", "EXTRACT_API_KEY"],
+        },
+        reasoning: ChatLaneConfig {
+            base_url: "https://reasoning.test/v1/chat/completions".to_string(),
+            model: "reasoning-test-model".to_string(),
+            api_key_envs: vec!["REASONING_API_KEY"],
+        },
+        distill: ChatLaneConfig {
+            base_url: "https://distill.test/v1/chat/completions".to_string(),
+            model: "distill-test-model".to_string(),
+            api_key_envs: vec!["DISTILL_API_KEY"],
+        },
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Local,
+            local_endpoint: Some("http://localhost:8080/rerank".to_string()),
+        },
+    };
+    let client =
+        LlmClient::new_with_config(config, None).expect("literal config should construct client");
+
+    assert_eq!(
+        client.lane(ChatLane::Extract).base_url,
+        "https://extract.test/v1/chat/completions"
+    );
+    assert_eq!(client.lane(ChatLane::Extract).model, "extract-test-model");
+    assert_eq!(
+        client.lane(ChatLane::Extract).api_key_envs,
+        vec!["EXTRACT_API_KEY"]
+    );
+    assert_eq!(
+        client.lane(ChatLane::Summary).base_url,
+        "https://summary.test/v1/chat/completions"
+    );
+    assert_eq!(client.lane(ChatLane::Summary).model, "summary-test-model");
+    assert_eq!(
+        client.lane(ChatLane::Reasoning).base_url,
+        "https://reasoning.test/v1/chat/completions"
+    );
+    assert_eq!(
+        client.lane(ChatLane::Reasoning).model,
+        "reasoning-test-model"
+    );
+    assert_eq!(
+        client.lane(ChatLane::Distill).base_url,
+        "https://distill.test/v1/chat/completions"
+    );
+    assert_eq!(client.lane(ChatLane::Distill).model, "distill-test-model");
+    assert_eq!(client.rerank_config().provider, RerankProviderKind::Local);
+    assert_eq!(
+        client.rerank_config().local_endpoint.as_deref(),
+        Some("http://localhost:8080/rerank")
+    );
+}
+
+/// Equivalence: under the same env, `ProviderRuntimeConfig::from_env()` produces
+/// fields identical to what `LlmClient::new()` (which delegates through
+/// `new_with_vault_db` → `from_env` → `new_with_config`) stores internally.
+/// This test holds the lock and sets env because it tests the env path.
+#[test]
+fn from_env_matches_new_with_vault_db_construction() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _extract_key = EnvRestore::set("EXTRACT_API_KEY", "eq-test-key");
+    let _extract_base = EnvRestore::set(
+        "EXTRACT_BASE_URL",
+        "https://extract.eq.test/v1/chat/completions",
+    );
+    let _extract_model = EnvRestore::set("EXTRACT_MODEL", "eq-extract-model");
+    let _guards = [
+        EnvRestore::unset("SUMMARY_API_KEY"),
+        EnvRestore::unset("DISTILL_API_KEY"),
+        EnvRestore::unset("REASONING_API_KEY"),
+        EnvRestore::unset("DEEPSEEK_API_KEY"),
+        EnvRestore::unset("ZAI_API_KEY"),
+        EnvRestore::unset("BIGMODEL_API_KEY"),
+        EnvRestore::unset("SILICONFLOW_API_KEY"),
+        EnvRestore::unset(RERANK_PROVIDER_ENV),
+        EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV),
+    ];
+
+    let config = ProviderRuntimeConfig::from_env().expect("from_env should succeed");
+    let client = LlmClient::new().expect("client should initialize");
+
+    assert_eq!(&config.extract, client.lane(ChatLane::Extract));
+    assert_eq!(&config.summary, client.lane(ChatLane::Summary));
+    assert_eq!(&config.reasoning, client.lane(ChatLane::Reasoning));
+    assert_eq!(&config.distill, client.lane(ChatLane::Distill));
+    assert_eq!(&config.rerank, client.rerank_config());
 }

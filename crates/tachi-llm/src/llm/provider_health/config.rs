@@ -31,6 +31,154 @@ const DEEPSEEK_REASONING_DEFAULT: ProviderLaneDefault = ProviderLaneDefault {
     model: DEFAULT_DEEPSEEK_REASONING_MODEL,
 };
 
+/// Construction-time provider/rerank configuration, separable from env reads.
+///
+/// `from_env()` reproduces the exact env-fallback chain that
+/// `LlmClient::new_with_vault_db` previously ran inline. Callers that want
+/// to bypass env (tests, programmatic config) can build this struct from
+/// literals and pass it to [`LlmClient::new_with_config`].
+///
+/// Precedent: `ClaudePool::new_in_app_home` accepts already-resolved values
+/// and does not re-read env at construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRuntimeConfig {
+    pub extract: ChatLaneConfig,
+    pub summary: ChatLaneConfig,
+    pub reasoning: ChatLaneConfig,
+    pub distill: ChatLaneConfig,
+    pub rerank: super::super::RerankConfig,
+}
+
+impl ProviderRuntimeConfig {
+    /// Resolve provider and rerank config from env, reproducing the exact
+    /// `load_lane`×4 + `RerankConfig::from_env` chain previously inline in
+    /// `LlmClient::new_with_vault_db`. Byte-for-byte equivalent env reads;
+    /// no semantic changes.
+    pub fn from_env() -> Result<Self, String> {
+        // ── Front-line LLM layer (Extract + Summary) ──
+        // Extract: EXTRACT_* → SILICONFLOW_*
+        let extract = super::super::LlmClient::load_lane(
+            "extract",
+            &["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
+            &[
+                "EXTRACT_BASE_URL",
+                "SILICONFLOW_BASE_URL",
+                "EXTRACTOR_BASE_URL",
+            ],
+            &["EXTRACT_MODEL", "SILICONFLOW_MODEL", "EXTRACTOR_MODEL"],
+            "TACHI_BACKEND_EXTRACT_TIER",
+            DEFAULT_EXTRACT_MODEL,
+            None,
+        )?;
+
+        // Summary: SUMMARY_* → EXTRACT_* → SILICONFLOW_*  (front-line default)
+        let summary = super::super::LlmClient::load_lane(
+            "summary",
+            &["SUMMARY_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
+            &[
+                "SUMMARY_BASE_URL",
+                "EXTRACT_BASE_URL",
+                "SILICONFLOW_BASE_URL",
+                "EXTRACTOR_BASE_URL",
+            ],
+            &[
+                "SUMMARY_MODEL",
+                "EXTRACT_MODEL",
+                "SILICONFLOW_MODEL",
+                "EXTRACTOR_MODEL",
+            ],
+            "TACHI_BACKEND_SUMMARY_TIER",
+            &extract.model,
+            None,
+        )?;
+
+        // ── Foundry LLM layer (Distill + Reasoning) ──
+        // DeepSeek is preferred when configured; otherwise foundry lanes still
+        // fall back through the legacy reasoning/ZAI/extract/SiliconFlow chain.
+        // Dedicated DISTILL_* env vars remain the explicit distill override.
+        let reasoning = super::super::LlmClient::load_lane(
+            "reasoning",
+            &[
+                "DEEPSEEK_API_KEY",
+                "REASONING_API_KEY",
+                "ZAI_API_KEY",
+                "BIGMODEL_API_KEY",
+                "DISTILL_API_KEY",
+                "EXTRACT_API_KEY",
+                "SILICONFLOW_API_KEY",
+            ],
+            &[
+                "REASONING_BASE_URL",
+                "DEEPSEEK_REASONING_BASE_URL",
+                "DEEPSEEK_BASE_URL",
+                "DISTILL_BASE_URL",
+                "EXTRACT_BASE_URL",
+                "SILICONFLOW_BASE_URL",
+            ],
+            &[
+                "REASONING_MODEL",
+                "DEEPSEEK_REASONING_MODEL",
+                "DEEPSEEK_MODEL",
+                "DISTILL_MODEL",
+                "EXTRACT_MODEL",
+                "SILICONFLOW_MODEL",
+            ],
+            "TACHI_BACKEND_REASONING_TIER",
+            DEFAULT_REASONING_MODEL,
+            Some(&DEEPSEEK_REASONING_DEFAULT),
+        )?;
+
+        let distill = super::super::LlmClient::load_lane(
+            "distill",
+            &[
+                "DISTILL_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "REASONING_API_KEY",
+                "ZAI_API_KEY",
+                "BIGMODEL_API_KEY",
+                "EXTRACT_API_KEY",
+                "SILICONFLOW_API_KEY",
+            ],
+            &[
+                "DISTILL_BASE_URL",
+                "DEEPSEEK_DISTILL_BASE_URL",
+                "DEEPSEEK_BASE_URL",
+                "REASONING_BASE_URL",
+                "EXTRACT_BASE_URL",
+                "SILICONFLOW_BASE_URL",
+            ],
+            &[
+                "DISTILL_MODEL",
+                "DEEPSEEK_DISTILL_MODEL",
+                "DEEPSEEK_MODEL",
+                "REASONING_MODEL",
+                "EXTRACT_MODEL",
+                "SILICONFLOW_MODEL",
+            ],
+            "TACHI_BACKEND_DISTILL_TIER",
+            &reasoning.model,
+            Some(&DEEPSEEK_DISTILL_DEFAULT),
+        )?;
+
+        // Eager rerank-config validation: unknown provider / local without
+        // endpoint fail at construction, never mid-search as a silent hybrid
+        // fallback (R2 review: config errors must not be swallowed).
+        // Under cfg(test), take the process-wide test lock so we don't race
+        // with embedding_rerank tests that temporarily set invalid providers.
+        #[cfg(test)]
+        let _test_lock = crate::test_support::global_test_lock().lock();
+        let rerank = super::super::RerankConfig::from_env()?;
+
+        Ok(Self {
+            extract,
+            summary,
+            reasoning,
+            distill,
+            rerank,
+        })
+    }
+}
+
 impl super::super::LlmClient {
     pub(in crate::llm) const MAX_ATTEMPTS: usize = 3;
     pub(in crate::llm) const BASE_RETRY_DELAY_MS: u64 = 500;
@@ -141,116 +289,23 @@ impl super::super::LlmClient {
     }
 
     pub fn new_with_vault_db(vault_db_path: Option<&Path>) -> Result<Self, String> {
+        Self::new_with_config(ProviderRuntimeConfig::from_env()?, vault_db_path)
+    }
+
+    /// Build an `LlmClient` from an already-resolved [`ProviderRuntimeConfig`],
+    /// skipping all env reads. This is the construction seam: callers that
+    /// want programmatic config (tests, future config-file loaders) pass a
+    /// literal struct; `new_with_vault_db` delegates here after running
+    /// `ProviderRuntimeConfig::from_env`.
+    pub fn new_with_config(
+        config: ProviderRuntimeConfig,
+        vault_db_path: Option<&Path>,
+    ) -> Result<Self, String> {
         let vault_db_path = vault_db_path.map(|path| path.to_path_buf());
 
         // Ensure a rustls crypto provider is installed before any HTTPS client
         // is built. reqwest uses rustls-no-provider, so this is required.
         crate::install_tls_provider();
-
-        // ── Front-line LLM layer (Extract + Summary) ──
-        // Extract: EXTRACT_* → SILICONFLOW_*
-        let extract = Self::load_lane(
-            "extract",
-            &["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
-            &[
-                "EXTRACT_BASE_URL",
-                "SILICONFLOW_BASE_URL",
-                "EXTRACTOR_BASE_URL",
-            ],
-            &["EXTRACT_MODEL", "SILICONFLOW_MODEL", "EXTRACTOR_MODEL"],
-            "TACHI_BACKEND_EXTRACT_TIER",
-            DEFAULT_EXTRACT_MODEL,
-            None,
-        )?;
-
-        // Summary: SUMMARY_* → EXTRACT_* → SILICONFLOW_*  (front-line default)
-        let summary = Self::load_lane(
-            "summary",
-            &["SUMMARY_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
-            &[
-                "SUMMARY_BASE_URL",
-                "EXTRACT_BASE_URL",
-                "SILICONFLOW_BASE_URL",
-                "EXTRACTOR_BASE_URL",
-            ],
-            &[
-                "SUMMARY_MODEL",
-                "EXTRACT_MODEL",
-                "SILICONFLOW_MODEL",
-                "EXTRACTOR_MODEL",
-            ],
-            "TACHI_BACKEND_SUMMARY_TIER",
-            &extract.model,
-            None,
-        )?;
-
-        // ── Foundry LLM layer (Distill + Reasoning) ──
-        // DeepSeek is preferred when configured; otherwise foundry lanes still
-        // fall back through the legacy reasoning/ZAI/extract/SiliconFlow chain.
-        // Dedicated DISTILL_* env vars remain the explicit distill override.
-        let reasoning = Self::load_lane(
-            "reasoning",
-            &[
-                "DEEPSEEK_API_KEY",
-                "REASONING_API_KEY",
-                "ZAI_API_KEY",
-                "BIGMODEL_API_KEY",
-                "DISTILL_API_KEY",
-                "EXTRACT_API_KEY",
-                "SILICONFLOW_API_KEY",
-            ],
-            &[
-                "REASONING_BASE_URL",
-                "DEEPSEEK_REASONING_BASE_URL",
-                "DEEPSEEK_BASE_URL",
-                "DISTILL_BASE_URL",
-                "EXTRACT_BASE_URL",
-                "SILICONFLOW_BASE_URL",
-            ],
-            &[
-                "REASONING_MODEL",
-                "DEEPSEEK_REASONING_MODEL",
-                "DEEPSEEK_MODEL",
-                "DISTILL_MODEL",
-                "EXTRACT_MODEL",
-                "SILICONFLOW_MODEL",
-            ],
-            "TACHI_BACKEND_REASONING_TIER",
-            DEFAULT_REASONING_MODEL,
-            Some(&DEEPSEEK_REASONING_DEFAULT),
-        )?;
-
-        let distill = Self::load_lane(
-            "distill",
-            &[
-                "DISTILL_API_KEY",
-                "DEEPSEEK_API_KEY",
-                "REASONING_API_KEY",
-                "ZAI_API_KEY",
-                "BIGMODEL_API_KEY",
-                "EXTRACT_API_KEY",
-                "SILICONFLOW_API_KEY",
-            ],
-            &[
-                "DISTILL_BASE_URL",
-                "DEEPSEEK_DISTILL_BASE_URL",
-                "DEEPSEEK_BASE_URL",
-                "REASONING_BASE_URL",
-                "EXTRACT_BASE_URL",
-                "SILICONFLOW_BASE_URL",
-            ],
-            &[
-                "DISTILL_MODEL",
-                "DEEPSEEK_DISTILL_MODEL",
-                "DEEPSEEK_MODEL",
-                "REASONING_MODEL",
-                "EXTRACT_MODEL",
-                "SILICONFLOW_MODEL",
-            ],
-            "TACHI_BACKEND_DISTILL_TIER",
-            &reasoning.model,
-            Some(&DEEPSEEK_DISTILL_DEFAULT),
-        )?;
 
         let http = Self::build_http_client()?;
 
@@ -260,32 +315,25 @@ impl super::super::LlmClient {
         // Warn when foundry lanes collapse to the same model/endpoint as extract.
         // This is expected when dedicated DISTILL_*/REASONING_* env vars are unset,
         // but the user should know so they can configure separation if needed.
-        if distill.base_url == extract.base_url && distill.model == extract.model {
+        if config.distill.base_url == config.extract.base_url
+            && config.distill.model == config.extract.model
+        {
             tracing::info!(
                 "LLM distill lane collapsed to extract endpoint ({}/{}). \
                  Set DISTILL_API_KEY / DISTILL_BASE_URL to separate.",
-                extract.base_url,
-                extract.model,
+                config.extract.base_url,
+                config.extract.model,
             );
         }
-
-        // Eager rerank-config validation: unknown provider / local without
-        // endpoint fail at construction, never mid-search as a silent hybrid
-        // fallback (R2 review: config errors must not be swallowed).
-        // Under cfg(test), take the process-wide test lock so we don't race
-        // with embedding_rerank tests that temporarily set invalid providers.
-        #[cfg(test)]
-        let _test_lock = crate::test_support::global_test_lock().lock();
-        let rerank_config = super::super::RerankConfig::from_env()?;
 
         Ok(Self {
             http: Arc::new(RwLock::new(http)),
             http_timeout_streak: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            extract,
-            distill,
-            reasoning,
-            summary,
-            rerank_config,
+            extract: config.extract,
+            distill: config.distill,
+            reasoning: config.reasoning,
+            summary: config.summary,
+            rerank_config: config.rerank,
             vault_db_path,
             provider_state: Arc::new(RwLock::new(ProviderState::with_health(provider_health))),
             provider_health_reload: Arc::new(RwLock::new(provider_health_reload)),

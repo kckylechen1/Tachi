@@ -16,9 +16,9 @@ mod rerank;
 
 pub(crate) use circuit_breaker::CircuitBreakerRegistry;
 pub use provider_health::ProviderSecret;
+pub use provider_health::{ChatLaneConfig, ProviderRuntimeConfig};
 use provider_health::{
-    ChatLaneConfig, ClaudeCliFailure, ProviderHealthPersistState, ProviderHealthReloadState,
-    ProviderState,
+    ClaudeCliFailure, ProviderHealthPersistState, ProviderHealthReloadState, ProviderState,
 };
 pub use rerank::{
     RerankConfig, RerankProviderKind, RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV,
