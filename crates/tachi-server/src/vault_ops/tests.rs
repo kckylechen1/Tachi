@@ -234,8 +234,8 @@ fn read_unlock_password_fifo_rejects_regular_file_without_removing_it() {
 // This is a regression guard: it passes both before and after the fix by
 // construction (the fix does not touch `handle_vault_lock`). Its purpose is to
 // prove the split did not accidentally weaken the user-facing lock command.
-#[tokio::test]
-async fn vault_lock_clears_key_and_provider_secrets() {
+#[test]
+fn vault_lock_clears_key_and_provider_secrets() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -253,8 +253,11 @@ async fn vault_lock_clears_key_and_provider_secrets() {
     }
     assert!(server.llm.set_provider_secret("OPENAI_API_KEY", "cached"));
 
-    handle_vault_lock(&server)
-        .await
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("create Tokio runtime")
+        .block_on(handle_vault_lock(&server))
         .expect("vault lock should succeed");
 
     {
