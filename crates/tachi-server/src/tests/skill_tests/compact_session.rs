@@ -20,6 +20,7 @@ async fn compact_session_memory_persists_rollup_and_signal_entries() {
             ],
             path_prefix: None,
             project: None,
+            project_explicit: false,
             scope: "project".to_string(),
             importance: 0.7,
             queue_maintenance: false,

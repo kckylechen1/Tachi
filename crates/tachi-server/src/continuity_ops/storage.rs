@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use memcore::{ContinuityMetrics, MemoryEdge, MemoryEntry, TachiEventQuery, TachiEventRecord};
 use memory_server_runtime::EventDbRoute;
 
+use crate::memory_search_ops::save_memory::write_affinity::WriteAffinityError;
 use crate::{DbScope, MemoryServer};
 
 #[derive(Debug, Clone)]
@@ -167,13 +168,22 @@ pub(super) fn read_events(
 /// pass the result in here — a genuine update-in-place is never
 /// second-guessed by a registry change that happened after the fact, same
 /// as `apply_write_affinity_with`'s own `id_resolves_at_target` contract.
+/// #1114 (codex round-2 item 3 fix): returns the TYPED `WriteAffinityError`
+/// rather than an already-stringified `String` — a refusal must stay
+/// typed all the way up to `projection.rs`'s own call site, which decides
+/// (based on whether this is a live explicit call or the background
+/// auto-sweep) whether to hard-abort or soft-continue, and which needs
+/// `WriteAffinityError::kind()` to tag the JSON response distinctly from an
+/// ordinary persistence error. Converting to `String` this early erased
+/// that distinction — every refusal looked identical to every other error
+/// once it reached the JSON `errors` array.
 pub(super) fn resolve_projection_write_target(
     server: &MemoryServer,
     target: &ContinuityEventTarget,
     domain: Option<&str>,
     project_explicit: bool,
     id_resolves_at_target: bool,
-) -> Result<ContinuityEventTarget, String> {
+) -> Result<ContinuityEventTarget, WriteAffinityError> {
     if target.db_path.is_some() {
         return Ok(target.clone());
     }
@@ -466,8 +476,10 @@ mod tests {
             let entry = projection_entry("projection-2", Some("equity_trading"));
             let err = resolve_projection_write_target(&server, &target, entry.domain.as_deref(), false, false)
                 .expect_err("must refuse, not silently write cross-domain");
-            assert!(err.contains("equity_trading"));
-            assert!(err.contains("hapi"));
+            assert_eq!(err.kind(), "unmounted_route");
+            let message = err.to_string();
+            assert!(message.contains("equity_trading"));
+            assert!(message.contains("hapi"));
         });
     }
 
@@ -637,6 +649,66 @@ mod tests {
             );
         });
     }
+
+    /// #1114 codex round-2 item 4② discriminating test: a genuine read
+    /// FAILURE against the pre-gate target (a store that "exists" per the
+    /// filesystem but is not actually a readable SQLite database — not the
+    /// same thing as "no rows found") must propagate as a real `Err`, not
+    /// be silently treated as "this id doesn't exist here". Before this
+    /// fix, the pre-gate existence check used `.ok().flatten().is_some()`,
+    /// which collapsed a read failure to `false` — indistinguishable from a
+    /// genuinely fresh row, and exactly as dangerous: it would let the gate
+    /// proceed to (re)create a fresh row at the reroute destination while a
+    /// copy might already exist at the target this call couldn't even read.
+    #[test]
+    fn read_failure_at_pretarget_propagates_instead_of_being_treated_as_absence() {
+        crate::test_support::with_tachi_home(|home| {
+            let server = bound_server(home, "quant");
+            // A store that exists per the filesystem (so
+            // `named_project_db_exists` and any naive `.exists()` check
+            // would call it "mounted") but is genuinely unreadable — not a
+            // valid SQLite database at all, unlike the zero-byte-placeholder
+            // shape that a real SQLite open initializes fine.
+            let corrupt_db = home.join("projects").join("corrupt").join("memory.db");
+            std::fs::create_dir_all(corrupt_db.parent().unwrap()).expect("mkdir corrupt");
+            std::fs::write(&corrupt_db, b"this is not a sqlite database file at all")
+                .expect("write garbage bytes");
+
+            let target =
+                ContinuityEventTarget::new(DbScope::Project, Some("corrupt".to_string()), None);
+            let result = super::get_projection_memory(&server, &target, "some-projection-id");
+            assert!(
+                result.is_err(),
+                "a genuinely unreadable store must propagate an error, not report None: {result:?}"
+            );
+        });
+    }
+
+    // #1114 codex round-2 item 4①/③ KNOWN LIMITATION (registry changes its
+    // route for a domain between two projection runs of the SAME
+    // deterministic id): NOT reproduced as an integration test in THIS
+    // module. `RoutingConfig::get_checked()` caches successfully-loaded
+    // config in a process-wide `OnceLock` for the rest of the process's
+    // lifetime (see that module's own "#1041 B4: shared read/write cache
+    // consistency" test-doc note: "cargo test runs every test in one
+    // process, so asserting on the real static would be poisoned") — a
+    // SECOND `routing.json` rewrite mid-test would silently have NO effect
+    // on a SECOND `resolve_projection_write_target` call, because it goes
+    // through the SAME cached, real `apply_write_affinity_for_domain`. This
+    // is also true of a REAL daemon: routing.json is effectively frozen for
+    // that daemon's entire uptime once first read, so the "domain routes to
+    // A, then later to B" scenario can only happen ACROSS a daemon restart
+    // — which needs two independent processes to reproduce faithfully, not
+    // one test function. The underlying GATE MECHANISM'S lack of memory
+    // across two calls with DIFFERENT configs — the actual thing that
+    // would let the same id split across two stores — IS characterized at
+    // the DI level, where config is a plain parameter with no caching
+    // involved at all:
+    // `memory_search_ops::save_memory::write_affinity::tests::
+    // config_change_between_calls_reroutes_a_stable_id_to_a_different_store`.
+    // Closing the gap for real requires persistent per-id "last known
+    // location" tracking (a schema-level change), deferred alongside
+    // #1115's check-then-insert atomicity work, not solved here.
 
     // #488: the TACHI_PROJECT pin must win over the git-hash db-path parent name
     // so direct-daemon continuity projections align with pinned reads/writes.

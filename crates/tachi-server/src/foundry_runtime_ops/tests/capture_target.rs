@@ -5,12 +5,119 @@ async fn resolve_capture_target_prefers_explicit_project() {
     let server = crate::MemoryServer::new(tmp.path().join("global.db"), None).expect("server");
 
     let (target_db, named_project, db_path, warning) =
-        resolve_capture_target(&server, "global", Some("wiki"), "main");
+        resolve_capture_target(&server, "global", Some("wiki"), true, "main");
 
     assert_eq!(target_db, DbScope::Project);
     assert_eq!(named_project.as_deref(), Some("wiki"));
     assert!(db_path.is_none());
     assert!(warning.is_none());
+}
+
+/// #1114 codex round-2 item 2 discriminating test (RED before this fix): a
+/// `project=` value that is present but NOT a caller decision (a
+/// transport-injected session default, `project_explicit: false`) must NOT
+/// bypass an agent's manifest DB pin — before the fix, `Some(project)` alone
+/// short-circuited straight past the manifest-pin check regardless of the
+/// marker, silently routing a pinned agent's capture into the session's
+/// bound project instead of its pinned manifest DB.
+#[tokio::test]
+async fn resolve_capture_target_transport_default_does_not_bypass_manifest_pin() {
+    let _guard = tachi_home_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let temp_home = tempdir().expect("temp home");
+    let original_tachi_home = std::env::var_os("TACHI_HOME");
+    std::env::set_var("TACHI_HOME", temp_home.path());
+
+    let manifest_path = temp_home.path().join("manifest.json");
+    let agent_db = temp_home
+        .path()
+        .join(".openclaw/extensions/tachi/data/agents/main/memory.db");
+    let manifest = Manifest {
+        schema_version: 1,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![DbEntry {
+            path: agent_db.to_string_lossy().into_owned(),
+            role: DbRole::Agent,
+            owner: "openclaw-agent:main".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_classification: "healthy".to_string(),
+            scope_hint: "agent:main".to_string(),
+            notes: String::new(),
+        }],
+    };
+    manifest.save(&manifest_path).expect("save manifest");
+
+    let server =
+        crate::MemoryServer::new(temp_home.path().join("global.db"), None).expect("server");
+    // `Some("session-bound-project")` here represents `enforce_session_
+    // project`'s transport-injected default — NOT a caller `project=`.
+    let (target_db, named_project, db_path, warning) = resolve_capture_target(
+        &server,
+        "global",
+        Some("session-bound-project"),
+        false,
+        "main",
+    );
+
+    assert_eq!(target_db, DbScope::Project);
+    assert!(
+        named_project.is_none(),
+        "the manifest pin must win over the transport default, got named_project={named_project:?}"
+    );
+    assert_eq!(
+        db_path.as_deref(),
+        Some(agent_db.as_path()),
+        "must resolve to the agent's manifest-pinned DB"
+    );
+    assert_eq!(
+        warning.as_deref(),
+        Some("agent capture pinned to manifest DB for main")
+    );
+
+    if let Some(value) = original_tachi_home {
+        std::env::set_var("TACHI_HOME", value);
+    } else {
+        std::env::remove_var("TACHI_HOME");
+    }
+}
+
+/// A transport default with NO manifest pin still gets honored — it's the
+/// best signal available for which store, just not strong enough to
+/// override a pin.
+#[tokio::test]
+async fn resolve_capture_target_transport_default_used_without_manifest_pin() {
+    let _guard = tachi_home_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let temp_home = tempdir().expect("temp home");
+    let original_tachi_home = std::env::var_os("TACHI_HOME");
+    std::env::set_var("TACHI_HOME", temp_home.path());
+
+    let server =
+        crate::MemoryServer::new(temp_home.path().join("global.db"), None).expect("server");
+    let (target_db, named_project, db_path, warning) = resolve_capture_target(
+        &server,
+        "global",
+        Some("session-bound-project"),
+        false,
+        "no-pin-agent",
+    );
+
+    assert_eq!(target_db, DbScope::Project);
+    assert_eq!(named_project.as_deref(), Some("session-bound-project"));
+    assert!(db_path.is_none());
+    assert!(warning.is_none());
+
+    if let Some(value) = original_tachi_home {
+        std::env::set_var("TACHI_HOME", value);
+    } else {
+        std::env::remove_var("TACHI_HOME");
+    }
 }
 #[tokio::test]
 async fn resolve_capture_target_prefers_manifest_agent_db() {
@@ -47,7 +154,7 @@ async fn resolve_capture_target_prefers_manifest_agent_db() {
     let server =
         crate::MemoryServer::new(temp_home.path().join("global.db"), None).expect("server");
     let (target_db, named_project, db_path, warning) =
-        resolve_capture_target(&server, "global", None, "main");
+        resolve_capture_target(&server, "global", None, false, "main");
 
     assert_eq!(target_db, DbScope::Project);
     assert!(named_project.is_none());
@@ -76,7 +183,7 @@ async fn resolve_capture_target_falls_back_to_server_scope_without_manifest_matc
     let server = crate::MemoryServer::new(temp_home.path().join("global.db"), Some(project_db))
         .expect("server");
     let (target_db, named_project, db_path, warning) =
-        resolve_capture_target(&server, "project", None, "missing-agent");
+        resolve_capture_target(&server, "project", None, false, "missing-agent");
 
     assert_eq!(target_db, DbScope::Project);
     assert!(named_project.is_none());

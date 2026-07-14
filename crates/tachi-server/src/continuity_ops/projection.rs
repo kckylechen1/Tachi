@@ -147,16 +147,32 @@ fn project_continuity_events_inner(
             // self-referencing timeline edges got dropped as "endpoint
             // missing" for the same reason.
             let domain = projection_event_domain(&event, projection, &key);
-            // #1114 (codex B4-class fix, proactive for continuity): does
-            // this row already exist at the PRE-gate target? If a prior run
-            // placed it there (e.g. before this domain had a registered
-            // route), a LATER route registration must not reroute the SAME
-            // deterministic id to a different store and split it across
-            // two — it must update the row that's already there.
-            let id_resolves_at_pretarget = get_projection_memory(server, target, &memory_id)
-                .ok()
-                .flatten()
-                .is_some();
+            // #1114 (codex round-2 item 4 fix): does this row already exist
+            // at the PRE-gate target? If a prior run placed it there (e.g.
+            // before this domain had a registered route), a LATER route
+            // registration must not reroute the SAME deterministic id to a
+            // different store and split it across two — it must update the
+            // row that's already there. `?` propagates a genuine read
+            // failure as a real error instead of the `.ok().flatten()`
+            // idiom this used to use, which conflated "the store is
+            // unreadable right now" with "this id doesn't exist" — a false
+            // negative here is exactly as dangerous as the bug this check
+            // exists to prevent (it would proceed to create a fresh,
+            // duplicate row instead of updating the one that's there).
+            //
+            // KNOWN LIMITATION (deferred, not solved here): this only
+            // catches the row sitting at the PRE-gate default. If the
+            // registry routes this domain to store A on one run and later
+            // (a SECOND registry edit) to a DIFFERENT store B, neither the
+            // pre-gate check here nor the post-gate check below (against
+            // whatever B resolves to) ever look at A — the row already at A
+            // is invisible to both, and a second, independent copy gets
+            // created at B. Closing that fully requires persistent per-id
+            // "last known location" tracking (a schema-level change), the
+            // same shape of gap #1115's check-then-insert atomicity work is
+            // already scoped to address — deliberately not solved with an
+            // ad-hoc migration in this leaf.
+            let id_resolves_at_pretarget = get_projection_memory(server, target, &memory_id)?.is_some();
             let routed_target = match resolve_projection_write_target(
                 server,
                 target,
@@ -166,23 +182,51 @@ fn project_continuity_events_inner(
             ) {
                 Ok(routed) => routed,
                 Err(error) => {
-                    // #1114 (codex B3 point ⑤): a write-affinity refusal is
-                    // a loud, TYPED failure ("拒必有声") — tagged distinctly
-                    // from an ordinary persistence error (via `reason`) and
-                    // logged at `warn`, not just buried as one more line in
-                    // a batch's `errors` array that only an info-level
-                    // count ever reaches the scheduler's own tracing.
+                    // #1114 (codex round-2 item 3 point ①): a write-affinity
+                    // refusal is a loud, TYPED failure ("拒必有声") — never
+                    // silently absorbed into an overall `Ok({"status":
+                    // "partial"})`. A live, explicit `action=project` call
+                    // (auto_only == false) hard-aborts: the caller asked for
+                    // this materialization and deserves a real error
+                    // response, not a 200 they have to inspect an `errors`
+                    // array to notice. The background auto-sweep
+                    // (auto_only == true) still soft-continues to the next
+                    // row for an ordinary per-domain refusal (aborting the
+                    // WHOLE sweep over one misconfigured route is a worse
+                    // operational outcome than skipping that one row) — but
+                    // `RoutingConfigUnavailable` hard-aborts even there,
+                    // because a broken config fails EVERY remaining row in
+                    // this same batch identically; continuing serves no
+                    // purpose. The JSON error entry (when soft-continuing)
+                    // carries `error.kind()` — a stable, typed discriminant
+                    // — not just the stringified `Display` message, so a
+                    // refusal stays distinguishable from an ordinary
+                    // persistence error downstream.
                     tracing::warn!(
                         event_id = %event.id,
                         projection = projection.as_str(),
+                        kind = error.kind(),
                         error = %error,
                         "continuity projection: write-affinity gate refused this row"
                     );
+                    let hard_abort = !auto_only
+                        || matches!(
+                            error,
+                            crate::memory_search_ops::save_memory::write_affinity::WriteAffinityError::RoutingConfigUnavailable(_)
+                        );
+                    if hard_abort {
+                        return Err(format!(
+                            "continuity projection refused (event {}, projection {}): {error}",
+                            event.id,
+                            projection.as_str()
+                        ));
+                    }
                     errors.push(json!({
                         "event_id": event.id,
                         "projection": projection.as_str(),
                         "memory_id": memory_id,
-                        "error": error,
+                        "error_kind": error.kind(),
+                        "error": error.to_string(),
                         "reason": "write_affinity_refused",
                     }));
                     continue;

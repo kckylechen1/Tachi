@@ -60,6 +60,7 @@ pub(crate) async fn handle_capture_session(
         server,
         &requested_scope,
         params.project.as_deref(),
+        params.project_explicit,
         &params.agent_id,
     );
 
@@ -390,18 +391,26 @@ pub(crate) async fn handle_capture_session(
 
     let saved_ids = dedup_strings(saved_ids);
 
-    // The pre-gate default destination — used to pick which destination
-    // group's maintenance/continuity results populate the response's
-    // top-level (pre-#1114-shaped) `maintenance_jobs`/`continuity` fields,
-    // so existing callers parsing this response see NO shape change in the
-    // common (nothing rerouted) case. Any additional destination reached by
-    // an actual reroute is still fully processed below and reported in
-    // `continuity.by_destination`.
+    // The pre-gate default destination — preferred, when present among the
+    // ACTUAL destinations reached, to populate the response's top-level
+    // (pre-#1114-shaped) `maintenance_jobs`/`continuity` fields, so existing
+    // callers parsing this response see NO shape change in the common
+    // (nothing rerouted) case. When every entry rerouted AWAY from this
+    // default (codex round-2 item 3 point ④), it will not appear in
+    // `by_destination` at all — falling back to whichever destination
+    // actually exists (below) instead of a hardcoded "skipped" placeholder
+    // is what keeps the top-level `continuity.session_event` truthful in
+    // that case.
     let default_destination_key = (target_db.as_str().to_string(), named_project.clone());
 
     let mut maintenance_jobs = Vec::new();
     let mut continuity_by_destination = Vec::new();
-    let mut primary_session_event = json!({"status": "skipped", "reason": "no_captured_entries"});
+    // (destination_key, session_event, pipeline) tuples, in the same order
+    // as `continuity_by_destination` — kept alongside the JSON so picking
+    // the "primary" entry after the loop doesn't need to round-trip
+    // through JSON value comparisons.
+    let mut continuity_results_by_destination: Vec<((String, Option<String>), Value, Value)> =
+        Vec::new();
 
     for (destination_key, raw_ids) in &by_destination {
         let ids = dedup_strings(raw_ids.clone());
@@ -439,38 +448,75 @@ pub(crate) async fn handle_capture_session(
             &base_path,
             ids,
             params.messages.len(),
-            params.project.as_deref(),
+            // #1114 (codex round-2 item 3 point ②): label this event with
+            // the destination it was ACTUALLY written to, not the stale
+            // pre-gate `params.project` — `ContinuityEventTarget::
+            // project_label`'s own precedence puts an "explicit_project"
+            // argument ahead of the target's own `named_project`, so
+            // passing the stale value here made the label lie about where
+            // the row landed whenever `params.project` was `Some` (which,
+            // since #1114's B2 fix, is nearly always true for a bound
+            // session).
+            group_named_project.as_deref(),
         );
-        if destination_key == &default_destination_key {
-            primary_session_event = session_event.clone();
-        }
+
+        // #1114 (codex round-2 item 3 point ③): the session-continuity
+        // PIPELINE analyzes the whole conversation (not specific memory
+        // ids), but it still writes its OWN continuity events — those must
+        // land where this destination group's rows actually are, not at
+        // the pre-gate default. Running it once per destination that
+        // actually received entries (rather than once, unconditionally, at
+        // the pre-gate default) means a fully-rerouted capture no longer
+        // writes pipeline events into a store none of its content ever
+        // reached; a batch split across multiple destinations pays for
+        // duplicate background analysis, which is the acceptable side of
+        // this trade-off (a background LLM pass repeating is far cheaper
+        // than a durable row landing in the wrong store).
+        let pipeline_target = crate::continuity_ops::ContinuityEventTarget::new(
+            group_target_db,
+            group_named_project.clone(),
+            db_path.clone(),
+        );
+        let pipeline = crate::continuity_ops::maybe_spawn_session_continuity_pipeline(
+            server,
+            pipeline_target,
+            params.conversation_id.clone(),
+            params.turn_id.clone(),
+            params.agent_id.clone(),
+            group_named_project.clone(),
+            params.messages.clone(),
+        );
+
+        continuity_results_by_destination.push((
+            destination_key.clone(),
+            session_event.clone(),
+            pipeline.clone(),
+        ));
         continuity_by_destination.push(json!({
             "target_db": group_target_db.as_str(),
             "named_project": group_named_project,
             "memory_ids": ids,
             "session_event": session_event,
+            "pipeline": pipeline,
         }));
     }
 
-    // The session-continuity PIPELINE analyzes the whole conversation (not
-    // specific memory ids), so unlike maintenance-enqueue/session-event
-    // above it runs exactly ONCE against the pre-gate default destination —
-    // matching pre-#1114 behavior exactly, and avoiding duplicate background
-    // analysis work if a batch happened to split across destinations.
-    let continuity_target = crate::continuity_ops::ContinuityEventTarget::new(
-        target_db,
-        named_project.clone(),
-        db_path.clone(),
-    );
-    let continuity_pipeline = crate::continuity_ops::maybe_spawn_session_continuity_pipeline(
-        server,
-        continuity_target,
-        params.conversation_id.clone(),
-        params.turn_id.clone(),
-        params.agent_id.clone(),
-        params.project.clone(),
-        params.messages.clone(),
-    );
+    // #1114 (codex round-2 item 3 point ④): prefer the pre-gate default
+    // destination's session event/pipeline when it's among the ones
+    // actually reached; otherwise (every entry rerouted away from it) fall
+    // back to whichever destination DID receive entries, rather than
+    // reporting a hardcoded "skipped: no_captured_entries" placeholder that
+    // contradicts `by_destination`'s own (truthful) contents.
+    let primary = continuity_results_by_destination
+        .iter()
+        .find(|(key, _, _)| key == &default_destination_key)
+        .or_else(|| continuity_results_by_destination.first());
+    let primary_session_event = primary
+        .map(|(_, event, _)| event.clone())
+        .unwrap_or_else(|| json!({"status": "skipped", "reason": "no_captured_entries"}));
+    let primary_pipeline = primary
+        .map(|(_, _, pipeline)| pipeline.clone())
+        .unwrap_or_else(|| json!({"status": "skipped", "reason": "no_captured_entries"}));
 
     let mut response = serde_json::Map::new();
     response.insert("status".into(), json!("completed"));
@@ -486,7 +532,7 @@ pub(crate) async fn handle_capture_session(
         "continuity".into(),
         json!({
             "session_event": primary_session_event,
-            "pipeline": continuity_pipeline,
+            "pipeline": primary_pipeline,
             "by_destination": continuity_by_destination,
         }),
     );
@@ -526,6 +572,19 @@ pub(crate) async fn handle_capture_session(
 /// existence at the PRE-gate target first (mirrors continuity's own
 /// `get_projection_memory` pre-check in `projection.rs`) makes a second
 /// capture of the same note skip the gate and update where it already is.
+///
+/// KNOWN LIMITATION (codex round-2 item 4③, deferred, not solved here):
+/// this only catches the note sitting at the PRE-gate default. If the
+/// registry routes this domain to store A on one capture and later (a
+/// SECOND registry edit) to a DIFFERENT store B, this check never looks at
+/// A — the note already there is invisible to it, and a second,
+/// independent copy gets created at B. Fully closing that requires
+/// persistent per-id "last known location" tracking (a schema-level
+/// change), the same shape of gap #1115's check-then-insert atomicity work
+/// is already scoped to address — deliberately not solved with an ad-hoc
+/// migration in this leaf. Concurrent/racing inserts against the SAME
+/// pre-gate id have the identical exposure for the same reason (this
+/// lookup-then-decide sequence has no transactional atomicity).
 fn resolve_capture_write_target(
     server: &MemoryServer,
     id: &str,
@@ -540,7 +599,12 @@ fn resolve_capture_write_target(
     if db_path.is_some() {
         return Ok((target_db, named_project.map(str::to_string)));
     }
-    let already_exists_at_target = capture_entry_exists_at(server, target_db, named_project, id);
+    // #1114 (codex round-2 item 4 fix): `?` propagates a genuine read
+    // failure instead of silently treating it as "doesn't exist" — a false
+    // negative here (store unreadable right now, NOT actually empty) risks
+    // creating exactly the duplicate-across-two-stores outcome this
+    // existence check exists to prevent.
+    let already_exists_at_target = capture_entry_exists_at(server, target_db, named_project, id)?;
     // `repair_target` returns `None` both when nothing needs repairing (an
     // already-clean domain is unchanged) and when there was truly nothing to
     // infer — same `.or_else` fallback `resolve_save_domain` (save_memory)
@@ -560,17 +624,21 @@ fn resolve_capture_write_target(
     Ok((affinity.target_db, affinity.named_project))
 }
 
-/// #1114 (codex round-1 B4 fix): does a row with this id already exist at
-/// the PRE-gate target? A read failure is treated as "doesn't exist" —
-/// same tolerant `.ok().flatten().is_some()` idiom
-/// `continuity_ops::projection::persist_timeline_graph_edges` already uses
-/// for its own endpoint-existence checks.
+/// #1114 (codex round-1 B4 fix, round-2 item 4 fix): does a row with this
+/// id already exist at the PRE-gate target? A read FAILURE now propagates
+/// as a real `Err` — treating it as "doesn't exist" (the original B4 shape,
+/// matching `continuity_ops::projection::persist_timeline_graph_edges`'s
+/// own tolerant endpoint-existence checks) is safe for THAT call site
+/// because a false negative there only skips an optional graph edge; here a
+/// false negative risks creating a duplicate row at the write-affinity
+/// gate's proposed reroute destination while a genuine copy already exists
+/// at the target this call couldn't read.
 fn capture_entry_exists_at(
     server: &MemoryServer,
     target_db: DbScope,
     named_project: Option<&str>,
     id: &str,
-) -> bool {
+) -> Result<bool, String> {
     let result = if let Some(project_name) = named_project {
         server.with_named_project_store_read(project_name, |store| {
             store.get(id).map_err(|e| e.to_string())
@@ -580,7 +648,7 @@ fn capture_entry_exists_at(
             store.get(id).map_err(|e| e.to_string())
         })
     };
-    result.ok().flatten().is_some()
+    Ok(result?.is_some())
 }
 
 #[cfg(test)]
@@ -838,6 +906,176 @@ mod affinity_tests {
                 "the repeat capture must target wherever the row ALREADY \
                  lives (quant), not re-evaluate domain routing and split it \
                  across two stores"
+            );
+        });
+    }
+
+    /// #1114 codex round-2 item 4② discriminating test: a genuine read
+    /// FAILURE at the pre-gate target must propagate as a real `Err`, not
+    /// be silently treated as "this id doesn't exist here" — see
+    /// `continuity_ops::storage::tests::read_failure_at_pretarget_propagates_instead_of_being_treated_as_absence`
+    /// for the fuller reasoning (same fix, same shape, applied to
+    /// `capture_entry_exists_at` instead of `get_projection_memory`).
+    #[test]
+    fn read_failure_at_pretarget_propagates_instead_of_being_treated_as_absence() {
+        crate::test_support::with_tachi_home(|home| {
+            let server = two_project_server(home, "quant");
+            // "corrupt" exists per the filesystem but is not a valid SQLite
+            // database at all — genuinely unreadable, not merely empty.
+            let corrupt_db = home.join("projects").join("corrupt").join("memory.db");
+            std::fs::create_dir_all(corrupt_db.parent().unwrap()).expect("mkdir corrupt");
+            std::fs::write(&corrupt_db, b"this is not a sqlite database file at all")
+                .expect("write garbage bytes");
+
+            let err = resolve_capture_write_target(
+                &server,
+                "cap-read-failure",
+                Some("equity_trading"),
+                "/openclaw/agent/self-evolution",
+                "preference",
+                DbScope::Project,
+                Some("corrupt"),
+                None,
+                false,
+            )
+            .expect_err(
+                "a genuinely unreadable pre-gate target must propagate an error, \
+                 not silently proceed as if the row didn't exist",
+            );
+            assert!(!err.is_empty());
+        });
+    }
+
+    // #1114 codex round-2 item 4①/③ KNOWN LIMITATION: NOT reproduced as an
+    // integration test in this module — see `continuity_ops::storage::
+    // tests`' own note (right above its equivalent, removed test) for why:
+    // `RoutingConfig::get_checked()` caches for the rest of the PROCESS's
+    // lifetime once loaded, so a second `routing.json` rewrite mid-test
+    // would silently have no effect on a second `resolve_capture_write_
+    // target` call — and in a real daemon, routing.json is effectively
+    // frozen for that daemon's whole uptime the same way, so this scenario
+    // can only happen ACROSS a restart, not within one test process. The
+    // underlying gate mechanism's lack of memory across two calls with
+    // DIFFERENT configs is characterized at the DI level instead:
+    // `memory_search_ops::save_memory::write_affinity::tests::
+    // config_change_between_calls_reroutes_a_stable_id_to_a_different_store`.
+    // Closing this fully requires persistent per-id location tracking,
+    // deferred alongside #1115's atomicity work, not solved here.
+}
+
+/// #1114 (codex round-2 item 5 fix): a handler-LEVEL discriminating test —
+/// every other #1114 capture test in this file drives `resolve_capture_
+/// write_target` (or the affinity DI core) directly, hand-injecting
+/// `Some("equity_trading")` as the domain. Production never does that:
+/// `handle_capture_session` always calls the gate with `domain: None` and
+/// lets it get INFERRED from the entry's own `path`/`category` via
+/// `repair::domain::repair_target`. A test that injects the domain
+/// directly would stay green even if the gate call were deleted from the
+/// handler entirely — it never proves the WIRING inside the handler itself.
+/// This test goes through the real `handle_capture_session` entry point
+/// with a bracket-self-evolution note (the only capture path that needs no
+/// live LLM call) whose `path_prefix` drives `infer_domain_from_row` to
+/// "equity_trading" the same way a real caller's path would, and asserts
+/// the captured row actually lands in the registered "hapi" store — not
+/// the daemon's own bound "quant". Deleting the handler's gate call turns
+/// this from green to red.
+#[cfg(test)]
+mod handler_tests {
+    use super::handle_capture_session;
+    use crate::server_state::MemoryServer;
+    use crate::tool_params::{CaptureSessionParams, Message};
+
+    // `with_tachi_home` is a plain sync closure (it restores TACHI_HOME the
+    // instant the closure returns) — not `#[tokio::test]`-compatible
+    // directly. Every other capture_session test in this file relies on
+    // that sync-closure shape, so rather than reach for a different
+    // env-var pattern for just this one test, this test stays `#[test]`
+    // and blocks on the handler's async body from INSIDE the closure, where
+    // TACHI_HOME is still set.
+    #[test]
+    fn handle_capture_session_infers_domain_from_entry_and_reroutes() {
+        crate::test_support::with_tachi_home(|home| {
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing.json");
+
+            let quant_db = home.join("projects").join("quant").join("memory.db");
+            std::fs::create_dir_all(quant_db.parent().unwrap()).expect("mkdir quant");
+            let global_db = home.join("global").join("memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+            let server =
+                MemoryServer::new(global_db, Some(quant_db)).expect("bind quant daemon");
+
+            let hapi_db = home.join("projects").join("hapi").join("memory.db");
+            std::fs::create_dir_all(hapi_db.parent().unwrap()).expect("mkdir hapi");
+            memcore::MemoryStore::open_with_label(
+                hapi_db.to_str().expect("utf-8 db path"),
+                "hapi",
+            )
+            .expect("init hapi schema");
+
+            let params = CaptureSessionParams {
+                conversation_id: "conv-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                agent_id: "handler-test-agent".to_string(),
+                messages: vec![Message {
+                    role: "assistant".to_string(),
+                    // A bracket self-evolution note: matches the "记住了"
+                    // strategy pattern `extract_bracket_self_evolution_notes`
+                    // requires — this path needs NO live LLM call, unlike
+                    // the session-capture draft path.
+                    content: "（记住了这次交易复盘的重要经验，下次要更谨慎）".to_string(),
+                }],
+                // #1114: this path prefix is what drives the HANDLER's own
+                // domain inference (`infer_domain_from_row`'s `/trading/
+                // equity` prefix rule) to "equity_trading" — the test never
+                // tells the gate what domain to use.
+                path_prefix: Some("/trading/equity".to_string()),
+                scope: "project".to_string(),
+                project: None,
+                project_explicit: false,
+                min_chars: 1,
+                force: true,
+            };
+
+            let response = tokio::runtime::Runtime::new()
+                .expect("tokio runtime")
+                .block_on(handle_capture_session(&server, params))
+                .expect("capture_session should complete");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&response).expect("response JSON");
+            assert_eq!(
+                parsed["captured"].as_u64(),
+                Some(1),
+                "the bracket note must be captured: {parsed}"
+            );
+
+            let in_hapi = server
+                .with_named_project_store_read("hapi", |store| {
+                    store
+                        .list_by_path("/trading/equity", 10, false)
+                        .map_err(|e| e.to_string())
+                })
+                .expect("read hapi");
+            assert_eq!(
+                in_hapi.len(),
+                1,
+                "equity_trading content (inferred by the HANDLER from the entry's \
+                 own path, not injected by this test) must reroute into hapi: {in_hapi:?}"
+            );
+
+            let in_quant = server
+                .with_project_store_read(|store| {
+                    store
+                        .list_by_path("/trading/equity", 10, false)
+                        .map_err(|e| e.to_string())
+                })
+                .expect("read quant");
+            assert!(
+                in_quant.is_empty(),
+                "must NOT silently land in the daemon's own bound (quant) store: {in_quant:?}"
             );
         });
     }

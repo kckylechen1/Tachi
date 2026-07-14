@@ -292,6 +292,12 @@ pub(crate) fn project_defaults_to_bound_project(tool_name: &str, args: &JsonObje
             // `project_explicit: false`) the same way every other
             // project-defaulting write tool already gets.
             | "capture_session"
+            // #1114 (codex round-2 item 2 fix): `compact_session_memory`
+            // calls the SAME `resolve_capture_target` as `capture_session`
+            // and has the identical exposure — a session bound to project B
+            // compacting through a daemon whose own static binding is
+            // project A would silently land the compacted rollup in A.
+            | "compact_session_memory"
     ) || tool_name == "tachi_memory"
 }
 
@@ -920,6 +926,43 @@ mod tests {
             "capture_session omitting project= must get the SESSION's own \
              bound project injected, not fall through to the daemon's static \
              default further down the call chain"
+        );
+        assert_eq!(
+            arguments
+                .as_ref()
+                .and_then(|a| a.get(PROJECT_EXPLICIT_MARKER))
+                .and_then(|v| v.as_bool()),
+            Some(false),
+            "the injected value is a transport default, not a caller decision"
+        );
+    }
+
+    /// #1114 codex round-2 item 2 discriminating test: `compact_session_memory`
+    /// has the SAME `resolve_capture_target` exposure `capture_session` does
+    /// — same fix, same allowlist entry.
+    #[test]
+    fn compact_session_memory_omitted_project_is_injected_from_session_binding() {
+        let mut arguments = args(map_from(&[
+            ("agent_id", json!("agent")),
+            ("conversation_id", json!("c1")),
+            ("window_id", json!("w1")),
+        ]));
+        enforce_session_project(
+            "compact_session_memory",
+            &mut arguments,
+            "project-b",
+            "HTTP direct-connect",
+            EnforcementRole::Authoritative,
+        )
+        .expect("inject session-bound project");
+        assert_eq!(
+            arguments
+                .as_ref()
+                .and_then(|a| a.get("project"))
+                .and_then(|v| v.as_str()),
+            Some("project-b"),
+            "compact_session_memory omitting project= must get the SESSION's \
+             own bound project injected"
         );
         assert_eq!(
             arguments

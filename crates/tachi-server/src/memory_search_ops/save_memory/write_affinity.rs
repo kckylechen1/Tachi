@@ -177,6 +177,25 @@ impl From<WriteAffinityError> for String {
     }
 }
 
+impl WriteAffinityError {
+    /// #1114 (codex round-2 item 3 fix): a stable, machine-checkable
+    /// discriminant for callers that surface this error into a JSON
+    /// response and need to tell "this domain's registered store isn't
+    /// mounted" apart from "the whole routing config is unusable right
+    /// now" without string-matching `Display`'s prose. Kept alongside
+    /// (not instead of) the `Display` message — callers that just want the
+    /// full text still get it via `.to_string()`/`{err}`.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            WriteAffinityError::UnmountedRoute { .. } => "unmounted_route",
+            WriteAffinityError::RoutingConfigUnavailable(_) => "routing_config_unavailable",
+            WriteAffinityError::RerouteRefusedForClientId { .. } => {
+                "reroute_refused_for_client_id"
+            }
+        }
+    }
+}
+
 /// What the gate did, surfaced back to the caller for transparency (never
 /// itself an error — an `Err` result is the separate, loud-refusal path).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -988,5 +1007,87 @@ mod tests {
         )
         .unwrap();
         assert!(outcome.note.is_none());
+    }
+
+    /// #1114 codex round-2 item 4①/③ CHARACTERIZATION test (documents a
+    /// KNOWN, ACCEPTED limitation, not a target this PR claims to hit): the
+    /// gate has no memory of a PRIOR call's decision across two calls with
+    /// DIFFERENT `RoutingConfig`s for the SAME domain/id. In production
+    /// this happens across a daemon restart after a `routing.json` edit
+    /// (see `continuity_ops::storage::tests`' note on why
+    /// `RoutingConfig::get_checked()`'s process-wide cache makes this
+    /// untestable as a same-process integration test — that cache is
+    /// exactly what makes it possible to characterize ONLY at this DI
+    /// level, where `config` is a plain parameter, not a cached global).
+    /// A caller can only ever check "does this id exist at the PRE-gate
+    /// target" (never at wherever a PRIOR run under the OLD config actually
+    /// placed it) — so when the registered route changes, the SAME
+    /// deterministic id resolves to a DIFFERENT store on the next call,
+    /// with nothing here (or in any of this PR's callers) aware that a
+    /// copy may already exist at the OLD destination. Two independent rows
+    /// under the same id, split across two stores, is the direct
+    /// consequence. Closing this for real requires persistent per-id
+    /// "last known location" tracking (a schema-level change), deferred
+    /// alongside #1115's check-then-insert atomicity work — not solved by
+    /// this PR.
+    #[test]
+    fn config_change_between_calls_reroutes_a_stable_id_to_a_different_store() {
+        let config_a = RoutingConfig {
+            domain_routes: vec![crate::memory_search_ops::routing_config::DomainRoute {
+                project: "store-a".to_string(),
+                domains: vec!["equity_trading".to_string()],
+            }],
+            ..Default::default()
+        };
+        let config_b = RoutingConfig {
+            domain_routes: vec![crate::memory_search_ops::routing_config::DomainRoute {
+                project: "store-b".to_string(),
+                domains: vec!["equity_trading".to_string()],
+            }],
+            ..Default::default()
+        };
+        let both_mounted = |project: &str| project == "store-a" || project == "store-b";
+
+        // "Before a routing.json edit + daemon restart": the id doesn't
+        // exist anywhere yet (`id_resolves_at_target: false`) — routes to A.
+        let before_restart = apply_write_affinity_for_domain_with(
+            Some("equity_trading"),
+            DbScope::Project,
+            Some("quant"),
+            false,
+            false,
+            &config_a,
+            Some("quant".to_string()),
+            both_mounted,
+        )
+        .unwrap();
+        assert_eq!(before_restart.named_project.as_deref(), Some("store-a"));
+
+        // "After the restart, with routing.json now pointing this domain at
+        // B": a caller can only ever check the pre-gate target for
+        // existence (never store-a, where the prior run actually placed
+        // it) — id_resolves_at_target is STILL false here, honestly
+        // reflecting what any real caller could know.
+        let after_restart = apply_write_affinity_for_domain_with(
+            Some("equity_trading"),
+            DbScope::Project,
+            Some("quant"),
+            false,
+            false,
+            &config_b,
+            Some("quant".to_string()),
+            both_mounted,
+        )
+        .unwrap();
+        assert_eq!(
+            after_restart.named_project.as_deref(),
+            Some("store-b"),
+            "documents the known limitation: the SAME deterministic id resolves \
+             to a DIFFERENT store once the registry changes, with nothing here \
+             aware a copy may already exist at store-a from before the change — \
+             this is what lets a row split across two stores. If this assertion \
+             ever needs to change because the gate gained cross-call memory of \
+             prior placements, that's a genuine improvement, not a regression."
+        );
     }
 }

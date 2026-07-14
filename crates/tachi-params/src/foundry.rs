@@ -358,6 +358,17 @@ pub struct CompactSessionMemoryParams {
     #[serde(default)]
     pub project: Option<String>,
 
+    /// #1114: see `CaptureSessionParams::project_explicit` — same signal,
+    /// same wire key. `session_identity::enforce_session_project` stamps
+    /// this on every bound-session tool call generically, so
+    /// `compact_session_memory`'s `resolve_capture_target` call can
+    /// distinguish a caller-supplied `project=` from a transport-injected
+    /// session-binding default (a genuine caller decision must win over an
+    /// agent's manifest DB pin; a transport default must not).
+    #[serde(default, rename = "__tachi_project_explicit")]
+    #[schemars(skip)]
+    pub project_explicit: bool,
+
     /// Scope for persisted memories
     #[serde(default = "default_compact_session_scope")]
     pub scope: String,
