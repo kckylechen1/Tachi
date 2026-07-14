@@ -83,9 +83,11 @@ async fn tachi_task_board_filters_to_flow_dispatch_ids() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let server = make_server();
+    // #1096: the server freezes its home identity at construction, so the
+    // TACHI_HOME override must be in place BEFORE make_server() runs.
     let temp_home = tempfile::tempdir().expect("temp tachi home");
     let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let server = make_server();
     let flow_id = "flow_20260609T000005Z_board_flow_filter";
     let dispatch_id = "20260609T000005Z-codex-flow";
     let other_dispatch_id = "20260609T000006Z-codex-other";

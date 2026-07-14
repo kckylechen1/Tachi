@@ -31,7 +31,7 @@ pub(crate) async fn run_daily_pipeline(
     server: &MemoryServer,
 ) -> Result<DailyPipelineReport, String> {
     let date = shanghai_today();
-    let app_home = crate::path_utils::tachi_home();
+    let app_home = server.tachi_home_dir();
     let global_db_path = server.global_db_path_buf();
     if let Err(e) =
         crate::status_ops::status_health::refresh_provider_probe_cache(&app_home, &global_db_path)

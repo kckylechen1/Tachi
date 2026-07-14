@@ -6,7 +6,26 @@ pub(super) struct ValidatedWikiIngestHttpUrl {
     pub(super) resolved_addrs: Option<Vec<SocketAddr>>,
 }
 
-fn wiki_ingest_local_file_allowed(source_path: &Path) -> bool {
+/// `tachi_home` is the caller's server-bound home directory
+/// (`MemoryServer::tachi_home_dir()`), already resolved through the
+/// canonical `TACHI_HOME` → `SIGIL_HOME` → `TACHI_APP_HOME` → workspace →
+/// `~/.tachi` precedence chain.
+///
+/// #1096 leaf-2a round-2 (codex C3-wiki): the first pass here replaced the
+/// pre-#1096 allow-list — which read `TACHI_HOME` and `SIGIL_HOME`
+/// independently and admitted BOTH roots when both were set — with just the
+/// funnel's single resolved winner. That is a narrowing, not a widening: a
+/// deployment with `TACHI_HOME=/A` and `SIGIL_HOME=/B` set simultaneously
+/// used to allow local ingest from files under `/B` (the funnel picks `/A`
+/// as `tachi_home`, but `/B` was still on the pre-#1096 allow-list); the
+/// first-pass rewrite silently rejected `/B` files it used to accept. This
+/// version restores the union: every one of `TACHI_HOME`/`SIGIL_HOME`/
+/// `TACHI_APP_HOME` that is independently set (even the ones the funnel's
+/// precedence didn't pick as `tachi_home`) is still an allow-list root,
+/// alongside the resolved `tachi_home` and cwd. See
+/// `ingest_local_file_allowed_tests::admits_union_of_all_three_home_env_roots`
+/// below for the regression this closes.
+fn wiki_ingest_local_file_allowed(source_path: &Path, tachi_home: &Path) -> bool {
     if std::env::var("TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE")
         .ok()
         .is_some_and(|value| {
@@ -24,17 +43,28 @@ fn wiki_ingest_local_file_allowed(source_path: &Path) -> bool {
         Err(_) => return false,
     };
     let cwd = std::env::current_dir().ok();
-    let home = dirs::home_dir();
     let mut roots = Vec::new();
     if let Some(cwd) = cwd {
         roots.push(cwd);
     }
-    for env_key in ["TACHI_HOME", "SIGIL_HOME"] {
+    roots.push(tachi_home.to_path_buf());
+    // Union, not narrowing: also admit whichever of the funnel's three home
+    // keys are independently set as raw env, even the ones the funnel's
+    // precedence didn't pick as the winning `tachi_home` above. This is what
+    // restores the pre-#1096 TACHI_HOME+SIGIL_HOME union behavior (see the
+    // function doc comment) while extending it to the funnel's third key.
+    for env_key in ["TACHI_HOME", "SIGIL_HOME", "TACHI_APP_HOME"] {
         if let Ok(path) = std::env::var(env_key) {
-            roots.push(PathBuf::from(path));
+            if !path.trim().is_empty() {
+                roots.push(PathBuf::from(path));
+            }
         }
     }
-    if let Some(home) = home {
+    // Preserved from the pre-#1096 behavior: the bare `~/.tachi` was always
+    // an allow-list root regardless of TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME
+    // overrides, so keep it even when `tachi_home` resolved elsewhere —
+    // narrowing this allow-list is out of scope for a pure plumbing change.
+    if let Some(home) = dirs::home_dir() {
         roots.push(home.join(".tachi"));
     }
 
@@ -44,7 +74,7 @@ fn wiki_ingest_local_file_allowed(source_path: &Path) -> bool {
         .any(|root| canonical_source.starts_with(root))
 }
 
-async fn source_for_path(source: &str) -> Result<String, String> {
+async fn source_for_path(tachi_home: &Path, source: &str) -> Result<String, String> {
     if source.starts_with("http://") || source.starts_with("https://") {
         let validated = validate_wiki_ingest_http_url(source).await?;
         let client = wiki_ingest_http_client_for_url(&validated)?;
@@ -62,7 +92,7 @@ async fn source_for_path(source: &str) -> Result<String, String> {
         read_limited_wiki_http_response(response).await
     } else {
         let path = Path::new(source);
-        if !wiki_ingest_local_file_allowed(path) {
+        if !wiki_ingest_local_file_allowed(path, tachi_home) {
             return Err(
                 "local wiki ingest is restricted to the current workspace or TACHI_HOME; set TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE=1 to override"
                     .to_string(),
@@ -313,7 +343,7 @@ pub(crate) async fn handle_wiki_ingest(
     server: &MemoryServer,
     params: TachiWikiIngestParams,
 ) -> Result<String, String> {
-    let content = source_for_path(&params.source).await?;
+    let content = source_for_path(&server.tachi_home_dir(), &params.source).await?;
     if content.trim().is_empty() {
         append_wiki_log(
             server,
@@ -487,4 +517,59 @@ pub(crate) async fn handle_wiki_ingest(
         "related_entries": related,
     }))
     .map_err(|e| format!("serialize wiki_ingest: {e}"))
+}
+
+#[cfg(test)]
+mod ingest_local_file_allowed_tests {
+    use super::wiki_ingest_local_file_allowed;
+    use crate::test_support::EnvRestore;
+
+    /// #1096 leaf-2a round-2 (codex C3-wiki): RED against the first-pass
+    /// implementation, which passed only the funnel-resolved `tachi_home`
+    /// (the single precedence winner) as an allow-list root. With
+    /// `TACHI_HOME=/A` and `SIGIL_HOME=/B` both set, the funnel resolves
+    /// `tachi_home` to `/A`; the first-pass code then rejected a file under
+    /// `/B` that the pre-#1096 implementation used to accept. This asserts
+    /// the union: a file under the LOSING key's root is still allowed.
+    #[test]
+    fn admits_union_of_all_three_home_env_roots() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let tachi_home_dir = tempfile::tempdir().expect("tachi_home tempdir");
+        let sigil_home_dir = tempfile::tempdir().expect("sigil_home tempdir");
+        let app_home_dir = tempfile::tempdir().expect("app_home tempdir");
+
+        let tachi_file = tachi_home_dir.path().join("under-tachi-home.md");
+        let sigil_file = sigil_home_dir.path().join("under-sigil-home.md");
+        let app_file = app_home_dir.path().join("under-app-home.md");
+        std::fs::write(&tachi_file, "tachi").expect("write tachi fixture");
+        std::fs::write(&sigil_file, "sigil").expect("write sigil fixture");
+        std::fs::write(&app_file, "app").expect("write app fixture");
+
+        let _tachi_env = EnvRestore::set_path("TACHI_HOME", tachi_home_dir.path());
+        let _sigil_env = EnvRestore::set_path("SIGIL_HOME", sigil_home_dir.path());
+        let _app_env = EnvRestore::set_path("TACHI_APP_HOME", app_home_dir.path());
+        // `TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE` would short-circuit the
+        // allow-list entirely and defeat this test's whole point.
+        let _allow_any_off = EnvRestore::remove("TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE");
+
+        // The funnel picks TACHI_HOME as the resolved winner passed in here,
+        // matching what `MemoryServer::tachi_home_dir()` would resolve to.
+        let resolved_tachi_home = tachi_home_dir.path();
+
+        assert!(
+            wiki_ingest_local_file_allowed(&tachi_file, resolved_tachi_home),
+            "file under the resolved (winning) TACHI_HOME must be allowed"
+        );
+        assert!(
+            wiki_ingest_local_file_allowed(&sigil_file, resolved_tachi_home),
+            "file under the losing key SIGIL_HOME must still be allowed (union, not narrowing)"
+        );
+        assert!(
+            wiki_ingest_local_file_allowed(&app_file, resolved_tachi_home),
+            "file under the losing key TACHI_APP_HOME must still be allowed (union, not narrowing)"
+        );
+    }
 }

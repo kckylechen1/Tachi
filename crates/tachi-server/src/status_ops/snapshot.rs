@@ -213,12 +213,14 @@ fn collect_snapshot_inner(
             global_db_path,
             fresh_provider_probe_cache,
             true,
+            Some(app_home),
         )
     } else {
         status_health::collect_api_key_status_with_probe_cache(
             global_db_path,
             fresh_provider_probe_cache,
             false,
+            Some(app_home),
         )
     };
     status_health::apply_inferred_provider_failures(&mut api_keys, &dbs);

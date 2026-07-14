@@ -149,12 +149,14 @@ fn read_unlock_password_fifo_reads_secure_runtime_fifo() {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
 
-    let _guard = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let old_home = std::env::var_os("TACHI_HOME");
+    // #1096 leaf-2a: `read_unlock_password_fifo` now takes `home` as an
+    // explicit parameter instead of re-deriving it from `TACHI_HOME` env
+    // internally (only env read the function body had), so this test no
+    // longer needs to mutate process env or hold `global_test_lock` against
+    // other env-dependent tests. NOT independently re-run here (edit-only
+    // lane) — Oz must confirm this passes under parallel `cargo test`
+    // before the lock removal is trusted.
     let temp = tempfile::tempdir().expect("temp tachi home");
-    std::env::set_var("TACHI_HOME", temp.path());
     let unlock_dir = temp.path().join("runtime").join("vault-unlock");
     std::fs::create_dir_all(&unlock_dir).expect("unlock dir");
     std::fs::set_permissions(&unlock_dir, std::fs::Permissions::from_mode(0o700))
@@ -173,16 +175,11 @@ fn read_unlock_password_fifo_reads_secure_runtime_fifo() {
         file.write_all(b"fifo-password").expect("write fifo");
     });
 
-    let password = read_unlock_password_fifo(fifo_path.to_str().unwrap()).expect("read fifo");
+    let password =
+        read_unlock_password_fifo(temp.path(), fifo_path.to_str().unwrap()).expect("read fifo");
     writer.join().expect("writer thread");
     assert_eq!(password, "fifo-password");
     assert!(!fifo_path.exists(), "daemon reader should remove FIFO");
-
-    if let Some(value) = old_home {
-        std::env::set_var("TACHI_HOME", value);
-    } else {
-        std::env::remove_var("TACHI_HOME");
-    }
 }
 
 #[cfg(unix)]
@@ -190,12 +187,10 @@ fn read_unlock_password_fifo_reads_secure_runtime_fifo() {
 fn read_unlock_password_fifo_rejects_regular_file_without_removing_it() {
     use std::os::unix::fs::PermissionsExt;
 
-    let _guard = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let old_home = std::env::var_os("TACHI_HOME");
+    // #1096 leaf-2a: see comment in
+    // `read_unlock_password_fifo_reads_secure_runtime_fifo` above — `home` is
+    // now an explicit parameter, so no env mutation / global_test_lock needed.
     let temp = tempfile::tempdir().expect("temp tachi home");
-    std::env::set_var("TACHI_HOME", temp.path());
     let unlock_dir = temp.path().join("runtime").join("vault-unlock");
     std::fs::create_dir_all(&unlock_dir).expect("unlock dir");
     std::fs::set_permissions(&unlock_dir, std::fs::Permissions::from_mode(0o700))
@@ -203,7 +198,8 @@ fn read_unlock_password_fifo_rejects_regular_file_without_removing_it() {
     let regular_path = unlock_dir.join("not-a-fifo");
     std::fs::write(&regular_path, b"not a fifo").expect("regular file");
 
-    let err = read_unlock_password_fifo(regular_path.to_str().unwrap()).expect_err("regular file");
+    let err = read_unlock_password_fifo(temp.path(), regular_path.to_str().unwrap())
+        .expect_err("regular file");
     assert!(
         err.contains("must be a FIFO"),
         "expected FIFO rejection, got: {err}"
@@ -212,12 +208,6 @@ fn read_unlock_password_fifo_rejects_regular_file_without_removing_it() {
         regular_path.exists(),
         "rejected non-FIFO input should not be removed"
     );
-
-    if let Some(value) = old_home {
-        std::env::set_var("TACHI_HOME", value);
-    } else {
-        std::env::remove_var("TACHI_HOME");
-    }
 }
 
 // G-B5 (updated for #400): auto-lock no longer clears provider secrets.

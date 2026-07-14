@@ -89,11 +89,14 @@ pub(crate) async fn handle_vault_unlock(
             );
         }
         let mut fifo_password = match fifo_path {
-            Some(path) => Some(
-                tokio::task::spawn_blocking(move || read_unlock_password_fifo(&path))
-                    .await
-                    .map_err(|e| format!("unlock FIFO reader task failed: {e}"))??,
-            ),
+            Some(path) => {
+                let home = server.tachi_home_dir();
+                Some(
+                    tokio::task::spawn_blocking(move || read_unlock_password_fifo(&home, &path))
+                        .await
+                        .map_err(|e| format!("unlock FIFO reader task failed: {e}"))??,
+                )
+            }
             None => None,
         };
         let password = match fifo_password.as_deref() {

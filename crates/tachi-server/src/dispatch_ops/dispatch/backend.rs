@@ -101,7 +101,12 @@ pub(super) fn prepare_dispatch_backend(
         execution_backend_metadata = Some(acpx_spec.metadata.clone());
         DispatchExecution::Subprocess(build_acpx_command(&acpx_spec))
     } else if native_acp_enabled {
-        let native_spec = match build_native_acp_run_spec(ctx.params, ctx.agent_norm, ctx.prompt) {
+        let native_spec = match build_native_acp_run_spec(
+            &ctx.server.tachi_home_dir(),
+            ctx.params,
+            ctx.agent_norm,
+            ctx.prompt,
+        ) {
             Ok(spec) => spec,
             Err(err) => {
                 record_backend_prepare_failure("acp_native", &err);

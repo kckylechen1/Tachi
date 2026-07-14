@@ -41,4 +41,33 @@ pub(crate) struct MemoryServer {
     // ─── Vault ACL Runtime ───────────────────────────────────────────────────
     /// Server-bound vault identity read once from `TACHI_AGENT_ID` at startup.
     pub(crate) bound_agent_id: Arc<StdRwLock<Option<String>>>,
+    // ─── Home Identity ───────────────────────────────────────────────────────
+    /// Server-bound Tachi home directory, resolved once at startup via
+    /// `path_utils::tachi_home()` (env-precedence chain
+    /// `TACHI_HOME` → `SIGIL_HOME` → `TACHI_APP_HOME` → workspace fallback →
+    /// `~/.tachi`). Immutable for the process lifetime — no lock needed.
+    /// Handler/ops code that runs after `MemoryServer::new` should read this
+    /// field via `tachi_home_dir()` instead of re-reading env at call time;
+    /// outer CLI/bootstrap entry points that run *before* a server exists
+    /// still read env directly (see #1096 leaf-2a).
+    ///
+    /// **Invariant (#1096 leaf-2a round-2, codex checkpoint-1 / B2):** this
+    /// frozen value and a live re-read of `path_utils::tachi_home()` are
+    /// equal for the entire lifetime of any real process, because no
+    /// production path ever mutates `TACHI_HOME`/`SIGIL_HOME`/`TACHI_APP_HOME`
+    /// after constructing a server — every poke/CLI/daemon entry point sets
+    /// env BEFORE calling `MemoryServer::new`. That invariant is what makes
+    /// the mixed frozen-vs-live split safe across this crate: dispatch's
+    /// write side (`dedupe.rs`/`start.rs`) and the enumerate side of `search`
+    /// still re-derive the home from env at call time, while the predicate
+    /// read side and `search`'s open side read this frozen field — under the
+    /// invariant, both give the same answer, so there is no correctness gap
+    /// to close by moving the live-read call sites onto this field (that
+    /// migration was scoped out of this leaf: 6 functions across 5 files).
+    /// The only known way to violate the invariant is test code that
+    /// mutates env *after* constructing a server — such tests must set env
+    /// first, then construct. See
+    /// `memory_server_tachi_home_dir_matches_canonical_resolution` in
+    /// `server_state/init.rs`'s test module for the equality check.
+    pub(crate) home_dir: Arc<std::path::PathBuf>,
 }

@@ -249,7 +249,19 @@ pub fn bootstrap_provider_runtime(server: &MemoryServer) {
 }
 
 /// Parse `~/.tachi/config.env` (and peers) into key → value (non-empty values only).
-pub fn collect_config_env_values() -> HashMap<String, String> {
+///
+/// `resolved_home`, when given, is unioned into the scan locations alongside
+/// every existing one — additive only, nothing below is removed. #1096
+/// leaf-2a round-2 (codex B4-status): this scan set used to miss a
+/// `SIGIL_HOME`-only (or `TACHI_APP_HOME`-only) deployment's home entirely —
+/// `status`'s manifest/probe side reads the server's frozen, funnel-resolved
+/// home (`MemoryServer::tachi_home_dir()`), but this function only ever
+/// looked at `~/.tachi`, `~/.sigil`, a bare `TACHI_HOME` env re-read, and cwd,
+/// so the same `status` snapshot's manifest side and provider-key side could
+/// resolve to two different homes. Passing `Some(server.tachi_home_dir())`
+/// from the `status` call site closes that gap without touching the other
+/// call sites (which keep passing `None` and are byte-for-byte unchanged).
+pub fn collect_config_env_values(resolved_home: Option<&Path>) -> HashMap<String, String> {
     let mut paths = Vec::new();
     if let Some(home) = dirs::home_dir() {
         paths.push(home.join(".tachi").join("config.env"));
@@ -260,6 +272,9 @@ pub fn collect_config_env_values() -> HashMap<String, String> {
     }
     paths.push(std::path::PathBuf::from(".tachi/config.env"));
     paths.push(std::path::PathBuf::from(".sigil/config.env"));
+    if let Some(home) = resolved_home {
+        paths.push(home.join("config.env"));
+    }
 
     let mut values = HashMap::new();
     for path in paths {
@@ -307,6 +322,39 @@ mod tests {
                 None => std::env::remove_var(self.key),
             }
         }
+    }
+
+    /// #1096 leaf-2a round-2 (codex B4-status): `resolved_home` is additive —
+    /// `None` reproduces the exact pre-existing scan set (unchanged for every
+    /// caller but `status`), and `Some(path)` unions in `path/config.env` on
+    /// top of it. This is the SIGIL_HOME-only-deployment regression codex
+    /// flagged: without the resolved-home union, a `config.env` living only
+    /// under a `SIGIL_HOME`-style custom root was invisible to this scan even
+    /// though `status`'s manifest side already resolved to that root.
+    #[test]
+    fn collect_config_env_values_unions_in_resolved_home() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let custom_home = tempfile::tempdir().expect("custom home tempdir");
+        std::fs::write(
+            custom_home.path().join("config.env"),
+            "TACHI_ROUND2_B4_PROBE=custom-value\n",
+        )
+        .expect("write custom config.env");
+
+        let without_home = collect_config_env_values(None);
+        assert!(
+            !without_home.contains_key("TACHI_ROUND2_B4_PROBE"),
+            "a config.env under an arbitrary path must not be scanned without resolved_home"
+        );
+
+        let with_home = collect_config_env_values(Some(custom_home.path()));
+        assert_eq!(
+            with_home.get("TACHI_ROUND2_B4_PROBE").map(String::as_str),
+            Some("custom-value"),
+            "resolved_home's config.env must be unioned into the scan set"
+        );
     }
 
     #[test]

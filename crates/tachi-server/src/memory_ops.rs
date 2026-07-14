@@ -246,7 +246,7 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
     let binary = std::env::current_exe()
         .ok()
         .map(|path| path.display().to_string());
-    let app_home = crate::status_ops::resolve_app_home();
+    let app_home = server.tachi_home_dir();
     let global_db_path = server.global_db_path_buf();
     let project_db_path = server.project_db_path_buf();
     let session_client = server.session_client();

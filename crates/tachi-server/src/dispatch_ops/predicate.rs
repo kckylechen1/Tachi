@@ -117,18 +117,35 @@ pub(crate) fn evaluate_completion_predicate(
 
 /// Load completion-predicate context from the dispatch run ledger (`status.json`).
 ///
+/// `home` is the caller's resolved Tachi home directory (from
+/// `MemoryServer::tachi_home_dir()` at both call sites — #1096 leaf-2a: this
+/// always runs after a server exists, so it reads the server-bound identity
+/// instead of re-deriving it from env).
+///
 /// Returns `(run_dir, declared_predicate, cwd)`.
 pub(crate) fn resolve_completion_predicate_context(
+    home: &Path,
     dispatch_id: &str,
 ) -> (
     Option<PathBuf>,
     Option<CompletionPredicate>,
     Option<PathBuf>,
 ) {
-    let run_dir = crate::path_utils::tachi_home()
-        .join("runs")
-        .join(dispatch_id);
+    let run_dir = home.join("runs").join(dispatch_id);
     if !run_dir.is_dir() {
+        // #1096 leaf-2a round-2 (codex B2): loud, not a silent fall-through
+        // to Unverified. This is either a genuinely stale/foreign dispatch_id
+        // OR `home` disagreeing with wherever the run was actually written —
+        // exactly the failure mode the frozen/live-read split (see the
+        // `home_dir` invariant doc) would produce if that invariant were
+        // ever violated. Does not change control flow: still resolves to
+        // `PredicateVerdict::Unverified` same as before this line existed.
+        tracing::warn!(
+            dispatch_id = %dispatch_id,
+            run_dir = %run_dir.display(),
+            "completion predicate context: run directory not found under resolved home; \
+             falling through to Unverified"
+        );
         return (None, None, None);
     }
     let status_path = run_dir.join("status.json");

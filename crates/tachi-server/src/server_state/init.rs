@@ -110,11 +110,19 @@ impl MemoryServer {
         let llm = Arc::new(tachi_llm::LlmClient::new_with_vault_db(Some(
             global_db_path.as_path(),
         ))?);
+        // Resolved once, ahead of `claude_pool` construction, so both the
+        // server's own `home_dir` field and `ClaudePool` bind to the SAME
+        // resolution instead of each independently re-reading
+        // TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME (#1096 leaf-2a).
+        let home_dir = Arc::new(crate::path_utils::tachi_home());
         let claude_pool_max = std::env::var("CLAUDE_POOL_MAX_CONCURRENT")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(tachi_llm::claude_pool::DEFAULT_MAX_CONCURRENT);
-        let claude_pool = Arc::new(tachi_llm::claude_pool::ClaudePool::new(claude_pool_max));
+        let claude_pool = Arc::new(tachi_llm::claude_pool::ClaudePool::new_in_app_home(
+            claude_pool_max,
+            (*home_dir).clone(),
+        ));
         let pipeline_enabled = std::env::var("ENABLE_PIPELINE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
@@ -224,6 +232,7 @@ impl MemoryServer {
                 handoff_memos: Vec::new(),
             })),
             bound_agent_id: Arc::new(StdRwLock::new(bound_agent_id)),
+            home_dir,
         };
 
         if background_workers_enabled() {
@@ -392,5 +401,30 @@ mod tests {
             found.expect("project entry exists").id,
             "startup-project-read-visible"
         );
+    }
+
+    /// #1096 leaf-2a round-2 (codex B2): pins the invariant documented on
+    /// `MemoryServer::home_dir` — a normally-constructed server's frozen
+    /// `tachi_home_dir()` must equal a live re-read of the canonical funnel
+    /// (`path_utils::tachi_home()`), because production never mutates
+    /// `TACHI_HOME`/`SIGIL_HOME`/`TACHI_APP_HOME` after constructing a
+    /// server. If this test starts failing, something is re-deriving home
+    /// AFTER construction with different env than construction saw — fix by
+    /// setting env before `MemoryServer::new`, not by moving more call sites
+    /// off the frozen field.
+    #[test]
+    fn memory_server_tachi_home_dir_matches_canonical_resolution() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp_home = tempfile::tempdir().expect("tachi home tempdir");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", temp_home.path());
+        let _sigil_home = crate::test_support::EnvRestore::remove("SIGIL_HOME");
+        let _app_home = crate::test_support::EnvRestore::remove("TACHI_APP_HOME");
+
+        let global_db = temp_home.path().join("global/memory.db");
+        let server = MemoryServer::new(global_db, None).expect("server construction");
+
+        assert_eq!(server.tachi_home_dir(), crate::path_utils::tachi_home());
     }
 }

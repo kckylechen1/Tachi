@@ -216,8 +216,8 @@ pub(crate) fn round_score(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
 }
 
-pub(crate) fn list_available_named_projects() -> Vec<String> {
-    let projects_dir = crate::path_utils::tachi_home().join("projects");
+pub(crate) fn list_available_named_projects(home: &std::path::Path) -> Vec<String> {
+    let projects_dir = home.join("projects");
     let Ok(read_dir) = std::fs::read_dir(projects_dir) else {
         return Vec::new();
     };
@@ -356,14 +356,24 @@ pub(crate) fn bound_project_label(server: &crate::MemoryServer) -> Option<String
         .and_then(|path| named_project_from_db_path(path.as_path()))
 }
 
-pub(crate) fn infer_search_project(query: &str, domain: Option<&str>) -> Option<String> {
-    infer_search_project_with(query, domain, &super::routing_config::RoutingConfig::get())
+pub(crate) fn infer_search_project(
+    home: &std::path::Path,
+    query: &str,
+    domain: Option<&str>,
+) -> Option<String> {
+    infer_search_project_with(
+        home,
+        query,
+        domain,
+        &super::routing_config::RoutingConfig::get(),
+    )
 }
 
 /// Config-injectable core. Domain-specific routing is supplied by
 /// [`RoutingConfig`] rather than hardcoded here; the engine itself stays
 /// domain-agnostic.
 fn infer_search_project_with(
+    home: &std::path::Path,
     query: &str,
     domain: Option<&str>,
     config: &super::routing_config::RoutingConfig,
@@ -373,7 +383,7 @@ fn infer_search_project_with(
         domain,
         config,
         named_project_db_exists,
-        list_available_named_projects(),
+        list_available_named_projects(home),
     )
 }
 
@@ -571,7 +581,10 @@ mod tests {
         let db_path = temp_home.path().join("global.sqlite");
         let server = crate::MemoryServer::new(PathBuf::from(&db_path), None).expect("server");
 
-        assert_eq!(list_available_named_projects(), vec!["lonely".to_string()]);
+        assert_eq!(
+            list_available_named_projects(temp_home.path()),
+            vec!["lonely".to_string()]
+        );
         assert_eq!(resolve_effective_named_project(&server, None), None);
     }
 

@@ -240,7 +240,7 @@ async fn handle_tachi_status_detail(
     server: &crate::MemoryServer,
     full: bool,
 ) -> Result<String, String> {
-    let app_home = resolve_app_home();
+    let app_home = server.tachi_home_dir();
     let global_db_path = server.global_db_path_buf();
     let project_db_path = server.project_db_path_buf();
 

@@ -15,6 +15,7 @@ pub(in crate::dispatch_ops) fn is_native_acp_transport(transport: &str) -> bool 
 }
 
 pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
+    home: &Path,
     params: &TachiDispatchParams,
     agent: &str,
     prompt: &str,
@@ -60,7 +61,7 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
             &serde_json::to_string(&session_key)
                 .map_err(|err| format!("serialize native ACP session key: {err}"))?,
         );
-        let base = crate::path_utils::tachi_home().join("sessions").join("acp");
+        let base = home.join("sessions").join("acp");
         (
             Some(base.join(format!("{record_id}.json"))),
             Some(base.join(format!("{record_id}.md"))),
@@ -255,8 +256,13 @@ mod tests {
         let mut params = params();
         params.sandbox = Some("workspace-write".to_string());
 
-        let err = build_native_acp_run_spec(&params, "custom", "hello")
-            .expect_err("native ACP has no sandbox concept and must fail closed");
+        let err = build_native_acp_run_spec(
+            Path::new("/tmp/tachi-home-test"),
+            &params,
+            "custom",
+            "hello",
+        )
+        .expect_err("native ACP has no sandbox concept and must fail closed");
         assert!(
             err.contains("acp-native") && err.contains("workspace-write"),
             "receipt must name backend + requested level: {err}"
@@ -267,8 +273,13 @@ mod tests {
     #[test]
     fn native_acp_builds_spec_without_sandbox() {
         let params = params();
-        let spec = build_native_acp_run_spec(&params, "custom", "hello")
-            .expect("no sandbox requested should build cleanly");
+        let spec = build_native_acp_run_spec(
+            Path::new("/tmp/tachi-home-test"),
+            &params,
+            "custom",
+            "hello",
+        )
+        .expect("no sandbox requested should build cleanly");
         assert_eq!(spec.command, "python3");
     }
 }

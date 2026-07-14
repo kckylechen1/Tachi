@@ -15,7 +15,13 @@ impl super::ClaudePool {
         Self::new_in_app_home(max_concurrent, crate::path::tachi_home())
     }
 
-    pub(crate) fn new_in_app_home(max_concurrent: usize, app_home: impl Into<PathBuf>) -> Self {
+    /// Same as [`Self::new`] but takes an already-resolved `app_home` instead
+    /// of re-deriving it from env via `crate::path::tachi_home()` internally.
+    /// #1096 leaf-2a: `tachi-server`'s `MemoryServer::new` already resolves
+    /// its own home once at construction (`MemoryServer::home_dir`) — this
+    /// lets it pass that value straight through instead of paying a second,
+    /// redundant env-precedence resolution here.
+    pub fn new_in_app_home(max_concurrent: usize, app_home: impl Into<PathBuf>) -> Self {
         let runs_dir = app_home.into().join("foundry-runs");
         if let Err(error) = std::fs::create_dir_all(&runs_dir) {
             tracing::warn!(

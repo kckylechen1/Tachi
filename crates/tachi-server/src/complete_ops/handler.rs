@@ -117,7 +117,10 @@ pub(crate) async fn handle_tachi_complete(
         .filter(|id| !id.trim().is_empty())
         .map(|did| {
             let (predicate_run_dir, declared_predicate, predicate_cwd) =
-                crate::dispatch_ops::resolve_completion_predicate_context(did);
+                crate::dispatch_ops::resolve_completion_predicate_context(
+                    &server.tachi_home_dir(),
+                    did,
+                );
             let predicate_output = predicate_run_dir
                 .as_deref()
                 .and_then(|dir| std::fs::read_to_string(dir.join("result.md")).ok())

@@ -1,5 +1,5 @@
 use super::*;
-use std::ffi::OsString;
+use crate::test_support::EnvRestore;
 use tokio_util::sync::CancellationToken;
 
 fn daemon(global: Option<&Path>, project: Option<&Path>) -> crate::cli_client::DaemonInfo {
@@ -12,24 +12,27 @@ fn daemon(global: Option<&Path>, project: Option<&Path>) -> crate::cli_client::D
     }
 }
 
+// #1096 leaf-2a: this file needs a caller-supplied (and sometimes reused
+// across several calls) `home` path, unlike `crate::test_support`'s
+// `with_tachi_home` which always mints its own fresh tempdir — so it keeps
+// its own distinct signature, but now delegates env save/restore to the
+// shared `EnvRestore` RAII guard instead of hand-rolled pre/post statements
+// (which, notably, were not panic-safe: a panic inside `f` used to skip the
+// restore calls below entirely and leak the override into later tests).
 fn with_tachi_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var_os("TACHI_HOME");
-    let saved_sigil = std::env::var_os("SIGIL_HOME");
-    let saved_app = std::env::var_os("TACHI_APP_HOME");
-    std::env::set_var("TACHI_HOME", home);
-    std::env::remove_var("SIGIL_HOME");
-    std::env::remove_var("TACHI_APP_HOME");
-    let out = f();
-    restore_env("TACHI_HOME", saved_home);
-    restore_env("SIGIL_HOME", saved_sigil);
-    restore_env("TACHI_APP_HOME", saved_app);
-    out
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+    f()
 }
 
-fn restore_env(name: &str, value: Option<OsString>) {
+// Still used by the ~44 hand-rolled save/set/restore sites further down this
+// file; those migrate to `EnvRestore` in the mechanical follow-up leaf, and
+// this helper leaves with them.
+fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
     if let Some(value) = value {
         std::env::set_var(name, value);
     } else {

@@ -116,27 +116,40 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
 ];
 
 pub(super) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus> {
-    collect_api_key_status_inner(global_db_path, false, None)
+    collect_api_key_status_inner(global_db_path, false, None, None)
 }
 
 pub(super) fn collect_api_key_status_with_value_compare(
     global_db_path: &Path,
 ) -> Vec<ApiKeyStatus> {
-    collect_api_key_status_inner(global_db_path, true, None)
+    collect_api_key_status_inner(global_db_path, true, None, None)
 }
 
+/// `resolved_home`: the caller's server-bound home (`MemoryServer::tachi_home_dir()`),
+/// unioned into the `config.env` scan set (#1096 leaf-2a round-2, codex
+/// B4-status) — see `provider_config::collect_config_env_values`'s doc for
+/// why this closes the manifest-side/provider-side split-home bug. The only
+/// caller of this function (`status_ops::snapshot::collect_snapshot_inner`)
+/// always has an `app_home` in scope, so it is passed as `Some`.
 pub(crate) fn collect_api_key_status_with_probe_cache(
     global_db_path: &Path,
     probe_cache: Option<&ProviderProbeCache>,
     compare_vault_values: bool,
+    resolved_home: Option<&Path>,
 ) -> Vec<ApiKeyStatus> {
-    collect_api_key_status_inner(global_db_path, compare_vault_values, probe_cache)
+    collect_api_key_status_inner(
+        global_db_path,
+        compare_vault_values,
+        probe_cache,
+        resolved_home,
+    )
 }
 
 fn collect_api_key_status_inner(
     global_db_path: &Path,
     compare_vault_values: bool,
     probe_cache: Option<&ProviderProbeCache>,
+    resolved_home: Option<&Path>,
 ) -> Vec<ApiKeyStatus> {
     let mut vault_names = HashSet::new();
     let mut rotation_rows = Vec::new();
@@ -181,7 +194,7 @@ fn collect_api_key_status_inner(
             )
         })
         .collect::<HashMap<_, _>>();
-    let config_env = crate::provider_config::collect_config_env_values();
+    let config_env = crate::provider_config::collect_config_env_values(resolved_home);
     let vault_values: HashMap<String, String> = if compare_vault_values {
         match load_keychain_vault_api_key_values(global_db_path) {
             Ok(values) => values.into_iter().collect(),

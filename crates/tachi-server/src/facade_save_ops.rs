@@ -98,6 +98,7 @@ pub(crate) async fn handle_tachi_save(
         }
         "note" => {
             let (abs_note_path, rel_note_path) = crate::notes_ops::write_note_file(
+                &server.tachi_home_dir(),
                 &params.text,
                 params.path.as_deref(),
                 params.title.as_deref(),

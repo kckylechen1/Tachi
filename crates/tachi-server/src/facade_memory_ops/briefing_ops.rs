@@ -100,7 +100,7 @@ pub(crate) async fn handle_memory_briefing(
         .clone()
         .or_else(|| resolve_effective_named_project(server, None));
     let available_projects = if named_project.is_none() {
-        list_available_named_projects()
+        list_available_named_projects(&server.tachi_home_dir())
     } else {
         Vec::new()
     };
@@ -282,7 +282,7 @@ pub(crate) async fn handle_memory_briefing(
         // disagree (this used to hardcode 95/85 and diverged from the actual score).
         // collect_snapshot does blocking SQLite I/O, so run it off the async
         // executor via spawn_blocking.
-        let app_home = crate::status_ops::resolve_app_home();
+        let app_home = server.tachi_home_dir();
         let global_db = server.global_db_path_buf();
         let project_db = server.project_db_path_buf();
         let health_score = tokio::task::spawn_blocking(move || {
