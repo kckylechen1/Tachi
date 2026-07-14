@@ -2,42 +2,7 @@ use super::*;
 // Shared OpenCode OpenAPI fixture lives in `crate::test_support`; the local
 // `spawn_auth_gated_opencode_doc_server` below is a distinct (auth-gated)
 // variant that uses it.
-use crate::test_support::OPENCODE_DOC_FIXTURE;
-
-struct EnvGuard {
-    key: &'static str,
-    original: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn set_value(key: &'static str, value: &str) -> Self {
-        let original = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, original }
-    }
-
-    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
-        let original = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, original }
-    }
-
-    fn remove(key: &'static str) -> Self {
-        let original = std::env::var_os(key);
-        std::env::remove_var(key);
-        Self { key, original }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        if let Some(value) = self.original.as_ref() {
-            std::env::set_var(self.key, value);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
+use crate::test_support::{EnvRestore, OPENCODE_DOC_FIXTURE};
 
 fn test_dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams {
     TachiDispatchParams {
@@ -292,11 +257,11 @@ async fn opencode_serve_dispatch_fails_fast_when_probe_auth_fails() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp home");
-    let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
-    let _host_profile = EnvGuard::set_value("TACHI_HOST_PROFILE", "development");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let _host_profile = EnvRestore::set("TACHI_HOST_PROFILE", "development");
     let run_root = dispatch_runs_root();
-    let _password = EnvGuard::remove("OPENCODE_SERVER_PASSWORD");
-    let _username = EnvGuard::remove("OPENCODE_SERVER_USERNAME");
+    let _password = EnvRestore::remove("OPENCODE_SERVER_PASSWORD");
+    let _username = EnvRestore::remove("OPENCODE_SERVER_USERNAME");
     let server = crate::tests::make_server();
     let (server_url, probe_server) = spawn_auth_gated_opencode_doc_server();
 
@@ -363,9 +328,9 @@ async fn opencode_serve_preflight_uses_dispatch_credential_env() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp home");
-    let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
-    let _password = EnvGuard::remove("OPENCODE_SERVER_PASSWORD");
-    let _username = EnvGuard::remove("OPENCODE_SERVER_USERNAME");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let _password = EnvRestore::remove("OPENCODE_SERVER_PASSWORD");
+    let _username = EnvRestore::remove("OPENCODE_SERVER_USERNAME");
     let server = crate::tests::make_server();
     let project = tempfile::tempdir().expect("temp project");
     let credentials_dir = project.path().join(".tachi/credentials");
@@ -450,7 +415,7 @@ async fn v2_auto_stage_rejects_unsupported_sandbox_before_plan_stage_spawn() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp home");
-    let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
     let run_root = dispatch_runs_root();
     let server = crate::tests::make_server();
 
@@ -503,7 +468,7 @@ async fn read_only_request_to_uncertified_backend_is_refused_before_run_dir_or_c
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp home");
-    let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
     let run_root = dispatch_runs_root();
     let server = crate::tests::make_server();
 
@@ -549,7 +514,7 @@ async fn dispatch_rejects_bare_cwd_without_unmanaged_optin_or_env_id() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp home");
-    let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
     let run_root = dispatch_runs_root();
     let server = crate::tests::make_server();
     let bare_cwd = tempfile::tempdir().expect("bare cwd dir");
@@ -584,8 +549,8 @@ async fn dispatch_rejects_level_above_host_profile_before_workspace_creation() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp home");
-    let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
-    let _host_profile = EnvGuard::set_value("TACHI_HOST_PROFILE", "development");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let _host_profile = EnvRestore::set("TACHI_HOST_PROFILE", "development");
     let run_root = dispatch_runs_root();
     let server = crate::tests::make_server();
 
@@ -781,7 +746,7 @@ async fn named_project_dispatch_receipt_carries_project_field() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp home");
-    let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
     let server = crate::tests::make_server();
 
     // The dispatch's own background completion also resolves `project` —
@@ -840,7 +805,7 @@ async fn dispatch_receipt_carries_the_effective_authority_contract() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp_home = tempfile::tempdir().expect("temp home");
-    let _tachi_home = EnvGuard::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
     let server = crate::tests::make_server();
 
     let mut params = test_dispatch_params(Some("custom"), "stamp the authority receipt");

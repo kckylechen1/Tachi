@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::EnvRestore;
 use std::path::{Path, PathBuf};
 
 fn with_env_lock<F: FnOnce()>(f: F) {
@@ -8,72 +9,45 @@ fn with_env_lock<F: FnOnce()>(f: F) {
     f();
 }
 
-fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
-    if let Some(v) = value {
-        std::env::set_var(name, v);
-    } else {
-        std::env::remove_var(name);
-    }
-}
-
 #[test]
 fn tachi_home_defaults_to_dot_tachi_under_user_home() {
     with_env_lock(|| {
         let tmp = tempfile::tempdir().expect("tmp");
         let saved_cwd = std::env::current_dir().expect("cwd");
-        let saved_home = std::env::var_os("TACHI_HOME");
-        let saved_sigil = std::env::var_os("SIGIL_HOME");
-        let saved_app = std::env::var_os("TACHI_APP_HOME");
+
         std::env::set_current_dir(tmp.path()).expect("set cwd");
-        std::env::remove_var("TACHI_HOME");
-        std::env::remove_var("SIGIL_HOME");
-        std::env::remove_var("TACHI_APP_HOME");
+        let _tachi_home = EnvRestore::remove("TACHI_HOME");
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
 
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         assert_eq!(tachi_home(), home.join(".tachi"));
 
         std::env::set_current_dir(saved_cwd).expect("restore cwd");
-        restore_env("TACHI_HOME", saved_home);
-        restore_env("SIGIL_HOME", saved_sigil);
-        restore_env("TACHI_APP_HOME", saved_app);
     });
 }
 
 #[test]
 fn tachi_home_honors_tilde_and_tilde_slash() {
     with_env_lock(|| {
-        let saved_home = std::env::var_os("TACHI_HOME");
-        let saved_sigil = std::env::var_os("SIGIL_HOME");
-        let saved_app = std::env::var_os("TACHI_APP_HOME");
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
 
-        std::env::set_var("TACHI_HOME", "~");
+        let _tachi_home = EnvRestore::set("TACHI_HOME", "~");
         assert_eq!(tachi_home(), home);
 
         std::env::set_var("TACHI_HOME", "~/custom-tachi");
         assert_eq!(tachi_home(), home.join("custom-tachi"));
-
-        restore_env("TACHI_HOME", saved_home);
-        restore_env("SIGIL_HOME", saved_sigil);
-        restore_env("TACHI_APP_HOME", saved_app);
     });
 }
 
 #[test]
 fn tachi_home_falls_back_to_tachi_app_home() {
     with_env_lock(|| {
-        let saved_home = std::env::var_os("TACHI_HOME");
-        let saved_sigil = std::env::var_os("SIGIL_HOME");
-        let saved_app = std::env::var_os("TACHI_APP_HOME");
-        std::env::remove_var("TACHI_HOME");
-        std::env::remove_var("SIGIL_HOME");
-        std::env::set_var("TACHI_APP_HOME", "/tmp/legacy-app-home");
+        let _tachi_home = EnvRestore::remove("TACHI_HOME");
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::set("TACHI_APP_HOME", "/tmp/legacy-app-home");
 
         assert_eq!(tachi_home(), PathBuf::from("/tmp/legacy-app-home"));
-
-        restore_env("TACHI_HOME", saved_home);
-        restore_env("SIGIL_HOME", saved_sigil);
-        restore_env("TACHI_APP_HOME", saved_app);
     });
 }
 
@@ -82,12 +56,10 @@ fn tachi_home_detects_workspace_data_tachi_layout() {
     with_env_lock(|| {
         let tmp = tempfile::tempdir().expect("tmp");
         let saved_cwd = std::env::current_dir().expect("cwd");
-        let saved_home = std::env::var_os("TACHI_HOME");
-        let saved_sigil = std::env::var_os("SIGIL_HOME");
-        let saved_app = std::env::var_os("TACHI_APP_HOME");
-        std::env::remove_var("TACHI_HOME");
-        std::env::remove_var("SIGIL_HOME");
-        std::env::remove_var("TACHI_APP_HOME");
+
+        let _tachi_home = EnvRestore::remove("TACHI_HOME");
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
 
         let repo = tmp.path().join("Quant_Analyzer_2026");
         let nested = repo.join("engine/v8");
@@ -106,40 +78,32 @@ fn tachi_home_detects_workspace_data_tachi_layout() {
         );
 
         std::env::set_current_dir(saved_cwd).expect("restore cwd");
-        restore_env("TACHI_HOME", saved_home);
-        restore_env("SIGIL_HOME", saved_sigil);
-        restore_env("TACHI_APP_HOME", saved_app);
     });
 }
 
 #[test]
 fn named_project_from_path_accepts_canonical_layout() {
     with_env_lock(|| {
-        let saved = std::env::var_os("TACHI_HOME");
-        std::env::set_var("TACHI_HOME", "/tmp/tachi-test-home");
+        let _tachi_home = EnvRestore::set("TACHI_HOME", "/tmp/tachi-test-home");
         let path = PathBuf::from("/tmp/tachi-test-home/projects/sigil/memory.db");
         assert_eq!(named_project_from_path(&path).as_deref(), Some("sigil"));
-        restore_env("TACHI_HOME", saved);
     });
 }
 
 #[test]
 fn named_project_from_path_honors_custom_tachi_home() {
     with_env_lock(|| {
-        let saved = std::env::var_os("TACHI_HOME");
-        std::env::set_var("TACHI_HOME", "/tmp/custom-tachi-root");
+        let _tachi_home = EnvRestore::set("TACHI_HOME", "/tmp/custom-tachi-root");
         let path = PathBuf::from("/tmp/custom-tachi-root/projects/my_app/memory.db");
         assert_eq!(named_project_from_path(&path).as_deref(), Some("my_app"));
-        restore_env("TACHI_HOME", saved);
     });
 }
 
 #[test]
 fn list_named_projects_finds_dirs_with_memory_db() {
     with_env_lock(|| {
-        let saved = std::env::var_os("TACHI_HOME");
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("TACHI_HOME", tmp.path());
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", tmp.path());
         let projects = tmp.path().join("projects");
         for name in ["alpha", "beta", "nodb"] {
             std::fs::create_dir_all(projects.join(name)).unwrap();
@@ -150,7 +114,6 @@ fn list_named_projects_finds_dirs_with_memory_db() {
         let mut got = list_named_projects();
         got.sort();
         assert_eq!(got, vec!["alpha".to_string(), "beta".to_string()]);
-        restore_env("TACHI_HOME", saved);
     });
 }
 
@@ -164,9 +127,9 @@ fn named_project_from_path_rejects_external_projects_dir() {
 fn named_project_for_db_path_accepts_plan_c_symlink_target() {
     with_env_lock(|| {
         let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
-        let saved = std::env::var_os("TACHI_HOME");
+
         let tachi_home = tmp.path().join("home");
-        std::env::set_var("TACHI_HOME", &tachi_home);
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
 
         let repo = tmp.path().join("Quant Analyzer");
         let local_db = repo.join(".tachi/memory.db");
@@ -184,8 +147,6 @@ fn named_project_for_db_path_accepts_plan_c_symlink_target() {
             named_project_for_db_path(&local_db).as_deref(),
             Some(expected.as_str())
         );
-
-        restore_env("TACHI_HOME", saved);
     });
 }
 
@@ -193,9 +154,9 @@ fn named_project_for_db_path_accepts_plan_c_symlink_target() {
 fn plan_c_regular_alias_file_reports_split_brain() {
     with_env_lock(|| {
         let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
-        let saved = std::env::var_os("TACHI_HOME");
+
         let tachi_home = tmp.path().join("home");
-        std::env::set_var("TACHI_HOME", &tachi_home);
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
 
         let repo = tmp.path().join("Split Brain Repo");
         let local_db = repo.join(".tachi/memory.db");
@@ -221,8 +182,6 @@ fn plan_c_regular_alias_file_reports_split_brain() {
             !issue.alias_db.is_symlink(),
             "regular alias file must not be silently replaced"
         );
-
-        restore_env("TACHI_HOME", saved);
     });
 }
 

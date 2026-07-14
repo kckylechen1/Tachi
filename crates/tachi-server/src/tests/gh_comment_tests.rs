@@ -87,13 +87,17 @@ async fn gh_comment_rejects_empty_body() {
 
 /// gh shim parity: comment verbs must pass body via `--body-file`, never inline `--body`.
 #[tokio::test]
+// The whole point of widening this lock (#1096 leaf-0 audit) is to keep PATH
+// serialized across the awaited fake-gh invocation; the awaited path never
+// takes global_test_lock, so there is no deadlock to guard against.
+#[allow(clippy::await_holding_lock)]
 async fn gh_comment_uses_body_file_not_inline_body() {
     let fake_bin = tempfile::tempdir().expect("fake bin");
     let gh_path = fake_bin.path().join("gh");
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let _path = {
-        let _lock = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         write_executable(
             &gh_path,
             "#!/bin/sh\n\

@@ -78,6 +78,16 @@ impl EnvRestore {
         Self { key, old }
     }
 
+    /// Set `key` to a raw `OsStr` value, returning a guard that restores the
+    /// prior value. For values that are not guaranteed UTF-8 (e.g. a PATH
+    /// rebuilt via `join_paths`) — `set`'s `&str` parameter would force a
+    /// lossy/panicking conversion that the old hand-rolled guards never did.
+    pub(crate) fn set_os(key: &'static str, value: &std::ffi::OsStr) -> Self {
+        let old = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, old }
+    }
+
     /// Remove `key`, returning a guard that restores the prior value.
     pub(crate) fn remove(key: &'static str) -> Self {
         let old = std::env::var_os(key);

@@ -37,13 +37,7 @@ async fn collect_database_stats_for_targets_preserves_manifest_order() {
     assert!(stats.iter().all(|stat| stat.error.is_some()));
 }
 
-fn restore_env_var(key: &str, saved: Option<std::ffi::OsString>) {
-    if let Some(value) = saved {
-        std::env::set_var(key, value);
-    } else {
-        std::env::remove_var(key);
-    }
-}
+use crate::test_support::EnvRestore;
 
 #[test]
 fn truth_maintenance_routes_external_project_target_by_path() {
@@ -91,8 +85,7 @@ fn truth_maintenance_routes_plan_c_project_by_name() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = crate::test_support::non_skipped_fixture_tempdir("daily-pipeline-");
-    let saved = std::env::var_os("TACHI_HOME");
-    std::env::set_var("TACHI_HOME", tmp.path());
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", tmp.path());
 
     let global = tmp.path().join("global").join("memory.db");
     let current_project = tmp
@@ -109,6 +102,4 @@ fn truth_maintenance_routes_plan_c_project_by_name() {
     assert_eq!(route.target_db, DbScope::Project);
     assert_eq!(route.named_project.as_deref(), Some("sigil"));
     assert_eq!(route.db_path, None);
-
-    restore_env_var("TACHI_HOME", saved);
 }

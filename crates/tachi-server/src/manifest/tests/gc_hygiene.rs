@@ -1,14 +1,7 @@
 use super::*;
+use crate::test_support::EnvRestore;
 
 // ─── PR-2: hygiene / GC tests ──────────────────────────────────────────
-
-fn restore_env_var(name: &str, value: Option<std::ffi::OsString>) {
-    if let Some(v) = value {
-        std::env::set_var(name, v);
-    } else {
-        std::env::remove_var(name);
-    }
-}
 
 #[cfg(unix)]
 #[test]
@@ -116,8 +109,7 @@ fn repo_local_db_fixture_helper_avoids_linux_tmp_skip_semantics() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_target = std::env::var_os("CARGO_TARGET_DIR");
-    std::env::set_var("CARGO_TARGET_DIR", "/private/tmp/sigil-target-review-784");
+    let _target = EnvRestore::set("CARGO_TARGET_DIR", "/private/tmp/sigil-target-review-784");
 
     assert!(
         should_skip_path(Path::new("/tmp/case/repo/.tachi/memory.db")).is_some(),
@@ -127,6 +119,4 @@ fn repo_local_db_fixture_helper_avoids_linux_tmp_skip_semantics() {
     let tmp = crate::test_support::non_skipped_fixture_tempdir("manifest-guard-");
     let local_db = tmp.path().join("repo/.tachi/memory.db");
     crate::test_support::assert_repo_local_db_fixture_not_skipped(&local_db);
-
-    restore_env_var("CARGO_TARGET_DIR", saved_target);
 }

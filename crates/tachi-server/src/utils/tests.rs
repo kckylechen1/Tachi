@@ -1,45 +1,8 @@
 use super::file::MAX_APPEND_ONLY_JSONL_LINE_BYTES;
 use super::*;
+use crate::test_support::EnvRestore;
 use serde_json::json;
 use std::path::{Path, PathBuf};
-
-struct EnvGuard {
-    key: &'static str,
-    original: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn set_path(key: &'static str, value: &Path) -> Self {
-        let original = std::env::var_os(key);
-        // SAFETY: tests that use this helper hold global_test_lock.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, original }
-    }
-
-    fn unset(key: &'static str) -> Self {
-        let original = std::env::var_os(key);
-        // SAFETY: tests that use this helper hold global_test_lock.
-        unsafe {
-            std::env::remove_var(key);
-        }
-        Self { key, original }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        // SAFETY: tests that use this helper hold global_test_lock.
-        unsafe {
-            if let Some(value) = self.original.as_ref() {
-                std::env::set_var(self.key, value);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-}
 
 struct CwdGuard {
     original: PathBuf,
@@ -65,14 +28,14 @@ fn make_git_root(parent: &Path, name: &str) -> PathBuf {
     root
 }
 
-fn clear_workspace_root_env() -> Vec<EnvGuard> {
+fn clear_workspace_root_env() -> Vec<EnvRestore> {
     vec![
-        EnvGuard::unset("TACHI_PROJECT_ROOT"),
-        EnvGuard::unset("TACHI_WORKSPACE_ROOT"),
-        EnvGuard::unset("PROJECT_ROOT"),
-        EnvGuard::unset("WORKSPACE_ROOT"),
-        EnvGuard::unset("WORKSPACE"),
-        EnvGuard::unset("PWD"),
+        EnvRestore::remove("TACHI_PROJECT_ROOT"),
+        EnvRestore::remove("TACHI_WORKSPACE_ROOT"),
+        EnvRestore::remove("PROJECT_ROOT"),
+        EnvRestore::remove("WORKSPACE_ROOT"),
+        EnvRestore::remove("WORKSPACE"),
+        EnvRestore::remove("PWD"),
     ]
 }
 
@@ -86,7 +49,7 @@ fn find_project_git_root_prefers_real_cwd_over_stale_pwd() {
     let nested = cwd_root.join("nested");
     std::fs::create_dir_all(&nested).expect("create nested cwd");
     let _cwd = CwdGuard::set(&nested);
-    let _pwd = EnvGuard::set_path("PWD", &pwd_root);
+    let _pwd = EnvRestore::set_path("PWD", &pwd_root);
 
     let resolved = find_project_git_root().expect("resolve project root");
 
@@ -105,8 +68,8 @@ fn find_project_git_root_prefers_explicit_tachi_root_over_cwd_and_pwd() {
     let cwd_root = make_git_root(dir.path(), "cwd-repo");
     let pwd_root = make_git_root(dir.path(), "stale-pwd-repo");
     let _cwd = CwdGuard::set(&cwd_root);
-    let _project = EnvGuard::set_path("TACHI_PROJECT_ROOT", &explicit_root);
-    let _pwd = EnvGuard::set_path("PWD", &pwd_root);
+    let _project = EnvRestore::set_path("TACHI_PROJECT_ROOT", &explicit_root);
+    let _pwd = EnvRestore::set_path("PWD", &pwd_root);
 
     let resolved = find_project_git_root().expect("resolve project root");
 

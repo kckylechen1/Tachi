@@ -26,48 +26,14 @@ pub(in crate::foundry_runtime_ops::recall_cache) fn recall_cache_write_path(
 #[cfg(test)]
 mod tests {
     use super::{durable_recall_cache_enabled, recall_cache_write_path};
-
-    struct EnvGuard {
-        key: &'static str,
-        old: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn unset(key: &'static str) -> Self {
-            let old = std::env::var(key).ok();
-            unsafe {
-                std::env::remove_var(key);
-            }
-            Self { key, old }
-        }
-
-        fn set(key: &'static str, value: &str) -> Self {
-            let old = std::env::var(key).ok();
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, old }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                if let Some(value) = &self.old {
-                    std::env::set_var(self.key, value);
-                } else {
-                    std::env::remove_var(self.key);
-                }
-            }
-        }
-    }
+    use crate::test_support::EnvRestore;
 
     #[test]
     fn durable_recall_cache_is_opt_in() {
-        let _guard = EnvGuard::unset("TACHI_ENABLE_DURABLE_RECALL_CACHE");
+        let _guard = EnvRestore::remove("TACHI_ENABLE_DURABLE_RECALL_CACHE");
         assert!(!durable_recall_cache_enabled());
 
-        let _guard = EnvGuard::set("TACHI_ENABLE_DURABLE_RECALL_CACHE", "1");
+        let _guard = EnvRestore::set("TACHI_ENABLE_DURABLE_RECALL_CACHE", "1");
         assert!(durable_recall_cache_enabled());
     }
 

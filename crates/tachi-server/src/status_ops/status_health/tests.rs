@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::EnvRestore;
 use serde_json::json;
 
 fn api_key_row<'a>(rows: &'a [ApiKeyStatus], name: &str) -> &'a ApiKeyStatus {
@@ -7,40 +8,13 @@ fn api_key_row<'a>(rows: &'a [ApiKeyStatus], name: &str) -> &'a ApiKeyStatus {
         .expect("api key row should exist")
 }
 
-fn restore_env(name: &str, original: Option<std::ffi::OsString>) {
-    if let Some(value) = original {
-        std::env::set_var(name, value);
-    } else {
-        std::env::remove_var(name);
-    }
-}
-
-struct EnvGuard {
-    name: &'static str,
-    original: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn set(name: &'static str, value: &str) -> Self {
-        let original = std::env::var_os(name);
-        std::env::set_var(name, value);
-        Self { name, original }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        restore_env(self.name, self.original.take());
-    }
-}
-
 #[test]
 fn vault_plaintext_duplicate_with_same_value_is_not_drift() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let original = std::env::var_os("VOYAGE_API_KEY");
-    std::env::set_var("VOYAGE_API_KEY", "same-secret");
+
+    let _voyage = EnvRestore::set("VOYAGE_API_KEY", "same-secret");
 
     let rows = collect_api_key_status_from_sources(
         HashSet::from(["VOYAGE_API_KEY".to_string()]),
@@ -58,8 +32,6 @@ fn vault_plaintext_duplicate_with_same_value_is_not_drift() {
         .drift_warning
         .as_deref()
         .is_some_and(|warning| warning.starts_with("redundant:")));
-
-    restore_env("VOYAGE_API_KEY", original);
 }
 
 #[test]
@@ -67,8 +39,8 @@ fn vault_plaintext_duplicate_with_different_value_is_drift() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let original = std::env::var_os("VOYAGE_API_KEY");
-    std::env::set_var("VOYAGE_API_KEY", "env-secret");
+
+    let _voyage = EnvRestore::set("VOYAGE_API_KEY", "env-secret");
 
     let rows = collect_api_key_status_from_sources(
         HashSet::from(["VOYAGE_API_KEY".to_string()]),
@@ -86,8 +58,6 @@ fn vault_plaintext_duplicate_with_different_value_is_drift() {
         .drift_warning
         .as_deref()
         .is_some_and(|warning| warning.starts_with("drift:")));
-
-    restore_env("VOYAGE_API_KEY", original);
 }
 
 #[test]
@@ -95,8 +65,8 @@ fn vault_plaintext_duplicate_without_decrypted_value_is_unverified_not_drift() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let original = std::env::var_os("VOYAGE_API_KEY");
-    std::env::set_var("VOYAGE_API_KEY", "env-secret");
+
+    let _voyage = EnvRestore::set("VOYAGE_API_KEY", "env-secret");
 
     let rows = collect_api_key_status_from_sources(
         HashSet::from(["VOYAGE_API_KEY".to_string()]),
@@ -114,8 +84,6 @@ fn vault_plaintext_duplicate_without_decrypted_value_is_unverified_not_drift() {
         .drift_warning
         .as_deref()
         .is_some_and(|warning| warning.starts_with("duplicate-unverified:")));
-
-    restore_env("VOYAGE_API_KEY", original);
 }
 
 #[test]
@@ -123,8 +91,8 @@ fn deprecated_configured_key_reports_canonical_cleanup_hint() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let original = std::env::var_os("REASONING_API_KEY");
-    std::env::set_var("REASONING_API_KEY", "legacy-secret");
+
+    let _reasoning = EnvRestore::set("REASONING_API_KEY", "legacy-secret");
 
     let rows = collect_api_key_status_from_sources(
         HashSet::new(),
@@ -143,8 +111,6 @@ fn deprecated_configured_key_reports_canonical_cleanup_hint() {
         .cleanup_hint
         .as_deref()
         .is_some_and(|hint| hint.contains("migrate this secret to DEEPSEEK_API_KEY")));
-
-    restore_env("REASONING_API_KEY", original);
 }
 
 #[test]
@@ -152,8 +118,8 @@ fn deprecated_unset_key_has_no_cleanup_hint() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let original = std::env::var_os("REASONING_API_KEY");
-    std::env::remove_var("REASONING_API_KEY");
+
+    let _reasoning = EnvRestore::remove("REASONING_API_KEY");
 
     let rows = collect_api_key_status_from_sources(
         HashSet::new(),
@@ -168,8 +134,6 @@ fn deprecated_unset_key_has_no_cleanup_hint() {
     assert!(reasoning.deprecated);
     assert_eq!(reasoning.status, "deprecated-unset");
     assert!(reasoning.cleanup_hint.is_none());
-
-    restore_env("REASONING_API_KEY", original);
 }
 
 #[test]
@@ -177,8 +141,8 @@ fn rotation_members_configure_their_logical_provider_key() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let original = std::env::var_os("VOYAGE_API_KEY");
-    std::env::remove_var("VOYAGE_API_KEY");
+
+    let _voyage = EnvRestore::remove("VOYAGE_API_KEY");
 
     let rows = collect_api_key_status_from_sources(
         HashSet::from([
@@ -293,8 +257,6 @@ fn rotation_members_configure_their_logical_provider_key() {
     assert_eq!(rotation.healthy_keys, Some(1));
     assert_eq!(rotation.rate_limited_keys, 1);
     assert_eq!(rotation.members[1].status, "rate_limited");
-
-    restore_env("VOYAGE_API_KEY", original);
 }
 
 #[test]
@@ -362,7 +324,7 @@ fn provider_probe_client_loads_target_db_key_health() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _persist = EnvGuard::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
+    let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
     let temp = tempfile::tempdir().expect("temp vault db");
     let db_path = temp.path().join("global.db");
     const KEY: &str = "TACHI_TEST_ONLY_API_KEY_PROBE_HEALTH";
@@ -400,12 +362,11 @@ fn model_lanes_reports_default_voyage_rerank_provider() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _provider = EnvGuard::set(tachi_llm::RERANK_PROVIDER_ENV, "");
+    let _provider = EnvRestore::set(tachi_llm::RERANK_PROVIDER_ENV, "");
     // Empty string is treated as unset by RerankProviderKind::parse → voyage.
     // Also clear any leftover local endpoint so the lane shape stays default.
-    let original_endpoint = std::env::var_os(tachi_llm::RERANK_LOCAL_ENDPOINT_ENV);
-    std::env::remove_var(tachi_llm::RERANK_LOCAL_ENDPOINT_ENV);
-    // EnvGuard with empty string still sets the var; remove for true default.
+    let _endpoint = EnvRestore::remove(tachi_llm::RERANK_LOCAL_ENDPOINT_ENV);
+    // EnvRestore with empty string still sets the var; remove for true default.
     std::env::remove_var(tachi_llm::RERANK_PROVIDER_ENV);
 
     let lanes = model_lanes_json();
@@ -415,8 +376,6 @@ fn model_lanes_reports_default_voyage_rerank_provider() {
         lanes["recall_rerank_cache"]["rerank_provider"],
         json!("voyage")
     );
-
-    restore_env(tachi_llm::RERANK_LOCAL_ENDPOINT_ENV, original_endpoint);
 }
 
 #[test]
@@ -424,8 +383,8 @@ fn model_lanes_reports_configured_local_rerank_provider() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _provider = EnvGuard::set(tachi_llm::RERANK_PROVIDER_ENV, "local");
-    let _endpoint = EnvGuard::set(
+    let _provider = EnvRestore::set(tachi_llm::RERANK_PROVIDER_ENV, "local");
+    let _endpoint = EnvRestore::set(
         tachi_llm::RERANK_LOCAL_ENDPOINT_ENV,
         "http://127.0.0.1:9/rerank",
     );

@@ -17,19 +17,13 @@ fn alias_drift_tempdir() -> tempfile::TempDir {
     crate::test_support::non_skipped_fixture_tempdir("alias-drift-")
 }
 
+use crate::test_support::EnvRestore;
+
 fn with_env_lock<F: FnOnce()>(f: F) {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     f();
-}
-
-fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
-    if let Some(v) = value {
-        std::env::set_var(name, v);
-    } else {
-        std::env::remove_var(name);
-    }
 }
 
 /// G-relabel: the real live-machine 3-alias shape — a legacy un-hashed
@@ -45,13 +39,11 @@ fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
 fn g_relabel_flips_label_without_touching_filesystem() {
     with_env_lock(|| {
         let tmp = alias_drift_tempdir();
-        let saved_home = std::env::var_os("TACHI_HOME");
-        let saved_sigil = std::env::var_os("SIGIL_HOME");
-        let saved_app = std::env::var_os("TACHI_APP_HOME");
+
         let tachi_home = tmp.path().join("home");
-        std::env::set_var("TACHI_HOME", &tachi_home);
-        std::env::remove_var("SIGIL_HOME");
-        std::env::remove_var("TACHI_APP_HOME");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
 
         // Repo-local canonical DB — the real data, never moved by this fix.
         let repo = tmp.path().join("Sigil");
@@ -128,10 +120,6 @@ fn g_relabel_flips_label_without_touching_filesystem() {
             std::fs::read(&local_db).expect("read canonical"),
             b"canonical-bytes"
         );
-
-        restore_env("TACHI_HOME", saved_home);
-        restore_env("SIGIL_HOME", saved_sigil);
-        restore_env("TACHI_APP_HOME", saved_app);
     });
 }
 
@@ -149,13 +137,11 @@ fn g_relabel_flips_label_without_touching_filesystem() {
 fn g_role_scope_and_role_agree_after_relabel() {
     with_env_lock(|| {
         let tmp = alias_drift_tempdir();
-        let saved_home = std::env::var_os("TACHI_HOME");
-        let saved_sigil = std::env::var_os("SIGIL_HOME");
-        let saved_app = std::env::var_os("TACHI_APP_HOME");
+
         let tachi_home = tmp.path().join("home");
-        std::env::set_var("TACHI_HOME", &tachi_home);
-        std::env::remove_var("SIGIL_HOME");
-        std::env::remove_var("TACHI_APP_HOME");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
 
         let repo = tmp.path().join("Role_Repo");
         let local_db = repo.join(".tachi/memory.db");
@@ -193,9 +179,5 @@ fn g_role_scope_and_role_agree_after_relabel() {
             m.dbs[0].owner, "tachi",
             "owner must be recomputed from the corrected scope"
         );
-
-        restore_env("TACHI_HOME", saved_home);
-        restore_env("SIGIL_HOME", saved_sigil);
-        restore_env("TACHI_APP_HOME", saved_app);
     });
 }

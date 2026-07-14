@@ -11,29 +11,7 @@
 // under that behavior.
 
 use super::*;
-
-/// Restores an env var to its prior value (or unset) on drop.
-struct EnvVarGuard {
-    key: &'static str,
-    prev: Option<std::ffi::OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let prev = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, prev }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        match self.prev.take() {
-            Some(v) => std::env::set_var(self.key, v),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
+use crate::test_support::EnvRestore;
 
 /// Bind a loopback TCP listener that accepts connections and never replies —
 /// the stand-in for the blackholed embedding proxy. Returns the bound port.
@@ -94,12 +72,12 @@ async fn search_falls_back_to_lexical_with_degraded_marker_when_embed_provider_b
 
     let port = spawn_blackhole_listener();
 
-    let _base = EnvVarGuard::set("VOYAGE_BASE_URL", &format!("http://127.0.0.1:{port}"));
-    let _timeout = EnvVarGuard::set("TACHI_RECALL_PROVIDER_TIMEOUT_SECS", "1");
-    let _attempts = EnvVarGuard::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
+    let _base = EnvRestore::set("VOYAGE_BASE_URL", &format!("http://127.0.0.1:{port}"));
+    let _timeout = EnvRestore::set("TACHI_RECALL_PROVIDER_TIMEOUT_SECS", "1");
+    let _attempts = EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
     // ensure_test_env disables query embedding suite-wide; re-enable here so the
     // recall path actually calls the (blackholed) provider.
-    let _embed = EnvVarGuard::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "0");
+    let _embed = EnvRestore::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "0");
 
     let started = std::time::Instant::now();
     let response = server

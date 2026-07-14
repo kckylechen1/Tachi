@@ -2,36 +2,8 @@ use super::handlers::{handle_vault_init, handle_vault_lock, handle_vault_unlock}
 use super::params::{VaultInitParams, VaultUnlockParams};
 use super::session::{read_unlock_password_fifo, with_vault_key};
 use crate::server_state::MemoryServer;
+use crate::test_support::EnvRestore;
 use std::time::{Duration, Instant};
-
-struct EnvGuard {
-    key: &'static str,
-    original: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn remove(key: &'static str) -> Self {
-        let original = std::env::var_os(key);
-        std::env::remove_var(key);
-        Self { key, original }
-    }
-
-    fn set(key: &'static str, value: &str) -> Self {
-        let original = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, original }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        if let Some(value) = self.original.as_ref() {
-            std::env::set_var(self.key, value);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
 
 #[tokio::test]
 async fn with_vault_key_drops_vault_lock_before_running_work() {
@@ -73,7 +45,7 @@ async fn auto_lock_clears_key_but_preserves_provider_secrets() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _openai_env = EnvGuard::remove("OPENAI_API_KEY");
+    let _openai_env = EnvRestore::remove("OPENAI_API_KEY");
     let db_path = std::env::temp_dir().join(format!(
         "memory-server-vault-auto-lock-test-{}.sqlite",
         uuid::Uuid::new_v4()
@@ -229,7 +201,7 @@ fn vault_lock_clears_key_and_provider_secrets() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _openai_env = EnvGuard::remove("OPENAI_API_KEY");
+    let _openai_env = EnvRestore::remove("OPENAI_API_KEY");
     let db_path = std::env::temp_dir().join(format!(
         "memory-server-vault-lock-full-clear-{}.sqlite",
         uuid::Uuid::new_v4()
@@ -276,8 +248,8 @@ async fn autolock_disabled_when_env_zero() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _env = EnvGuard::set("TACHI_VAULT_AUTOLOCK_SECS", "0");
-    let _openai_env = EnvGuard::remove("OPENAI_API_KEY");
+    let _env = EnvRestore::set("TACHI_VAULT_AUTOLOCK_SECS", "0");
+    let _openai_env = EnvRestore::remove("OPENAI_API_KEY");
     let db_path = std::env::temp_dir().join(format!(
         "memory-server-vault-autolock-disabled-{}.sqlite",
         uuid::Uuid::new_v4()
@@ -340,8 +312,8 @@ async fn autolock_disabled_reports_unlocked_in_runtime_status() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _env = EnvGuard::set("TACHI_VAULT_AUTOLOCK_SECS", "0");
-    let _openai_env = EnvGuard::remove("OPENAI_API_KEY");
+    let _env = EnvRestore::set("TACHI_VAULT_AUTOLOCK_SECS", "0");
+    let _openai_env = EnvRestore::remove("OPENAI_API_KEY");
     let db_path = std::env::temp_dir().join(format!(
         "memory-server-vault-autolock-disabled-status-{}.sqlite",
         uuid::Uuid::new_v4()

@@ -551,31 +551,9 @@ mod tests {
         auto_backfill_needed, embedding_input, list_missing_vector_entries,
         read_vector_sweep_state_for_status, vector_counts_filtered,
     };
+    use crate::test_support::EnvRestore;
     use memcore::MemoryStore;
     use rusqlite::params;
-
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            if let Some(previous) = &self.previous {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
 
     #[test]
     fn embedding_input_prefers_summary_for_long_text() {
@@ -687,7 +665,7 @@ mod tests {
         let _lock = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let _initial_threshold = EnvGuard::set("TACHI_VECTOR_SWEEP_PENDING_THRESHOLD", "10");
+        let _initial_threshold = EnvRestore::set("TACHI_VECTOR_SWEEP_PENDING_THRESHOLD", "10");
 
         let dir = tempfile::tempdir().expect("tmp");
         let db_path = dir.path().join("threshold-drift.db");
@@ -713,7 +691,7 @@ mod tests {
         .expect("seed state");
         drop(_initial_threshold);
 
-        let _raised_threshold = EnvGuard::set("TACHI_VECTOR_SWEEP_PENDING_THRESHOLD", "1");
+        let _raised_threshold = EnvRestore::set("TACHI_VECTOR_SWEEP_PENDING_THRESHOLD", "1");
         let state = read_vector_sweep_state_for_status(&db_path)
             .expect("read state")
             .expect("state exists");

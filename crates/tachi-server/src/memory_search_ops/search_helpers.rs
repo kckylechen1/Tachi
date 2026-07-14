@@ -441,36 +441,9 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
-    struct EnvGuard {
-        key: &'static str,
-        original: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn set_path(key: &'static str, value: &Path) -> Self {
-            let original = std::env::var_os(key);
-            // SAFETY: tests that use this helper hold global_test_lock.
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, original }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: tests that use this helper hold global_test_lock.
-            unsafe {
-                if let Some(value) = self.original.as_ref() {
-                    std::env::set_var(self.key, value);
-                } else {
-                    std::env::remove_var(self.key);
-                }
-            }
-        }
-    }
+    use crate::test_support::EnvRestore;
 
     // #485: explicit TACHI_PROJECT pin normalization. Pure function — no process
     // env is mutated, so these do not race with parallel tests that resolve the
@@ -573,7 +546,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let temp_home = tempfile::tempdir().expect("temp tachi home");
-        let _home = EnvGuard::set_path("TACHI_HOME", temp_home.path());
+        let _home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
         let lonely_project = temp_home.path().join("projects").join("lonely");
         std::fs::create_dir_all(&lonely_project).expect("project dir");
         std::fs::write(lonely_project.join("memory.db"), b"").expect("project db marker");
