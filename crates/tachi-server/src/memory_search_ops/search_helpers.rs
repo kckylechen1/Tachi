@@ -441,7 +441,7 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     use crate::test_support::EnvRestore;
 

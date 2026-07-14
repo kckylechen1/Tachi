@@ -28,7 +28,7 @@ fn make_git_root(parent: &Path, name: &str) -> PathBuf {
     root
 }
 
-fn clear_workspace_root_env() -> Vec<EnvGuard> {
+fn clear_workspace_root_env() -> Vec<EnvRestore> {
     vec![
         EnvRestore::remove("TACHI_PROJECT_ROOT"),
         EnvRestore::remove("TACHI_WORKSPACE_ROOT"),
