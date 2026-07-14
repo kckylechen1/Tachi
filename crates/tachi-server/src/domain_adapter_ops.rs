@@ -139,13 +139,16 @@ async fn lorebook_import(
             source_repo: Some("romanbath".to_string()),
             adapter: Some("domain_adapter:lorebook".to_string()),
             project: project.clone(),
-            // #1114: this is an internal, programmatic construction (not raw
-            // wire JSON) — `project_explicit: project.is_some()` preserves
-            // this call site's pre-#1114 behavior exactly (no new
-            // write-affinity scrutiny introduced here), matching
-            // `RememberParams::project_explicit`'s documented convention for
-            // non-wire callers.
-            project_explicit: project.is_some(),
+            // #1114 (codex round-1 B1 fix): CARRY the caller's own
+            // `project_explicit` marker through rather than re-deriving it
+            // from `project.is_some()` — `params.project` here may be a
+            // transport-injected session default (bound session,
+            // `tachi_domain_adapter` omitted `project=`), and
+            // `project.is_some()` alone cannot distinguish that from a
+            // genuine caller `project=`. Re-deriving silently turned every
+            // transport default into a false "explicit", bypassing this
+            // event's own write-affinity scrutiny in `handle_tachi_event`.
+            project_explicit: params.project_explicit,
             domain: Some(domain.clone()),
             session_id: Some(session_id.clone()),
             actor: Some(actor.clone()),
@@ -183,9 +186,9 @@ async fn lorebook_import(
             id: None,
             source_repo: None,
             adapter: None,
-            // #1114: see the `emit` construction above — preserve this call
-            // site's pre-#1114 behavior exactly.
-            project_explicit: project.is_some(),
+            // #1114 (codex round-1 B1 fix): see the `emit` construction
+            // above — carry the caller's actual marker, don't re-derive it.
+            project_explicit: params.project_explicit,
             project,
             domain: Some(domain),
             session_id: None,

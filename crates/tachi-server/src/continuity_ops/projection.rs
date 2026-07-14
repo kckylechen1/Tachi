@@ -8,14 +8,16 @@ use crate::MemoryServer;
 use memory_server_runtime::query_limit;
 
 use super::storage::{
-    add_memory_edge, get_projection_memory, read_events, upsert_projection_memory,
+    add_memory_edge, get_projection_memory, read_events, resolve_projection_write_target,
+    upsert_projection_memory,
 };
 use super::{event_query_from_params, target_from_event_params, ContinuityEventTarget};
 
 mod entry;
 
 use self::entry::{
-    build_projection_entry, counter_i64, event_projections, projection_key, projection_memory_id,
+    build_projection_entry, counter_i64, event_projections, projection_event_domain,
+    projection_key, projection_memory_id,
 };
 pub(super) use self::entry::{projected_path_prefix, projection_filters, projection_kind_metadata};
 
@@ -130,22 +132,67 @@ fn project_continuity_events_inner(
             }
             let key = projection_key(&event, projection);
             let memory_id = projection_memory_id(projection, &key);
-            let existing = get_projection_memory(server, target, &memory_id)?;
-            // #1114: capture before `build_projection_entry` consumes
-            // `existing` — whether this exact projection row already lives
-            // at the PRE-gate target is the write-affinity gate's
-            // `id_resolves_at_target` signal (a genuine update-in-place is
-            // never second-guessed, same as `apply_write_affinity`'s own).
-            let id_resolves_at_target = existing.is_some();
+
+            // #1114 (codex round-1 B3 fix): resolve ONE routed destination
+            // for this projection BEFORE any existing-row lookup, write, or
+            // graph-edge work — `projection_event_domain` computes the SAME
+            // domain `build_projection_entry` would (without building the
+            // rest of the entry, which needs `existing` to merge correctly).
+            // Row lookup, row write, and this projection's timeline graph
+            // edges all use `routed_target`, never the pre-gate `target`:
+            // before this split, a rerouted projection's SECOND run looked
+            // up "does this exist" at the stale pre-gate store, found
+            // nothing, and silently reset its aggregation counters instead
+            // of updating the row that had actually moved — and
+            // self-referencing timeline edges got dropped as "endpoint
+            // missing" for the same reason.
+            let domain = projection_event_domain(&event, projection, &key);
+            // #1114 (codex B4-class fix, proactive for continuity): does
+            // this row already exist at the PRE-gate target? If a prior run
+            // placed it there (e.g. before this domain had a registered
+            // route), a LATER route registration must not reroute the SAME
+            // deterministic id to a different store and split it across
+            // two — it must update the row that's already there.
+            let id_resolves_at_pretarget = get_projection_memory(server, target, &memory_id)
+                .ok()
+                .flatten()
+                .is_some();
+            let routed_target = match resolve_projection_write_target(
+                server,
+                target,
+                domain.as_deref(),
+                project_explicit,
+                id_resolves_at_pretarget,
+            ) {
+                Ok(routed) => routed,
+                Err(error) => {
+                    // #1114 (codex B3 point ⑤): a write-affinity refusal is
+                    // a loud, TYPED failure ("拒必有声") — tagged distinctly
+                    // from an ordinary persistence error (via `reason`) and
+                    // logged at `warn`, not just buried as one more line in
+                    // a batch's `errors` array that only an info-level
+                    // count ever reaches the scheduler's own tracing.
+                    tracing::warn!(
+                        event_id = %event.id,
+                        projection = projection.as_str(),
+                        error = %error,
+                        "continuity projection: write-affinity gate refused this row"
+                    );
+                    errors.push(json!({
+                        "event_id": event.id,
+                        "projection": projection.as_str(),
+                        "memory_id": memory_id,
+                        "error": error,
+                        "reason": "write_affinity_refused",
+                    }));
+                    continue;
+                }
+            };
+
+            let existing = get_projection_memory(server, &routed_target, &memory_id)?;
             let (entry, already_projected) = build_projection_entry(existing, &event, projection);
             if !dry_run {
-                if let Err(error) = upsert_projection_memory(
-                    server,
-                    target,
-                    &entry,
-                    project_explicit,
-                    id_resolves_at_target,
-                ) {
+                if let Err(error) = upsert_projection_memory(server, &routed_target, &entry) {
                     errors.push(json!({
                         "event_id": event.id,
                         "projection": projection.as_str(),
@@ -156,7 +203,7 @@ fn project_continuity_events_inner(
                 }
             }
             let graph_edges = if projection == ProjectionKind::Timeline {
-                persist_timeline_graph_edges(server, target, &entry, &event, dry_run)
+                persist_timeline_graph_edges(server, &routed_target, &entry, &event, dry_run)
             } else {
                 json!({
                     "saved_count": 0,

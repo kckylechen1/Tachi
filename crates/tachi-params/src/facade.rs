@@ -298,6 +298,21 @@ pub struct TachiDomainAdapterParams {
     #[schemars(description = "Named project DB for imported events/projections.")]
     pub project: Option<String>,
 
+    /// #1114 (codex round-1 B1): see `TachiEventParams::project_explicit` —
+    /// same signal, same wire key. Without this field, `domain_adapter_ops`
+    /// had to re-derive "was `project` a caller decision" from
+    /// `project.is_some()` alone, which is exactly the F2-class bug: a
+    /// transport-injected session default (stamped
+    /// `__tachi_project_explicit: false` by
+    /// `session_identity::enforce_session_project`, since
+    /// `tachi_domain_adapter` IS in `project_defaults_to_bound_project`'s
+    /// allowlist) was silently discarded on deserialization and
+    /// re-inferred as `true`, bypassing the two `TachiEventParams` calls'
+    /// write-affinity scrutiny entirely.
+    #[serde(default, rename = "__tachi_project_explicit")]
+    #[schemars(skip)]
+    pub project_explicit: bool,
+
     #[serde(default)]
     #[schemars(description = "Domain label for imported events/projections.")]
     pub domain: Option<String>,

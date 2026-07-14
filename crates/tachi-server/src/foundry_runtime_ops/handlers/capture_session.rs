@@ -13,6 +13,19 @@ use chrono::Utc;
 use memcore::MemoryEntry;
 use serde_json::{json, Value};
 
+/// #1114 (codex round-1 B3 fix): a `MemoryEntry` carried alongside its OWN
+/// resolved write-affinity destination — computed once, per entry, before
+/// provenance/persist/maintenance/continuity all need to agree on where the
+/// row actually lives. A single `capture_session` batch's entries do NOT
+/// all necessarily share one destination (a mismatched entry can reroute
+/// independently of its siblings), so this is tracked per-entry rather than
+/// once for the whole batch.
+struct CapturedEntry {
+    entry: MemoryEntry,
+    target_db: DbScope,
+    named_project: Option<String>,
+}
+
 pub(crate) async fn handle_capture_session(
     server: &MemoryServer,
     params: CaptureSessionParams,
@@ -61,8 +74,23 @@ pub(crate) async fn handle_capture_session(
     let is_user_memory_agent = matches_agent_tag(&params.agent_id, "user-memory")
         || matches_agent_tag(&params.agent_id, "jayne");
 
-    let mut entries = Vec::<MemoryEntry>::new();
+    let mut entries = Vec::<CapturedEntry>::new();
     for note in extract_bracket_self_evolution_notes(&params.agent_id, &params.messages) {
+        // #1114 (codex round-1 B3 point ③): resolve this entry's routed
+        // write-affinity destination BEFORE `inject_provenance` runs, so
+        // provenance is stamped against where the row is actually going to
+        // land, not the pre-gate default the gate is about to override.
+        let (entry_target_db, entry_named_project) = resolve_capture_write_target(
+            server,
+            &note.id,
+            None,
+            &self_evolution_path,
+            &note.category,
+            target_db,
+            named_project.as_deref(),
+            db_path.as_ref(),
+            params.project_explicit,
+        )?;
         let metadata = crate::provenance::inject_provenance(
             server,
             json!({
@@ -79,7 +107,7 @@ pub(crate) async fn handle_capture_session(
             "capture_session",
             "bracket_self_evolution",
             Some(requested_scope.as_str()),
-            target_db,
+            entry_target_db,
             json!({
                 "conversation_id": params.conversation_id,
                 "turn_id": params.turn_id,
@@ -98,42 +126,46 @@ pub(crate) async fn handle_capture_session(
             requested_scope.clone()
         };
 
-        entries.push(MemoryEntry {
-            id: note.id,
-            path: self_evolution_path.clone(),
-            summary: note.text.chars().take(100).collect(),
-            text: note.text,
-            importance: 0.70,
-            timestamp: Utc::now().to_rfc3339(),
-            valid_from: String::new(),
-            valid_until: None,
-            category: note.category,
-            topic: "self_evolution".to_string(),
-            keywords: dedup_strings(vec![
-                "self-evolution".to_string(),
-                "bracket-note".to_string(),
-                strategy_keyword,
-            ]),
-            persons: Vec::new(),
-            entities: if is_user_memory_agent {
-                vec!["user".to_string()]
-            } else {
-                Vec::new()
+        entries.push(CapturedEntry {
+            entry: MemoryEntry {
+                id: note.id,
+                path: self_evolution_path.clone(),
+                summary: note.text.chars().take(100).collect(),
+                text: note.text,
+                importance: 0.70,
+                timestamp: Utc::now().to_rfc3339(),
+                valid_from: String::new(),
+                valid_until: None,
+                category: note.category,
+                topic: "self_evolution".to_string(),
+                keywords: dedup_strings(vec![
+                    "self-evolution".to_string(),
+                    "bracket-note".to_string(),
+                    strategy_keyword,
+                ]),
+                persons: Vec::new(),
+                entities: if is_user_memory_agent {
+                    vec!["user".to_string()]
+                } else {
+                    Vec::new()
+                },
+                location: String::new(),
+                source: "bracket_self_evolution".to_string(),
+                scope: entry_scope,
+                archived: false,
+                access_count: 0,
+                last_access: None,
+                revision: 1,
+                metadata,
+                vector: None,
+                retention_policy: None,
+                domain: None,
+                recall_count: 0,
+                query_diversity: 0,
+                tier: "raw".to_string(),
             },
-            location: String::new(),
-            source: "bracket_self_evolution".to_string(),
-            scope: entry_scope,
-            archived: false,
-            access_count: 0,
-            last_access: None,
-            revision: 1,
-            metadata,
-            vector: None,
-            retention_policy: None,
-            domain: None,
-            recall_count: 0,
-            query_diversity: 0,
-            tier: "raw".to_string(),
+            target_db: entry_target_db,
+            named_project: entry_named_project,
         });
     }
 
@@ -203,6 +235,26 @@ pub(crate) async fn handle_capture_session(
             draft.topic.trim().to_string()
         };
         let scope = normalize_scope(&draft.scope, &requested_scope);
+        let entry_path = build_entry_path(&base_path, &topic);
+        let entry_category = normalize_category(&draft.category);
+        // LLM drafts always mint a fresh random id here (never caller
+        // -supplied, never deterministic) — hoisted so the SAME id is used
+        // for both the B4 existence pre-check below and the persisted entry.
+        let entry_id = uuid::Uuid::new_v4().to_string();
+
+        // #1114 (codex round-1 B3 point ③): resolve BEFORE provenance, same
+        // reasoning as the bracket-note loop above.
+        let (entry_target_db, entry_named_project) = resolve_capture_write_target(
+            server,
+            &entry_id,
+            None,
+            &entry_path,
+            &entry_category,
+            target_db,
+            named_project.as_deref(),
+            db_path.as_ref(),
+            params.project_explicit,
+        )?;
         let metadata = crate::provenance::inject_provenance(
             server,
             json!({
@@ -218,7 +270,7 @@ pub(crate) async fn handle_capture_session(
             "capture_session",
             "session_capture",
             Some(scope.as_str()),
-            target_db,
+            entry_target_db,
             json!({
                 "conversation_id": params.conversation_id,
                 "turn_id": params.turn_id,
@@ -233,46 +285,50 @@ pub(crate) async fn handle_capture_session(
             draft.summary.trim().to_string()
         };
 
-        entries.push(MemoryEntry {
-            id: uuid::Uuid::new_v4().to_string(),
-            path: build_entry_path(&base_path, &topic),
-            summary,
-            text: draft.text.trim().to_string(),
-            importance: draft.importance.clamp(0.0, 1.0),
-            timestamp: Utc::now().to_rfc3339(),
-            valid_from: String::new(),
-            valid_until: None,
-            category: normalize_category(&draft.category),
-            topic,
-            keywords: dedup_strings(draft.keywords),
-            persons: Vec::new(),
-            entities: {
-                let mut entities = dedup_strings(draft.entities);
-                for name in draft.persons {
-                    memcore::types::push_entity_name(&mut entities, &name);
-                }
-                entities
+        entries.push(CapturedEntry {
+            entry: MemoryEntry {
+                id: entry_id,
+                path: entry_path,
+                summary,
+                text: draft.text.trim().to_string(),
+                importance: draft.importance.clamp(0.0, 1.0),
+                timestamp: Utc::now().to_rfc3339(),
+                valid_from: String::new(),
+                valid_until: None,
+                category: entry_category,
+                topic,
+                keywords: dedup_strings(draft.keywords),
+                persons: Vec::new(),
+                entities: {
+                    let mut entities = dedup_strings(draft.entities);
+                    for name in draft.persons {
+                        memcore::types::push_entity_name(&mut entities, &name);
+                    }
+                    entities
+                },
+                location: draft.location.trim().to_string(),
+                source: "capture_session".to_string(),
+                scope,
+                archived: false,
+                access_count: 0,
+                last_access: None,
+                revision: 1,
+                metadata,
+                vector: None,
+                retention_policy: None,
+                domain: None,
+                recall_count: 0,
+                query_diversity: 0,
+                tier: "raw".to_string(),
             },
-            location: draft.location.trim().to_string(),
-            source: "capture_session".to_string(),
-            scope,
-            archived: false,
-            access_count: 0,
-            last_access: None,
-            revision: 1,
-            metadata,
-            vector: None,
-            retention_policy: None,
-            domain: None,
-            recall_count: 0,
-            query_diversity: 0,
-            tier: "raw".to_string(),
+            target_db: entry_target_db,
+            named_project: entry_named_project,
         });
     }
 
     let texts = entries
         .iter()
-        .map(|entry| entry.text.clone())
+        .map(|captured| captured.entry.text.clone())
         .collect::<Vec<_>>();
     let texts: Vec<_> = texts
         .iter()
@@ -286,79 +342,125 @@ pub(crate) async fn handle_capture_session(
         }
     };
     if let Some(vectors) = embeddings.as_ref() {
-        for (entry, vector) in entries.iter_mut().zip(vectors.iter()) {
-            entry.vector = Some(vector.clone());
+        for (captured, vector) in entries.iter_mut().zip(vectors.iter()) {
+            captured.entry.vector = Some(vector.clone());
         }
     }
 
     let mut saved_ids = Vec::new();
+    // #1114 (codex round-1 B3 point ④): group persisted ids by their ACTUAL
+    // (post-gate) destination — a maintenance job or continuity event
+    // enqueued against the pre-gate default, for an entry that reroutes
+    // elsewhere, resolves memory_ids against a store that never received
+    // them: the maintenance worker (`with_foundry_store`) finds nothing and
+    // silently skips the job forever, and a later continuity sweep over the
+    // pre-gate store references a memory id that doesn't exist there.
+    let mut by_destination: std::collections::BTreeMap<(String, Option<String>), Vec<String>> =
+        std::collections::BTreeMap::new();
 
-    for entry in &entries {
-        // KNOWN LIMITATION: only this entry's own persisted row is
-        // re-targeted on a reroute — `enqueue_capture_maintenance_jobs`
-        // below and the continuity `session_event`/pipeline still use the
-        // pre-gate `target_db`/`named_project` for the whole batch, so a
-        // rerouted entry's downstream maintenance job would look for it in
-        // the pre-gate store. This only matters when a genuine cross-domain
-        // mismatch actually fires (rare); flagged for the next holder of
-        // this path rather than silently accepted.
-        let (entry_target_db, entry_named_project) = resolve_capture_entry_write_target(
-            server,
-            entry,
-            target_db,
-            named_project.as_deref(),
-            db_path.as_ref(),
-            params.project_explicit,
-        )?;
+    for captured in &entries {
         persist_capture_entry(
             server,
-            entry_target_db,
-            entry_named_project.as_deref(),
+            captured.target_db,
+            captured.named_project.as_deref(),
             db_path.as_ref(),
-            entry,
+            &captured.entry,
         )?;
         if embeddings.is_none() {
             queue_capture_enrichment(
                 server,
-                entry_target_db,
-                entry_named_project.clone(),
+                captured.target_db,
+                captured.named_project.clone(),
                 db_path.clone(),
-                entry,
+                &captured.entry,
                 false,
                 Some(&params.agent_id),
                 Some(&base_path),
             );
         }
-        saved_ids.push(entry.id.clone());
+        saved_ids.push(captured.entry.id.clone());
+        by_destination
+            .entry((
+                captured.target_db.as_str().to_string(),
+                captured.named_project.clone(),
+            ))
+            .or_default()
+            .push(captured.entry.id.clone());
     }
 
     let saved_ids = dedup_strings(saved_ids);
-    let maintenance_jobs = enqueue_capture_maintenance_jobs(
-        server,
-        target_db,
-        named_project.clone(),
-        db_path.clone(),
-        &params.agent_id,
-        &base_path,
-        &saved_ids,
-        0,
-        0,
-    )?;
+
+    // The pre-gate default destination — used to pick which destination
+    // group's maintenance/continuity results populate the response's
+    // top-level (pre-#1114-shaped) `maintenance_jobs`/`continuity` fields,
+    // so existing callers parsing this response see NO shape change in the
+    // common (nothing rerouted) case. Any additional destination reached by
+    // an actual reroute is still fully processed below and reported in
+    // `continuity.by_destination`.
+    let default_destination_key = (target_db.as_str().to_string(), named_project.clone());
+
+    let mut maintenance_jobs = Vec::new();
+    let mut continuity_by_destination = Vec::new();
+    let mut primary_session_event = json!({"status": "skipped", "reason": "no_captured_entries"});
+
+    for (destination_key, raw_ids) in &by_destination {
+        let ids = dedup_strings(raw_ids.clone());
+        let ids = &ids;
+        let (db_str, group_named_project) = destination_key;
+        let group_target_db = if db_str.as_str() == DbScope::Global.as_str() {
+            DbScope::Global
+        } else {
+            DbScope::Project
+        };
+        let mut jobs = enqueue_capture_maintenance_jobs(
+            server,
+            group_target_db,
+            group_named_project.clone(),
+            db_path.clone(),
+            &params.agent_id,
+            &base_path,
+            ids,
+            0,
+            0,
+        )?;
+        maintenance_jobs.append(&mut jobs);
+
+        let group_continuity_target = crate::continuity_ops::ContinuityEventTarget::new(
+            group_target_db,
+            group_named_project.clone(),
+            db_path.clone(),
+        );
+        let session_event = crate::continuity_ops::emit_session_captured_event(
+            server,
+            &group_continuity_target,
+            &params.conversation_id,
+            &params.turn_id,
+            &params.agent_id,
+            &base_path,
+            ids,
+            params.messages.len(),
+            params.project.as_deref(),
+        );
+        if destination_key == &default_destination_key {
+            primary_session_event = session_event.clone();
+        }
+        continuity_by_destination.push(json!({
+            "target_db": group_target_db.as_str(),
+            "named_project": group_named_project,
+            "memory_ids": ids,
+            "session_event": session_event,
+        }));
+    }
+
+    // The session-continuity PIPELINE analyzes the whole conversation (not
+    // specific memory ids), so unlike maintenance-enqueue/session-event
+    // above it runs exactly ONCE against the pre-gate default destination —
+    // matching pre-#1114 behavior exactly, and avoiding duplicate background
+    // analysis work if a batch happened to split across destinations.
     let continuity_target = crate::continuity_ops::ContinuityEventTarget::new(
         target_db,
         named_project.clone(),
         db_path.clone(),
-    );
-    let session_event = crate::continuity_ops::emit_session_captured_event(
-        server,
-        &continuity_target,
-        &params.conversation_id,
-        &params.turn_id,
-        &params.agent_id,
-        &base_path,
-        &saved_ids,
-        params.messages.len(),
-        params.project.as_deref(),
     );
     let continuity_pipeline = crate::continuity_ops::maybe_spawn_session_continuity_pipeline(
         server,
@@ -383,8 +485,9 @@ pub(crate) async fn handle_capture_session(
     response.insert(
         "continuity".into(),
         json!({
-            "session_event": session_event,
+            "session_event": primary_session_event,
             "pipeline": continuity_pipeline,
+            "by_destination": continuity_by_destination,
         }),
     );
     if let Some(warning) = warning {
@@ -399,19 +502,36 @@ pub(crate) async fn handle_capture_session(
 /// scrutiny for the fresh-incoming-content path — bracket self-evolution
 /// notes and LLM-drafted session-capture drafts land wherever
 /// `resolve_capture_target` resolved, the exact ambiguous-default shape S1
-/// exists to catch. Entries here carry `domain: None` on the wire, so derive
-/// one the same way `resolve_save_domain` does for `save_memory` (transient
-/// — only used for this routing decision, never written back onto `entry`).
+/// exists to catch. Takes `path`/`category`/`domain` directly (not a built
+/// `MemoryEntry`) so the routed destination can be resolved BEFORE the entry
+/// (and its provenance) is constructed at all — see `handle_capture_session`'s
+/// entry-building loops, where the ROUTED destination now feeds
+/// `provenance::inject_provenance` directly instead of the pre-gate default
+/// (codex round-1 B3 point ③: provenance must not be stamped against a
+/// destination the write-affinity gate is about to override).
+///
 /// A `db_path` target (the manifest agent-pinned branch of
 /// `resolve_capture_target`) is a deliberate per-agent DB assignment and is
 /// never scrutinized here, same posture as continuity's own `db_path` skip
 /// in `continuity_ops::storage::upsert_projection_memory`.
 ///
-/// Pulled out of `handle_capture_session`'s loop so the routing decision is
-/// unit-testable without an LLM/embedding call — see the `tests` module.
-fn resolve_capture_entry_write_target(
+/// `id` (codex round-1 B4 fix): bracket self-evolution notes use a
+/// deterministic `UUIDv5` (`build_bracket_self_evolution_id`, hashed from
+/// `agent_id` + note text), not a fresh random id — a repeat capture of the
+/// SAME note text is an update-in-place at wherever it already lives, not a
+/// fresh row. `id_resolves_at_target` used to be hard-coded `false`, so a
+/// repeat bracket capture whose domain routes elsewhere would reroute AGAIN
+/// on every call, landing a duplicate copy at BOTH the original and the
+/// rerouted store instead of updating the one row in place. Checking
+/// existence at the PRE-gate target first (mirrors continuity's own
+/// `get_projection_memory` pre-check in `projection.rs`) makes a second
+/// capture of the same note skip the gate and update where it already is.
+fn resolve_capture_write_target(
     server: &MemoryServer,
-    entry: &MemoryEntry,
+    id: &str,
+    domain: Option<&str>,
+    path: &str,
+    category: &str,
     target_db: DbScope,
     named_project: Option<&str>,
     db_path: Option<&std::path::PathBuf>,
@@ -420,34 +540,52 @@ fn resolve_capture_entry_write_target(
     if db_path.is_some() {
         return Ok((target_db, named_project.map(str::to_string)));
     }
+    let already_exists_at_target = capture_entry_exists_at(server, target_db, named_project, id);
     // `repair_target` returns `None` both when nothing needs repairing (an
     // already-clean domain is unchanged) and when there was truly nothing to
     // infer — same `.or_else` fallback `resolve_save_domain` (save_memory)
     // and `projection_domain_label` (continuity) both apply, so an already
-    // -valid `entry.domain` is never dropped just because it didn't need a
-    // repair.
-    let domain = crate::repair::domain::repair_target(
-        entry.domain.as_deref(),
-        &entry.path,
-        &entry.category,
-        "foundry_capture",
-    )
-    .or_else(|| entry.domain.clone());
+    // -valid `domain` is never dropped just because it didn't need a repair.
+    let resolved_domain = crate::repair::domain::repair_target(domain, path, category, "foundry_capture")
+        .or_else(|| domain.map(str::to_string));
     let affinity =
         crate::memory_search_ops::save_memory::write_affinity::apply_write_affinity_for_domain(
             server,
-            domain.as_deref(),
+            resolved_domain.as_deref(),
             target_db,
             named_project,
             project_explicit,
-            false, // id_resolves_at_target: capture entries are freshly materialized here, no pre-check of an existing row at this call site
+            already_exists_at_target,
         )?;
     Ok((affinity.target_db, affinity.named_project))
 }
 
+/// #1114 (codex round-1 B4 fix): does a row with this id already exist at
+/// the PRE-gate target? A read failure is treated as "doesn't exist" —
+/// same tolerant `.ok().flatten().is_some()` idiom
+/// `continuity_ops::projection::persist_timeline_graph_edges` already uses
+/// for its own endpoint-existence checks.
+fn capture_entry_exists_at(
+    server: &MemoryServer,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    id: &str,
+) -> bool {
+    let result = if let Some(project_name) = named_project {
+        server.with_named_project_store_read(project_name, |store| {
+            store.get(id).map_err(|e| e.to_string())
+        })
+    } else {
+        server.with_store_for_scope_read(target_db, |store| {
+            store.get(id).map_err(|e| e.to_string())
+        })
+    };
+    result.ok().flatten().is_some()
+}
+
 #[cfg(test)]
 mod affinity_tests {
-    use super::resolve_capture_entry_write_target;
+    use super::resolve_capture_write_target;
     use crate::server_state::MemoryServer;
     use crate::DbScope;
     use memcore::MemoryEntry;
@@ -485,6 +623,17 @@ mod affinity_tests {
         }
     }
 
+    fn two_project_server(home: &std::path::Path, bound_project: &str) -> MemoryServer {
+        let quant_db = home.join("projects").join(bound_project).join("memory.db");
+        std::fs::create_dir_all(quant_db.parent().unwrap()).expect("mkdir bound project");
+        let global_db = home.join("global").join("memory.db");
+        std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+        // `MemoryServer::new(global, project)` — the project path (not the
+        // first/global one) is what `bound_project_label` resolves the bound
+        // name from via the Plan C `projects/<name>/memory.db` convention.
+        MemoryServer::new(global_db, Some(quant_db)).expect("bind daemon")
+    }
+
     /// #1114 discriminating test (red before this PR): capture content whose
     /// domain is registered to a DIFFERENT, mounted store than the daemon's
     /// own bound project must be rerouted there, not silently land in the
@@ -500,17 +649,8 @@ mod affinity_tests {
                 r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
             )
             .expect("write routing.json");
-
-            let quant_db = home.join("projects").join("quant").join("memory.db");
-            std::fs::create_dir_all(quant_db.parent().unwrap()).expect("mkdir quant");
-            let global_db = home.join("global").join("memory.db");
-            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
-            // `MemoryServer::new(global, project)` — the project path (not the
-            // first/global one) is what `bound_project_label` resolves "quant"
-            // from via the Plan C `projects/<name>/memory.db` convention.
-            let server =
-                MemoryServer::new(global_db, Some(quant_db.clone())).expect("bind quant daemon");
-            // `resolve_capture_entry_write_target` only needs
+            let server = two_project_server(home, "quant");
+            // `resolve_capture_write_target` only needs
             // `named_project_db_exists("hapi")` to be true here (it checks
             // mountedness via `apply_write_affinity_for_domain`, it does not
             // itself write into "hapi") — `with_named_project_store` resolves
@@ -523,10 +663,12 @@ mod affinity_tests {
             std::fs::create_dir_all(hapi_db.parent().unwrap()).expect("mkdir hapi");
             std::fs::write(&hapi_db, b"").expect("hapi db placeholder");
 
-            let entry = entry_with_domain("cap-1", Some("equity_trading"));
-            let (target_db, named_project) = resolve_capture_entry_write_target(
+            let (target_db, named_project) = resolve_capture_write_target(
                 &server,
-                &entry,
+                "cap-1",
+                Some("equity_trading"),
+                "/openclaw/agent/self-evolution",
+                "preference",
                 DbScope::Project,
                 Some("quant"), // transport-injected default == daemon's own bound project
                 None,
@@ -553,22 +695,15 @@ mod affinity_tests {
                 r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
             )
             .expect("write routing.json");
-
-            let quant_db = home.join("projects").join("quant").join("memory.db");
-            std::fs::create_dir_all(quant_db.parent().unwrap()).expect("mkdir quant");
-            let global_db = home.join("global").join("memory.db");
-            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
-            // `MemoryServer::new(global, project)` — the project path (not the
-            // first/global one) is what `bound_project_label` resolves "quant"
-            // from via the Plan C `projects/<name>/memory.db` convention.
-            let server =
-                MemoryServer::new(global_db, Some(quant_db.clone())).expect("bind quant daemon");
+            let server = two_project_server(home, "quant");
             // "hapi" is never mounted here.
 
-            let entry = entry_with_domain("cap-2", Some("equity_trading"));
-            let err = resolve_capture_entry_write_target(
+            let err = resolve_capture_write_target(
                 &server,
-                &entry,
+                "cap-2",
+                Some("equity_trading"),
+                "/openclaw/agent/self-evolution",
+                "preference",
                 DbScope::Project,
                 Some("quant"),
                 None,
@@ -585,20 +720,14 @@ mod affinity_tests {
     #[test]
     fn same_domain_capture_entry_is_unaffected() {
         crate::test_support::with_tachi_home(|home| {
-            let quant_db = home.join("projects").join("quant").join("memory.db");
-            std::fs::create_dir_all(quant_db.parent().unwrap()).expect("mkdir quant");
-            let global_db = home.join("global").join("memory.db");
-            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
-            // `MemoryServer::new(global, project)` — the project path (not the
-            // first/global one) is what `bound_project_label` resolves "quant"
-            // from via the Plan C `projects/<name>/memory.db` convention.
-            let server =
-                MemoryServer::new(global_db, Some(quant_db.clone())).expect("bind quant daemon");
+            let server = two_project_server(home, "quant");
 
-            let entry = entry_with_domain("cap-3", None);
-            let (target_db, named_project) = resolve_capture_entry_write_target(
+            let (target_db, named_project) = resolve_capture_write_target(
                 &server,
-                &entry,
+                "cap-3",
+                None,
+                "/openclaw/agent/self-evolution",
+                "preference",
                 DbScope::Project,
                 Some("quant"),
                 None,
@@ -622,22 +751,15 @@ mod affinity_tests {
                 r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
             )
             .expect("write routing.json");
+            let server = two_project_server(home, "quant");
 
-            let quant_db = home.join("projects").join("quant").join("memory.db");
-            std::fs::create_dir_all(quant_db.parent().unwrap()).expect("mkdir quant");
-            let global_db = home.join("global").join("memory.db");
-            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
-            // `MemoryServer::new(global, project)` — the project path (not the
-            // first/global one) is what `bound_project_label` resolves "quant"
-            // from via the Plan C `projects/<name>/memory.db` convention.
-            let server =
-                MemoryServer::new(global_db, Some(quant_db.clone())).expect("bind quant daemon");
-
-            let entry = entry_with_domain("cap-4", Some("equity_trading"));
             let pinned = home.join("projects").join("pinned-agent-db").join("memory.db");
-            let (target_db, named_project) = resolve_capture_entry_write_target(
+            let (target_db, named_project) = resolve_capture_write_target(
                 &server,
-                &entry,
+                "cap-4",
+                Some("equity_trading"),
+                "/openclaw/agent/self-evolution",
+                "preference",
                 DbScope::Project,
                 None,
                 Some(&pinned),
@@ -647,6 +769,75 @@ mod affinity_tests {
 
             assert_eq!(target_db, DbScope::Project);
             assert!(named_project.is_none());
+        });
+    }
+
+    /// #1114 codex round-1 B4 discriminating test: bracket self-evolution
+    /// notes hash to a stable, deterministic `UUIDv5` (same agent + same
+    /// note text -> same id every time) — NOT a fresh random id each
+    /// capture. Scenario: a note was captured back when `equity_trading` had
+    /// no registered route (landed at the daemon's own bound "quant" store,
+    /// the ordinary passthrough case), and the SAME note text gets captured
+    /// AGAIN later, after `equity_trading` has since been registered to
+    /// route to "hapi". The repeat capture must update the row that's
+    /// ALREADY at "quant" in place, not reroute to "hapi" and create a
+    /// SECOND, independent copy of the identical note split across two
+    /// stores. Before the B4 fix, `id_resolves_at_target` was hard-coded
+    /// `false`, so every repeat capture blindly re-evaluated domain routing
+    /// from scratch regardless of where the row already lived.
+    #[test]
+    fn repeat_capture_of_same_deterministic_id_updates_in_place_not_rerouted() {
+        crate::test_support::with_tachi_home(|home| {
+            let server = two_project_server(home, "quant");
+            // The note's FIRST capture landed here, back before
+            // `equity_trading` had any registered route at all.
+            server
+                .with_project_store(|store| {
+                    store
+                        .upsert(&entry_with_domain(
+                            "bracket-self-evolution:stable-hash",
+                            Some("equity_trading"),
+                        ))
+                        .map_err(|e| e.to_string())
+                })
+                .expect("seed the note's original row at the pre-gate target");
+
+            // `equity_trading` is now registered to route to "hapi", and
+            // "hapi" is mounted — if the gate did not check for an existing
+            // row first, a repeat capture would reroute there.
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing.json");
+            let hapi_db = home.join("projects").join("hapi").join("memory.db");
+            std::fs::create_dir_all(hapi_db.parent().unwrap()).expect("mkdir hapi");
+            std::fs::write(&hapi_db, b"").expect("hapi db placeholder");
+
+            let (round2_db, round2_project) = resolve_capture_write_target(
+                &server,
+                "bracket-self-evolution:stable-hash",
+                Some("equity_trading"),
+                "/openclaw/agent/self-evolution",
+                "preference",
+                DbScope::Project,
+                Some("quant"),
+                None,
+                false,
+            )
+            .expect("repeat capture resolve");
+            assert_eq!(
+                round2_db,
+                DbScope::Project,
+                "the repeat capture must update in place, not reroute"
+            );
+            assert_eq!(
+                round2_project.as_deref(),
+                Some("quant"),
+                "the repeat capture must target wherever the row ALREADY \
+                 lives (quant), not re-evaluate domain routing and split it \
+                 across two stores"
+            );
         });
     }
 }
