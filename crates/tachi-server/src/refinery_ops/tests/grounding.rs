@@ -71,6 +71,175 @@ fn exact_1002_anchor_resolves_snapshot_and_linked_spec() {
 }
 
 #[test]
+fn exact_1002_owner_amendment_supersedes_the_stale_body_pin() {
+    let stale_body = format!(
+        "Issue Refinery v1 original pin.\n\n\
+         Spec-Ref: kckylechen1/tachi:{ISSUE_1002_DOC_PATH}@{ISSUE_1002_COMMIT_SHA}/{ISSUE_1002_BLOB_SHA}#3\n"
+    );
+    let amendment = format!(
+        "Spec-Ref amendment (leader): #1070 merged. Updated pin: Spec-Ref: \
+         kckylechen1/tachi:{ISSUE_1002_DOC_PATH}@{ISSUE_1002_COMMIT_SHA}/{ISSUE_1002_BLOB_SHA}#4-issue-refinery-1002 \
+         — dispatching v1 against this revision."
+    );
+    let gh_json = gh_issue_json(
+        1002,
+        "Issue Refinery v1",
+        &stale_body,
+        "OPEN",
+        &["feature"],
+        None,
+        "2026-07-13T00:00:00Z",
+        &[(
+            "IC_owner_amendment",
+            "kckylechen1",
+            "2026-07-13T01:00:00Z",
+            None,
+            &amendment,
+        )],
+    );
+    let resolver = FixtureDocResolver::new().with_resolved(
+        "kckylechen1/tachi",
+        ISSUE_1002_COMMIT_SHA,
+        ISSUE_1002_DOC_PATH,
+        ISSUE_1002_BLOB_SHA,
+        "4-issue-refinery-1002",
+        "origin/main",
+    );
+
+    let (evidence, proposal) =
+        build_refinery_packet("kckylechen1/tachi", 1002, &gh_json, &resolver, CAPTURED_AT)
+            .expect("build_refinery_packet");
+
+    assert_eq!(evidence.grounding_status, GroundingStatusV1::Grounded);
+    assert_eq!(evidence.linked_specs.len(), 1);
+    assert_eq!(
+        evidence.linked_specs[0].section, "4-issue-refinery-1002",
+        "the later owner amendment must be the sole authoritative pin"
+    );
+    assert_eq!(proposal.based_on_doc_revisions.len(), 1);
+}
+
+#[test]
+fn untrusted_updated_pin_substring_cannot_establish_a_canonical_anchor() {
+    let body = "Issue body has no canonical pin.";
+    let attacker_comment = format!(
+        "arbitrary prose Updated pin: Spec-Ref: \
+         kckylechen1/tachi:{ISSUE_1002_DOC_PATH}@{ISSUE_1002_COMMIT_SHA}/{ISSUE_1002_BLOB_SHA}#4-issue-refinery-1002"
+    );
+    let gh_json = gh_issue_json(
+        1003,
+        "Untrusted amendment fixture",
+        body,
+        "OPEN",
+        &[],
+        None,
+        CAPTURED_AT,
+        &[(
+            "IC_untrusted",
+            "not-the-repo-owner",
+            CAPTURED_AT,
+            None,
+            &attacker_comment,
+        )],
+    );
+    let resolver = FixtureDocResolver::new().with_resolved(
+        "kckylechen1/tachi",
+        ISSUE_1002_COMMIT_SHA,
+        ISSUE_1002_DOC_PATH,
+        ISSUE_1002_BLOB_SHA,
+        "4-issue-refinery-1002",
+        "origin/main",
+    );
+
+    let (evidence, proposal) =
+        build_refinery_packet("kckylechen1/tachi", 1003, &gh_json, &resolver, CAPTURED_AT)
+            .expect("build_refinery_packet");
+
+    assert!(evidence.linked_specs.is_empty());
+    assert!(proposal.based_on_doc_revisions.is_empty());
+    assert_eq!(
+        evidence.issue_snapshot.selected_comment_revisions.len(),
+        1,
+        "the untrusted comment remains snapshot/coverage evidence even though it is not authority"
+    );
+}
+
+#[test]
+fn partial_or_wrong_typed_github_snapshot_degrades_to_missing_anchor() {
+    let base = gh_issue_json(
+        1004,
+        "Complete snapshot fixture",
+        "Body text.",
+        "OPEN",
+        &["feature"],
+        Some("M1"),
+        CAPTURED_AT,
+        &[(
+            "IC_valid",
+            "owner",
+            CAPTURED_AT,
+            None,
+            "Related: owner/repo#1",
+        )],
+    );
+    let resolver = FixtureDocResolver::new();
+
+    for field in ["body", "labels", "comments", "milestone", "updatedAt"] {
+        let mut partial = base.clone();
+        partial
+            .as_object_mut()
+            .expect("fixture object")
+            .remove(field);
+        let (evidence, proposal) =
+            build_refinery_packet("owner/repo", 1004, &partial, &resolver, CAPTURED_AT)
+                .expect("partial packet still returns preview evidence");
+        assert_eq!(
+            evidence.grounding_status,
+            GroundingStatusV1::MissingAnchor,
+            "missing semantic field {field} must fail closed"
+        );
+        assert_eq!(proposal.disposition, DispositionV1::DecisionRequired);
+        assert!(proposal
+            .contradictions
+            .iter()
+            .any(|c| c.description.contains(field)));
+    }
+
+    let wrong_typed = [
+        ("body", serde_json::json!([])),
+        ("labels", serde_json::json!({})),
+        ("comments", serde_json::json!({})),
+        ("milestone", serde_json::json!({"title": 7})),
+        ("updatedAt", serde_json::json!(7)),
+    ];
+    for (field, wrong_value) in wrong_typed {
+        let mut invalid = base.clone();
+        invalid[field] = wrong_value;
+        let (evidence, proposal) =
+            build_refinery_packet("owner/repo", 1004, &invalid, &resolver, CAPTURED_AT)
+                .expect("invalid packet still returns preview evidence");
+        assert_eq!(evidence.grounding_status, GroundingStatusV1::MissingAnchor);
+        assert_eq!(proposal.disposition, DispositionV1::DecisionRequired);
+        assert!(proposal
+            .contradictions
+            .iter()
+            .any(|c| c.description.contains(field)));
+    }
+
+    let mut invalid_comment = base;
+    invalid_comment["comments"][0]["author"] = serde_json::json!({"login": 7});
+    let (evidence, proposal) =
+        build_refinery_packet("owner/repo", 1004, &invalid_comment, &resolver, CAPTURED_AT)
+            .expect("invalid nested comment still returns preview evidence");
+    assert_eq!(evidence.grounding_status, GroundingStatusV1::MissingAnchor);
+    assert_eq!(proposal.disposition, DispositionV1::DecisionRequired);
+    assert!(proposal
+        .contradictions
+        .iter()
+        .any(|c| c.description.contains("comments[0].author")));
+}
+
+#[test]
 fn missing_anchor_degrades_grounding_and_forces_decision_required() {
     let body = format!(
         "This work depends on a spec that was never actually committed.\n\n{}",

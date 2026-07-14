@@ -49,10 +49,12 @@ pub(crate) struct RelatedSignalV1 {
 /// protection is now derived directly from `evidence` inside `classify`
 /// (see [`is_protected_router`]) so the two can never desync again.
 ///
-/// Live-path collection honesty (F7, build-seat REQUEST-CHANGES): `related`
-/// is live-derived from each relation line's own `[state]` annotation (see
-/// `parse::parse_related_state_suffix`); `stale_body_signal` is live-derived
-/// from a blob-sha-drift resolver reason (see `mod::build_refinery_packet`).
+/// Live-path collection honesty (F7, build-seat REQUEST-CHANGES): until
+/// #1105 adds authenticated relation lookups, the live path normalizes every
+/// prose `[state]` annotation to `Unknown` before populating `related` and
+/// preserves the unverified annotation as an advisory contradiction.
+/// `stale_body_signal` is live-derived from a blob-sha-drift resolver reason
+/// (see `mod::build_refinery_packet`).
 /// `scope_collisions` and `shipped_evidence` are NOT collected by the live
 /// path at all (no scope-collision detection or shipped-evidence
 /// cross-check exists yet — both remain a follow-up slice, `Default`
@@ -211,16 +213,14 @@ pub(crate) fn propose_disposition(
     let proposed_doc_deltas: Vec<tachi_params::DocDeltaProposalV1> = Vec::new();
     let proposed_comment: Option<String> = None;
 
+    // Bind the complete revision records, not just their content/head SHAs.
+    // The same blob can appear under a different canonical section, path,
+    // commit, or trusted ref; the same commit can also belong to a different
+    // repo/ref tuple. None of those are replay-equivalent authority.
     let source_bundle_basis = serde_json::json!({
         "issue_snapshot_hash": evidence.issue_snapshot_hash,
-        "doc_blob_shas": based_on_doc_revisions
-            .iter()
-            .map(|d| d.blob_sha.clone())
-            .collect::<Vec<_>>(),
-        "repo_commit_shas": based_on_repo_revisions
-            .iter()
-            .map(|r| r.commit_sha.clone())
-            .collect::<Vec<_>>(),
+        "doc_revisions": &based_on_doc_revisions,
+        "repo_revisions": &based_on_repo_revisions,
     });
     let source_bundle_hash = tachi_params::canonical_json_sha256(&source_bundle_basis)?;
 

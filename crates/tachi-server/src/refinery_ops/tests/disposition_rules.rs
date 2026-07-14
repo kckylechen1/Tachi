@@ -299,18 +299,15 @@ fn all_ten_dispositions_are_reachable_by_at_least_one_fixture_in_this_file() {
     }
 }
 
-// ─── real production wiring for `RelatedIssueStateV1` (BUG-2 regression) ───
+// ─── prose relation-state annotations are advisory until #1105 ────────────
 
 /// End-to-end (through `build_refinery_packet`, the exact function the live
 /// `refine_issues` action calls — not the `propose()` bypass helpers above):
-/// a `Supersedes:` relation line's own `[closed_shipped]` annotation (see
-/// `parse::parse_related_state_suffix`) really is parsed and really does
-/// drive `classify()` to CLOSE_SUPERSEDED. This is the production
-/// construction site for `RelatedIssueStateV1::ClosedShipped` (a build-seat
-/// RED previously flagged it as dead code because only the `propose()`
-/// bypass helpers constructed it directly).
+/// a `Supersedes:` relation line's own `[closed_shipped]` annotation is
+/// preserved as evidence but cannot manufacture CLOSE_SUPERSEDED before the
+/// authenticated relation lookup in #1105 exists.
 #[test]
-fn relation_line_state_annotation_drives_close_superseded_through_the_real_pipeline() {
+fn relation_line_state_annotation_cannot_close_superseded_before_1105() {
     let body = "This work is superseded by the landed replacement.\n\n\
                 Supersedes: owner/repo#7001 [closed_shipped]\n"
         .to_string();
@@ -329,14 +326,18 @@ fn relation_line_state_annotation_drives_close_superseded_through_the_real_pipel
         build_refinery_packet("owner/repo", 8090, &gh_json, &resolver, CAPTURED_AT)
             .expect("build_refinery_packet");
     assert_eq!(evidence.relations.len(), 1);
-    assert_eq!(proposal.disposition, DispositionV1::CloseSuperseded);
+    assert_eq!(proposal.disposition, DispositionV1::Keep);
+    assert!(proposal.contradictions.iter().any(|c| {
+        c.description
+            .contains("unverified related issue state annotation")
+            && c.description.contains("owner/repo#7001")
+    }));
 }
 
-/// Same pipeline, `[closed_unshipped]` annotation -> DORMANT with a
-/// contradiction — the production construction site for
-/// `RelatedIssueStateV1::ClosedUnshipped`.
+/// The same fail-safe applies to `[closed_unshipped]`: retain the advisory
+/// contradiction, but do not manufacture DORMANT.
 #[test]
-fn relation_line_state_annotation_drives_dormant_through_the_real_pipeline() {
+fn relation_line_state_annotation_cannot_drive_dormant_before_1105() {
     let body = "This work is superseded but the replacement did not land.\n\n\
                 Supersedes: owner/repo#7002 [closed_unshipped]\n"
         .to_string();
@@ -351,11 +352,46 @@ fn relation_line_state_annotation_drives_dormant_through_the_real_pipeline() {
         &[],
     );
     let resolver = FixtureDocResolver::new();
-    let (_evidence, proposal) =
+    let (evidence, proposal) =
         build_refinery_packet("owner/repo", 8091, &gh_json, &resolver, CAPTURED_AT)
             .expect("build_refinery_packet");
-    assert_eq!(proposal.disposition, DispositionV1::Dormant);
-    assert!(!proposal.contradictions.is_empty());
+    assert_eq!(evidence.relations.len(), 1);
+    assert_eq!(proposal.disposition, DispositionV1::Keep);
+    assert!(proposal
+        .contradictions
+        .iter()
+        .any(|c| c.description.contains("advisory only until #1105")));
+}
+
+#[test]
+fn relation_line_state_annotation_cannot_drive_blocked_before_1105() {
+    let body = "Dependency state is only asserted in prose.\n\n\
+                Depends-On: owner/repo#7004 [open]\n"
+        .to_string();
+    let gh_json = gh_issue_json(
+        8093,
+        "Unverified dependency fixture",
+        &body,
+        "OPEN",
+        &[],
+        None,
+        CAPTURED_AT,
+        &[],
+    );
+    let resolver = FixtureDocResolver::new();
+    let (evidence, proposal) =
+        build_refinery_packet("owner/repo", 8093, &gh_json, &resolver, CAPTURED_AT)
+            .expect("build_refinery_packet");
+    assert_eq!(
+        evidence.relations.len(),
+        1,
+        "relation evidence is preserved"
+    );
+    assert_eq!(proposal.disposition, DispositionV1::Keep);
+    assert!(proposal
+        .contradictions
+        .iter()
+        .any(|c| c.description.contains("owner/repo#7004")));
 }
 
 /// Absent annotation -> `Unknown`, and `classify()`'s no-op for `Unknown`

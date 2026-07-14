@@ -620,11 +620,16 @@ pub fn check_proposal_replay(
     }
 
     for doc_rev in &proposal.based_on_doc_revisions {
-        let actual = current
-            .doc_revisions
-            .iter()
-            .find(|d| d.path == doc_rev.path && d.repo == doc_rev.repo);
-        // All three axes must match — commit_sha, trusted_ref, AND blob_sha.
+        let actual = current.doc_revisions.iter().find(|d| {
+            d.repo == doc_rev.repo
+                && d.trusted_ref == doc_rev.trusted_ref
+                && d.path == doc_rev.path
+                && d.section == doc_rev.section
+        });
+        // The complete canonical identity must match — repo, trusted_ref,
+        // commit_sha, path, blob_sha, AND section. An identical blob can
+        // legitimately back more than one section, but authority over one
+        // section does not authorize replay against another.
         // Canon doc §5: "a SHA alone does not grant canonical authority" —
         // an identical blob_sha at a DIFFERENT commit/trusted_ref must still
         // be treated as stale (the original approval was scoped to the
@@ -672,11 +677,15 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// making the body self-referential").
 pub fn compute_issue_body_hash(raw_body: &str) -> String {
     let normalized = normalize_line_endings(raw_body);
-    let filtered = normalized
-        .lines()
-        .filter(|line| !line.starts_with("Freeze-Receipt:"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut filtered = String::with_capacity(normalized.len());
+    for line_with_ending in normalized.split_inclusive('\n') {
+        let line = line_with_ending
+            .strip_suffix('\n')
+            .unwrap_or(line_with_ending);
+        if !line.starts_with("Freeze-Receipt:") {
+            filtered.push_str(line_with_ending);
+        }
+    }
     sha256_hex(filtered.as_bytes())
 }
 
@@ -756,10 +765,24 @@ mod tests {
     fn compute_issue_body_hash_strips_freeze_receipt_line_and_normalizes_crlf() {
         let with_crlf_and_receipt =
             "Title line\r\nBody detail.\r\nFreeze-Receipt: abc123\r\nTrailer.\r\n";
-        let without_receipt_lf = "Title line\nBody detail.\nTrailer.";
+        let without_receipt_lf = "Title line\nBody detail.\nTrailer.\n";
         assert_eq!(
             compute_issue_body_hash(with_crlf_and_receipt),
             sha256_hex(without_receipt_lf.as_bytes())
+        );
+    }
+
+    #[test]
+    fn compute_issue_body_hash_preserves_trailing_lf_and_only_removes_exact_receipt_lines() {
+        assert_ne!(
+            compute_issue_body_hash("same body"),
+            compute_issue_body_hash("same body\n"),
+            "the issue body's trailing LF is part of its byte identity"
+        );
+        assert_eq!(
+            compute_issue_body_hash("body\n Freeze-Receipt: advisory\n"),
+            sha256_hex(b"body\n Freeze-Receipt: advisory\n"),
+            "an indented prose mention is not an exact Freeze-Receipt line"
         );
     }
 
@@ -907,6 +930,26 @@ mod tests {
         current.doc_revisions[0].commit_sha = "a-different-commit-sha".to_string();
         let err = check_proposal_replay(&proposal, &current)
             .expect_err("same blob at a different commit must still be stale");
+        assert!(err
+            .iter()
+            .any(|r| matches!(r, StalenessReasonV1::DocRevisionChanged { .. })));
+    }
+
+    #[test]
+    fn check_proposal_replay_rejects_same_blob_at_a_different_section() {
+        let proposal = sample_proposal();
+        let mut current = CurrentGroundStateV1 {
+            issue_snapshot_hash: proposal.based_on_issue_snapshot_hash.clone(),
+            repo_revisions: proposal.based_on_repo_revisions.clone(),
+            doc_revisions: proposal.based_on_doc_revisions.clone(),
+        };
+        assert_eq!(
+            current.doc_revisions[0].blob_sha, proposal.based_on_doc_revisions[0].blob_sha,
+            "test setup: blob_sha must start identical"
+        );
+        current.doc_revisions[0].section = "a-different-section".to_string();
+        let err = check_proposal_replay(&proposal, &current)
+            .expect_err("same blob at a different section must still be stale");
         assert!(err
             .iter()
             .any(|r| matches!(r, StalenessReasonV1::DocRevisionChanged { .. })));

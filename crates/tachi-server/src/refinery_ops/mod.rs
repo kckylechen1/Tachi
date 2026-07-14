@@ -74,12 +74,11 @@
 //! staleness signal, not a placeholder default.
 //!
 //! Known scope gap (tracked here, not hidden): related-issue state (canon
-//! doc §4.1 input-order step 4) is wired ONLY through each relation line's
-//! own optional `[state]` annotation (see `parse::parse_related_state_suffix`)
-//! — a bounded, zero-extra-IO signal an issue author/dispatch tool can set
-//! explicitly. It is NOT yet a live per-relation GitHub cross-reference
-//! (fetching the target issue's real state/labels); that fuller version,
-//! and scope-collision detection, remain a follow-up slice.
+//! doc §4.1 input-order step 4) is NOT yet a live per-relation GitHub
+//! cross-reference. Until #1105 supplies that authenticated lookup, optional
+//! prose `[state]` annotations are preserved as advisory contradictions but
+//! normalized to `Unknown` before disposition classification. They therefore
+//! cannot manufacture BLOCKED/DORMANT/NARROW/CLOSE_SUPERSEDED outcomes.
 //! `shipped_evidence` live derivation is under active contract-interpretation
 //! dispute (sent to arbitration) and deliberately untouched this round.
 
@@ -221,20 +220,39 @@ fn resolve_known_repo_root(expected_repo: &str) -> Option<std::path::PathBuf> {
     }
 }
 
-/// Pure: extract `"owner/repo"` from a git remote URL, handling both
-/// `https://github.com/owner/repo.git` and `git@github.com:owner/repo.git`
-/// forms. `None` for anything that doesn't parse as a plausible GitHub
-/// remote — the caller treats that as "cannot verify", never a match.
+/// Pure: extract `"owner/repo"` from an explicitly supported github.com
+/// URL/SCP form. Host-looking substrings embedded in another URL are never
+/// authority: the caller treats every unsupported form as "cannot verify".
 fn parse_owner_repo_from_git_url(url: &str) -> Option<String> {
-    let trimmed = url.trim().trim_end_matches(".git").trim_end_matches('/');
-    let after_host = trimmed
-        .rsplit_once("github.com/")
-        .map(|(_, rest)| rest)
-        .or_else(|| trimmed.rsplit_once("github.com:").map(|(_, rest)| rest))?;
-    if after_host.is_empty() || after_host.matches('/').count() != 1 {
+    const URL_PREFIXES: &[&str] = &[
+        "https://github.com/",
+        "http://github.com/",
+        "ssh://git@github.com/",
+        "git://github.com/",
+    ];
+    const SCP_PREFIX: &str = "git@github.com:";
+
+    let trimmed = url.trim();
+    let path = URL_PREFIXES
+        .iter()
+        .find_map(|prefix| trimmed.strip_prefix(prefix))
+        .or_else(|| trimmed.strip_prefix(SCP_PREFIX))?
+        .trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, repo) = path.split_once('/')?;
+    if owner.is_empty()
+        || repo.is_empty()
+        || repo.contains('/')
+        || !owner.chars().all(is_github_repo_component_char)
+        || !repo.chars().all(is_github_repo_component_char)
+    {
         return None;
     }
-    Some(after_host.to_string())
+    Some(format!("{owner}/{repo}"))
+}
+
+fn is_github_repo_component_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')
 }
 
 /// F1/R4-1: the fetched `gh issue view --json ...` result must be a
@@ -297,14 +315,168 @@ fn validate_gh_issue_result(
         }
         None => return Err("issue_read result is missing 'state'".to_string()),
     }
-    if let Some(v) = obj.get("body") {
-        if !v.is_string() && !v.is_null() {
+    match obj.get("body") {
+        Some(v) if v.is_string() || v.is_null() => {}
+        Some(v) => {
             return Err(format!(
-                "issue_read result 'body' is not a string (got {v})"
+                "issue_read result 'body' is neither a string nor null (got {v})"
+            ));
+        }
+        None => return Err("issue_read result is missing 'body'".to_string()),
+    }
+    match obj.get("labels") {
+        Some(serde_json::Value::Array(labels)) => {
+            for (index, label) in labels.iter().enumerate() {
+                if label.get("name").and_then(|v| v.as_str()).is_none() {
+                    return Err(format!(
+                        "issue_read result 'labels[{index}].name' is missing or not a string (got {label})"
+                    ));
+                }
+            }
+        }
+        Some(v) => {
+            return Err(format!(
+                "issue_read result 'labels' is not an array (got {v})"
+            ));
+        }
+        None => return Err("issue_read result is missing 'labels'".to_string()),
+    }
+    match obj.get("milestone") {
+        Some(v) if v.is_null() => {}
+        Some(v) if v.get("title").and_then(|title| title.as_str()).is_some() => {}
+        Some(v) => {
+            return Err(format!(
+                "issue_read result 'milestone' is neither null nor an object with string 'title' (got {v})"
+            ));
+        }
+        None => return Err("issue_read result is missing 'milestone'".to_string()),
+    }
+    match obj.get("updatedAt") {
+        Some(v) if v.is_string() => {}
+        Some(v) => {
+            return Err(format!(
+                "issue_read result 'updatedAt' is not a string (got {v})"
+            ));
+        }
+        None => return Err("issue_read result is missing 'updatedAt'".to_string()),
+    }
+    match obj.get("comments") {
+        Some(serde_json::Value::Array(comments)) => {
+            for (index, comment) in comments.iter().enumerate() {
+                validate_gh_comment(comment, index)?;
+            }
+        }
+        Some(v) => {
+            return Err(format!(
+                "issue_read result 'comments' is not an array (got {v})"
+            ));
+        }
+        None => return Err("issue_read result is missing 'comments'".to_string()),
+    }
+    Ok(())
+}
+
+fn validate_gh_comment(comment: &serde_json::Value, index: usize) -> Result<(), String> {
+    let Some(obj) = comment.as_object() else {
+        return Err(format!(
+            "issue_read result 'comments[{index}]' is not an object (got {comment})"
+        ));
+    };
+    match obj.get("id") {
+        Some(v) if v.is_string() || v.as_u64().is_some() => {}
+        Some(v) => {
+            return Err(format!(
+                "issue_read result 'comments[{index}].id' is neither a string nor an unsigned number (got {v})"
+            ));
+        }
+        None => {
+            return Err(format!(
+                "issue_read result is missing 'comments[{index}].id'"
+            ))
+        }
+    }
+    match obj.get("body") {
+        Some(v) if v.is_string() => {}
+        Some(v) => {
+            return Err(format!(
+                "issue_read result 'comments[{index}].body' is not a string (got {v})"
+            ));
+        }
+        None => {
+            return Err(format!(
+                "issue_read result is missing 'comments[{index}].body'"
+            ))
+        }
+    }
+    match obj.get("author") {
+        Some(v) if v.is_null() => {}
+        Some(v) if v.get("login").and_then(|login| login.as_str()).is_some() => {}
+        Some(v) => {
+            return Err(format!(
+                "issue_read result 'comments[{index}].author' is neither null nor an object with string 'login' (got {v})"
+            ));
+        }
+        None => {
+            return Err(format!(
+                "issue_read result is missing 'comments[{index}].author'"
+            ));
+        }
+    }
+    match obj.get("createdAt") {
+        Some(v) if v.is_string() => {}
+        Some(v) => {
+            return Err(format!(
+                "issue_read result 'comments[{index}].createdAt' is not a string (got {v})"
+            ));
+        }
+        None => {
+            return Err(format!(
+                "issue_read result is missing 'comments[{index}].createdAt'"
+            ));
+        }
+    }
+    if let Some(v) = obj.get("updatedAt") {
+        if !v.is_string() {
+            return Err(format!(
+                "issue_read result 'comments[{index}].updatedAt' is not a string (got {v})"
             ));
         }
     }
     Ok(())
+}
+
+fn shift_spec_ref_span(spec_ref: &mut parse::SpecRefLine, offset: usize) {
+    spec_ref.span.start_byte += offset;
+    spec_ref.span.end_byte += offset;
+}
+
+fn shift_malformed_spec_ref_span(malformed: &mut parse::MalformedSpecRefLine, offset: usize) {
+    malformed.span.start_byte += offset;
+    malformed.span.end_byte += offset;
+}
+
+fn parse_updated_pin_amendment(
+    body: &str,
+    source_offset: usize,
+) -> Option<Result<parse::SpecRefLine, parse::MalformedSpecRefLine>> {
+    const PREFIX: &str = "Updated pin: Spec-Ref: ";
+    let prefix_start = body.rfind(PREFIX)?;
+    let value_start = prefix_start + PREFIX.len();
+    let value = body[value_start..].split_whitespace().next().unwrap_or("");
+    let span = SourceSpanV1 {
+        start_byte: source_offset + value_start,
+        end_byte: source_offset + value_start + value.len(),
+    };
+    Some(match parse::parse_spec_ref_value(value) {
+        Some(mut parsed) => {
+            parsed.span = span;
+            Ok(parsed)
+        }
+        None => Err(parse::MalformedSpecRefLine {
+            raw: value.to_string(),
+            span,
+        }),
+    })
 }
 
 /// Pure pipeline: `gh issue view --json ...` result → typed evidence +
@@ -337,12 +509,70 @@ pub(crate) fn build_refinery_packet(
     // double-newline join keeps each comment its own paragraph(s), never
     // merged with the body's last paragraph.
     let mut source_text = snapshot.body.clone();
+    let mut comment_offsets = Vec::with_capacity(snapshot.selected_comment_revisions.len());
     for c in &snapshot.selected_comment_revisions {
         source_text.push_str("\n\n");
+        comment_offsets.push(source_text.len());
         source_text.push_str(&c.body);
     }
 
-    let (spec_refs, malformed_spec_refs) = parse::parse_spec_ref_lines(&source_text);
+    // The issue body is the baseline authority. A later owner-authored
+    // `Updated pin: Spec-Ref: ...` amendment supersedes it deterministically;
+    // untrusted comments cannot introduce or replace canonical authority.
+    let owner = repo.split_once('/').map(|(owner, _)| owner).unwrap_or("");
+    let mut amendments = snapshot
+        .selected_comment_revisions
+        .iter()
+        .zip(&comment_offsets)
+        .filter(|(comment, _)| {
+            comment
+                .author
+                .as_deref()
+                .is_some_and(|author| author.eq_ignore_ascii_case(owner))
+        })
+        .filter_map(|(comment, offset)| {
+            parse_updated_pin_amendment(&comment.body, *offset).map(|parsed| {
+                (
+                    comment.updated_at.clone(),
+                    comment.comment_id.clone(),
+                    parsed,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    amendments.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+
+    let (spec_refs, malformed_spec_refs) = if let Some((_, _, amendment)) = amendments.pop() {
+        match amendment {
+            Ok(spec_ref) => (vec![spec_ref], Vec::new()),
+            Err(malformed) => (Vec::new(), vec![malformed]),
+        }
+    } else {
+        let (mut refs, mut malformed) = parse::parse_spec_ref_lines(&snapshot.body);
+        for (comment, offset) in snapshot
+            .selected_comment_revisions
+            .iter()
+            .zip(&comment_offsets)
+            .filter(|(comment, _)| {
+                comment
+                    .author
+                    .as_deref()
+                    .is_some_and(|author| author.eq_ignore_ascii_case(owner))
+            })
+        {
+            let (mut comment_refs, mut comment_malformed) =
+                parse::parse_spec_ref_lines(&comment.body);
+            for spec_ref in &mut comment_refs {
+                shift_spec_ref_span(spec_ref, *offset);
+            }
+            for malformed in &mut comment_malformed {
+                shift_malformed_spec_ref_span(malformed, *offset);
+            }
+            refs.extend(comment_refs);
+            malformed.extend(comment_malformed);
+        }
+        (refs, malformed)
+    };
     let relation_lines = parse::parse_relation_lines(&source_text);
 
     // F1: a Spec-Ref line that failed to parse is a claimed-but-broken
@@ -396,16 +626,24 @@ pub(crate) fn build_refinery_packet(
         .map(|r| (r.span, r.target_ref.clone()))
         .collect();
 
-    // Real (non-live-lookup) related-issue-state signals: each relation
-    // line's own optional `[state]` annotation (see
-    // `parse::parse_related_state_suffix`), defaulting to `Unknown` when
-    // absent — `classify` treats `Unknown` as a no-op (fail open).
+    // Before #1105, prose state annotations are advisory evidence only.
+    // Preserve a contradiction explaining the gap, but normalize the
+    // classifier input to Unknown so prose cannot manufacture a terminal
+    // or blocked disposition.
+    for relation in &relation_lines {
+        if relation.state != disposition::RelatedIssueStateV1::Unknown {
+            contradiction_reasons.push(format!(
+                "unverified related issue state annotation for {} is advisory only until #1105 live verification",
+                relation.target_ref
+            ));
+        }
+    }
     let related_signals: Vec<disposition::RelatedSignalV1> = relation_lines
         .iter()
         .map(|r| disposition::RelatedSignalV1 {
             target_ref: r.target_ref.clone(),
             kind: r.kind,
-            state: r.state,
+            state: disposition::RelatedIssueStateV1::Unknown,
         })
         .collect();
 
@@ -479,6 +717,10 @@ mod url_tests {
             parse_owner_repo_from_git_url("git@github.com:kckylechen1/tachi.git"),
             Some("kckylechen1/tachi".to_string())
         );
+        assert_eq!(
+            parse_owner_repo_from_git_url("ssh://git@github.com/kckylechen1/tachi.git"),
+            Some("kckylechen1/tachi".to_string())
+        );
     }
 
     #[test]
@@ -499,6 +741,22 @@ mod url_tests {
             None
         );
         assert_eq!(parse_owner_repo_from_git_url("not a url at all"), None);
+    }
+
+    #[test]
+    fn rejects_embedded_or_lookalike_github_hosts() {
+        for hostile in [
+            "https://example.com/github.com/kckylechen1/tachi.git",
+            "https://github.com.evil/kckylechen1/tachi.git",
+            "git@github.com.evil:kckylechen1/tachi.git",
+            "https://evil.invalid/?next=https://github.com/kckylechen1/tachi.git",
+        ] {
+            assert_eq!(
+                parse_owner_repo_from_git_url(hostile),
+                None,
+                "host lookalike must not establish repo authority: {hostile}"
+            );
+        }
     }
 
     #[test]

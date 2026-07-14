@@ -20,14 +20,9 @@
 //!
 //! A relation line may carry an optional trailing `[state]` annotation
 //! applying to every target on that line — also this leaf's own convention,
-//! not canon-frozen, e.g. `Supersedes: #89 [closed_shipped]`. Recognized
-//! values (case-insensitive): `open`, `closed_shipped`, `closed_unshipped`.
-//! Absent or unrecognized -> `RelatedIssueStateV1::Unknown`, which the
-//! classifier treats as a no-op (fail open, never a false
-//! BLOCKED/DORMANT/NARROW/CLOSE_SUPERSEDED). A live per-relation GitHub
-//! cross-reference (canon doc §4.1 input-order step 4: "related issue/PR
-//! state") is the fuller version of this and remains a follow-up slice —
-//! this annotation is the bounded, zero-extra-IO slice landing now.
+//! not canon-frozen, e.g. `Supersedes: #89 [closed_shipped]`. The parser
+//! preserves that prose annotation, but the live pipeline must treat it as
+//! advisory until #1105 supplies an authenticated cross-reference lookup.
 
 use super::disposition::RelatedIssueStateV1;
 use tachi_params::{CommentRevisionV1, IssueRelationKindV1, IssueSnapshotV1, SourceSpanV1};
@@ -87,7 +82,7 @@ pub(crate) fn parse_spec_ref_lines(text: &str) -> (Vec<SpecRefLine>, Vec<Malform
     (ok, malformed)
 }
 
-fn parse_spec_ref_value(value: &str) -> Option<SpecRefLine> {
+pub(super) fn parse_spec_ref_value(value: &str) -> Option<SpecRefLine> {
     // owner/repo:path@commit_sha/blob_sha#section
     let (repo_and_path, rest) = value.split_once('@')?;
     let (repo, path) = repo_and_path.split_once(':')?;
@@ -188,10 +183,11 @@ fn parse_related_state_suffix(rest: &str) -> (RelatedIssueStateV1, &str) {
 }
 
 fn comment_has_structured_marker(body: &str) -> bool {
-    body.lines().any(|line| {
-        let t = line.trim_start();
-        t.starts_with("Spec-Ref:") || match_relation_prefix(t).is_some()
-    })
+    body.contains("Updated pin: Spec-Ref:")
+        || body.lines().any(|line| {
+            let t = line.trim_start();
+            t.starts_with("Spec-Ref:") || match_relation_prefix(t).is_some()
+        })
 }
 
 /// Parse a `gh issue view --json ...` result payload (already fetched by the

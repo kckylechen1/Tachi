@@ -2,11 +2,12 @@
 //! reasoning can never mark a HEAD claim verified).
 
 use super::super::build_refinery_packet;
+use super::super::disposition::{propose_disposition, RefinerySignalsV1};
 use super::super::doc_resolver::{DocRefResolver, DocResolution, GitRefResolver, NullDocResolver};
 use super::super::fixtures::{gh_issue_json, minimal_evidence, spec_ref_line, FixtureDocResolver};
 use tachi_params::{
-    check_proposal_replay, CurrentGroundStateV1, GroundingStatusV1, RepoRevisionV1,
-    StalenessReasonV1,
+    check_proposal_replay, CanonicalDocRefV1, CurrentGroundStateV1, GroundingStatusV1,
+    RepoRevisionV1, StalenessReasonV1,
 };
 
 const CAPTURED_AT: &str = "2026-07-13T00:00:00Z";
@@ -42,6 +43,73 @@ fn a_fresh_proposal_replays_cleanly_against_its_own_pinned_state() {
         doc_revisions: proposal.based_on_doc_revisions.clone(),
     };
     assert!(check_proposal_replay(&proposal, &current).is_ok());
+}
+
+#[test]
+fn source_and_proposal_hashes_bind_same_blob_to_its_exact_section() {
+    let evidence = minimal_evidence("owner/repo#9300", "OPEN", &[]);
+    let repo_revision = RepoRevisionV1 {
+        repo: "owner/repo".to_string(),
+        git_ref: "origin/main".to_string(),
+        commit_sha: "headsha0".to_string(),
+        verified_at: CAPTURED_AT.to_string(),
+    };
+    let section_three = CanonicalDocRefV1 {
+        repo: "owner/repo".to_string(),
+        trusted_ref: "origin/main".to_string(),
+        commit_sha: "doccommit0".to_string(),
+        path: "docs/spec.md".to_string(),
+        blob_sha: "same-blob".to_string(),
+        section: "3".to_string(),
+        authority_receipt: "fixture:pre-registered".to_string(),
+        verified_reachable_at: CAPTURED_AT.to_string(),
+    };
+    let mut section_four = section_three.clone();
+    section_four.section = "4-issue-refinery-1002".to_string();
+
+    let proposal_three = propose_disposition(
+        &evidence,
+        &RefinerySignalsV1::default(),
+        vec![repo_revision.clone()],
+        vec![section_three],
+        &[],
+        CAPTURED_AT,
+    )
+    .expect("section three proposal");
+    let proposal_four = propose_disposition(
+        &evidence,
+        &RefinerySignalsV1::default(),
+        vec![repo_revision],
+        vec![section_four],
+        &[],
+        CAPTURED_AT,
+    )
+    .expect("section four proposal");
+
+    assert_ne!(
+        proposal_three.source_bundle_hash, proposal_four.source_bundle_hash,
+        "same blob at a different canonical section is a different source bundle"
+    );
+    assert_ne!(
+        proposal_three.proposal_hash, proposal_four.proposal_hash,
+        "the proposal hash must inherit the exact canonical section identity"
+    );
+
+    let mut other_ref_revision = proposal_three.based_on_repo_revisions[0].clone();
+    other_ref_revision.git_ref = "refs/heads/not-main".to_string();
+    let other_ref_proposal = propose_disposition(
+        &evidence,
+        &RefinerySignalsV1::default(),
+        vec![other_ref_revision],
+        proposal_three.based_on_doc_revisions.clone(),
+        &[],
+        CAPTURED_AT,
+    )
+    .expect("other-ref proposal");
+    assert_ne!(
+        proposal_three.source_bundle_hash, other_ref_proposal.source_bundle_hash,
+        "same commit under a different repo ref is a different source bundle"
+    );
 }
 
 #[test]
