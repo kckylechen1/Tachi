@@ -47,6 +47,24 @@ jobs:
       - name: Run workspace tests
         run: cargo nextest run --workspace --locked --profile ci
 
+      - name: Archive nextest JUnit timing report
+        # (Refs #1095) The ci profile (.config/nextest.toml) writes
+        # target/nextest/ci/junit.xml. Each <testcase> there carries a pure
+        # test-BODY `time` (nextest excludes compile/link), so this artifact is
+        # the archival form of nextest's own per-test timing: compile/link cost =
+        # (this step's wall-time) - (sum of JUnit testcase times). That makes
+        # compile/link and test-execution durations distinguishable in CI
+        # telemetry instead of being collapsed into one step clock. Uses the
+        # same actions/* first-party family as checkout/setup-node (pinned to
+        # @v4, matching the upload-artifact major already used by
+        # release-cli-binaries.yml) -- no new third-party action introduced.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit-report
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
       - name: Verify portable-kernel feature boundary
         run: cargo test -p portable-kernel --features portable-contract-test --locked
 

@@ -136,16 +136,39 @@ tokio = { version = "1", features = ["test-util", "macros", "rt", "time"] }
 name = "tachi_server"
 path = "src/lib.rs"
 
-# Primary product binary names. `memory-server` kept as install/PATH
-# compatibility alias during the MemCore/Tachi brand rename (#912 / #890).
+# Primary product binary name. Keeps the default test/bench targets.
 [[bin]]
 name = "tachi-server"
 path = "src/main.rs"
 
+# Install/PATH compatibility aliases for the MemCore/Tachi brand rename
+# (#912 / #890). All three bins compile the SAME `src/main.rs`, so with default
+# flags `cargo test` / `cargo nextest run` / `--all-targets` / `cargo bench`
+# build three byte-identical copies of this (test-free, bench-free) main.rs.
+# The two aliases below set `test = false` / `bench = false` to drop those two
+# redundant copies (Refs #1095).
+#
+# Equivalence -- the release binary SET and the tested test SET are both
+# unchanged:
+#   * src/main.rs has NO `#[cfg(test)]` / `#[test]` / `mod tests` (verified by
+#     grep), so disabling these bin TEST targets removes ZERO tests; the only
+#     thing removed is duplicate compilation/linking of an empty test harness.
+#   * `test` / `bench` affect only test/bench TARGET discovery -- `cargo build`
+#     and `cargo build --release` still produce all three bin ARTIFACTS, so
+#     release packaging (scripts/package_release_binary.sh -> the `tachi`
+#     binary) and the install/PATH surface are byte-identical.
+#   * No `CARGO_BIN_EXE_*` reference exists anywhere in the repo (verified by
+#     grep, zero hits), so no integration test depends on these bins' test
+#     targets; and there is no `[[bench]]` / `#[bench]` in this crate, so
+#     `bench = false` removes nothing.
 [[bin]]
 name = "tachi"
 path = "src/main.rs"
+test = false
+bench = false
 
 [[bin]]
 name = "memory-server"
 path = "src/main.rs"
+test = false
+bench = false
