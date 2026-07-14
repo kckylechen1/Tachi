@@ -56,6 +56,42 @@ impl std::fmt::Display for KdfParamsFormatError {
 
 impl std::error::Error for KdfParamsFormatError {}
 
+/// Exhaustive failures from deriving and verifying a key against a stored
+/// vault configuration.
+///
+/// Callers that intentionally treat a wrong candidate password as a benign
+/// miss must match [`Self::WrongPassword`] explicitly. Every stored-config
+/// integrity or derivation failure remains distinguishable and loud.
+#[derive(Debug)]
+pub enum StoredVaultKeyDerivationError {
+    InvalidSalt(String),
+    KdfParamsFormat(KdfParamsFormatError),
+    Derivation(String),
+    WrongPassword,
+    CorruptVerifier(String),
+}
+
+impl std::fmt::Display for StoredVaultKeyDerivationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidSalt(err) => write!(f, "Invalid vault salt: {err}"),
+            Self::KdfParamsFormat(err) => std::fmt::Display::fmt(err, f),
+            Self::Derivation(err) => write!(f, "Vault key derivation failed: {err}"),
+            Self::WrongPassword => f.write_str("Wrong password"),
+            Self::CorruptVerifier(err) => write!(f, "Invalid vault verifier: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for StoredVaultKeyDerivationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::KdfParamsFormat(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
 /// Parse the `vault_config.kdf_params` JSON column into a validated
 /// `KdfParams` (fail-closed). Called by every unlock/verify path that derives
 /// a key from a *stored* config (tachi#1080): as of the full wiring this is the
@@ -99,29 +135,25 @@ pub fn parse_stored_kdf_params(config_kdf_params: &str) -> Result<KdfParams, Kdf
 /// verifies the password, so the three inline steps are not re-implemented at
 /// each call site.
 ///
-/// Error classes are deliberately separable by downcast:
-/// - a stored-format/version failure surfaces as a TYPED
-///   [`KdfParamsFormatError`] (kept un-stringified inside the `Box<dyn Error>`);
-/// - a password mismatch surfaces as a boxed `String` ("Wrong password");
-/// - a salt/derivation failure surfaces as a boxed `String`.
-///
-/// A caller must never confuse a stored-format failure for a wrong password
-/// (and vice versa) — the [`KdfParamsFormatError`] downcast is the discriminator.
+/// The exhaustive [`StoredVaultKeyDerivationError`] is the discriminator: a
+/// caller may choose a benign outcome for [`StoredVaultKeyDerivationError::WrongPassword`]
+/// without accidentally swallowing corrupt stored configuration or a local
+/// derivation failure.
 pub fn derive_verified_key_from_stored_config(
     config: &memcore::vault::VaultConfig,
     password: &str,
-) -> Result<DerivedVaultKey, Box<dyn std::error::Error>> {
+) -> Result<DerivedVaultKey, StoredVaultKeyDerivationError> {
     let salt = B64
         .decode(&config.salt)
-        .map_err(|e| format!("Invalid vault salt: {e}"))?;
-    // parse_stored_kdf_params returns a TYPED KdfParamsFormatError; `?` keeps
-    // it downcastable inside the Box<dyn Error> so a caller can distinguish a
-    // stored-format failure from a password mismatch (tachi#1080).
-    let params = parse_stored_kdf_params(&config.kdf_params)?;
-    let key =
-        DerivedVaultKey::derive_with_params(password, &salt, &params).map_err(|e| e.to_string())?;
-    if !verify_password(key.bytes(), &config.verifier)? {
-        return Err("Wrong password".into());
+        .map_err(|err| StoredVaultKeyDerivationError::InvalidSalt(err.to_string()))?;
+    let params = parse_stored_kdf_params(&config.kdf_params)
+        .map_err(StoredVaultKeyDerivationError::KdfParamsFormat)?;
+    let key = DerivedVaultKey::derive_with_params(password, &salt, &params)
+        .map_err(|err| StoredVaultKeyDerivationError::Derivation(err.to_string()))?;
+    let matches = verify_password(key.bytes(), &config.verifier)
+        .map_err(StoredVaultKeyDerivationError::CorruptVerifier)?;
+    if !matches {
+        return Err(StoredVaultKeyDerivationError::WrongPassword);
     }
     Ok(key)
 }
@@ -240,8 +272,8 @@ mod tests {
     // These exercise the PURE seam `derive_verified_key_from_stored_config`
     // (parse stored kdf_params -> derive_with_params -> verify_password) with
     // zero system dependencies: no Keychain, no DB, no `security` CLI. The
-    // discriminator is a typed `KdfParamsFormatError` downcast, which a
-    // password mismatch must NEVER satisfy.
+    // discriminator is the exhaustive `StoredVaultKeyDerivationError`, so a
+    // password mismatch can never share a branch with stored-data corruption.
 
     use memcore::vault::{VaultCipher, VaultConfig};
 
@@ -286,7 +318,7 @@ mod tests {
         let err = derive_verified_key_from_stored_config(&config, "correct-pw")
             .expect_err("unsupported kdf_params must fail the seam");
         assert!(
-            err.downcast_ref::<KdfParamsFormatError>().is_some(),
+            matches!(&err, StoredVaultKeyDerivationError::KdfParamsFormat(_)),
             "unsupported kdf_params must surface as a typed KdfParamsFormatError \
              (not a password error); got: {err}"
         );
@@ -302,7 +334,7 @@ mod tests {
         let err = derive_verified_key_from_stored_config(&config, "correct-pw")
             .expect_err("malformed kdf_params JSON must fail the seam");
         assert!(
-            err.downcast_ref::<KdfParamsFormatError>().is_some(),
+            matches!(&err, StoredVaultKeyDerivationError::KdfParamsFormat(_)),
             "malformed kdf_params JSON must surface as a typed KdfParamsFormatError; \
              got: {err}"
         );
@@ -313,14 +345,37 @@ mod tests {
     /// format problem must never be misread as "wrong password", and a wrong
     /// password must never masquerade as a format problem.
     #[test]
-    fn seam_wrong_password_is_not_a_format_error() {
+    fn seam_wrong_password_has_dedicated_error_variant() {
         let config = make_stored_config_for_password("correct-pw");
         let err = derive_verified_key_from_stored_config(&config, "wrong-pw")
             .expect_err("wrong password must fail verification");
         assert!(
-            err.downcast_ref::<KdfParamsFormatError>().is_none(),
-            "wrong password must NOT surface as a KdfParamsFormatError (would \
-             conflate password mismatch with stored-format failure); got: {err}"
+            matches!(&err, StoredVaultKeyDerivationError::WrongPassword),
+            "wrong password must have its dedicated variant; got: {err}"
+        );
+    }
+
+    #[test]
+    fn seam_invalid_salt_is_not_a_password_miss() {
+        let mut config = make_stored_config_for_password("correct-pw");
+        config.salt = "not base64!".to_string();
+        let err = derive_verified_key_from_stored_config(&config, "correct-pw")
+            .expect_err("invalid stored salt must fail the seam");
+        assert!(
+            matches!(&err, StoredVaultKeyDerivationError::InvalidSalt(_)),
+            "invalid stored salt must remain a typed integrity error; got: {err}"
+        );
+    }
+
+    #[test]
+    fn seam_corrupt_verifier_is_not_a_password_miss() {
+        let mut config = make_stored_config_for_password("correct-pw");
+        config.verifier = "not-a-verifier".to_string();
+        let err = derive_verified_key_from_stored_config(&config, "correct-pw")
+            .expect_err("corrupt stored verifier must fail the seam");
+        assert!(
+            matches!(&err, StoredVaultKeyDerivationError::CorruptVerifier(_)),
+            "corrupt stored verifier must remain a typed integrity error; got: {err}"
         );
     }
 }
