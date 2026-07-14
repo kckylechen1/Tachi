@@ -81,13 +81,30 @@ impl RerankConfig {
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
-        if provider == RerankProviderKind::Local && local_endpoint.is_none() {
-            return Err(LOCAL_NOT_CONFIGURED.to_string());
-        }
-        Ok(Self {
+        let config = Self {
             provider,
             local_endpoint,
-        })
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate that a `Local` provider has a non-empty endpoint.
+    ///
+    /// Shared by `from_env` (env path) and `new_with_config` (injection path)
+    /// so both fail closed at construction — never deferring to a runtime
+    /// belt-and-suspenders check.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.provider == RerankProviderKind::Local
+            && self
+                .local_endpoint
+                .as_deref()
+                .map(|e| e.trim().is_empty())
+                .unwrap_or(true)
+        {
+            return Err(LOCAL_NOT_CONFIGURED.to_string());
+        }
+        Ok(())
     }
 
     pub fn provider_name(&self) -> &'static str {

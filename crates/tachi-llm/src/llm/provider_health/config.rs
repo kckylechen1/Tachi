@@ -303,6 +303,11 @@ impl super::super::LlmClient {
     ) -> Result<Self, String> {
         let vault_db_path = vault_db_path.map(|path| path.to_path_buf());
 
+        // Fail-closed rerank validation: injected `Local` without a non-empty
+        // endpoint must error here, not defer to a runtime belt-and-suspenders
+        // check. Shares the same `validate()` as the env path (#1096 R2).
+        config.rerank.validate()?;
+
         // Ensure a rustls crypto provider is installed before any HTTPS client
         // is built. reqwest uses rustls-no-provider, so this is required.
         crate::install_tls_provider();
