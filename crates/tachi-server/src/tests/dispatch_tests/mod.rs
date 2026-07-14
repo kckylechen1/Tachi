@@ -272,7 +272,7 @@ use crate::test_support::EnvRestore;
 /// dispatch-tests sub-modules (which import this as `n`) keep their
 /// `n::set_path` / `n::set_value` syntax without each file needing its
 /// own import. #1096 leaf-2a.
-struct EnvVarGuard(EnvRestore);
+struct EnvVarGuard(#[allow(dead_code)] EnvRestore); // held for Drop only
 
 impl EnvVarGuard {
     fn set_path(key: &'static str, value: &std::path::Path) -> Self {
