@@ -172,7 +172,8 @@ fn project_continuity_events_inner(
             // same shape of gap #1115's check-then-insert atomicity work is
             // already scoped to address — deliberately not solved with an
             // ad-hoc migration in this leaf.
-            let id_resolves_at_pretarget = get_projection_memory(server, target, &memory_id)?.is_some();
+            let id_resolves_at_pretarget =
+                get_projection_memory(server, target, &memory_id)?.is_some();
             let routed_target = match resolve_projection_write_target(
                 server,
                 target,

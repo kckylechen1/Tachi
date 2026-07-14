@@ -187,14 +187,15 @@ pub(super) fn resolve_projection_write_target(
     if target.db_path.is_some() {
         return Ok(target.clone());
     }
-    let affinity = crate::memory_search_ops::save_memory::write_affinity::apply_write_affinity_for_domain(
-        server,
-        domain,
-        target.target_db,
-        target.named_project.as_deref(),
-        project_explicit,
-        id_resolves_at_target,
-    )?;
+    let affinity =
+        crate::memory_search_ops::save_memory::write_affinity::apply_write_affinity_for_domain(
+            server,
+            domain,
+            target.target_db,
+            target.named_project.as_deref(),
+            project_explicit,
+            id_resolves_at_target,
+        )?;
     Ok(ContinuityEventTarget {
         target_db: affinity.target_db,
         named_project: affinity.named_project,
@@ -375,10 +376,7 @@ mod tests {
     }
 
     fn bound_server(home: &std::path::Path, bound_project: &str) -> MemoryServer {
-        let project_db = home
-            .join("projects")
-            .join(bound_project)
-            .join("memory.db");
+        let project_db = home.join("projects").join(bound_project).join("memory.db");
         std::fs::create_dir_all(project_db.parent().unwrap()).expect("mkdir project");
         let global_db = home.join("global").join("memory.db");
         std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
@@ -434,8 +432,14 @@ mod tests {
                 None,
             );
             let entry = projection_entry("projection-1", Some("equity_trading"));
-            let routed = resolve_projection_write_target(&server, &target, entry.domain.as_deref(), false, false)
-                .expect("resolve routed target");
+            let routed = resolve_projection_write_target(
+                &server,
+                &target,
+                entry.domain.as_deref(),
+                false,
+                false,
+            )
+            .expect("resolve routed target");
             upsert_projection_memory(&server, &routed, &entry).expect("upsert projection memory");
 
             let in_hapi = server
@@ -474,8 +478,14 @@ mod tests {
             let target =
                 ContinuityEventTarget::new(DbScope::Project, Some("quant".to_string()), None);
             let entry = projection_entry("projection-2", Some("equity_trading"));
-            let err = resolve_projection_write_target(&server, &target, entry.domain.as_deref(), false, false)
-                .expect_err("must refuse, not silently write cross-domain");
+            let err = resolve_projection_write_target(
+                &server,
+                &target,
+                entry.domain.as_deref(),
+                false,
+                false,
+            )
+            .expect_err("must refuse, not silently write cross-domain");
             assert_eq!(err.kind(), "unmounted_route");
             let message = err.to_string();
             assert!(message.contains("equity_trading"));
@@ -492,8 +502,14 @@ mod tests {
             let target =
                 ContinuityEventTarget::new(DbScope::Project, Some("quant".to_string()), None);
             let entry = projection_entry("projection-3", Some("engineering"));
-            let routed = resolve_projection_write_target(&server, &target, entry.domain.as_deref(), false, false)
-                .expect("resolve routed target");
+            let routed = resolve_projection_write_target(
+                &server,
+                &target,
+                entry.domain.as_deref(),
+                false,
+                false,
+            )
+            .expect("resolve routed target");
             upsert_projection_memory(&server, &routed, &entry).expect("upsert projection memory");
 
             let in_quant = server
@@ -521,10 +537,17 @@ mod tests {
             let pinned_db = home.join("pinned").join("memory.db");
             std::fs::create_dir_all(pinned_db.parent().unwrap()).expect("mkdir pinned");
 
-            let target = ContinuityEventTarget::new(DbScope::Project, None, Some(pinned_db.clone()));
+            let target =
+                ContinuityEventTarget::new(DbScope::Project, None, Some(pinned_db.clone()));
             let entry = projection_entry("projection-4", Some("equity_trading"));
-            let routed = resolve_projection_write_target(&server, &target, entry.domain.as_deref(), false, false)
-                .expect("resolve routed target (db_path skips unchanged)");
+            let routed = resolve_projection_write_target(
+                &server,
+                &target,
+                entry.domain.as_deref(),
+                false,
+                false,
+            )
+            .expect("resolve routed target (db_path skips unchanged)");
             upsert_projection_memory(&server, &routed, &entry).expect("upsert projection memory");
 
             let in_pinned = server
@@ -564,9 +587,14 @@ mod tests {
             let entry = projection_entry("projection-5", Some("equity_trading"));
 
             // Round 1: fresh row, reroutes into hapi.
-            let routed_1 =
-                resolve_projection_write_target(&server, &target, entry.domain.as_deref(), false, false)
-                    .expect("round 1 routed target");
+            let routed_1 = resolve_projection_write_target(
+                &server,
+                &target,
+                entry.domain.as_deref(),
+                false,
+                false,
+            )
+            .expect("round 1 routed target");
             assert_eq!(routed_1.named_project.as_deref(), Some("hapi"));
             let existing_1 = super::get_projection_memory(&server, &routed_1, &entry.id)
                 .expect("round 1 existing-row lookup");
@@ -579,9 +607,14 @@ mod tests {
             // Round 2: SAME event/projection/key -> same deterministic id.
             // The existing-row lookup must use the SAME routed target as
             // round 1 (hapi), and must find the row round 1 just wrote.
-            let routed_2 =
-                resolve_projection_write_target(&server, &target, entry.domain.as_deref(), false, false)
-                    .expect("round 2 routed target");
+            let routed_2 = resolve_projection_write_target(
+                &server,
+                &target,
+                entry.domain.as_deref(),
+                false,
+                false,
+            )
+            .expect("round 2 routed target");
             assert_eq!(
                 routed_2.named_project.as_deref(),
                 Some("hapi"),
@@ -625,9 +658,10 @@ mod tests {
             .expect("write routing.json");
             let _hapi_db = mount_named_project_db(home, "hapi");
 
-            let id_resolves_at_pretarget = super::get_projection_memory(&server, &target, &entry.id)
-                .expect("pretarget existence check")
-                .is_some();
+            let id_resolves_at_pretarget =
+                super::get_projection_memory(&server, &target, &entry.id)
+                    .expect("pretarget existence check")
+                    .is_some();
             assert!(
                 id_resolves_at_pretarget,
                 "the seeded row must be found at the pre-gate target"
@@ -650,39 +684,15 @@ mod tests {
         });
     }
 
-    /// #1114 codex round-2 item 4② discriminating test: a genuine read
-    /// FAILURE against the pre-gate target (a store that "exists" per the
-    /// filesystem but is not actually a readable SQLite database — not the
-    /// same thing as "no rows found") must propagate as a real `Err`, not
-    /// be silently treated as "this id doesn't exist here". Before this
-    /// fix, the pre-gate existence check used `.ok().flatten().is_some()`,
-    /// which collapsed a read failure to `false` — indistinguishable from a
-    /// genuinely fresh row, and exactly as dangerous: it would let the gate
-    /// proceed to (re)create a fresh row at the reroute destination while a
-    /// copy might already exist at the target this call couldn't even read.
-    #[test]
-    fn read_failure_at_pretarget_propagates_instead_of_being_treated_as_absence() {
-        crate::test_support::with_tachi_home(|home| {
-            let server = bound_server(home, "quant");
-            // A store that exists per the filesystem (so
-            // `named_project_db_exists` and any naive `.exists()` check
-            // would call it "mounted") but is genuinely unreadable — not a
-            // valid SQLite database at all, unlike the zero-byte-placeholder
-            // shape that a real SQLite open initializes fine.
-            let corrupt_db = home.join("projects").join("corrupt").join("memory.db");
-            std::fs::create_dir_all(corrupt_db.parent().unwrap()).expect("mkdir corrupt");
-            std::fs::write(&corrupt_db, b"this is not a sqlite database file at all")
-                .expect("write garbage bytes");
-
-            let target =
-                ContinuityEventTarget::new(DbScope::Project, Some("corrupt".to_string()), None);
-            let result = super::get_projection_memory(&server, &target, "some-projection-id");
-            assert!(
-                result.is_err(),
-                "a genuinely unreadable store must propagate an error, not report None: {result:?}"
-            );
-        });
-    }
+    // #1114 codex round-3 item 4 fix: the test that used to live here
+    // (asserting `get_projection_memory` itself returns `Err` on a read
+    // failure) was HOLLOW — that helper already propagated read errors at
+    // the base level, unaffected by the #1114 fix, so the test passed
+    // identically before and after. The line actually changed was one layer
+    // up, in `projection.rs`'s loop (`id_resolves_at_pretarget = ...ok()
+    // .flatten().is_some()` -> `?`) — moved to a real discriminating test
+    // driving that layer's actual entry point:
+    // `continuity_ops::tests::project_auto_continuity_events_propagates_a_downstream_read_failure`.
 
     // #1114 codex round-2 item 4①/③ KNOWN LIMITATION (registry changes its
     // route for a domain between two projection runs of the SAME

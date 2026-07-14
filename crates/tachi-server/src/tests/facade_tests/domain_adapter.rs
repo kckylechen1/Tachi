@@ -125,8 +125,7 @@ async fn lorebook_import_preserves_transport_default_marker_through_write_affini
 
     // "hapi" is the store `agent_os` is registered to — mounted and ready.
     let hapi_db = home.temp_home.join(".tachi/projects/hapi/memory.db");
-    std::fs::create_dir_all(hapi_db.parent().expect("hapi parent"))
-        .expect("create hapi dir");
+    std::fs::create_dir_all(hapi_db.parent().expect("hapi parent")).expect("create hapi dir");
     memcore::MemoryStore::open_with_label(hapi_db.to_str().expect("utf-8 db path"), "hapi")
         .expect("create hapi DB");
 

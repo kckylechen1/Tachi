@@ -189,9 +189,7 @@ impl WriteAffinityError {
         match self {
             WriteAffinityError::UnmountedRoute { .. } => "unmounted_route",
             WriteAffinityError::RoutingConfigUnavailable(_) => "routing_config_unavailable",
-            WriteAffinityError::RerouteRefusedForClientId { .. } => {
-                "reroute_refused_for_client_id"
-            }
+            WriteAffinityError::RerouteRefusedForClientId { .. } => "reroute_refused_for_client_id",
         }
     }
 }

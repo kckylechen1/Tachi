@@ -610,8 +610,9 @@ fn resolve_capture_write_target(
     // infer — same `.or_else` fallback `resolve_save_domain` (save_memory)
     // and `projection_domain_label` (continuity) both apply, so an already
     // -valid `domain` is never dropped just because it didn't need a repair.
-    let resolved_domain = crate::repair::domain::repair_target(domain, path, category, "foundry_capture")
-        .or_else(|| domain.map(str::to_string));
+    let resolved_domain =
+        crate::repair::domain::repair_target(domain, path, category, "foundry_capture")
+            .or_else(|| domain.map(str::to_string));
     let affinity =
         crate::memory_search_ops::save_memory::write_affinity::apply_write_affinity_for_domain(
             server,
@@ -644,9 +645,8 @@ fn capture_entry_exists_at(
             store.get(id).map_err(|e| e.to_string())
         })
     } else {
-        server.with_store_for_scope_read(target_db, |store| {
-            store.get(id).map_err(|e| e.to_string())
-        })
+        server
+            .with_store_for_scope_read(target_db, |store| store.get(id).map_err(|e| e.to_string()))
     };
     Ok(result?.is_some())
 }
@@ -824,7 +824,10 @@ mod affinity_tests {
             .expect("write routing.json");
             let server = two_project_server(home, "quant");
 
-            let pinned = home.join("projects").join("pinned-agent-db").join("memory.db");
+            let pinned = home
+                .join("projects")
+                .join("pinned-agent-db")
+                .join("memory.db");
             let (target_db, named_project) = resolve_capture_write_target(
                 &server,
                 "cap-4",
@@ -1008,11 +1011,8 @@ mod handler_tests {
 
             let hapi_db = home.join("projects").join("hapi").join("memory.db");
             std::fs::create_dir_all(hapi_db.parent().unwrap()).expect("mkdir hapi");
-            memcore::MemoryStore::open_with_label(
-                hapi_db.to_str().expect("utf-8 db path"),
-                "hapi",
-            )
-            .expect("init hapi schema");
+            memcore::MemoryStore::open_with_label(hapi_db.to_str().expect("utf-8 db path"), "hapi")
+                .expect("init hapi schema");
 
             let params = CaptureSessionParams {
                 conversation_id: "conv-1".to_string(),
@@ -1056,10 +1056,8 @@ mod handler_tests {
             // INSIDE the same `block_on`'d runtime, not constructed before
             // it: calling `tokio::spawn` with no active runtime context
             // panics.
-            let _background_workers = crate::test_support::EnvRestore::set(
-                "TACHI_TEST_ENABLE_BACKGROUND_WORKERS",
-                "1",
-            );
+            let _background_workers =
+                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
 
             // The spawned foundry-maintenance worker's `while let Some(item)
             // = rx.recv().await` loop (maintenance/worker.rs:120) only ever
@@ -1081,8 +1079,7 @@ mod handler_tests {
                 (response, server)
             });
             rt.shutdown_timeout(std::time::Duration::from_millis(500));
-            let parsed: serde_json::Value =
-                serde_json::from_str(&response).expect("response JSON");
+            let parsed: serde_json::Value = serde_json::from_str(&response).expect("response JSON");
             assert_eq!(
                 parsed["captured"].as_u64(),
                 Some(1),
@@ -1116,4 +1113,34 @@ mod handler_tests {
             );
         });
     }
+
+    // #1114 codex round-3 item 3 point ③, capture_session-side (label +
+    // by_destination fallback): DELIBERATELY NOT covered by a new runtime
+    // test this round. `emit_session_captured_event` (what such a test
+    // would check) runs AFTER `enqueue_capture_maintenance_jobs` within the
+    // SAME per-destination-group loop iteration — unlike
+    // `handle_capture_session_infers_domain_from_entry_and_reroutes` above
+    // (which only needs state written BEFORE that call), there is no way to
+    // observe this fix without the maintenance-enqueue call actually
+    // succeeding, which needs `TACHI_TEST_ENABLE_BACKGROUND_WORKERS`
+    // enabled. That would reintroduce EXACTLY the process-env-var
+    // concurrency race item 5 was fixed for (`EnvRestore` prevents the
+    // value LEAKING after this test ends; it does not prevent OTHER,
+    // concurrently-running tests that don't hold `global_test_lock` from
+    // OBSERVING it while set — and per codex's own grep,
+    // `server_state/init.rs`'s tests around lines 371-379 are exactly such
+    // tests) — multiplying the exact class of risk this round exists to
+    // eliminate, not adding a new instance of it. A safe test would need
+    // either (a) reordering `capture_session.rs` so the continuity event is
+    // written before maintenance-enqueue, or (b) extracting the
+    // destination-group loop body into a directly-testable seam — both are
+    // production changes, out of scope for a test-quality-only round. The
+    // fix itself (verified correct by codex's own production-logic review
+    // this round) stays confirmed by code inspection only:
+    // `emit_session_captured_event`'s call now passes `group_named_project
+    // .as_deref()` instead of the stale `params.project.as_deref()`, and
+    // `primary_session_event`/`primary_pipeline` fall back to whichever
+    // destination group actually exists instead of a hardcoded "skipped"
+    // placeholder — see capture_session.rs's own inline doc comments at
+    // those two call sites for the reasoning.
 }
