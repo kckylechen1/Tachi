@@ -182,7 +182,7 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
         "tachi_task" => match action.as_str() {
             "plan" | "briefing" | "doc_index" | "status" | "board" | "wait" | "profiles"
             | "profile" | "card" | "cycle_status" | "cycle_plan" | "ux_matrix"
-            | "build_references" => Some(ToolBundle::Observe),
+            | "build_references" | "refine_issues" => Some(ToolBundle::Observe),
             "complete" | "adjudicate" => Some(ToolBundle::Remember),
             "dispatch" | "recommend" | "cancel" | "merge" | "intake" | "close_loop" => {
                 Some(ToolBundle::Coordinate)

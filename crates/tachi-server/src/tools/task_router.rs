@@ -322,6 +322,9 @@ pub(super) async fn handle_tachi_task_facade(
                 }
             }
             Ok(result)
+        }
+        TachiTaskAction::RefineIssues => {
+            crate::refinery_ops::handle_refine_issues(server, &params).await
         } // No `_ =>` catch-all: `TachiTaskAction` is exhaustively matched
           // above (#919 concern) — a new variant fails to compile here until
           // it is explicitly routed, instead of silently returning "Invalid

@@ -11,7 +11,7 @@ fn tachi_task_action_schema(
     // #757: GH PR lifecycle is only on tachi_gh — not accepted by tachi_task.
     string_enum_schema(
         &super::action_enums::TachiTaskAction::primary_wire_strings(),
-        "Required Tachi task facade action. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'wait'/'board'/'cancel' manage dispatches; action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='recommend'/'route_simulate'/'proposals' manage routing; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs).",
+        "Required Tachi task facade action. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'wait'/'board'/'cancel' manage dispatches; action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='recommend'/'route_simulate'/'proposals' manage routing; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs); action='refine_issues' is a manually-triggered, read-only, proposal-only semantic refinement of one GitHub issue (#1002) — it never closes/reopens/edits/writes back.",
         generator,
     )
 }
@@ -30,6 +30,8 @@ pub struct TachiTaskParams {
     /// action="intake" binds a GitHub issue to a flow.
     /// action="cycle_status" / "cycle_plan" are read-only lifecycle models.
     /// action="ux_matrix" / "build_references" / "close_loop" close the issue loop.
+    /// action="refine_issues" (#1002) reads one GitHub issue and returns typed
+    /// evidence + a proposal-only disposition; uses `issue_ref` (or `repo`+`number`).
     /// GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note): use **tachi_gh only** (#757).
     #[schemars(schema_with = "tachi_task_action_schema")]
     pub action: TachiTaskAction,

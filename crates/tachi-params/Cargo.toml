@@ -12,3 +12,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+# Cryptographic SHA-256 for the #1002 Issue Refinery's frozen hashing contract
+# (issue body hash / canonical-JSON snapshot hash — docs/engineering/architecture/
+# issue-refinery-memory-lanes.md §5 requires SHA-256 specifically, not a
+# non-cryptographic hash). `ring` 0.17 is ALREADY resolved in this workspace's
+# dependency graph (it is the rustls crypto provider selected via
+# `rustls = { features = ["ring"] }` at the workspace level — see root
+# Cargo.toml), so this adds no new crate to the build, only a direct-dependency
+# edge onto something already compiled (same rationale as the `blake2`/`argon2`
+# edge in tachi-server's Cargo.toml).
+ring = "0.17"

@@ -97,6 +97,7 @@ pub enum TachiTaskAction {
     UxMatrix,
     BuildReferences,
     CloseLoop,
+    RefineIssues,
     Adjudicate,
 }
 
@@ -127,6 +128,7 @@ impl TachiTaskAction {
         Self::UxMatrix,
         Self::BuildReferences,
         Self::CloseLoop,
+        Self::RefineIssues,
         Self::Adjudicate,
     ];
 
@@ -156,6 +158,7 @@ impl TachiTaskAction {
             Self::UxMatrix => "ux_matrix",
             Self::BuildReferences => "build_references",
             Self::CloseLoop => "close_loop",
+            Self::RefineIssues => "refine_issues",
             Self::Adjudicate => "adjudicate",
         }
     }
@@ -202,6 +205,7 @@ impl FromStr for TachiTaskAction {
             "ux_matrix" => Ok(Self::UxMatrix),
             "build_references" => Ok(Self::BuildReferences),
             "close_loop" => Ok(Self::CloseLoop),
+            "refine_issues" => Ok(Self::RefineIssues),
             "adjudicate" => Ok(Self::Adjudicate),
             // #757: these were removed from tachi_task; point callers at tachi_gh.
             "link_pr" | "pr_status" | "pr_handoff" | "release_note" => Err(format!(
