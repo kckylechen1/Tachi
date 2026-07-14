@@ -336,8 +336,28 @@ pub(crate) fn resolve_effective_named_project(
     None
 }
 
+/// The daemon's currently-bound project store label, with NO workspace/CWD
+/// inference (unlike [`resolve_effective_named_project`], which is
+/// READ-ONLY-surfaces-only for exactly this reason). Safe to call from a
+/// write path: it only reports what this daemon process actually has open
+/// (`has_project_db` / `project_db_path_buf`), never what the caller's CWD
+/// or git root *would* resolve to. `None` when no project DB is bound, or
+/// when the bound path doesn't map to a recognized named-project convention.
+///
+/// Used by `save_memory`'s domain-store write-affinity gate (#1041 S1) to
+/// tell whether an unqualified `scope=project` save is already landing in
+/// the store its (explicit-or-classified) domain is registered to.
+pub(crate) fn bound_project_label(server: &crate::MemoryServer) -> Option<String> {
+    if !server.has_project_db() {
+        return None;
+    }
+    server
+        .project_db_path_buf()
+        .and_then(|path| named_project_from_db_path(path.as_path()))
+}
+
 pub(crate) fn infer_search_project(query: &str, domain: Option<&str>) -> Option<String> {
-    infer_search_project_with(query, domain, super::routing_config::RoutingConfig::get())
+    infer_search_project_with(query, domain, &super::routing_config::RoutingConfig::get())
 }
 
 /// Config-injectable core. Domain-specific routing is supplied by

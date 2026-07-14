@@ -15,6 +15,10 @@ pub(super) async fn run_lesson_post_complete_hook(
     safe_skills_used: &[String],
     date: &str,
     task_id: &str,
+    // #1041 B7: see `build_complete_eval_record`'s doc — the
+    // caller-resolved, wire-accurate explicitness signal, not
+    // `params.project.is_some()`.
+    project_explicit: bool,
 ) -> serde_json::Value {
     if !matches!(outcome_norm, "failure" | "partial") {
         return json!("skipped (outcome not failure/partial)");
@@ -95,6 +99,10 @@ pub(super) async fn run_lesson_post_complete_hook(
         force: true,
         auto_link: true,
         project: params.project.clone(),
+        // #1041 B7 (was F2's stale premise) — see
+        // `build_complete_eval_record`'s identical fix for why
+        // `params.project.is_some()` is not a safe stand-in here.
+        project_explicit,
         retention_policy: Some("durable".to_string()),
         domain: None,
         timestamp: None,

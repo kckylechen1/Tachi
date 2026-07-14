@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 
 use crate::error::MemoryError;
@@ -114,6 +114,32 @@ pub fn get_all(
         out.push(r?);
     }
     Ok(out)
+}
+
+/// Return the id of an active (non-archived) row with the EXACT `path` and
+/// `text`, via a direct SQL predicate — no recency-window `LIMIT` to hide
+/// behind. #1041 F6: the previous dedup check ran `list_by_path(path, 64,
+/// false)` (exact path OR descendant paths, ordered `path ASC, timestamp
+/// DESC`, capped at 64 rows) and THEN filtered in memory for an exact
+/// path+text match. Once 64+ rows already exist under a path's descendant
+/// family, a genuinely duplicate row can sort past the cutoff and never
+/// reach the in-memory filter, so dedup silently misses it. Pushing the
+/// exact-match predicate into SQL removes the window entirely (correctness
+/// win) and is also cheaper (no descendant-path fetch, no full-row hydration
+/// for rows the caller was only going to discard).
+pub fn find_exact_path_text_id(
+    conn: &Connection,
+    path: &str,
+    text: &str,
+) -> Result<Option<String>, MemoryError> {
+    conn.query_row(
+        "SELECT id FROM memories WHERE path = ?1 AND text = ?2 AND archived = 0 \
+         ORDER BY timestamp DESC LIMIT 1",
+        params![path, text],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(MemoryError::from)
 }
 
 /// Fetch entries under a path prefix using SQL pushdown instead of full-table scans.

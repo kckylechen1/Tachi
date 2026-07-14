@@ -17,12 +17,10 @@ pub(crate) async fn handle_distill_trajectory(
     } else {
         server.resolve_write_scope(&params.scope)
     };
-    let domain = params.domain.clone().or_else(|| {
-        std::env::var("TACHI_DOMAIN")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    });
+    // #1041 S2: shares `pipeline_ops::helpers::resolve_domain`'s fix — an
+    // absent domain classifies to `general`, it no longer inherits the
+    // daemon-wide `TACHI_DOMAIN` env var (see that function's doc for why).
+    let domain = crate::pipeline_ops::helpers::resolve_domain(params.domain.clone());
     let distilled_execution = execute_registered_skill_prompt(
         server,
         "skill:trajectory-distiller",

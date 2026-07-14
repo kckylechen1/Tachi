@@ -5,7 +5,7 @@ mod eval_capture;
 mod library_binding;
 mod recall_degradation;
 mod rerank;
-mod routing_config;
+pub(crate) mod routing_config;
 mod save_memory;
 mod search_helpers;
 mod search_memory;

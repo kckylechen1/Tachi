@@ -46,6 +46,7 @@ async fn tachi_memory_progress_writes_append_only_jsonl() {
             event: Some("validation".to_string()),
             state: Some("running".to_string()),
             project: None,
+            project_explicit: false,
             domain: None,
             metadata: None,
             emit_continuity: false,

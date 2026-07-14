@@ -1,6 +1,6 @@
 mod audit;
 mod auto_ingest;
-mod helpers;
+pub(crate) mod helpers;
 mod ingest;
 mod status;
 mod sync;

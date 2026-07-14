@@ -48,8 +48,12 @@ pub fn render_report(report: &DoctorReport) -> String {
             .none_domain_count
             .map(|n| n.to_string())
             .unwrap_or_else(|| "-".to_string());
+        let cross_domain = f
+            .cross_domain_suspect_count
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "-".to_string());
         lines.push(format!(
-            "{} {} [{}] size={} mem={} vec={} <none>={} jobs={}/c={}/s={}/f={}/p={} wal={} schema={} scope={}",
+            "{} {} [{}] size={} mem={} vec={} <none>={} cross_domain_suspect={} jobs={}/c={}/s={}/f={}/p={} wal={} schema={} scope={}",
             f.classification.icon(),
             f.classification.as_str(),
             f.path,
@@ -57,6 +61,7 @@ pub fn render_report(report: &DoctorReport) -> String {
             mem,
             vec,
             none_dom,
+            cross_domain,
             f.jobs.total,
             f.jobs.completed,
             f.jobs.skipped,
@@ -66,6 +71,12 @@ pub fn render_report(report: &DoctorReport) -> String {
             f.schema_kind,
             f.scope_hint,
         ));
+        if f.cross_domain_suspect_count.unwrap_or(0) > 0 {
+            lines.push(format!(
+                "    cross_domain_suspect sample ids: {}",
+                f.cross_domain_suspect_sample.join(", ")
+            ));
+        }
         if let Some(err) = &f.error {
             lines.push(format!("    error: {err}"));
         }

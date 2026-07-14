@@ -279,6 +279,20 @@ pub struct TachiTaskParams {
         description = "Named project DB for context/dispatch. Shared across actions; omit for the daemon-bound workspace DB."
     )]
     pub project: Option<String>,
+    /// #1041 B7: see `crate::memory::SaveMemoryParams::project_explicit` —
+    /// same wire signal, same purpose. `tachi_task` is one of the tools
+    /// `session_identity::enforce_session_project` auto-defaults `project`
+    /// onto when the caller omits it (a bound-session convenience) — WITHOUT
+    /// this field, `action='complete'`'s downstream eval/lesson/precedent
+    /// writes (`build_complete_eval_record`/`run_lesson_post_complete_hook`/
+    /// `record_complete_rulings`) had no way to tell that transport-injected
+    /// default apart from a caller's own deliberate `project=`, and treated
+    /// `project.is_some()` alone as proof of deliberate intent — exactly the
+    /// inverted-polarity bug `SaveMemoryParams::project_explicit` was
+    /// introduced to fix for `save_memory` itself.
+    #[serde(default, rename = "__tachi_project_explicit")]
+    #[schemars(skip)]
+    pub project_explicit: bool,
     #[serde(default)]
     #[schemars(
         description = "[action=dispatch|recommend] Workflow stage hint, e.g. plan, build, review."

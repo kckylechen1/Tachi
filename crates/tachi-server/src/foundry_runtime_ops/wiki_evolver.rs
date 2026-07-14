@@ -384,6 +384,10 @@ async fn save_wiki_draft(
             entities: draft.entities,
             scope: Some("global".to_string()),
             project: Some("wiki".to_string()),
+            // #1041 F2: server-internal, hardcoded deliberate placement
+            // (kind="wiki" also means this never reaches the #1041 S1
+            // write-affinity gate at all — wiki writes are a separate path).
+            project_explicit: true,
             domain: Some(draft.domain),
             retention_policy: Some("durable".to_string()),
             force: true,

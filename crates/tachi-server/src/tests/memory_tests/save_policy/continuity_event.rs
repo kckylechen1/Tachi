@@ -23,6 +23,7 @@ async fn save_memory_emit_continuity_writes_memory_saved_event() {
             force: true,
             auto_link: false,
             project: None,
+            project_explicit: false,
             retention_policy: Some("durable".to_string()),
             domain: Some("agent_os".to_string()),
             timestamp: Some("2026-06-24T00:00:00Z".to_string()),

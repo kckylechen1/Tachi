@@ -77,7 +77,7 @@ pub(super) fn project_scope_allows_memory(
     params: &SearchMemoryParams,
     entry: &memcore::MemoryEntry,
 ) -> bool {
-    project_scope_allows_memory_with_config(project_name, params, entry, RoutingConfig::get())
+    project_scope_allows_memory_with_config(project_name, params, entry, &RoutingConfig::get())
 }
 
 pub(super) fn project_scope_allows_memory_with_config(

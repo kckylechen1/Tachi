@@ -25,6 +25,7 @@ async fn save_arena_feedback_rule(server: &MemoryServer) -> String {
                 force: true,
                 auto_link: true,
                 project: None,
+                project_explicit: false,
                 retention_policy: Some("durable".to_string()),
                 domain: None,
                 timestamp: None,

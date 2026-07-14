@@ -189,6 +189,7 @@ async fn tachi_complete_auto_injects_issue_ref_from_kanban_card_when_missing() {
             force: true,
             auto_link: true,
             project: None,
+            project_explicit: false,
             retention_policy: Some(memcore::RetentionPolicy::Pinned.as_str().to_string()),
             domain: Some("system".to_string()),
             timestamp: None,

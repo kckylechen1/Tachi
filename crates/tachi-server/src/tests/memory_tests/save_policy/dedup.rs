@@ -26,6 +26,7 @@ async fn save_memory_rejects_exact_path_text_duplicate_without_force() {
         force: false,
         auto_link: false,
         project: None,
+        project_explicit: false,
         retention_policy: None,
         domain: Some("scratch".to_string()),
         timestamp: None,
@@ -56,10 +57,14 @@ async fn save_memory_rejects_exact_path_text_duplicate_without_force() {
 }
 
 #[tokio::test]
-async fn save_memory_allows_duplicate_when_force_true() {
+async fn save_memory_allows_a_second_row_when_caller_supplies_its_own_id() {
+    // An explicit `id=` (not `force`) is what makes a second row with the
+    // same path+text land as a distinct save: `find_exact_path_text_duplicate`
+    // is only ever consulted when the caller omits `id` (see #1041 S3 below
+    // for why `force` alone must NOT also skip it).
     let server = make_server();
     let path = format!("/scratch/tachi/dedup-force-{}", uuid::Uuid::new_v4());
-    let text = "Force=true should bypass the exact path/text dedup guard.".to_string();
+    let text = "An explicit id, not force, is what bypasses the dedup guard.".to_string();
 
     let mut base = SaveMemoryParams {
         text: text.clone(),
@@ -78,6 +83,7 @@ async fn save_memory_allows_duplicate_when_force_true() {
         force: false,
         auto_link: false,
         project: None,
+        project_explicit: false,
         retention_policy: None,
         domain: Some("scratch".to_string()),
         timestamp: None,
@@ -103,4 +109,136 @@ async fn save_memory_allows_duplicate_when_force_true() {
             .is_some_and(|status| status.starts_with("saved")),
         "{forced_json:#}"
     );
+}
+
+// ── #1041 S3: sync-pipe write-side idempotency ──────────────────────────────
+//
+// Root cause: a periodic writer (real-time position sync / post-market
+// summary) commonly passes `force=true` (to clear the noise filter on short
+// factual content) with no client-supplied `id`. The dedup guard used to be
+// gated on `!params.force && params.id.is_none()`, so `force=true` silently
+// disabled the exact path+text duplicate check too — every retry minted a
+// fresh random id, which is how one fact ends up as 121 duplicate rows. The
+// fix decouples `force` (content-quality bypass) from dedup (identity
+// check): dedup now fires for every id-less save regardless of `force`.
+
+#[tokio::test]
+async fn sync_save_with_force_and_no_id_dedupes_same_path_and_text() {
+    let server = make_server();
+    let path = format!("/trading/sync/{}", uuid::Uuid::new_v4());
+    let text = "300502.SZ synced shares=100".to_string();
+
+    let params = SaveMemoryParams {
+        text: text.clone(),
+        summary: String::new(),
+        path: path.clone(),
+        importance: 0.7,
+        category: "fact".to_string(),
+        topic: String::new(),
+        keywords: Vec::new(),
+        persons: Vec::new(),
+        entities: Vec::new(),
+        location: String::new(),
+        scope: "global".to_string(),
+        vector: None,
+        id: None,
+        force: true,
+        auto_link: false,
+        project: None,
+        project_explicit: false,
+        retention_policy: None,
+        domain: Some("scratch".to_string()),
+        timestamp: None,
+        valid_from: None,
+        valid_until: None,
+        metadata: None,
+        emit_continuity: false,
+    };
+
+    let first = handle_save_memory(&server, params.clone())
+        .await
+        .expect("first sync save");
+    let first_json: Value = serde_json::from_str(&first).expect("first json");
+    assert!(
+        first_json["status"]
+            .as_str()
+            .is_some_and(|status| status.starts_with("saved")),
+        "{first_json:#}"
+    );
+
+    // Same day, same content, retried (e.g. the next periodic tick) — must
+    // collapse onto the same row, not mint a new UUID.
+    let second = handle_save_memory(&server, params.clone())
+        .await
+        .expect("second sync save");
+    let second_json: Value = serde_json::from_str(&second).expect("second json");
+    assert_eq!(second_json["status"], "duplicate", "{second_json:#}");
+    assert_eq!(second_json["saved"], false);
+    assert_eq!(second_json["id"], first_json["id"]);
+
+    // A third retry, same everything — still one row.
+    let third = handle_save_memory(&server, params)
+        .await
+        .expect("third sync save");
+    let third_json: Value = serde_json::from_str(&third).expect("third json");
+    assert_eq!(third_json["status"], "duplicate", "{third_json:#}");
+    assert_eq!(third_json["id"], first_json["id"]);
+}
+
+#[tokio::test]
+async fn sync_save_with_force_and_no_id_on_a_new_path_is_a_distinct_row() {
+    // A new calendar day's sync bucket typically means a new path (the
+    // caller's own date-bucketing) — that must still land as its own row,
+    // not get swallowed by the dedup guard.
+    let server = make_server();
+    let text = "300502.SZ synced shares=100".to_string();
+
+    let day_one = SaveMemoryParams {
+        text: text.clone(),
+        summary: String::new(),
+        path: "/trading/sync/2026-07-13/300502".to_string(),
+        importance: 0.7,
+        category: "fact".to_string(),
+        topic: String::new(),
+        keywords: Vec::new(),
+        persons: Vec::new(),
+        entities: Vec::new(),
+        location: String::new(),
+        scope: "global".to_string(),
+        vector: None,
+        id: None,
+        force: true,
+        auto_link: false,
+        project: None,
+        project_explicit: false,
+        retention_policy: None,
+        domain: Some("scratch".to_string()),
+        timestamp: None,
+        valid_from: None,
+        valid_until: None,
+        metadata: None,
+        emit_continuity: false,
+    };
+    let mut day_two = day_one.clone();
+    day_two.path = "/trading/sync/2026-07-14/300502".to_string();
+
+    let first = handle_save_memory(&server, day_one)
+        .await
+        .expect("day one sync save");
+    let first_json: Value = serde_json::from_str(&first).expect("first json");
+    assert!(first_json["status"]
+        .as_str()
+        .is_some_and(|status| status.starts_with("saved")));
+
+    let second = handle_save_memory(&server, day_two)
+        .await
+        .expect("day two sync save");
+    let second_json: Value = serde_json::from_str(&second).expect("second json");
+    assert!(
+        second_json["status"]
+            .as_str()
+            .is_some_and(|status| status.starts_with("saved")),
+        "{second_json:#}"
+    );
+    assert_ne!(second_json["id"], first_json["id"]);
 }

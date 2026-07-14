@@ -32,6 +32,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
             mem_count: None,
             vec_rowid_count: None,
             none_domain_count: None,
+            cross_domain_suspect_count: None,
+            cross_domain_suspect_sample: Vec::new(),
             jobs: JobBreakdown::default(),
             schema_kind: "unknown".to_string(),
             error: None,
@@ -49,6 +51,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
             mem_count: None,
             vec_rowid_count: None,
             none_domain_count: None,
+            cross_domain_suspect_count: None,
+            cross_domain_suspect_sample: Vec::new(),
             jobs: JobBreakdown::default(),
             schema_kind: "empty".to_string(),
             error: None,
@@ -74,6 +78,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
                 mem_count: None,
                 vec_rowid_count: None,
                 none_domain_count: None,
+                cross_domain_suspect_count: None,
+                cross_domain_suspect_sample: Vec::new(),
                 jobs: JobBreakdown::default(),
                 schema_kind: "unknown".to_string(),
                 error: Some(format!("open failed: {e}")),
@@ -95,6 +101,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
             mem_count: None,
             vec_rowid_count: None,
             none_domain_count: None,
+            cross_domain_suspect_count: None,
+            cross_domain_suspect_sample: Vec::new(),
             jobs: JobBreakdown::default(),
             schema_kind: "unknown".to_string(),
             error: Some(format!("schema_version probe failed: {e}")),
@@ -102,10 +110,71 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
         };
     }
 
-    // Detect schema kind.
-    let has_memories = memcore::db::table_exists(&conn, "memories");
-    let has_chunks = memcore::db::table_exists(&conn, "chunks");
-    let has_memories_vec = memcore::db::table_exists(&conn, "memories_vec");
+    // Detect schema kind. #1041 B6: `table_exists` now surfaces a real
+    // `sqlite_master` query error instead of folding it into `false` — treat
+    // it exactly like the `schema_version`/`count_result` probe failures
+    // just above: a real error here means this DB couldn't even be
+    // classified, not "schema kind unknown, otherwise fine".
+    let has_memories = match memcore::db::table_exists(&conn, "memories") {
+        Ok(v) => v,
+        Err(e) => {
+            return DoctorFinding {
+                path: path_str,
+                classification: DbClassification::Corrupt,
+                file_size,
+                has_wal,
+                mem_count: None,
+                vec_rowid_count: None,
+                none_domain_count: None,
+                cross_domain_suspect_count: None,
+                cross_domain_suspect_sample: Vec::new(),
+                jobs: JobBreakdown::default(),
+                schema_kind: "unknown".to_string(),
+                error: Some(format!("table_exists('memories') probe failed: {e}")),
+                scope_hint,
+            };
+        }
+    };
+    let has_chunks = match memcore::db::table_exists(&conn, "chunks") {
+        Ok(v) => v,
+        Err(e) => {
+            return DoctorFinding {
+                path: path_str,
+                classification: DbClassification::Corrupt,
+                file_size,
+                has_wal,
+                mem_count: None,
+                vec_rowid_count: None,
+                none_domain_count: None,
+                cross_domain_suspect_count: None,
+                cross_domain_suspect_sample: Vec::new(),
+                jobs: JobBreakdown::default(),
+                schema_kind: "unknown".to_string(),
+                error: Some(format!("table_exists('chunks') probe failed: {e}")),
+                scope_hint,
+            };
+        }
+    };
+    let has_memories_vec = match memcore::db::table_exists(&conn, "memories_vec") {
+        Ok(v) => v,
+        Err(e) => {
+            return DoctorFinding {
+                path: path_str,
+                classification: DbClassification::Corrupt,
+                file_size,
+                has_wal,
+                mem_count: None,
+                vec_rowid_count: None,
+                none_domain_count: None,
+                cross_domain_suspect_count: None,
+                cross_domain_suspect_sample: Vec::new(),
+                jobs: JobBreakdown::default(),
+                schema_kind: "unknown".to_string(),
+                error: Some(format!("table_exists('memories_vec') probe failed: {e}")),
+                scope_hint,
+            };
+        }
+    };
 
     let schema_kind = if has_memories {
         "tachi"
@@ -147,6 +216,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
             mem_count: None,
             vec_rowid_count: None,
             none_domain_count: None,
+            cross_domain_suspect_count: None,
+            cross_domain_suspect_sample: Vec::new(),
             jobs: JobBreakdown::default(),
             schema_kind,
             error: Some(msg),
@@ -166,6 +237,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
             mem_count,
             vec_rowid_count: None,
             none_domain_count: None,
+            cross_domain_suspect_count: None,
+            cross_domain_suspect_sample: Vec::new(),
             jobs: JobBreakdown::default(),
             schema_kind,
             error: None,
@@ -207,6 +280,11 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
 
     // Detail probes (best-effort, all errors swallowed).
     let none_domain_count = memcore::db::count_memories_missing_domain(&conn).ok();
+    let cross_domain_probe = super::cross_domain::probe(&conn, &scope_hint);
+    let cross_domain_suspect_count = cross_domain_probe.as_ref().map(|probe| probe.count);
+    let cross_domain_suspect_sample = cross_domain_probe
+        .map(|probe| probe.sample_ids)
+        .unwrap_or_default();
     let jobs = job_breakdown_from_counts(memcore::db::foundry_job_status_counts(&conn));
 
     DoctorFinding {
@@ -217,6 +295,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
         mem_count,
         vec_rowid_count,
         none_domain_count,
+        cross_domain_suspect_count,
+        cross_domain_suspect_sample,
         jobs,
         schema_kind,
         error: None,

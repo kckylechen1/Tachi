@@ -537,6 +537,13 @@ fn prepare_proxy_tool_call(
             &mut request.arguments,
             project,
             "stdio proxy",
+            // #1041 B1: this is a Preflight hop only — it validates/rejects
+            // early (before the HTTP round-trip to the daemon) but never
+            // injects a default `project=`. The daemon's own call_tool
+            // (Authoritative) is the sole place that happens, so there is
+            // never a wire-forgeable "was this hop's default" signal to
+            // preserve across the stdio-proxy -> daemon-HTTP hop.
+            crate::session_identity::EnforcementRole::Preflight,
         )?;
     }
     Ok(request)

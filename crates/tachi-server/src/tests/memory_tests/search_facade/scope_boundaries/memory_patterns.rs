@@ -97,6 +97,7 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         event: None,
         state: None,
         project: None,
+        project_explicit: false,
         domain: None,
         compact: false,
         proposal_id: None,

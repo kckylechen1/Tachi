@@ -19,6 +19,7 @@
 
 mod autofix;
 mod classify;
+mod cross_domain;
 mod hub_lint;
 mod render;
 mod scan;

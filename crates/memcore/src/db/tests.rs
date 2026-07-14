@@ -8,13 +8,14 @@ use super::{
     list_by_path, list_eval_evidence, list_memories_by_category_and_path_prefix,
     list_memories_by_path_prefix, list_observations_for_edge, list_sandbox_policies,
     list_tachi_events, list_wiki_duplicate_candidates, normalize_for_write, now_utc_iso,
-    open_for_wal_checkpoint, open_immutable_readonly, open_raw, promote_memory_to_durable,
-    record_access, record_access_with_updates, record_enrichment_failure, register_sqlite_vec,
-    release_event_claim, schema_version, search_fts, search_symbolic_candidates, search_vec,
-    serialize_f32, set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status,
-    set_sandbox_policy, stats, supersede_memory, table_exists, try_claim_event,
-    try_load_sqlite_vec, update_agent_known_state, update_enrichment_fields, update_with_revision,
-    upsert, AccessUpdate, AnchorKind, EdgeProvenance, FoundryJobStatusCounts,
+    open_for_wal_checkpoint, open_immutable_readonly, open_raw, probe_keyword_suspects,
+    promote_memory_to_durable, record_access, record_access_with_updates,
+    record_enrichment_failure, register_sqlite_vec, release_event_claim, schema_version,
+    search_fts, search_symbolic_candidates, search_vec, serialize_f32,
+    set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status, set_sandbox_policy,
+    stats, supersede_memory, table_exists, try_claim_event, try_load_sqlite_vec,
+    update_agent_known_state, update_enrichment_fields, update_with_revision, upsert, AccessUpdate,
+    AnchorKind, EdgeProvenance, FoundryJobStatusCounts, KeywordSuspectProbe,
 };
 #[cfg(feature = "admin")]
 use super::{vault_touch_entry, vault_upsert_entry};

@@ -358,6 +358,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     force: true,
                     auto_link: false,
                     project: None,
+                    project_explicit: false,
                     retention_policy: Some("durable".to_string()),
                     domain: Some("system".to_string()),
                     timestamp: None,

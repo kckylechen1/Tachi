@@ -18,6 +18,7 @@ async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
             entities: Vec::new(),
             scope: Some("note".to_string()),
             project: None,
+            project_explicit: false,
             domain: None,
             retention_policy: None,
             force: true,

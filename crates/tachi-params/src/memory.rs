@@ -118,6 +118,22 @@ pub struct SaveMemoryParams {
     #[serde(default)]
     pub project: Option<String>,
 
+    /// #1041 F2: internal-only signal — true when `project` reflects the
+    /// CALLER's own explicit placement decision, never set by an outside
+    /// client directly. `session_identity::enforce_session_project` stamps
+    /// this on the raw request JSON (wire key
+    /// `__tachi_project_explicit`) BEFORE deserialization, distinguishing a
+    /// caller-supplied `project=` from a transport-injected session-binding
+    /// default. The #1041 S1 write-affinity gate only treats `project` as
+    /// an override signal when this is `true` — see `write_affinity.rs`'s
+    /// module doc. Hidden from the published tool schema
+    /// (`#[schemars(skip)]`); callers that construct `SaveMemoryParams`
+    /// programmatically (not from raw client JSON) should set this to
+    /// `project.is_some()` to preserve pre-#1041-F2 behavior exactly.
+    #[serde(default, rename = "__tachi_project_explicit")]
+    #[schemars(skip)]
+    pub project_explicit: bool,
+
     /// Retention policy: "ephemeral" | "durable" | "permanent" | "pinned".
     /// NULL/omitted = durable (default).
     #[serde(default)]
@@ -191,6 +207,13 @@ pub struct RememberParams {
     /// Optional named project DB target.
     #[serde(default)]
     pub project: Option<String>,
+
+    /// #1041 F2: see `SaveMemoryParams::project_explicit` — same signal,
+    /// same wire key, threaded through `handle_remember`'s internal
+    /// `SaveMemoryParams` construction.
+    #[serde(default, rename = "__tachi_project_explicit")]
+    #[schemars(skip)]
+    pub project_explicit: bool,
 
     /// Optional path override. If omitted, defaults to `/notes/{YYYY-MM-DD}`.
     #[serde(default)]

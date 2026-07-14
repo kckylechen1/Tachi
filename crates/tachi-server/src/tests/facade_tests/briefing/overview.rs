@@ -42,6 +42,7 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
             event: None,
             state: None,
             project: None,
+            project_explicit: false,
             domain: None,
             metadata: None,
             emit_continuity: false,

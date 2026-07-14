@@ -24,6 +24,7 @@ async fn save_memory_updates_legacy_location_on_overwrite() {
                 force: true,
                 auto_link: false,
                 project: None,
+                project_explicit: false,
                 retention_policy: None,
                 domain: None,
                 timestamp: None,

@@ -140,6 +140,7 @@ async fn cli_client_in_process_remember_round_trips_through_handler() {
             importance: Some(0.6),
             scope: Some("project".to_string()),
             project: None,
+            project_explicit: false,
             path: Some("/notes/cli-roundtrip".to_string()),
             category: None,
             domain: None,

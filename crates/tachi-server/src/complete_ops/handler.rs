@@ -28,6 +28,22 @@ struct CompletionVerdict {
 pub(crate) async fn handle_tachi_complete(
     server: &MemoryServer,
     mut params: TachiCompleteParams,
+    // #1041 B7: whether `params.project` reflects the ORIGINAL caller's own
+    // explicit placement decision, as opposed to a value the daemon's
+    // session-binding default-injection put there. `TachiCompleteParams`
+    // itself carries no wire marker for this (unlike `SaveMemoryParams`) —
+    // widening it would touch ~20 direct struct-literal test fixtures for a
+    // signal only ONE of its two callers actually needs to get right, so
+    // each caller resolves it for its OWN entry point instead:
+    //   - `dispatch_facade.rs`'s direct `tachi_complete` tool: `tachi_complete`
+    //     is NOT in `session_identity::project_defaults_to_bound_project`'s
+    //     list, so an omitted `project=` is NEVER auto-injected for it —
+    //     `params.project.is_some()` is genuinely safe there.
+    //   - `task_router.rs`'s `tachi_task(action='complete')` bridge: `project`
+    //     CAN be a transport-injected default (`tachi_task` IS in that list)
+    //     — it passes `TachiTaskParams::project_explicit`, the actual wire
+    //     marker, instead.
+    project_explicit: bool,
 ) -> Result<String, String> {
     let now = Utc::now();
     let date = now.format("%Y-%m-%d").to_string();
@@ -72,7 +88,7 @@ pub(crate) async fn handle_tachi_complete(
         verification_present,
         secret_redactions,
         mem_params,
-    } = build_complete_eval_record(&params, &date, &ts);
+    } = build_complete_eval_record(&params, &date, &ts, project_explicit);
 
     // Writes never auto-select a named project from machine state (workspace
     // detection / "single project on disk"): that silently reroutes eval rows
@@ -255,6 +271,25 @@ pub(crate) async fn handle_tachi_complete(
                 pipeline_status["distill_trajectory"] = json!("enqueued");
                 pipeline_status["skill_evolve"] = json!("will follow distill if successful");
                 tokio::spawn(async move {
+                    // #1041 F5: `domain: None` here is an intentional S2
+                    // consequence, not a regression. Before S2,
+                    // `resolve_domain(None)` fell back to the daemon-wide
+                    // `TACHI_DOMAIN` env var, so a trajectory distilled from
+                    // a `tachi_complete` call on a trading daemon inherited
+                    // "equity_trading" even though nothing here actually
+                    // classified this trajectory as trading content — S1's
+                    // whole point is that inheriting a per-process domain
+                    // onto unclassified content is how cross-domain drift
+                    // happens in the first place. `TachiCompleteParams` (the
+                    // public `tachi_complete` params struct) has NO `domain`
+                    // field for a caller to supply — there is no explicit
+                    // domain anywhere in this call's context to thread
+                    // through instead — so this now resolves to `general`
+                    // via `pipeline_ops::helpers::resolve_domain`, same as
+                    // any other domain-less write. If a real need for
+                    // caller-supplied domain on `tachi_complete` shows up,
+                    // add the field to `TachiCompleteParams` rather than
+                    // reaching back for the env var.
                     let distill_params = DistillTrajectoryParams {
                         task_description: task_desc,
                         execution_trace: trace,
@@ -500,7 +535,7 @@ pub(crate) async fn handle_tachi_complete(
     // leader rulings as /precedents rows. Best-effort — a malformed ruling is
     // skipped + warned and never fails completion (the primary contract).
     pipeline_status["precedent_recording"] =
-        crate::precedent_ops::record_complete_rulings(server, &params).await;
+        crate::precedent_ops::record_complete_rulings(server, &params, project_explicit).await;
 
     pipeline_status["post_complete_hooks"] = run_lesson_post_complete_hook(
         server,
@@ -512,6 +547,7 @@ pub(crate) async fn handle_tachi_complete(
         &safe_skills_used,
         &date,
         &task_id,
+        project_explicit,
     )
     .await;
 

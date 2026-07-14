@@ -33,6 +33,13 @@ fn cli_tool_allows_read_fallback(tool_name: &str) -> bool {
 /// Dispatch a CLI tool invocation: try the running daemon first; on miss,
 /// build a transient in-process MemoryServer and call the handler directly.
 /// Either path returns the tool's JSON string body.
+///
+/// #1041 round-7: the in-process branch stamps `__tachi_project_explicit`
+/// (via `session_identity::stamp_project_explicit_marker`) before invoking
+/// `in_process`, since it never goes through `enforce_session_project` (no
+/// daemon/session exists on this path at all). `project` present in the raw
+/// CLI args means caller-explicit here, unconditionally — this dispatcher
+/// never injects a default itself.
 pub(super) async fn dispatch_cli_tool<F, Fut>(
     tool_name: &str,
     args: serde_json::Map<String, serde_json::Value>,
@@ -117,6 +124,24 @@ where
             );
         }
     }
+    // #1041 round-7 BUG (codex-17c966): this in-process path never goes
+    // through a daemon, so `enforce_session_project` (the ONLY other place
+    // that stamps `__tachi_project_explicit`) never runs here at all — there
+    // is no session/transport to enforce against, just a transient
+    // `MemoryServer` and the raw CLI args. Without this stamp, a caller who
+    // typed an explicit `--project X` on the CLI arrives at
+    // `write_affinity`'s S1 gate looking identical to a transport-injected
+    // default (`project_explicit` defaults to `false` on deserialization),
+    // so a domain-routed save can get silently rerouted away from the
+    // project the caller pinned it to. `project` is present in `args` here
+    // if and only if the CLI caller passed `--project`/`project=` explicitly
+    // (this dispatcher never injects one itself) — so "present" IS
+    // caller-explicit, unconditionally, in this in-process branch. Reuses
+    // `session_identity`'s shared stamping helper rather than re-deriving
+    // this signal a second way.
+    let mut args = args;
+    let project_explicit = args.contains_key("project");
+    crate::session_identity::stamp_project_explicit_marker(&mut args, project_explicit);
     let server = crate::cli_client::build_in_process_server(global_db, project_db)?;
     let body = in_process(server, args)
         .await
@@ -387,5 +412,109 @@ mod tests {
         }
         assert!(!cli_tool_allows_read_fallback("save_memory"));
         assert!(!cli_tool_allows_read_fallback("tachi_wiki_write"));
+    }
+
+    /// #1041 round-7 BUG regression (codex-17c966): with NO daemon reachable
+    /// at all (fresh `app_home`, no pid file — the exact scenario
+    /// `dispatch_cli_tool` falls through to its unconditional in-process
+    /// branch for), a caller-supplied `project=` on the CLI must still be
+    /// stamped `__tachi_project_explicit: true` before the handler sees it.
+    /// Before the fix, this in-process path never ran
+    /// `session_identity::enforce_session_project` (or anything equivalent)
+    /// at all, so the marker was simply absent from the args map and
+    /// `RememberParams::project_explicit` deserialized to its serde default
+    /// (`false`) — indistinguishable, at `write_affinity`'s S1 gate, from a
+    /// transport-injected default. A CLI `remember --project X` whose
+    /// content's domain routed to an already-mounted project Y would then
+    /// get silently rerouted into Y instead of landing in the caller's own
+    /// X.
+    #[tokio::test]
+    async fn in_process_fallback_stamps_project_explicit_true_for_caller_supplied_project() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_home = temp.path().join("home");
+        std::fs::create_dir_all(&app_home).expect("app_home dir");
+        let global_db = temp.path().join("global.db");
+
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "text".to_string(),
+            serde_json::json!("cli explicit project regression"),
+        );
+        args.insert("project".to_string(), serde_json::json!("some-project"));
+
+        let body = dispatch_cli_tool(
+            "remember",
+            args,
+            &global_db,
+            None,
+            &app_home,
+            |_server, args_map| {
+                Box::pin(async move {
+                    let marker = args_map
+                        .get(crate::session_identity::PROJECT_EXPLICIT_MARKER)
+                        .cloned();
+                    Ok(serde_json::json!({ "marker": marker }).to_string())
+                })
+            },
+        )
+        .await
+        .expect("dispatch should reach the in-process fallback and succeed");
+
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("json body");
+        assert_eq!(
+            parsed["marker"],
+            serde_json::json!(true),
+            "in-process fallback must stamp __tachi_project_explicit=true when \
+             the CLI caller supplied an explicit project=, exactly like \
+             enforce_session_project's Authoritative branch does for a bound \
+             session — otherwise write_affinity's S1 gate treats a \
+             caller-pinned project as a transport default and can silently \
+             reroute the write; body={body}"
+        );
+    }
+
+    /// Companion to the above: when the CLI caller omits `project=` entirely,
+    /// the marker must stay `false` — presence of `project` in the raw args
+    /// is the ONLY signal, matching `enforce_session_project`'s own
+    /// unconditional-false-on-inject branch.
+    #[tokio::test]
+    async fn in_process_fallback_stamps_project_explicit_false_when_project_omitted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_home = temp.path().join("home");
+        std::fs::create_dir_all(&app_home).expect("app_home dir");
+        let global_db = temp.path().join("global.db");
+
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "text".to_string(),
+            serde_json::json!("cli default project regression"),
+        );
+
+        let body = dispatch_cli_tool(
+            "remember",
+            args,
+            &global_db,
+            None,
+            &app_home,
+            |_server, args_map| {
+                Box::pin(async move {
+                    let marker = args_map
+                        .get(crate::session_identity::PROJECT_EXPLICIT_MARKER)
+                        .cloned();
+                    Ok(serde_json::json!({ "marker": marker }).to_string())
+                })
+            },
+        )
+        .await
+        .expect("dispatch should reach the in-process fallback and succeed");
+
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("json body");
+        assert_eq!(
+            parsed["marker"],
+            serde_json::json!(false),
+            "when the CLI caller omits project=, the marker must stay false — \
+             only presence of project= in the raw args means caller-explicit; \
+             body={body}"
+        );
     }
 }

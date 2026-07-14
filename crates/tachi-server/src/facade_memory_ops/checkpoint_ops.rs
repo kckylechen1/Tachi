@@ -91,6 +91,12 @@ pub(crate) async fn save_memory_checkpoint(
         entities: std::mem::take(&mut params.entities),
         scope: params.scope.take().or_else(|| Some("project".to_string())),
         project: params.project.take(),
+        // #1041 F2: `project` here may be genuinely caller-explicit or a
+        // transport-injected session default (`checkpoint` is one of the
+        // project-defaulting actions in
+        // `session_identity::project_defaults_to_bound_project`) —
+        // propagate the incoming signal instead of hardcoding it.
+        project_explicit: params.project_explicit,
         domain: params.domain.take(),
         retention_policy: params
             .retention_policy
@@ -171,6 +177,7 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         event: None,
         state: None,
         project: None,
+        project_explicit: false,
         domain: Some("agent".to_string()),
         metadata: None,
         emit_continuity: false,

@@ -99,6 +99,7 @@ impl MemoryServer {
             event: None,
             state: None,
             project: named,
+            project_explicit: false,
             domain: None,
             metadata: None,
             emit_continuity: false,

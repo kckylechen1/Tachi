@@ -193,7 +193,11 @@ fn merge_patch_metadata(
     serde_json::Value::Object(merged)
 }
 
-fn resolve_save_domain(
+/// `pub(super)`: also used by `write_affinity`'s pre-write domain
+/// classification (#1041 S1) so the affinity gate checks the SAME resolved
+/// domain that will end up on the entry, instead of re-deriving its own
+/// classification.
+pub(super) fn resolve_save_domain(
     requested_domain: Option<String>,
     path: &str,
     category: &str,

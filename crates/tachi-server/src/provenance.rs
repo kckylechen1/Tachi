@@ -93,6 +93,49 @@ pub(super) fn inject_provenance(
     serde_json::Value::Object(metadata_obj)
 }
 
+/// #1041 F3 fix: correct ONLY `provenance.db_path` to point at a
+/// caller-resolved named-project path, leaving every other provenance field
+/// (`db_scope`, `tool_name`, `captured_at`, audit context) untouched.
+///
+/// #1041 C5 (codex round-4 CONCERN, resolved as doc-only): the call site
+/// (`save_memory/handler.rs`) invokes this for EVERY save whose actual
+/// target is a named project — not only a save the write-affinity gate
+/// (`write_affinity::apply_write_affinity`) rerouted. That's intentional,
+/// not scope creep: `inject_provenance`'s `current_db_path` can NEVER
+/// resolve a named-project path at all (its `DbScope::Project` branch only
+/// ever knows this daemon's OWN bound project path) — so `provenance.db_path`
+/// is wrong for ANY named-project save, whether that named project came
+/// from a domain reroute, a caller's own explicit `project=` override, or
+/// simply passed straight through unchanged. This was already true, and
+/// already wrong, for ordinary explicit-`project=` saves BEFORE #1041 ever
+/// introduced the reroute gate; narrowing this fix to only the reroute case
+/// would leave that older, broader bug back in place for every other
+/// named-project save. The invariant this function actually restores is:
+/// `provenance.db_path` always matches the row's REAL destination store,
+/// full stop — not "matches the destination only when a reroute happened".
+///
+/// Deliberately NOT `restamp_provenance_for_destination`: that function
+/// (below) also records a `copied_from` breadcrumb, which is correct for an
+/// actual copy/distill of a row that previously lived elsewhere, but would
+/// be misleading here — a named-project save never existed at the
+/// daemon-bound path in the first place, so there is nothing to record as
+/// its "prior" location.
+pub(super) fn correct_provenance_db_path_for_named_project(
+    mut metadata: serde_json::Value,
+    named_project_db_path: &Path,
+) -> serde_json::Value {
+    let Some(metadata_obj) = metadata.as_object_mut() else {
+        return metadata;
+    };
+    if let Some(serde_json::Value::Object(provenance)) = metadata_obj.get_mut("provenance") {
+        provenance.insert(
+            "db_path".into(),
+            json!(named_project_db_path.display().to_string()),
+        );
+    }
+    metadata
+}
+
 /// Restamp the `provenance.db_path` and `provenance.db_scope` fields on a
 /// memory entry's metadata to reflect a new destination DB. Used when
 /// copying/distilling rows from one DB to another so the destination row
@@ -150,6 +193,44 @@ pub(super) fn restamp_provenance_for_destination(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    // #1041 F3 regression: a rerouted save's provenance must point at the
+    // ACTUAL destination store, not the daemon-bound store it never touched.
+    #[test]
+    fn correct_provenance_db_path_only_touches_db_path() {
+        let original = json!({
+            "provenance": {
+                "tool_name": "save_memory",
+                "db_path": "/daemon-bound/quant.db",
+                "db_scope": "project",
+                "captured_at": "2026-01-01T00:00:00Z",
+                "context": {"path": "/notes/x"},
+            },
+            "user_field": "preserved",
+        });
+        let named_project_path = PathBuf::from("/named/hapi.db");
+        let corrected = correct_provenance_db_path_for_named_project(original, &named_project_path);
+
+        let prov = corrected.get("provenance").unwrap();
+        assert_eq!(prov.get("db_path").unwrap(), "/named/hapi.db");
+        // Everything else on provenance is untouched — this is not a "copy",
+        // there is no prior location to record.
+        assert_eq!(prov.get("db_scope").unwrap(), "project");
+        assert_eq!(prov.get("tool_name").unwrap(), "save_memory");
+        assert_eq!(prov.get("captured_at").unwrap(), "2026-01-01T00:00:00Z");
+        assert!(prov.get("copied_from").is_none());
+        assert_eq!(corrected.get("user_field").unwrap(), "preserved");
+    }
+
+    #[test]
+    fn correct_provenance_db_path_is_a_noop_without_a_provenance_object() {
+        let original = json!({ "user_field": "preserved" });
+        let corrected = correct_provenance_db_path_for_named_project(
+            original.clone(),
+            std::path::Path::new("/named/hapi.db"),
+        );
+        assert_eq!(corrected, original);
+    }
 
     #[test]
     fn restamp_replaces_db_path_and_records_origin() {

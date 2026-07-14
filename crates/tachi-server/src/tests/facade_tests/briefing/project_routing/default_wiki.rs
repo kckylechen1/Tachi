@@ -49,6 +49,7 @@ async fn tachi_memory_briefing_defaults_to_named_wiki_project_hits() {
             event: None,
             state: None,
             project: None,
+            project_explicit: false,
             domain: None,
             metadata: None,
             emit_continuity: false,

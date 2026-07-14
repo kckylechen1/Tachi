@@ -24,6 +24,7 @@ async fn tachi_save_note_rejects_symlink_leaf() {
             entities: Vec::new(),
             scope: None,
             project: None,
+            project_explicit: false,
             domain: None,
             retention_policy: None,
             force: true,
