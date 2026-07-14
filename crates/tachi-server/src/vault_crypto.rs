@@ -286,7 +286,7 @@ mod tests {
         let key = DerivedVaultKey::derive(password, &salt).expect("derive");
         let verifier = create_verifier(key.bytes()).expect("verifier");
         VaultConfig {
-            salt: B64.encode(&salt),
+            salt: B64.encode(salt),
             verifier,
             kdf_algorithm: "argon2id".to_string(),
             kdf_params: active_kdf_params_json().to_string(),
