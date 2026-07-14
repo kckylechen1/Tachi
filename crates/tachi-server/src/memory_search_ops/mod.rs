@@ -6,7 +6,7 @@ mod library_binding;
 mod recall_degradation;
 mod rerank;
 pub(crate) mod routing_config;
-mod save_memory;
+pub(crate) mod save_memory;
 mod search_helpers;
 mod search_memory;
 mod text_scrub;

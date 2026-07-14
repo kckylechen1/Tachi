@@ -8,14 +8,16 @@ use crate::MemoryServer;
 use memory_server_runtime::query_limit;
 
 use super::storage::{
-    add_memory_edge, get_projection_memory, read_events, upsert_projection_memory,
+    add_memory_edge, get_projection_memory, read_events, resolve_projection_write_target,
+    upsert_projection_memory,
 };
 use super::{event_query_from_params, target_from_event_params, ContinuityEventTarget};
 
 mod entry;
 
 use self::entry::{
-    build_projection_entry, counter_i64, event_projections, projection_key, projection_memory_id,
+    build_projection_entry, counter_i64, event_projections, projection_event_domain,
+    projection_key, projection_memory_id,
 };
 pub(super) use self::entry::{projected_path_prefix, projection_filters, projection_kind_metadata};
 
@@ -26,7 +28,22 @@ pub(crate) fn project_continuity_events(
     let target = target_from_event_params(server, params);
     let query = event_query_from_params(params);
     let filters = projection_filters(&params.projection_hints)?;
-    project_continuity_events_inner(server, &target, query, filters, params.dry_run, false)
+    // #1114: `params.project.is_some()` alone is not proof of a caller
+    // decision — bound stdio/HTTP sessions inject the session's bound
+    // project onto every project-defaulting write tool, same as
+    // `SaveMemoryParams` pre-#1041-F2. `project_explicit` (stamped by
+    // `session_identity::enforce_session_project`) distinguishes the two;
+    // see `write_affinity`'s module doc.
+    let project_explicit = params.project.is_some() && params.project_explicit;
+    project_continuity_events_inner(
+        server,
+        &target,
+        query,
+        filters,
+        params.dry_run,
+        false,
+        project_explicit,
+    )
 }
 
 pub(crate) fn project_auto_continuity_events_for_target(
@@ -38,7 +55,13 @@ pub(crate) fn project_auto_continuity_events_for_target(
         limit: query_limit(limit),
         ..TachiEventQuery::default()
     };
-    project_continuity_events_inner(server, &target, query, Vec::new(), false, true)
+    // #1114: every target this caller (the background
+    // `ContinuityProjectionScheduler` sweep) builds is a `db_path`-pinned
+    // visit to one specific manifest DB — `upsert_projection_memory`'s own
+    // `db_path.is_some()` check skips the write-affinity gate for these
+    // regardless of this flag, so `project_explicit` here is inert by
+    // construction, not a live decision.
+    project_continuity_events_inner(server, &target, query, Vec::new(), false, true, true)
 }
 
 fn auto_projectable_event(event: &TachiEventRecord) -> bool {
@@ -78,6 +101,7 @@ fn project_continuity_events_inner(
     filters: Vec<ProjectionKind>,
     dry_run: bool,
     auto_only: bool,
+    project_explicit: bool,
 ) -> Result<Value, String> {
     let events = read_events(server, target, &query)?;
     let mut projected = Vec::new();
@@ -108,10 +132,112 @@ fn project_continuity_events_inner(
             }
             let key = projection_key(&event, projection);
             let memory_id = projection_memory_id(projection, &key);
-            let existing = get_projection_memory(server, target, &memory_id)?;
+
+            // #1114 (codex round-1 B3 fix): resolve ONE routed destination
+            // for this projection BEFORE any existing-row lookup, write, or
+            // graph-edge work — `projection_event_domain` computes the SAME
+            // domain `build_projection_entry` would (without building the
+            // rest of the entry, which needs `existing` to merge correctly).
+            // Row lookup, row write, and this projection's timeline graph
+            // edges all use `routed_target`, never the pre-gate `target`:
+            // before this split, a rerouted projection's SECOND run looked
+            // up "does this exist" at the stale pre-gate store, found
+            // nothing, and silently reset its aggregation counters instead
+            // of updating the row that had actually moved — and
+            // self-referencing timeline edges got dropped as "endpoint
+            // missing" for the same reason.
+            let domain = projection_event_domain(&event, projection, &key);
+            // #1114 (codex round-2 item 4 fix): does this row already exist
+            // at the PRE-gate target? If a prior run placed it there (e.g.
+            // before this domain had a registered route), a LATER route
+            // registration must not reroute the SAME deterministic id to a
+            // different store and split it across two — it must update the
+            // row that's already there. `?` propagates a genuine read
+            // failure as a real error instead of the `.ok().flatten()`
+            // idiom this used to use, which conflated "the store is
+            // unreadable right now" with "this id doesn't exist" — a false
+            // negative here is exactly as dangerous as the bug this check
+            // exists to prevent (it would proceed to create a fresh,
+            // duplicate row instead of updating the one that's there).
+            //
+            // KNOWN LIMITATION (deferred, not solved here): this only
+            // catches the row sitting at the PRE-gate default. If the
+            // registry routes this domain to store A on one run and later
+            // (a SECOND registry edit) to a DIFFERENT store B, neither the
+            // pre-gate check here nor the post-gate check below (against
+            // whatever B resolves to) ever look at A — the row already at A
+            // is invisible to both, and a second, independent copy gets
+            // created at B. Closing that fully requires persistent per-id
+            // "last known location" tracking (a schema-level change), the
+            // same shape of gap #1115's check-then-insert atomicity work is
+            // already scoped to address — deliberately not solved with an
+            // ad-hoc migration in this leaf.
+            let id_resolves_at_pretarget =
+                get_projection_memory(server, target, &memory_id)?.is_some();
+            let routed_target = match resolve_projection_write_target(
+                server,
+                target,
+                domain.as_deref(),
+                project_explicit,
+                id_resolves_at_pretarget,
+            ) {
+                Ok(routed) => routed,
+                Err(error) => {
+                    // #1114 (codex round-2 item 3 point ①): a write-affinity
+                    // refusal is a loud, TYPED failure ("拒必有声") — never
+                    // silently absorbed into an overall `Ok({"status":
+                    // "partial"})`. A live, explicit `action=project` call
+                    // (auto_only == false) hard-aborts: the caller asked for
+                    // this materialization and deserves a real error
+                    // response, not a 200 they have to inspect an `errors`
+                    // array to notice. The background auto-sweep
+                    // (auto_only == true) still soft-continues to the next
+                    // row for an ordinary per-domain refusal (aborting the
+                    // WHOLE sweep over one misconfigured route is a worse
+                    // operational outcome than skipping that one row) — but
+                    // `RoutingConfigUnavailable` hard-aborts even there,
+                    // because a broken config fails EVERY remaining row in
+                    // this same batch identically; continuing serves no
+                    // purpose. The JSON error entry (when soft-continuing)
+                    // carries `error.kind()` — a stable, typed discriminant
+                    // — not just the stringified `Display` message, so a
+                    // refusal stays distinguishable from an ordinary
+                    // persistence error downstream.
+                    tracing::warn!(
+                        event_id = %event.id,
+                        projection = projection.as_str(),
+                        kind = error.kind(),
+                        error = %error,
+                        "continuity projection: write-affinity gate refused this row"
+                    );
+                    let hard_abort = !auto_only
+                        || matches!(
+                            error,
+                            crate::memory_search_ops::save_memory::write_affinity::WriteAffinityError::RoutingConfigUnavailable(_)
+                        );
+                    if hard_abort {
+                        return Err(format!(
+                            "continuity projection refused (event {}, projection {}): {error}",
+                            event.id,
+                            projection.as_str()
+                        ));
+                    }
+                    errors.push(json!({
+                        "event_id": event.id,
+                        "projection": projection.as_str(),
+                        "memory_id": memory_id,
+                        "error_kind": error.kind(),
+                        "error": error.to_string(),
+                        "reason": "write_affinity_refused",
+                    }));
+                    continue;
+                }
+            };
+
+            let existing = get_projection_memory(server, &routed_target, &memory_id)?;
             let (entry, already_projected) = build_projection_entry(existing, &event, projection);
             if !dry_run {
-                if let Err(error) = upsert_projection_memory(server, target, &entry) {
+                if let Err(error) = upsert_projection_memory(server, &routed_target, &entry) {
                     errors.push(json!({
                         "event_id": event.id,
                         "projection": projection.as_str(),
@@ -122,7 +248,7 @@ fn project_continuity_events_inner(
                 }
             }
             let graph_edges = if projection == ProjectionKind::Timeline {
-                persist_timeline_graph_edges(server, target, &entry, &event, dry_run)
+                persist_timeline_graph_edges(server, &routed_target, &entry, &event, dry_run)
             } else {
                 json!({
                     "saved_count": 0,

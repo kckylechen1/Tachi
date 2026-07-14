@@ -34,6 +34,7 @@ pub(crate) async fn handle_compact_session_memory(
         server,
         &requested_scope,
         params.project.as_deref(),
+        params.project_explicit,
         &params.agent_id,
     );
     let base_path = params

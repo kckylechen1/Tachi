@@ -154,6 +154,16 @@ pub struct CaptureSessionParams {
     #[serde(default)]
     pub project: Option<String>,
 
+    /// #1114: see `SaveMemoryParams::project_explicit` — same signal, same
+    /// wire key. `session_identity::enforce_session_project` stamps this on
+    /// every bound-session tool call generically, so `capture_session`'s
+    /// write-affinity scrutiny can distinguish a caller-supplied `project=`
+    /// from a transport-injected session-binding default the same way the
+    /// S1 gate already does for `save_memory`.
+    #[serde(default, rename = "__tachi_project_explicit")]
+    #[schemars(skip)]
+    pub project_explicit: bool,
+
     /// Minimum combined character count before capture runs
     #[serde(default = "default_capture_min_chars")]
     pub min_chars: usize,
@@ -347,6 +357,17 @@ pub struct CompactSessionMemoryParams {
     /// Optional named project DB
     #[serde(default)]
     pub project: Option<String>,
+
+    /// #1114: see `CaptureSessionParams::project_explicit` — same signal,
+    /// same wire key. `session_identity::enforce_session_project` stamps
+    /// this on every bound-session tool call generically, so
+    /// `compact_session_memory`'s `resolve_capture_target` call can
+    /// distinguish a caller-supplied `project=` from a transport-injected
+    /// session-binding default (a genuine caller decision must win over an
+    /// agent's manifest DB pin; a transport default must not).
+    #[serde(default, rename = "__tachi_project_explicit")]
+    #[schemars(skip)]
+    pub project_explicit: bool,
 
     /// Scope for persisted memories
     #[serde(default = "default_compact_session_scope")]

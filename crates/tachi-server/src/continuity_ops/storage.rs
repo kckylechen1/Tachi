@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use memcore::{ContinuityMetrics, MemoryEdge, MemoryEntry, TachiEventQuery, TachiEventRecord};
 use memory_server_runtime::EventDbRoute;
 
+use crate::memory_search_ops::save_memory::write_affinity::WriteAffinityError;
 use crate::{DbScope, MemoryServer};
 
 #[derive(Debug, Clone)]
@@ -124,6 +125,82 @@ pub(super) fn read_events(
                 .map_err(|e| format!("list continuity events: {e}"))
         })
     }
+}
+
+/// #1114 (codex round-1 B3 fix): resolve ONE routed destination for a
+/// continuity projection's write-affinity gate — called ONCE, BEFORE any
+/// existing-row lookup, row write, or graph-edge work for this projection,
+/// so `get_projection_memory` (existing-row lookup), `upsert_projection_memory`
+/// (the write), and `add_memory_edge`/timeline endpoint checks all target the
+/// SAME store. Before this split, the gate ran INSIDE `upsert_projection_memory`
+/// itself, after the caller had already looked up "does this row exist" and
+/// resolved graph edges against the STALE pre-gate `target` — so a rerouted
+/// projection's second run silently reset its aggregation state (seen/hit/miss
+/// counters never found the row that had actually moved) and self-referencing
+/// timeline edges got dropped as "endpoint missing" (the endpoint existed,
+/// just not at the store being checked).
+///
+/// Only in scope when `target.db_path.is_none()` — a `db_path` target (the
+/// background `ContinuityProjectionScheduler` sweep) is a pinned visit to
+/// one specific manifest DB, source store == destination store by
+/// construction, never the daemon's ambiguous default; gating it would risk
+/// rerouting a scheduled per-DB pass away from the exact DB it's sweeping.
+/// When `target.named_project` is `Some`, `project_explicit` (threaded from
+/// `TachiEventParams::project_explicit`) decides whether that's a genuine
+/// caller placement decision (skip) or a transport-injected session default
+/// (still scrutinized) — same semantics as `SaveMemoryParams::project_explicit`.
+///
+/// `id_resolves_at_target` (codex round-1 B4-class fix — B4 itself named
+/// `capture_session.rs`, but continuity projection has the identical
+/// exposure and is closed here proactively): continuity projection ids are
+/// internally deterministic (a stable hash of the projection key), never
+/// caller-placement-authority — there is no caller id to second-guess a
+/// reroute against (mirrors `apply_write_affinity_for_domain`'s
+/// `client_id: None` contract for every #1114 caller). But a STABLE
+/// deterministic id is exactly the shape that can get split across two
+/// stores if the routing registry changes between two projection runs of
+/// the SAME event: a projection captured before its domain had a
+/// registered route lands at the pre-gate default; if that domain is later
+/// registered, blindly re-evaluating routing on every subsequent run would
+/// reroute the SAME id to the newly-registered store, creating a second,
+/// independent copy instead of updating the row that's already there.
+/// Callers check "does this row already exist at the PRE-gate target" and
+/// pass the result in here — a genuine update-in-place is never
+/// second-guessed by a registry change that happened after the fact, same
+/// as `apply_write_affinity_with`'s own `id_resolves_at_target` contract.
+/// #1114 (codex round-2 item 3 fix): returns the TYPED `WriteAffinityError`
+/// rather than an already-stringified `String` — a refusal must stay
+/// typed all the way up to `projection.rs`'s own call site, which decides
+/// (based on whether this is a live explicit call or the background
+/// auto-sweep) whether to hard-abort or soft-continue, and which needs
+/// `WriteAffinityError::kind()` to tag the JSON response distinctly from an
+/// ordinary persistence error. Converting to `String` this early erased
+/// that distinction — every refusal looked identical to every other error
+/// once it reached the JSON `errors` array.
+pub(super) fn resolve_projection_write_target(
+    server: &MemoryServer,
+    target: &ContinuityEventTarget,
+    domain: Option<&str>,
+    project_explicit: bool,
+    id_resolves_at_target: bool,
+) -> Result<ContinuityEventTarget, WriteAffinityError> {
+    if target.db_path.is_some() {
+        return Ok(target.clone());
+    }
+    let affinity =
+        crate::memory_search_ops::save_memory::write_affinity::apply_write_affinity_for_domain(
+            server,
+            domain,
+            target.target_db,
+            target.named_project.as_deref(),
+            project_explicit,
+            id_resolves_at_target,
+        )?;
+    Ok(ContinuityEventTarget {
+        target_db: affinity.target_db,
+        named_project: affinity.named_project,
+        db_path: None,
+    })
 }
 
 pub(super) fn upsert_projection_memory(
@@ -260,6 +337,388 @@ pub(super) fn continuity_metrics(
 #[cfg(test)]
 mod tests {
     use super::pick_label;
+    use super::{resolve_projection_write_target, upsert_projection_memory, ContinuityEventTarget};
+    use crate::server_state::MemoryServer;
+    use crate::DbScope;
+    use memcore::MemoryEntry;
+    use serde_json::json;
+
+    fn projection_entry(id: &str, domain: Option<&str>) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: "/timeline/projected".to_string(),
+            summary: "projected".to_string(),
+            text: "projected content".to_string(),
+            importance: 0.6,
+            timestamp: "2026-07-14T00:00:00Z".to_string(),
+            valid_from: "2026-07-14T00:00:00Z".to_string(),
+            valid_until: None,
+            category: "experience".to_string(),
+            topic: "timeline".to_string(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "external:tachi_event_projection".to_string(),
+            scope: "project".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: domain.map(str::to_string),
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    fn bound_server(home: &std::path::Path, bound_project: &str) -> MemoryServer {
+        let project_db = home.join("projects").join(bound_project).join("memory.db");
+        std::fs::create_dir_all(project_db.parent().unwrap()).expect("mkdir project");
+        let global_db = home.join("global").join("memory.db");
+        std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+        // `MemoryServer::new(global, project)` — the PROJECT path (second
+        // arg) is what `bound_project_label` resolves the daemon's own bound
+        // name from via the Plan C `projects/<name>/memory.db` convention.
+        MemoryServer::new(global_db, Some(project_db)).expect("bind daemon")
+    }
+
+    /// #1114 (Oz r3 fixture fix): mount a real, schema-initialized named
+    /// -project DB rather than a zero-byte placeholder file. `with_named_
+    /// project_store` (the WRITE path) resolves via `resolve_named_project_
+    /// db_path`, which only checks `.exists()` — a zero-byte file satisfies
+    /// that, and a WRITE against it succeeds because `MemoryStore::open_
+    /// with_label` runs schema init on first open. But `with_named_project_
+    /// store_read` (the READ path a pre-gate/existing-row check goes
+    /// through) does NOT run that init — reading a schema-less file fails
+    /// outright ("no such table: memories"), not "no rows found". Any test
+    /// whose FIRST touch of a mounted store is a read (not a write) needs a
+    /// REAL schema, not a placeholder — `memcore::MemoryStore::open_with_label`
+    /// (the same call the write path itself makes) gives it one.
+    fn mount_named_project_db(home: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let db_path = home.join("projects").join(name).join("memory.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir named project");
+        memcore::MemoryStore::open_with_label(db_path.to_str().expect("utf-8 db path"), name)
+            .expect("init named project schema");
+        db_path
+    }
+
+    /// #1114 discriminating test (red before this PR): a continuity
+    /// projection whose event domain is registered to a DIFFERENT, mounted
+    /// store than the daemon's own bound project — via a transport-injected
+    /// `named_project` (bound session default, NOT a caller's `project=`) —
+    /// must be rerouted there, not silently upserted into the bound
+    /// project's own store. Before this change, `upsert_projection_memory`
+    /// called `with_named_project_store`/`with_store_for_scope` directly
+    /// with no domain-affinity check at all: this is the exact
+    /// cross-domain-drift shape #1041/#1114 exist to catch.
+    #[test]
+    fn cross_domain_projection_reroutes_to_registered_mounted_store() {
+        crate::test_support::with_tachi_home(|home| {
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing.json");
+            let server = bound_server(home, "quant");
+            let _hapi_db = mount_named_project_db(home, "hapi");
+
+            let target = ContinuityEventTarget::new(
+                DbScope::Project,
+                Some("quant".to_string()), // transport-injected default == bound project
+                None,
+            );
+            let entry = projection_entry("projection-1", Some("equity_trading"));
+            let routed = resolve_projection_write_target(
+                &server,
+                &target,
+                entry.domain.as_deref(),
+                false,
+                false,
+            )
+            .expect("resolve routed target");
+            upsert_projection_memory(&server, &routed, &entry).expect("upsert projection memory");
+
+            let in_hapi = server
+                .with_named_project_store_read("hapi", |store| {
+                    store.get(&entry.id).map_err(|e| e.to_string())
+                })
+                .expect("read hapi");
+            assert!(
+                in_hapi.is_some(),
+                "equity_trading projection content must reroute into hapi"
+            );
+            let in_quant = server
+                .with_project_store_read(|store| store.get(&entry.id).map_err(|e| e.to_string()))
+                .expect("read quant");
+            assert!(
+                in_quant.is_none(),
+                "must NOT silently land in the daemon's own bound (quant) store"
+            );
+        });
+    }
+
+    /// Same mismatch, but the registered store is not mounted — must refuse
+    /// loudly (typed `WriteAffinityError` surfaced as a `String`), never
+    /// silently write cross-domain.
+    #[test]
+    fn cross_domain_projection_refuses_when_registered_store_unmounted() {
+        crate::test_support::with_tachi_home(|home| {
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing.json");
+            let server = bound_server(home, "quant");
+            // "hapi" is never mounted here.
+
+            let target =
+                ContinuityEventTarget::new(DbScope::Project, Some("quant".to_string()), None);
+            let entry = projection_entry("projection-2", Some("equity_trading"));
+            let err = resolve_projection_write_target(
+                &server,
+                &target,
+                entry.domain.as_deref(),
+                false,
+                false,
+            )
+            .expect_err("must refuse, not silently write cross-domain");
+            assert_eq!(err.kind(), "unmounted_route");
+            let message = err.to_string();
+            assert!(message.contains("equity_trading"));
+            assert!(message.contains("hapi"));
+        });
+    }
+
+    /// Same-domain (unregistered-domain) projection content is unaffected —
+    /// the ordinary case must not be disturbed by this gate.
+    #[test]
+    fn same_domain_projection_is_unaffected() {
+        crate::test_support::with_tachi_home(|home| {
+            let server = bound_server(home, "quant");
+            let target =
+                ContinuityEventTarget::new(DbScope::Project, Some("quant".to_string()), None);
+            let entry = projection_entry("projection-3", Some("engineering"));
+            let routed = resolve_projection_write_target(
+                &server,
+                &target,
+                entry.domain.as_deref(),
+                false,
+                false,
+            )
+            .expect("resolve routed target");
+            upsert_projection_memory(&server, &routed, &entry).expect("upsert projection memory");
+
+            let in_quant = server
+                .with_named_project_store_read("quant", |store| {
+                    store.get(&entry.id).map_err(|e| e.to_string())
+                })
+                .expect("read quant");
+            assert!(in_quant.is_some());
+        });
+    }
+
+    /// A `db_path`-targeted projection (the background
+    /// `ContinuityProjectionScheduler` sweep) is never scrutinized — it
+    /// passes through unchanged even for mismatched, registered domain
+    /// content, since source store == destination store by construction.
+    #[test]
+    fn db_path_target_skips_the_gate_entirely() {
+        crate::test_support::with_tachi_home(|home| {
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing.json");
+            let server = bound_server(home, "quant");
+            let pinned_db = home.join("pinned").join("memory.db");
+            std::fs::create_dir_all(pinned_db.parent().unwrap()).expect("mkdir pinned");
+
+            let target =
+                ContinuityEventTarget::new(DbScope::Project, None, Some(pinned_db.clone()));
+            let entry = projection_entry("projection-4", Some("equity_trading"));
+            let routed = resolve_projection_write_target(
+                &server,
+                &target,
+                entry.domain.as_deref(),
+                false,
+                false,
+            )
+            .expect("resolve routed target (db_path skips unchanged)");
+            upsert_projection_memory(&server, &routed, &entry).expect("upsert projection memory");
+
+            let in_pinned = server
+                .with_path_store_read(&pinned_db, |store| {
+                    store.get(&entry.id).map_err(|e| e.to_string())
+                })
+                .expect("read pinned db");
+            assert!(
+                in_pinned.is_some(),
+                "db_path target must land exactly where pinned, ungated"
+            );
+        });
+    }
+
+    /// #1114 codex round-1 B3 point ① discriminating test: a SECOND run over
+    /// the SAME rerouted projection must find its own row at the ROUTED
+    /// destination (via `resolve_projection_write_target` + `get_
+    /// projection_memory` sharing the SAME resolved target), not silently
+    /// treat it as brand-new every time. Before the B3 fix,
+    /// `get_projection_memory` in `projection.rs`'s loop always read the
+    /// STALE pre-gate `target` — a rerouted projection's aggregation state
+    /// (seen/hit/miss counters) reset on every subsequent run because the
+    /// existing-row lookup never found the row that had actually moved.
+    #[test]
+    fn rerouted_projection_is_found_on_a_second_run_not_recreated() {
+        crate::test_support::with_tachi_home(|home| {
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing.json");
+            let server = bound_server(home, "quant");
+            let _hapi_db = mount_named_project_db(home, "hapi");
+
+            let target =
+                ContinuityEventTarget::new(DbScope::Project, Some("quant".to_string()), None);
+            let entry = projection_entry("projection-5", Some("equity_trading"));
+
+            // Round 1: fresh row, reroutes into hapi.
+            let routed_1 = resolve_projection_write_target(
+                &server,
+                &target,
+                entry.domain.as_deref(),
+                false,
+                false,
+            )
+            .expect("round 1 routed target");
+            assert_eq!(routed_1.named_project.as_deref(), Some("hapi"));
+            let existing_1 = super::get_projection_memory(&server, &routed_1, &entry.id)
+                .expect("round 1 existing-row lookup");
+            assert!(
+                existing_1.is_none(),
+                "round 1 is a genuinely fresh row: {existing_1:?}"
+            );
+            upsert_projection_memory(&server, &routed_1, &entry).expect("round 1 upsert");
+
+            // Round 2: SAME event/projection/key -> same deterministic id.
+            // The existing-row lookup must use the SAME routed target as
+            // round 1 (hapi), and must find the row round 1 just wrote.
+            let routed_2 = resolve_projection_write_target(
+                &server,
+                &target,
+                entry.domain.as_deref(),
+                false,
+                false,
+            )
+            .expect("round 2 routed target");
+            assert_eq!(
+                routed_2.named_project.as_deref(),
+                Some("hapi"),
+                "round 2 must resolve to the SAME destination as round 1"
+            );
+            let existing_2 = super::get_projection_memory(&server, &routed_2, &entry.id)
+                .expect("round 2 existing-row lookup");
+            assert!(
+                existing_2.is_some(),
+                "round 2 must find round 1's row at the routed destination, \
+                 not silently treat it as a fresh row"
+            );
+        });
+    }
+
+    /// #1114 codex round-1 B4-class discriminating test (proactive for
+    /// continuity, same bug class B4 named for `capture_session.rs`): a
+    /// projection whose row ALREADY exists at the pre-gate default (e.g.
+    /// projected before its domain had any registered route) must be
+    /// updated in place when that domain is LATER registered — not
+    /// rerouted to the newly-registered store, which would split the same
+    /// deterministic id across two stores.
+    #[test]
+    fn preexisting_projection_at_pretarget_updates_in_place_when_route_added_later() {
+        crate::test_support::with_tachi_home(|home| {
+            let server = bound_server(home, "quant");
+            let target =
+                ContinuityEventTarget::new(DbScope::Project, Some("quant".to_string()), None);
+            let entry = projection_entry("projection-6", Some("equity_trading"));
+            // The row already lives at "quant" — projected back when
+            // `equity_trading` had no registered route at all.
+            upsert_projection_memory(&server, &target, &entry)
+                .expect("seed pre-existing row at the pre-gate target");
+
+            // `equity_trading` is now registered to route to "hapi", and
+            // "hapi" is mounted.
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing.json");
+            let _hapi_db = mount_named_project_db(home, "hapi");
+
+            let id_resolves_at_pretarget =
+                super::get_projection_memory(&server, &target, &entry.id)
+                    .expect("pretarget existence check")
+                    .is_some();
+            assert!(
+                id_resolves_at_pretarget,
+                "the seeded row must be found at the pre-gate target"
+            );
+            let routed = resolve_projection_write_target(
+                &server,
+                &target,
+                entry.domain.as_deref(),
+                false,
+                id_resolves_at_pretarget,
+            )
+            .expect("resolve routed target");
+
+            assert_eq!(
+                routed.named_project.as_deref(),
+                Some("quant"),
+                "must update the row already at quant, not split it into a \
+                 second copy at the newly-registered hapi"
+            );
+        });
+    }
+
+    // #1114 codex round-3 item 4 fix: the test that used to live here
+    // (asserting `get_projection_memory` itself returns `Err` on a read
+    // failure) was HOLLOW — that helper already propagated read errors at
+    // the base level, unaffected by the #1114 fix, so the test passed
+    // identically before and after. The line actually changed was one layer
+    // up, in `projection.rs`'s loop (`id_resolves_at_pretarget = ...ok()
+    // .flatten().is_some()` -> `?`) — moved to a real discriminating test
+    // driving that layer's actual entry point:
+    // `continuity_ops::tests::project_auto_continuity_events_propagates_a_downstream_read_failure`.
+
+    // #1114 codex round-2 item 4①/③ KNOWN LIMITATION (registry changes its
+    // route for a domain between two projection runs of the SAME
+    // deterministic id): NOT reproduced as an integration test in THIS
+    // module. `RoutingConfig::get_checked()` caches successfully-loaded
+    // config in a process-wide `OnceLock` for the rest of the process's
+    // lifetime (see that module's own "#1041 B4: shared read/write cache
+    // consistency" test-doc note: "cargo test runs every test in one
+    // process, so asserting on the real static would be poisoned") — a
+    // SECOND `routing.json` rewrite mid-test would silently have NO effect
+    // on a SECOND `resolve_projection_write_target` call, because it goes
+    // through the SAME cached, real `apply_write_affinity_for_domain`. This
+    // is also true of a REAL daemon: routing.json is effectively frozen for
+    // that daemon's entire uptime once first read, so the "domain routes to
+    // A, then later to B" scenario can only happen ACROSS a daemon restart
+    // — which needs two independent processes to reproduce faithfully, not
+    // one test function. The underlying GATE MECHANISM'S lack of memory
+    // across two calls with DIFFERENT configs — the actual thing that
+    // would let the same id split across two stores — IS characterized at
+    // the DI level, where config is a plain parameter with no caching
+    // involved at all:
+    // `memory_search_ops::save_memory::write_affinity::tests::
+    // config_change_between_calls_reroutes_a_stable_id_to_a_different_store`.
+    // Closing the gap for real requires persistent per-id "last known
+    // location" tracking (a schema-level change), deferred alongside
+    // #1115's check-then-insert atomicity work, not solved here.
 
     // #488: the TACHI_PROJECT pin must win over the git-hash db-path parent name
     // so direct-daemon continuity projections align with pinned reads/writes.

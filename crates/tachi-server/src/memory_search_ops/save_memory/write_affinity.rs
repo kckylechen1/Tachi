@@ -43,42 +43,72 @@
 //! (whether the caller's `id`, if any, was found to already exist at the
 //! PRE-gate target) instead of re-deriving that from `params.id.is_some()`.
 //!
-//! # F1 (round-2, scope boundary — NOT closed by this PR)
+//! # F1 (round-2, scope boundary — partially closed by #1114)
 //!
 //! `handle_save_memory` is not the only code path that persists a
 //! `MemoryEntry`. Verified (read the code, not just codex's citation) direct
 //! `MemoryStore::upsert` callers that never pass through this gate:
 //!
-//! - **Continuity/event projection** — derives its own domain from the
-//!   event but chooses its store independently:
-//!   `continuity_ops.rs`, `continuity_ops/projection/entry.rs`,
-//!   `continuity_ops/storage.rs::upsert_projection_memory`.
+//! - **Continuity/event projection** — CLOSED by #1114 via
+//!   [`apply_write_affinity_for_domain`], called from
+//!   `continuity_ops/storage.rs::upsert_projection_memory` for the live
+//!   `tachi_event(action=project)` / `emit_memory_saved_event` path (the one
+//!   that derives its own domain from the event but resolves its own store
+//!   independently of `with_store_for_scope`). The background
+//!   `ContinuityProjectionScheduler` sweep (`continuity_projector.rs`) is
+//!   deliberately NOT gated: every target it builds is a `db_path`-pinned
+//!   visit to one specific manifest DB (source store == destination store by
+//!   construction), never the daemon's own ambiguous default — see the gate
+//!   call site's doc for why a `db_path` target skips this gate entirely.
 //! - **Pipeline ingest** (event/structured-event/source/extract) — each
 //!   resolves `target_db`/`named_project` and upserts directly:
 //!   `pipeline_ops/ingest/{event,structured_event,source,extract}.rs`.
 //! - **Trajectory distill**: `hub_ops/call/distill.rs`.
-//! - **Foundry capture/distill**: `foundry_runtime_ops/handlers/capture_session.rs`,
-//!   `foundry_runtime_ops/daily_distill/persist.rs`,
-//!   `foundry_runtime_ops/maintenance/distill_job.rs` (daily foundry also
-//!   scans every named project directly: `daily_distill/runner.rs`).
+//! - **Foundry capture** — CLOSED by #1114 via
+//!   [`apply_write_affinity_for_domain`], called per-entry from
+//!   `foundry_runtime_ops/handlers/capture_session.rs` before
+//!   `persist_capture_entry` (the fresh-incoming-content path: bracket
+//!   self-evolution notes and LLM-drafted session captures land wherever
+//!   `resolve_capture_target` resolves, the exact ambiguous-default shape S1
+//!   exists to catch — entries there set `domain: None` on the wire, so the
+//!   gate call derives one via `repair::domain::repair_target` the same way
+//!   `resolve_save_domain` does for `save_memory`).
+//! - **Foundry distill** — verified NOT gated by #1114, and deliberately so:
+//!   `foundry_runtime_ops/daily_distill/persist.rs::persist_distill_memory`
+//!   and `foundry_runtime_ops/maintenance/distill_job.rs::process_memory_distill_job`
+//!   both read their source memories from one specific store
+//!   (`daily_distill/candidates.rs::collect_candidate_groups`'s
+//!   `project`/`FoundryMaintenanceItem`'s `target_db`/`named_project`/
+//!   `db_path`) and write the distilled summary BACK into that exact same
+//!   store — source and destination are the same store by construction
+//!   (`daily_distill/runner.rs::distill_one_project` threads one `project`
+//!   value through both the read and the write). There is no ambiguous
+//!   -default placement decision here to scrutinize: gating this the way
+//!   `capture_session` is gated would risk collapsing every project's
+//!   distilled output into one store the moment `domain: "foundry"`
+//!   (a fixed tag, not content classification) ever gets registered as a
+//!   route — exactly the "correctness regression in the name of coverage"
+//!   this doc already warns about for the blanket-hook approach. Left
+//!   unmodified; flagged for the next holder of this doc rather than
+//!   silently dropped from the enumeration.
 //! - **Other direct memory-row writers**: `component_governance_ops/mod.rs`,
 //!   `copilot_ops/support/skills.rs`, `memory_search_ops/eval_capture.rs`,
 //!   `handoff_ops/handlers.rs`, `kanban/handlers.rs`, `sticky_ops/handlers.rs`,
 //!   `wiki_ops/ingest.rs`, `wiki_ops/log.rs`.
 //!
-//! Why this PR does not close them: EVERY one of the above ultimately calls
-//! the exact same `MemoryStore::upsert` (via `MemoryServer::with_store_for_scope`
-//! / `with_named_project_store`) that `handle_save_memory` itself calls —
-//! but that shared choke point lives BELOW where the routing policy exists.
-//! `MemoryStore::upsert` (memcore) is a domain-agnostic storage primitive
-//! with no `RoutingConfig`, no daemon-bound-project concept, and no
-//! `MemoryServer` reference; hooking the gate there would mean plumbing
-//! tachi-server-level policy down into memcore, a real layering change, not
-//! a cheap plug-in. The next candidate layer up —
-//! `with_store_for_scope`/`with_named_project_store` on `MemoryServer`
-//! itself — IS reachable from tachi-server, but it is shared by every
-//! read AND write in the server (reads already use the separate `_read`
-//! variants) across row kinds that are NOT domain-classified memory
+//! Why the remaining paths above still don't close via `with_store_for_scope`:
+//! EVERY one of them ultimately calls the exact same `MemoryStore::upsert`
+//! (via `MemoryServer::with_store_for_scope` / `with_named_project_store`)
+//! that `handle_save_memory` itself calls — but that shared choke point
+//! lives BELOW where the routing policy exists. `MemoryStore::upsert`
+//! (memcore) is a domain-agnostic storage primitive with no `RoutingConfig`,
+//! no daemon-bound-project concept, and no `MemoryServer` reference; hooking
+//! the gate there would mean plumbing tachi-server-level policy down into
+//! memcore, a real layering change, not a cheap plug-in. The next candidate
+//! layer up — `with_store_for_scope`/`with_named_project_store` on
+//! `MemoryServer` itself — IS reachable from tachi-server, but it is shared
+//! by every read AND write in the server (reads already use the separate
+//! `_read` variants) across row kinds that are NOT domain-classified memory
 //! content in the `SaveMemoryParams` sense: a kanban card, a sticky note, a
 //! handoff memo, a component-governance record. Running THIS gate's
 //! `resolve_save_domain`/`RoutingConfig::domain_routes` logic against those
@@ -87,15 +117,7 @@
 //! match a registered route) — a correctness regression in the name of
 //! coverage, not a safe extension.
 //!
-//! Event projection and foundry distill are the two paths worth prioritizing
-//! for that follow-up (`continuity_ops`/`foundry_runtime_ops` above) — they
-//! DO carry genuine domain-classified memory content (the audited original
-//! cross-domain-drift sources per the #1041 investigation) and already
-//! resolve their own `target_db`/`named_project` independently
-//! (`ContinuityEventTarget`, foundry's own routing), so a purpose-built call
-//! into this module's `apply_write_affinity_with` core (not a blanket
-//! choke-point hook) is the shape of the real fix — tracked as a follow-up,
-//! out of scope for this bounded PR.
+//! [`apply_write_affinity_for_domain`]: apply_write_affinity_for_domain
 
 use super::entry::resolve_save_domain;
 use crate::memory_search_ops::routing_config::{RoutingConfig, RoutingConfigError};
@@ -112,7 +134,7 @@ use thiserror::Error;
 /// -wide save_memory error type stays `String` end-to-end, this only adds a
 /// typed intermediate that can't be silently downgraded to a generic retry.
 #[derive(Debug, Error)]
-pub(in crate::memory_search_ops::save_memory) enum WriteAffinityError {
+pub(crate) enum WriteAffinityError {
     #[error(
         "save refused: domain '{domain}' is registered to project store '{store}', which is not mounted on this daemon (bound store: {bound}). Refusing to silently write cross-domain into the bound store. Mount/register '{store}', or pass an explicit project= to override."
     )]
@@ -155,10 +177,27 @@ impl From<WriteAffinityError> for String {
     }
 }
 
+impl WriteAffinityError {
+    /// #1114 (codex round-2 item 3 fix): a stable, machine-checkable
+    /// discriminant for callers that surface this error into a JSON
+    /// response and need to tell "this domain's registered store isn't
+    /// mounted" apart from "the whole routing config is unusable right
+    /// now" without string-matching `Display`'s prose. Kept alongside
+    /// (not instead of) the `Display` message — callers that just want the
+    /// full text still get it via `.to_string()`/`{err}`.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            WriteAffinityError::UnmountedRoute { .. } => "unmounted_route",
+            WriteAffinityError::RoutingConfigUnavailable(_) => "routing_config_unavailable",
+            WriteAffinityError::RerouteRefusedForClientId { .. } => "reroute_refused_for_client_id",
+        }
+    }
+}
+
 /// What the gate did, surfaced back to the caller for transparency (never
 /// itself an error — an `Err` result is the separate, loud-refusal path).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::memory_search_ops::save_memory) enum AffinityNote {
+pub(crate) enum AffinityNote {
     /// The domain has no registered route — nothing to compare against, so
     /// the requested target was left untouched (uncertain, not wrong).
     Unregistered { domain: String },
@@ -168,7 +207,7 @@ pub(in crate::memory_search_ops::save_memory) enum AffinityNote {
 }
 
 #[derive(Debug)]
-pub(in crate::memory_search_ops::save_memory) struct AffinityOutcome {
+pub(crate) struct AffinityOutcome {
     pub target_db: DbScope,
     pub named_project: Option<String>,
     pub note: Option<AffinityNote>,
@@ -243,6 +282,128 @@ where
         _ => return Ok(passthrough()),
     };
 
+    route_decision(
+        domain,
+        target_db,
+        named_project,
+        params.id.as_deref(),
+        config,
+        current_label,
+        project_exists,
+        "save_memory",
+    )
+}
+
+/// #1114: entrypoint for callers outside `save_memory` that already resolved
+/// their own domain and target store independently of `with_store_for_scope`
+/// (continuity/event projection, foundry capture) — see the module doc's F1
+/// note. This is NOT the blanket choke-point hook that doc rejects: it is
+/// opt-in per write, and the caller supplies its own already-derived
+/// `domain` and target instead of a `SaveMemoryParams`. Same
+/// Unregistered/Rerouted/UnmountedRoute posture as [`apply_write_affinity`].
+///
+/// `explicit_project`: mirrors `SaveMemoryParams::project_explicit` — true
+/// only when the CALLER (not a transport-injected session default) chose
+/// `named_project`, in which case (like `apply_write_affinity`'s own
+/// passthrough) it is never second-guessed. Callers whose target shape has
+/// no ambiguous-default concept at all (e.g. a background sweep visiting one
+/// specific `db_path`) should not call this function in the first place —
+/// see the call sites in `continuity_ops::storage` and
+/// `foundry_runtime_ops::handlers::capture_session` for the guard.
+///
+/// `id_resolves_at_target`: whether this exact row already exists at the
+/// PRE-gate target — a genuine update-in-place is never second-guessed,
+/// same as `apply_write_affinity`'s `id_resolves_at_target`.
+pub(crate) fn apply_write_affinity_for_domain(
+    server: &MemoryServer,
+    domain: Option<&str>,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    explicit_project: bool,
+    id_resolves_at_target: bool,
+) -> Result<AffinityOutcome, WriteAffinityError> {
+    let config =
+        RoutingConfig::get_checked().map_err(WriteAffinityError::RoutingConfigUnavailable)?;
+    apply_write_affinity_for_domain_with(
+        domain,
+        target_db,
+        named_project,
+        explicit_project,
+        id_resolves_at_target,
+        &config,
+        bound_project_label(server),
+        named_project_db_exists,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_write_affinity_for_domain_with<F>(
+    domain: Option<&str>,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    explicit_project: bool,
+    id_resolves_at_target: bool,
+    config: &RoutingConfig,
+    current_label: Option<String>,
+    project_exists: F,
+) -> Result<AffinityOutcome, WriteAffinityError>
+where
+    F: Fn(&str) -> bool,
+{
+    let passthrough = || AffinityOutcome {
+        target_db,
+        named_project: named_project.map(str::to_string),
+        note: None,
+    };
+
+    let explicit_project_override = named_project.is_some() && explicit_project;
+    if explicit_project_override || id_resolves_at_target || target_db != DbScope::Project {
+        return Ok(passthrough());
+    }
+
+    let domain = match domain.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(d) => d.to_string(),
+        None => return Ok(passthrough()),
+    };
+
+    // Continuity/foundry ids are internally generated (a stable hash or a
+    // fresh uuid), never a caller-chosen placement authority the way
+    // `SaveMemoryParams::id` can be — so a domain mismatch always reroutes,
+    // matching `apply_write_affinity_with`'s id-LESS case. There is no
+    // `RerouteRefusedForClientId` branch reachable from this entrypoint.
+    route_decision(
+        domain,
+        target_db,
+        named_project,
+        None,
+        config,
+        current_label,
+        project_exists,
+        "write_affinity",
+    )
+}
+
+/// Shared decision tail once a domain string, target, and scrutiny
+/// -eligibility have already been established by the caller's own preamble
+/// (`apply_write_affinity_with`'s `SaveMemoryParams`-shaped shortcuts, or
+/// `apply_write_affinity_for_domain_with`'s domain-generic ones).
+/// `client_id`: a caller-supplied placement-authority id (see
+/// `WriteAffinityError::RerouteRefusedForClientId`'s doc) — `None` from every
+/// #1114 caller, since continuity/foundry ids are never placement authority.
+#[allow(clippy::too_many_arguments)]
+fn route_decision<F>(
+    domain: String,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    client_id: Option<&str>,
+    config: &RoutingConfig,
+    current_label: Option<String>,
+    project_exists: F,
+    log_target: &'static str,
+) -> Result<AffinityOutcome, WriteAffinityError>
+where
+    F: Fn(&str) -> bool,
+{
     let route = config.domain_routes.iter().find(|route| {
         route
             .domains
@@ -253,25 +414,14 @@ where
     let Some(route) = route else {
         tracing::warn!(
             domain = %domain,
-            "save_memory: domain has no registered store route; proceeding with the requested target (uncertain classification, fail-safe permissive)"
+            target = log_target,
+            "write-affinity: domain has no registered store route; proceeding with the requested target (uncertain classification, fail-safe permissive)"
         );
-        // #1041 round-3 regression fix: this branch is documented (and
-        // named) as pass-through — "uncertain classification, proceeds
-        // unchanged" — but unconditionally forced `named_project: None`
-        // regardless of what was passed in. That was inert pre-F2 (this
-        // branch was only ever reached with `named_project` already `None`,
-        // since `named_project.is_some()` alone used to skip the gate
-        // entirely). F2 widened the gate to also evaluate transport
-        // -injected defaults (`project_explicit == false`), and
-        // `resolve_save_domain` (via `repair::domain::repair_target`)
-        // NEVER returns `None` — every save gets SOME inferred domain, so
-        // an unregistered domain is now the common case for ordinary
-        // bound-session saves. Discarding `named_project` here silently
-        // dropped the transport-injected bound project and fell back to
-        // the untargeted `DbScope::Project` store, which is absent on a
-        // global-only daemon (`with_project_store` -> "No project database
-        // available") — 5 stdio/HTTP regressions. Preserve it, exactly like
-        // `passthrough()`.
+        // #1041 round-3 regression fix (see `apply_write_affinity_with`'s
+        // history): this branch is pass-through — "uncertain classification,
+        // proceeds unchanged" — and must preserve whatever `named_project`
+        // was passed in rather than forcing it to `None`, or a bound
+        // transport's default target silently gets dropped.
         return Ok(AffinityOutcome {
             target_db,
             named_project: named_project.map(str::to_string),
@@ -284,7 +434,11 @@ where
         .is_some_and(|c| c.eq_ignore_ascii_case(&route.project))
     {
         // Already the registered store — no mismatch.
-        return Ok(passthrough());
+        return Ok(AffinityOutcome {
+            target_db,
+            named_project: named_project.map(str::to_string),
+            note: None,
+        });
     }
 
     // #1041 F8 (round-2 review, CONCERN — not fixed here): `project_exists`
@@ -308,12 +462,12 @@ where
         // #1041 B2: a caller-supplied `id` that didn't resolve at the
         // pre-gate target is not proof no row exists there — a concurrent
         // writer can insert that exact id at the pre-gate store between the
-        // pre-gate lookup (in `handler.rs`) and this decision. Silently
-        // rerouting would then let the SAME caller-chosen id exist at two
-        // stores. Refuse instead of reroute when `id` was genuinely supplied
-        // by the caller (an id skipped this branch entirely, via the earlier
+        // pre-gate lookup and this decision. Silently rerouting would then
+        // let the SAME caller-chosen id exist at two stores. Refuse instead
+        // of reroute when `id` was genuinely supplied by the caller (an id
+        // skipped this branch entirely, via the earlier
         // `id_resolves_at_target` passthrough, if it already resolved).
-        if let Some(id) = params.id.as_deref() {
+        if let Some(id) = client_id {
             return Err(WriteAffinityError::RerouteRefusedForClientId {
                 id: id.to_string(),
                 domain,
@@ -322,9 +476,10 @@ where
         }
         tracing::warn!(
             domain = %domain,
+            target = log_target,
             from = current_label.as_deref().unwrap_or("<unbound>"),
             to = %route.project,
-            "save_memory: domain-store affinity mismatch — rerouting to the registered store"
+            "write-affinity: domain-store affinity mismatch — rerouting to the registered store"
         );
         return Ok(AffinityOutcome {
             target_db: DbScope::Project,
@@ -678,5 +833,259 @@ mod tests {
             outcome.note,
             Some(AffinityNote::Unregistered { .. })
         ));
+    }
+
+    // ─── #1114: `apply_write_affinity_for_domain_with` (continuity/foundry) ───
+
+    /// #1114 core judgement test: continuity-projected trading content on an
+    /// engineering-bound daemon, with the trading store mounted -> reroute.
+    /// Mirrors `trading_domain_on_engineering_daemon_reroutes_when_trading_store_mounted`
+    /// but through the domain-generic entrypoint continuity/foundry call.
+    #[test]
+    fn for_domain_reroutes_mismatched_domain_when_store_mounted() {
+        let outcome = apply_write_affinity_for_domain_with(
+            Some("equity_trading"),
+            DbScope::Project,
+            None,
+            false,
+            false,
+            &trading_routed_config(),
+            Some("quant".to_string()),
+            |project| project == "hapi",
+        )
+        .unwrap();
+        assert_eq!(outcome.target_db, DbScope::Project);
+        assert_eq!(outcome.named_project.as_deref(), Some("hapi"));
+        assert!(matches!(outcome.note, Some(AffinityNote::Rerouted { .. })));
+    }
+
+    /// Same mismatch, but the registered store isn't mounted -> loud refusal,
+    /// never a silent cross-domain write — same fail-safe posture as
+    /// `apply_write_affinity_with`.
+    #[test]
+    fn for_domain_refuses_loudly_when_store_unmounted() {
+        let result = apply_write_affinity_for_domain_with(
+            Some("equity_trading"),
+            DbScope::Project,
+            None,
+            false,
+            false,
+            &trading_routed_config(),
+            Some("quant".to_string()),
+            |_| false,
+        );
+        let err = result.expect_err("must refuse, not silently write cross-domain");
+        assert!(matches!(err, WriteAffinityError::UnmountedRoute { .. }));
+        let message = err.to_string();
+        assert!(message.contains("equity_trading"));
+        assert!(message.contains("hapi"));
+    }
+
+    /// A transport-injected `named_project` (continuity's own `event_db_route`
+    /// resolving the bound session's project, `explicit_project == false`)
+    /// must NOT skip the gate — same regression class as
+    /// `transport_injected_project_does_not_skip_the_gate` for `save_memory`.
+    #[test]
+    fn for_domain_transport_injected_project_does_not_skip_the_gate() {
+        let outcome = apply_write_affinity_for_domain_with(
+            Some("equity_trading"),
+            DbScope::Project,
+            Some("quant"),
+            false, // NOT a caller-explicit project= — transport-injected default
+            false,
+            &trading_routed_config(),
+            Some("quant".to_string()),
+            |project| project == "hapi",
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.named_project.as_deref(),
+            Some("hapi"),
+            "a transport default must not be treated as an override — the \
+             gate must still reroute mismatched content"
+        );
+        assert!(matches!(outcome.note, Some(AffinityNote::Rerouted { .. })));
+    }
+
+    /// A genuinely caller-explicit `project=` is never second-guessed, even
+    /// against a mismatched, mounted domain route.
+    #[test]
+    fn for_domain_skips_when_explicit_project_given() {
+        let outcome = apply_write_affinity_for_domain_with(
+            Some("equity_trading"),
+            DbScope::Project,
+            Some("quant"),
+            true, // caller-explicit
+            false,
+            &trading_routed_config(),
+            Some("quant".to_string()),
+            |project| project == "hapi",
+        )
+        .unwrap();
+        assert!(outcome.note.is_none());
+        assert_eq!(outcome.named_project.as_deref(), Some("quant"));
+    }
+
+    /// `id_resolves_at_target` (an update-in-place at the pre-gate target,
+    /// e.g. a continuity projection memory that already exists there) is
+    /// never second-guessed even for a mismatched, mounted domain route.
+    #[test]
+    fn for_domain_skips_when_id_resolves_at_target() {
+        let outcome = apply_write_affinity_for_domain_with(
+            Some("equity_trading"),
+            DbScope::Project,
+            None,
+            false,
+            true, // id_resolves_at_target
+            &trading_routed_config(),
+            Some("quant".to_string()),
+            |_| true,
+        )
+        .unwrap();
+        assert!(outcome.note.is_none());
+        assert!(outcome.named_project.is_none());
+    }
+
+    /// Same-domain content proceeds unaffected, matching
+    /// `engineering_content_proceeds_normally`.
+    #[test]
+    fn for_domain_unregistered_domain_proceeds_uncertain_not_blocking() {
+        let outcome = apply_write_affinity_for_domain_with(
+            Some("engineering"),
+            DbScope::Project,
+            None,
+            false,
+            false,
+            &trading_routed_config(),
+            Some("quant".to_string()),
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(outcome.target_db, DbScope::Project);
+        assert!(outcome.named_project.is_none());
+        assert!(matches!(
+            outcome.note,
+            Some(AffinityNote::Unregistered { .. })
+        ));
+    }
+
+    /// A `Global` scope target is never second-guessed — same as
+    /// `skips_when_scope_is_global`.
+    #[test]
+    fn for_domain_skips_when_scope_is_global() {
+        let outcome = apply_write_affinity_for_domain_with(
+            Some("equity_trading"),
+            DbScope::Global,
+            None,
+            false,
+            false,
+            &trading_routed_config(),
+            Some("quant".to_string()),
+            |_| true,
+        )
+        .unwrap();
+        assert!(outcome.note.is_none());
+        assert_eq!(outcome.target_db, DbScope::Global);
+    }
+
+    /// No domain at all (e.g. `repair::domain::repair_target` was somehow
+    /// bypassed and the caller genuinely has nothing) passes through
+    /// unchanged rather than panicking or defaulting to a route.
+    #[test]
+    fn for_domain_none_passes_through() {
+        let outcome = apply_write_affinity_for_domain_with(
+            None,
+            DbScope::Project,
+            None,
+            false,
+            false,
+            &trading_routed_config(),
+            Some("quant".to_string()),
+            |_| true,
+        )
+        .unwrap();
+        assert!(outcome.note.is_none());
+    }
+
+    /// #1114 codex round-2 item 4①/③ CHARACTERIZATION test (documents a
+    /// KNOWN, ACCEPTED limitation, not a target this PR claims to hit): the
+    /// gate has no memory of a PRIOR call's decision across two calls with
+    /// DIFFERENT `RoutingConfig`s for the SAME domain/id. In production
+    /// this happens across a daemon restart after a `routing.json` edit
+    /// (see `continuity_ops::storage::tests`' note on why
+    /// `RoutingConfig::get_checked()`'s process-wide cache makes this
+    /// untestable as a same-process integration test — that cache is
+    /// exactly what makes it possible to characterize ONLY at this DI
+    /// level, where `config` is a plain parameter, not a cached global).
+    /// A caller can only ever check "does this id exist at the PRE-gate
+    /// target" (never at wherever a PRIOR run under the OLD config actually
+    /// placed it) — so when the registered route changes, the SAME
+    /// deterministic id resolves to a DIFFERENT store on the next call,
+    /// with nothing here (or in any of this PR's callers) aware that a
+    /// copy may already exist at the OLD destination. Two independent rows
+    /// under the same id, split across two stores, is the direct
+    /// consequence. Closing this for real requires persistent per-id
+    /// "last known location" tracking (a schema-level change), deferred
+    /// alongside #1115's check-then-insert atomicity work — not solved by
+    /// this PR.
+    #[test]
+    fn config_change_between_calls_reroutes_a_stable_id_to_a_different_store() {
+        let config_a = RoutingConfig {
+            domain_routes: vec![crate::memory_search_ops::routing_config::DomainRoute {
+                project: "store-a".to_string(),
+                domains: vec!["equity_trading".to_string()],
+            }],
+            ..Default::default()
+        };
+        let config_b = RoutingConfig {
+            domain_routes: vec![crate::memory_search_ops::routing_config::DomainRoute {
+                project: "store-b".to_string(),
+                domains: vec!["equity_trading".to_string()],
+            }],
+            ..Default::default()
+        };
+        let both_mounted = |project: &str| project == "store-a" || project == "store-b";
+
+        // "Before a routing.json edit + daemon restart": the id doesn't
+        // exist anywhere yet (`id_resolves_at_target: false`) — routes to A.
+        let before_restart = apply_write_affinity_for_domain_with(
+            Some("equity_trading"),
+            DbScope::Project,
+            Some("quant"),
+            false,
+            false,
+            &config_a,
+            Some("quant".to_string()),
+            both_mounted,
+        )
+        .unwrap();
+        assert_eq!(before_restart.named_project.as_deref(), Some("store-a"));
+
+        // "After the restart, with routing.json now pointing this domain at
+        // B": a caller can only ever check the pre-gate target for
+        // existence (never store-a, where the prior run actually placed
+        // it) — id_resolves_at_target is STILL false here, honestly
+        // reflecting what any real caller could know.
+        let after_restart = apply_write_affinity_for_domain_with(
+            Some("equity_trading"),
+            DbScope::Project,
+            Some("quant"),
+            false,
+            false,
+            &config_b,
+            Some("quant".to_string()),
+            both_mounted,
+        )
+        .unwrap();
+        assert_eq!(
+            after_restart.named_project.as_deref(),
+            Some("store-b"),
+            "documents the known limitation: the SAME deterministic id resolves \
+             to a DIFFERENT store once the registry changes, with nothing here \
+             aware a copy may already exist at store-a from before the change — \
+             this is what lets a row split across two stores. If this assertion \
+             ever needs to change because the gate gained cross-call memory of \
+             prior placements, that's a genuine improvement, not a regression."
+        );
     }
 }

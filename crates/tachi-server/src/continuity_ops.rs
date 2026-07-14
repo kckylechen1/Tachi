@@ -372,4 +372,290 @@ mod tests {
         .expect("list gates");
         assert!(gates.is_empty());
     }
+
+    /// #1114 codex round-3 item 4 fix: replaces a HOLLOW test (`storage.rs`'s
+    /// `read_failure_at_pretarget_propagates_instead_of_being_treated_as_absence`,
+    /// removed) that only asserted `get_projection_memory` itself returns
+    /// `Err` on a read failure — true both before AND after the #1114 fix,
+    /// since that helper already propagated errors at the base level. The
+    /// line actually changed was ONE LAYER UP, in `projection.rs`'s loop:
+    /// `id_resolves_at_pretarget = get_projection_memory(...).ok().flatten()
+    /// .is_some()` silently collapsed a read failure to `false` ("doesn't
+    /// exist") before the #1114 fix; `?` now propagates it. This test drives
+    /// the REAL entry point (`project_auto_continuity_events_for_target`)
+    /// and proves THAT layer surfaces the failure as a real `Err`, not a
+    /// silently-completed report.
+    ///
+    /// Constructing "read_events succeeds, but the projection-write target's
+    /// existence check fails" against the SAME store (continuity events and
+    /// their projections share one store) needs the failure to be scoped to
+    /// exactly the `memories` table, not the whole file — a raw
+    /// `DROP TABLE memories` (leaving `tachi_events` intact) does that
+    /// precisely, without needing any `RoutingConfig`/`routing.json`
+    /// involvement at all: this pre-gate check runs unconditionally, before
+    /// domain resolution or the write-affinity gate are ever reached, so
+    /// this test has NONE of the process-wide `RoutingConfig` cache
+    /// exposure #1114's OTHER, routing-dependent tests carry (see
+    /// `memory_search_ops::save_memory::write_affinity::tests::
+    /// config_change_between_calls_reroutes_a_stable_id_to_a_different_store`'s
+    /// doc for that limitation, and this file's own
+    /// `project_continuity_events_hard_aborts_on_write_affinity_refusal`/
+    /// `project_auto_continuity_events_soft_continues_with_typed_error_kind_on_refusal`
+    /// below, which DO carry it) — this one is reliable under both nextest
+    /// and plain `cargo test`.
+    #[test]
+    fn project_auto_continuity_events_propagates_a_downstream_read_failure() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = dir.path().join("memory.db");
+        let server = MemoryServer::new(db.clone(), None).expect("test server");
+
+        server
+            .with_global_store(|store| {
+                let event = TachiEventRecord {
+                    id: "session-captured-read-failure".to_string(),
+                    source_repo: "tachi".to_string(),
+                    adapter: "test".to_string(),
+                    project: "sigil".to_string(),
+                    domain: "agent_os".to_string(),
+                    session_id: "s1".to_string(),
+                    actor: "codex".to_string(),
+                    event_type: "session.captured".to_string(),
+                    authority: AuthorityLevel::RawFact,
+                    effects: vec![EffectScope::MemoryWrite, EffectScope::ProjectCycle],
+                    projection_hints: vec![ProjectionKind::Timeline, ProjectionKind::ProjectCycle],
+                    payload: json!({
+                        "summary": "session captured before the memories table vanished",
+                        "text": "auto-projectable event seeded for the read-failure test",
+                        "projection_key": "read-failure-timeline",
+                    }),
+                    provenance: json!({"source": "test"}),
+                    created_at: now_rfc3339(),
+                };
+                store.insert_tachi_event(&event).map_err(|e| e.to_string())
+            })
+            .expect("seed one auto-projectable event");
+
+        // Drop ONLY the `memories` table (leaving `tachi_events` intact) —
+        // `read_events` (which queries `tachi_events`) still succeeds and
+        // returns the seeded event; the per-projection pre-gate existence
+        // check (which queries `memories`) now genuinely fails to read,
+        // exactly the scenario the #1114 fix propagates instead of
+        // silently swallowing.
+        {
+            let raw = rusqlite::Connection::open(&db).expect("open raw sqlite connection");
+            raw.execute("DROP TABLE memories", [])
+                .expect("drop the memories table");
+        }
+
+        let result = project_auto_continuity_events_for_target(
+            &server,
+            ContinuityEventTarget::new(DbScope::Global, None, None),
+            20,
+        );
+        let err = result.expect_err(
+            "a genuine read failure on the projection-write target must propagate as Err, \
+             not silently complete as if the row simply didn't exist",
+        );
+        assert!(
+            err.contains("memories") || err.contains("no such table"),
+            "expected the underlying SQLite error to surface, got: {err}"
+        );
+    }
+
+    /// `params.domain`, unlike an event's own `domain` field, is only a
+    /// QUERY filter here (`event_query_from_params` feeds it straight into
+    /// `TachiEventQuery::domain`) — left `None` so the call picks up every
+    /// seeded event regardless of its own domain, matching how a real
+    /// `action=project` call is normally invoked (no domain filter).
+    fn project_action_params() -> TachiEventParams {
+        TachiEventParams {
+            action: "project".to_string(),
+            format: None,
+            id: None,
+            source_repo: None,
+            adapter: None,
+            project: None,
+            project_explicit: false,
+            domain: None,
+            session_id: None,
+            actor: None,
+            event_type: None,
+            authority: None,
+            effects: Vec::new(),
+            projection_hints: vec!["timeline".to_string()],
+            payload: None,
+            provenance: None,
+            created_at: None,
+            limit: 20,
+            path_prefix: None,
+            dry_run: false,
+        }
+    }
+
+    fn seed_trading_event(server: &MemoryServer, id: &str, key: &str) {
+        server
+            .with_project_store(|store| {
+                let event = TachiEventRecord {
+                    id: id.to_string(),
+                    source_repo: "tachi".to_string(),
+                    adapter: "test".to_string(),
+                    project: "quant".to_string(),
+                    domain: "equity_trading".to_string(),
+                    session_id: "s1".to_string(),
+                    actor: "codex".to_string(),
+                    event_type: "session.captured".to_string(),
+                    authority: AuthorityLevel::RawFact,
+                    effects: vec![EffectScope::MemoryWrite, EffectScope::ProjectCycle],
+                    projection_hints: vec![ProjectionKind::Timeline],
+                    payload: json!({
+                        "summary": "trading content routed to an unmounted store",
+                        "text": "write-affinity refusal scenario",
+                        "projection_key": key,
+                    }),
+                    provenance: json!({"source": "test"}),
+                    created_at: now_rfc3339(),
+                };
+                store.insert_tachi_event(&event).map_err(|e| e.to_string())
+            })
+            .expect("seed trading event");
+    }
+
+    fn seed_engineering_event(server: &MemoryServer, id: &str, key: &str) {
+        server
+            .with_project_store(|store| {
+                let event = TachiEventRecord {
+                    id: id.to_string(),
+                    source_repo: "tachi".to_string(),
+                    adapter: "test".to_string(),
+                    project: "quant".to_string(),
+                    domain: "engineering".to_string(),
+                    session_id: "s1".to_string(),
+                    actor: "codex".to_string(),
+                    event_type: "session.captured".to_string(),
+                    authority: AuthorityLevel::RawFact,
+                    effects: vec![EffectScope::MemoryWrite, EffectScope::ProjectCycle],
+                    projection_hints: vec![ProjectionKind::Timeline],
+                    payload: json!({
+                        "summary": "unregistered-domain content, must project normally",
+                        "text": "ordinary passthrough scenario",
+                        "projection_key": key,
+                    }),
+                    provenance: json!({"source": "test"}),
+                    created_at: now_rfc3339(),
+                };
+                store.insert_tachi_event(&event).map_err(|e| e.to_string())
+            })
+            .expect("seed engineering event");
+    }
+
+    fn bound_quant_server(home: &std::path::Path) -> MemoryServer {
+        let quant_db = home.join("projects").join("quant").join("memory.db");
+        std::fs::create_dir_all(quant_db.parent().unwrap()).expect("mkdir quant");
+        let global_db = home.join("global").join("memory.db");
+        std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+        MemoryServer::new(global_db, Some(quant_db)).expect("bind quant daemon")
+    }
+
+    // #1114 codex round-3 item 5 note (applies to BOTH tests below, not
+    // repeated per-test): these two rely on the REAL, cached
+    // `RoutingConfig::get_checked()` (via `apply_write_affinity_for_domain`)
+    // seeing THIS test's own `routing.json` — reliable under nextest (each
+    // test its own process, this repo's default/CI runner), not guaranteed
+    // under a shared-process plain `cargo test` if some OTHER test in the
+    // same binary already cached a conflicting config first. This is the
+    // SAME pre-existing, accepted characteristic every #1114 routing.json
+    // -dependent test in this crate already carries (see
+    // `memory_search_ops::save_memory::write_affinity::tests::
+    // config_change_between_calls_reroutes_a_stable_id_to_a_different_store`'s
+    // doc) — not a NEW isolation problem introduced here, and not solvable
+    // without a `#[cfg(test)]`-only cache-reset hook in `routing_config.rs`
+    // (a real production-infra change, out of scope for this bounded PR).
+
+    /// #1114 codex round-3 item 3 point ① discriminating RED test: a live,
+    /// explicit `action=project` call (`project_continuity_events`,
+    /// `auto_only == false` always) must HARD-ABORT when the write-affinity
+    /// gate refuses a row — a real `Err`, never silently folded into an
+    /// `Ok({"status": "partial", ...})` the caller might not inspect.
+    /// Reverting `projection.rs`'s `!auto_only` branch of the hard-abort
+    /// condition turns this from red to green incorrectly (i.e. makes it
+    /// pass when it shouldn't) — this test is what would catch that.
+    #[test]
+    fn project_continuity_events_hard_aborts_on_write_affinity_refusal() {
+        crate::test_support::with_tachi_home(|home| {
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing.json");
+            let server = bound_quant_server(home);
+            // "hapi" is registered but never mounted.
+            seed_trading_event(&server, "explicit-refusal-1", "explicit-refusal");
+
+            let params = project_action_params();
+            let result = project_continuity_events(&server, &params);
+            let err = result.expect_err(
+                "an explicit action=project call must hard-abort on a write-affinity \
+                 refusal, not silently report status: partial",
+            );
+            assert!(err.contains("equity_trading"));
+            assert!(err.contains("hapi"));
+        });
+    }
+
+    /// #1114 codex round-3 item 3 point ② discriminating RED test: the
+    /// background auto-sweep (`project_auto_continuity_events_for_target`,
+    /// `auto_only == true` always) must SOFT-CONTINUE on an ordinary
+    /// per-domain write-affinity refusal — `Ok(...)` with `status:
+    /// "partial"`, the refused row's error entry carrying a typed
+    /// `error_kind`, and OTHER rows in the same sweep still processed.
+    /// Reverting the auto-sweep to hard-abort (or dropping `error_kind`
+    /// from the JSON) turns this from green to red.
+    #[test]
+    fn project_auto_continuity_events_soft_continues_with_typed_error_kind_on_refusal() {
+        crate::test_support::with_tachi_home(|home| {
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing.json");
+            let server = bound_quant_server(home);
+            // "hapi" is registered but never mounted -> the trading event
+            // must be refused; "engineering" has no registered route at
+            // all -> must project normally (proves the sweep continues).
+            seed_trading_event(&server, "auto-refusal-1", "auto-refusal");
+            seed_engineering_event(&server, "auto-ok-1", "auto-ok");
+
+            let report = project_auto_continuity_events_for_target(
+                &server,
+                ContinuityEventTarget::new(DbScope::Project, None, None),
+                20,
+            )
+            .expect(
+                "the auto-sweep must soft-continue (Ok), not hard-abort, on an \
+                 ordinary per-domain refusal",
+            );
+            assert_eq!(
+                report["status"],
+                json!("partial"),
+                "one refused row must still surface as a partial batch: {report}"
+            );
+            assert!(
+                report["projected_count"].as_u64().unwrap_or(0) >= 1,
+                "the unaffected (engineering) event must still have been \
+                 projected — the sweep must not stop at the first refusal: {report}"
+            );
+            let errors = report["errors"].as_array().expect("errors array");
+            assert_eq!(
+                errors.len(),
+                1,
+                "exactly the trading row must be refused: {report}"
+            );
+            assert_eq!(
+                errors[0]["error_kind"],
+                json!("unmounted_route"),
+                "the refusal must carry a typed, machine-checkable kind, not just a \
+                 stringified message: {report}"
+            );
+        });
+    }
 }

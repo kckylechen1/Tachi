@@ -220,6 +220,25 @@ fn projection_domain_label(event: &TachiEventRecord, path: &str, category: &str)
     .or_else(|| Some(raw.to_string()))
 }
 
+/// #1114 (codex round-1 B3 fix): the domain a projection WOULD carry,
+/// computed the exact same way `build_projection_entry` computes
+/// `entry.domain` (same `path`/`category` inputs), but WITHOUT building the
+/// rest of the entry (keywords/entities/metadata JSON) — so the write
+/// -affinity gate can be evaluated, and its routed destination resolved,
+/// BEFORE the existing-row lookup that `build_projection_entry`'s merge
+/// logic depends on. See `projection.rs`'s `resolve_projection_write_target`
+/// for why the ordering matters (a stale pre-gate lookup silently resets a
+/// rerouted projection's aggregation state on every subsequent run).
+pub(in crate::continuity_ops) fn projection_event_domain(
+    event: &TachiEventRecord,
+    projection: ProjectionKind,
+    key: &str,
+) -> Option<String> {
+    let path = projection_path(event, projection, key);
+    let category = projection_category(projection);
+    projection_domain_label(event, &path, category)
+}
+
 fn projected_summary(event: &TachiEventRecord, projection: ProjectionKind) -> String {
     let payload = nested_payload(event);
     string_value(payload, &["summary", "title", "state", "outcome", "label"])

@@ -278,6 +278,26 @@ pub(crate) fn project_defaults_to_bound_project(tool_name: &str, args: &JsonObje
             | "tachi_wiki"
             | "wiki_write"
             | "tachi_wiki_write"
+            // #1114 (codex round-1 B2 fix): `capture_session` omitting
+            // `project=` used to fall all the way through
+            // `resolve_capture_target` to `resolve_write_scope`, which
+            // resolves the DAEMON's own static `has_project_db()` binding —
+            // NOT the calling HTTP/stdio session's own bound project
+            // (`self.session_project()`, which can differ per session on a
+            // daemon serving multiple bound sessions). Without this entry,
+            // a session bound to project B calling `capture_session`
+            // without `project=` silently captured rows into the daemon's
+            // project A. Adding it here makes `enforce_session_project`
+            // inject the SESSION's own bound project (with
+            // `project_explicit: false`) the same way every other
+            // project-defaulting write tool already gets.
+            | "capture_session"
+            // #1114 (codex round-2 item 2 fix): `compact_session_memory`
+            // calls the SAME `resolve_capture_target` as `capture_session`
+            // and has the identical exposure — a session bound to project B
+            // compacting through a daemon whose own static binding is
+            // project A would silently land the compacted rollup in A.
+            | "compact_session_memory"
     ) || tool_name == "tachi_memory"
 }
 
@@ -855,6 +875,88 @@ mod tests {
                 .and_then(|v| v.as_bool()),
             Some(false),
             "a transport-injected default must be stamped NOT explicit"
+        );
+    }
+
+    /// #1114 codex round-1 B2 discriminating test: `capture_session` must
+    /// get the SAME session-bound-project injection every other
+    /// project-defaulting write tool gets. Before the B2 fix,
+    /// `project_defaults_to_bound_project` did not list `capture_session`,
+    /// so `enforce_session_project` returned early without touching
+    /// `args["project"]` at all — a session bound to a DIFFERENT project
+    /// than whatever the daemon's own static `has_project_db()` happens to
+    /// be would have its capture rows silently fall through
+    /// `resolve_capture_target`/`resolve_write_scope` into the daemon's
+    /// default project instead of the session's own bound one.
+    #[test]
+    fn capture_session_omitted_project_is_injected_from_session_binding() {
+        let mut arguments = args(map_from(&[
+            ("conversation_id", json!("c1")),
+            ("turn_id", json!("t1")),
+            ("agent_id", json!("agent")),
+        ]));
+        enforce_session_project(
+            "capture_session",
+            &mut arguments,
+            "project-b",
+            "HTTP direct-connect",
+            EnforcementRole::Authoritative,
+        )
+        .expect("inject session-bound project");
+        assert_eq!(
+            arguments
+                .as_ref()
+                .and_then(|a| a.get("project"))
+                .and_then(|v| v.as_str()),
+            Some("project-b"),
+            "capture_session omitting project= must get the SESSION's own \
+             bound project injected, not fall through to the daemon's static \
+             default further down the call chain"
+        );
+        assert_eq!(
+            arguments
+                .as_ref()
+                .and_then(|a| a.get(PROJECT_EXPLICIT_MARKER))
+                .and_then(|v| v.as_bool()),
+            Some(false),
+            "the injected value is a transport default, not a caller decision"
+        );
+    }
+
+    /// #1114 codex round-2 item 2 discriminating test: `compact_session_memory`
+    /// has the SAME `resolve_capture_target` exposure `capture_session` does
+    /// — same fix, same allowlist entry.
+    #[test]
+    fn compact_session_memory_omitted_project_is_injected_from_session_binding() {
+        let mut arguments = args(map_from(&[
+            ("agent_id", json!("agent")),
+            ("conversation_id", json!("c1")),
+            ("window_id", json!("w1")),
+        ]));
+        enforce_session_project(
+            "compact_session_memory",
+            &mut arguments,
+            "project-b",
+            "HTTP direct-connect",
+            EnforcementRole::Authoritative,
+        )
+        .expect("inject session-bound project");
+        assert_eq!(
+            arguments
+                .as_ref()
+                .and_then(|a| a.get("project"))
+                .and_then(|v| v.as_str()),
+            Some("project-b"),
+            "compact_session_memory omitting project= must get the SESSION's \
+             own bound project injected"
+        );
+        assert_eq!(
+            arguments
+                .as_ref()
+                .and_then(|a| a.get(PROJECT_EXPLICIT_MARKER))
+                .and_then(|v| v.as_bool()),
+            Some(false),
+            "the injected value is a transport default, not a caller decision"
         );
     }
 
