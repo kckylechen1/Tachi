@@ -1,56 +1,5 @@
 use super::*;
-
-struct EnvGuard {
-    key: &'static str,
-    original: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn set_path(key: &'static str, value: &Path) -> Self {
-        let original = std::env::var_os(key);
-        // SAFETY: arena tests that use this helper hold tachi_arena_root_env_lock.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, original }
-    }
-
-    fn set(key: &'static str, value: &str) -> Self {
-        let original = std::env::var_os(key);
-        // SAFETY: arena tests that use this helper hold tachi_arena_root_env_lock.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, original }
-    }
-
-    fn prepend_path(key: &'static str, dir: &Path) -> Self {
-        let original = std::env::var_os(key);
-        let mut paths = vec![dir.to_path_buf()];
-        if let Some(value) = original.as_ref() {
-            paths.extend(std::env::split_paths(value));
-        }
-        let joined = std::env::join_paths(paths).expect("join PATH");
-        // SAFETY: arena tests that use this helper hold tachi_arena_root_env_lock.
-        unsafe {
-            std::env::set_var(key, joined);
-        }
-        Self { key, original }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        // SAFETY: arena tests that use this helper hold tachi_arena_root_env_lock.
-        unsafe {
-            if let Some(value) = self.original.as_ref() {
-                std::env::set_var(self.key, value);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
-}
+use crate::test_support::EnvRestore;
 
 // Same worst-case ceiling as before (40 * 100ms = 200 * 20ms = 4s); a finer
 // poll interval lets the common fast-resolving case return sooner without
@@ -132,8 +81,20 @@ async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
         perms.set_mode(0o755);
         std::fs::set_permissions(&opencode_path, perms).expect("chmod fake opencode");
     }
-    let _home = EnvGuard::set_path("TACHI_HOME", temp_home.path());
-    let _path = EnvGuard::prepend_path("PATH", fake_bin.path());
+    let _home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
+    let _path = {
+        let mut paths = vec![fake_bin.path().to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        EnvRestore::set(
+            "PATH",
+            std::env::join_paths(paths)
+                .expect("join PATH")
+                .to_str()
+                .expect("PATH UTF-8"),
+        )
+    };
 
     let server = server();
     let mut open = params("open");
@@ -292,9 +253,21 @@ async fn arena_opencode_executor_fallback_uses_glm_registry_model() {
         perms.set_mode(0o755);
         std::fs::set_permissions(&opencode_path, perms).expect("chmod fake opencode");
     }
-    let _home = EnvGuard::set_path("TACHI_HOME", temp_home.path());
-    let _path = EnvGuard::prepend_path("PATH", fake_bin.path());
-    let _model = EnvGuard::set("TACHI_DISPATCH_GLM_CODING_MODEL", "zhipuai/glm-5.2-arena");
+    let _home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
+    let _path = {
+        let mut paths = vec![fake_bin.path().to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        EnvRestore::set(
+            "PATH",
+            std::env::join_paths(paths)
+                .expect("join PATH")
+                .to_str()
+                .expect("PATH UTF-8"),
+        )
+    };
+    let _model = EnvRestore::set("TACHI_DISPATCH_GLM_CODING_MODEL", "zhipuai/glm-5.2-arena");
 
     let server = server();
     let mut open = params("open");

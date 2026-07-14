@@ -29,17 +29,6 @@ fn with_tachi_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
     f()
 }
 
-// Still used by the ~44 hand-rolled save/set/restore sites further down this
-// file; those migrate to `EnvRestore` in the mechanical follow-up leaf, and
-// this helper leaves with them.
-fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
-    if let Some(value) = value {
-        std::env::set_var(name, value);
-    } else {
-        std::env::remove_var(name);
-    }
-}
-
 fn test_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -264,11 +253,6 @@ fn ensure_stdio_proxy_accepts_global_only_daemon_for_project_client() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var_os("TACHI_HOME");
-    let saved_sigil = std::env::var_os("SIGIL_HOME");
-    let saved_app = std::env::var_os("TACHI_APP_HOME");
-    let saved_disable_proxy = std::env::var_os("TACHI_DISABLE_STDIO_PROXY");
-    let saved_disable_auto = std::env::var_os("TACHI_DISABLE_AUTO_DAEMON");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
@@ -277,11 +261,11 @@ fn ensure_stdio_proxy_accepts_global_only_daemon_for_project_client() {
     std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
     std::fs::create_dir_all(project.parent().expect("project parent")).expect("project parent");
     std::fs::write(&project, b"").expect("project db placeholder");
-    std::env::set_var("TACHI_HOME", &tachi_home);
-    std::env::remove_var("SIGIL_HOME");
-    std::env::remove_var("TACHI_APP_HOME");
-    std::env::remove_var("TACHI_DISABLE_STDIO_PROXY");
-    std::env::set_var("TACHI_DISABLE_AUTO_DAEMON", "1");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+    let _disable_proxy = EnvRestore::remove("TACHI_DISABLE_STDIO_PROXY");
+    let _disable_auto = EnvRestore::set("TACHI_DISABLE_AUTO_DAEMON", "1");
 
     let rt = test_runtime();
     let listener = rt
@@ -315,11 +299,6 @@ fn ensure_stdio_proxy_accepts_global_only_daemon_for_project_client() {
     assert_eq!(info.url, format!("http://127.0.0.1:{port}/mcp"));
 
     drop(listener);
-    restore_env("TACHI_HOME", saved_home);
-    restore_env("SIGIL_HOME", saved_sigil);
-    restore_env("TACHI_APP_HOME", saved_app);
-    restore_env("TACHI_DISABLE_STDIO_PROXY", saved_disable_proxy);
-    restore_env("TACHI_DISABLE_AUTO_DAEMON", saved_disable_auto);
 }
 
 #[test]
@@ -327,9 +306,6 @@ fn stdio_proxy_call_writes_bound_project_via_global_only_daemon() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var_os("TACHI_HOME");
-    let saved_sigil = std::env::var_os("SIGIL_HOME");
-    let saved_app = std::env::var_os("TACHI_APP_HOME");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
@@ -340,9 +316,9 @@ fn stdio_proxy_call_writes_bound_project_via_global_only_daemon() {
         .join(project_name)
         .join("memory.db");
     std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-    std::env::set_var("TACHI_HOME", &tachi_home);
-    std::env::remove_var("SIGIL_HOME");
-    std::env::remove_var("TACHI_APP_HOME");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
     seed_project_db(&tachi_home, &project);
 
     let rt = test_runtime();
@@ -387,9 +363,6 @@ fn stdio_proxy_call_writes_bound_project_via_global_only_daemon() {
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
-    restore_env("TACHI_HOME", saved_home);
-    restore_env("SIGIL_HOME", saved_sigil);
-    restore_env("TACHI_APP_HOME", saved_app);
 }
 
 #[test]
@@ -397,9 +370,6 @@ fn stdio_proxy_same_db_alias_write_normalizes_to_bound_identity() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var_os("TACHI_HOME");
-    let saved_sigil = std::env::var_os("SIGIL_HOME");
-    let saved_app = std::env::var_os("TACHI_APP_HOME");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
@@ -407,9 +377,9 @@ fn stdio_proxy_same_db_alias_write_normalizes_to_bound_identity() {
     let repo = temp.path().join("repos/Sigil");
     let project = repo.join(".tachi/memory.db");
     std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-    std::env::set_var("TACHI_HOME", &tachi_home);
-    std::env::remove_var("SIGIL_HOME");
-    std::env::remove_var("TACHI_APP_HOME");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
     seed_project_db(&tachi_home, &project);
     write_repo_project_manifest(&tachi_home, &[&project]);
     let bound_name = crate::path_utils::plan_c_dir_name_from_root(&repo).expect("hashed name");
@@ -480,9 +450,6 @@ fn stdio_proxy_same_db_alias_write_normalizes_to_bound_identity() {
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
-    restore_env("TACHI_HOME", saved_home);
-    restore_env("SIGIL_HOME", saved_sigil);
-    restore_env("TACHI_APP_HOME", saved_app);
 }
 
 #[test]
@@ -490,9 +457,6 @@ fn stdio_proxy_call_rejects_cross_project_override_before_daemon_write() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var_os("TACHI_HOME");
-    let saved_sigil = std::env::var_os("SIGIL_HOME");
-    let saved_app = std::env::var_os("TACHI_APP_HOME");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
@@ -508,9 +472,9 @@ fn stdio_proxy_call_rejects_cross_project_override_before_daemon_write() {
         .join(other_project_name)
         .join("memory.db");
     std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-    std::env::set_var("TACHI_HOME", &tachi_home);
-    std::env::remove_var("SIGIL_HOME");
-    std::env::remove_var("TACHI_APP_HOME");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
     seed_project_db(&tachi_home, &bound_project);
     seed_project_db(&tachi_home, &other_project);
 
@@ -564,9 +528,6 @@ fn stdio_proxy_call_rejects_cross_project_override_before_daemon_write() {
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
-    restore_env("TACHI_HOME", saved_home);
-    restore_env("SIGIL_HOME", saved_sigil);
-    restore_env("TACHI_APP_HOME", saved_app);
 }
 
 #[test]
@@ -574,9 +535,6 @@ fn stdio_proxy_tachi_search_returns_global_and_bound_project_rows() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var_os("TACHI_HOME");
-    let saved_sigil = std::env::var_os("SIGIL_HOME");
-    let saved_app = std::env::var_os("TACHI_APP_HOME");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
@@ -587,9 +545,9 @@ fn stdio_proxy_tachi_search_returns_global_and_bound_project_rows() {
         .join(project_name)
         .join("memory.db");
     std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-    std::env::set_var("TACHI_HOME", &tachi_home);
-    std::env::remove_var("SIGIL_HOME");
-    std::env::remove_var("TACHI_APP_HOME");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
     seed_project_db(&tachi_home, &project);
 
     let rt = test_runtime();
@@ -670,9 +628,6 @@ fn stdio_proxy_tachi_search_returns_global_and_bound_project_rows() {
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
-    restore_env("TACHI_HOME", saved_home);
-    restore_env("SIGIL_HOME", saved_sigil);
-    restore_env("TACHI_APP_HOME", saved_app);
 }
 
 #[test]
@@ -680,9 +635,6 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var_os("TACHI_HOME");
-    let saved_sigil = std::env::var_os("SIGIL_HOME");
-    let saved_app = std::env::var_os("TACHI_APP_HOME");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
@@ -698,9 +650,9 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
         .join(other_project_name)
         .join("memory.db");
     std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-    std::env::set_var("TACHI_HOME", &tachi_home);
-    std::env::remove_var("SIGIL_HOME");
-    std::env::remove_var("TACHI_APP_HOME");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
     seed_project_db(&tachi_home, &bound_project);
     seed_project_db(&tachi_home, &other_project);
 
@@ -782,9 +734,6 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
-    restore_env("TACHI_HOME", saved_home);
-    restore_env("SIGIL_HOME", saved_sigil);
-    restore_env("TACHI_APP_HOME", saved_app);
 }
 
 #[test]
@@ -792,9 +741,6 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var_os("TACHI_HOME");
-    let saved_sigil = std::env::var_os("SIGIL_HOME");
-    let saved_app = std::env::var_os("TACHI_APP_HOME");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
@@ -805,9 +751,9 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
         .join(project_name)
         .join("memory.db");
     std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-    std::env::set_var("TACHI_HOME", &tachi_home);
-    std::env::remove_var("SIGIL_HOME");
-    std::env::remove_var("TACHI_APP_HOME");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
     seed_project_db(&tachi_home, &project);
 
     let rt = test_runtime();
@@ -898,9 +844,6 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
-    restore_env("TACHI_HOME", saved_home);
-    restore_env("SIGIL_HOME", saved_sigil);
-    restore_env("TACHI_APP_HOME", saved_app);
 }
 
 #[test]
@@ -908,9 +851,6 @@ fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var_os("TACHI_HOME");
-    let saved_sigil = std::env::var_os("SIGIL_HOME");
-    let saved_app = std::env::var_os("TACHI_APP_HOME");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
@@ -921,9 +861,9 @@ fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
         .join(project_name)
         .join("memory.db");
     std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-    std::env::set_var("TACHI_HOME", &tachi_home);
-    std::env::remove_var("SIGIL_HOME");
-    std::env::remove_var("TACHI_APP_HOME");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
     seed_project_db(&tachi_home, &project);
 
     let rt = test_runtime();
@@ -1014,9 +954,6 @@ fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
-    restore_env("TACHI_HOME", saved_home);
-    restore_env("SIGIL_HOME", saved_sigil);
-    restore_env("TACHI_APP_HOME", saved_app);
 }
 
 #[test]
@@ -1595,9 +1532,6 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var_os("TACHI_HOME");
-    let saved_sigil = std::env::var_os("SIGIL_HOME");
-    let saved_app = std::env::var_os("TACHI_APP_HOME");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
@@ -1608,9 +1542,9 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
         .join(project_name)
         .join("memory.db");
     std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-    std::env::set_var("TACHI_HOME", &tachi_home);
-    std::env::remove_var("SIGIL_HOME");
-    std::env::remove_var("TACHI_APP_HOME");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
     seed_project_db(&tachi_home, &project);
 
     let rt = test_runtime();
@@ -1735,9 +1669,6 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
-    restore_env("TACHI_HOME", saved_home);
-    restore_env("SIGIL_HOME", saved_sigil);
-    restore_env("TACHI_APP_HOME", saved_app);
 }
 
 #[test]
@@ -1745,17 +1676,14 @@ fn http_direct_connect_rejects_admin_profile_without_authorization_policy() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var_os("TACHI_HOME");
-    let saved_sigil = std::env::var_os("SIGIL_HOME");
-    let saved_app = std::env::var_os("TACHI_APP_HOME");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
     let global = tachi_home.join("global/memory.db");
     std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-    std::env::set_var("TACHI_HOME", &tachi_home);
-    std::env::remove_var("SIGIL_HOME");
-    std::env::remove_var("TACHI_APP_HOME");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
 
     let rt = test_runtime();
     let (ct, daemon_task) = rt.block_on(async {
@@ -1777,9 +1705,6 @@ fn http_direct_connect_rejects_admin_profile_without_authorization_policy() {
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
-    restore_env("TACHI_HOME", saved_home);
-    restore_env("SIGIL_HOME", saved_sigil);
-    restore_env("TACHI_APP_HOME", saved_app);
 }
 
 #[test]
@@ -1788,9 +1713,6 @@ fn http_direct_connect_unbound_session_rejects_explicit_cross_project_write() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var_os("TACHI_HOME");
-    let saved_sigil = std::env::var_os("SIGIL_HOME");
-    let saved_app = std::env::var_os("TACHI_APP_HOME");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
@@ -1806,9 +1728,9 @@ fn http_direct_connect_unbound_session_rejects_explicit_cross_project_write() {
         .join(victim_project_name)
         .join("memory.db");
     std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-    std::env::set_var("TACHI_HOME", &tachi_home);
-    std::env::remove_var("SIGIL_HOME");
-    std::env::remove_var("TACHI_APP_HOME");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
     seed_project_db(&tachi_home, &attacker_project);
     seed_project_db(&tachi_home, &victim_project);
 
@@ -1897,9 +1819,6 @@ fn http_direct_connect_unbound_session_rejects_explicit_cross_project_write() {
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
-    restore_env("TACHI_HOME", saved_home);
-    restore_env("SIGIL_HOME", saved_sigil);
-    restore_env("TACHI_APP_HOME", saved_app);
 }
 
 /// #732: initialize result advertises HTTP direct-connect guidance (reconnect path).
@@ -1909,17 +1828,14 @@ fn http_direct_connect_initialize_advertises_http_guidance() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var_os("TACHI_HOME");
-    let saved_sigil = std::env::var_os("SIGIL_HOME");
-    let saved_app = std::env::var_os("TACHI_APP_HOME");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
     let global = tachi_home.join("global/memory.db");
     std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-    std::env::set_var("TACHI_HOME", &tachi_home);
-    std::env::remove_var("SIGIL_HOME");
-    std::env::remove_var("TACHI_APP_HOME");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
 
     let rt = test_runtime();
     let (ct, daemon_task) = rt.block_on(async {
@@ -1939,9 +1855,6 @@ fn http_direct_connect_initialize_advertises_http_guidance() {
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
-    restore_env("TACHI_HOME", saved_home);
-    restore_env("SIGIL_HOME", saved_sigil);
-    restore_env("TACHI_APP_HOME", saved_app);
 }
 
 /// #1061: HTTP direct-connect applies the same canonical alias equivalence as stdio.
@@ -1950,9 +1863,6 @@ fn http_direct_connect_same_db_alias_write_normalizes_to_bound_identity() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var_os("TACHI_HOME");
-    let saved_sigil = std::env::var_os("SIGIL_HOME");
-    let saved_app = std::env::var_os("TACHI_APP_HOME");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
@@ -1960,9 +1870,9 @@ fn http_direct_connect_same_db_alias_write_normalizes_to_bound_identity() {
     let repo = temp.path().join("repos/Sigil");
     let project = repo.join(".tachi/memory.db");
     std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-    std::env::set_var("TACHI_HOME", &tachi_home);
-    std::env::remove_var("SIGIL_HOME");
-    std::env::remove_var("TACHI_APP_HOME");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
     seed_project_db(&tachi_home, &project);
     write_repo_project_manifest(&tachi_home, &[&project]);
     let requested_alias =
@@ -2043,9 +1953,6 @@ fn http_direct_connect_same_db_alias_write_normalizes_to_bound_identity() {
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
-    restore_env("TACHI_HOME", saved_home);
-    restore_env("SIGIL_HOME", saved_sigil);
-    restore_env("TACHI_APP_HOME", saved_app);
 }
 
 /// #732 / #737: bound HTTP session rejects cross-project *writes* (reads remain allowed).
@@ -2054,9 +1961,6 @@ fn http_direct_connect_bound_session_rejects_cross_project_write() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let saved_home = std::env::var_os("TACHI_HOME");
-    let saved_sigil = std::env::var_os("SIGIL_HOME");
-    let saved_app = std::env::var_os("TACHI_APP_HOME");
 
     let temp = tempfile::tempdir().expect("tempdir");
     let tachi_home = temp.path().join("home");
@@ -2072,9 +1976,9 @@ fn http_direct_connect_bound_session_rejects_cross_project_write() {
         .join(other_name)
         .join("memory.db");
     std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
-    std::env::set_var("TACHI_HOME", &tachi_home);
-    std::env::remove_var("SIGIL_HOME");
-    std::env::remove_var("TACHI_APP_HOME");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
     seed_project_db(&tachi_home, &bound_project);
     seed_project_db(&tachi_home, &other_project);
 
@@ -2136,7 +2040,4 @@ fn http_direct_connect_bound_session_rejects_cross_project_write() {
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
-    restore_env("TACHI_HOME", saved_home);
-    restore_env("SIGIL_HOME", saved_sigil);
-    restore_env("TACHI_APP_HOME", saved_app);
 }

@@ -162,36 +162,7 @@ mod tests {
         root.join(".tachi").join("memory.db")
     }
 
-    /// Restore process env on drop even if a later assert panics.
-    /// Callers must hold [`crate::utils::global_test_lock`] for the guard's lifetime.
-    struct EnvGuard {
-        key: &'static str,
-        original: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn set_path(key: &'static str, value: &Path) -> Self {
-            let original = std::env::var_os(key);
-            // SAFETY: tests that use this helper hold global_test_lock.
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, original }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: tests that use this helper hold global_test_lock.
-            unsafe {
-                if let Some(value) = self.original.as_ref() {
-                    std::env::set_var(self.key, value);
-                } else {
-                    std::env::remove_var(self.key);
-                }
-            }
-        }
-    }
+    use crate::test_support::EnvRestore;
 
     #[test]
     fn format_binding_markdown_includes_warnings() {
@@ -245,7 +216,7 @@ mod tests {
         }
 
         // Drop-safe restore of TACHI_PROJECT_ROOT even if asserts panic.
-        let _project_root = EnvGuard::set_path("TACHI_PROJECT_ROOT", &workspace);
+        let _project_root = EnvRestore::set_path("TACHI_PROJECT_ROOT", &workspace);
 
         let global_db = tmp.path().join("global-memory.db");
         {

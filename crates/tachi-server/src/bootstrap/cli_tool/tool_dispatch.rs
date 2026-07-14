@@ -153,18 +153,9 @@ where
 mod tests {
     use super::cli_tool_allows_read_fallback;
     use crate::bootstrap::cli_tool::tool_dispatch::dispatch_cli_tool;
-    use std::ffi::OsString;
+    use crate::test_support::EnvRestore;
     use std::path::PathBuf;
     use tokio_util::sync::CancellationToken;
-
-    /// Restore an environment variable to its prior value (or remove it).
-    fn restore_env(name: &str, value: Option<OsString>) {
-        if let Some(value) = value {
-            std::env::set_var(name, value);
-        } else {
-            std::env::remove_var(name);
-        }
-    }
 
     /// Spawn a global-only HTTP MCP daemon (no project DB) on a random local
     /// port, mirroring the stdio-proxy test fixture pattern. Returns the bound
@@ -235,18 +226,12 @@ mod tests {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let saved_home = std::env::var_os("TACHI_HOME");
-        let saved_sigil = std::env::var_os("SIGIL_HOME");
-        let saved_app = std::env::var_os("TACHI_APP_HOME");
-        let saved_disable_proxy = std::env::var_os("TACHI_DISABLE_STDIO_PROXY");
-        let saved_disable_auto = std::env::var_os("TACHI_DISABLE_AUTO_DAEMON");
         // The in-process test daemon shares this process; mark it as the daemon
         // so its own tool handlers short-circuit `maybe_forward_*` (which would
         // otherwise detect the daemon's own PID file and loop). The CLI dispatch
         // path (`dispatch_cli_tool`) does not consult TACHI_DAEMON, so it still
         // detects and forwards to the daemon via the PID file.
-        let saved_is_daemon = std::env::var_os("TACHI_DAEMON");
-        std::env::set_var("TACHI_DAEMON", "1");
+        let _is_daemon = EnvRestore::set("TACHI_DAEMON", "1");
 
         let temp = tempfile::tempdir().expect("tempdir");
         let tachi_home = temp.path().join("home");
@@ -259,10 +244,10 @@ mod tests {
         std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
         std::fs::create_dir_all(cli_project.parent().expect("project parent"))
             .expect("project parent");
-        std::env::set_var("TACHI_HOME", &tachi_home);
-        std::env::remove_var("SIGIL_HOME");
-        std::env::remove_var("TACHI_APP_HOME");
-        std::env::set_var("TACHI_DISABLE_AUTO_DAEMON", "1");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        let _disable_auto = EnvRestore::set("TACHI_DISABLE_AUTO_DAEMON", "1");
 
         // Seed the project DB schema so the daemon can open it for the named project.
         let _seed = crate::MemoryServer::new(
@@ -385,12 +370,6 @@ mod tests {
 
         ct.cancel();
         rt.block_on(daemon_task).expect("daemon task");
-        restore_env("TACHI_HOME", saved_home);
-        restore_env("SIGIL_HOME", saved_sigil);
-        restore_env("TACHI_APP_HOME", saved_app);
-        restore_env("TACHI_DISABLE_STDIO_PROXY", saved_disable_proxy);
-        restore_env("TACHI_DISABLE_AUTO_DAEMON", saved_disable_auto);
-        restore_env("TACHI_DAEMON", saved_is_daemon);
     }
 
     #[test]

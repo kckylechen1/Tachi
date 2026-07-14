@@ -14,30 +14,8 @@ use super::{
     dispatch_params, wait_for_dispatch_result, DISPATCH_TEST_WAIT_ATTEMPTS,
     DISPATCH_TEST_WAIT_INTERVAL,
 };
+use crate::test_support::EnvRestore;
 use serde_json::{json, Value};
-
-struct EnvGuard {
-    key: &'static str,
-    original: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let original = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, original }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        if let Some(value) = self.original.as_ref() {
-            std::env::set_var(self.key, value);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
 
 /// Write a fake `claude` CLI at `path` that either succeeds with a
 /// minimal-but-valid plan envelope, or exits non-zero to force
@@ -165,10 +143,10 @@ async fn plan_stage_failure_closes_both_status_and_kanban_row() {
     let fake_claude = temp_home.path().join("claude-fail");
     write_fake_claude_binary(&fake_claude, FakeClaudeMode::Fail);
 
-    let _tachi_home = EnvGuard::set("TACHI_HOME", temp_home.path());
-    let _claude_bin = EnvGuard::set("CLAUDE_BIN", &fake_claude);
-    let _skip_perms = EnvGuard::set("TACHI_CLAUDE_SKIP_PERMISSIONS", "true");
-    let _v2_review = EnvGuard::set("DISPATCH_V2_PLAN_REVIEW", "false");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
+    let _claude_bin = EnvRestore::set_path("CLAUDE_BIN", &fake_claude);
+    let _skip_perms = EnvRestore::set("TACHI_CLAUDE_SKIP_PERMISSIONS", "true");
+    let _v2_review = EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
 
     let run_root = temp_home.path().join("runs");
     let server = make_server();
@@ -232,10 +210,10 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
         },
     );
 
-    let _tachi_home = EnvGuard::set("TACHI_HOME", temp_home.path());
-    let _claude_bin = EnvGuard::set("CLAUDE_BIN", &fake_claude);
-    let _skip_perms = EnvGuard::set("TACHI_CLAUDE_SKIP_PERMISSIONS", "true");
-    let _v2_review = EnvGuard::set("DISPATCH_V2_PLAN_REVIEW", "false");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
+    let _claude_bin = EnvRestore::set_path("CLAUDE_BIN", &fake_claude);
+    let _skip_perms = EnvRestore::set("TACHI_CLAUDE_SKIP_PERMISSIONS", "true");
+    let _v2_review = EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
 
     let run_root = temp_home.path().join("runs");
     let server = make_server();
@@ -345,10 +323,10 @@ async fn plan_review_pending_response_projects_input_required_kanban_state() {
     // pending-review early response.
     std::fs::write(&release_path, b"go").expect("write release sentinel");
 
-    let _tachi_home = EnvGuard::set("TACHI_HOME", temp_home.path());
-    let _claude_bin = EnvGuard::set("CLAUDE_BIN", &fake_claude);
-    let _skip_perms = EnvGuard::set("TACHI_CLAUDE_SKIP_PERMISSIONS", "true");
-    let _v2_review = EnvGuard::set("DISPATCH_V2_PLAN_REVIEW", "true");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
+    let _claude_bin = EnvRestore::set_path("CLAUDE_BIN", &fake_claude);
+    let _skip_perms = EnvRestore::set("TACHI_CLAUDE_SKIP_PERMISSIONS", "true");
+    let _v2_review = EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "true");
 
     let run_root = temp_home.path().join("runs");
     let server = make_server();
@@ -416,7 +394,7 @@ async fn v1_dispatch_status_and_kanban_unaffected_by_reorder() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let temp_home = tempfile::tempdir().expect("temp tachi home");
-    let _tachi_home = EnvGuard::set("TACHI_HOME", temp_home.path());
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
     let run_root = temp_home.path().join("runs");
     let server = make_server();
 

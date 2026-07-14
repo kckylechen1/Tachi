@@ -266,32 +266,24 @@ async fn save_grep_evidence_feedback_rule(server: &MemoryServer) -> String {
         .to_string()
 }
 
-struct EnvVarGuard {
-    key: &'static str,
-    original: Option<std::ffi::OsString>,
-}
+use crate::test_support::EnvRestore;
+
+/// Thin wrapper around [`EnvRestore`] so the ~60 call sites across the
+/// dispatch-tests sub-modules (which import this as `n`) keep their
+/// `n::set_path` / `n::set_value` syntax without each file needing its
+/// own import. #1096 leaf-2a.
+struct EnvVarGuard(EnvRestore);
 
 impl EnvVarGuard {
     fn set_path(key: &'static str, value: &std::path::Path) -> Self {
-        let original = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, original }
+        Self(EnvRestore::set_path(key, value))
     }
 
     fn set_value(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let original = std::env::var_os(key);
-        std::env::set_var(key, value);
-        Self { key, original }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        if let Some(value) = self.original.as_ref() {
-            std::env::set_var(self.key, value);
-        } else {
-            std::env::remove_var(self.key);
-        }
+        Self(EnvRestore::set(
+            key,
+            value.as_ref().to_str().expect("env value must be UTF-8"),
+        ))
     }
 }
 

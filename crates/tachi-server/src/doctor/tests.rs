@@ -9,13 +9,7 @@ fn with_env_lock<F: FnOnce()>(f: F) {
     f();
 }
 
-fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
-    if let Some(v) = value {
-        std::env::set_var(name, v);
-    } else {
-        std::env::remove_var(name);
-    }
-}
+use crate::test_support::EnvRestore;
 
 fn make_healthy_db(path: &Path) {
     let conn = memcore::db::open_raw(path).unwrap();
@@ -264,13 +258,11 @@ fn scan_default_is_read_only() {
 fn doctor_fix_retires_old_hash_alias_without_touching_legacy() {
     with_env_lock(|| {
         let dir = tempdir().unwrap();
-        let saved_home = std::env::var_os("TACHI_HOME");
-        let saved_sigil = std::env::var_os("SIGIL_HOME");
-        let saved_app = std::env::var_os("TACHI_APP_HOME");
+
         let tachi_home = dir.path().join(".tachi");
-        std::env::set_var("TACHI_HOME", &tachi_home);
-        std::env::remove_var("SIGIL_HOME");
-        std::env::remove_var("TACHI_APP_HOME");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
 
         let repo = dir.path().join("Sigil");
         let local_db = repo.join(".tachi/memory.db");
@@ -345,10 +337,6 @@ fn doctor_fix_retires_old_hash_alias_without_touching_legacy() {
             "doctor --fix should report the alias retirement action: {:?}",
             report.auto_fix_actions
         );
-
-        restore_env("TACHI_HOME", saved_home);
-        restore_env("SIGIL_HOME", saved_sigil);
-        restore_env("TACHI_APP_HOME", saved_app);
     });
 }
 
@@ -357,13 +345,11 @@ fn doctor_fix_retires_old_hash_alias_without_touching_legacy() {
 fn doctor_fix_does_not_rebrand_corrupt_plan_c_db() {
     with_env_lock(|| {
         let dir = tempdir().unwrap();
-        let saved_home = std::env::var_os("TACHI_HOME");
-        let saved_sigil = std::env::var_os("SIGIL_HOME");
-        let saved_app = std::env::var_os("TACHI_APP_HOME");
+
         let tachi_home = dir.path().join(".tachi");
-        std::env::set_var("TACHI_HOME", &tachi_home);
-        std::env::remove_var("SIGIL_HOME");
-        std::env::remove_var("TACHI_APP_HOME");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
 
         let repo = dir.path().join("Sigil");
         let local_db = repo.join(".tachi/memory.db");
@@ -417,10 +403,6 @@ fn doctor_fix_does_not_rebrand_corrupt_plan_c_db() {
             "corrupt DB must emit no Plan C alias retirement actions: {:?}",
             report.auto_fix_actions
         );
-
-        restore_env("TACHI_HOME", saved_home);
-        restore_env("SIGIL_HOME", saved_sigil);
-        restore_env("TACHI_APP_HOME", saved_app);
     });
 }
 
@@ -429,13 +411,11 @@ fn doctor_fix_does_not_rebrand_corrupt_plan_c_db() {
 fn doctor_fix_plan_c_alias_retirement_is_idempotent() {
     with_env_lock(|| {
         let dir = tempdir().unwrap();
-        let saved_home = std::env::var_os("TACHI_HOME");
-        let saved_sigil = std::env::var_os("SIGIL_HOME");
-        let saved_app = std::env::var_os("TACHI_APP_HOME");
+
         let tachi_home = dir.path().join(".tachi");
-        std::env::set_var("TACHI_HOME", &tachi_home);
-        std::env::remove_var("SIGIL_HOME");
-        std::env::remove_var("TACHI_APP_HOME");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
 
         let repo = dir.path().join("Sigil");
         let local_db = repo.join(".tachi/memory.db");
@@ -497,10 +477,6 @@ fn doctor_fix_plan_c_alias_retirement_is_idempotent() {
             !old_hash_db.exists(),
             "old-hash alias should remain retired after the second run"
         );
-
-        restore_env("TACHI_HOME", saved_home);
-        restore_env("SIGIL_HOME", saved_sigil);
-        restore_env("TACHI_APP_HOME", saved_app);
     });
 }
 

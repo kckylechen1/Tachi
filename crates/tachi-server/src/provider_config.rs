@@ -301,28 +301,7 @@ pub fn collect_config_env_values(resolved_home: Option<&Path>) -> HashMap<String
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct EnvGuard {
-        key: &'static str,
-        original: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let original = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, original }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.original.as_ref() {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
+    use crate::test_support::EnvRestore;
 
     /// #1096 leaf-2a round-2 (codex B4-status): `resolved_home` is additive —
     /// `None` reproduces the exact pre-existing scan set (unchanged for every
@@ -402,7 +381,7 @@ mod tests {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = EnvGuard::set("VOYAGE_API_KEY", "vault:VOYAGE_API_KEY");
+        let _env = EnvRestore::set("VOYAGE_API_KEY", "vault:VOYAGE_API_KEY");
         let llm = LlmClient::new().expect("llm client");
         let vault_pools = HashMap::from([(
             "VOYAGE_API_KEY".to_string(),
@@ -432,7 +411,7 @@ mod tests {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = EnvGuard::set("OPENAI_API_KEY", "env-secret");
+        let _env = EnvRestore::set("OPENAI_API_KEY", "env-secret");
         let llm = LlmClient::new().expect("llm client");
         let vault_pools = HashMap::from([(
             "OPENAI_API_KEY".to_string(),
@@ -459,7 +438,7 @@ mod tests {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _env = EnvGuard::set("VOYAGE_API_KEY", "vault:MISSING_VOYAGE");
+        let _env = EnvRestore::set("VOYAGE_API_KEY", "vault:MISSING_VOYAGE");
         let llm = LlmClient::new().expect("llm client");
         let err = materialize_provider_secrets(&llm, &HashMap::new())
             .expect_err("missing alias should fail");

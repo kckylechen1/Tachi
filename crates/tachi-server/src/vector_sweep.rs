@@ -375,31 +375,9 @@ fn record_disabled_sweep_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::EnvRestore;
     use std::fs;
     use tempfile::TempDir;
-
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            if let Some(previous) = &self.previous {
-                std::env::set_var(self.key, previous);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
-    }
 
     #[test]
     fn collect_sweep_paths_includes_global_and_manifest_entries() {
@@ -672,7 +650,7 @@ mod tests {
         )
         .expect("seed prior failure state");
 
-        let _threshold = EnvGuard::set("TACHI_VECTOR_SWEEP_PENDING_THRESHOLD", "1");
+        let _threshold = EnvRestore::set("TACHI_VECTOR_SWEEP_PENDING_THRESHOLD", "1");
         let llm = LlmClient::new().expect("llm client");
         let embedded = run_vector_sweep_paths(vec![db_path.clone()], &llm, 1, true).await;
 

@@ -1,33 +1,5 @@
 use super::*;
-
-struct EnvGuard {
-    name: &'static str,
-    original: Option<std::ffi::OsString>,
-}
-
-impl EnvGuard {
-    fn set(name: &'static str, value: &str) -> Self {
-        let original = std::env::var_os(name);
-        std::env::set_var(name, value);
-        Self { name, original }
-    }
-
-    fn unset(name: &'static str) -> Self {
-        let original = std::env::var_os(name);
-        std::env::remove_var(name);
-        Self { name, original }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        if let Some(value) = self.original.take() {
-            std::env::set_var(self.name, value);
-        } else {
-            std::env::remove_var(self.name);
-        }
-    }
-}
+use crate::test_support::EnvRestore;
 
 #[test]
 fn truncate_honors_max() {
@@ -153,8 +125,8 @@ fn infer_provider_from_auth_error_maps_real_failures() {
 
     // Generic auth failure on the rerank lane consults configured provider
     // (default voyage → VOYAGE; local → None, no API key to flag).
-    let _provider = EnvGuard::unset(tachi_llm::RERANK_PROVIDER_ENV);
-    let _endpoint = EnvGuard::unset(tachi_llm::RERANK_LOCAL_ENDPOINT_ENV);
+    let _provider = EnvRestore::remove(tachi_llm::RERANK_PROVIDER_ENV);
+    let _endpoint = EnvRestore::remove(tachi_llm::RERANK_LOCAL_ENDPOINT_ENV);
     assert_eq!(
         status_health::infer_provider_from_failed_job(
             "recall_rerank_cache",
@@ -165,8 +137,8 @@ fn infer_provider_from_auth_error_maps_real_failures() {
         "default rerank config must infer VOYAGE (not hardcoded only when reason names it)"
     );
 
-    let _local = EnvGuard::set(tachi_llm::RERANK_PROVIDER_ENV, "local");
-    let _local_ep = EnvGuard::set(
+    let _local = EnvRestore::set(tachi_llm::RERANK_PROVIDER_ENV, "local");
+    let _local_ep = EnvRestore::set(
         tachi_llm::RERANK_LOCAL_ENDPOINT_ENV,
         "http://127.0.0.1:9/rerank",
     );

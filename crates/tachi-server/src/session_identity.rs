@@ -390,34 +390,20 @@ mod tests {
             .collect()
     }
 
-    fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
-        if let Some(value) = value {
-            std::env::set_var(name, value);
-        } else {
-            std::env::remove_var(name);
-        }
-    }
+    use crate::test_support::EnvRestore;
 
     fn with_test_home<T>(f: impl FnOnce(&Path) -> T) -> T {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        let saved_home = std::env::var_os("TACHI_HOME");
-        let saved_sigil = std::env::var_os("SIGIL_HOME");
-        let saved_app = std::env::var_os("TACHI_APP_HOME");
         let temp = tempfile::tempdir().expect("tempdir");
         let tachi_home = temp.path().join("home");
         std::fs::create_dir_all(&tachi_home).expect("tachi home");
-        std::env::set_var("TACHI_HOME", &tachi_home);
-        std::env::remove_var("SIGIL_HOME");
-        std::env::remove_var("TACHI_APP_HOME");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
 
-        let result = f(&tachi_home);
-
-        restore_env("TACHI_HOME", saved_home);
-        restore_env("SIGIL_HOME", saved_sigil);
-        restore_env("TACHI_APP_HOME", saved_app);
-        result
+        f(&tachi_home)
     }
 
     fn repo_db(root: &Path) -> PathBuf {

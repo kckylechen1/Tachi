@@ -90,10 +90,10 @@ async fn gh_comment_rejects_empty_body() {
 async fn gh_comment_uses_body_file_not_inline_body() {
     let fake_bin = tempfile::tempdir().expect("fake bin");
     let gh_path = fake_bin.path().join("gh");
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let _path = {
-        let _lock = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         write_executable(
             &gh_path,
             "#!/bin/sh\n\

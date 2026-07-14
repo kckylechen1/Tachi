@@ -318,6 +318,7 @@ impl MemoryServer {
 #[cfg(test)]
 mod resolve_named_project_tests {
     use super::*;
+    use crate::test_support::EnvRestore;
 
     fn with_env_lock<F: FnOnce()>(f: F) {
         let _guard = crate::utils::global_test_lock()
@@ -326,25 +327,14 @@ mod resolve_named_project_tests {
         f();
     }
 
-    fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
-        if let Some(v) = value {
-            std::env::set_var(name, v);
-        } else {
-            std::env::remove_var(name);
-        }
-    }
-
     #[test]
     fn resolve_named_project_uses_workspace_data_tachi_home() {
         with_env_lock(|| {
             let tmp = tempfile::tempdir().expect("tmp");
             let saved_cwd = std::env::current_dir().expect("cwd");
-            let saved_home = std::env::var_os("TACHI_HOME");
-            let saved_sigil = std::env::var_os("SIGIL_HOME");
-            let saved_app = std::env::var_os("TACHI_APP_HOME");
-            std::env::remove_var("TACHI_HOME");
-            std::env::remove_var("SIGIL_HOME");
-            std::env::remove_var("TACHI_APP_HOME");
+            let _tachi_home = EnvRestore::remove("TACHI_HOME");
+            let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+            let _app_home = EnvRestore::remove("TACHI_APP_HOME");
 
             let repo = tmp.path().join("Quant_Analyzer_2026");
             let nested = repo.join("engine/v8");
@@ -360,9 +350,6 @@ mod resolve_named_project_tests {
             assert_eq!(resolved, named_db);
 
             std::env::set_current_dir(saved_cwd).expect("restore cwd");
-            restore_env("TACHI_HOME", saved_home);
-            restore_env("SIGIL_HOME", saved_sigil);
-            restore_env("TACHI_APP_HOME", saved_app);
         });
     }
 
@@ -372,10 +359,9 @@ mod resolve_named_project_tests {
     fn resolve_prefers_manifest_repo_local_db_without_symlink() {
         with_env_lock(|| {
             let tmp = crate::test_support::non_skipped_fixture_tempdir("server-methods-");
-            let saved = std::env::var_os("TACHI_HOME");
             let tachi_home = tmp.path().join("home");
             std::fs::create_dir_all(&tachi_home).expect("home");
-            std::env::set_var("TACHI_HOME", &tachi_home);
+            let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
 
             // Repo-local source of truth — NO Plan C alias/symlink created.
             let repo = tmp.path().join("My Service");
@@ -413,8 +399,6 @@ mod resolve_named_project_tests {
             let name = crate::path_utils::plan_c_dir_name_from_root(&repo).expect("name");
             let resolved = MemoryServer::resolve_named_project_db_path(&name).expect("resolve");
             assert_eq!(resolved, local_db);
-
-            restore_env("TACHI_HOME", saved);
         });
     }
 }
