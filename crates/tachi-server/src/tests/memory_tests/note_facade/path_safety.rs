@@ -19,6 +19,7 @@ async fn tachi_save_note_rejects_paths_outside_notes_root() {
                 entities: Vec::new(),
                 scope: None,
                 project: None,
+                project_explicit: false,
                 domain: None,
                 retention_policy: None,
                 force: true,

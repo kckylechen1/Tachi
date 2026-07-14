@@ -246,6 +246,13 @@ pub struct TachiSaveParams {
     #[serde(default)]
     pub project: Option<String>,
 
+    /// #1041 F2: see `crate::memory::SaveMemoryParams::project_explicit` —
+    /// same signal, same wire key, threaded through `handle_tachi_save`'s
+    /// internal `SaveMemoryParams`/`RememberParams` construction.
+    #[serde(default, rename = "__tachi_project_explicit")]
+    #[schemars(skip)]
+    pub project_explicit: bool,
+
     /// Optional codebase area tag (does not select DB)
     #[serde(default)]
     pub domain: Option<String>,
@@ -488,6 +495,12 @@ pub struct TachiMemoryParams {
         description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, recall/save targets ONLY that library. Omit to use global + the daemon-bound workspace project DB (shown in every response)."
     )]
     pub project: Option<String>,
+    /// #1041 F2: see `crate::memory::SaveMemoryParams::project_explicit` —
+    /// same signal, same wire key, threaded through `handle_tachi_memory`'s
+    /// `action=save` internal `TachiSaveParams` construction.
+    #[serde(default, rename = "__tachi_project_explicit")]
+    #[schemars(skip)]
+    pub project_explicit: bool,
     #[serde(default)]
     #[schemars(
         description = "Optional area tag (e.g. rust, ci, mcp). Filter on search; stored on save. Does not select the DB — use project for that."

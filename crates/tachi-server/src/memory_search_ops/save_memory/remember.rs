@@ -37,6 +37,7 @@ pub(crate) async fn handle_remember(
         force: params.force,
         auto_link: true,
         project: params.project,
+        project_explicit: params.project_explicit,
         retention_policy: params.retention_policy,
         domain: params.domain,
         timestamp: None,

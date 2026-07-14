@@ -151,7 +151,18 @@ pub(super) async fn handle_tachi_task_facade(
                 rulings: params.rulings.clone(),
                 adjudication: params.adjudication.clone(),
             };
-            crate::complete_ops::handle_tachi_complete(server, complete_params).await
+            // #1041 B7: forward the REAL wire explicitness signal —
+            // `TachiCompleteParams.project` here can be a transport-injected
+            // default (`tachi_task` IS in
+            // `session_identity::project_defaults_to_bound_project`'s list),
+            // and `TachiCompleteParams` itself has no field to carry that
+            // distinction across this bridge.
+            crate::complete_ops::handle_tachi_complete(
+                server,
+                complete_params,
+                params.project_explicit,
+            )
+            .await
         }
         TachiTaskAction::Board => {
             let board_params = TachiBoardParams {

@@ -19,6 +19,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_memory_basic(
             importance: Some(0.2),
             scope: Some("project".to_string()),
             project: None,
+            project_explicit: false,
             path: Some("/scratch/poke/memory-basic".to_string()),
             category: Some("fact".to_string()),
             domain: Some("engineering".to_string()),

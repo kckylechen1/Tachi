@@ -357,7 +357,7 @@ pub(crate) fn bound_project_label(server: &crate::MemoryServer) -> Option<String
 }
 
 pub(crate) fn infer_search_project(query: &str, domain: Option<&str>) -> Option<String> {
-    infer_search_project_with(query, domain, super::routing_config::RoutingConfig::get())
+    infer_search_project_with(query, domain, &super::routing_config::RoutingConfig::get())
 }
 
 /// Config-injectable core. Domain-specific routing is supplied by

@@ -369,6 +369,9 @@ fn extract_persisted_id(saved: &Value) -> Result<String, String> {
 pub(crate) async fn record_complete_rulings(
     server: &MemoryServer,
     params: &TachiCompleteParams,
+    // #1041 B7: see `build_complete_eval_record`'s doc — the caller-resolved,
+    // wire-accurate explicitness signal, not `params.project.is_some()`.
+    project_explicit: bool,
 ) -> Value {
     if params.rulings.is_empty() {
         return json!("skipped (no rulings)");
@@ -440,6 +443,15 @@ pub(crate) async fn record_complete_rulings(
             force: false,
             auto_link: true,
             project: params.project.clone(),
+            // #1041 B7 (was F2's stale premise): `TachiCompleteParams` is NOT
+            // exclusively server-internal/programmatic — it is also built by
+            // `task_router.rs`'s `tachi_task(action='complete')` bridge from
+            // a `TachiTaskParams`, whose `project` can be a
+            // transport-injected default from a bound session that omitted
+            // `project=` entirely. `project.is_some()` can't tell that apart
+            // from genuine caller intent; use the signal the caller of
+            // `record_complete_rulings` already resolved correctly.
+            project_explicit,
             retention_policy: None,
             domain: Some("precedent".to_string()),
             timestamp: None,

@@ -474,6 +474,10 @@ impl ServerHandler for MemoryServer {
                     &mut params.arguments,
                     project,
                     "HTTP direct-connect",
+                    // #1041 B1: the daemon's own call_tool is the sole
+                    // authoritative hop — it, and only it, may inject a
+                    // default `project` for an absent one.
+                    crate::session_identity::EnforcementRole::Authoritative,
                 )?;
             }
             // C1 fix (fail-closed): an unbound HTTP direct-connect session has no

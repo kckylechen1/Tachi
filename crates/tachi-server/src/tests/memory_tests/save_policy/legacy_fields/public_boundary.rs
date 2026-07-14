@@ -25,6 +25,7 @@ async fn save_memory_folds_legacy_persons_and_location_out_of_public_fields() {
             force: true,
             auto_link: false,
             project: None,
+            project_explicit: false,
             retention_policy: None,
             domain: None,
             timestamp: None,

@@ -3,7 +3,13 @@ use crate::memory_search_ops::contradiction::apply_auto_contradiction_detection;
 use crate::{DbScope, MemoryServer};
 use memcore::{MemoryEntry, MemoryStore};
 
-/// Return the id of an active row with the same normalized path and exact text.
+/// Return the id of an active row with the same normalized path and exact
+/// text. #1041 F6: this used to fetch `list_by_path(path, 64, false)` (exact
+/// path + descendants, capped at 64 rows) and filter for an exact path+text
+/// match in memory — once 64+ rows already existed under that path's
+/// descendant family, a genuinely duplicate row could sort past the cutoff
+/// and never reach the filter. `find_exact_path_text_id` pushes the exact
+/// match into SQL instead, so no window size can hide an existing duplicate.
 pub(in crate::memory_search_ops::save_memory) fn find_exact_path_text_duplicate(
     server: &MemoryServer,
     path: &str,
@@ -13,13 +19,9 @@ pub(in crate::memory_search_ops::save_memory) fn find_exact_path_text_duplicate(
 ) -> Result<Option<String>, String> {
     let normalized_path = memcore::path_router::normalize_path(path);
     let lookup = |store: &mut MemoryStore| {
-        let entries = store
-            .list_by_path(&normalized_path, 64, false)
-            .map_err(|e| format_save_error(server, target_db, named_project, &e))?;
-        Ok(entries
-            .into_iter()
-            .find(|entry| entry.path == normalized_path && entry.text == text)
-            .map(|entry| entry.id))
+        store
+            .find_exact_path_text_id(&normalized_path, text)
+            .map_err(|e| format_save_error(server, target_db, named_project, &e))
     };
     if let Some(project_name) = named_project {
         server.with_named_project_store_read(project_name, lookup)

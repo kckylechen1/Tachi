@@ -17,8 +17,8 @@ pub(crate) use access::record_access_with_updates;
 #[cfg(test)]
 pub(crate) use access::{record_access, AccessUpdate};
 pub use read::{
-    fetch_by_ids, find_active_wiki_entry_by_path_or_topic, get_all, list_by_path,
-    list_by_path_recent, list_wiki_duplicate_candidates,
+    fetch_by_ids, find_active_wiki_entry_by_path_or_topic, find_exact_path_text_id, get_all,
+    list_by_path, list_by_path_recent, list_wiki_duplicate_candidates,
 };
 pub(crate) use search::search_fts_raw_match;
 pub use search::{search_fts, search_symbolic_candidates, search_vec};

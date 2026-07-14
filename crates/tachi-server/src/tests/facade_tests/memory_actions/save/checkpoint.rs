@@ -42,6 +42,7 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
             event: None,
             state: None,
             project: None,
+            project_explicit: false,
             domain: Some("engineering".to_string()),
             metadata: None,
             emit_continuity: false,

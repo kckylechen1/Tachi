@@ -122,6 +122,7 @@ pub(crate) async fn handle_tachi_save(
                 importance: params.importance,
                 scope: Some(db_scope),
                 project: params.project.clone(),
+                project_explicit: params.project_explicit,
                 path: Some(db_path),
                 category: Some(
                     params
@@ -181,6 +182,7 @@ pub(crate) async fn handle_tachi_save(
                 force: params.force,
                 auto_link: true,
                 project: params.project.clone(),
+                project_explicit: params.project_explicit,
                 retention_policy: params.retention_policy.clone(),
                 domain: params.domain.clone(),
                 timestamp: None,

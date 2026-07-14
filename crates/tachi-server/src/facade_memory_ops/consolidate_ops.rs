@@ -306,6 +306,7 @@ fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
         event: None,
         state: None,
         project: project.map(str::to_string),
+        project_explicit: false,
         domain: None,
         compact: false,
         proposal_id: None,

@@ -29,6 +29,12 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<TachiCompleteParams>,
     ) -> Result<String, String> {
-        crate::complete_ops::handle_tachi_complete(self, params).await
+        // #1041 B7: `tachi_complete` (unlike `tachi_task`) is never in
+        // `session_identity::project_defaults_to_bound_project`'s list, so
+        // `enforce_session_project` never auto-injects a default `project=`
+        // for this tool — a present `project` here is always the direct
+        // caller's own choice.
+        let project_explicit = params.project.is_some();
+        crate::complete_ops::handle_tachi_complete(self, params, project_explicit).await
     }
 }

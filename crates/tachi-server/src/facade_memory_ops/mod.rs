@@ -149,6 +149,7 @@ pub(crate) async fn handle_tachi_memory(
                 entities: params.entities.clone(),
                 scope: params.scope.clone(),
                 project: params.project.clone(),
+                project_explicit: params.project_explicit,
                 domain: params.domain.clone(),
                 retention_policy: params.retention_policy.clone(),
                 force: params.force,

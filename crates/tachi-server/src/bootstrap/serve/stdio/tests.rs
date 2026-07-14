@@ -1206,24 +1206,34 @@ fn proxy_maps_zero_arg_briefing_to_project_memory_briefing() {
         .contains("Sigil-abc123"));
 }
 
+// #1041 B1: the stdio proxy's `prepare_proxy_tool_call` is a Preflight hop
+// only — it validates/rejects an explicit `project=` but never injects a
+// default for an absent one (see `EnforcementRole::Preflight`). Injecting
+// the bound project for an omitted argument is the daemon's own
+// `call_tool` (Authoritative) job, exercised end-to-end (through a real
+// spawned daemon, asserting the write landed on the right db) by
+// `stdio_proxy_call_writes_bound_project_via_global_only_daemon` above.
 #[test]
-fn proxy_injects_bound_project_for_tachi_memory_project_actions() {
+fn preflight_maps_tachi_memory_project_actions_without_injecting() {
     let save = rmcp::model::CallToolRequestParams::new("tachi_memory").with_arguments(
         serde_json::Map::from_iter([("action".to_string(), serde_json::json!("save"))]),
     );
     let save = prepare_proxy_tool_call(save, Some("Sigil-abc123")).expect("save mapped");
-    assert_eq!(
-        save.arguments.expect("save args")["project"],
-        serde_json::json!("Sigil-abc123")
+    assert!(
+        !save.arguments.expect("save args").contains_key("project"),
+        "preflight must not inject a default project for save"
     );
 
     let search = rmcp::model::CallToolRequestParams::new("tachi_memory").with_arguments(
         serde_json::Map::from_iter([("action".to_string(), serde_json::json!("search"))]),
     );
     let search = prepare_proxy_tool_call(search, Some("Sigil-abc123")).expect("search mapped");
-    assert_eq!(
-        search.arguments.expect("search args")["project"],
-        serde_json::json!("Sigil-abc123")
+    assert!(
+        !search
+            .arguments
+            .expect("search args")
+            .contains_key("project"),
+        "preflight must not inject a default project for search"
     );
 
     for action in [
@@ -1242,16 +1252,15 @@ fn proxy_injects_bound_project_for_tachi_memory_project_actions() {
             serde_json::Map::from_iter([("action".to_string(), serde_json::json!(action))]),
         );
         let mapped = prepare_proxy_tool_call(request, Some("Sigil-abc123")).expect("action mapped");
-        assert_eq!(
-            mapped.arguments.expect("args")["project"],
-            serde_json::json!("Sigil-abc123"),
-            "{action} should inherit the bound project"
+        assert!(
+            !mapped.arguments.expect("args").contains_key("project"),
+            "{action} preflight must not inject a default project"
         );
     }
 }
 
 #[test]
-fn proxy_injects_bound_project_for_raw_project_tools() {
+fn preflight_maps_raw_project_tools_without_injecting() {
     for tool in [
         "search_memory",
         "find_similar_memory",
@@ -1266,10 +1275,9 @@ fn proxy_injects_bound_project_for_raw_project_tools() {
             Some("Sigil-abc123"),
         )
         .unwrap_or_else(|err| panic!("{tool} should map: {err}"));
-        assert_eq!(
-            mapped.arguments.expect("args")["project"],
-            serde_json::json!("Sigil-abc123"),
-            "{tool} should inherit the bound project"
+        assert!(
+            !mapped.arguments.expect("args").contains_key("project"),
+            "{tool} preflight must not inject a default project"
         );
     }
 }

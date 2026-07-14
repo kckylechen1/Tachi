@@ -41,6 +41,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
             event: None,
             state: None,
             project: None,
+            project_explicit: false,
             domain: None,
             metadata: None,
             emit_continuity: false,

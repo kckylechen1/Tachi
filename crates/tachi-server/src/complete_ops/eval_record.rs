@@ -27,6 +27,12 @@ pub(super) fn build_complete_eval_record(
     params: &TachiCompleteParams,
     date: &str,
     ts: &str,
+    // #1041 B7: the caller-computed, wire-accurate signal — NOT
+    // `params.project.is_some()` (see the `project_explicit` field below for
+    // why that inversion is unsafe for the `tachi_task(action='complete')`
+    // bridge path). `handle_tachi_complete`'s two callers compute this
+    // correctly for their own entry point (see that fn's doc).
+    project_explicit: bool,
 ) -> CompleteEvalRecord {
     let task_id = params.task_id.clone().unwrap_or_else(|| {
         let agent_slug = params
@@ -295,6 +301,14 @@ pub(super) fn build_complete_eval_record(
         force: false,
         auto_link: true,
         project: params.project.clone(),
+        // #1041 B7 (was F2's stale premise): `params.project.is_some()` is
+        // NOT proof of deliberate intent here — `TachiCompleteParams.project`
+        // can be a transport-injected default forwarded from the
+        // `tachi_task(action='complete')` bridge (`task_router.rs`), whose
+        // OWN caller may have omitted `project=` entirely on a bound
+        // session. Use the signal the caller of `build_complete_eval_record`
+        // resolved correctly for its own entry point instead.
+        project_explicit,
         retention_policy: None,
         domain: Some("eval".to_string()),
         timestamp: None,
@@ -331,5 +345,80 @@ fn coerce_stringified_trajectory_array(value: serde_json::Value) -> serde_json::
     match serde_json::from_str::<serde_json::Value>(raw) {
         Ok(parsed) if parsed.is_array() => parsed,
         _ => value,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_params() -> TachiCompleteParams {
+        TachiCompleteParams {
+            task_id: None,
+            task: "fix the thing".to_string(),
+            agent: "codex".to_string(),
+            outcome: "success".to_string(),
+            task_type: Some("fix_request".to_string()),
+            profile: None,
+            risk: None,
+            duration_ms: None,
+            skills_used: Vec::new(),
+            cost_tokens: Some(500),
+            cost_usd: Some(0.02),
+            quality_score: None,
+            notes: None,
+            trajectory: None,
+            diff: None,
+            worktree: None,
+            subagents: Vec::new(),
+            feedback_rules_applied: Vec::new(),
+            dispatch_id: Some("dispatch-abc".to_string()),
+            flow_id: Some("flow-1".to_string()),
+            issue_ref: Some("kckylechen1/tachi#773".to_string()),
+            pr_ref: None,
+            evidence_refs: Vec::new(),
+            tests_run: Vec::new(),
+            diff_present: None,
+            scope: Some("global".to_string()),
+            // Mimics a transport-injected default forwarded through the
+            // `tachi_task(action='complete')` bridge — `project` present,
+            // but the ORIGINAL caller never wrote `project=` at all.
+            project: Some("quant".to_string()),
+            format: None,
+            signatures: Vec::new(),
+            rulings: Vec::new(),
+            adjudication: None,
+        }
+    }
+
+    /// #1041 B7 core regression: `build_complete_eval_record` must use the
+    /// CALLER-resolved `project_explicit` argument, never re-derive it from
+    /// `params.project.is_some()` — that inversion would treat a
+    /// transport-injected default (present `project`, but NOT a caller
+    /// decision) as deliberate placement authority, letting eval rows for
+    /// mismatched-domain content skip the #1041 S1 write-affinity gate
+    /// entirely (the gate's `explicit_project_override` check trusts this
+    /// exact flag).
+    #[test]
+    fn project_explicit_follows_the_argument_not_project_presence() {
+        let params = base_params();
+        assert!(
+            params.project.is_some(),
+            "fixture must have `project` present to prove the inversion"
+        );
+
+        let with_true = build_complete_eval_record(&params, "2026-01-01", "20260101T000000Z", true);
+        assert!(
+            with_true.mem_params.project_explicit,
+            "an actually-explicit caller decision must come through as true"
+        );
+
+        let with_false =
+            build_complete_eval_record(&params, "2026-01-01", "20260101T000000Z", false);
+        assert!(
+            !with_false.mem_params.project_explicit,
+            "project.is_some() alone must NOT force project_explicit=true — \
+             that was exactly the B7 inversion bug"
+        );
     }
 }

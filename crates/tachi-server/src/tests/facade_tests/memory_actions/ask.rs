@@ -42,6 +42,7 @@ async fn tachi_memory_ask_returns_evidence_contract() {
             event: None,
             state: None,
             project: None,
+            project_explicit: false,
             domain: None,
             metadata: None,
             emit_continuity: false,

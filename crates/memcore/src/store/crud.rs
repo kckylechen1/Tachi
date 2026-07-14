@@ -97,6 +97,17 @@ impl MemoryStore {
         db::get_all(&self.conn, limit, include_archived)
     }
 
+    /// Id of an active row with the EXACT `path` and `text`, via a direct
+    /// SQL predicate (no recency-window cutoff to hide behind — see
+    /// `db::find_exact_path_text_id`'s doc for the #1041 F6 bug this fixes).
+    pub fn find_exact_path_text_id(
+        &self,
+        path: &str,
+        text: &str,
+    ) -> Result<Option<String>, MemoryError> {
+        db::find_exact_path_text_id(&self.conn, path, text)
+    }
+
     /// List entries under a path (exact + descendants) with SQL pushdown.
     pub fn list_by_path(
         &self,

@@ -105,6 +105,7 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
             event: None,
             state: None,
             project: None,
+            project_explicit: false,
             domain: Some("rust".to_string()),
             metadata: None,
             emit_continuity: false,

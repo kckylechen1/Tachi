@@ -94,9 +94,17 @@ pub(in crate::memory_search_ops::save_memory) fn build_duplicate_save_response(
     response.insert("id".into(), json!(existing_id));
     response.insert("path".into(), json!(path));
     response.insert("db".into(), json!(target_db.as_str()));
+    // #1041 F6: this used to say "Pass force=true to write anyway", which
+    // stopped being true once S3 decoupled dedup from the noise/capture-gate
+    // bypass — `force` skips content-quality gates only, never this
+    // path+text identity check. The only way to force a second, distinct
+    // row is a caller-supplied `id` (the dedup check only runs when `id` is
+    // absent in the first place).
     response.insert(
         "hint".into(),
-        json!("Identical text already saved at this path. Pass force=true to write anyway."),
+        json!(
+            "Identical text already saved at this path. force=true does NOT bypass this — pass your own explicit id= to create a second, distinct row anyway."
+        ),
     );
     response
 }

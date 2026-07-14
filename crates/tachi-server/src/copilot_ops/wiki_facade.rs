@@ -111,6 +111,14 @@ pub(crate) async fn handle_tachi_wiki_write(
             force: true,
             auto_link: true,
             project: target_project.clone(),
+            // #1041 F2: server-internal, programmatic construction (wiki
+            // writes are their own write path, out of #1041 S1's scope per
+            // F1) — `target_project.is_some()` preserves the exact pre-F2
+            // gate behavior (this is not the raw client `project=`, it may
+            // already be a resolved "wiki" default, but it was always this
+            // call's own deliberate placement, never a session-identity
+            // transport default).
+            project_explicit: target_project.is_some(),
             retention_policy: Some(params.retention_policy),
             domain: domain.clone(),
             timestamp: None,

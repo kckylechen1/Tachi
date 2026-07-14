@@ -71,6 +71,7 @@ pub(crate) async fn save_daily_health_wiki(
             entities: vec!["Tachi".to_string()],
             scope: Some("global".to_string()),
             project: None,
+            project_explicit: false,
             domain: Some("wiki".to_string()),
             retention_policy: Some("permanent".to_string()),
             force: true,

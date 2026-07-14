@@ -74,13 +74,42 @@ pub(crate) async fn handle_save_memory(
         crate::memory_search_ops::scope_downgrade_warning(&requested_scope, target_db.as_str())
     });
 
+    // #1041 F2: resolve whether a caller-supplied `id` already exists at the
+    // PRE-gate target (see `write_affinity` module doc's F2 note — `id` is
+    // an update key, not placement authority, so an id that doesn't resolve
+    // here is really a new row and gets the same domain-routing scrutiny as
+    // an id-less save). When the gate later determines this genuinely IS a
+    // patch (skips unchanged), this same lookup is reused below instead of
+    // querying twice.
+    let pre_gate_existing_entry = lookup_existing_entry(
+        server,
+        &id,
+        requested_id.is_some(),
+        target_db,
+        named_project.as_deref(),
+    )?;
+    let id_resolves_at_target = pre_gate_existing_entry.is_some();
+
     // #1041 S1: domain-store write affinity gate. Only acts on the ambiguous
-    // default path (no explicit project=, no client id, resolved to the
-    // bound project store) — reroutes to the domain's registered store when
-    // one is mounted, refuses loudly when it isn't, or passes through
-    // unchanged when the domain has no registered route at all (uncertain,
-    // fail-safe permissive). See `write_affinity` module docs.
-    let affinity = apply_write_affinity(server, &params, target_db, named_project.as_deref())?;
+    // default path (no CALLER-explicit project=, no id resolving to an
+    // existing row at the target, resolved to the bound project store) —
+    // reroutes to the domain's registered store when one is mounted,
+    // refuses loudly when it isn't, or passes through unchanged when the
+    // domain has no registered route at all (uncertain, fail-safe
+    // permissive). See `write_affinity` module docs.
+    // #1041 B2: capture the PRE-gate target before `apply_write_affinity`
+    // shadows `target_db`/`named_project` with the (possibly rerouted)
+    // POST-gate values, so the duplicate-lookup avoidance below can tell
+    // whether the gate actually changed the target or just passed through.
+    let pre_gate_target_db = target_db;
+    let pre_gate_named_project = named_project.clone();
+    let affinity = apply_write_affinity(
+        server,
+        &params,
+        target_db,
+        named_project.as_deref(),
+        id_resolves_at_target,
+    )?;
     let target_db = affinity.target_db;
     let named_project = affinity.named_project;
     let affinity_note = affinity.note;
@@ -95,6 +124,14 @@ pub(crate) async fn handle_save_memory(
     // random id on every retry because this check was skipped outright.
     // Path+text identity is unaffected by `force` from here on; a caller
     // that truly wants a second, distinct row can still pass its own `id`.
+    //
+    // KNOWN LIMITATION (#1041 F6, tracked for a follow-up, not fixed here):
+    // this lookup-then-upsert is not atomic and `memories` has no path+text
+    // uniqueness constraint (only `id` is unique) — two concurrent id-less
+    // saves with identical path+text can both observe "no existing row" and
+    // insert two distinct UUIDs. Closing that requires either a DB-level
+    // unique index + upsert-on-conflict (a migration) or an application
+    // lock broader than this single request; out of scope for this PR.
     if params.id.is_none() {
         if let Some(existing_id) = find_exact_path_text_duplicate(
             server,
@@ -108,13 +145,31 @@ pub(crate) async fn handle_save_memory(
                 .map_err(|e| format!("Failed to serialize response: {}", e));
         }
     }
-    let existing_entry = lookup_existing_entry(
-        server,
-        &id,
-        requested_id.is_some(),
-        target_db,
-        named_project.as_deref(),
-    )?;
+    // #1041 F2/B2: when the id resolved at the PRE-gate target, the gate
+    // necessarily passed through unchanged (that's exactly the skip
+    // condition) — target_db/named_project are identical to what
+    // `pre_gate_existing_entry` was already looked up against, so reuse it
+    // instead of querying the same store twice. When it did NOT resolve
+    // there, only re-query if the gate actually changed the target (a real
+    // reroute, which is now never mixed with a caller-supplied id — see
+    // `write_affinity`'s B2 refusal): a passthrough (same store, same
+    // project) already got its answer from the pre-gate lookup (`None`,
+    // since `id_resolves_at_target` is false here), so re-querying the
+    // identical store for the identical id would just be a wasted duplicate
+    // read.
+    let existing_entry = if id_resolves_at_target {
+        pre_gate_existing_entry
+    } else if target_db == pre_gate_target_db && named_project == pre_gate_named_project {
+        None
+    } else {
+        lookup_existing_entry(
+            server,
+            &id,
+            requested_id.is_some(),
+            target_db,
+            named_project.as_deref(),
+        )?
+    };
     let enrichment_revision = existing_entry
         .as_ref()
         .map(|entry| entry.revision)
@@ -125,7 +180,7 @@ pub(crate) async fn handle_save_memory(
     let needs_embedding = params.vector.is_none();
     let auto_link = params.auto_link;
     let emit_continuity = params.emit_continuity;
-    let entry = build_save_entry(
+    let mut entry = build_save_entry(
         server,
         params,
         safe_text,
@@ -135,6 +190,25 @@ pub(crate) async fn handle_save_memory(
         target_db,
         existing_entry.as_ref(),
     );
+
+    // #1041 F3/C5: `build_save_entry` -> `inject_provenance` resolves
+    // `provenance.db_path` from `target_db` alone, which only ever knows
+    // this daemon's OWN bound project path — it has no visibility into ANY
+    // named-project target, whether that name came from a write-affinity
+    // reroute, a caller's own explicit `project=`, or simply passed through
+    // unchanged. So this runs for every named-project save, not only a
+    // rerouted one (see `correct_provenance_db_path_for_named_project`'s doc
+    // for why narrowing this to "only reroutes" would resurrect an older,
+    // broader pre-#1041 bug instead of closing it) — the invariant is
+    // `provenance.db_path` always matches where the row actually landed.
+    if let Some(project_name) = named_project.as_deref() {
+        if let Ok(named_project_path) = MemoryServer::resolve_named_project_db_path(project_name) {
+            entry.metadata = crate::provenance::correct_provenance_db_path_for_named_project(
+                entry.metadata,
+                &named_project_path,
+            );
+        }
+    }
 
     upsert_save_entry(server, &entry, target_db, named_project.as_deref())?;
 

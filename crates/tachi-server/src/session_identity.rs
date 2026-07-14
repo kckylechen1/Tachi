@@ -21,11 +21,96 @@ pub(crate) const META_PROFILE: &str = "tachiProfile";
 pub(crate) const META_CLIENT: &str = "tachiClient";
 pub(crate) const META_PROJECT: &str = "tachiProject";
 
+/// #1041 F2: wire key stamped onto the raw tool-call arguments (never a
+/// caller-facing schema field — hidden via `#[schemars(skip)]` on every
+/// params struct that carries it) to record whether `project` reflects the
+/// CALLER's own explicit placement decision, versus a value this function
+/// injected below because the transport (a bound stdio proxy or HTTP
+/// direct-connect session) defaulted it. Before this signal existed, the
+/// write-affinity gate (`save_memory/write_affinity.rs`) treated
+/// `named_project.is_some()` as proof of deliberate intent — but bound
+/// sessions unconditionally inject the session project onto every
+/// project-defaulting write tool (see the tail of this function), so the
+/// ordinary ambiguous-default save (the exact case #1041 S1 exists to
+/// catch) always arrived at the gate looking "explicit" and skipped it
+/// entirely.
+///
+/// #1041 B1 (codex round-4, real escalation — closed): this key is
+/// deserialized straight off the wire into `project_explicit`
+/// (`#[serde(rename = "__tachi_project_explicit")]` — `#[schemars(skip)]`
+/// only hides it from the *published* tool schema, it does not stop a raw
+/// client from sending the field directly). A client that sends an
+/// explicit, bound-matching `project=` alongside a forged
+/// `__tachi_project_explicit: false` used to have that forged `false`
+/// preserved (see the now-removed `mark_project_explicit_unless_already_
+/// defaulted`), making a genuinely-explicit write look like a
+/// transport-injected default. `write_affinity.rs`'s S1 gate only
+/// re-evaluates domain routing for that "default" case — so the forged
+/// marker let a write whose caller explicitly pinned it to project X get
+/// silently domain-rerouted into a *different*, already-mounted project Y,
+/// a target `enforce_session_project` never validated at all (no identity
+/// match check, no cross-binding check — only `write_affinity`'s
+/// `project_exists` mount check runs against Y). The fix: the marker is
+/// never read back off the wire and never "preserved" across hops. See
+/// [`EnforcementRole`] for how the double-hop topology now avoids needing
+/// to trust an incoming wire value for this key at all.
+pub(crate) const PROJECT_EXPLICIT_MARKER: &str = "__tachi_project_explicit";
+
+/// Which hop of the (possible) stdio-proxy -> daemon-HTTP double hop is
+/// calling [`enforce_session_project`]. #1041 B1: introduced so the marker
+/// this function stamps is *computed*, never *trusted off the wire* —
+/// eliminating the need to "preserve an incoming false across hops" (the
+/// mechanism a forged wire value used to hide behind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EnforcementRole {
+    /// A non-injecting pre-check run before forwarding a request over an
+    /// internal transport hop (today: the stdio proxy, before it forwards to
+    /// the daemon over HTTP in `prepare_proxy_tool_call`). Still validates,
+    /// rejects, and normalizes a caller-explicit `project=` exactly like
+    /// `Authoritative` (so bad requests fail fast, before a network
+    /// round-trip) — the ONLY thing it never does is inject a *default*
+    /// `project` when the caller omitted one. That decision, and the
+    /// `PROJECT_EXPLICIT_MARKER = false` that goes with it, is deferred
+    /// entirely to the `Authoritative` hop. A `Preflight` hop must never be
+    /// the only hop enforcing a given tool call.
+    Preflight,
+    /// The single, sole point that may inject a default `project` for an
+    /// absent one (today: the daemon's own HTTP `call_tool` in
+    /// `server_handler.rs`, and the CLI's direct daemon-only path, which has
+    /// no `Preflight` hop at all). Because `Preflight` never injects, by the
+    /// time an `Authoritative` call sees `project` present in the arguments,
+    /// it is unambiguously genuine caller intent — either supplied directly
+    /// to this hop, or forwarded unmodified by an earlier `Preflight` hop.
+    /// Either way the marker is stamped `true`, unconditionally; an absent
+    /// `project` is injected here and stamped `false`, unconditionally. No
+    /// incoming wire value for the marker key is ever read.
+    Authoritative,
+}
+
+/// Stamp [`PROJECT_EXPLICIT_MARKER`] onto `args`, unconditionally overwriting
+/// any incoming wire value (never read one back — see the marker's own doc
+/// for why that must stay true). This is the shared half of
+/// `enforce_session_project`'s two stamping sites below, factored out so a
+/// caller that has NO bound session to enforce against — the CLI's
+/// in-process dispatch fallback (`bootstrap::cli_tool::tool_dispatch::
+/// dispatch_cli_tool`, which never runs `enforce_session_project` at all
+/// because there is no daemon/session in that branch) — can still produce
+/// the identical caller-explicit-vs-transport-default signal the
+/// write-affinity gate (`memory_search_ops::save_memory::write_affinity`)
+/// depends on, instead of hand-rolling a second copy of this semantics.
+pub(crate) fn stamp_project_explicit_marker(args: &mut JsonObject, explicit: bool) {
+    args.insert(
+        PROJECT_EXPLICIT_MARKER.to_string(),
+        serde_json::json!(explicit),
+    );
+}
+
 pub(crate) fn enforce_session_project(
     tool_name: &str,
     arguments: &mut Option<JsonObject>,
     project: &str,
     transport_label: &str,
+    role: EnforcementRole,
 ) -> Result<(), rmcp::ErrorData> {
     let args = arguments.get_or_insert_with(serde_json::Map::new);
     if let Some(explicit_project) = args.get("project") {
@@ -38,6 +123,10 @@ pub(crate) fn enforce_session_project(
                 Some("project must be a string"),
             ));
         };
+        // #1041 B1: unconditionally genuine — never preserve/trust whatever
+        // value the wire already had for this key. See [`EnforcementRole`]
+        // for why this is safe regardless of which hop is calling.
+        stamp_project_explicit_marker(args, true);
         let requested_identity =
             crate::MemoryServer::resolve_named_project_db_identity(&requested_alias);
         let bound_identity = crate::MemoryServer::resolve_named_project_db_identity(project);
@@ -82,6 +171,14 @@ pub(crate) fn enforce_session_project(
             }
         }
     }
+    // #1041 B1: `Preflight` never injects a default — that decision (and the
+    // `false` marker that goes with it) is deferred entirely to whichever
+    // `Authoritative` hop eventually sees this request, so there is exactly
+    // one place a `project` can go from absent to present, and no wire value
+    // for the marker to preserve or forge across the gap.
+    if role == EnforcementRole::Preflight {
+        return Ok(());
+    }
     if !project_defaults_to_bound_project(tool_name, args) {
         return Ok(());
     }
@@ -101,6 +198,10 @@ pub(crate) fn enforce_session_project(
     {
         return Ok(());
     }
+    // #1041 F2: this is the transport-injected default itself, not a caller
+    // decision — always stamp `false` (unconditionally; `project` cannot
+    // already be present here, this branch only runs when it was absent).
+    stamp_project_explicit_marker(args, false);
     args.insert("project".to_string(), serde_json::json!(project));
     Ok(())
 }
@@ -366,6 +467,7 @@ mod tests {
             &mut arguments,
             "sigil",
             "HTTP direct-connect",
+            EnforcementRole::Authoritative,
         )
         .expect_err("cross-project write must fail");
         assert!(
@@ -403,6 +505,7 @@ mod tests {
                 &mut arguments,
                 "sigil",
                 "HTTP direct-connect",
+                EnforcementRole::Authoritative,
             )
             .expect("cross-project read must pass");
             assert_eq!(
@@ -436,6 +539,7 @@ mod tests {
                     &mut arguments,
                     bound,
                     "HTTP direct-connect",
+                    EnforcementRole::Authoritative,
                 )
                 .unwrap_or_else(|err| {
                     panic!("{requested} should normalize to bound {bound}: {err}")
@@ -467,9 +571,14 @@ mod tests {
                 ("text", json!("must not guess")),
             ]));
 
-            let err =
-                enforce_session_project("tachi_memory", &mut arguments, &bound, "stdio proxy")
-                    .expect_err("duplicate legacy basename must be ambiguous");
+            let err = enforce_session_project(
+                "tachi_memory",
+                &mut arguments,
+                &bound,
+                "stdio proxy",
+                EnforcementRole::Preflight,
+            )
+            .expect_err("duplicate legacy basename must be ambiguous");
             assert!(err.message.contains("requested alias 'Sigil'"));
             assert!(err
                 .message
@@ -483,11 +592,14 @@ mod tests {
                 ("project", json!(&other_hashed)),
                 ("text", json!("same basename is not same DB")),
             ]));
-            let err =
-                enforce_session_project("tachi_memory", &mut arguments, &bound, "stdio proxy")
-                    .expect_err(
-                        "distinct hashed aliases with equal basenames must remain isolated",
-                    );
+            let err = enforce_session_project(
+                "tachi_memory",
+                &mut arguments,
+                &bound,
+                "stdio proxy",
+                EnforcementRole::Preflight,
+            )
+            .expect_err("distinct hashed aliases with equal basenames must remain isolated");
             assert!(
                 err.message.contains("different canonical database"),
                 "got: {}",
@@ -520,6 +632,7 @@ mod tests {
                     &mut arguments,
                     &bound,
                     "HTTP direct-connect",
+                    EnforcementRole::Authoritative,
                 )
                 .expect_err("different-project mutation must fail");
                 assert!(
@@ -552,9 +665,14 @@ mod tests {
                     ("project", json!(alias)),
                     ("text", json!("must not create")),
                 ]));
-                let err =
-                    enforce_session_project("tachi_memory", &mut arguments, &bound, "stdio proxy")
-                        .expect_err("unresolvable alias must fail closed");
+                let err = enforce_session_project(
+                    "tachi_memory",
+                    &mut arguments,
+                    &bound,
+                    "stdio proxy",
+                    EnforcementRole::Preflight,
+                )
+                .expect_err("unresolvable alias must fail closed");
                 assert!(
                     err.message.contains("resolution failed closed"),
                     "got: {}",
@@ -601,6 +719,7 @@ mod tests {
                 &mut arguments,
                 "sigil",
                 "HTTP direct-connect",
+                EnforcementRole::Authoritative,
             )
             .expect_err("manifest parse failure must reject an otherwise equal alias");
             assert!(
@@ -623,8 +742,15 @@ mod tests {
             ("action", json!("save")),
             ("text", json!("bound write")),
         ]));
-        enforce_session_project("tachi_memory", &mut arguments, "sigil", "stdio proxy")
-            .expect("inject project");
+        // #1041 B1: only the Authoritative hop may inject a default project.
+        enforce_session_project(
+            "tachi_memory",
+            &mut arguments,
+            "sigil",
+            "HTTP direct-connect",
+            EnforcementRole::Authoritative,
+        )
+        .expect("inject project");
         assert_eq!(
             arguments
                 .as_ref()
@@ -634,6 +760,273 @@ mod tests {
         );
     }
 
+    /// #1041 B1: a `Preflight` hop (the stdio proxy, before it forwards to
+    /// the daemon) must NEVER inject a default `project` for an absent one —
+    /// that decision (and the marker that goes with it) is deferred entirely
+    /// to whichever `Authoritative` hop the request eventually reaches. This
+    /// is what makes the marker unforgeable: there is no wire round-trip
+    /// carrying "hop 1 decided this was a default" for an attacker to spoof.
+    #[test]
+    fn preflight_hop_never_injects_a_default_project() {
+        let mut arguments = args(map_from(&[
+            ("action", json!("save")),
+            ("text", json!("bound write, no project given")),
+        ]));
+        enforce_session_project(
+            "tachi_memory",
+            &mut arguments,
+            "sigil",
+            "stdio proxy",
+            EnforcementRole::Preflight,
+        )
+        .expect("preflight passes through");
+        let args = arguments.as_ref().expect("arguments present");
+        assert!(
+            args.get("project").is_none(),
+            "Preflight must not inject a default project"
+        );
+        assert!(
+            args.get(PROJECT_EXPLICIT_MARKER).is_none(),
+            "Preflight must not stamp a marker for a project it never touched"
+        );
+    }
+
+    /// #1041 B1 (dispatcher-required judgment test — already-safe path,
+    /// nailed down): a forged `__tachi_project_explicit: true` alongside an
+    /// OMITTED `project=` must not let the default-inject branch skip
+    /// stamping `false`. This half of the marker was never wire-trusted even
+    /// before the B1 fix (the inject branch always overwrote unconditionally)
+    /// — this test exists so that invariant has explicit coverage, not just
+    /// the explicit-project half (`forged_default_marker_on_explicit_project_is_overwritten`).
+    #[test]
+    fn forged_true_marker_on_defaulted_project_does_not_skip_the_gate() {
+        let mut arguments = args(map_from(&[
+            ("action", json!("save")),
+            ("text", json!("bound write, no project given")),
+            (PROJECT_EXPLICIT_MARKER, json!(true)),
+        ]));
+        enforce_session_project(
+            "tachi_memory",
+            &mut arguments,
+            "sigil",
+            "HTTP direct-connect",
+            EnforcementRole::Authoritative,
+        )
+        .expect("inject project");
+        assert_eq!(
+            arguments
+                .as_ref()
+                .and_then(|a| a.get(PROJECT_EXPLICIT_MARKER))
+                .and_then(|v| v.as_bool()),
+            Some(false),
+            "a forged `true` on an omitted project must not survive — the \
+             injected default is always stamped false, unconditionally"
+        );
+    }
+
+    // ── #1041 round-7: shared stamping helper ────────────────────────────────
+
+    /// `stamp_project_explicit_marker` is the extracted half of
+    /// `enforce_session_project`'s marker logic that a caller WITHOUT a
+    /// bound session (the CLI in-process dispatch fallback) can also use —
+    /// verify it round-trips both polarities and unconditionally overwrites
+    /// any prior value, matching `enforce_session_project`'s own contract of
+    /// never trusting/preserving a wire value for this key.
+    #[test]
+    fn stamp_project_explicit_marker_sets_both_polarities_and_overwrites() {
+        let mut map = map_from(&[("project", json!("hapi"))]);
+        stamp_project_explicit_marker(&mut map, true);
+        assert_eq!(map.get(PROJECT_EXPLICIT_MARKER), Some(&json!(true)));
+
+        stamp_project_explicit_marker(&mut map, false);
+        assert_eq!(
+            map.get(PROJECT_EXPLICIT_MARKER),
+            Some(&json!(false)),
+            "must overwrite a prior true, not preserve it"
+        );
+    }
+
+    // ── #1041 F2: PROJECT_EXPLICIT_MARKER ────────────────────────────────────
+
+    #[test]
+    fn defaulted_project_is_stamped_not_explicit() {
+        let mut arguments = args(map_from(&[
+            ("action", json!("save")),
+            ("text", json!("bound write, no project given")),
+        ]));
+        enforce_session_project(
+            "tachi_memory",
+            &mut arguments,
+            "sigil",
+            "HTTP direct-connect",
+            EnforcementRole::Authoritative,
+        )
+        .expect("inject project");
+        assert_eq!(
+            arguments
+                .as_ref()
+                .and_then(|a| a.get(PROJECT_EXPLICIT_MARKER))
+                .and_then(|v| v.as_bool()),
+            Some(false),
+            "a transport-injected default must be stamped NOT explicit"
+        );
+    }
+
+    #[test]
+    fn genuinely_explicit_project_is_stamped_explicit() {
+        // #1041 round-3 fixture fix: an explicit `project=` (equal to the
+        // bound identity) resolves through `resolve_named_project_db_identity`,
+        // which fails closed when the named project has no DB on disk.
+        // Without `with_test_home` + a seeded `projects/sigil/memory.db`,
+        // this only "passed" by coincidence on a dev box that happened to
+        // have a real `sigil` project registered — it fails closed
+        // ("Project 'sigil' not found") in a clean environment/CI.
+        with_test_home(|tachi_home| {
+            let sigil = tachi_home.join("projects/sigil/memory.db");
+            std::fs::create_dir_all(sigil.parent().expect("sigil parent")).expect("sigil parent");
+            std::fs::write(&sigil, b"sigil").expect("sigil db");
+
+            let mut arguments = args(map_from(&[
+                ("action", json!("save")),
+                ("project", json!("sigil")),
+                ("text", json!("caller named its own bound project")),
+            ]));
+            enforce_session_project(
+                "tachi_memory",
+                &mut arguments,
+                "sigil",
+                "stdio proxy",
+                EnforcementRole::Preflight,
+            )
+            .expect("same-DB alias normalizes");
+            assert_eq!(
+                arguments
+                    .as_ref()
+                    .and_then(|a| a.get(PROJECT_EXPLICIT_MARKER))
+                    .and_then(|v| v.as_bool()),
+                Some(true),
+                "a caller-supplied project=, even if it resolves to the bound \
+                 identity, is still a genuine explicit decision"
+            );
+        });
+    }
+
+    /// #1041 B1 core regression (codex round-4): a raw client that supplies
+    /// an explicit, bound-matching `project=` cannot forge
+    /// `__tachi_project_explicit: false` alongside it to make the write look
+    /// like a transport default. Before the fix, `mark_project_explicit_
+    /// unless_already_defaulted` preserved this wire-supplied `false`,
+    /// letting the caller's OWN explicit placement decision get silently
+    /// second-guessed by the write-affinity domain-reroute gate (which only
+    /// re-evaluates the "default" case) — routing the write into a
+    /// completely different, never-validated project store. The marker must
+    /// now always be recomputed as `true` whenever `project` is genuinely
+    /// present, regardless of what a forged wire value claims.
+    #[test]
+    fn forged_default_marker_on_explicit_project_is_overwritten() {
+        with_test_home(|tachi_home| {
+            let sigil = tachi_home.join("projects/sigil/memory.db");
+            std::fs::create_dir_all(sigil.parent().expect("sigil parent")).expect("sigil parent");
+            std::fs::write(&sigil, b"sigil").expect("sigil db");
+
+            let mut arguments = args(map_from(&[
+                ("action", json!("save")),
+                ("project", json!("sigil")),
+                ("text", json!("attacker-forged marker")),
+                // A raw client can send this key directly — it is hidden
+                // from the *published* schema (`#[schemars(skip)]`) but
+                // `#[serde(rename = ...)]` still deserializes it from any
+                // wire JSON that includes it.
+                (PROJECT_EXPLICIT_MARKER, json!(false)),
+            ]));
+            enforce_session_project(
+                "tachi_memory",
+                &mut arguments,
+                "sigil",
+                "HTTP direct-connect",
+                EnforcementRole::Authoritative,
+            )
+            .expect("explicit project matching the bound identity is accepted");
+            assert_eq!(
+                arguments
+                    .as_ref()
+                    .and_then(|a| a.get(PROJECT_EXPLICIT_MARKER))
+                    .and_then(|v| v.as_bool()),
+                Some(true),
+                "a genuinely-present project= must never be second-guessed by a \
+                 forged wire marker — this must always come out `true`"
+            );
+        });
+    }
+
+    /// #1041 F2/B1 core regression: the stdio-proxy -> daemon HTTP double
+    /// hop, with the B1 fix's revised division of labor. The proxy
+    /// (`Preflight`) runs `enforce_session_project` first on a request where
+    /// the client omitted `project=` — it must leave the arguments
+    /// completely untouched (no injected project, no marker at all), since
+    /// injecting anything here would recreate a wire-visible "this hop
+    /// decided it's a default" signal for an attacker to spoof. Only the
+    /// daemon's own HTTP `call_tool` (`Authoritative`) actually injects the
+    /// default and stamps the marker, and it is the ONLY hop that ever does
+    /// so for this request.
+    #[test]
+    fn marker_survives_double_enforcement_across_proxy_and_daemon_hops() {
+        // #1041 round-3 fixture fix: the Authoritative hop resolves the
+        // injected bound project through `resolve_named_project_db_identity`
+        // internally — needs `with_test_home` + a seeded
+        // `projects/sigil/memory.db` for the same reason as
+        // `genuinely_explicit_project_is_stamped_explicit` above.
+        with_test_home(|tachi_home| {
+            let sigil = tachi_home.join("projects/sigil/memory.db");
+            std::fs::create_dir_all(sigil.parent().expect("sigil parent")).expect("sigil parent");
+            std::fs::write(&sigil, b"sigil").expect("sigil db");
+
+            let mut arguments = args(map_from(&[
+                ("action", json!("save")),
+                ("text", json!("forwarded through the stdio proxy")),
+            ]));
+            // Hop 1: stdio proxy, client omitted project=. Preflight must be
+            // a no-op here — nothing to forge downstream.
+            enforce_session_project(
+                "tachi_memory",
+                &mut arguments,
+                "sigil",
+                "stdio proxy",
+                EnforcementRole::Preflight,
+            )
+            .expect("hop 1: preflight passes through");
+            let after_hop1 = arguments.as_ref().expect("arguments present");
+            assert!(
+                after_hop1.get("project").is_none(),
+                "Preflight must not inject a default project"
+            );
+            assert!(
+                after_hop1.get(PROJECT_EXPLICIT_MARKER).is_none(),
+                "Preflight must not stamp any marker for an untouched default"
+            );
+            // Hop 2: the daemon's own HTTP call_tool, same bound project,
+            // is the sole Authoritative hop — it sees `project` genuinely
+            // absent (hop 1 didn't touch it) and injects the default itself.
+            enforce_session_project(
+                "tachi_memory",
+                &mut arguments,
+                "sigil",
+                "HTTP direct-connect",
+                EnforcementRole::Authoritative,
+            )
+            .expect("hop 2: inject default project");
+            assert_eq!(
+                arguments
+                    .as_ref()
+                    .and_then(|a| a.get(PROJECT_EXPLICIT_MARKER))
+                    .and_then(|v| v.as_bool()),
+                Some(false),
+                "the sole Authoritative hop must mark its own injected default \
+                 as NOT explicit"
+            );
+        });
+    }
+
     #[test]
     fn bound_session_does_not_force_project_on_global_scope() {
         let mut arguments = args(map_from(&[
@@ -641,8 +1034,17 @@ mod tests {
             ("scope", json!("global")),
             ("query", json!("x")),
         ]));
-        enforce_session_project("tachi_memory", &mut arguments, "sigil", "stdio proxy")
-            .expect("global scope search");
+        // Authoritative (not Preflight): exercises the scope=global bypass
+        // inside the injection branch itself, not just "Preflight never
+        // injects anything anyway".
+        enforce_session_project(
+            "tachi_memory",
+            &mut arguments,
+            "sigil",
+            "HTTP direct-connect",
+            EnforcementRole::Authoritative,
+        )
+        .expect("global scope search");
         assert!(
             arguments.as_ref().and_then(|a| a.get("project")).is_none(),
             "global scope must not get bound project injected"

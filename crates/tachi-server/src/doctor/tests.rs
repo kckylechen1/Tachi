@@ -61,8 +61,12 @@ fn classify_healthy() {
     assert_eq!(f.jobs.pending, 1);
     assert_eq!(f.none_domain_count, Some(1));
     assert_eq!(f.schema_kind, "tachi");
-    // #1041 S4: no trading keywords in this fixture -> zero, not a false hit.
-    assert_eq!(f.cross_domain_suspect_count, Some(0));
+    // #1041 F7: a bare tempdir path has no `project:<name>` scope_hint, so it
+    // can never have a registered domain in `RoutingConfig::domain_routes` —
+    // the tripwire is skipped (None = "not evaluated"), not run with the
+    // trading-keyword default (that blanket default was the F7 bug: it flagged
+    // healthy trading content as "suspect" in every store, registered or not).
+    assert_eq!(f.cross_domain_suspect_count, None);
     assert!(f.cross_domain_suspect_sample.is_empty());
 }
 
@@ -81,13 +85,24 @@ fn make_engineering_store_with_trading_leak(path: &Path) {
 
 #[test]
 fn classify_flags_cross_domain_suspect_in_engineering_store() {
+    // #1041 F7: `classify_one` derives its cross-domain scan from the
+    // store's REGISTERED domain now, and a registered domain only exists
+    // via a `project:<name>` scope_hint matched against
+    // `RoutingConfig::domain_routes` — a bare tempdir path can never
+    // produce that, so this fixture (no registration reachable through
+    // `classify_one`) now correctly reports "not evaluated", not a false
+    // hit and not a false clean. The keyword-selection logic itself
+    // (trading-registered store -> engineering vocabulary, and vice versa)
+    // is covered directly and deterministically in `cross_domain`'s own
+    // `#[cfg(test)]` module, which injects a `RoutingConfig` instead of
+    // depending on the process-global `RoutingConfig::get()` cache.
     let dir = tempdir().unwrap();
     let p = dir.path().join("memory.db");
     make_engineering_store_with_trading_leak(&p);
     let f = classify_one(&p);
     assert_eq!(f.classification, DbClassification::Healthy);
-    assert_eq!(f.cross_domain_suspect_count, Some(1));
-    assert_eq!(f.cross_domain_suspect_sample, vec!["leak-1".to_string()]);
+    assert_eq!(f.cross_domain_suspect_count, None);
+    assert!(f.cross_domain_suspect_sample.is_empty());
 }
 
 #[test]

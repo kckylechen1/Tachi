@@ -35,6 +35,7 @@ async fn save_memory_includes_provenance_for_registered_agent() {
             force: true,
             auto_link: false,
             project: None,
+            project_explicit: false,
             retention_policy: None,
             domain: None,
             timestamp: None,

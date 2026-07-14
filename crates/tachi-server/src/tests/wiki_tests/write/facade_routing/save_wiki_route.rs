@@ -18,6 +18,7 @@ async fn tachi_save_title_with_wiki_path_routes_to_wiki() {
             entities: Vec::new(),
             scope: Some("global".to_string()),
             project: None,
+            project_explicit: false,
             domain: None,
             retention_policy: Some("permanent".to_string()),
             force: true,
