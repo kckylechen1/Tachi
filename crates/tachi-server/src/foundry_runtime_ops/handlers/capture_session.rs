@@ -510,11 +510,18 @@ mod affinity_tests {
             // from via the Plan C `projects/<name>/memory.db` convention.
             let server =
                 MemoryServer::new(global_db, Some(quant_db.clone())).expect("bind quant daemon");
-            // Pre-mount "hapi" (open-or-create semantics — see write_affinity's
-            // F8 doc note) so `named_project_db_exists("hapi")` is true.
-            server
-                .with_named_project_store("hapi", |_store| Ok::<(), String>(()))
-                .expect("create hapi store");
+            // `resolve_capture_entry_write_target` only needs
+            // `named_project_db_exists("hapi")` to be true here (it checks
+            // mountedness via `apply_write_affinity_for_domain`, it does not
+            // itself write into "hapi") — `with_named_project_store` resolves
+            // via `resolve_named_project_db_path`, which requires the path to
+            // already `.exists()`; it does NOT create a missing store. Lay
+            // down an empty placeholder file directly (same fixture pattern
+            // as `dispatch_ops::dispatch::tests`) rather than trying to
+            // "pre-mount" it through a write call.
+            let hapi_db = home.join("projects").join("hapi").join("memory.db");
+            std::fs::create_dir_all(hapi_db.parent().unwrap()).expect("mkdir hapi");
+            std::fs::write(&hapi_db, b"").expect("hapi db placeholder");
 
             let entry = entry_with_domain("cap-1", Some("equity_trading"));
             let (target_db, named_project) = resolve_capture_entry_write_target(

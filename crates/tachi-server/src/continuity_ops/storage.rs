@@ -365,9 +365,16 @@ mod tests {
             )
             .expect("write routing.json");
             let server = bound_server(home, "quant");
-            server
-                .with_named_project_store("hapi", |_store| Ok::<(), String>(()))
-                .expect("create hapi store");
+            // `with_named_project_store` resolves the target path via
+            // `resolve_named_project_db_path` and requires it to already
+            // `.exists()` — it does NOT create a missing store itself. The
+            // established fixture pattern (see
+            // `dispatch_ops::dispatch::tests::recover_orphaned_dispatch_runs_honors_project_from_receipt`)
+            // is to lay down an empty placeholder file directly; SQLite
+            // initializes schema on first real open regardless.
+            let hapi_db = home.join("projects").join("hapi").join("memory.db");
+            std::fs::create_dir_all(hapi_db.parent().unwrap()).expect("mkdir hapi");
+            std::fs::write(&hapi_db, b"").expect("hapi db placeholder");
 
             let target = ContinuityEventTarget::new(
                 DbScope::Project,
