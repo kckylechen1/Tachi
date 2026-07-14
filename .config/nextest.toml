@@ -27,3 +27,17 @@ failure-output = "immediate-final"
 success-output = "never"
 status-level = "fail"
 final-status-level = "flaky"
+
+# JUnit timing telemetry (Refs #1095): the ci profile writes a machine-readable
+# JUnit report at this path (the location the header comment above already
+# advertises). Each <testcase time="..."> records the pure test-BODY duration
+# (nextest measures only execution, never compile/link), so in CI the step's
+# wall-time minus the report's summed test time cleanly separates compile/link
+# cost from test-execution cost -- the two are no longer conflated. The report
+# is archived by the `Archive nextest JUnit timing report` step in
+# .github/workflows/ci.yml via actions/upload-artifact (no third-party action).
+# NOTE: `path` resolves relative to the profile's store dir
+# (target/nextest/ci/), so a bare filename lands the report at
+# target/nextest/ci/junit.xml -- a repo-relative path here would double-nest.
+[profile.ci.junit]
+path = "junit.xml"
