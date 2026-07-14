@@ -9,6 +9,7 @@
 //! | `--decay-policy <name>` | `PORTABLE_DECAY_POLICY` | `default` | #791 scorer hook |
 //! | `--daemon` | `PORTABLE_DAEMON=true` | off (stdio) | serve streamable HTTP on loopback instead of stdio (tachi #938) |
 //! | `--port <n>` | `PORTABLE_PORT` | `7919` | loopback port for `--daemon` mode; ignored in stdio mode |
+//! | `--allow-schema-migration` | `PORTABLE_ALLOW_SCHEMA_MIGRATION=true` | off (refuse) | #1119: authorize migrating an EXISTING older-schema persistent DB forward in place; translated into a typed `memcore::MigrationAuthority`, never a process env var read by the gate itself |
 
 use std::sync::Arc;
 
@@ -37,6 +38,13 @@ pub struct Config {
     pub daemon: bool,
     /// Loopback port for `--daemon` mode. Ignored in stdio mode.
     pub port: u16,
+    /// #1119: explicit opt-in to migrate an EXISTING older-schema persistent
+    /// DB forward in place (both `db_path` and every `project_db_paths`
+    /// entry). Default `false` (fail-closed): `main.rs` translates this into
+    /// a typed `memcore::MigrationAuthority::Allow` / `Deny` at the DB-open
+    /// call site — never a process env var read by the gate itself. Has no
+    /// effect on in-memory stores (always fresh, never gated).
+    pub allow_schema_migration: bool,
 }
 
 impl Config {
@@ -57,6 +65,7 @@ impl Config {
         let mut decay_policy_name: Option<String> = None;
         let mut daemon = false;
         let mut port: Option<u16> = None;
+        let mut allow_schema_migration = false;
 
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
@@ -82,6 +91,9 @@ impl Config {
                 "--daemon" => {
                     daemon = true;
                 }
+                "--allow-schema-migration" => {
+                    allow_schema_migration = true;
+                }
                 "--port" => {
                     let raw = it
                         .next()
@@ -102,7 +114,7 @@ impl Config {
                 }
                 other => {
                     return Err(format!(
-                        "unknown argument '{other}' (supported: --global-db, --project-db, --decay-policy, --daemon, --port)"
+                        "unknown argument '{other}' (supported: --global-db, --project-db, --decay-policy, --daemon, --port, --allow-schema-migration)"
                     ));
                 }
             }
@@ -139,6 +151,11 @@ impl Config {
             },
         };
 
+        let allow_schema_migration = allow_schema_migration
+            || env("PORTABLE_ALLOW_SCHEMA_MIGRATION")
+                .map(|v| is_truthy(&v))
+                .unwrap_or(false);
+
         Ok(Self {
             db_path,
             project_db_paths,
@@ -146,6 +163,7 @@ impl Config {
             decay_policy,
             daemon,
             port,
+            allow_schema_migration,
         })
     }
 }
@@ -189,6 +207,38 @@ mod tests {
         assert_eq!(
             DEFAULT_PORT, 7919,
             "must not default to the full daemon's 6919"
+        );
+        assert!(
+            !c.allow_schema_migration,
+            "schema-migration authority must default off (fail-closed, #1119)"
+        );
+    }
+
+    /// #1119 discriminating test 1: the flag parses into `Config`.
+    #[test]
+    fn allow_schema_migration_flag_sets_config_field() {
+        let args = vec!["--allow-schema-migration".to_string()];
+        let c = Config::parse(args, no_env).expect("parse");
+        assert!(c.allow_schema_migration);
+    }
+
+    #[test]
+    fn allow_schema_migration_env_fallback_is_truthy_parsed() {
+        let env = |k: &str| match k {
+            "PORTABLE_ALLOW_SCHEMA_MIGRATION" => Some("true".to_string()),
+            _ => None,
+        };
+        let c = Config::parse(Vec::<String>::new(), env).expect("parse");
+        assert!(c.allow_schema_migration);
+
+        let env_off = |k: &str| match k {
+            "PORTABLE_ALLOW_SCHEMA_MIGRATION" => Some("nah".to_string()),
+            _ => None,
+        };
+        let c_off = Config::parse(Vec::<String>::new(), env_off).expect("parse");
+        assert!(
+            !c_off.allow_schema_migration,
+            "non-truthy PORTABLE_ALLOW_SCHEMA_MIGRATION must not enable migration authority"
         );
     }
 
