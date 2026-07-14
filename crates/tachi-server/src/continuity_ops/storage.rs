@@ -378,6 +378,26 @@ mod tests {
         MemoryServer::new(global_db, Some(project_db)).expect("bind daemon")
     }
 
+    /// #1114 (Oz r3 fixture fix): mount a real, schema-initialized named
+    /// -project DB rather than a zero-byte placeholder file. `with_named_
+    /// project_store` (the WRITE path) resolves via `resolve_named_project_
+    /// db_path`, which only checks `.exists()` — a zero-byte file satisfies
+    /// that, and a WRITE against it succeeds because `MemoryStore::open_
+    /// with_label` runs schema init on first open. But `with_named_project_
+    /// store_read` (the READ path a pre-gate/existing-row check goes
+    /// through) does NOT run that init — reading a schema-less file fails
+    /// outright ("no such table: memories"), not "no rows found". Any test
+    /// whose FIRST touch of a mounted store is a read (not a write) needs a
+    /// REAL schema, not a placeholder — `memcore::MemoryStore::open_with_label`
+    /// (the same call the write path itself makes) gives it one.
+    fn mount_named_project_db(home: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let db_path = home.join("projects").join(name).join("memory.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir named project");
+        memcore::MemoryStore::open_with_label(db_path.to_str().expect("utf-8 db path"), name)
+            .expect("init named project schema");
+        db_path
+    }
+
     /// #1114 discriminating test (red before this PR): a continuity
     /// projection whose event domain is registered to a DIFFERENT, mounted
     /// store than the daemon's own bound project — via a transport-injected
@@ -396,16 +416,7 @@ mod tests {
             )
             .expect("write routing.json");
             let server = bound_server(home, "quant");
-            // `with_named_project_store` resolves the target path via
-            // `resolve_named_project_db_path` and requires it to already
-            // `.exists()` — it does NOT create a missing store itself. The
-            // established fixture pattern (see
-            // `dispatch_ops::dispatch::tests::recover_orphaned_dispatch_runs_honors_project_from_receipt`)
-            // is to lay down an empty placeholder file directly; SQLite
-            // initializes schema on first real open regardless.
-            let hapi_db = home.join("projects").join("hapi").join("memory.db");
-            std::fs::create_dir_all(hapi_db.parent().unwrap()).expect("mkdir hapi");
-            std::fs::write(&hapi_db, b"").expect("hapi db placeholder");
+            let _hapi_db = mount_named_project_db(home, "hapi");
 
             let target = ContinuityEventTarget::new(
                 DbScope::Project,
@@ -534,9 +545,7 @@ mod tests {
             )
             .expect("write routing.json");
             let server = bound_server(home, "quant");
-            let hapi_db = home.join("projects").join("hapi").join("memory.db");
-            std::fs::create_dir_all(hapi_db.parent().unwrap()).expect("mkdir hapi");
-            std::fs::write(&hapi_db, b"").expect("hapi db placeholder");
+            let _hapi_db = mount_named_project_db(home, "hapi");
 
             let target =
                 ContinuityEventTarget::new(DbScope::Project, Some("quant".to_string()), None);
@@ -602,9 +611,7 @@ mod tests {
                 r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
             )
             .expect("write routing.json");
-            let hapi_db = home.join("projects").join("hapi").join("memory.db");
-            std::fs::create_dir_all(hapi_db.parent().unwrap()).expect("mkdir hapi");
-            std::fs::write(&hapi_db, b"").expect("hapi db placeholder");
+            let _hapi_db = mount_named_project_db(home, "hapi");
 
             let id_resolves_at_pretarget = super::get_projection_memory(&server, &target, &entry.id)
                 .expect("pretarget existence check")

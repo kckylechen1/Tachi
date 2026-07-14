@@ -634,6 +634,20 @@ mod affinity_tests {
         MemoryServer::new(global_db, Some(quant_db)).expect("bind daemon")
     }
 
+    /// #1114 (Oz r3 fixture fix): mount a real, schema-initialized named
+    /// -project DB rather than a zero-byte placeholder file — see
+    /// `continuity_ops::storage::tests::mount_named_project_db`'s doc for
+    /// why a zero-byte file only survives a WRITE-first touch, not a READ
+    /// -first one (`with_named_project_store_read` does not run schema
+    /// init the way the write path's `MemoryStore::open_with_label` does).
+    fn mount_named_project_db(home: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let db_path = home.join("projects").join(name).join("memory.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir named project");
+        memcore::MemoryStore::open_with_label(db_path.to_str().expect("utf-8 db path"), name)
+            .expect("init named project schema");
+        db_path
+    }
+
     /// #1114 discriminating test (red before this PR): capture content whose
     /// domain is registered to a DIFFERENT, mounted store than the daemon's
     /// own bound project must be rerouted there, not silently land in the
@@ -650,18 +664,7 @@ mod affinity_tests {
             )
             .expect("write routing.json");
             let server = two_project_server(home, "quant");
-            // `resolve_capture_write_target` only needs
-            // `named_project_db_exists("hapi")` to be true here (it checks
-            // mountedness via `apply_write_affinity_for_domain`, it does not
-            // itself write into "hapi") — `with_named_project_store` resolves
-            // via `resolve_named_project_db_path`, which requires the path to
-            // already `.exists()`; it does NOT create a missing store. Lay
-            // down an empty placeholder file directly (same fixture pattern
-            // as `dispatch_ops::dispatch::tests`) rather than trying to
-            // "pre-mount" it through a write call.
-            let hapi_db = home.join("projects").join("hapi").join("memory.db");
-            std::fs::create_dir_all(hapi_db.parent().unwrap()).expect("mkdir hapi");
-            std::fs::write(&hapi_db, b"").expect("hapi db placeholder");
+            let _hapi_db = mount_named_project_db(home, "hapi");
 
             let (target_db, named_project) = resolve_capture_write_target(
                 &server,
@@ -810,9 +813,7 @@ mod affinity_tests {
                 r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
             )
             .expect("write routing.json");
-            let hapi_db = home.join("projects").join("hapi").join("memory.db");
-            std::fs::create_dir_all(hapi_db.parent().unwrap()).expect("mkdir hapi");
-            std::fs::write(&hapi_db, b"").expect("hapi db placeholder");
+            let _hapi_db = mount_named_project_db(home, "hapi");
 
             let (round2_db, round2_project) = resolve_capture_write_target(
                 &server,
