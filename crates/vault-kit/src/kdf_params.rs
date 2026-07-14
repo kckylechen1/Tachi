@@ -40,22 +40,50 @@ pub struct KdfParams {
 }
 
 impl KdfParams {
-    /// The only parameter set either product has ever actually written.
-    /// Every healthy vault in the field today has exactly this value in its
-    /// `kdf_params` column — enforcing against this set does not affect
-    /// day-one unlock for a single existing vault.
+    /// The only parameter set either product has ever actually written in a
+    /// production release. Every healthy vault in the field today has exactly
+    /// this value in its `kdf_params` column — enforcing against this set
+    /// does not affect day-one unlock for a single existing vault.
     pub const PRODUCTION: KdfParams = KdfParams {
         memory_cost_kib: 65_536,
         time_cost: 3,
         parallelism: 4,
     };
 
+    /// The lightweight parameter set `active_kdf_params_json()` writes under
+    /// `cfg(test)` / `test-support`+`debug_assertions` (mirrors the cfg gate
+    /// on the compile-time constants in `kdf.rs`). It must be in the
+    /// supported set in those same builds: a test that inits a vault and
+    /// unlocks it writes the active profile, then re-reads it through
+    /// `from_stored_json` — if the just-written value were rejected as
+    /// unsupported, the init→unlock round-trip (and every downstream test
+    /// suite that exercises it) would break against the product's own stored
+    /// format.
+    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+    const TEST: KdfParams = KdfParams {
+        memory_cost_kib: 64,
+        time_cost: 1,
+        parallelism: 1,
+    };
+
     /// The parameter sets `derive_with_params`/`from_stored_json` accept.
-    /// Deliberately a single entry today (the only value ever written);
-    /// this is the seam a future format revision extends, not a place to
+    ///
+    /// In a production build this is exactly `[PRODUCTION]` — the only value
+    /// either product has ever written. Under `cfg(test)` / `test-support`
+    /// the matching lightweight profile is accepted too, so "what `derive()`
+    /// uses" and "what `supported()` accepts" stay in lockstep in every build
+    /// mode (a test-profile vault must unlock against its own stored params).
+    /// This is the seam a future format revision extends, not a place to
     /// widen speculatively.
     pub fn supported() -> &'static [KdfParams] {
-        &[KdfParams::PRODUCTION]
+        #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+        {
+            &[KdfParams::PRODUCTION, KdfParams::TEST]
+        }
+        #[cfg(not(any(test, all(feature = "test-support", debug_assertions))))]
+        {
+            &[KdfParams::PRODUCTION]
+        }
     }
 
     /// Whether `self` is one of the [`KdfParams::supported`] profiles.

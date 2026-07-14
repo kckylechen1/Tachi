@@ -184,8 +184,6 @@ pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, St
         return Ok(false);
     }
 
-    use base64::{engine::general_purpose::STANDARD as B64, Engine};
-
     let config = server
         .with_global_store_read(|store| store.vault_get_config().map_err(|e| e.to_string()))?
         .ok_or_else(|| "vault not initialized".to_string())?;
@@ -213,16 +211,11 @@ pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, St
         return Ok(false);
     }
 
-    let salt = B64
-        .decode(&config.salt)
-        .map_err(|e| format!("invalid vault salt: {e}"))?;
-    let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)
-        .map_err(|e| format!("vault key derivation failed: {e}"))?;
-    if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)
-        .map_err(|e| format!("vault verifier check failed: {e}"))?
-    {
-        return Err("keychain password does not match vault".to_string());
-    }
+    // tachi#1080: derive+verify through the shared in-process seam so a stored
+    // kdf_params failure stays loud and typed (never misread as "wrong
+    // password", never silently unlocks with a compile-time-derived key).
+    let key = crate::vault_crypto::derive_verified_key_from_stored_config(&config, &password)
+        .map_err(|e| e.to_string())?;
 
     {
         let mut v = server.vault_write();

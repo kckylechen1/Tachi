@@ -105,7 +105,17 @@ pub(crate) async fn handle_vault_unlock(
                 &params.password
             }
         };
-        let key = match crypto::DerivedVaultKey::derive(password, &salt) {
+        // tachi#1080: derive using the STORED `vault_config.kdf_params`, not a
+        // compile-time constant. A malformed or unsupported stored value fails
+        // loud and versioned here — before `verify_password` — so it is never
+        // misread as "wrong password" and never counts against the lockout
+        // counter (mirrors the corrupted-verifier discipline).
+        let key_result = match crypto::parse_stored_kdf_params(&config.kdf_params) {
+            Ok(params) => crypto::DerivedVaultKey::derive_with_params(password, &salt, &params)
+                .map_err(|e| e.to_string()),
+            Err(err) => Err(err.to_string()),
+        };
+        let key = match key_result {
             Ok(key) => key,
             Err(err) => {
                 if let Some(password) = fifo_password.as_mut() {

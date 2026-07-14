@@ -63,6 +63,25 @@ impl MemoryStore {
     /// A sync bundle spans the singleton config row, encrypted entries, and
     /// rotation rows. Import callers must not leave a target Vault half-initialized
     /// if a later row fails validation or persistence.
+    ///
+    /// # Unvalidated primitive — caller contract
+    ///
+    /// This is a low-level storage primitive: it writes `config` verbatim and
+    /// does **not** validate `kdf_params`/`kdf_algorithm` for support. This
+    /// crate (memcore) is a storage leaf and intentionally has no dependency
+    /// on `vault-kit`'s KDF-parameter validation, so that check cannot live
+    /// here.
+    ///
+    /// **Callers must validate the incoming `VaultConfig`'s `kdf_params` via
+    /// `vault-kit`'s `KdfParams` before calling this method.** Skipping that
+    /// step can persist a Vault whose KDF is never unlockable — a day-one
+    /// brick with no recovery path.
+    ///
+    /// The sole current caller, `tachi-server`'s
+    /// `bootstrap::vault_sync::import_vault_bundle`, performs this validation
+    /// before opening the vault (Refs kckylechen1/Hyperion-HyperTachi#28,
+    /// tachi#1080). Enforcing this contract at the boundary itself, rather
+    /// than relying on caller discipline, is a follow-up hardening item.
     pub fn vault_import_bundle(
         &mut self,
         config: &VaultConfig,
