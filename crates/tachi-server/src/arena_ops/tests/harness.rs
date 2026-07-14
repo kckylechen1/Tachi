@@ -87,13 +87,7 @@ async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
         if let Some(existing) = std::env::var_os("PATH") {
             paths.extend(std::env::split_paths(&existing));
         }
-        EnvRestore::set(
-            "PATH",
-            std::env::join_paths(paths)
-                .expect("join PATH")
-                .to_str()
-                .expect("PATH UTF-8"),
-        )
+        EnvRestore::set_os("PATH", &std::env::join_paths(paths).expect("join PATH"))
     };
 
     let server = server();
@@ -259,13 +253,7 @@ async fn arena_opencode_executor_fallback_uses_glm_registry_model() {
         if let Some(existing) = std::env::var_os("PATH") {
             paths.extend(std::env::split_paths(&existing));
         }
-        EnvRestore::set(
-            "PATH",
-            std::env::join_paths(paths)
-                .expect("join PATH")
-                .to_str()
-                .expect("PATH UTF-8"),
-        )
+        EnvRestore::set_os("PATH", &std::env::join_paths(paths).expect("join PATH"))
     };
     let _model = EnvRestore::set("TACHI_DISPATCH_GLM_CODING_MODEL", "zhipuai/glm-5.2-arena");
 

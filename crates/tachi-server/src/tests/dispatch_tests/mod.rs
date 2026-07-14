@@ -280,10 +280,7 @@ impl EnvVarGuard {
     }
 
     fn set_value(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        Self(EnvRestore::set(
-            key,
-            value.as_ref().to_str().expect("env value must be UTF-8"),
-        ))
+        Self(EnvRestore::set_os(key, value.as_ref()))
     }
 }
 
