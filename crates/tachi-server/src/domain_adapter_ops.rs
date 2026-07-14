@@ -139,6 +139,13 @@ async fn lorebook_import(
             source_repo: Some("romanbath".to_string()),
             adapter: Some("domain_adapter:lorebook".to_string()),
             project: project.clone(),
+            // #1114: this is an internal, programmatic construction (not raw
+            // wire JSON) — `project_explicit: project.is_some()` preserves
+            // this call site's pre-#1114 behavior exactly (no new
+            // write-affinity scrutiny introduced here), matching
+            // `RememberParams::project_explicit`'s documented convention for
+            // non-wire callers.
+            project_explicit: project.is_some(),
             domain: Some(domain.clone()),
             session_id: Some(session_id.clone()),
             actor: Some(actor.clone()),
@@ -176,6 +183,9 @@ async fn lorebook_import(
             id: None,
             source_repo: None,
             adapter: None,
+            // #1114: see the `emit` construction above — preserve this call
+            // site's pre-#1114 behavior exactly.
+            project_explicit: project.is_some(),
             project,
             domain: Some(domain),
             session_id: None,

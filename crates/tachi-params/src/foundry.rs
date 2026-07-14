@@ -154,6 +154,16 @@ pub struct CaptureSessionParams {
     #[serde(default)]
     pub project: Option<String>,
 
+    /// #1114: see `SaveMemoryParams::project_explicit` — same signal, same
+    /// wire key. `session_identity::enforce_session_project` stamps this on
+    /// every bound-session tool call generically, so `capture_session`'s
+    /// write-affinity scrutiny can distinguish a caller-supplied `project=`
+    /// from a transport-injected session-binding default the same way the
+    /// S1 gate already does for `save_memory`.
+    #[serde(default, rename = "__tachi_project_explicit")]
+    #[schemars(skip)]
+    pub project_explicit: bool,
+
     /// Minimum combined character count before capture runs
     #[serde(default = "default_capture_min_chars")]
     pub min_chars: usize,

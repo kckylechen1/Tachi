@@ -8,6 +8,7 @@ fn tachi_event_params(action: &str) -> TachiEventParams {
         source_repo: None,
         adapter: None,
         project: None,
+        project_explicit: false,
         domain: None,
         session_id: None,
         actor: None,

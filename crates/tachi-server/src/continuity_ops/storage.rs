@@ -126,11 +126,46 @@ pub(super) fn read_events(
     }
 }
 
+/// #1114 (write_affinity module doc's F1 note): purpose-built call into the
+/// S1 write-affinity gate's DI core for continuity projection — the
+/// audited original cross-domain-drift source that bypassed
+/// `handle_save_memory`'s gate entirely by resolving its own store here.
+///
+/// Only in scope when `target.db_path.is_none()` — a `db_path` target (the
+/// background `ContinuityProjectionScheduler` sweep) is a pinned visit to
+/// one specific manifest DB, source store == destination store by
+/// construction, never the daemon's ambiguous default; gating it would risk
+/// rerouting a scheduled per-DB pass away from the exact DB it's sweeping.
+/// When `target.named_project` is `Some`, `project_explicit` (threaded from
+/// `TachiEventParams::project_explicit`) decides whether that's a genuine
+/// caller placement decision (skip) or a transport-injected session default
+/// (still scrutinized) — same semantics as `SaveMemoryParams::project_explicit`.
 pub(super) fn upsert_projection_memory(
     server: &MemoryServer,
     target: &ContinuityEventTarget,
     entry: &MemoryEntry,
+    project_explicit: bool,
+    id_resolves_at_target: bool,
 ) -> Result<(), String> {
+    let gated = if target.db_path.is_none() {
+        let affinity = crate::memory_search_ops::save_memory::write_affinity::apply_write_affinity_for_domain(
+            server,
+            entry.domain.as_deref(),
+            target.target_db,
+            target.named_project.as_deref(),
+            project_explicit,
+            id_resolves_at_target,
+        )?;
+        Some(ContinuityEventTarget {
+            target_db: affinity.target_db,
+            named_project: affinity.named_project,
+            db_path: None,
+        })
+    } else {
+        None
+    };
+    let target = gated.as_ref().unwrap_or(target);
+
     if let Some(project_name) = target.named_project.as_deref() {
         server.with_named_project_store(project_name, |store| {
             store
@@ -260,6 +295,185 @@ pub(super) fn continuity_metrics(
 #[cfg(test)]
 mod tests {
     use super::pick_label;
+    use super::{upsert_projection_memory, ContinuityEventTarget};
+    use crate::server_state::MemoryServer;
+    use crate::DbScope;
+    use memcore::MemoryEntry;
+    use serde_json::json;
+
+    fn projection_entry(id: &str, domain: Option<&str>) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: "/timeline/projected".to_string(),
+            summary: "projected".to_string(),
+            text: "projected content".to_string(),
+            importance: 0.6,
+            timestamp: "2026-07-14T00:00:00Z".to_string(),
+            valid_from: "2026-07-14T00:00:00Z".to_string(),
+            valid_until: None,
+            category: "experience".to_string(),
+            topic: "timeline".to_string(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "external:tachi_event_projection".to_string(),
+            scope: "project".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: domain.map(str::to_string),
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    fn bound_server(home: &std::path::Path, bound_project: &str) -> MemoryServer {
+        let project_db = home
+            .join("projects")
+            .join(bound_project)
+            .join("memory.db");
+        std::fs::create_dir_all(project_db.parent().unwrap()).expect("mkdir project");
+        let global_db = home.join("global").join("memory.db");
+        std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+        // `MemoryServer::new(global, project)` — the PROJECT path (second
+        // arg) is what `bound_project_label` resolves the daemon's own bound
+        // name from via the Plan C `projects/<name>/memory.db` convention.
+        MemoryServer::new(global_db, Some(project_db)).expect("bind daemon")
+    }
+
+    /// #1114 discriminating test (red before this PR): a continuity
+    /// projection whose event domain is registered to a DIFFERENT, mounted
+    /// store than the daemon's own bound project — via a transport-injected
+    /// `named_project` (bound session default, NOT a caller's `project=`) —
+    /// must be rerouted there, not silently upserted into the bound
+    /// project's own store. Before this change, `upsert_projection_memory`
+    /// called `with_named_project_store`/`with_store_for_scope` directly
+    /// with no domain-affinity check at all: this is the exact
+    /// cross-domain-drift shape #1041/#1114 exist to catch.
+    #[test]
+    fn cross_domain_projection_reroutes_to_registered_mounted_store() {
+        crate::test_support::with_tachi_home(|home| {
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing.json");
+            let server = bound_server(home, "quant");
+            server
+                .with_named_project_store("hapi", |_store| Ok::<(), String>(()))
+                .expect("create hapi store");
+
+            let target = ContinuityEventTarget::new(
+                DbScope::Project,
+                Some("quant".to_string()), // transport-injected default == bound project
+                None,
+            );
+            let entry = projection_entry("projection-1", Some("equity_trading"));
+            upsert_projection_memory(&server, &target, &entry, false, false)
+                .expect("upsert projection memory");
+
+            let in_hapi = server
+                .with_named_project_store_read("hapi", |store| {
+                    store.get(&entry.id).map_err(|e| e.to_string())
+                })
+                .expect("read hapi");
+            assert!(
+                in_hapi.is_some(),
+                "equity_trading projection content must reroute into hapi"
+            );
+            let in_quant = server
+                .with_project_store_read(|store| store.get(&entry.id).map_err(|e| e.to_string()))
+                .expect("read quant");
+            assert!(
+                in_quant.is_none(),
+                "must NOT silently land in the daemon's own bound (quant) store"
+            );
+        });
+    }
+
+    /// Same mismatch, but the registered store is not mounted — must refuse
+    /// loudly (typed `WriteAffinityError` surfaced as a `String`), never
+    /// silently write cross-domain.
+    #[test]
+    fn cross_domain_projection_refuses_when_registered_store_unmounted() {
+        crate::test_support::with_tachi_home(|home| {
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing.json");
+            let server = bound_server(home, "quant");
+            // "hapi" is never mounted here.
+
+            let target =
+                ContinuityEventTarget::new(DbScope::Project, Some("quant".to_string()), None);
+            let entry = projection_entry("projection-2", Some("equity_trading"));
+            let err = upsert_projection_memory(&server, &target, &entry, false, false)
+                .expect_err("must refuse, not silently write cross-domain");
+            assert!(err.contains("equity_trading"));
+            assert!(err.contains("hapi"));
+        });
+    }
+
+    /// Same-domain (unregistered-domain) projection content is unaffected —
+    /// the ordinary case must not be disturbed by this gate.
+    #[test]
+    fn same_domain_projection_is_unaffected() {
+        crate::test_support::with_tachi_home(|home| {
+            let server = bound_server(home, "quant");
+            let target =
+                ContinuityEventTarget::new(DbScope::Project, Some("quant".to_string()), None);
+            let entry = projection_entry("projection-3", Some("engineering"));
+            upsert_projection_memory(&server, &target, &entry, false, false)
+                .expect("upsert projection memory");
+
+            let in_quant = server
+                .with_named_project_store_read("quant", |store| {
+                    store.get(&entry.id).map_err(|e| e.to_string())
+                })
+                .expect("read quant");
+            assert!(in_quant.is_some());
+        });
+    }
+
+    /// A `db_path`-targeted projection (the background
+    /// `ContinuityProjectionScheduler` sweep) is never scrutinized — it
+    /// passes through unchanged even for mismatched, registered domain
+    /// content, since source store == destination store by construction.
+    #[test]
+    fn db_path_target_skips_the_gate_entirely() {
+        crate::test_support::with_tachi_home(|home| {
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing.json");
+            let server = bound_server(home, "quant");
+            let pinned_db = home.join("pinned").join("memory.db");
+            std::fs::create_dir_all(pinned_db.parent().unwrap()).expect("mkdir pinned");
+
+            let target = ContinuityEventTarget::new(DbScope::Project, None, Some(pinned_db.clone()));
+            let entry = projection_entry("projection-4", Some("equity_trading"));
+            upsert_projection_memory(&server, &target, &entry, false, false)
+                .expect("upsert projection memory");
+
+            let in_pinned = server
+                .with_path_store_read(&pinned_db, |store| {
+                    store.get(&entry.id).map_err(|e| e.to_string())
+                })
+                .expect("read pinned db");
+            assert!(
+                in_pinned.is_some(),
+                "db_path target must land exactly where pinned, ungated"
+            );
+        });
+    }
 
     // #488: the TACHI_PROJECT pin must win over the git-hash db-path parent name
     // so direct-daemon continuity projections align with pinned reads/writes.

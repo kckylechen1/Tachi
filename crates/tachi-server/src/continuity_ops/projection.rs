@@ -26,7 +26,22 @@ pub(crate) fn project_continuity_events(
     let target = target_from_event_params(server, params);
     let query = event_query_from_params(params);
     let filters = projection_filters(&params.projection_hints)?;
-    project_continuity_events_inner(server, &target, query, filters, params.dry_run, false)
+    // #1114: `params.project.is_some()` alone is not proof of a caller
+    // decision — bound stdio/HTTP sessions inject the session's bound
+    // project onto every project-defaulting write tool, same as
+    // `SaveMemoryParams` pre-#1041-F2. `project_explicit` (stamped by
+    // `session_identity::enforce_session_project`) distinguishes the two;
+    // see `write_affinity`'s module doc.
+    let project_explicit = params.project.is_some() && params.project_explicit;
+    project_continuity_events_inner(
+        server,
+        &target,
+        query,
+        filters,
+        params.dry_run,
+        false,
+        project_explicit,
+    )
 }
 
 pub(crate) fn project_auto_continuity_events_for_target(
@@ -38,7 +53,13 @@ pub(crate) fn project_auto_continuity_events_for_target(
         limit: query_limit(limit),
         ..TachiEventQuery::default()
     };
-    project_continuity_events_inner(server, &target, query, Vec::new(), false, true)
+    // #1114: every target this caller (the background
+    // `ContinuityProjectionScheduler` sweep) builds is a `db_path`-pinned
+    // visit to one specific manifest DB — `upsert_projection_memory`'s own
+    // `db_path.is_some()` check skips the write-affinity gate for these
+    // regardless of this flag, so `project_explicit` here is inert by
+    // construction, not a live decision.
+    project_continuity_events_inner(server, &target, query, Vec::new(), false, true, true)
 }
 
 fn auto_projectable_event(event: &TachiEventRecord) -> bool {
@@ -78,6 +99,7 @@ fn project_continuity_events_inner(
     filters: Vec<ProjectionKind>,
     dry_run: bool,
     auto_only: bool,
+    project_explicit: bool,
 ) -> Result<Value, String> {
     let events = read_events(server, target, &query)?;
     let mut projected = Vec::new();
@@ -109,9 +131,21 @@ fn project_continuity_events_inner(
             let key = projection_key(&event, projection);
             let memory_id = projection_memory_id(projection, &key);
             let existing = get_projection_memory(server, target, &memory_id)?;
+            // #1114: capture before `build_projection_entry` consumes
+            // `existing` — whether this exact projection row already lives
+            // at the PRE-gate target is the write-affinity gate's
+            // `id_resolves_at_target` signal (a genuine update-in-place is
+            // never second-guessed, same as `apply_write_affinity`'s own).
+            let id_resolves_at_target = existing.is_some();
             let (entry, already_projected) = build_projection_entry(existing, &event, projection);
             if !dry_run {
-                if let Err(error) = upsert_projection_memory(server, target, &entry) {
+                if let Err(error) = upsert_projection_memory(
+                    server,
+                    target,
+                    &entry,
+                    project_explicit,
+                    id_resolves_at_target,
+                ) {
                     errors.push(json!({
                         "event_id": event.id,
                         "projection": projection.as_str(),

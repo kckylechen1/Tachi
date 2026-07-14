@@ -8,6 +8,7 @@ use super::bracket::{extract_bracket_self_evolution_notes, matches_agent_tag};
 use super::target::resolve_capture_target;
 use crate::server_state::MemoryServer;
 use crate::tool_params::CaptureSessionParams;
+use crate::DbScope;
 use chrono::Utc;
 use memcore::MemoryEntry;
 use serde_json::{json, Value};
@@ -293,18 +294,34 @@ pub(crate) async fn handle_capture_session(
     let mut saved_ids = Vec::new();
 
     for entry in &entries {
-        persist_capture_entry(
+        // KNOWN LIMITATION: only this entry's own persisted row is
+        // re-targeted on a reroute — `enqueue_capture_maintenance_jobs`
+        // below and the continuity `session_event`/pipeline still use the
+        // pre-gate `target_db`/`named_project` for the whole batch, so a
+        // rerouted entry's downstream maintenance job would look for it in
+        // the pre-gate store. This only matters when a genuine cross-domain
+        // mismatch actually fires (rare); flagged for the next holder of
+        // this path rather than silently accepted.
+        let (entry_target_db, entry_named_project) = resolve_capture_entry_write_target(
             server,
+            entry,
             target_db,
             named_project.as_deref(),
+            db_path.as_ref(),
+            params.project_explicit,
+        )?;
+        persist_capture_entry(
+            server,
+            entry_target_db,
+            entry_named_project.as_deref(),
             db_path.as_ref(),
             entry,
         )?;
         if embeddings.is_none() {
             queue_capture_enrichment(
                 server,
-                target_db,
-                named_project.clone(),
+                entry_target_db,
+                entry_named_project.clone(),
                 db_path.clone(),
                 entry,
                 false,
@@ -376,4 +393,253 @@ pub(crate) async fn handle_capture_session(
 
     serde_json::to_string(&Value::Object(response))
         .map_err(|e| format!("Failed to serialize capture_session response: {e}"))
+}
+
+/// #1114 (write_affinity module doc's F1 note): purpose-built write-affinity
+/// scrutiny for the fresh-incoming-content path — bracket self-evolution
+/// notes and LLM-drafted session-capture drafts land wherever
+/// `resolve_capture_target` resolved, the exact ambiguous-default shape S1
+/// exists to catch. Entries here carry `domain: None` on the wire, so derive
+/// one the same way `resolve_save_domain` does for `save_memory` (transient
+/// — only used for this routing decision, never written back onto `entry`).
+/// A `db_path` target (the manifest agent-pinned branch of
+/// `resolve_capture_target`) is a deliberate per-agent DB assignment and is
+/// never scrutinized here, same posture as continuity's own `db_path` skip
+/// in `continuity_ops::storage::upsert_projection_memory`.
+///
+/// Pulled out of `handle_capture_session`'s loop so the routing decision is
+/// unit-testable without an LLM/embedding call — see the `tests` module.
+fn resolve_capture_entry_write_target(
+    server: &MemoryServer,
+    entry: &MemoryEntry,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    db_path: Option<&std::path::PathBuf>,
+    project_explicit: bool,
+) -> Result<(DbScope, Option<String>), String> {
+    if db_path.is_some() {
+        return Ok((target_db, named_project.map(str::to_string)));
+    }
+    // `repair_target` returns `None` both when nothing needs repairing (an
+    // already-clean domain is unchanged) and when there was truly nothing to
+    // infer — same `.or_else` fallback `resolve_save_domain` (save_memory)
+    // and `projection_domain_label` (continuity) both apply, so an already
+    // -valid `entry.domain` is never dropped just because it didn't need a
+    // repair.
+    let domain = crate::repair::domain::repair_target(
+        entry.domain.as_deref(),
+        &entry.path,
+        &entry.category,
+        "foundry_capture",
+    )
+    .or_else(|| entry.domain.clone());
+    let affinity =
+        crate::memory_search_ops::save_memory::write_affinity::apply_write_affinity_for_domain(
+            server,
+            domain.as_deref(),
+            target_db,
+            named_project,
+            project_explicit,
+            false, // id_resolves_at_target: capture entries are freshly materialized here, no pre-check of an existing row at this call site
+        )?;
+    Ok((affinity.target_db, affinity.named_project))
+}
+
+#[cfg(test)]
+mod affinity_tests {
+    use super::resolve_capture_entry_write_target;
+    use crate::server_state::MemoryServer;
+    use crate::DbScope;
+    use memcore::MemoryEntry;
+    use serde_json::json;
+
+    fn entry_with_domain(id: &str, domain: Option<&str>) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: "/openclaw/agent/self-evolution".to_string(),
+            summary: String::new(),
+            text: "captured note".to_string(),
+            importance: 0.7,
+            timestamp: "2026-07-14T00:00:00Z".to_string(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "preference".to_string(),
+            topic: String::new(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "capture_session".to_string(),
+            scope: "project".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: domain.map(str::to_string),
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    /// #1114 discriminating test (red before this PR): capture content whose
+    /// domain is registered to a DIFFERENT, mounted store than the daemon's
+    /// own bound project must be rerouted there, not silently land in the
+    /// bound project just because that's where `resolve_capture_target`
+    /// pointed by default. Before this change, `capture_session.rs` called
+    /// `persist_capture_entry` directly with the pre-gate target — this is
+    /// exactly the cross-domain-drift shape #1041/#1114 exist to catch.
+    #[test]
+    fn cross_domain_capture_entry_reroutes_to_registered_mounted_store() {
+        crate::test_support::with_tachi_home(|home| {
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing.json");
+
+            let quant_db = home.join("projects").join("quant").join("memory.db");
+            std::fs::create_dir_all(quant_db.parent().unwrap()).expect("mkdir quant");
+            let global_db = home.join("global").join("memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+            // `MemoryServer::new(global, project)` — the project path (not the
+            // first/global one) is what `bound_project_label` resolves "quant"
+            // from via the Plan C `projects/<name>/memory.db` convention.
+            let server =
+                MemoryServer::new(global_db, Some(quant_db.clone())).expect("bind quant daemon");
+            // Pre-mount "hapi" (open-or-create semantics — see write_affinity's
+            // F8 doc note) so `named_project_db_exists("hapi")` is true.
+            server
+                .with_named_project_store("hapi", |_store| Ok::<(), String>(()))
+                .expect("create hapi store");
+
+            let entry = entry_with_domain("cap-1", Some("equity_trading"));
+            let (target_db, named_project) = resolve_capture_entry_write_target(
+                &server,
+                &entry,
+                DbScope::Project,
+                Some("quant"), // transport-injected default == daemon's own bound project
+                None,
+                false, // project_explicit: NOT a caller decision
+            )
+            .expect("resolve write target");
+
+            assert_eq!(target_db, DbScope::Project);
+            assert_eq!(
+                named_project.as_deref(),
+                Some("hapi"),
+                "equity_trading content on an unrelated (quant) daemon must reroute to hapi"
+            );
+        });
+    }
+
+    /// Same mismatch, but the registered store is NOT mounted — must refuse
+    /// loudly rather than silently landing the entry in the bound store.
+    #[test]
+    fn cross_domain_capture_entry_refuses_when_registered_store_unmounted() {
+        crate::test_support::with_tachi_home(|home| {
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing.json");
+
+            let quant_db = home.join("projects").join("quant").join("memory.db");
+            std::fs::create_dir_all(quant_db.parent().unwrap()).expect("mkdir quant");
+            let global_db = home.join("global").join("memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+            // `MemoryServer::new(global, project)` — the project path (not the
+            // first/global one) is what `bound_project_label` resolves "quant"
+            // from via the Plan C `projects/<name>/memory.db` convention.
+            let server =
+                MemoryServer::new(global_db, Some(quant_db.clone())).expect("bind quant daemon");
+            // "hapi" is never mounted here.
+
+            let entry = entry_with_domain("cap-2", Some("equity_trading"));
+            let err = resolve_capture_entry_write_target(
+                &server,
+                &entry,
+                DbScope::Project,
+                Some("quant"),
+                None,
+                false,
+            )
+            .expect_err("must refuse, not silently write cross-domain");
+            assert!(err.contains("equity_trading"));
+            assert!(err.contains("hapi"));
+        });
+    }
+
+    /// Same-domain (or unregistered-domain) content on its own daemon is
+    /// unaffected — the common case must not be disturbed by this gate.
+    #[test]
+    fn same_domain_capture_entry_is_unaffected() {
+        crate::test_support::with_tachi_home(|home| {
+            let quant_db = home.join("projects").join("quant").join("memory.db");
+            std::fs::create_dir_all(quant_db.parent().unwrap()).expect("mkdir quant");
+            let global_db = home.join("global").join("memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+            // `MemoryServer::new(global, project)` — the project path (not the
+            // first/global one) is what `bound_project_label` resolves "quant"
+            // from via the Plan C `projects/<name>/memory.db` convention.
+            let server =
+                MemoryServer::new(global_db, Some(quant_db.clone())).expect("bind quant daemon");
+
+            let entry = entry_with_domain("cap-3", None);
+            let (target_db, named_project) = resolve_capture_entry_write_target(
+                &server,
+                &entry,
+                DbScope::Project,
+                Some("quant"),
+                None,
+                false,
+            )
+            .expect("resolve write target");
+
+            assert_eq!(target_db, DbScope::Project);
+            assert_eq!(named_project.as_deref(), Some("quant"));
+        });
+    }
+
+    /// An explicit `db_path` target (the manifest agent-pinned capture
+    /// branch) is never scrutinized — it passes through unchanged even for
+    /// mismatched, registered domain content.
+    #[test]
+    fn db_path_target_skips_the_gate_entirely() {
+        crate::test_support::with_tachi_home(|home| {
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing.json");
+
+            let quant_db = home.join("projects").join("quant").join("memory.db");
+            std::fs::create_dir_all(quant_db.parent().unwrap()).expect("mkdir quant");
+            let global_db = home.join("global").join("memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+            // `MemoryServer::new(global, project)` — the project path (not the
+            // first/global one) is what `bound_project_label` resolves "quant"
+            // from via the Plan C `projects/<name>/memory.db` convention.
+            let server =
+                MemoryServer::new(global_db, Some(quant_db.clone())).expect("bind quant daemon");
+
+            let entry = entry_with_domain("cap-4", Some("equity_trading"));
+            let pinned = home.join("projects").join("pinned-agent-db").join("memory.db");
+            let (target_db, named_project) = resolve_capture_entry_write_target(
+                &server,
+                &entry,
+                DbScope::Project,
+                None,
+                Some(&pinned),
+                false,
+            )
+            .expect("resolve write target");
+
+            assert_eq!(target_db, DbScope::Project);
+            assert!(named_project.is_none());
+        });
+    }
 }
