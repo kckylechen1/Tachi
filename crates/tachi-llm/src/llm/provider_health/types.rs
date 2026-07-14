@@ -1,10 +1,10 @@
 use super::*;
 
-#[derive(Clone)]
-pub(in crate::llm) struct ChatLaneConfig {
-    pub(in crate::llm) base_url: String,
-    pub(in crate::llm) model: String,
-    pub(in crate::llm) api_key_envs: Vec<&'static str>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatLaneConfig {
+    pub base_url: String,
+    pub model: String,
+    pub api_key_envs: Vec<&'static str>,
 }
 
 #[derive(Clone)]

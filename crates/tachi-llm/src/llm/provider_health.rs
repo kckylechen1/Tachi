@@ -16,13 +16,15 @@ mod selection;
 mod state;
 mod types;
 
+pub use self::config::ProviderRuntimeConfig;
 pub(super) use self::state::{
     ProviderHealthPersistState, ProviderHealthReloadState, ProviderHealthSnapshot, ProviderState,
 };
+pub use self::types::ChatLaneConfig;
 pub use self::types::ProviderSecret;
 pub(super) use self::types::{
-    ChatLane, ChatLaneConfig, ClaudeCliFailure, ClaudeCliFailureKind, ClaudeCliSkip,
-    KeyAvailability, KeyRetryStatus, SelectedProviderSecret,
+    ChatLane, ClaudeCliFailure, ClaudeCliFailureKind, ClaudeCliSkip, KeyAvailability,
+    KeyRetryStatus, SelectedProviderSecret,
 };
 pub use self::types::{ProviderHealthStatus, ProviderKeyCooldownStatus, ProviderPoolStatus};
 

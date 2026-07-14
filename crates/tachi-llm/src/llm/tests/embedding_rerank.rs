@@ -1,3 +1,4 @@
+use super::super::{ChatLaneConfig, ProviderRuntimeConfig};
 use super::*;
 
 fn embedding_values(seed: f64) -> Vec<f64> {
@@ -93,8 +94,6 @@ async fn voyage_request_shape_unchanged() {
     use axum::{extract::State, routing::post, Json, Router};
     use std::sync::{Arc, Mutex};
 
-    let _guard = crate::test_support::global_test_lock().lock();
-
     #[derive(Clone, Default)]
     struct Capture {
         hits: usize,
@@ -136,13 +135,42 @@ async fn voyage_request_shape_unchanged() {
     });
 
     let endpoint = format!("http://127.0.0.1:{port}/v1/rerank");
-    let _provider = EnvRestore::unset(RERANK_PROVIDER_ENV);
-    let _endpoint = EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV);
+
+    // Lock only the env-dependent section: these vars are read live at call
+    // time by rerank_voyage (voyage_rerank_url + secret selection). Provider
+    // selection is now via injected config, not env.
+    let _guard = crate::test_support::global_test_lock().lock();
     let _voyage_url = EnvRestore::set(RERANK_VOYAGE_ENDPOINT_ENV, &endpoint);
     let _vk = EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
     let _vrk = EnvRestore::unset("VOYAGE_RERANK_API_KEY");
 
-    let client = LlmClient::new().expect("client");
+    let config = ProviderRuntimeConfig {
+        extract: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        summary: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        reasoning: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        distill: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("client");
     let docs = vec!["alpha".to_string(), "beta".to_string()];
     let out = client
         .rerank("probe query", &docs, 2)
@@ -227,12 +255,9 @@ fn local_rerank_unconfigured_does_not_fall_back_to_voyage() {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
 async fn local_rerank_hits_configured_endpoint() {
     use axum::{extract::State, routing::post, Json, Router};
     use std::sync::{Arc, Mutex};
-
-    let _guard = crate::test_support::global_test_lock().lock();
 
     #[derive(Clone, Default)]
     struct Capture {
@@ -268,10 +293,34 @@ async fn local_rerank_hits_configured_endpoint() {
     });
 
     let endpoint = format!("http://127.0.0.1:{port}/rerank");
-    let _provider = EnvRestore::set(RERANK_PROVIDER_ENV, "local");
-    let _endpoint = EnvRestore::set(RERANK_LOCAL_ENDPOINT_ENV, &endpoint);
+    let config = ProviderRuntimeConfig {
+        extract: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        summary: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        reasoning: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        distill: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Local,
+            local_endpoint: Some(endpoint),
+        },
+    };
 
-    let client = LlmClient::new().expect("client");
+    let client = LlmClient::new_with_config(config, None).expect("client");
     // Index 1 is empty → filtered out; remaining map: filtered[0]=orig 0, filtered[1]=orig 2
     let docs = vec![
         "doc-zero".to_string(),
