@@ -50,6 +50,11 @@ TEST_FILTER="test(bootstrap::cli_tool::cards::tests) \
 + test(proposal_evolution) \
 + ${ACPX_FILTER} \
 + test(cycle_status)"
-run cargo nextest run -p tachi-server --locked -j 1 -E "$TEST_FILTER"
+# --no-fail-fast: the old six libtest commands ran every matching test inside
+# a failing group to completion before reporting; nextest's default fail-fast
+# would abandon later selected tests mid-run. With --no-fail-fast the failure
+# path executes the full selected set (a diagnostics superset of the old
+# group-level abort), and the exit code stays red on any failure.
+run cargo nextest run -p tachi-server --locked -j 1 --no-fail-fast -E "$TEST_FILTER"
 
 run cargo clippy -p tachi-server --all-targets --locked -- -D warnings

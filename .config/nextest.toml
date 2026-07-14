@@ -36,5 +36,8 @@ final-status-level = "flaky"
 # cost from test-execution cost -- the two are no longer conflated. The report
 # is archived by the `Archive nextest JUnit timing report` step in
 # .github/workflows/ci.yml via actions/upload-artifact (no third-party action).
+# NOTE: `path` resolves relative to the profile's store dir
+# (target/nextest/ci/), so a bare filename lands the report at
+# target/nextest/ci/junit.xml -- a repo-relative path here would double-nest.
 [profile.ci.junit]
-path = "target/nextest/ci/junit.xml"
+path = "junit.xml"

@@ -63,7 +63,9 @@ jobs:
         with:
           name: nextest-junit-report
           path: target/nextest/ci/junit.xml
-          if-no-files-found: warn
+          # A missing report means the junit config is dead, not that there was
+          # nothing to archive -- fail loudly instead of degrading silently.
+          if-no-files-found: error
 
       - name: Verify portable-kernel feature boundary
         run: cargo test -p portable-kernel --features portable-contract-test --locked
