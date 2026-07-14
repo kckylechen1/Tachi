@@ -21,30 +21,33 @@ fn clear_cached_vault_state_locked(v: &mut crate::VaultState) {
     v.unlock_time = None;
 }
 
+/// Clear ONLY the vault master key and unlock time — NOT provider secrets.
+///
+/// Provider secrets are materialized from the vault at unlock time and have a
+/// lifecycle independent of the master key. Auto-lock is about preventing the
+/// master key from residing in memory long-term, NOT about stopping the service
+/// from working. Clearing provider secrets on auto-lock breaks headless daemons
+/// (e.g. production Linux routers without Keychain) with no recovery path.
+pub(super) fn clear_vault_key_only(server: &MemoryServer) {
+    let mut v = server.vault_write();
+    clear_cached_vault_state_locked(&mut v);
+}
+
+/// Full clear: vault key + unlock time + provider secrets.
+/// Used ONLY by user-initiated `vault lock`, where the user explicitly wants
+/// everything purged.
 pub(super) fn clear_cached_vault_state(server: &MemoryServer) {
-    {
-        let mut v = server.vault_write();
-        clear_cached_vault_state_locked(&mut v);
-    }
+    clear_vault_key_only(server);
     server.llm.clear_provider_secrets();
 }
 
 pub(super) fn maybe_auto_lock_vault(server: &MemoryServer) -> bool {
-    let locked = {
-        let mut v = server.vault_write();
-        let expired = v.unlock_time.is_some_and(|unlock_time| {
-            unlock_time.elapsed() > Duration::from_secs(v.auto_lock_after_secs)
-        });
-        if expired {
-            clear_cached_vault_state_locked(&mut v);
-        }
-        expired
-    };
-    if locked {
-        server.llm.clear_provider_secrets();
-        crate::provider_config::re_materialize_provider_secrets_after_auto_lock(server);
+    let mut v = server.vault_write();
+    let expired = v.auto_lock_expired();
+    if expired {
+        clear_cached_vault_state_locked(&mut v);
     }
-    locked
+    expired
 }
 
 /// Attempt a Keychain auto-unlock after a locked-access was observed.
@@ -88,9 +91,7 @@ pub(super) fn with_vault_key<T>(
             let mut v = server.vault_write();
             match v.unlock_time {
                 None => Err("Vault is locked. Call vault_unlock first.".to_string()),
-                Some(unlock_time)
-                    if unlock_time.elapsed() > Duration::from_secs(v.auto_lock_after_secs) =>
-                {
+                Some(_) if v.auto_lock_expired() => {
                     clear_cached_vault_state_locked(&mut v);
                     Err("Vault auto-locked. Call vault_unlock first.".to_string())
                 }
@@ -108,15 +109,7 @@ pub(super) fn with_vault_key<T>(
                 attempted_auto_unlock = true;
                 match try_keychain_auto_unlock_after_locked_access(server, &reason) {
                     Ok(true) => continue,
-                    Ok(false) => {
-                        if reason.starts_with("Vault auto-locked") {
-                            server.llm.clear_provider_secrets();
-                            crate::provider_config::re_materialize_provider_secrets_after_auto_lock(
-                                server,
-                            );
-                        }
-                        break Err(reason);
-                    }
+                    Ok(false) => break Err(reason),
                     // A real auto-unlock failure (e.g. stored kdf_params
                     // format error, or "keychain password does not match
                     // vault") — propagate the distinguishable message instead
@@ -125,10 +118,6 @@ pub(super) fn with_vault_key<T>(
                 }
             }
             Err(reason) => {
-                if reason.starts_with("Vault auto-locked") {
-                    server.llm.clear_provider_secrets();
-                    crate::provider_config::re_materialize_provider_secrets_after_auto_lock(server);
-                }
                 break Err(reason);
             }
         }

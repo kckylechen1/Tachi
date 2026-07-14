@@ -99,9 +99,14 @@ pub(crate) fn runtime_observability_json(
                 .as_secs()
         });
         json!({
-            "unlocked": state.key.is_some() && unlocked_for_seconds
-                .map(|elapsed| elapsed <= state.auto_lock_after_secs)
-                .unwrap_or(false),
+            // `auto_lock_expired()` is the single source of truth: when
+            // auto-lock is disabled (secs == 0) it returns false, so the
+            // runtime status reports `unlocked: true` as long as the key is
+            // present — matching the enforcement path. The old bare
+            // `elapsed <= auto_lock_after_secs` comparison reported
+            // `unlocked: false` one second after unlock for a 0-configured
+            // daemon while the key was still live.
+            "unlocked": state.key.is_some() && !state.auto_lock_expired(),
             "unlocked_for_seconds": unlocked_for_seconds,
             "auto_lock_after_seconds": state.auto_lock_after_secs,
             "failed_attempts": state.failed_attempts.0,

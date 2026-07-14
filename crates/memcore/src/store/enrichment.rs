@@ -56,7 +56,8 @@ impl MemoryStore {
             None
         };
 
-        db::retry_memory_locked(|| {
+        let db_label = self.db_label.clone();
+        db::retry_memory_locked("update_with_revision", &db_label, || {
             db::update_with_revision(
                 &mut self.conn,
                 id,
@@ -86,7 +87,8 @@ impl MemoryStore {
         } else {
             None
         };
-        db::retry_memory_locked(|| {
+        let db_label = self.db_label.clone();
+        db::retry_memory_locked("update_enrichment_fields", &db_label, || {
             db::update_enrichment_fields(
                 &mut self.conn,
                 id,

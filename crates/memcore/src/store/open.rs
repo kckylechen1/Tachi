@@ -124,6 +124,9 @@ impl MemoryStore {
                 return Err(MemoryError::InvalidArg(e.to_string()));
             }
         }
-        db::retry_memory_locked(|| db::upsert(&mut self.conn, entry, self.vec_available))
+        let db_label = self.db_label.clone();
+        db::retry_memory_locked("upsert", &db_label, || {
+            db::upsert(&mut self.conn, entry, self.vec_available)
+        })
     }
 }

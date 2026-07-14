@@ -15,7 +15,8 @@
 
 - **T0 trivial**: main agent inline, zero ceremony.
 - **T1 lookup / current-state mapping**: `Explore` agent, `model: sonnet`.
-- **T2 implementation (default)**: `general-purpose` or `opus` agent (Opus-class model) on an isolated worktree implements; a fresh `codex:dispatch` / `codex:rescue` session reviews with numbered checkpoints. The inverse (codex implements, opus/sonnet reviews) is a valid alternate lane — pick per task, never let one side self-grade.
+- **T2 implementation, bounded + spec-frozen (default; owner-ratified 2026-07-14)**: supervised GLM — the `Clanker` supervisor agent (sonnet) drives a GLM opencode write lane under a vaccine contract (explicit file allowlist, no cargo except `cargo fmt --all`, STOP-on-scope-gap); a fresh `codex:dispatch` / `codex:rescue` session reviews with numbered checkpoints. The supervisor + cross-vendor review are what make the cheap lane safe — never run GLM writes through a bare relay.
+- **T2 implementation, judgment-dense / trust-boundary / concurrency**: `Wizard` (sonnet; opus override for the hardest) on an isolated worktree implements; codex reviews. The inverse (codex implements, opus/sonnet reviews) is a valid alternate lane — pick per task, never let one side self-grade.
 - **T3 design research**: `.claude/workflows/design-collision.js` fans out to 2-3 diverse strong lanes (e.g. fable/opus/codex) on the same frozen question.
 - **Mechanical chores** (long test suites, git/PR plumbing): `test-runner` / `git-clerk` agents on `sonnet`, content authored by the leader verbatim — these agents never author conclusions.
 
