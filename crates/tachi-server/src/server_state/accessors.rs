@@ -152,4 +152,12 @@ impl MemoryServer {
             .filter(|value| !value.is_empty())
             .map(str::to_string);
     }
+
+    /// This server's Tachi home directory, resolved once at construction
+    /// (see `home_dir` field doc). Handlers reachable after `MemoryServer::new`
+    /// should call this instead of re-reading `path_utils::tachi_home()` /
+    /// `TACHI_HOME`-family env vars directly.
+    pub(crate) fn tachi_home_dir(&self) -> PathBuf {
+        (*self.home_dir).clone()
+    }
 }

@@ -292,19 +292,41 @@ fn unquote_env_value(value: &str) -> &str {
         .unwrap_or(value)
 }
 
+/// #1096 leaf-2a: three-key precedence (`TACHI_HOME` → `SIGIL_HOME` →
+/// `TACHI_APP_HOME`), matching the order of the two `tachi_home()` funnels in
+/// `tachi-server`/`tachi-llm`. This used to check ONLY `TACHI_HOME` — a
+/// process launched with just `SIGIL_HOME` or `TACHI_APP_HOME` set (as those
+/// two crates' own funnels honor) silently read recall config from the
+/// wrong default (`$HOME/.tachi/config.env`) instead of the home the rest of
+/// the app actually resolved to. See `config_env_path_uses_three_key_home_precedence`
+/// below for the RED-before-fix regression this closes.
+///
+/// #1096 leaf-2a round-2 (codex C3-recall_config): the skip test on each key
+/// must match the canonical funnel's skip semantics
+/// (`path_utils::home::tachi_home` in `tachi-server`), which reads via
+/// `std::env::var` (UTF-8 only) and skips when the TRIMMED value is empty.
+/// This used to read via `var_os` and only skip on a byte-empty `OsString`,
+/// so a whitespace-only value like `SIGIL_HOME="   "` was NOT skipped here
+/// (unlike the canonical funnel, which moves on to the next key) — the app's
+/// resolved home and this crate's recall-config home silently disagreed.
 fn config_env_path() -> Option<PathBuf> {
-    let app_home = match std::env::var_os("TACHI_HOME") {
-        Some(raw) if !raw.is_empty() => {
-            let raw = PathBuf::from(raw);
-            if raw.starts_with("~") {
-                let home = std::env::var_os("HOME").map(PathBuf::from)?;
-                home.join(raw.strip_prefix("~").ok()?)
-            } else {
-                raw
-            }
+    for key in ["TACHI_HOME", "SIGIL_HOME", "TACHI_APP_HOME"] {
+        let Ok(value) = std::env::var(key) else {
+            continue;
+        };
+        if value.trim().is_empty() {
+            continue;
         }
-        _ => std::env::var_os("HOME").map(PathBuf::from)?.join(".tachi"),
-    };
+        let raw = PathBuf::from(value);
+        let app_home = if raw.starts_with("~") {
+            let home = std::env::var_os("HOME").map(PathBuf::from)?;
+            home.join(raw.strip_prefix("~").ok()?)
+        } else {
+            raw
+        };
+        return Some(app_home.join("config.env"));
+    }
+    let app_home = std::env::var_os("HOME").map(PathBuf::from)?.join(".tachi");
     Some(app_home.join("config.env"))
 }
 
@@ -318,6 +340,47 @@ fn env_truthy(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RAII env-var restore for the `config_env_path` precedence tests below.
+    ///
+    /// #1096 leaf-2a round-2 (codex C5): the prior version of
+    /// `config_env_path_uses_three_key_home_precedence` saved/cleared env at
+    /// the top and restored it via a plain closure call at the bottom — if
+    /// any assertion in between panicked, the restore call never ran and the
+    /// temp `TACHI_HOME`/`SIGIL_HOME`/`TACHI_APP_HOME`/`HOME` overrides leaked
+    /// into every test that runs after it in the same process (`memcore`'s
+    /// tests run in parallel by default, so this can poison an unrelated
+    /// sibling test, not just a rerun). Restoring via `Drop` survives a panic
+    /// during unwinding, same guarantee `tachi-server`'s `EnvRestore` gives.
+    struct EnvVarSnapshotRestore {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvVarSnapshotRestore {
+        /// Snapshot each key's current value, clear it, and return a guard
+        /// that restores the snapshot on drop (including panic unwinding).
+        fn capture_and_clear(keys: &[&'static str]) -> Self {
+            let saved: Vec<(&'static str, Option<std::ffi::OsString>)> = keys
+                .iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect();
+            for key in keys {
+                std::env::remove_var(key);
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvVarSnapshotRestore {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn defaults_preserve_prior_hardcoded_values() {
@@ -409,5 +472,96 @@ mod tests {
             RecallConfig::default().or_fallback_fts_score_factor
         );
         assert_eq!(config.or_fallback_fts_max_terms, 1);
+    }
+
+    /// #1096 leaf-2a. Against the pre-fix `config_env_path()` (which only
+    /// ever read `TACHI_HOME`, unconditionally falling back to
+    /// `$HOME/.tachi` otherwise) this test is RED at the `TACHI_APP_HOME`-only
+    /// step below: that step's expected path is under `app_home_dir`, but the
+    /// old implementation — seeing no `TACHI_HOME` — would have resolved
+    /// `home_dir.join(".tachi")` instead, so the assertion would fail.
+    /// Single test function (not split across several `#[test]`s) so the env
+    /// mutations below are strictly sequential and never race another test
+    /// thread touching the same process-global vars — this crate has no
+    /// existing env-guard/lock convention to reuse for this. Restore is via
+    /// `EnvVarSnapshotRestore`'s `Drop` (round-2 C5), not a postlude call, so
+    /// a failing assertion below still restores env instead of leaking the
+    /// temp overrides into whichever sibling test runs next.
+    #[test]
+    fn config_env_path_uses_three_key_home_precedence() {
+        let _restore = EnvVarSnapshotRestore::capture_and_clear(&[
+            "TACHI_HOME",
+            "SIGIL_HOME",
+            "TACHI_APP_HOME",
+            "HOME",
+        ]);
+
+        let home_dir = tempfile::tempdir().expect("home tempdir");
+        let sigil_home_dir = tempfile::tempdir().expect("sigil home tempdir");
+        let app_home_dir = tempfile::tempdir().expect("app home tempdir");
+        let tachi_home_dir = tempfile::tempdir().expect("tachi home tempdir");
+
+        // No TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME set: falls back to
+        // $HOME/.tachi, same as before this fix.
+        std::env::set_var("HOME", home_dir.path());
+        assert_eq!(
+            config_env_path(),
+            Some(home_dir.path().join(".tachi").join("config.env"))
+        );
+
+        // TACHI_APP_HOME alone: the old single-key implementation never read
+        // this var, so it would still have resolved $HOME/.tachi here. This
+        // assertion is the RED case referenced above.
+        std::env::set_var("TACHI_APP_HOME", app_home_dir.path());
+        assert_eq!(
+            config_env_path(),
+            Some(app_home_dir.path().join("config.env"))
+        );
+
+        // SIGIL_HOME set alongside TACHI_APP_HOME: SIGIL_HOME wins (matches
+        // the funnel's TACHI_HOME > SIGIL_HOME > TACHI_APP_HOME order).
+        std::env::set_var("SIGIL_HOME", sigil_home_dir.path());
+        assert_eq!(
+            config_env_path(),
+            Some(sigil_home_dir.path().join("config.env"))
+        );
+
+        // TACHI_HOME set alongside both: TACHI_HOME wins over everything.
+        std::env::set_var("TACHI_HOME", tachi_home_dir.path());
+        assert_eq!(
+            config_env_path(),
+            Some(tachi_home_dir.path().join("config.env"))
+        );
+    }
+
+    /// #1096 leaf-2a round-2 (codex C3-recall_config): RED against the
+    /// pre-fix `config_env_path()`, which read via `var_os` and only skipped
+    /// a key on byte-empty `OsString` — a whitespace-only value like
+    /// `SIGIL_HOME="   "` was NOT byte-empty, so the old code would have used
+    /// `PathBuf::from("   ")` as `app_home` (a bogus non-empty path) instead
+    /// of falling through to the next key/default, silently disagreeing with
+    /// the canonical funnel (`path_utils::home::tachi_home` in
+    /// `tachi-server`), which reads via `env::var` (UTF-8) and skips on
+    /// TRIMMED-empty. Restore via `EnvVarSnapshotRestore`'s `Drop`, same as
+    /// the sibling precedence test above.
+    #[test]
+    fn config_env_path_skips_whitespace_only_home_value() {
+        let _restore = EnvVarSnapshotRestore::capture_and_clear(&[
+            "TACHI_HOME",
+            "SIGIL_HOME",
+            "TACHI_APP_HOME",
+            "HOME",
+        ]);
+
+        let home_dir = tempfile::tempdir().expect("home tempdir");
+        std::env::set_var("HOME", home_dir.path());
+        std::env::set_var("SIGIL_HOME", "   ");
+
+        assert_eq!(
+            config_env_path(),
+            Some(home_dir.path().join(".tachi").join("config.env")),
+            "whitespace-only SIGIL_HOME must be treated as unset, matching the \
+             canonical funnel's trim-then-empty-check skip semantics"
+        );
     }
 }

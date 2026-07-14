@@ -844,20 +844,10 @@ mod tests {
         (server, dir)
     }
 
-    fn with_tachi_home<F: FnOnce(&std::path::Path)>(f: F) {
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().expect("tachi home");
-        let saved = std::env::var_os("TACHI_HOME");
-        std::env::set_var("TACHI_HOME", home.path());
-        f(home.path());
-        if let Some(value) = saved {
-            std::env::set_var("TACHI_HOME", value);
-        } else {
-            std::env::remove_var("TACHI_HOME");
-        }
-    }
+    // #1096 leaf-2a: local `with_tachi_home` replaced by the shared,
+    // panic-safe `crate::test_support::with_tachi_home` (see its doc comment
+    // for why the old local copy here was unsound under a panicking `f`).
+    use crate::test_support::with_tachi_home;
 
     #[test]
     fn writes_canonical_row_with_expected_fields() {

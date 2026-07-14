@@ -13,8 +13,8 @@ const NOTE_SUBDIRS: &[&str] = &[
 ];
 
 /// Resolve the notes root directory under the active Tachi home.
-pub(crate) fn notes_root() -> PathBuf {
-    crate::path_utils::tachi_home().join("notes")
+pub(crate) fn notes_root(home: &Path) -> PathBuf {
+    home.join("notes")
 }
 
 /// Ensure standard subdirectories exist under the notes root.
@@ -139,6 +139,7 @@ fn build_note_markdown(
 
 /// Write a note to the filesystem and return the relative path + absolute path.
 pub(crate) fn write_note_file(
+    home: &Path,
     text: &str,
     user_path: Option<&str>,
     title: Option<&str>,
@@ -146,7 +147,7 @@ pub(crate) fn write_note_file(
     category: Option<&str>,
     keywords: &[String],
 ) -> Result<(PathBuf, String), String> {
-    let root = notes_root();
+    let root = notes_root(home);
     ensure_notes_dirs(&root)?;
 
     let now = Utc::now();

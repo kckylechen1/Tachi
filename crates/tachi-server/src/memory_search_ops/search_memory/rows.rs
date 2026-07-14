@@ -317,7 +317,11 @@ pub(crate) async fn search_memory_rows_with_recall_config(
                 combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
             }
         } else {
-            let inferred_project = infer_search_project(&params.query, params.domain.as_deref());
+            let inferred_project = infer_search_project(
+                &server.tachi_home_dir(),
+                &params.query,
+                params.domain.as_deref(),
+            );
             let inferred_db_path = inferred_project
                 .as_deref()
                 .and_then(|name| crate::MemoryServer::resolve_named_project_db_path(name).ok());
@@ -380,7 +384,8 @@ pub(crate) async fn search_memory_rows_with_recall_config(
     if !eval_recall_opted_in(&params) {
         combined_results.retain(|(result, _)| !is_eval_entry(&result.entry));
     }
-    if let Some(project_name) = project_filter_name(&params, project_only) {
+    if let Some(project_name) = project_filter_name(&server.tachi_home_dir(), &params, project_only)
+    {
         combined_results.retain(|(result, db_scope)| match db_scope {
             DbScope::Project => project_scope_allows_memory(&project_name, &params, &result.entry),
             DbScope::Global => true,

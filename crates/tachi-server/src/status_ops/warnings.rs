@@ -4,8 +4,8 @@
 //! from `status_ops::mod` (no behavior change); shared types come via the parent.
 
 use super::{
-    collect_snapshot, resolve_app_home, status_health, truncate, DaemonStatus, DbStatus,
-    StatusSnapshot, EXPECTED_EMBEDDING_DIM, STUCK_THRESHOLD_SECS,
+    collect_snapshot, status_health, truncate, DaemonStatus, DbStatus, StatusSnapshot,
+    EXPECTED_EMBEDDING_DIM, STUCK_THRESHOLD_SECS,
 };
 use serde_json::json;
 
@@ -13,8 +13,11 @@ use serde_json::json;
 pub(crate) async fn collect_agent_warning_lines(server: &crate::MemoryServer) -> Vec<String> {
     let global_db = server.global_db_path_buf();
     let project_db = server.project_db_path_buf();
+    // #1096 leaf-2a: resolve the server-bound home BEFORE the blocking
+    // closure so it reads the accessor (cheap, sync) instead of re-deriving
+    // from env inside the spawned blocking task.
+    let app_home = server.tachi_home_dir();
     tokio::task::spawn_blocking(move || {
-        let app_home = resolve_app_home();
         let snapshot = collect_snapshot(&app_home, &global_db, project_db.as_deref());
         let daemon_state = match &snapshot.daemon {
             DaemonStatus::Running { .. } => json!({ "running": true }),

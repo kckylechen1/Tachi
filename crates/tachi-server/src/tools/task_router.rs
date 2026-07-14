@@ -84,6 +84,7 @@ pub(super) async fn handle_tachi_task_facade(
                 .filter(|dispatch_id| !dispatch_id.trim().is_empty())
                 .and_then(|dispatch_id| {
                     read_dispatch_defaults_for_complete_with_flow(
+                        &server.tachi_home_dir(),
                         params.flow_id.as_deref(),
                         dispatch_id,
                     )

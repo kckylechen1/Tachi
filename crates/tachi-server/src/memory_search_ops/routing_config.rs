@@ -224,20 +224,9 @@ mod tests {
         assert!(config.ticker_route_project.is_none());
     }
 
-    fn with_test_tachi_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        let saved = std::env::var_os("TACHI_HOME");
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::env::set_var("TACHI_HOME", temp.path());
-        let result = f(temp.path());
-        match saved {
-            Some(value) => std::env::set_var("TACHI_HOME", value),
-            None => std::env::remove_var("TACHI_HOME"),
-        }
-        result
-    }
+    // #1096 leaf-2a: local `with_test_tachi_home` replaced by the shared,
+    // panic-safe `crate::test_support::with_tachi_home`.
+    use crate::test_support::with_tachi_home as with_test_tachi_home;
 
     // #1041 F4 regression: `load()` must distinguish "no override file" (a
     // legitimate empty table) from a REAL load failure (unreadable /

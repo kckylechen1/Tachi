@@ -131,15 +131,10 @@ pub(super) async fn generate_mcp_config(
 
     let config = json!({ "mcpServers": mcp_servers });
 
-    // Write to temp file under $TACHI_HOME/tmp or $HOME/.tachi/tmp
-    let tmp_dir = if let Ok(home) = std::env::var("TACHI_HOME") {
-        PathBuf::from(home)
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".tachi")
-    } else {
-        std::env::temp_dir().join("tachi")
-    };
-    let tmp_dir = tmp_dir.join("tmp");
+    // Write to temp file under the server-bound Tachi home's tmp dir (#1096
+    // leaf-2a: was a private TACHI_HOME/HOME two-key duplicate of the
+    // canonical funnel).
+    let tmp_dir = server.tachi_home_dir().join("tmp");
     std::fs::create_dir_all(&tmp_dir)
         .map_err(|e| format!("Failed to create tmp dir for MCP config: {e}"))?;
 

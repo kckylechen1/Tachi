@@ -4,7 +4,7 @@ use super::*;
 #[tokio::test]
 async fn tachi_save_note_rejects_symlink_leaf() {
     let (server, temp_home) = make_server_with_temp_home();
-    let notes_dir = crate::notes_ops::notes_root().join("brainstorm");
+    let notes_dir = crate::notes_ops::notes_root(&server.tachi_home_dir()).join("brainstorm");
     std::fs::create_dir_all(&notes_dir).expect("create notes dir");
     let outside = temp_home.temp_home.join("outside.md");
     std::fs::write(&outside, "outside").expect("write outside target");

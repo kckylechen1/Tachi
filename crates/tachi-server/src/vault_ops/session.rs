@@ -1,6 +1,6 @@
 use crate::server_state::MemoryServer;
 use crate::vault_crypto as crypto;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const VAULT_UNLOCK_MAX_FAILED_ATTEMPTS: u32 = 5;
@@ -168,16 +168,14 @@ pub(super) fn record_vault_unlock_failure(server: &MemoryServer) -> Result<Strin
 }
 
 #[cfg(unix)]
-pub(super) fn read_unlock_password_fifo(path: &str) -> Result<String, String> {
+pub(super) fn read_unlock_password_fifo(home: &Path, path: &str) -> Result<String, String> {
     use std::io::Read;
     use std::os::fd::FromRawFd;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
 
     let path = PathBuf::from(path);
-    let unlock_dir = crate::path_utils::tachi_home()
-        .join("runtime")
-        .join("vault-unlock");
+    let unlock_dir = home.join("runtime").join("vault-unlock");
     let expected_parent = unlock_dir
         .canonicalize()
         .map_err(|e| format!("unlock FIFO directory is not available: {e}"))?;
@@ -298,6 +296,6 @@ pub(super) fn read_unlock_password_fifo(path: &str) -> Result<String, String> {
 }
 
 #[cfg(not(unix))]
-pub(super) fn read_unlock_password_fifo(_path: &str) -> Result<String, String> {
+pub(super) fn read_unlock_password_fifo(_home: &Path, _path: &str) -> Result<String, String> {
     Err("unlock password FIFO transport is only supported on Unix".to_string())
 }

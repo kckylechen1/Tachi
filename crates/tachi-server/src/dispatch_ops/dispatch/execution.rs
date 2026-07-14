@@ -254,7 +254,10 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 // COMPLETED (no synthesized success eval for routing stats).
                 let tail = tail_chars(&full_output, 500);
                 let (run_dir_opt, declared_pred, pred_cwd) =
-                    crate::dispatch_ops::resolve_completion_predicate_context(&d_id);
+                    crate::dispatch_ops::resolve_completion_predicate_context(
+                        &server_clone.tachi_home_dir(),
+                        &d_id,
+                    );
                 let empty_run = std::path::PathBuf::new();
                 let run_dir = run_dir_opt.as_deref().unwrap_or(&empty_run);
                 let output_for_pred = run_dir

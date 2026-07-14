@@ -100,6 +100,7 @@ pub(super) fn project_scope_allows_memory_with_config(
 }
 
 pub(super) fn project_filter_name(
+    home: &std::path::Path,
     params: &SearchMemoryParams,
     project_only: bool,
 ) -> Option<String> {
@@ -107,7 +108,7 @@ pub(super) fn project_filter_name(
         if project_only {
             crate::memory_search_ops::search_helpers::resolve_workspace_named_project()
         } else {
-            infer_search_project(&params.query, params.domain.as_deref())
+            infer_search_project(home, &params.query, params.domain.as_deref())
         }
     })
 }
