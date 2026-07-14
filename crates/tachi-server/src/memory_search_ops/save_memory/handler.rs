@@ -6,12 +6,31 @@ use super::persist::{
 };
 use super::response::{build_duplicate_save_response, build_save_response};
 use super::validation::{validate_save_text, SaveTextValidation};
+use super::write_affinity::{apply_write_affinity, AffinityNote};
 use crate::memory_search_ops::auto_link::{is_training_seed, spawn_auto_linking};
 use crate::memory_search_ops::text_scrub::{scrub_secrets, scrub_think_tags};
 use crate::tool_params::SaveMemoryParams;
 use crate::{DbScope, MemoryServer};
 use chrono::Utc;
 use serde_json::json;
+
+/// Render a #1041 S1 write-affinity note into the compact JSON shape
+/// surfaced on the save response (`domain_affinity`), never blocking the
+/// caller — a hard mismatch with no eligible store is a loud `Err` from
+/// `apply_write_affinity` before a response is ever built, not a note.
+fn domain_affinity_note_json(note: &AffinityNote) -> serde_json::Value {
+    match note {
+        AffinityNote::Unregistered { domain } => json!({
+            "status": "unregistered",
+            "domain": domain,
+        }),
+        AffinityNote::Rerouted { domain, project } => json!({
+            "status": "rerouted",
+            "domain": domain,
+            "project": project,
+        }),
+    }
+}
 
 pub(crate) async fn handle_save_memory(
     server: &MemoryServer,
@@ -54,7 +73,29 @@ pub(crate) async fn handle_save_memory(
     let scope_warning = warning.as_ref().map(|_| {
         crate::memory_search_ops::scope_downgrade_warning(&requested_scope, target_db.as_str())
     });
-    if !params.force && params.id.is_none() {
+
+    // #1041 S1: domain-store write affinity gate. Only acts on the ambiguous
+    // default path (no explicit project=, no client id, resolved to the
+    // bound project store) — reroutes to the domain's registered store when
+    // one is mounted, refuses loudly when it isn't, or passes through
+    // unchanged when the domain has no registered route at all (uncertain,
+    // fail-safe permissive). See `write_affinity` module docs.
+    let affinity = apply_write_affinity(server, &params, target_db, named_project.as_deref())?;
+    let target_db = affinity.target_db;
+    let named_project = affinity.named_project;
+    let affinity_note = affinity.note;
+
+    // #1041 S3: dedup must fire for every id-less save, `force` or not.
+    // `force` bypasses the *content-quality* gates (noise filter / capture
+    // gate) above — it was never meant to also waive "did I already save
+    // this exact row", but the prior `!params.force &&` guard coupled the
+    // two. That coupling is exactly the "sync pipe has no write-side
+    // idempotency" defect: a periodic writer that passes `force=true` (to
+    // get past the noise filter on short factual content) minted a fresh
+    // random id on every retry because this check was skipped outright.
+    // Path+text identity is unaffected by `force` from here on; a caller
+    // that truly wants a second, distinct row can still pass its own `id`.
+    if params.id.is_none() {
         if let Some(existing_id) = find_exact_path_text_duplicate(
             server,
             &params.path,
@@ -136,6 +177,10 @@ pub(crate) async fn handle_save_memory(
     );
     if let Some(event) = continuity_event {
         response.insert("continuity_event".into(), event);
+    }
+
+    if let Some(note) = affinity_note {
+        response.insert("domain_affinity".into(), domain_affinity_note_json(&note));
     }
 
     if auto_link && !entry.entities.is_empty() && !is_training_seed(&entry) {

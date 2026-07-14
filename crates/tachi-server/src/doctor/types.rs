@@ -70,6 +70,15 @@ pub struct DoctorFinding {
     pub mem_count: Option<usize>,
     pub vec_rowid_count: Option<usize>,
     pub none_domain_count: Option<usize>,
+    /// #1041 S4: count of rows whose text/summary/path match an obvious
+    /// trading-vocabulary keyword — an informational cross-domain-suspect
+    /// tripwire, never a gate. `None` when the probe wasn't run (non-tachi
+    /// schema, corrupt/backup/placeholder classification, or the probe
+    /// itself errored — same best-effort contract as `none_domain_count`).
+    pub cross_domain_suspect_count: Option<usize>,
+    /// Up to a handful of matching ids so an operator can spot-check hits.
+    /// Empty whenever `cross_domain_suspect_count` is `None` or `0`.
+    pub cross_domain_suspect_sample: Vec<String>,
     pub jobs: JobBreakdown,
     pub schema_kind: String, // "tachi" | "openclaw_legacy" | "unknown" | "empty"
     pub error: Option<String>,

@@ -36,13 +36,23 @@ fn topic_from_path(path: &str) -> String {
         .replace('-', "_")
 }
 
+/// Resolve the domain to stamp on an ingested/pipeline entry. #1041 S2: this
+/// used to fall back to the `TACHI_DOMAIN` env var — a daemon-wide, per-process
+/// setting (e.g. a trading daemon's fixed "equity_trading") — whenever the
+/// caller omitted a domain. That inherits the *project's* main domain onto
+/// content whose actual domain was never classified, which is how an
+/// engineering probe row ends up double-mislabeled `equity_trading` on a
+/// trading daemon. An absent domain is classified-or-`general` now, never a
+/// blind per-process env default; `TACHI_DOMAIN` still rides on every write
+/// as `metadata.provenance.domain` (see `provenance::inject_provenance`) —
+/// that's a legitimate "what context was this captured under" audit trail,
+/// distinct from (and no longer feeding) the entry's own canonical domain.
 pub(crate) fn resolve_domain(domain: Option<String>) -> Option<String> {
-    domain.filter(|value| !value.trim().is_empty()).or_else(|| {
-        std::env::var("TACHI_DOMAIN")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    })
+    Some(
+        domain
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "general".to_string()),
+    )
 }
 
 pub(crate) fn is_lazy_source(source: &str) -> bool {
@@ -154,6 +164,44 @@ pub(crate) fn chunk_text(
         chunks.push(content.trim().to_string());
     }
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_domain;
+
+    #[test]
+    fn explicit_domain_wins() {
+        assert_eq!(
+            resolve_domain(Some("engineering".to_string())),
+            Some("engineering".to_string())
+        );
+    }
+
+    #[test]
+    fn blank_or_absent_domain_falls_back_to_general_never_tachi_domain_env() {
+        // #1041 S2 regression: absent domain must land on `general`, never
+        // silently inherit the process-wide `TACHI_DOMAIN` env var (which is
+        // how an engineering row got double-mislabeled `equity_trading` on a
+        // trading daemon). Set TACHI_DOMAIN to prove it's genuinely ignored.
+        let guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("TACHI_DOMAIN");
+        std::env::set_var("TACHI_DOMAIN", "equity_trading");
+
+        assert_eq!(resolve_domain(None), Some("general".to_string()));
+        assert_eq!(
+            resolve_domain(Some("   ".to_string())),
+            Some("general".to_string())
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("TACHI_DOMAIN", value),
+            None => std::env::remove_var("TACHI_DOMAIN"),
+        }
+        drop(guard);
+    }
 }
 
 pub(crate) fn build_ingest_entry(

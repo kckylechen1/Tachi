@@ -64,7 +64,8 @@ pub use dispatch_outcomes::{
 pub use doctor_probe::{
     checkpoint_wal_truncate, count_chunks_rows, count_memories_missing_domain, count_memories_rows,
     count_memories_vec_rows, foundry_job_status_counts, open_for_wal_checkpoint,
-    open_immutable_readonly, open_raw, schema_version, table_exists, FoundryJobStatusCounts,
+    open_immutable_readonly, open_raw, probe_keyword_suspects, schema_version, table_exists,
+    FoundryJobStatusCounts, KeywordSuspectProbe,
 };
 pub use event_ledger::{continuity_metrics, insert_tachi_event, list_tachi_events};
 pub use gc_candidates::{

@@ -61,6 +61,33 @@ fn classify_healthy() {
     assert_eq!(f.jobs.pending, 1);
     assert_eq!(f.none_domain_count, Some(1));
     assert_eq!(f.schema_kind, "tachi");
+    // #1041 S4: no trading keywords in this fixture -> zero, not a false hit.
+    assert_eq!(f.cross_domain_suspect_count, Some(0));
+    assert!(f.cross_domain_suspect_sample.is_empty());
+}
+
+// ── #1041 S4: doctor cross-domain suspect tripwire ──────────────────────────
+
+fn make_engineering_store_with_trading_leak(path: &Path) {
+    let conn = memcore::db::open_raw(path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT, archived INT DEFAULT 0, domain TEXT);
+         INSERT INTO memories (id, text, domain) VALUES ('eng-1', 'refactored the save handler', 'engineering');
+         INSERT INTO memories (id, text, domain) VALUES ('leak-1', '持仓 300502.SZ 止损 set', 'engineering');
+         CREATE TABLE foundry_jobs (id TEXT, status TEXT);",
+    )
+    .unwrap();
+}
+
+#[test]
+fn classify_flags_cross_domain_suspect_in_engineering_store() {
+    let dir = tempdir().unwrap();
+    let p = dir.path().join("memory.db");
+    make_engineering_store_with_trading_leak(&p);
+    let f = classify_one(&p);
+    assert_eq!(f.classification, DbClassification::Healthy);
+    assert_eq!(f.cross_domain_suspect_count, Some(1));
+    assert_eq!(f.cross_domain_suspect_sample, vec!["leak-1".to_string()]);
 }
 
 #[test]

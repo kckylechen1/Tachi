@@ -32,6 +32,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
             mem_count: None,
             vec_rowid_count: None,
             none_domain_count: None,
+            cross_domain_suspect_count: None,
+            cross_domain_suspect_sample: Vec::new(),
             jobs: JobBreakdown::default(),
             schema_kind: "unknown".to_string(),
             error: None,
@@ -49,6 +51,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
             mem_count: None,
             vec_rowid_count: None,
             none_domain_count: None,
+            cross_domain_suspect_count: None,
+            cross_domain_suspect_sample: Vec::new(),
             jobs: JobBreakdown::default(),
             schema_kind: "empty".to_string(),
             error: None,
@@ -74,6 +78,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
                 mem_count: None,
                 vec_rowid_count: None,
                 none_domain_count: None,
+                cross_domain_suspect_count: None,
+                cross_domain_suspect_sample: Vec::new(),
                 jobs: JobBreakdown::default(),
                 schema_kind: "unknown".to_string(),
                 error: Some(format!("open failed: {e}")),
@@ -95,6 +101,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
             mem_count: None,
             vec_rowid_count: None,
             none_domain_count: None,
+            cross_domain_suspect_count: None,
+            cross_domain_suspect_sample: Vec::new(),
             jobs: JobBreakdown::default(),
             schema_kind: "unknown".to_string(),
             error: Some(format!("schema_version probe failed: {e}")),
@@ -147,6 +155,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
             mem_count: None,
             vec_rowid_count: None,
             none_domain_count: None,
+            cross_domain_suspect_count: None,
+            cross_domain_suspect_sample: Vec::new(),
             jobs: JobBreakdown::default(),
             schema_kind,
             error: Some(msg),
@@ -166,6 +176,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
             mem_count,
             vec_rowid_count: None,
             none_domain_count: None,
+            cross_domain_suspect_count: None,
+            cross_domain_suspect_sample: Vec::new(),
             jobs: JobBreakdown::default(),
             schema_kind,
             error: None,
@@ -207,6 +219,11 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
 
     // Detail probes (best-effort, all errors swallowed).
     let none_domain_count = memcore::db::count_memories_missing_domain(&conn).ok();
+    let cross_domain_probe = super::cross_domain::probe(&conn);
+    let cross_domain_suspect_count = cross_domain_probe.as_ref().map(|probe| probe.count);
+    let cross_domain_suspect_sample = cross_domain_probe
+        .map(|probe| probe.sample_ids)
+        .unwrap_or_default();
     let jobs = job_breakdown_from_counts(memcore::db::foundry_job_status_counts(&conn));
 
     DoctorFinding {
@@ -217,6 +234,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
         mem_count,
         vec_rowid_count,
         none_domain_count,
+        cross_domain_suspect_count,
+        cross_domain_suspect_sample,
         jobs,
         schema_kind,
         error: None,

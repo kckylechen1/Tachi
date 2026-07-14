@@ -6,6 +6,7 @@ mod persist;
 mod remember;
 mod response;
 mod validation;
+mod write_affinity;
 
 pub(crate) use handler::handle_save_memory;
 pub(crate) use remember::handle_remember;

@@ -153,3 +153,82 @@ fn checkpoint_wal_truncate_is_a_harmless_noop_off_wal_mode() {
     // Not in WAL mode here — PRAGMA wal_checkpoint is still a valid no-op.
     checkpoint_wal_truncate(&conn).expect("checkpoint should not error off WAL mode");
 }
+
+// ── #1041 S4: doctor cross-domain keyword suspect probe ─────────────────────
+
+#[test]
+fn probe_keyword_suspects_finds_matching_row_and_samples_its_id() {
+    let mut conn = make_conn();
+    let mut trading_flavored = make_entry("trading-in-eng-store", "positions: 持仓 300502.SZ");
+    trading_flavored.domain = Some("engineering".to_string());
+    upsert(&mut conn, &trading_flavored, false).unwrap();
+    upsert(
+        &mut conn,
+        &make_entry("clean", "just a normal engineering note"),
+        false,
+    )
+    .unwrap();
+
+    let probe = probe_keyword_suspects(&conn, &["持仓", "止损"], 5).unwrap();
+    assert_eq!(probe.count, 1);
+    assert_eq!(probe.sample_ids, vec!["trading-in-eng-store".to_string()]);
+}
+
+#[test]
+fn probe_keyword_suspects_zero_when_no_keyword_matches() {
+    let mut conn = make_conn();
+    upsert(
+        &mut conn,
+        &make_entry("clean", "just engineering notes"),
+        false,
+    )
+    .unwrap();
+
+    let probe = probe_keyword_suspects(&conn, &["持仓", "止损"], 5).unwrap();
+    assert_eq!(probe, KeywordSuspectProbe::default());
+}
+
+#[test]
+fn probe_keyword_suspects_respects_sample_limit() {
+    let mut conn = make_conn();
+    for i in 0..3 {
+        let id = format!("hit-{i}");
+        upsert(&mut conn, &make_entry(&id, "持仓 hit"), false).unwrap();
+    }
+
+    let probe = probe_keyword_suspects(&conn, &["持仓"], 2).unwrap();
+    assert_eq!(probe.count, 3);
+    assert_eq!(probe.sample_ids.len(), 2);
+}
+
+#[test]
+fn probe_keyword_suspects_empty_keywords_is_all_zero() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("a", "持仓 whatever"), false).unwrap();
+
+    let probe = probe_keyword_suspects(&conn, &[], 5).unwrap();
+    assert_eq!(probe, KeywordSuspectProbe::default());
+}
+
+#[test]
+fn probe_keyword_suspects_degrades_to_text_only_on_legacy_schema() {
+    // Foreign/legacy `memories` table lacking `summary`/`path` — the probe
+    // must fall back to a text-only scan instead of erroring.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT);
+         INSERT INTO memories (id, text) VALUES ('legacy-hit', '持仓 300502.SZ');",
+    )
+    .unwrap();
+
+    let probe = probe_keyword_suspects(&conn, &["持仓"], 5).unwrap();
+    assert_eq!(probe.count, 1);
+    assert_eq!(probe.sample_ids, vec!["legacy-hit".to_string()]);
+}
+
+#[test]
+fn probe_keyword_suspects_missing_memories_table_is_all_zero_not_error() {
+    let conn = Connection::open_in_memory().unwrap();
+    let probe = probe_keyword_suspects(&conn, &["持仓"], 5).unwrap();
+    assert_eq!(probe, KeywordSuspectProbe::default());
+}

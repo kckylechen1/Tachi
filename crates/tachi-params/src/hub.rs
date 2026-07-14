@@ -100,7 +100,8 @@ pub struct DistillTrajectoryParams {
     #[schemars(schema_with = "super::coerce::opt_number_from_string_or_number_schema")]
     pub importance: Option<f64>,
 
-    /// Optional domain. Defaults to TACHI_DOMAIN when present.
+    /// Optional domain. #1041 S2: an absent domain classifies to `general`,
+    /// it no longer inherits the process-wide `TACHI_DOMAIN` env var.
     #[serde(default)]
     pub domain: Option<String>,
 

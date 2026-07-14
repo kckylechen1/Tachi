@@ -19,6 +19,8 @@ fn mk_finding(path: &str, class: DbClassification, scope: &str) -> DoctorFinding
         mem_count: Some(1),
         vec_rowid_count: Some(1),
         none_domain_count: Some(0),
+        cross_domain_suspect_count: Some(0),
+        cross_domain_suspect_sample: Vec::new(),
         jobs: JobBreakdown::default(),
         schema_kind: "tachi".to_string(),
         error: None,
