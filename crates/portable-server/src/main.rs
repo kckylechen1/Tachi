@@ -167,10 +167,8 @@ mod tests {
     /// authorized migration actually runs, exactly as it would for a real
     /// legacy file.
     fn fabricate_stamped_older_db() -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "portable-server-1119-{}.db",
-            uuid::Uuid::new_v4()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("portable-server-1119-{}.db", uuid::Uuid::new_v4()));
         let conn = rusqlite::Connection::open(&path).expect("create raw sqlite file");
         let older = portable_kernel::db::migrations::EXPECTED_SCHEMA_VERSION - 1;
         conn.execute_batch(&format!("PRAGMA user_version = {older}"))
@@ -228,9 +226,14 @@ mod tests {
         let path = fabricate_stamped_older_db();
         let config = config_for_persistent_db(&path, false);
 
-        let err = build_server(config).expect_err(
-            "Deny (default) must refuse a stamped-older persistent DB instead of migrating it",
-        );
+        // Not `expect_err`: that would require `PortableServer: Debug`, and the
+        // server owns a store we deliberately don't want formatted into panics.
+        let err = match build_server(config) {
+            Ok(_) => panic!(
+                "Deny (default) must refuse a stamped-older persistent DB instead of migrating it"
+            ),
+            Err(err) => err,
+        };
         assert!(
             err.contains("refusing to migrate db schema"),
             "expected the typed SchemaMigrationOptInRequired refusal, got: {err}"
