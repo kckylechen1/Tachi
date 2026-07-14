@@ -39,10 +39,7 @@ impl MemoryStore {
 
     /// Open (or create) with an explicit [`DbOpenContext`] and no manifest
     /// label (path-routing validation disabled, like [`Self::open`]).
-    pub fn open_with_context(
-        db_path: &str,
-        ctx: &DbOpenContext,
-    ) -> Result<Self, MemoryError> {
+    pub fn open_with_context(db_path: &str, ctx: &DbOpenContext) -> Result<Self, MemoryError> {
         Self::open_with_label_inner(db_path, "unknown", false, ctx)
     }
 

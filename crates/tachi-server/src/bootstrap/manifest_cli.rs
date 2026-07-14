@@ -85,6 +85,10 @@ pub(super) async fn run_doctor_command(
         .extend(crate::doctor::hub_capability_discovery_status_warnings(
             &collect_hub_caps_for_lint(global_db_path, project_db_path),
         ));
+    // #1119: proactively surface any DB already skewed vs this binary's schema
+    // version (the incident shape), computed from the just-scanned findings.
+    let schema_skew = crate::doctor::schema_version_skew_warnings(&report.findings);
+    report.warnings.extend(schema_skew);
 
     // Always update the manifest after a doctor run (idempotent; preserves notes).
     let manifest_path = manifest_path(app_home);

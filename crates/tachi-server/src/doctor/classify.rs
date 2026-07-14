@@ -304,7 +304,10 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
     }
 }
 
-fn make_immutable_uri(path: &Path) -> String {
+// pub(crate): reused by `schema_skew` (#1119) to reopen an already-classified
+// finding's DB read-only/immutable for a best-effort `PRAGMA user_version`
+// probe, exactly as `classify_one` opens it.
+pub(crate) fn make_immutable_uri(path: &Path) -> String {
     // sqlite URI percent-encoding: only ?, #, and space need handling for typical paths.
     let s = path.to_string_lossy().to_string();
     let encoded = s

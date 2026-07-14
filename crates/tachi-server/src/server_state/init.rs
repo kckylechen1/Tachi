@@ -16,6 +16,7 @@ use crate::mcp_pool::McpClientPool;
 use crate::mcp_proxy::McpToolExposureMode;
 use crate::utils::parse_env_u64;
 use memcore::MemoryStore;
+use memcore::{DbOpenContext, MigrationAuthority, OpenIntent};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
@@ -77,9 +78,33 @@ fn parse_auto_lock_secs() -> u64 {
 }
 
 impl MemoryServer {
+    /// Fail-closed constructor: no schema-migration authority
+    /// ([`MigrationAuthority::Deny`]). Every existing caller (tests, CLI tools
+    /// that are not the deploy daemon) keeps this behavior — a fresh DB
+    /// builds, a current DB opens, but an older-schema DB refuses to migrate
+    /// in place (#1119). The deploy path uses
+    /// [`Self::new_with_migration_authority`].
     pub(crate) fn new(
         global_db_path: PathBuf,
         project_db_path: Option<PathBuf>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_migration_authority(
+            global_db_path,
+            project_db_path,
+            MigrationAuthority::Deny,
+        )
+    }
+
+    /// #1119: construct with an explicit schema-migration authority threaded
+    /// down to every write-open point (global store, the initial project
+    /// store, and the [`DbRuntime`] that owns *dynamic* project opens). Only
+    /// the deploy ritual — `tachi serve --allow-schema-migration` — passes
+    /// [`MigrationAuthority::Allow`]; that is the sole process permitted to
+    /// forward-migrate a live DB a deployed daemon depends on.
+    pub(crate) fn new_with_migration_authority(
+        global_db_path: PathBuf,
+        project_db_path: Option<PathBuf>,
+        schema_migration: MigrationAuthority,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         ensure_db_parent(&global_db_path)?;
         if let Some(project_db_path) = project_db_path.as_ref() {
@@ -96,13 +121,21 @@ impl MemoryServer {
                 ),
             )
         })?;
-        let global_store = MemoryStore::open_with_label(global_db_str, "global")?;
+        let global_open_ctx = DbOpenContext {
+            intent: OpenIntent::OpenExisting,
+            migration: schema_migration.clone(),
+        };
+        let global_store =
+            MemoryStore::open_with_label_and_context(global_db_str, "global", &global_open_ctx)?;
         let read_pool_size = configured_memory_read_pool_size();
         let global_read_pool = ReadStorePool::open_read_only(global_db_str, read_pool_size)?;
         let global_vec_available = global_store.vec_available;
 
         let project_db_state = if let Some(ref p) = project_db_path {
-            Some(ProjectDbState::open(p.clone(), read_pool_size).map_err(std::io::Error::other)?)
+            Some(
+                ProjectDbState::open(p.clone(), read_pool_size, &schema_migration)
+                    .map_err(std::io::Error::other)?,
+            )
         } else {
             None
         };
@@ -167,6 +200,7 @@ impl MemoryServer {
             project_db: Arc::new(StdRwLock::new(project_db_state)),
             attached_project_dbs: Arc::new(StdRwLock::new(HashMap::new())),
             project_attach_init_gate: Arc::new(StdMutex::new(())),
+            schema_migration,
         };
 
         let server = Self {

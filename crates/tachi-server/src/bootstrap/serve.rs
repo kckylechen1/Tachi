@@ -92,6 +92,12 @@ struct StartupContext {
     command: Commands,
     defer_manifest_startup: bool,
     git_root: Option<PathBuf>,
+    /// #1119: resolved-once schema-migration authority for this process. Set
+    /// to `Allow` only when `--allow-schema-migration` is passed (the deploy
+    /// ritual); `Deny` otherwise. Threaded into `MemoryServer` construction so
+    /// every DB open in this process carries the same typed decision — never
+    /// a process env var.
+    schema_migration: memcore::MigrationAuthority,
 }
 
 struct StartupHygiene {
@@ -163,12 +169,31 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
         git_root.as_deref(),
     );
 
+    // #1119: resolve the schema-migration authority ONCE, from the CLI flag,
+    // into a typed value. Then defensively remove the legacy opt-in env var
+    // (the reverted first attempt's `TACHI_ALLOW_SCHEMA_MIGRATION`) so that no
+    // code path anywhere in this process — including subprocesses that would
+    // otherwise inherit it — can resurrect the ambient-capability antipattern.
+    // The authority now lives only in the typed value threaded below; the env
+    // is never read again. This is the single removal that replaces the old
+    // route's 40+ per-spawn `env_remove` calls: if the var is never set here,
+    // there is nothing to scrub at each spawn boundary.
+    std::env::remove_var(memcore::db::SCHEMA_MIGRATION_LEGACY_ENV);
+    let schema_migration = if cli.allow_schema_migration {
+        memcore::MigrationAuthority::Allow {
+            approved_by: "cli:--allow-schema-migration".to_string(),
+        }
+    } else {
+        memcore::MigrationAuthority::Deny
+    };
+
     Ok(StartupContext {
         home,
         app_home,
         command,
         defer_manifest_startup,
         git_root,
+        schema_migration,
     })
 }
 
@@ -590,9 +615,13 @@ fn build_server_state(
         std::env::remove_var("TACHI_DAEMON");
     }
 
-    let server = MemoryServer::new(
+    // #1119: the serve/daemon path is the ONE process allowed to migrate a
+    // live DB forward — and only when the operator passed
+    // `--allow-schema-migration` (resolved into `ctx.schema_migration`).
+    let server = MemoryServer::new_with_migration_authority(
         global_db_path.to_path_buf(),
         hygiene.project_db_path.clone(),
+        ctx.schema_migration.clone(),
     )?;
     match crate::signature_evidence::seed_signature_taxonomy_evidence(&server) {
         Ok(true) => eprintln!("[signatures] seeded 2026-07-05 error-signature taxonomy evidence"),

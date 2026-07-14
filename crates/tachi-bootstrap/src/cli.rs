@@ -48,6 +48,21 @@ pub struct Cli {
     #[arg(long)]
     pub no_project_db: bool,
 
+    /// Explicitly opt in to migrating an EXISTING older-schema DB forward in
+    /// place (#1119). Default is refuse-and-report: opening a live DB stamped
+    /// below this binary's schema version without this flag is a hard error
+    /// naming both versions and how to opt in, instead of silently upgrading
+    /// it (which would brick any other deployed daemon still on the old
+    /// schema). Only the deploy ritual's launchd/brew invocation should pass
+    /// this — `tachi_server::bootstrap::serve` turns it into a typed
+    /// `memcore::MigrationAuthority::Allow` threaded down every DB-open call
+    /// (NOT a process env var; the reverted first attempt used
+    /// `TACHI_ALLOW_SCHEMA_MIGRATION`, which serve now defensively clears
+    /// once at startup). A dev/test/agent-lane binary that never passes this
+    /// flag carries `Deny` by construction and hits the refusal by default.
+    #[arg(long)]
+    pub allow_schema_migration: bool,
+
     /// Built-in tool surface bundles or host alias, e.g. remember, observe+coordinate, openclaw, admin
     #[arg(long)]
     pub profile: Option<String>,
