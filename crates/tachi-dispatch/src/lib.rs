@@ -86,8 +86,8 @@ pub use routing::{
     RouteSimulationChoice, RouteSimulationSummary, RouteSubagentScore, SkippedRoutePolicyRule,
 };
 pub use signatures::{
-    dispatch_role_class, normalize_vendor, project_counter_clauses, self_report_trust,
-    signature_def, ProjectedCounterClause, Severity, SignatureDef, SignatureEvidenceRow,
-    SignatureRowKind, ACT_R_ACTIVATION_FLOOR, ACT_R_DECAY_RATE, ACT_R_MIN_AGE_DAYS,
-    COUNTER_CLAUSE_TOP_N, ERROR_SIGNATURE_TAXONOMY,
+    dispatch_role_class, normalize_vendor, project_counter_clauses, resolve_signature_id,
+    self_report_trust, signature_def, ProjectedCounterClause, Severity, SignatureDef,
+    SignatureEvidenceRow, SignatureRowKind, ACT_R_ACTIVATION_FLOOR, ACT_R_DECAY_RATE,
+    ACT_R_MIN_AGE_DAYS, COUNTER_CLAUSE_TOP_N, ERROR_SIGNATURE_TAXONOMY, SIGNATURE_ALIASES,
 };

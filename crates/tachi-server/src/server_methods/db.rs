@@ -84,16 +84,7 @@ impl MemoryServer {
     /// can be stale). It falls back to the `~/.tachi/projects/<name>/` alias for
     /// backward compatibility (e.g. named stores like `wiki` that have no repo).
     pub(crate) fn resolve_named_project_db_path(project_name: &str) -> Result<PathBuf, String> {
-        // Guard: reject names that could escape the projects/ directory.
-        if project_name.is_empty()
-            || project_name.contains('/')
-            || project_name.contains('\\')
-            || project_name.contains("..")
-            || project_name.starts_with('.')
-        {
-            return Err(format!("Invalid project name '{project_name}'"));
-        }
-        let safe_name = crate::utils::sanitize_safe_path_name(project_name);
+        let safe_name = Self::validate_named_project(project_name)?;
 
         // Prefer the manifest-recorded repo-local DB for this project name. This
         // makes repo-local addressing primary and removes the hard dependency on
@@ -127,6 +118,130 @@ impl MemoryServer {
         } else {
             Ok(db_path)
         }
+    }
+
+    /// Resolve a project name to the canonical identity of an existing DB
+    /// without opening, creating, repairing, or registering anything.
+    ///
+    /// This is deliberately stricter than ordinary named-project routing: a
+    /// malformed/unreadable manifest, a matching missing DB, or a legacy alias
+    /// that matches multiple physical repo-local DBs is an error. Callers use
+    /// this at write-isolation gates, where uncertainty must fail closed.
+    pub(crate) fn resolve_named_project_db_identity(project_name: &str) -> Result<PathBuf, String> {
+        let safe_name = Self::validate_named_project(project_name)?;
+        let manifest_matches = Self::strict_manifest_repo_local_dbs_for_project(&safe_name)?;
+
+        if !manifest_matches.is_empty() {
+            let mut identities = Vec::with_capacity(manifest_matches.len());
+            for db_path in manifest_matches {
+                let canonical = std::fs::canonicalize(&db_path).map_err(|err| {
+                    format!(
+                        "Project '{project_name}' manifest DB cannot be canonicalized at {}: {err}",
+                        db_path.display()
+                    )
+                })?;
+                Self::require_regular_project_db(project_name, &canonical)?;
+                identities.push(canonical);
+            }
+            identities.sort();
+            identities.dedup();
+            return match identities.as_slice() {
+                [identity] => Ok(identity.clone()),
+                _ => Err(format!(
+                    "Project '{project_name}' alias is ambiguous across {} repo-local databases",
+                    identities.len()
+                )),
+            };
+        }
+
+        let db_path = crate::path_utils::plan_c_global_db_path(&safe_name);
+        if !db_path.exists() {
+            if db_path.is_symlink() {
+                let target_str = match std::fs::read_link(&db_path) {
+                    Ok(target) => target.display().to_string(),
+                    Err(_) => "<unknown>".to_string(),
+                };
+                return Err(format!(
+                    "Project '{}' database symlink is broken: {} -> (target missing: {})",
+                    project_name,
+                    db_path.display(),
+                    target_str
+                ));
+            }
+            return Err(format!(
+                "Project '{}' not found (expected DB at {})",
+                project_name,
+                db_path.display()
+            ));
+        }
+
+        let canonical = std::fs::canonicalize(&db_path).map_err(|err| {
+            format!(
+                "Project '{project_name}' database cannot be canonicalized at {}: {err}",
+                db_path.display()
+            )
+        })?;
+        Self::require_regular_project_db(project_name, &canonical)?;
+        Ok(canonical)
+    }
+
+    fn validate_named_project(project_name: &str) -> Result<String, String> {
+        // Guard: reject names that could escape the projects/ directory.
+        if project_name.is_empty()
+            || project_name.contains('/')
+            || project_name.contains('\\')
+            || project_name.contains("..")
+            || project_name.starts_with('.')
+        {
+            return Err(format!("Invalid project name '{project_name}'"));
+        }
+        Ok(crate::utils::sanitize_safe_path_name(project_name))
+    }
+
+    fn require_regular_project_db(project_name: &str, db_path: &Path) -> Result<(), String> {
+        let metadata = std::fs::metadata(db_path).map_err(|err| {
+            format!(
+                "Project '{project_name}' database metadata failed at {}: {err}",
+                db_path.display()
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "Project '{project_name}' resolved to a non-file database path: {}",
+                db_path.display()
+            ));
+        }
+        Ok(())
+    }
+
+    fn strict_manifest_repo_local_dbs_for_project(safe_name: &str) -> Result<Vec<PathBuf>, String> {
+        let manifest_path = crate::path_utils::tachi_home().join("manifest.json");
+        let manifest = match crate::manifest::Manifest::load(&manifest_path) {
+            Ok(manifest) => manifest,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(format!(
+                    "Project manifest cannot be read at {}: {err}",
+                    manifest_path.display()
+                ));
+            }
+        };
+
+        Ok(manifest
+            .dbs
+            .iter()
+            .filter_map(|entry| {
+                let db_path = Path::new(&entry.path);
+                let project_root = crate::path_utils::plan_c_project_root_from_local_db(db_path)?;
+                let matches = crate::path_utils::plan_c_dir_name_from_root(&project_root)
+                    .as_deref()
+                    == Some(safe_name)
+                    || crate::path_utils::plan_c_legacy_dir_name_from_root(&project_root)
+                        .as_deref()
+                        == Some(safe_name);
+                matches.then(|| db_path.to_path_buf())
+            })
+            .collect())
     }
 
     /// Resolve a (sanitized) project name to a repo-local `<repo>/.tachi/memory.db`

@@ -4,6 +4,8 @@ mod audit;
 mod common;
 mod daily_pipeline;
 #[cfg(feature = "admin")]
+pub mod dispatch_adjudications;
+#[cfg(feature = "admin")]
 pub mod dispatch_outcomes;
 mod doctor_probe;
 mod event_ledger;
@@ -47,11 +49,17 @@ pub use daily_pipeline::{
     DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow,
 };
 #[cfg(feature = "admin")]
+pub use dispatch_adjudications::{
+    append_dispatch_adjudication, list_adjudications_for_outcome, outcome_is_adjudicated,
+    DispatchAdjudication, DispatchAdjudicationSignature, NewDispatchAdjudication,
+    NOT_REQUIRED_REASONS,
+};
+#[cfg(feature = "admin")]
 pub use dispatch_outcomes::{
-    derive_idempotency_key, find_outcome_by_dispatch_id, get_outcome, list_outcomes_by_issue_ref,
-    list_outcomes_by_vendor_window, outcome_exists_for_dispatch, upsert_outcome,
-    upsert_outcome_reconciling_terminal_placeholder, DispatchOutcomeRow, NewDispatchOutcome,
-    OutcomeEvidenceClass,
+    derive_idempotency_key, find_outcome_by_dispatch_id, get_outcome,
+    list_outcome_ids_for_dispatch, list_outcomes_by_issue_ref, list_outcomes_by_vendor_window,
+    outcome_exists_for_dispatch, upsert_outcome, upsert_outcome_reconciling_terminal_placeholder,
+    DispatchOutcomeRow, NewDispatchOutcome, OutcomeEvidenceClass,
 };
 pub use doctor_probe::{
     checkpoint_wal_truncate, count_chunks_rows, count_memories_missing_domain, count_memories_rows,
@@ -90,6 +98,10 @@ pub use memory_crud::{
     set_keyword_enrichment_status, supersede_memory, try_claim_event, update_enrichment_fields,
     update_with_revision, upsert,
 };
+/// Public: benchmarks/diagnostics outside this crate read the process-wide
+/// lock-retry backoff counter without needing a tracing subscriber (see
+/// `open::lock_retry_backoff_count`'s doc comment).
+pub use open::lock_retry_backoff_count;
 pub(crate) use open::{
     acquire_startup_lock, configure_connection, open_read_only, open_read_write,
     retry_memory_locked, sqlite_error_is_locked,

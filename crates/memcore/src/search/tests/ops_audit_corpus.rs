@@ -587,63 +587,6 @@ fn ops_audit_corpus_ratchet_floors() {
     }
 }
 
-/// PRODUCT LAYER — same assertions as the ratchet after the fix; kept as a
-/// named product target so Phase reports can still point at one entry.
-#[test]
-fn ops_audit_corpus_meets_product_targets() {
-    let mut conn = setup();
-    seed_corpus(&mut conn);
-
-    for case in CASES {
-        let rank = rank_of(&conn, case.query, case.expected);
-        match case.class {
-            DefectClass::RankDilution | DefectClass::AdjacentWikiSteal => {
-                assert_eq!(
-                    rank,
-                    Some(1),
-                    "case `{}`: expected `{}` at rank 1, got {rank:?}",
-                    case.name,
-                    case.expected
-                );
-            }
-            DefectClass::GovernanceMiss => {
-                assert!(
-                    matches!(rank, Some(r) if r <= 5),
-                    "case `{}`: expected `{}` hit@5, got rank={rank:?}",
-                    case.name,
-                    case.expected
-                );
-            }
-        }
-    }
-}
-
-/// Documents that all three product goals are currently green (post-fix).
-/// If a regression re-introduces a red case, this fails — re-open discrimination.
-#[test]
-fn ops_audit_corpus_documents_product_green_shape() {
-    let mut conn = setup();
-    seed_corpus(&mut conn);
-
-    let mut red_cases = Vec::new();
-    for case in CASES {
-        let rank = rank_of(&conn, case.query, case.expected);
-        let product_green = match case.class {
-            DefectClass::RankDilution | DefectClass::AdjacentWikiSteal => rank == Some(1),
-            DefectClass::GovernanceMiss => matches!(rank, Some(r) if r <= 5),
-        };
-        if !product_green {
-            red_cases.push((case.name, rank));
-        }
-    }
-
-    assert!(
-        red_cases.is_empty(),
-        "ops-audit product goals regressed to red: {red_cases:?} \
-         (pre-fix ranks were 6 / 7 / miss@10; same-store precision must keep them green)"
-    );
-}
-
 /// Determinism lock — identical query → identical id order across reruns.
 #[test]
 fn ops_audit_corpus_recall_order_is_deterministic() {

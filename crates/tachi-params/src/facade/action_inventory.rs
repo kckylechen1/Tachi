@@ -85,13 +85,14 @@ mod tests {
                 "primary task schema must not advertise {action}; use tachi_gh"
             );
         }
-        // #1002 Issue Refinery bumps this from 24 -> 25 (`refine_issues`,
-        // read-only/proposal-only, Observe bundle). Still well under
+        // #1002 Issue Refinery plus append-only adjudication bump this from
+        // 24 -> 26 (`refine_issues` is proposal-only/Observe; `adjudicate` is
+        // Remember). Still well under
         // TACHI_TASK_PRIMARY_ACTION_SOFT_MAX (28) — the soft-ceiling
         // assertion below still passes (`<=`), but the tripwire above is
         // deliberately exact so the next addition gets the same explicit
         // look this one did.
-        assert_eq!(primary.len(), 25);
+        assert_eq!(primary.len(), 26);
         assert!(primary.len() <= TACHI_TASK_PRIMARY_ACTION_SOFT_MAX);
     }
 

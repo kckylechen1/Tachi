@@ -15,6 +15,12 @@ impl EnvGuard {
         std::env::remove_var(key);
         Self { key, original }
     }
+
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, original }
+    }
 }
 
 impl Drop for EnvGuard {
@@ -52,8 +58,18 @@ async fn with_vault_key_drops_vault_lock_before_running_work() {
     .expect("vault key should be available");
 }
 
+// Discrimination test (a) for #400: auto-lock must clear the vault master key
+// but PRESERVE provider secrets. Provider secrets are materialized from the
+// vault at unlock time and have a lifecycle independent of the master key;
+// auto-lock is "don't keep the key in memory long-term", NOT "stop the service".
+//
+// RED before fix: the old `with_vault_key` auto-lock path called
+// `clear_provider_secrets()` + `re_materialize_provider_secrets_after_auto_lock()`,
+// wiping the materialized key. On a headless Linux router (no Keychain) the
+// re-materialize failed silently, leaving zero keys → the assertion
+// `== Some("cached")` would fail because the value was gone.
 #[tokio::test]
-async fn with_vault_key_auto_lock_clears_key_and_provider_cache_atomically() {
+async fn auto_lock_clears_key_but_preserves_provider_secrets() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -80,13 +96,13 @@ async fn with_vault_key_auto_lock_clears_key_and_provider_cache_atomically() {
         assert!(v.key.is_none());
         assert!(v.unlock_time.is_none());
     }
-    assert_ne!(
+    assert_eq!(
         server
             .llm
             .provider_secret_for_tests(&["OPENAI_API_KEY"])
             .as_deref(),
         Some("cached"),
-        "auto-lock must not leave stale Vault-derived provider cache entries behind"
+        "auto-lock must NOT clear provider secrets — they have a lifecycle independent of the vault master key"
     );
 }
 
@@ -204,20 +220,28 @@ fn read_unlock_password_fifo_rejects_regular_file_without_removing_it() {
     }
 }
 
-// G-B5: auto-lock clears the stale Vault-derived provider cache, and
-// re-materialization after auto-lock — which reads the now-locked Vault, NOT
-// process env — must not resurrect the stale value. (An earlier draft set a
-// process-global provider env var to model "config fallback present"; that was
-// wrong — re-materialization is vault-based, not env-based — and the global env
-// mutation raced with parallel tests. The real regression is vault-based.)
-#[tokio::test]
-async fn with_vault_key_auto_lock_clears_cache_and_rematerialize_does_not_resurrect() {
+// G-B5 (updated for #400): auto-lock no longer clears provider secrets.
+// The original re-materialization path (`re_materialize_provider_secrets_after_auto_lock`)
+// was production dead code after the split — it had no callers outside tests —
+// so both the function and the test that exercised it were removed (正本清源).
+// The surviving discrimination test (a) `auto_lock_clears_key_but_preserves_provider_secrets`
+// already proves auto-lock preserves provider secrets.
+
+// Discrimination test (b) for #400: user-initiated `vault lock` must clear BOTH
+// the vault master key AND provider secrets — the original full-clear semantics
+// must be preserved when the split was introduced.
+//
+// This is a regression guard: it passes both before and after the fix by
+// construction (the fix does not touch `handle_vault_lock`). Its purpose is to
+// prove the split did not accidentally weaken the user-facing lock command.
+#[test]
+fn vault_lock_clears_key_and_provider_secrets() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _openai_env = EnvGuard::remove("OPENAI_API_KEY");
     let db_path = std::env::temp_dir().join(format!(
-        "memory-server-vault-auto-lock-rematerialize-test-{}.sqlite",
+        "memory-server-vault-lock-full-clear-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
     let server = MemoryServer::new(db_path, None).expect("create test server");
@@ -225,24 +249,145 @@ async fn with_vault_key_auto_lock_clears_cache_and_rematerialize_does_not_resurr
     {
         let mut v = server.vault_write();
         v.key = Some(crate::CachedVaultKey::copy_from(&key));
-        v.unlock_time = Some(Instant::now() - Duration::from_secs(60));
-        v.auto_lock_after_secs = 30;
+        v.unlock_time = Some(Instant::now());
     }
     assert!(server.llm.set_provider_secret("OPENAI_API_KEY", "cached"));
 
-    let err = with_vault_key(&server, |_| Ok(())).expect_err("expired key should auto-lock");
-    assert!(err.contains("Vault auto-locked"), "{err}");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("create Tokio runtime")
+        .block_on(handle_vault_lock(&server))
+        .expect("vault lock should succeed");
 
-    // A second re-materialization from the now-locked vault must not bring the
-    // stale "cached" value back.
-    crate::provider_config::re_materialize_provider_secrets_after_auto_lock(&server);
-    assert_ne!(
+    {
+        let v = server.vault_read();
+        assert!(v.key.is_none(), "vault lock must clear the master key");
+        assert!(v.unlock_time.is_none(), "vault lock must clear unlock_time");
+    }
+    assert_eq!(
         server
             .llm
             .provider_secret_for_tests(&["OPENAI_API_KEY"])
             .as_deref(),
-        Some("cached"),
-        "auto-lock + re-materialization from a locked vault must not resurrect the stale cache entry"
+        None,
+        "vault lock must clear provider secrets (full clear)"
+    );
+}
+
+// Discrimination test (c) for #400: TACHI_VAULT_AUTOLOCK_SECS=0 disables
+// auto-lock entirely — the key survives even past the normal timeout.
+//
+// RED before fix: there was no env knob; `auto_lock_after_secs` was hardcoded
+// to 1800. The expired key would auto-lock regardless of any env value, and the
+// assertion `key.is_some()` would fail.
+#[tokio::test]
+async fn autolock_disabled_when_env_zero() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env = EnvGuard::set("TACHI_VAULT_AUTOLOCK_SECS", "0");
+    let _openai_env = EnvGuard::remove("OPENAI_API_KEY");
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-autolock-disabled-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+
+    assert_eq!(
+        server.vault_read().auto_lock_after_secs,
+        0,
+        "TACHI_VAULT_AUTOLOCK_SECS=0 must set auto_lock_after_secs to 0"
+    );
+
+    let key = [9u8; 32];
+    {
+        let mut v = server.vault_write();
+        v.key = Some(crate::CachedVaultKey::copy_from(&key));
+        // Expired well beyond any normal timeout.
+        v.unlock_time = Some(Instant::now() - Duration::from_secs(9999));
+    }
+    assert!(server.llm.set_provider_secret("OPENAI_API_KEY", "cached"));
+
+    // With auto-lock disabled, the key is still valid even though unlock_time
+    // is far in the past.
+    let result = with_vault_key(&server, |k| {
+        assert_eq!(
+            k, &key,
+            "key must still be accessible with auto-lock disabled"
+        );
+        Ok(())
+    });
+    result.expect("vault key should be available with auto-lock disabled");
+
+    {
+        let v = server.vault_read();
+        assert!(
+            v.key.is_some(),
+            "key must survive past timeout when auto-lock is disabled"
+        );
+        assert!(
+            v.unlock_time.is_some(),
+            "unlock_time must not be cleared when auto-lock is disabled"
+        );
+    }
+}
+
+// Discrimination test (d) for #400: when auto-lock is disabled
+// (`TACHI_VAULT_AUTOLOCK_SECS=0`), the runtime status surface must report
+// `vault.unlocked: true` even if `unlock_time` is far in the past.
+//
+// RED before fix: `runtime_observability_json` computed `unlocked` with the
+// bare predicate `elapsed <= auto_lock_after_secs`, which has no `0 = never
+// expires` sentinel. With `auto_lock_after_secs == 0` and any `elapsed > 0`
+// (here 9999s), `9999 <= 0` is `false`, so the status path reported
+// `unlocked: false` one second after unlock — contradicting the enforcement
+// path, which still held the key live and usable. A monitoring poll reading
+// the runtime block would see `locked: true` while the daemon was happily
+// serving with a live key.
+#[tokio::test]
+async fn autolock_disabled_reports_unlocked_in_runtime_status() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _env = EnvGuard::set("TACHI_VAULT_AUTOLOCK_SECS", "0");
+    let _openai_env = EnvGuard::remove("OPENAI_API_KEY");
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-autolock-disabled-status-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path.clone(), None).expect("create test server");
+
+    assert_eq!(
+        server.vault_read().auto_lock_after_secs,
+        0,
+        "TACHI_VAULT_AUTOLOCK_SECS=0 must set auto_lock_after_secs to 0"
+    );
+
+    let key = [9u8; 32];
+    {
+        let mut v = server.vault_write();
+        v.key = Some(crate::CachedVaultKey::copy_from(&key));
+        // Expired well beyond any normal timeout.
+        v.unlock_time = Some(Instant::now() - Duration::from_secs(9999));
+    }
+
+    let runtime = crate::status_ops::runtime_observability_json(
+        &server,
+        &db_path,
+        Some(&crate::status_ops::DaemonStatus::None),
+        false,
+    );
+    let vault = &runtime["vault"];
+    assert_eq!(
+        vault["unlocked"],
+        serde_json::json!(true),
+        "with auto-lock disabled, runtime status must report unlocked: true even past the normal timeout (status path must match the enforcement path)"
+    );
+    assert_eq!(
+        vault["auto_lock_after_seconds"],
+        serde_json::json!(0),
+        "runtime status should still surface the configured auto_lock_after_secs"
     );
 }
 

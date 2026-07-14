@@ -637,6 +637,39 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             ON dispatch_outcomes(issue_ref);
         CREATE INDEX IF NOT EXISTS idx_dispatch_outcomes_dispatch_id
             ON dispatch_outcomes(dispatch_id);
+
+        -- #1035: machine execution facts remain in dispatch_outcomes. Terminal
+        -- leader judgment is an append-only event linked by outcome_id.
+        CREATE TABLE IF NOT EXISTS dispatch_adjudications (
+            adjudication_id TEXT PRIMARY KEY,
+            outcome_id TEXT NOT NULL,
+            event_key TEXT NOT NULL UNIQUE,
+            verdict TEXT,
+            not_required_reason TEXT,
+            actor TEXT NOT NULL CHECK (length(trim(actor)) > 0),
+            evidence_ref TEXT NOT NULL CHECK (length(trim(evidence_ref)) > 0),
+            created_at TEXT NOT NULL DEFAULT '',
+            insertion_seq INTEGER NOT NULL,
+            UNIQUE (outcome_id, insertion_seq),
+            CHECK (
+                (verdict IS NOT NULL AND length(trim(verdict)) > 0 AND not_required_reason IS NULL)
+                OR
+                (verdict IS NULL AND not_required_reason IS NOT NULL AND length(trim(not_required_reason)) > 0)
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_dispatch_adjudications_outcome
+            ON dispatch_adjudications(outcome_id, created_at);
+
+        -- One adjudication event may classify multiple canonical signatures.
+        CREATE TABLE IF NOT EXISTS dispatch_adjudication_signatures (
+            adjudication_id TEXT NOT NULL,
+            signature_id TEXT NOT NULL,
+            evidence_ref TEXT,
+            resolved INTEGER NOT NULL DEFAULT 0 CHECK (resolved IN (0, 1)),
+            PRIMARY KEY (adjudication_id, signature_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_dispatch_adjudication_signatures_signature
+            ON dispatch_adjudication_signatures(signature_id);
         -- Cross-session presence claims (#1001). Advisory "who's working on
         -- what" lease rows — NOT a mutual-exclusion lock. A session/dispatch
         -- registers a claim on an issue/lane when it starts touching it and

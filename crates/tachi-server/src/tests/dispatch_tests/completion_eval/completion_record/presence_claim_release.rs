@@ -40,6 +40,7 @@ fn base_complete_for_dispatch(dispatch_id: &str) -> TachiCompleteParams {
         format: Some("full".to_string()),
         signatures: Vec::new(),
         rulings: Vec::new(),
+        adjudication: None,
     }
 }
 

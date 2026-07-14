@@ -408,6 +408,7 @@ async fn tachi_complete_records_pattern_hit_from_evidence_ref() {
             format: None,
             signatures: Vec::new(),
             rulings: Vec::new(),
+            adjudication: None,
         }))
         .await
         .expect("complete with pattern ref");

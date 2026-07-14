@@ -808,16 +808,6 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    #[test]
-    fn hook_input_with_no_identity_is_inert() {
-        // auto_register_or_heartbeat_claim requires a MemoryServer, which
-        // needs a live daemon fixture; the no-identity short-circuit is
-        // exercised directly here as a pure-logic check on the guard
-        // condition it uses (issue_ref/flow_id both absent).
-        let input = ClaimHookInput::default();
-        assert!(input.issue_ref.is_none() && input.flow_id.is_none());
-    }
-
     // --- #1001 round 2 item 5: sanitized rendering ------------------------
 
     #[test]
