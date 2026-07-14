@@ -21,6 +21,13 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
 /// version newer than this kernel's `EXPECTED_SCHEMA_VERSION` supports — see
 /// `crate::db::migrations::check_schema_version_gate`.
 ///
+/// Also enforces the #1119 typed migration gate
+/// (`crate::db::migrations::check_db_open_context_gate`) using the caller's
+/// [`crate::db::DbOpenContext`]: an `OpenExisting` open of a *stamped older*
+/// DB (`1 ≤ stored < EXPECTED`) without `MigrationAuthority::Allow` refuses
+/// with a typed `SchemaMigrationOptInRequired` instead of silently migrating
+/// in place. Fresh (`user_version == 0`) files build with no authority.
+///
 /// ## Compatibility transaction boundary (#984 F1 round 3)
 ///
 /// Everything that mutates schema or data in a way another kernel's
@@ -38,8 +45,14 @@ pub fn init_schema_with_label_mut(
     conn: &mut Connection,
     db_label: &str,
     current_db_path: &Path,
+    ctx: &crate::db::DbOpenContext,
 ) -> Result<crate::db::migrations::MigrationReport, MemoryError> {
     crate::db::migrations::check_schema_version_gate(conn)?;
+    // #1119: typed migration gate. Runs BEFORE any backup/DDL/migration/stamp
+    // mutates the DB — an unauthorized `OpenExisting + Deny` open of a
+    // stamped older DB must refuse before `init_schema_inner`'s idempotent
+    // DDL or the final `write_schema_version_stamp` touches the file.
+    crate::db::migrations::check_db_open_context_gate(conn, current_db_path, ctx)?;
     maybe_backup_before_migration(conn, current_db_path)?;
     apply_connection_pragmas(conn)?;
 

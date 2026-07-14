@@ -85,6 +85,7 @@ pub use db::session_claims::{
     ClaimState, NewSessionClaim, ReleaseOutcome, SessionClaim, SessionClaimsGc,
 };
 pub use db::{anchor_id, anchor_path, AnchorKind};
+pub use db::{DbOpenContext, MigrationAuthority, OpenIntent};
 pub use db::{CategoryPathPrefixMemoryRow, FoundryJobStatusCounts, PathPrefixMemoryRow};
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use error::MemoryError;
