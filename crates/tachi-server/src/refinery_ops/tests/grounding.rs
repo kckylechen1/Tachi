@@ -14,6 +14,7 @@ const CAPTURED_AT: &str = "2026-07-13T00:00:00Z";
 /// "exact #1002 anchor" test a faithful replay of #1002's own grounding,
 /// not just a synthetic shape check.
 const ISSUE_1002_COMMIT_SHA: &str = "12102bd92e2e6f6959aa1b20858b4fe8f2889585";
+const ISSUE_1002_STALE_COMMIT_SHA: &str = "50e14052d5f737a41362f51bdd6ee5cb5a8e0e60";
 const ISSUE_1002_DOC_PATH: &str = "docs/engineering/architecture/issue-refinery-memory-lanes.md";
 const ISSUE_1002_BLOB_SHA: &str = "d303db5446a30136003a0f518dde0ed9bac4ea0f";
 
@@ -74,7 +75,7 @@ fn exact_1002_anchor_resolves_snapshot_and_linked_spec() {
 fn exact_1002_owner_amendment_supersedes_the_stale_body_pin() {
     let stale_body = format!(
         "Issue Refinery v1 original pin.\n\n\
-         Spec-Ref: kckylechen1/tachi:{ISSUE_1002_DOC_PATH}@{ISSUE_1002_COMMIT_SHA}/{ISSUE_1002_BLOB_SHA}#3\n"
+         Spec-Ref: kckylechen1/tachi:{ISSUE_1002_DOC_PATH}@{ISSUE_1002_STALE_COMMIT_SHA}/{ISSUE_1002_BLOB_SHA}#3\n"
     );
     let amendment = format!(
         "Spec-Ref amendment (leader): #1070 merged. Updated pin: Spec-Ref: \
