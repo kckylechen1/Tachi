@@ -50,7 +50,16 @@ pub(super) fn derive_verified_vault_key_from_password(
     let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid vault salt: {e}"))?;
-    let key_result = crate::vault_crypto::DerivedVaultKey::derive(password, &salt);
+    // tachi#1080: derive using the STORED `vault_config.kdf_params`
+    // (fail-closed on a malformed/unsupported value) before verifying the
+    // password — a stored-format error is never a "wrong password".
+    let key_result = match crate::vault_crypto::parse_stored_kdf_params(&config.kdf_params) {
+        Ok(params) => {
+            crate::vault_crypto::DerivedVaultKey::derive_with_params(password, &salt, &params)
+                .map_err(|e| e.to_string())
+        }
+        Err(err) => Err(err.to_string()),
+    };
     crate::vault_crypto::zero_string(password);
     let key = key_result?;
     if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {

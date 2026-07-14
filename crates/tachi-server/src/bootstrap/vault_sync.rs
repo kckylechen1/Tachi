@@ -185,11 +185,6 @@ pub(super) fn import_vault_bundle(
     validate_bundle(&bundle)?;
     verify_bundle_signature(&bundle, verification_key, allow_unsigned)?;
 
-    let mut store = open_cli_store(global_db_path)?;
-    let local_config = store
-        .vault_get_config()
-        .map_err(|e| format!("vault_get_config: {e}"))?;
-
     // entries-only bundles (no vault_config) cannot bootstrap a new vault.
     // The target must already be initialized with a matching config.
     let bundle_config = bundle.vault_config.as_ref().ok_or_else(|| {
@@ -198,6 +193,36 @@ pub(super) fn import_vault_bundle(
          then re-run the import."
             .to_string()
     })?;
+
+    // tachi#1080 day-one brick fix: validate the imported vault_config's KDF
+    // algorithm/params BEFORE the target store is even opened. `bundle_config`
+    // is derived purely from the already-parsed/verified bundle above and has
+    // no dependency on the target store, so this gate can — and must — run
+    // before `open_cli_store` below. `MemoryStore::open` itself creates the
+    // target DB file and runs schema init/migrations on it (see
+    // `memcore::store::open::MemoryStore::open_with_label_inner`), so
+    // validating only after opening still leaves a rejected import having
+    // created (or migrated) the target DB file, even though it never got as
+    // far as writing `vault_config`. Without this gate the bootstrap path
+    // below (`local_config.is_none()`) also writes `bundle_config`
+    // unconditionally once the store is open — `store.vault_import_bundle`
+    // itself performs no KDF validation — so a bundle carrying an
+    // unsupported/corrupted KDF profile (e.g. a hand-edited
+    // `{"m":1,"t":1,"p":1}`) would import cleanly and then permanently fail
+    // every subsequent unlock: the stored-config KDF gate wired elsewhere in
+    // #1080 (`parse_stored_kdf_params`) refuses to derive against it. That is
+    // not a decryption failure, it's a vault that is initialized but can
+    // never again be opened. Checked unconditionally (not just on the
+    // bootstrap path) as defense in depth even though the existing-vault
+    // path's `ensure_same_vault` equality check makes it transitively
+    // redundant there (a local config only ever reaches the store via a path
+    // that already validated it).
+    ensure_importable_kdf(bundle_config)?;
+
+    let mut store = open_cli_store(global_db_path)?;
+    let local_config = store
+        .vault_get_config()
+        .map_err(|e| format!("vault_get_config: {e}"))?;
 
     let initialized_vault = local_config.is_none();
     if let Some(local_config) = local_config.as_ref() {
@@ -330,6 +355,42 @@ fn validate_bundle(bundle: &VaultSyncBundle) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
+/// Reject an imported `vault_config` whose KDF algorithm/parameters are not
+/// ones this build can actually derive against (tachi#1080 day-one brick
+/// fix; see the call site in `import_vault_bundle` for the full incident).
+fn ensure_importable_kdf(config: &VaultConfig) -> Result<(), Box<dyn std::error::Error>> {
+    // `kdf_algorithm` is a non-`Option<String>` column (DDL:
+    // `kdf_algorithm TEXT NOT NULL DEFAULT 'argon2id'`; Rust type `String`,
+    // no `#[serde(default)]`), and every writer in this repo always sets it
+    // to the literal "argon2id". A bundle whose JSON omits the field
+    // entirely already fails to deserialize as `VaultSyncBundle` earlier in
+    // `import_vault_bundle`, before this function ever runs — so the only
+    // reachable "no algorithm recorded" shape is an explicit empty string in
+    // an older/hand-crafted bundle. Treat that as the implicit historical
+    // default rather than rejecting it outright; reject anything else that
+    // isn't "argon2id".
+    let algorithm = if config.kdf_algorithm.trim().is_empty() {
+        "argon2id"
+    } else {
+        config.kdf_algorithm.as_str()
+    };
+    if algorithm != "argon2id" {
+        return Err(format!(
+            "Vault sync bundle's vault_config uses an unrecognized KDF algorithm '{}' (only 'argon2id' is supported); refusing to import.",
+            config.kdf_algorithm
+        )
+        .into());
+    }
+
+    crate::vault_crypto::parse_stored_kdf_params(&config.kdf_params)
+        .map_err(|e| {
+            format!(
+                "Vault sync bundle's vault_config uses unsupported KDF parameters; refusing to import (importing it would create a Vault that can never be unlocked again): {e}"
+            )
+        })?;
+    Ok(())
+}
+
 fn ensure_same_vault(
     local: &VaultConfig,
     imported: &VaultConfig,
@@ -421,12 +482,27 @@ mod tests {
         );
     }
 
+    /// The KDF profile this repo has ever actually written in production
+    /// (`KdfParams::PRODUCTION`), always in the supported set regardless of
+    /// build cfg — the safe default for fixtures that need a config which
+    /// imports successfully.
+    const VALID_KDF_PARAMS: &str = r#"{"m":65536,"t":3,"p":4}"#;
+
+    /// tachi#1080: an unsupported KDF profile a bundle could carry (e.g.
+    /// corrupted/hand-edited). Used by tests that assert the day-one-brick
+    /// import gate rejects it — see `ensure_importable_kdf`.
+    const UNSUPPORTED_KDF_PARAMS: &str = r#"{"m":1,"t":1,"p":1}"#;
+
     fn sample_config() -> VaultConfig {
+        sample_config_with_kdf_params(VALID_KDF_PARAMS)
+    }
+
+    fn sample_config_with_kdf_params(kdf_params: &str) -> VaultConfig {
         VaultConfig {
             salt: "salt".to_string(),
             verifier: "verifier".to_string(),
             kdf_algorithm: "argon2id".to_string(),
-            kdf_params: r#"{"m":1,"t":1,"p":1}"#.to_string(),
+            kdf_params: kdf_params.to_string(),
             cipher: memcore::vault::VaultCipher::Aes256Gcm,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
@@ -660,10 +736,141 @@ mod tests {
         assert!(err.to_string().contains("--allow-unsigned"), "{err}");
 
         let report = import_vault_bundle(&target_db, &bundle_path, None, true)
-            .expect("explicit unsigned import should remain available");
+            .expect("explicit unsigned import with supported KDF params should remain available");
         assert!(report.initialized_vault);
         assert_eq!(report.entries_imported, 0);
 
+        let _ = std::fs::remove_file(target_db);
+    }
+
+    /// tachi#1080 day-one brick fix: `--allow-unsigned` overrides the
+    /// *signature* requirement only, not the KDF-parameter gate. An unsigned
+    /// bundle whose `vault_config` carries an unsupported `kdf_params`
+    /// profile must still be rejected even with the explicit override —
+    /// before this fix the bootstrap path (`local_config.is_none()`) wrote
+    /// it unconditionally, which would create a Vault that can never again
+    /// be unlocked (see `ensure_importable_kdf`).
+    ///
+    /// The KDF gate now runs before the target store is ever opened (the gate
+    /// moved ahead of `open_cli_store` in `import_vault_bundle`), so a
+    /// rejected import must leave the target DB file itself absent — not
+    /// merely absent a `vault_config` row in an already-created file. Assert
+    /// against the file, not a read-only re-open, because `MemoryStore::
+    /// open_read_only` on a path that was never created would itself error
+    /// (`SQLITE_OPEN_READ_ONLY` on a missing file), which would mask the very
+    /// regression this test exists to catch.
+    #[test]
+    fn vault_sync_unsigned_bundle_with_unsupported_kdf_is_rejected_even_with_override() {
+        let target_db = temp_db_path();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bundle_path = dir.path().join("vault.bundle.json");
+        let unsigned = VaultSyncBundle {
+            bundle_type: BUNDLE_TYPE.to_string(),
+            version: BUNDLE_VERSION,
+            exported_at: "2026-01-01T00:00:00Z".to_string(),
+            vault_config: Some(sample_config_with_kdf_params(UNSUPPORTED_KDF_PARAMS)),
+            entries: Vec::new(),
+            rotations: Vec::new(),
+            signature: None,
+        };
+        std::fs::write(
+            &bundle_path,
+            serde_json::to_string_pretty(&unsigned).expect("serialize unsigned bundle"),
+        )
+        .expect("write unsigned bundle");
+
+        let err = import_vault_bundle(&target_db, &bundle_path, None, true)
+            .expect_err("unsupported kdf_params must be rejected even with --allow-unsigned");
+        assert!(
+            err.to_string().contains("unsupported KDF parameters"),
+            "{err}"
+        );
+
+        assert!(
+            !target_db.exists(),
+            "rejected import must not create/open the target DB file at all \
+             (would brick the vault): {}",
+            target_db.display()
+        );
+
+        let _ = std::fs::remove_file(target_db);
+    }
+
+    /// tachi#1080 day-one brick fix, end to end: importing a bundle whose
+    /// `vault_config` uses the supported (default) KDF profile succeeds;
+    /// importing one whose `kdf_params` is an unsupported/corrupted value
+    /// (e.g. hand-edited `{"m":1,"t":1,"p":1}`) is rejected BEFORE anything
+    /// is written — and, per the follow-up fix that moved the gate ahead of
+    /// `open_cli_store`, before the target store is even opened. Before that
+    /// follow-up the gate ran *after* `open_cli_store`, which itself creates
+    /// the target DB file and runs schema init/migrations — so a rejected
+    /// import still left a freshly-created (or freshly-migrated) DB file
+    /// behind, even though `vault_config` itself was never written. Before
+    /// the original #1080 fix the case "succeeded" outright — the bundle
+    /// imported cleanly and initialized a vault_config row — and only later,
+    /// at unlock time, would every attempt fail because the stored-config
+    /// KDF gate wired elsewhere in #1080 (`parse_stored_kdf_params`) refuses
+    /// to derive against the unsupported params: a vault that is
+    /// initialized but can never again be opened (a silent brick, not a
+    /// decrypt failure). Asserting the target DB file's existence (not just
+    /// its `vault_config` row) is what catches that intermediate
+    /// too-late-a-gate regression red.
+    #[test]
+    fn vault_sync_import_rejects_unsupported_kdf_params_before_persisting() {
+        // Success case: a supported KDF profile imports and bootstraps fine.
+        let source_db = temp_db_path();
+        let target_db = temp_db_path();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bundle_path = dir.path().join("vault-supported.bundle.json");
+
+        let source = open_cli_store(&source_db).expect("source store");
+        source
+            .vault_set_config(&sample_config())
+            .expect("set source config");
+        export_vault_bundle(&source_db, &bundle_path, false, false, &[7u8; 32])
+            .expect("export vault sync bundle");
+
+        let report = import_vault_bundle(&target_db, &bundle_path, Some(&[7u8; 32]), false)
+            .expect("importing a bundle with supported KDF params must succeed");
+        assert!(report.initialized_vault);
+
+        let _ = std::fs::remove_file(source_db);
+        let _ = std::fs::remove_file(target_db);
+
+        // Failure case: an unsupported kdf_params profile must be rejected
+        // before persisting anything, not merely fail at a later unlock.
+        let source_db = temp_db_path();
+        let target_db = temp_db_path();
+        let bundle_path = dir.path().join("vault-unsupported.bundle.json");
+
+        let source = open_cli_store(&source_db).expect("source store");
+        source
+            .vault_set_config(&sample_config_with_kdf_params(UNSUPPORTED_KDF_PARAMS))
+            .expect("set source config with unsupported kdf_params");
+        export_vault_bundle(&source_db, &bundle_path, false, false, &[7u8; 32])
+            .expect("export vault sync bundle");
+
+        let err = import_vault_bundle(&target_db, &bundle_path, Some(&[7u8; 32]), false)
+            .expect_err("unsupported kdf_params must be rejected before persisting");
+        assert!(
+            err.to_string().contains("unsupported KDF parameters"),
+            "{err}"
+        );
+
+        // `target_db` is a brand-new random path that has never been opened
+        // before this call. If the KDF gate ran after `open_cli_store` (the
+        // bug this test guards against), that call alone would have created
+        // the file and run schema init/migrations on it — so asserting only
+        // that `vault_config` is unset would pass even with the gate
+        // mis-ordered. Assert the file itself was never created.
+        assert!(
+            !target_db.exists(),
+            "rejected import must not create/open the target DB file at all \
+             (would brick the vault): {}",
+            target_db.display()
+        );
+
+        let _ = std::fs::remove_file(source_db);
         let _ = std::fs::remove_file(target_db);
     }
 

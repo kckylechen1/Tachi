@@ -246,6 +246,18 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
                     );
                 }
                 Err(err) => {
+                    // tachi#1080: a stored-KDF-format failure means the vault's
+                    // stored config is unusable. It MUST NOT be swallowed into
+                    // the plaintext fallback — that would silently persist the
+                    // freshly entered keys as plaintext to config.env (a worse
+                    // outcome than the original bug). Detect it by the typed
+                    // error (downcast, NOT a fragile string match) and abort.
+                    if err
+                        .downcast_ref::<crate::vault_crypto::KdfParamsFormatError>()
+                        .is_some()
+                    {
+                        return Err(err);
+                    }
                     // Fall back to plaintext (unchanged behavior) so the wizard
                     // never strands the user with half-applied state.
                     println!(
