@@ -884,8 +884,12 @@ fn new_with_config_rejects_local_rerank_without_endpoint() {
             local_endpoint: None,
         },
     };
-    let err = LlmClient::new_with_config(config, None)
-        .expect_err("local rerank without endpoint must fail at construction");
+    // Not `expect_err`: that would require `LlmClient: Debug`, and deriving
+    // Debug on the client is a secret-exposure surface we deliberately avoid.
+    let err = match LlmClient::new_with_config(config, None) {
+        Ok(_) => panic!("local rerank without endpoint must fail at construction"),
+        Err(err) => err,
+    };
     assert!(
         err.contains("local rerank provider not configured"),
         "got: {err}"
@@ -921,8 +925,10 @@ fn new_with_config_rejects_local_rerank_with_whitespace_endpoint() {
             local_endpoint: Some("   ".to_string()),
         },
     };
-    let err = LlmClient::new_with_config(config, None)
-        .expect_err("whitespace-only endpoint must fail at construction");
+    let err = match LlmClient::new_with_config(config, None) {
+        Ok(_) => panic!("whitespace-only endpoint must fail at construction"),
+        Err(err) => err,
+    };
     assert!(
         err.contains("local rerank provider not configured"),
         "got: {err}"
