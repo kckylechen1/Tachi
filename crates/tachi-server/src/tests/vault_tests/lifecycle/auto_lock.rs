@@ -75,6 +75,6 @@ async fn vault_auto_lock_expires_cached_key() {
             .llm
             .provider_secret_for_tests(&["OPENAI_API_KEY"])
             .is_some(),
-        "auto-lock must NOT clear provider secrets — they survive auto-lock (#28)"
+        "auto-lock must NOT clear provider secrets — they survive auto-lock (#400)"
     );
 }

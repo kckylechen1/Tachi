@@ -58,7 +58,7 @@ async fn with_vault_key_drops_vault_lock_before_running_work() {
     .expect("vault key should be available");
 }
 
-// Discrimination test (a) for #28: auto-lock must clear the vault master key
+// Discrimination test (a) for #400: auto-lock must clear the vault master key
 // but PRESERVE provider secrets. Provider secrets are materialized from the
 // vault at unlock time and have a lifecycle independent of the master key;
 // auto-lock is "don't keep the key in memory long-term", NOT "stop the service".
@@ -220,14 +220,14 @@ fn read_unlock_password_fifo_rejects_regular_file_without_removing_it() {
     }
 }
 
-// G-B5 (updated for #28): auto-lock no longer clears provider secrets.
+// G-B5 (updated for #400): auto-lock no longer clears provider secrets.
 // The original re-materialization path (`re_materialize_provider_secrets_after_auto_lock`)
 // was production dead code after the split — it had no callers outside tests —
 // so both the function and the test that exercised it were removed (正本清源).
 // The surviving discrimination test (a) `auto_lock_clears_key_but_preserves_provider_secrets`
 // already proves auto-lock preserves provider secrets.
 
-// Discrimination test (b) for #28: user-initiated `vault lock` must clear BOTH
+// Discrimination test (b) for #400: user-initiated `vault lock` must clear BOTH
 // the vault master key AND provider secrets — the original full-clear semantics
 // must be preserved when the split was introduced.
 //
@@ -272,7 +272,7 @@ async fn vault_lock_clears_key_and_provider_secrets() {
     );
 }
 
-// Discrimination test (c) for #28: TACHI_VAULT_AUTOLOCK_SECS=0 disables
+// Discrimination test (c) for #400: TACHI_VAULT_AUTOLOCK_SECS=0 disables
 // auto-lock entirely — the key survives even past the normal timeout.
 //
 // RED before fix: there was no env knob; `auto_lock_after_secs` was hardcoded
@@ -330,7 +330,7 @@ async fn autolock_disabled_when_env_zero() {
     }
 }
 
-// Discrimination test (d) for #28: when auto-lock is disabled
+// Discrimination test (d) for #400: when auto-lock is disabled
 // (`TACHI_VAULT_AUTOLOCK_SECS=0`), the runtime status surface must report
 // `vault.unlocked: true` even if `unlock_time` is far in the past.
 //
