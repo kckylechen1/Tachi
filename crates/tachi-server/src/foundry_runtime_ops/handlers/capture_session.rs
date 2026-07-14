@@ -1005,8 +1005,6 @@ mod handler_tests {
             std::fs::create_dir_all(quant_db.parent().unwrap()).expect("mkdir quant");
             let global_db = home.join("global").join("memory.db");
             std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
-            let server =
-                MemoryServer::new(global_db, Some(quant_db)).expect("bind quant daemon");
 
             let hapi_db = home.join("projects").join("hapi").join("memory.db");
             std::fs::create_dir_all(hapi_db.parent().unwrap()).expect("mkdir hapi");
@@ -1040,10 +1038,49 @@ mod handler_tests {
                 force: true,
             };
 
-            let response = tokio::runtime::Runtime::new()
-                .expect("tokio runtime")
-                .block_on(handle_capture_session(&server, params))
-                .expect("capture_session should complete");
+            // Oz r5 fixture fix: `handle_capture_session` unconditionally
+            // calls `enqueue_capture_maintenance_jobs`, which `try_send`s
+            // onto the foundry-maintenance mpsc channel — under `#[cfg(test)]`,
+            // `background_workers_enabled()` (server_state/init.rs:37-46)
+            // defaults OFF unless `TACHI_TEST_ENABLE_BACKGROUND_WORKERS` is
+            // set, so `MemoryServer::new` never spawns the worker that would
+            // hold the receiver open; the sender side is immediately
+            // disconnected and the real handler call fails with "foundry
+            // maintenance worker unavailable". This is a TEST-fixture gap,
+            // not a production one — the fix is enabling the real worker for
+            // this test, NOT teaching the handler to tolerate a missing one
+            // (that would mask a genuinely dead worker in production, the
+            // same "拒必有声" reasoning the write-affinity gate itself
+            // follows). `MemoryServer::new` spawns via `tokio::spawn` when
+            // workers are enabled, so it — and everything else — now runs
+            // INSIDE the same `block_on`'d runtime, not constructed before
+            // it: calling `tokio::spawn` with no active runtime context
+            // panics.
+            let _background_workers = crate::test_support::EnvRestore::set(
+                "TACHI_TEST_ENABLE_BACKGROUND_WORKERS",
+                "1",
+            );
+
+            // The spawned foundry-maintenance worker's `while let Some(item)
+            // = rx.recv().await` loop (maintenance/worker.rs:120) only ever
+            // exits when its Sender is dropped — but `server` (which owns
+            // it) is kept alive below for the post-capture read assertions,
+            // so that task genuinely never finishes on its own within this
+            // test's lifetime. Explicitly bounding shutdown here (rather
+            // than trusting `Runtime`'s implicit `Drop` to reap a
+            // still-running spawned task within some unstated time budget)
+            // is what guarantees this test can never hang instead of
+            // failing fast.
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            let (response, server) = rt.block_on(async move {
+                let server =
+                    MemoryServer::new(global_db, Some(quant_db)).expect("bind quant daemon");
+                let response = handle_capture_session(&server, params)
+                    .await
+                    .expect("capture_session should complete");
+                (response, server)
+            });
+            rt.shutdown_timeout(std::time::Duration::from_millis(500));
             let parsed: serde_json::Value =
                 serde_json::from_str(&response).expect("response JSON");
             assert_eq!(
