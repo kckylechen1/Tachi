@@ -552,6 +552,10 @@ pub(crate) async fn search_memory_rows_with_recall_config(
     Ok(output)
 }
 
+/// Test-proven, production-dormant (#1125): the consumer that flips search
+/// sampling on operationally does not exist yet — same dormancy as the whole
+/// receipt API. Lift this gate in the leaf that adds that consumer.
+#[cfg(test)]
 /// #1125 — the rows-layer receipt-assembly point.
 ///
 /// The store layer returns the per-phase search receipt (whose `pool_wait` is

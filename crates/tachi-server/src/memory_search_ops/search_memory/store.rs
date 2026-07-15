@@ -25,6 +25,10 @@ fn search_store(
     Ok(results)
 }
 
+/// Test-proven, production-dormant (#1125): the consumer that flips search
+/// sampling on operationally does not exist yet — same dormancy as the whole
+/// receipt API. Lift this gate in the leaf that adds that consumer.
+#[cfg(test)]
 /// #1125 recording twin of [`search_store`]: identical search + access-capture
 /// behavior, but runs `MemoryStore::search_with_receipt` (the sampled path)
 /// instead of the plain `search`, returning the per-phase `SearchPhaseReceipt`
@@ -76,6 +80,10 @@ pub(super) fn with_named_project_search(
     }
 }
 
+/// Test-proven, production-dormant (#1125): the consumer that flips search
+/// sampling on operationally does not exist yet — same dormancy as the whole
+/// receipt API. Lift this gate in the leaf that adds that consumer.
+#[cfg(test)]
 /// #1125 recording twin of [`with_named_project_search`]. Returns the search
 /// results + phase receipt PLUS the pool checkout receipt, as a 3-tuple. The
 /// pool receipt is `Some` on the attached/cached branch (which checks a slot
@@ -167,6 +175,10 @@ pub(super) fn with_project_search(
     }
 }
 
+/// Test-proven, production-dormant (#1125): the consumer that flips search
+/// sampling on operationally does not exist yet — same dormancy as the whole
+/// receipt API. Lift this gate in the leaf that adds that consumer.
+#[cfg(test)]
 /// #1125 recording twin of [`with_project_search`] — see
 /// [`with_named_project_search_recording`]. The project read path always
 /// checks a slot out of the project read pool, so the pool receipt is `Some`
@@ -219,6 +231,10 @@ pub(super) fn with_global_search(
     }
 }
 
+/// Test-proven, production-dormant (#1125): the consumer that flips search
+/// sampling on operationally does not exist yet — same dormancy as the whole
+/// receipt API. Lift this gate in the leaf that adds that consumer.
+#[cfg(test)]
 /// #1125 recording twin of [`with_global_search`] — see
 /// [`with_named_project_search_recording`]. The global read path always
 /// checks a slot out of the global read pool, so the pool receipt is `Some`
