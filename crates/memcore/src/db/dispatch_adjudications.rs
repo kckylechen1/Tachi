@@ -52,8 +52,9 @@ pub struct DispatchAdjudication {
     pub signatures: Vec<DispatchAdjudicationSignature>,
 }
 
-/// Replaying an event key returns the original event. Corrections require a new
-/// key and therefore preserve the preceding adjudication history.
+/// Replaying an event key returns the original event only when its canonical
+/// payload is unchanged. Corrections require a new key and therefore preserve
+/// the preceding adjudication history.
 pub fn append_dispatch_adjudication(
     conn: &Connection,
     new: &NewDispatchAdjudication,
@@ -111,7 +112,20 @@ pub fn append_dispatch_adjudication(
                     .to_string(),
             ));
         }
-        // Idempotent replay: return the original row without writing.
+        // An event key represents a transport retry only when every semantic
+        // payload field is unchanged. Returning `existing` for a changed
+        // payload would silently report a correction as recorded while
+        // preserving the old row instead. That threatens the append-only
+        // ledger's truthfulness invariant, so refuse the replay loudly and
+        // leave the original row/signatures untouched.
+        if !replay_payload_matches(&existing, new) {
+            return Err(MemoryError::InvalidArg(
+                "event_key replay payload mismatch: the existing adjudication is not canonically equivalent; use a new event_key for a correction".to_string(),
+            ));
+        }
+
+        // Idempotent replay: return the canonically identical original row
+        // without writing.
         return Ok(existing);
     }
 
@@ -151,6 +165,36 @@ pub fn append_dispatch_adjudication(
     })?;
     tx.commit()?;
     Ok(result)
+}
+
+/// Compare the semantic content of an existing adjudication against a replay
+/// request. `adjudication_id`, timestamps, and insertion sequence identify the
+/// persisted event and therefore do not participate; all caller-supplied
+/// terminal content does. Signature input order is transport noise, so compare
+/// its canonical ordering while retaining every triple field.
+fn replay_payload_matches(
+    existing: &DispatchAdjudication,
+    replay: &NewDispatchAdjudication,
+) -> bool {
+    existing.outcome_id == replay.outcome_id
+        && existing.verdict == replay.verdict
+        && existing.not_required_reason == replay.not_required_reason
+        && existing.actor == replay.actor
+        && existing.evidence_ref == replay.evidence_ref
+        && canonical_signatures(&existing.signatures) == canonical_signatures(&replay.signatures)
+}
+
+fn canonical_signatures(
+    signatures: &[DispatchAdjudicationSignature],
+) -> Vec<DispatchAdjudicationSignature> {
+    let mut canonical = signatures.to_vec();
+    canonical.sort_by(|left, right| {
+        left.signature_id
+            .cmp(&right.signature_id)
+            .then_with(|| left.evidence_ref.cmp(&right.evidence_ref))
+            .then_with(|| left.resolved.cmp(&right.resolved))
+    });
+    canonical
 }
 
 pub fn list_adjudications_for_outcome(
@@ -358,6 +402,91 @@ mod tests {
         );
         assert_eq!(history[0].verdict.as_deref(), Some("accepted"));
         assert_eq!(history[1].verdict.as_deref(), Some("rejected"));
+    }
+
+    fn assert_same_key_payload_mismatch_is_rejected(
+        case: &str,
+        original: NewDispatchAdjudication,
+        mutate_replay: impl FnOnce(&mut NewDispatchAdjudication),
+    ) {
+        let conn = open_conn();
+        let first = append_dispatch_adjudication(&conn, &original).unwrap();
+        let mut replay = original;
+        replay.adjudication_id = format!("replay-{case}");
+        mutate_replay(&mut replay);
+
+        let err = append_dispatch_adjudication(&conn, &replay)
+            .expect_err("a same-key replay with changed payload must fail loudly");
+        assert!(
+            err.to_string().contains("payload mismatch"),
+            "{case}: error must identify the non-equivalent replay: {err}"
+        );
+
+        let history = list_adjudications_for_outcome(&conn, &first.outcome_id).unwrap();
+        assert_eq!(
+            history,
+            vec![first],
+            "{case}: the rejected replay must preserve the original row and signatures exactly"
+        );
+    }
+
+    /// A replay may be idempotent only for canonically identical content. The
+    /// table covers every scalar payload field plus all fields in the signature
+    /// triples, while the helper asserts that the rejected write leaves the
+    /// stored event byte-for-byte unchanged.
+    #[test]
+    fn replay_with_changed_payload_is_rejected_and_preserves_original() {
+        type ReplayMutation = fn(&mut NewDispatchAdjudication);
+        let cases: [(&str, ReplayMutation); 6] = [
+            ("verdict", |replay| {
+                replay.verdict = Some("rejected".to_string());
+            }),
+            ("actor", |replay| {
+                replay.actor = "different-leader".to_string();
+            }),
+            ("evidence_ref", |replay| {
+                replay.evidence_ref = "different-evidence".to_string();
+            }),
+            ("signature_id", |replay| {
+                replay.signatures[0].signature_id = "different_signature".to_string();
+            }),
+            ("signature_evidence_ref", |replay| {
+                replay.signatures[0].evidence_ref = Some("different-review".to_string());
+            }),
+            ("signature_resolved", |replay| {
+                replay.signatures[0].resolved = true;
+            }),
+        ];
+
+        for (case, mutate_replay) in cases {
+            assert_same_key_payload_mismatch_is_rejected(
+                case,
+                event(&format!("event-payload-mismatch-{case}")),
+                mutate_replay,
+            );
+        }
+
+        assert_same_key_payload_mismatch_is_rejected(
+            "not_required_reason",
+            not_required_event("event-payload-mismatch-reason", "trivial_change"),
+            |replay| replay.not_required_reason = Some("superseded".to_string()),
+        );
+    }
+
+    #[test]
+    fn replay_with_reordered_signature_triples_remains_idempotent() {
+        let conn = open_conn();
+        let original = event("event-signature-order");
+        let first = append_dispatch_adjudication(&conn, &original).unwrap();
+
+        let mut reordered = original;
+        reordered.adjudication_id = "adjudication-event-signature-order-replay".to_string();
+        reordered.signatures.reverse();
+        let replay = append_dispatch_adjudication(&conn, &reordered).unwrap();
+
+        assert_eq!(replay, first, "signature order is not semantic content");
+        let history = list_adjudications_for_outcome(&conn, "outcome-1").unwrap();
+        assert_eq!(history, vec![first], "reordered retry did not append");
     }
 
     #[test]

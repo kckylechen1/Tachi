@@ -1743,9 +1743,10 @@ mod tests {
         );
         assert_eq!(after_skip[0], first_row, "original row untouched");
 
-        // Replay 2: same complete, DIFFERENT adjudication → idempotent
-        // short-circuit (event_key "complete:{outcome_id}" already exists,
-        // so the original row is returned unchanged, not overwritten).
+        // Replay 2: same complete, DIFFERENT adjudication must be rejected.
+        // `complete:{outcome_id}` identifies a transport retry only when its
+        // canonical payload is also identical; otherwise accepting it would
+        // falsely report that the changed verdict was recorded.
         let mut replay_diff_adj = params.clone();
         replay_diff_adj.adjudication = Some(AdjudicationParams {
             verdict: Some("rejected".to_string()),
@@ -1767,8 +1768,14 @@ mod tests {
         let replay2_adj = record_complete_adjudication(&server, &replay_diff_adj, &replay2_status);
         assert_eq!(
             replay2_adj["recorded"],
-            json!(true),
-            "replay adjudication status"
+            json!(false),
+            "a changed adjudication behind the same complete event key must fail loudly: {replay2_adj}"
+        );
+        assert!(
+            replay2_adj["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("payload mismatch")),
+            "replay error must identify the mismatched payload: {replay2_adj}"
         );
         let after_diff = adjudication_outcome_rows(&server, &outcome_id);
         assert_eq!(after_diff.len(), 1, "replay did not append a new row");
