@@ -104,7 +104,11 @@ pub(super) fn collect_candidates(
     let symbolic_candidate_count = symbolic_candidate_entries.len();
 
     let exact_id = exact_memory_id_query(query);
-    let candidate_ids = vec_scores
+    // Explicit type: the receipt below calls `candidate_ids.len()` inside a
+    // closure, and method resolution can't wait for the `CandidateSet` literal
+    // at the end of the function to pin the element type down. Matches
+    // `CandidateSet::candidate_ids` exactly.
+    let candidate_ids: Vec<String> = vec_scores
         .keys()
         .chain(fts_scores.keys())
         .chain(symbolic_candidate_entries.iter().map(|entry| &entry.id))
