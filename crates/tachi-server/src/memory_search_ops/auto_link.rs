@@ -20,44 +20,99 @@ const REINFORCEMENT_DUPLICATE_SIMILARITY: f64 = 0.95;
 // (auto_link.rs:136/:138); write time = per-edge `with_*_store` writes
 // (:231/:233). No new DB I/O, no quality logic touched.
 //
-// Per #1097 D2 this receipt carries ONLY the existing `entry.id` (the save
-// response's UUID, captured into the spawned closure at auto_link.rs:110 —
-// no query/trace id is minted, none exists in the codebase). Per D5 it
-// contains no entity names (entities are the search queries here, so naming
-// them would log query text), no memory content, no DB path.
+// Per #1097 D2 this receipt carries ONLY the existing `entry.id` (captured
+// into the spawned closure at auto_link.rs:110 — no query/trace id is
+// minted, none exists in the codebase). Per D5 it contains no entity names
+// (entities are the search queries here, so naming them would log query
+// text), no memory content, no DB path.
+//
+// #1097 r1 codex review ① (D5 hard line): `entry.id` is NOT necessarily a
+// save-generated UUID — `save_memory` accepts a caller-supplied
+// `params.id` verbatim (handler.rs:46-49 only generates one when `id` is
+// MISSING), the wire field has no content constraint
+// (tachi-params/src/memory.rs:104), and validation only checks presence
+// (save_memory/validation.rs:13). A caller can therefore push query text,
+// memory content, entity names, or credentials INTO `id`, and the unredacted
+// value used to flow straight into this receipt and the `tracing::info!`
+// line. The `entry_id` field + log point now carry the raw id ONLY when it
+// parses as a legal UUID (`uuid::Uuid::parse_str`); otherwise they carry
+// the fixed [`REDACTED_NON_UUID_ID`] marker — never the raw string.
 //
 // The receipt is emitted from INSIDE the spawned task because the save
 // handler returns `"auto_link": "pending"` (handler.rs:261-262) without
 // awaiting it — the closure is the only place the finished counts exist.
 // ---------------------------------------------------------------------------
 
+/// Fixed marker placed in [`AutoLinkReceipt::entry_id`] (and the log line)
+/// when the underlying `entry.id` does not parse as a legal UUID. See the
+/// #1097 r1 codex review ① note above — a caller can push arbitrary text
+/// into `params.id`, so the receipt must never echo the raw string.
+pub const REDACTED_NON_UUID_ID: &str = "<non-uuid-id>";
+
+/// Return `id` verbatim when it parses as a legal UUID (`uuid::Uuid::parse_str`,
+/// same validator the rest of the codebase uses — e.g. candidates.rs:147),
+/// otherwise the fixed [`REDACTED_NON_UUID_ID`] marker. This is the single
+/// choke point for the #1097 r1 codex review ① redaction: every place the
+/// auto-link receipt or its log line touches `entry.id` routes through here,
+/// so the raw (possibly caller-hostile) string can never reach telemetry.
+///
+/// Owned `String` return because the receipt field is `String`; this keeps
+/// the redaction unit test free of lifetime gymnastics.
+pub(crate) fn redacted_entry_id(id: &str) -> String {
+    if uuid::Uuid::parse_str(id).is_ok() {
+        id.to_string()
+    } else {
+        REDACTED_NON_UUID_ID.to_string()
+    }
+}
+
 /// Per-call receipt for one `spawn_auto_linking` invocation, emitted via
 /// `tracing::info!` from inside the spawned task. See the module-level
 /// honesty rules above for what is and is not populated.
 #[derive(Debug, Clone)]
 pub struct AutoLinkReceipt {
-    /// The save-generated UUID of the entry whose entities drove this
-    /// auto-link pass. Already in the save response (handler.rs:47-49 /
-    /// :261-262), contains no content; carried here per #1097 D2 so a log
-    /// reader can pair this receipt with its save response without minting
-    /// a new trace/operation id (none exists codebase-wide).
+    /// The id of the entry whose entities drove this auto-link pass, AFTER
+    /// [`redacted_entry_id`] redaction. Carried so a log reader can pair
+    /// this receipt with its save response without minting a new trace id
+    /// (none exists codebase-wide, per #1097 D2). Per #1097 r1 codex
+    /// review ① this is the RAW id only when it parses as a legal UUID;
+    /// otherwise it is the fixed [`REDACTED_NON_UUID_ID`] marker — never
+    /// the raw (possibly caller-hostile) string.
     pub entry_id: String,
     /// `entry.entities.iter().cloned().collect::<HashSet>().len()` —
     /// deduplicated entity count driving the per-entity search loop.
     pub entity_count: usize,
-    /// Number of per-entity searches actually executed. Equals
-    /// `entity_count` on the current code path (one search per entity) but
-    /// counted separately so future short-circuit logic does not silently
-    /// mis-state the executed work.
+    /// Number of per-entity searches that ACTUALLY EXECUTED — i.e. the
+    /// store search returned a result set (possibly empty). #1097 r1
+    /// codex review ③-A: this was previously incremented before the
+    /// result was checked, so a named-project resolution failure
+    /// (server_methods/db.rs:280) counted as "executed". It no longer
+    /// does — see [`SearchOutcome::Failed`] / `searches_failed`.
     pub searches_executed: usize,
+    /// Number of per-entity searches that FAILED before producing a
+    /// result set (named-project resolution error, store error). #1097
+    /// r1 codex review ③-A: separated from `searches_executed` so the
+    /// receipt no longer conflates attempts with executions.
+    pub searches_failed: usize,
     /// Number of search results examined across all per-entity searches
     /// (the inner `for result in results` loop at auto_link.rs:142).
     pub candidates_examined: usize,
     /// Number of edges for which `save_edge_action` was actually invoked
     /// (auto_link.rs:230-234) — every write attempt.
     pub edges_attempted: usize,
-    /// Number of edge writes that returned `Ok(())`.
+    /// Number of edge writes whose INSERT landed (the edge row is
+    /// persisted). #1097 r1 codex review ③-B: the edge insert commits
+    /// under its OWN savepoint (db/graph.rs:144, RELEASEd at :158)
+    /// BEFORE the post-insert supersede/reinforce update runs, so an
+    /// insert that landed must count here EVEN WHEN the update fails —
+    /// the edge is in the DB either way. Previously this only counted
+    /// insert+update both-Ok, hiding a real persisted edge behind a zero.
     pub edges_written: usize,
+    /// Number of edge writes where the INSERT landed but the post-insert
+    /// update (supersede / reinforce) failed. #1097 r1 codex review ③-B:
+    /// separated from `edges_written` so the partial-write case is
+    /// visible instead of erased.
+    pub post_write_failures: usize,
     /// Skip-counter breakdown covering the four `continue` points in the
     /// per-hit loop (auto_link.rs:143/146/153/175). Their sum plus
     /// `edges_attempted` equals `candidates_examined`.
@@ -73,6 +128,73 @@ pub struct AutoLinkReceipt {
     pub write_elapsed: Duration,
     /// Wall time of the whole spawned task end-to-end.
     pub total_elapsed: Duration,
+}
+
+/// Receipt-counter classification for one per-entity search. #1097 r1 codex
+/// review ③-A: `searches_executed` must count searches that ACTUALLY
+/// produced a result set, not mere attempts — a named-project resolution
+/// failure (`server_methods/db.rs:280`) never reaches the store's `search`
+/// call, so it goes to [`SearchOutcome::Failed`] / `searches_failed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchOutcome {
+    /// The store search executed and returned a result set (possibly empty).
+    Executed,
+    /// Store resolution or the search itself returned `Err` — no result set
+    /// was produced.
+    Failed,
+}
+
+/// Receipt-counter classification for one edge write. #1097 r1 codex review
+/// ③-B: the edge insert commits under its OWN savepoint (`db/graph.rs:144`,
+/// `RELEASE`d at :158) before the post-insert supersede/reinforce update
+/// runs, so an insert that landed is a persisted edge regardless of the
+/// later update's outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EdgeWriteOutcome {
+    /// Edge insert landed AND the post-insert update (supersede/reinforce)
+    /// landed too.
+    InsertAndPostWriteOk,
+    /// Edge insert landed, post-insert update FAILED. The edge IS persisted
+    /// (its savepoint released), so `edges_written` must still count it —
+    /// but `post_write_failures` also increments so the partial write is
+    /// visible instead of erased.
+    InsertOkPostWriteFailed,
+    /// Edge insert itself failed (ontology rejection, DB error). Nothing
+    /// persisted. Neither `edges_written` nor `post_write_failures` moves.
+    InsertFailed,
+}
+
+impl AutoLinkReceipt {
+    /// Apply one per-entity search outcome to the receipt counters. This is
+    /// the SINGLE source of truth for the #1097 r1 codex review ③-A
+    /// "attempts vs executions" semantics — the spawn block routes every
+    /// search result through here so the counting cannot drift from the
+    /// tested contract.
+    pub(crate) fn apply_search_outcome(&mut self, outcome: SearchOutcome) {
+        match outcome {
+            SearchOutcome::Executed => self.searches_executed += 1,
+            SearchOutcome::Failed => self.searches_failed += 1,
+        }
+    }
+
+    /// Apply one edge-write outcome to the receipt counters. This is the
+    /// SINGLE source of truth for the #1097 r1 codex review ③-B
+    /// "insert-landed vs full-success" semantics: `edges_attempted` always
+    /// increments (the loop reached the write), `edges_written` increments
+    /// whenever the INSERT landed (even if the post-insert update failed —
+    /// the edge is persisted either way), and `post_write_failures`
+    /// increments only on the partial-write case.
+    pub(crate) fn apply_edge_outcome(&mut self, outcome: EdgeWriteOutcome) {
+        self.edges_attempted += 1;
+        match outcome {
+            EdgeWriteOutcome::InsertAndPostWriteOk => self.edges_written += 1,
+            EdgeWriteOutcome::InsertOkPostWriteFailed => {
+                self.edges_written += 1;
+                self.post_write_failures += 1;
+            }
+            EdgeWriteOutcome::InsertFailed => {}
+        }
+    }
 }
 
 pub(crate) fn path_root(path: &str) -> &str {
@@ -181,19 +303,38 @@ pub(crate) fn spawn_auto_linking(
     let auto_link_entity_list: Vec<String> = auto_link_entities.iter().cloned().collect();
 
     tokio::spawn(async move {
-        // #1097 S1 phase-attribution counters (pure observation — no
+        // #1097 S1 phase-attribution receipt (pure observation — no
         // behavioral change to the four skip points or the edge write).
-        let mut searches_executed = 0_usize;
-        let mut candidates_examined = 0_usize;
-        let mut edges_attempted = 0_usize;
-        let mut edges_written = 0_usize;
-        let mut skipped_self_id = 0_usize;
-        let mut skipped_training_seed = 0_usize;
-        let mut skipped_no_shared_entities = 0_usize;
-        let mut skipped_no_supersede_or_reinforce = 0_usize;
-        let mut read_elapsed = Duration::ZERO;
-        let mut write_elapsed = Duration::ZERO;
+        // The receipt is accumulated in place; the outcome→counter mapping
+        // for searches and edge writes is routed THROUGH
+        // `AutoLinkReceipt::apply_search_outcome` /
+        // `apply_edge_outcome` so the #1097 r1 codex review ③ semantics
+        // (attempts-vs-executions, insert-landed-vs-full-success) are the
+        // TESTED contract, not ad-hoc inline arithmetic — reverting either
+        // method turns its discrimination test red and this call site
+        // follows.
+        //
+        // #1097 r1 codex review ①: `entry_id` is filled in at the end via
+        // `redacted_entry_id` so the raw (possibly caller-hostile) id is
+        // never stored on the receipt before redaction.
         let task_start = Instant::now();
+        let mut receipt = AutoLinkReceipt {
+            entry_id: String::new(),
+            entity_count: auto_link_entity_list.len(),
+            searches_executed: 0,
+            searches_failed: 0,
+            candidates_examined: 0,
+            edges_attempted: 0,
+            edges_written: 0,
+            post_write_failures: 0,
+            skipped_self_id: 0,
+            skipped_training_seed: 0,
+            skipped_no_shared_entities: 0,
+            skipped_no_supersede_or_reinforce: 0,
+            read_elapsed: Duration::ZERO,
+            write_elapsed: Duration::ZERO,
+            total_elapsed: Duration::ZERO,
+        };
 
         for entity in &auto_link_entity_list {
             let query = entity.clone();
@@ -218,18 +359,27 @@ pub(crate) fn spawn_auto_linking(
             } else {
                 auto_link_server.with_store_for_scope_read(target_db, search_action)
             };
-            read_elapsed += read_timer.elapsed();
-            searches_executed += 1;
+            receipt.read_elapsed += read_timer.elapsed();
+            // #1097 r1 codex review ③-A: count ONLY searches that produced
+            // a result set. A named-project resolution failure
+            // (server_methods/db.rs:280) returns Err WITHOUT ever invoking
+            // the store's `search` call, so it is a FAILED attempt, not an
+            // executed one — previously it inflated `searches_executed`.
+            let search_outcome = match &search_res {
+                Ok(_) => SearchOutcome::Executed,
+                Err(_) => SearchOutcome::Failed,
+            };
+            receipt.apply_search_outcome(search_outcome);
 
             if let Ok(results) = search_res {
                 for result in results {
-                    candidates_examined += 1;
+                    receipt.candidates_examined += 1;
                     if result.entry.id == auto_link_id {
-                        skipped_self_id += 1;
+                        receipt.skipped_self_id += 1;
                         continue;
                     }
                     if is_training_seed(&result.entry) {
-                        skipped_training_seed += 1;
+                        receipt.skipped_training_seed += 1;
                         continue;
                     }
                     // Unique shared entities only — duplicate entity labels must not
@@ -237,7 +387,7 @@ pub(crate) fn spawn_auto_linking(
                     let shared =
                         unique_shared_entities(&auto_link_entity_list, &result.entry.entities);
                     if shared.is_empty() {
-                        skipped_no_shared_entities += 1;
+                        receipt.skipped_no_shared_entities += 1;
                         continue;
                     }
 
@@ -266,7 +416,7 @@ pub(crate) fn spawn_auto_linking(
                         // and isn't worth a persisted fog edge — and the memcore
                         // edge-write choke point (relation_ontology) would reject
                         // `related_to` on new writes anyway (item 1).
-                        skipped_no_supersede_or_reinforce += 1;
+                        receipt.skipped_no_supersede_or_reinforce += 1;
                         continue;
                     }
                     let relation = if supersedes {
@@ -295,37 +445,58 @@ pub(crate) fn spawn_auto_linking(
                         // Edges are only closed/expired when supersession is explicitly reversed.
                         valid_to: None,
                     };
-                    let save_edge_action = |store: &mut MemoryStore| {
-                        store.add_edge(&edge).map_err(|e| format!("{}", e))?;
-                        if supersedes {
-                            store
-                                .mark_superseded_closing_validity(
+                    // #1097 r1 codex review ③-B: classify the write outcome
+                    // INSIDE the closure so the receipt can distinguish
+                    // "insert landed" (edge persisted under its own
+                    // savepoint at db/graph.rs:144, RELEASEd at :158) from
+                    // "full success". The closure returns Ok(classification);
+                    // an outer Err means store resolution failed and the
+                    // closure never ran (insert never attempted) — folded
+                    // to `InsertFailed` below since both leave nothing
+                    // persisted.
+                    let save_edge_action =
+                        |store: &mut MemoryStore| -> Result<EdgeWriteOutcome, String> {
+                            if store.add_edge(&edge).is_err() {
+                                return Ok(EdgeWriteOutcome::InsertFailed);
+                            }
+                            let post_ok = if supersedes {
+                                store
+                                    .mark_superseded_closing_validity(
+                                        &result.entry.id,
+                                        &auto_link_id,
+                                        &now,
+                                    )
+                                    .is_ok()
+                            } else if reinforces {
+                                apply_confidence_reinforcement(
+                                    store,
                                     &result.entry.id,
-                                    &auto_link_id,
+                                    confidence_increment(weight),
                                     &now,
                                 )
-                                .map_err(|e| format!("{e}"))?;
-                        } else if reinforces {
-                            apply_confidence_reinforcement(
-                                store,
-                                &result.entry.id,
-                                confidence_increment(weight),
-                                &now,
-                            )?;
-                        }
-                        Ok(())
-                    };
-                    edges_attempted += 1;
+                                .is_ok()
+                            } else {
+                                true
+                            };
+                            Ok(if post_ok {
+                                EdgeWriteOutcome::InsertAndPostWriteOk
+                            } else {
+                                EdgeWriteOutcome::InsertOkPostWriteFailed
+                            })
+                        };
                     let write_timer = Instant::now();
                     let write_res = if let Some(ref p) = named_project {
                         auto_link_server.with_named_project_store(p, save_edge_action)
                     } else {
                         auto_link_server.with_store_for_scope(target_db, save_edge_action)
                     };
-                    write_elapsed += write_timer.elapsed();
-                    if write_res.is_ok() {
-                        edges_written += 1;
-                    }
+                    receipt.write_elapsed += write_timer.elapsed();
+                    // Outer Err = store resolution failed (closure never ran,
+                    // nothing persisted); fold to `InsertFailed` so the
+                    // attempt is counted but neither `edges_written` nor
+                    // `post_write_failures` moves.
+                    let edge_outcome = write_res.unwrap_or(EdgeWriteOutcome::InsertFailed);
+                    receipt.apply_edge_outcome(edge_outcome);
                 }
             }
         }
@@ -335,31 +506,26 @@ pub(crate) fn spawn_auto_linking(
         // this point, so this closure is the only place the finished counts
         // exist. Fields are whitelisted per #1097 D5: no entity names
         // (entities ARE the search queries here), no memory content, no DB
-        // path. The `auto_link_id` is the save-generated UUID already in the
-        // save response, so a log reader pairs receipt↔save without minting
-        // a new trace id (none exists codebase-wide, per D2).
-        let receipt = AutoLinkReceipt {
-            entry_id: auto_link_id.clone(),
-            entity_count: auto_link_entity_list.len(),
-            searches_executed,
-            candidates_examined,
-            edges_attempted,
-            edges_written,
-            skipped_self_id,
-            skipped_training_seed,
-            skipped_no_shared_entities,
-            skipped_no_supersede_or_reinforce,
-            read_elapsed,
-            write_elapsed,
-            total_elapsed: task_start.elapsed(),
-        };
+        // path.
+        //
+        // #1097 r1 codex review ①: `entry_id` is the redacted form of
+        // `auto_link_id` — the raw id is echoed ONLY when it parses as a
+        // legal UUID; otherwise the fixed [`REDACTED_NON_UUID_ID`] marker
+        // is used. A caller can push arbitrary text into `params.id`
+        // (handler.rs:46-49, tachi-params/src/memory.rs:104,
+        // save_memory/validation.rs:13 only checks presence), so the raw
+        // string can never reach telemetry.
+        receipt.entry_id = redacted_entry_id(&auto_link_id);
+        receipt.total_elapsed = task_start.elapsed();
         tracing::info!(
             entry_id = %receipt.entry_id,
             entity_count = receipt.entity_count,
             searches_executed = receipt.searches_executed,
+            searches_failed = receipt.searches_failed,
             candidates_examined = receipt.candidates_examined,
             edges_attempted = receipt.edges_attempted,
             edges_written = receipt.edges_written,
+            post_write_failures = receipt.post_write_failures,
             skipped_self_id = receipt.skipped_self_id,
             skipped_training_seed = receipt.skipped_training_seed,
             skipped_no_shared_entities = receipt.skipped_no_shared_entities,
@@ -541,5 +707,192 @@ mod tests {
         // Neither signal fires -> no edge at all (query-time recoverable via
         // shared-entity search instead of a persisted fog edge).
         assert_eq!(auto_link_emitted_relation(false, false), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // #1097 r1 codex review ① — entry_id redaction. `params.id` is
+    // caller-controlled and unconstrained (handler.rs:46-49 only generates a
+    // UUID when MISSING; wire field has no content constraint; validation
+    // only checks presence). A caller can push query text / memory content /
+    // entity names / credentials into `id`, and the un-redacted value used
+    // to flow straight into the receipt + tracing line. These tests lock the
+    // choke point (`redacted_entry_id`): the raw id reaches the receipt ONLY
+    // when it parses as a legal UUID; otherwise the fixed marker.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn redacted_entry_id_passes_a_legal_uuid_verbatim() {
+        let legal = "550e8400-e29b-41d4-a716-446655440000";
+        assert_eq!(redacted_entry_id(legal), legal);
+        // Also accept uppercase hex — `uuid::Uuid::parse_str` is case-insensitive.
+        let legal_upper = "550E8400-E29B-41D4-A716-446655440000";
+        assert_eq!(redacted_entry_id(legal_upper), legal_upper);
+    }
+
+    #[test]
+    fn redacted_entry_id_replaces_non_uuid_input_with_the_marker() {
+        // Not a UUID at all — the redaction must kick in.
+        assert_eq!(redacted_entry_id("not-a-uuid"), REDACTED_NON_UUID_ID);
+        // Almost-UUID but malformed (wrong group length) — must still redact.
+        assert_eq!(
+            redacted_entry_id("550e8400-e29b-41d4-a716"),
+            REDACTED_NON_UUID_ID
+        );
+        // Empty string is not a UUID.
+        assert_eq!(redacted_entry_id(""), REDACTED_NON_UUID_ID);
+    }
+
+    #[test]
+    fn redacted_entry_id_never_echoes_caller_hostile_text() {
+        // #1097 r1 codex review ①'s actual threat model: a caller pushing
+        // query text / SQL / credentials into `params.id`. The redacted
+        // receipt must NOT contain the raw string anywhere — assert neither
+        // the marker equality NOR a substring match on the hostile text.
+        let hostile = "select * from memories where secret='pwn'";
+        let redacted = redacted_entry_id(hostile);
+        assert_eq!(redacted, REDACTED_NON_UUID_ID);
+        assert!(
+            !redacted.contains(hostile),
+            "redacted id must never echo the raw hostile input"
+        );
+        assert!(
+            !redacted.contains("secret"),
+            "redacted id must not leak any fragment of the hostile input"
+        );
+
+        // Entity-name-shaped and memory-content-shaped ids are the same risk
+        // (entities ARE the search queries here, per the module D5 note) —
+        // redaction is content-blind, so all non-UUID shapes collapse to
+        // the marker.
+        let entity_like = "Sigil";
+        assert_eq!(redacted_entry_id(entity_like), REDACTED_NON_UUID_ID);
+        let content_like = "the user prefers dark mode";
+        let redacted2 = redacted_entry_id(content_like);
+        assert_eq!(redacted2, REDACTED_NON_UUID_ID);
+        assert!(
+            !redacted2.contains("dark mode"),
+            "memory-content-shaped id must be fully redacted"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #1097 r1 codex review ③ — honest auto-link counters. The
+    // `apply_search_outcome` / `apply_edge_outcome` methods are the single
+    // source of truth the spawn block routes through; these tests revert one
+    // outcome classification at a time and assert the counters move per the
+    // reviewed contract.
+    // -----------------------------------------------------------------------
+
+    fn zeroed_receipt() -> AutoLinkReceipt {
+        AutoLinkReceipt {
+            entry_id: REDACTED_NON_UUID_ID.to_string(),
+            entity_count: 0,
+            searches_executed: 0,
+            searches_failed: 0,
+            candidates_examined: 0,
+            edges_attempted: 0,
+            edges_written: 0,
+            post_write_failures: 0,
+            skipped_self_id: 0,
+            skipped_training_seed: 0,
+            skipped_no_shared_entities: 0,
+            skipped_no_supersede_or_reinforce: 0,
+            read_elapsed: Duration::ZERO,
+            write_elapsed: Duration::ZERO,
+            total_elapsed: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn apply_search_outcome_executed_increments_only_searches_executed() {
+        let mut r = zeroed_receipt();
+        r.apply_search_outcome(SearchOutcome::Executed);
+        assert_eq!(r.searches_executed, 1);
+        assert_eq!(
+            r.searches_failed, 0,
+            "a successful search must not tick the failure counter"
+        );
+    }
+
+    #[test]
+    fn apply_search_outcome_failed_increments_only_searches_failed() {
+        // #1097 r1 codex review ③-A: a named-project resolution failure
+        // (server_methods/db.rs:280) used to tick `searches_executed`
+        // before the result was even checked. `SearchOutcome::Failed` now
+        // routes it to `searches_failed` instead — reverting
+        // `apply_search_outcome` to always-increment-`searches_executed`
+        // turns this red.
+        let mut r = zeroed_receipt();
+        r.apply_search_outcome(SearchOutcome::Failed);
+        assert_eq!(r.searches_failed, 1);
+        assert_eq!(
+            r.searches_executed, 0,
+            "a failed search attempt must NOT count as executed"
+        );
+    }
+
+    #[test]
+    fn apply_edge_outcome_full_success_counts_one_written_no_failures() {
+        let mut r = zeroed_receipt();
+        r.apply_edge_outcome(EdgeWriteOutcome::InsertAndPostWriteOk);
+        assert_eq!(r.edges_attempted, 1);
+        assert_eq!(r.edges_written, 1);
+        assert_eq!(r.post_write_failures, 0);
+    }
+
+    #[test]
+    fn apply_edge_outcome_insert_landed_but_post_write_failed_still_counts_written() {
+        // #1097 r1 codex review ③-B: the edge insert commits under its OWN
+        // savepoint (db/graph.rs:144 RELEASEd at :158) BEFORE the
+        // supersede/reinforce update runs. When the update fails, the edge
+        // is ALREADY persisted — so `edges_written` must still count it,
+        // AND `post_write_failures` must tick so the partial write is
+        // visible. Reverting `apply_edge_outcome(InsertOkPostWriteFailed)`
+        // to NOT tick `edges_written` (the round-1 bug) turns this red.
+        let mut r = zeroed_receipt();
+        r.apply_edge_outcome(EdgeWriteOutcome::InsertOkPostWriteFailed);
+        assert_eq!(
+            r.edges_attempted, 1,
+            "the write was attempted (closure ran)"
+        );
+        assert_eq!(
+            r.edges_written, 1,
+            "insert landed → edge persisted → must count as written"
+        );
+        assert_eq!(
+            r.post_write_failures, 1,
+            "the post-insert update failed → must be counted separately"
+        );
+    }
+
+    #[test]
+    fn apply_edge_outcome_insert_failed_counts_attempt_only() {
+        let mut r = zeroed_receipt();
+        r.apply_edge_outcome(EdgeWriteOutcome::InsertFailed);
+        assert_eq!(r.edges_attempted, 1);
+        assert_eq!(
+            r.edges_written, 0,
+            "insert itself failed → nothing persisted → not written"
+        );
+        assert_eq!(
+            r.post_write_failures, 0,
+            "no partial write — insert never landed, so no post-write failure either"
+        );
+    }
+
+    #[test]
+    fn apply_edge_outcome_mix_sums_consistently() {
+        // A small fold covering every outcome once: one full success, one
+        // partial write, one insert failure. `edges_attempted` must equal
+        // the number of outcomes; `edges_written` must equal full-success
+        // PLUS partial-write (both persisted the edge); `post_write_failures`
+        // must equal only the partial-write outcome.
+        let mut r = zeroed_receipt();
+        r.apply_edge_outcome(EdgeWriteOutcome::InsertAndPostWriteOk);
+        r.apply_edge_outcome(EdgeWriteOutcome::InsertOkPostWriteFailed);
+        r.apply_edge_outcome(EdgeWriteOutcome::InsertFailed);
+        assert_eq!(r.edges_attempted, 3);
+        assert_eq!(r.edges_written, 2);
+        assert_eq!(r.post_write_failures, 1);
     }
 }

@@ -244,13 +244,26 @@ pub struct FetchPhaseReceipt {
 /// scoring math; MMR itself is NOT separately timed because splitting it out
 /// would mean restructuring `rank_candidate_entries` — a quality change, out
 /// of scope for an instrumentation leaf.
+///
+/// #1097 r1 codex review ② (honest "phase executed"): the rank phase begins
+/// with `get_superseded_ids` (ranking.rs:55) and only THEN filters the
+/// candidate map down (ranking.rs:60-84). When that filter zeros out, the
+/// `rank` receipt stays `Some(...)` carrying `get_superseded_ids`' timing +
+/// count — the DB I/O demonstrably ran. `get_access_times` runs AFTER the
+/// filter (ranking.rs:96), so when the filter zeros out it never executes;
+/// its field is `None` in that case (honest "did not run"), not a zero.
 #[derive(Debug, Clone)]
 pub struct RankPhaseReceipt {
     pub total_elapsed: Duration,
-    /// `get_superseded_ids` DB I/O (ranking.rs:47).
+    /// `get_superseded_ids` DB I/O (ranking.rs:55). Always populated when
+    /// the rank phase produced a receipt — it runs unconditionally at the
+    /// top of `rank_candidate_entries`, before the candidate filter.
     pub get_superseded_ids: ChannelPhaseReceipt,
-    /// `get_access_times` DB I/O (ranking.rs:82).
-    pub get_access_times: ChannelPhaseReceipt,
+    /// `get_access_times` DB I/O (ranking.rs:96). `None` when the rank
+    /// phase executed but the candidate filter zeroed out before this
+    /// second DB I/O was reached (ranking.rs:86-90 early return); `Some`
+    /// when it actually ran.
+    pub get_access_times: Option<ChannelPhaseReceipt>,
     /// `opts.mmr_threshold.is_some()`. The MMR diversity post-filter ran iff
     /// this is `true`; otherwise the ranker returned its plain score-sorted
     /// order. The on/off state — not a separate timer — is the discrimination
@@ -300,8 +313,13 @@ pub struct SearchPhaseReceipt {
     pub candidates: Option<CandidatePhaseReceipt>,
     /// `None` only on the empty-candidate early return (search.rs:160-162).
     pub fetch: Option<FetchPhaseReceipt>,
-    /// `None` when ranking never produced a result set (empty candidate set
-    /// or every candidate filtered out before scoring, ranking.rs:77-79).
+    /// `None` only when the rank phase never executed (the empty-candidate
+    /// early return in `hybrid_search_with_receipt` skips fetch/rank/graph
+    /// entirely). When ranking DID run but its candidate filter zeroed out,
+    /// this is `Some(...)` carrying the `get_superseded_ids` DB I/O timing
+    /// — per #1097 r1 codex review ②, an executed phase must stay visible
+    /// even with a zero result; `get_access_times` is `None` inside that
+    /// receipt because it runs AFTER the filter.
     pub rank: Option<RankPhaseReceipt>,
     /// Always `Some` when `sampled` (function is always invoked; inner
     /// `enabled` flag carries the disabled-vs-empty distinction).
@@ -341,11 +359,19 @@ impl SearchPhaseReceipt {
 ///  4. Hybrid score merge (weighted sum) with ACT-R decay
 ///  5. Sort, take top_k, record access
 ///
-/// This is the production entry point. It is **zero-overhead** with respect to
-/// `SearchOptions::collect_phase_receipt`: the phase receipt is collected by
-/// `hybrid_search_with_receipt` and discarded here, so a production caller
-/// that never sets `collect_phase_receipt` pays nothing. See
-/// `hybrid_search_with_receipt` for the receipt contract (#1097).
+/// This is the production entry point. With respect to
+/// `SearchOptions::collect_phase_receipt`, the `false` path constructs only
+/// a [`SearchPhaseReceipt::not_sampled()`] placeholder receipt — zero
+/// `Instant::now()` reads, zero DB I/O, zero `Vec` allocations inside the
+/// receipt body — and discards it via the `.map(|(results, _)| results)`
+/// tuple projection at the foot of [`hybrid_search_with_receipt`]. The
+/// source-level cost is NOT literally zero (the placeholder struct + the
+/// result tuple are still constructed), so the unqualified "zero-overhead"
+/// claim of the first round is withdrawn pending measurement: actually
+/// proving the runtime delta is negligible vs. a non-instrumented baseline
+/// is an S2 acceptance item (a `collect_phase_receipt:false` vs. baseline
+/// benchmark), not a source-level assertion. See `hybrid_search_with_receipt`
+/// for the receipt contract (#1097).
 pub fn hybrid_search(
     conn: &Connection,
     query: &str,

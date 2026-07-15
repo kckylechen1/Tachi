@@ -84,9 +84,28 @@ pub(super) fn rank_candidate_entries(
         .collect();
 
     if entries_ref.is_empty() {
-        // Honest "ranking never produced a result set" — the receipt stays
-        // `None` at the call site rather than reporting zero elapsed.
-        return Ok((vec![], None));
+        // #1097 r1 codex review ②: `get_superseded_ids` (ranking.rs:55)
+        // already executed and was timed before this filter ran — the rank
+        // phase DID run, it just produced zero survivors. Previously this
+        // returned `None`, erasing the already-executed DB I/O from the
+        // receipt and making "rank is slow" reports lie ("rank never ran").
+        // Now we return a `Some(...)` receipt carrying that DB I/O's timing
+        // + count so an executed phase is always visible, even with a zero
+        // result. `get_access_times` is `None` here, not a zero: it runs
+        // AFTER this filter (ranking.rs:96), so when the filter zeros out
+        // it never executed — honest "did not run" rather than "ran and
+        // matched zero".
+        let receipt = phase_start.map(|s| RankPhaseReceipt {
+            total_elapsed: s.elapsed(),
+            get_superseded_ids: ChannelPhaseReceipt {
+                elapsed: superseded_elapsed.unwrap_or_default(),
+                candidate_count: fetched_ids_count,
+            },
+            get_access_times: None,
+            mmr_enabled: opts.mmr_threshold.is_some(),
+            ranked_result_count: 0,
+        });
+        return Ok((vec![], receipt));
     }
 
     let candidate_ids_vec: Vec<String> = entries_ref.keys().cloned().collect();
@@ -185,10 +204,10 @@ pub(super) fn rank_candidate_entries(
             elapsed: superseded_elapsed.unwrap_or_default(),
             candidate_count: fetched_ids_count,
         },
-        get_access_times: ChannelPhaseReceipt {
+        get_access_times: Some(ChannelPhaseReceipt {
             elapsed: access_elapsed.unwrap_or_default(),
             candidate_count: access_candidate_count,
-        },
+        }),
         mmr_enabled,
         ranked_result_count,
     });

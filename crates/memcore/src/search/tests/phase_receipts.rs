@@ -160,27 +160,55 @@ fn receipt_records_vector_channel_as_none_when_available_but_no_query_vec() {
 }
 
 // ---------------------------------------------------------------------------
-// New (#1097 D7-③): vector channel executed. No prior fixture exercises
-// real KNN; this one only proves the receipt captures the channel running,
-// not that KNN matched anything (would need a populated `vector` column).
+// New (#1097 D7-③): vector channel executed. #1097 r1 codex review ④-A:
+// the first round ended with `let _ = vec_receipt.candidate_count;`, which
+// asserted nothing — a channel that silently returned a fake zero-count
+// receipt would still pass. This version seeds a real stored embedding so
+// KNN actually matches, then asserts `candidate_count >= 1`: the test now
+// goes red if anyone reverts the vec-receipt construction to report a
+// placeholder/zero count, or wires the receipt to the wrong channel.
 // ---------------------------------------------------------------------------
+
+/// Seed an entry WITH a stored embedding vector. The shared `insert` /
+/// `insert_entry` helpers pass `vec_available=false` to `upsert`, so the
+/// vector never reaches `memories_vec` — KNN then legitimately returns
+/// zero matches and a real `candidate_count >= 1` assertion requires this
+/// helper. (#1097 r1 codex review ④-A.)
+fn insert_with_vector(
+    conn: &mut Connection,
+    id: &str,
+    text: &str,
+    keywords: &[&str],
+    vector: Vec<f32>,
+) {
+    let mut entry = memory_entry(id, text, keywords);
+    entry.vector = Some(vector);
+    upsert(conn, &entry, true).unwrap();
+}
 
 #[test]
 fn receipt_records_vector_channel_as_some_when_query_vec_supplied() {
     let mut conn = setup();
-    insert(&mut conn, "v", "voyage fallback lexical probe", &["voyage"]);
-
-    // vec_available=true + a dummy query_vec, so `search_vec` is invoked and
-    // timed. The vector MUST be 1024-wide: that is the `embedding float[1024]`
-    // column `try_load_sqlite_vec` creates (db/sqlite_vec.rs:37), and sqlite-vec
+    // Seed a row whose stored embedding is identical to the query vector
+    // (cosine similarity = 1.0 → guaranteed top-K match). The vector MUST
+    // be 1024-wide: that is the `embedding float[1024]` column
+    // `try_load_sqlite_vec` creates (db/sqlite_vec.rs:37), and sqlite-vec
     // *validates* the query vector's width — a mismatch is a hard
-    // `SqliteFailure`, not a quiet zero-row result, so a short dummy vector
-    // fails the whole search instead of exercising the channel. (The dimension
-    // is a magic number on both sides today; no shared constant exists.)
+    // `SqliteFailure`, not a quiet zero-row result. (The dimension is a
+    // magic number on both sides today; no shared constant exists.)
+    let dim = 1024;
+    insert_with_vector(
+        &mut conn,
+        "v",
+        "voyage fallback lexical probe",
+        &["voyage"],
+        vec![0.01; dim],
+    );
+
     let opts = SearchOptions {
         top_k: 3,
         vec_available: true,
-        query_vec: Some(vec![0.01; 1024]),
+        query_vec: Some(vec![0.01; dim]),
         record_access: false,
         collect_phase_receipt: true,
         ..Default::default()
@@ -192,10 +220,15 @@ fn receipt_records_vector_channel_as_some_when_query_vec_supplied() {
         .vec
         .as_ref()
         .expect("vec receipt must be Some when vec_available=true AND query_vec=Some");
-    // We do NOT assert candidate_count > 0 here — the seeded entry has no
-    // `vector` column, so KNN may legitimately return zero. The point is
-    // that the channel RAN and was timed, not that it matched.
-    let _ = vec_receipt.candidate_count;
+    // #1097 r1 codex review ④-A: a REAL assertion. The seeded embedding is
+    // identical to the query, so KNN must surface at least one candidate —
+    // reverting the vec-receipt to a placeholder zero count, or wiring it
+    // to the wrong channel, turns this red.
+    assert!(
+        vec_receipt.candidate_count >= 1,
+        "vec channel must report the KNN match (seeded identical embedding), got count={}",
+        vec_receipt.candidate_count
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -395,8 +428,12 @@ fn receipt_records_mmr_enabled_flag_under_both_states() {
         rank_off.get_superseded_ids.candidate_count > 0,
         "get_superseded_ids candidate count is a free read of the existing fetched-ids vec"
     );
+    let access_off = rank_off
+        .get_access_times
+        .as_ref()
+        .expect("get_access_times must be Some on a normal (non-filtered-to-zero) rank path");
     assert!(
-        rank_off.get_access_times.candidate_count > 0,
+        access_off.candidate_count > 0,
         "get_access_times candidate count is a free read of the existing filtered-ids vec"
     );
 }
@@ -474,4 +511,142 @@ fn receipt_populates_all_running_phases_on_a_normal_successful_search() {
         .as_ref()
         .expect("access_recording must be Some when record_access=true");
     assert!(access.updated_row_count > 0);
+}
+
+// ---------------------------------------------------------------------------
+// #1097 r1 codex review ② — rank phase must stay present when its candidate
+// filter zeros out (the DB I/O `get_superseded_ids` already executed).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn receipt_keeps_rank_phase_when_candidate_filter_zeros_out() {
+    let mut conn = setup();
+    insert(&mut conn, "a", "rust performance memory safety", &["rust"]);
+    insert(&mut conn, "b", "rust async runtime tokio", &["rust"]);
+
+    // The `domain` filter is applied ONLY inside `rank_candidate_entries`
+    // (ranking.rs:75-80), NOT during candidate collection — so the FTS /
+    // symbolic channels still surface both rows, fetch_by_ids loads them,
+    // and THEN ranking's domain filter zeros `entries_ref` out (every
+    // seeded row has `domain: None`, which never matches `Some("nope")`).
+    // This is exactly the "#1097 r1 ②" shape: rank ran real DB work
+    // (`get_superseded_ids`) but produced zero survivors.
+    let opts = SearchOptions {
+        top_k: 3,
+        domain: Some("nonexistent-domain".to_string()),
+        record_access: false,
+        collect_phase_receipt: true,
+        ..Default::default()
+    };
+    let (results, receipt) = hybrid_search_with_receipt(&conn, "rust performance", &opts).unwrap();
+
+    assert!(
+        results.is_empty(),
+        "domain filter excludes every seeded row"
+    );
+    assert!(receipt.sampled, "caller opted into sampling");
+    // fetch DID execute (candidates were non-empty) — honest "ran":
+    assert!(
+        receipt.fetch.is_some(),
+        "fetch must be present — candidate collection surfaced rows"
+    );
+    // #1097 r1 ②: the rank phase executed `get_superseded_ids` and was
+    // timed BEFORE the domain filter ran. The receipt must carry that
+    // work — `rank = None` here would erase an already-executed DB I/O
+    // and make "rank is slow" reports lie ("rank never ran").
+    let rank = receipt.rank.as_ref().expect(
+        "rank must be Some even when its candidate filter zeros out — get_superseded_ids ran",
+    );
+    assert!(
+        rank.get_superseded_ids.candidate_count > 0,
+        "get_superseded_ids ran on the fetched candidate set (count is a free read of the existing fetched-ids vec)"
+    );
+    assert_eq!(
+        rank.ranked_result_count, 0,
+        "domain filter zeroed out every candidate"
+    );
+    // #1097 r1 ② honest "did not run": `get_access_times` runs AFTER the
+    // filter (ranking.rs:96), so when the filter zeros out it never
+    // executes. The receipt marks it `None` — NOT a fake zero count —
+    // so a reader can tell "ran and matched zero" from "never reached".
+    assert!(
+        rank.get_access_times.is_none(),
+        "get_access_times must be None when the candidate filter zeroed out before it could run"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #1097 r1 codex review ④-B — no prior test asserted that sampled elapsed
+// fields are actually wired (a timer that was never started, or wired to
+// the wrong phase, would leave every elapsed at ZERO / out-of-order and
+// these tests would still be green). This test falsifies both: total must
+// be non-zero on a real search, and the whole is at least as large as each
+// measured sub-phase (guards "timer pointed at the wrong phase").
+// ---------------------------------------------------------------------------
+
+#[test]
+fn receipt_sampled_timers_actually_ran_and_subphases_fit_under_total() {
+    let mut conn = setup();
+    insert(&mut conn, "a", "rust performance memory safety", &["rust"]);
+    insert(&mut conn, "b", "rust async runtime tokio", &["rust"]);
+    insert(&mut conn, "c", "rust ownership borrow checker", &["rust"]);
+
+    let opts = SearchOptions {
+        top_k: 3,
+        record_access: true,
+        collect_phase_receipt: true,
+        ..Default::default()
+    };
+    let (results, receipt) = hybrid_search_with_receipt(&conn, "rust performance", &opts).unwrap();
+    assert!(!results.is_empty());
+
+    // Discriminator 1: a sampled receipt on a real search must have a
+    // non-zero total. If `total_start = sample.then(Instant::now)` were
+    // ever broken (sample flag ignored, timer never started, or
+    // `finish_receipt` returning the `not_sampled()` placeholder), this
+    // would be exactly `Duration::ZERO`. (On any real machine searching
+    // an in-memory SQLite DB, elapsed is microseconds — `Instant` has
+    // nanosecond resolution, so a true zero is the bug signature, not a
+    // fast-run artifact.)
+    assert!(
+        receipt.total_elapsed > std::time::Duration::ZERO,
+        "sampled total_elapsed must be non-zero on a real search (timer wired / started)"
+    );
+
+    // Discriminator 2: sub-phase containment. `candidates`, `fetch`, and
+    // `access_recording` all run inside the `total_start..finish_receipt`
+    // window, so each must be <= total. If a timer were pointed at the
+    // WRONG phase (e.g. `candidates.total_elapsed` accidentally measured
+    // the whole call), that ordering would invert and one of these would
+    // exceed `total_elapsed`. Loose inequality (not equality) on purpose
+    // — the receipt does not promise the sum, only the containment, so
+    // this stays a non-flaky structural check.
+    let candidates = receipt
+        .candidates
+        .as_ref()
+        .expect("candidates phase always runs when sampled");
+    assert!(
+        candidates.total_elapsed <= receipt.total_elapsed,
+        "candidates.total_elapsed must fit under total_elapsed (sub-phase wiring)"
+    );
+    assert!(
+        candidates.symbolic.elapsed <= candidates.total_elapsed,
+        "symbolic.elapsed must fit under candidates.total_elapsed (sub-sub-phase wiring)"
+    );
+    let fetch = receipt
+        .fetch
+        .as_ref()
+        .expect("fetch runs when candidates non-empty");
+    assert!(
+        fetch.elapsed <= receipt.total_elapsed,
+        "fetch.elapsed must fit under total_elapsed"
+    );
+    let access = receipt
+        .access_recording
+        .as_ref()
+        .expect("access_recording runs when record_access=true");
+    assert!(
+        access.elapsed <= receipt.total_elapsed,
+        "access_recording.elapsed must fit under total_elapsed"
+    );
 }
