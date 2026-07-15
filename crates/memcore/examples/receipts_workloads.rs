@@ -83,26 +83,80 @@ const CJK_QUERY: &str = "记忆系统召回检索通道融合排序";
 /// misses on W2 have real distractors to lose to — same intent as
 /// `golden_corpus`'s topical clusters.
 const TOPICS: &[(&str, &[&str])] = &[
-    ("runtime", &["scheduler", "executor", "task", "worker", "pool"]),
-    ("database", &["index", "query", "transaction", "schema", "cursor"]),
-    ("memory", &["recall", "decay", "activation", "retention", "weight"]),
-    ("network", &["socket", "packet", "latency", "protocol", "handshake"]),
-    ("security", &["cipher", "key", "vault", "secret", "credential"]),
-    ("interface", &["button", "layout", "render", "widget", "canvas"]),
-    ("policy", &["rule", "gate", "adjudication", "review", "doctrine"]),
-    ("cluster", &["node", "replica", "shard", "partition", "quorum"]),
-    ("storage", &["block", "segment", "wal", "checkpoint", "page"]),
-    ("pipeline", &["stage", "batch", "queue", "worker", "throughput"]),
-    ("daemon", &["process", "signal", "respawn", "watchdog", "reaper"]),
-    ("config", &["profile", "override", "default", "merge", "validate"]),
+    (
+        "runtime",
+        &["scheduler", "executor", "task", "worker", "pool"],
+    ),
+    (
+        "database",
+        &["index", "query", "transaction", "schema", "cursor"],
+    ),
+    (
+        "memory",
+        &["recall", "decay", "activation", "retention", "weight"],
+    ),
+    (
+        "network",
+        &["socket", "packet", "latency", "protocol", "handshake"],
+    ),
+    (
+        "security",
+        &["cipher", "key", "vault", "secret", "credential"],
+    ),
+    (
+        "interface",
+        &["button", "layout", "render", "widget", "canvas"],
+    ),
+    (
+        "policy",
+        &["rule", "gate", "adjudication", "review", "doctrine"],
+    ),
+    (
+        "cluster",
+        &["node", "replica", "shard", "partition", "quorum"],
+    ),
+    (
+        "storage",
+        &["block", "segment", "wal", "checkpoint", "page"],
+    ),
+    (
+        "pipeline",
+        &["stage", "batch", "queue", "worker", "throughput"],
+    ),
+    (
+        "daemon",
+        &["process", "signal", "respawn", "watchdog", "reaper"],
+    ),
+    (
+        "config",
+        &["profile", "override", "default", "merge", "validate"],
+    ),
     ("cache", &["eviction", "ttl", "hit", "miss", "invalidate"]),
-    ("queue", &["producer", "consumer", "backpressure", "offset", "ack"]),
-    ("vector", &["embedding", "cosine", "knn", "dimension", "normalize"]),
+    (
+        "queue",
+        &["producer", "consumer", "backpressure", "offset", "ack"],
+    ),
+    (
+        "vector",
+        &["embedding", "cosine", "knn", "dimension", "normalize"],
+    ),
     ("token", &["lexer", "tokenizer", "ngram", "stem", "segment"]),
-    ("schema", &["migration", "column", "constraint", "fkey", "index"]),
-    ("service", &["handler", "endpoint", "router", "middleware", "facade"]),
-    ("kernel", &["syscall", "trap", "scheduler", "interrupt", "context"]),
-    ("protocol", &["frame", "opcode", "session", "version", "negotiate"]),
+    (
+        "schema",
+        &["migration", "column", "constraint", "fkey", "index"],
+    ),
+    (
+        "service",
+        &["handler", "endpoint", "router", "middleware", "facade"],
+    ),
+    (
+        "kernel",
+        &["syscall", "trap", "scheduler", "interrupt", "context"],
+    ),
+    (
+        "protocol",
+        &["frame", "opcode", "session", "version", "negotiate"],
+    ),
 ];
 
 /// CJK sentence templates (themes reused from `golden_corpus`'s Chinese
@@ -296,7 +350,11 @@ fn build_receipt_digest(r: &SearchPhaseReceipt) -> String {
         .map(|rk| rk.total_elapsed.as_micros() as u64)
         .unwrap_or(0);
     let graph_present = r.graph_expansion.is_some();
-    let graph_enabled = r.graph_expansion.as_ref().map(|g| g.enabled).unwrap_or(false);
+    let graph_enabled = r
+        .graph_expansion
+        .as_ref()
+        .map(|g| g.enabled)
+        .unwrap_or(false);
     let graph_us = r
         .graph_expansion
         .as_ref()
@@ -334,8 +392,8 @@ fn demonstrate_store_wrapper(conn: &Connection, store: &MemoryStore) {
             record_access: false,
             ..Default::default()
         };
-        let (_, receipt) = hybrid_search_with_receipt(conn, "raretok0042", &opts)
-            .expect("bare wrapper receipt");
+        let (_, receipt) =
+            hybrid_search_with_receipt(conn, "raretok0042", &opts).expect("bare wrapper receipt");
         receipt
     };
     let wrapped = {
