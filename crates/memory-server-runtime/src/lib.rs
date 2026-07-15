@@ -197,8 +197,9 @@ impl ReadStorePool {
 
     /// Test-only: fire every observer registered via
     /// `observe_next_parked_checkout_for_test`, then clear them (each
-    /// observer is one-shot). Called immediately before `wait_while` in
-    /// `with_store_recording`.
+    /// observer is one-shot). Called immediately before `wait_while` in the
+    /// shared `ReadStorePool::checkout` loop (both the recording and plain
+    /// paths — the observer is about the wait, not the timer).
     #[cfg(test)]
     fn notify_parked_observers_for_test(&self) {
         let mut observers =
@@ -1463,11 +1464,12 @@ mod tests {
     /// `checkout_started` inside `ReadStorePool::checkout` (the shared
     /// checkout loop `with_store_recording` — and so
     /// `with_global_store_read_recording` — delegates to with `record: true`).
-    /// Stubbing that timer to `Duration::ZERO` (e.g.
-    /// `let checkout_started = record.then(Instant::now); ... let
-    /// pool_checkout_wait = checkout_started.map(|s| s.elapsed());` →
-    /// `Duration::ZERO`) turns the final assertion red even though B genuinely
-    /// waited — that is
+    /// Stubbing the mapped wait to zero — the type-preserving mutation
+    /// `checkout_started.map(|s| s.elapsed())` →
+    /// `checkout_started.map(|_| Duration::ZERO)` (a bare `Duration::ZERO`
+    /// would not compile: the value stays `Option<Duration>` through the
+    /// `.expect()` downstream) — turns the final assertion red even though B
+    /// genuinely waited — that is
     /// exactly the mutation the build seat re-checks. `>= ZERO` is
     /// deliberately NOT used (it is a tautology and would not catch the
     /// mutation); the parked-observer handshake is what makes the wait a proven
@@ -1545,8 +1547,9 @@ mod tests {
             .expect("waiter should report its receipt within the bound")
             .expect("waiter recording checkout should succeed");
         // The acceptance assertion: a measured wait that is strictly positive
-        // because B was PROVEN parked. Mutation target =
-        // `with_store_recording`'s `checkout_started`/`elapsed()` timer.
+        // because B was PROVEN parked. Mutation target = the
+        // `checkout_started`/`elapsed()` timer in the shared
+        // `ReadStorePool::checkout` loop (record: true path).
         assert!(
             waiter_wait > Duration::ZERO,
             "contended recording checkout must report a strictly-positive \
