@@ -92,11 +92,10 @@ struct StartupContext {
     command: Commands,
     defer_manifest_startup: bool,
     git_root: Option<PathBuf>,
-    /// #1119: resolved-once schema-migration authority for this process. Set
-    /// to `Allow` only when `--allow-schema-migration` is passed (the deploy
-    /// ritual); `Deny` otherwise. Threaded into `MemoryServer` construction so
-    /// every DB open in this process carries the same typed decision — never
-    /// a process env var.
+    /// #1119: resolved-once schema-migration authority. Set to `Allow` only
+    /// when `--allow-schema-migration` is passed; `Deny` otherwise. The
+    /// pre-serve `remember` fallback and the serve/daemon constructor receive
+    /// this typed decision explicitly — never through a process env var.
     schema_migration: memcore::MigrationAuthority,
 }
 
@@ -509,6 +508,7 @@ async fn run_startup_hygiene(
         global_db_path,
         project_db_path.as_ref(),
         ctx.git_root.as_ref(),
+        &ctx.schema_migration,
     )
     .await?
     {
@@ -822,6 +822,85 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn remember_cli(global_db: std::path::PathBuf, allow_schema_migration: bool) -> Cli {
+        Cli {
+            daemon: false,
+            port: 6919,
+            global_db: Some(global_db),
+            project_db: None,
+            no_project_db: true,
+            allow_schema_migration,
+            profile: None,
+            gc_enabled: None,
+            gc_initial_delay_secs: None,
+            gc_interval_secs: None,
+            command: Some(Commands::Remember {
+                text: "#1131 cli migration authority regression".to_string(),
+                tags: vec![],
+                scope: None,
+                project: None,
+                path: None,
+                importance: None,
+                category: None,
+                topic: None,
+                domain: None,
+                retention_policy: None,
+                summary: None,
+                force: true,
+            }),
+        }
+    }
+
+    #[test]
+    fn remember_cli_requires_flag_to_migrate_stamped_older_db_in_process() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("cli-remember-schema-");
+        let app_home = fixture.path().join("home");
+        let global_db = app_home.join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global DB parent"))
+            .expect("create global DB parent");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = crate::test_support::EnvRestore::remove("SIGIL_HOME");
+        let _app_home = crate::test_support::EnvRestore::remove("TACHI_APP_HOME");
+
+        let server = MemoryServer::new(global_db.clone(), None).expect("seed current DB");
+        drop(server);
+        let conn = memcore::db::open_raw(&global_db).expect("open seeded DB");
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {}",
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1
+        ))
+        .expect("stamp older schema version");
+        drop(conn);
+
+        let err = tokio_main(remember_cli(global_db.clone(), false))
+            .expect_err("remember without the flag must preserve OpenExisting + Deny");
+        assert!(
+            err.to_string().contains("refusing to migrate db schema"),
+            "unexpected deny error: {err}"
+        );
+
+        let conn = memcore::db::open_raw(&global_db).expect("reopen denied DB");
+        assert_eq!(
+            memcore::db::migrations::read_schema_version(&conn).expect("read denied version"),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
+            "deny must not mutate the old schema stamp"
+        );
+        drop(conn);
+
+        tokio_main(remember_cli(global_db.clone(), true))
+            .expect("remember with the flag must migrate the isolated DB");
+
+        let conn = memcore::db::open_raw(&global_db).expect("reopen migrated DB");
+        assert_eq!(
+            memcore::db::migrations::read_schema_version(&conn).expect("read migrated version"),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION,
+            "allow must re-stamp the DB at the current schema version"
+        );
+    }
 
     #[test]
     fn primary_log_path_lives_under_app_home() {

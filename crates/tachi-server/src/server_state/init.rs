@@ -98,10 +98,10 @@ impl MemoryServer {
 
     /// #1119: construct with an explicit schema-migration authority threaded
     /// down to every write-open point (global store, the initial project
-    /// store, and the [`DbRuntime`] that owns *dynamic* project opens). Only
-    /// the deploy ritual — `tachi serve --allow-schema-migration` — passes
-    /// [`MigrationAuthority::Allow`]; that is the sole process permitted to
-    /// forward-migrate a live DB a deployed daemon depends on.
+    /// store, and the [`DbRuntime`] that owns *dynamic* project opens). Callers
+    /// pass [`MigrationAuthority::Allow`] only from an explicit
+    /// `--allow-schema-migration` CLI decision; ordinary constructors remain
+    /// fail-closed.
     pub(crate) fn new_with_migration_authority(
         global_db_path: PathBuf,
         project_db_path: Option<PathBuf>,
