@@ -37,9 +37,9 @@ const REINFORCEMENT_DUPLICATE_SIMILARITY: f64 = 0.95;
 // (save_memory/validation.rs:13). A caller can therefore push query text,
 // memory content, entity names, or credentials INTO `id`, and the unredacted
 // value used to flow straight into this receipt and the `tracing::info!`
-// line. The `entry_id` field + log point now carry the raw id ONLY when it
-// parses as a legal UUID (`uuid::Uuid::parse_str`); otherwise they carry
-// the fixed [`REDACTED_NON_UUID_ID`] marker — never the raw string.
+// line. UUID shape is not provenance: a caller can supply UUID-looking text
+// too. The `entry_id` field and log point always carry the fixed
+// [`REDACTED_ENTRY_ID`] marker, never the raw string.
 //
 // The receipt is emitted from INSIDE the spawned task because the save
 // handler returns `"auto_link": "pending"` (handler.rs:261-262) without
@@ -49,27 +49,18 @@ const REINFORCEMENT_DUPLICATE_SIMILARITY: f64 = 0.95;
 // `spawn_auto_linking` is only the spawn + emit shell around it.
 // ---------------------------------------------------------------------------
 
-/// Fixed marker placed in [`AutoLinkReceipt::entry_id`] (and the log line)
-/// when the underlying `entry.id` does not parse as a legal UUID. See the
-/// #1097 r1 codex review ① note above — a caller can push arbitrary text
-/// into `params.id`, so the receipt must never echo the raw string.
-pub const REDACTED_NON_UUID_ID: &str = "<non-uuid-id>";
+/// Fixed marker placed in [`AutoLinkReceipt::entry_id`] and the log line.
+/// UUID syntax is caller-controllable, so no raw id is safe telemetry.
+pub const REDACTED_ENTRY_ID: &str = "<redacted-entry-id>";
 
-/// Return `id` verbatim when it parses as a legal UUID (`uuid::Uuid::parse_str`,
-/// same validator the rest of the codebase uses — e.g. candidates.rs:147),
-/// otherwise the fixed [`REDACTED_NON_UUID_ID`] marker. This is the single
-/// choke point for the #1097 r1 codex review ① redaction: every place the
-/// auto-link receipt or its log line touches `entry.id` routes through here,
-/// so the raw (possibly caller-hostile) string can never reach telemetry.
+/// Redact every entry id. Syntax validation cannot establish provenance: the
+/// save API accepts a caller-supplied UUID verbatim, so UUID-shaped ids are
+/// just as unsafe to emit as arbitrary text.
 ///
 /// Owned `String` return because the receipt field is `String`; this keeps
 /// the redaction unit test free of lifetime gymnastics.
-pub(crate) fn redacted_entry_id(id: &str) -> String {
-    if uuid::Uuid::parse_str(id).is_ok() {
-        id.to_string()
-    } else {
-        REDACTED_NON_UUID_ID.to_string()
-    }
+pub(crate) fn redacted_entry_id(_id: &str) -> String {
+    REDACTED_ENTRY_ID.to_string()
 }
 
 /// Per-call receipt for one `spawn_auto_linking` invocation, emitted via
@@ -81,9 +72,8 @@ pub struct AutoLinkReceipt {
     /// [`redacted_entry_id`] redaction. Carried so a log reader can pair
     /// this receipt with its save response without minting a new trace id
     /// (none exists codebase-wide, per #1097 D2). Per #1097 r1 codex
-    /// review ① this is the RAW id only when it parses as a legal UUID;
-    /// otherwise it is the fixed [`REDACTED_NON_UUID_ID`] marker — never
-    /// the raw (possibly caller-hostile) string.
+    /// review ① this is always the fixed [`REDACTED_ENTRY_ID`] marker — never
+    /// raw caller-controlled input.
     pub entry_id: String,
     /// `entry.entities.iter().cloned().collect::<HashSet>().len()` —
     /// deduplicated entity count driving the per-entity search loop.
@@ -204,9 +194,8 @@ impl AutoLinkReceipt {
 }
 
 /// Finalize an accumulated [`AutoLinkReceipt`]: apply the redacted
-/// `entry_id` (#1097 r1 codex review ① — the raw id reaches the receipt
-/// ONLY when it parses as a legal UUID, otherwise the fixed
-/// [`REDACTED_NON_UUID_ID`] marker) and the end-to-end `total_elapsed`.
+/// `entry_id` (#1097 r1 codex review ① — always the fixed
+/// [`REDACTED_ENTRY_ID`] marker) and the end-to-end `total_elapsed`.
 ///
 /// This is the pure tail of [`run_auto_linking`]: it needs no store, no
 /// runtime and no subscriber, so the two post-loop assignments
@@ -317,6 +306,121 @@ pub(crate) fn has_numeric_mismatch(new_entry: &MemoryEntry, old_entry: &MemoryEn
     let old_numbers = numbers_in_text(&old_entry.text);
     !new_numbers.is_empty() && !old_numbers.is_empty() && new_numbers != old_numbers
 }
+
+fn auto_link_receipt_sampling_enabled() -> bool {
+    auto_link_receipt_sampling_enabled_from(std::env::var("TACHI_AUTO_LINK_PHASE_RECEIPTS").ok())
+}
+
+fn auto_link_receipt_sampling_enabled_from(value: Option<String>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
+}
+
+/// Preserve the pre-receipt auto-link behavior for normal saves. Receipt
+/// sampling is explicitly opt-in because this background side effect must not
+/// add timers, counters, or telemetry to every `auto_link=true` save.
+fn run_auto_linking_without_receipt(
+    server: &MemoryServer,
+    entry: &MemoryEntry,
+    entity_list: &[String],
+    target_db: DbScope,
+    named_project: Option<&str>,
+) {
+    for entity in entity_list {
+        let query = entity.clone();
+        let search_action = |store: &mut MemoryStore| {
+            store
+                .search(
+                    &query,
+                    Some(memcore::SearchOptions {
+                        top_k: 5,
+                        record_access: false,
+                        ..Default::default()
+                    }),
+                )
+                .map_err(|e| e.to_string())
+        };
+        let search_res = if let Some(project) = named_project {
+            server.with_named_project_store_read(project, search_action)
+        } else {
+            server.with_store_for_scope_read(target_db, search_action)
+        };
+
+        let Ok(results) = search_res else {
+            continue;
+        };
+        for result in results {
+            if result.entry.id == entry.id || is_training_seed(&result.entry) {
+                continue;
+            }
+            let shared = unique_shared_entities(entity_list, &result.entry.entities);
+            if shared.is_empty() {
+                continue;
+            }
+
+            let now = chrono::Utc::now().to_rfc3339();
+            let vector_similarity = vector_similarity_between(entry, &result.entry);
+            let supersedes =
+                should_supersede(entry, &result.entry, shared.len(), result.score.symbolic);
+            let reinforces = vector_similarity.is_some_and(|similarity| {
+                should_reinforce(entry, &result.entry, shared.len(), similarity, supersedes)
+            });
+            if !supersedes && !reinforces {
+                continue;
+            }
+            let relation = if supersedes {
+                "supersedes"
+            } else {
+                "reinforces"
+            };
+            let weight = if supersedes {
+                0.9
+            } else {
+                vector_similarity.unwrap_or(0.0)
+            };
+            let edge = memcore::MemoryEdge {
+                source_id: entry.id.clone(),
+                target_id: result.entry.id.clone(),
+                relation: relation.to_string(),
+                weight,
+                metadata: json!({
+                    "auto_link": true,
+                    "shared_entities": shared,
+                    "similarity": vector_similarity,
+                    "confidence_increment": reinforces.then(|| confidence_increment(weight)),
+                }),
+                created_at: now.clone(),
+                valid_from: String::new(),
+                valid_to: None,
+            };
+            let save_edge_action = |store: &mut MemoryStore| {
+                store.add_edge(&edge).map_err(|e| e.to_string())?;
+                if supersedes {
+                    store
+                        .mark_superseded_closing_validity(&result.entry.id, &entry.id, &now)
+                        .map_err(|e| e.to_string())?;
+                } else if reinforces {
+                    apply_confidence_reinforcement(
+                        store,
+                        &result.entry.id,
+                        confidence_increment(weight),
+                        &now,
+                    )?;
+                }
+                Ok(())
+            };
+            let _ = if let Some(project) = named_project {
+                server.with_named_project_store(project, save_edge_action)
+            } else {
+                server.with_store_for_scope(target_db, save_edge_action)
+            };
+        }
+    }
+}
 /// Spawn the background auto-link task for a freshly-saved `entry`. The save
 /// handler returns `"auto_link": "pending"` without awaiting it
 /// (handler.rs:261-262), so nothing downstream can observe the finished
@@ -375,8 +479,19 @@ pub(crate) fn spawn_auto_linking(
     // past the #773 related_to fog floor (Gemini #905 review).
     let auto_link_entities: HashSet<String> = entry.entities.iter().cloned().collect();
     let auto_link_entity_list: Vec<String> = auto_link_entities.iter().cloned().collect();
+    let sample_receipt = auto_link_receipt_sampling_enabled();
 
     tokio::spawn(async move {
+        if !sample_receipt {
+            run_auto_linking_without_receipt(
+                &auto_link_server,
+                &auto_link_entry,
+                &auto_link_entity_list,
+                target_db,
+                named_project.as_deref(),
+            );
+            return;
+        }
         let receipt = run_auto_linking(
             &auto_link_server,
             &auto_link_entry,
@@ -673,6 +788,23 @@ mod tests {
     }
 
     #[test]
+    fn auto_link_receipt_sampling_is_default_off_and_requires_explicit_opt_in() {
+        assert!(!auto_link_receipt_sampling_enabled_from(None));
+        assert!(!auto_link_receipt_sampling_enabled_from(Some(
+            "false".to_string()
+        )));
+        assert!(!auto_link_receipt_sampling_enabled_from(Some(
+            "0".to_string()
+        )));
+        assert!(auto_link_receipt_sampling_enabled_from(Some(
+            "true".to_string()
+        )));
+        assert!(auto_link_receipt_sampling_enabled_from(Some(
+            " YES ".to_string()
+        )));
+    }
+
+    #[test]
     fn path_root_extracts_first_segment() {
         assert_eq!(path_root("/project/alpha"), "project");
         assert_eq!(path_root("/wiki/entry"), "wiki");
@@ -818,30 +950,29 @@ mod tests {
     // only checks presence). A caller can push query text / memory content /
     // entity names / credentials into `id`, and the un-redacted value used
     // to flow straight into the receipt + tracing line. These tests lock the
-    // choke point (`redacted_entry_id`): the raw id reaches the receipt ONLY
-    // when it parses as a legal UUID; otherwise the fixed marker.
+    // choke point (`redacted_entry_id`): no caller-provided id may reach a
+    // receipt, including UUID-shaped input.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn redacted_entry_id_passes_a_legal_uuid_verbatim() {
+    fn redacted_entry_id_redacts_legal_uuid_too() {
         let legal = "550e8400-e29b-41d4-a716-446655440000";
-        assert_eq!(redacted_entry_id(legal), legal);
-        // Also accept uppercase hex — `uuid::Uuid::parse_str` is case-insensitive.
+        assert_eq!(redacted_entry_id(legal), REDACTED_ENTRY_ID);
         let legal_upper = "550E8400-E29B-41D4-A716-446655440000";
-        assert_eq!(redacted_entry_id(legal_upper), legal_upper);
+        assert_eq!(redacted_entry_id(legal_upper), REDACTED_ENTRY_ID);
     }
 
     #[test]
     fn redacted_entry_id_replaces_non_uuid_input_with_the_marker() {
         // Not a UUID at all — the redaction must kick in.
-        assert_eq!(redacted_entry_id("not-a-uuid"), REDACTED_NON_UUID_ID);
+        assert_eq!(redacted_entry_id("not-a-uuid"), REDACTED_ENTRY_ID);
         // Almost-UUID but malformed (wrong group length) — must still redact.
         assert_eq!(
             redacted_entry_id("550e8400-e29b-41d4-a716"),
-            REDACTED_NON_UUID_ID
+            REDACTED_ENTRY_ID
         );
         // Empty string is not a UUID.
-        assert_eq!(redacted_entry_id(""), REDACTED_NON_UUID_ID);
+        assert_eq!(redacted_entry_id(""), REDACTED_ENTRY_ID);
     }
 
     #[test]
@@ -852,7 +983,7 @@ mod tests {
         // the marker equality NOR a substring match on the hostile text.
         let hostile = "select * from memories where secret='pwn'";
         let redacted = redacted_entry_id(hostile);
-        assert_eq!(redacted, REDACTED_NON_UUID_ID);
+        assert_eq!(redacted, REDACTED_ENTRY_ID);
         assert!(
             !redacted.contains(hostile),
             "redacted id must never echo the raw hostile input"
@@ -867,10 +998,10 @@ mod tests {
         // redaction is content-blind, so all non-UUID shapes collapse to
         // the marker.
         let entity_like = "Sigil";
-        assert_eq!(redacted_entry_id(entity_like), REDACTED_NON_UUID_ID);
+        assert_eq!(redacted_entry_id(entity_like), REDACTED_ENTRY_ID);
         let content_like = "the user prefers dark mode";
         let redacted2 = redacted_entry_id(content_like);
-        assert_eq!(redacted2, REDACTED_NON_UUID_ID);
+        assert_eq!(redacted2, REDACTED_ENTRY_ID);
         assert!(
             !redacted2.contains("dark mode"),
             "memory-content-shaped id must be fully redacted"
@@ -910,7 +1041,7 @@ mod tests {
         let finalized = finalize_auto_link_receipt(r, hostile, total);
 
         // Redaction: the marker, and the raw hostile text must not appear.
-        assert_eq!(finalized.entry_id, REDACTED_NON_UUID_ID);
+        assert_eq!(finalized.entry_id, REDACTED_ENTRY_ID);
         assert!(
             !finalized.entry_id.contains(hostile),
             "finalized entry_id must not echo the raw hostile input"
@@ -938,13 +1069,11 @@ mod tests {
     }
 
     #[test]
-    fn finalize_auto_link_receipt_passes_legal_uuid_verbatim() {
-        // A legal UUID is NOT redacted — the raw value is what a log reader
-        // pairs with the save response (no trace id exists codebase-wide).
+    fn finalize_auto_link_receipt_redacts_legal_uuid_too() {
         let legal = "550e8400-e29b-41d4-a716-446655440000";
         let finalized =
             finalize_auto_link_receipt(zeroed_receipt(), legal, Duration::from_micros(10));
-        assert_eq!(finalized.entry_id, legal);
+        assert_eq!(finalized.entry_id, REDACTED_ENTRY_ID);
         assert_eq!(finalized.total_elapsed, Duration::from_micros(10));
     }
 
@@ -955,7 +1084,7 @@ mod tests {
         // D5 note) — redaction is content-blind.
         let finalized =
             finalize_auto_link_receipt(zeroed_receipt(), "Sigil", Duration::from_micros(10));
-        assert_eq!(finalized.entry_id, REDACTED_NON_UUID_ID);
+        assert_eq!(finalized.entry_id, REDACTED_ENTRY_ID);
     }
 
     // -----------------------------------------------------------------------
@@ -968,7 +1097,7 @@ mod tests {
 
     fn zeroed_receipt() -> AutoLinkReceipt {
         AutoLinkReceipt {
-            entry_id: REDACTED_NON_UUID_ID.to_string(),
+            entry_id: REDACTED_ENTRY_ID.to_string(),
             entity_count: 0,
             searches_executed: 0,
             searches_failed: 0,
@@ -1214,9 +1343,9 @@ mod tests {
             receipt.write_elapsed
         );
 
-        // The redaction choke point is live on this path too: `fresh_id` is a
-        // legal UUID, so it passes through verbatim.
-        assert_eq!(receipt.entry_id, fresh_id);
+        // The redaction choke point is live on this path too: UUID syntax is
+        // caller-controllable, so it is still never emitted.
+        assert_eq!(receipt.entry_id, REDACTED_ENTRY_ID);
         assert_eq!(receipt.entity_count, 2);
     }
 }

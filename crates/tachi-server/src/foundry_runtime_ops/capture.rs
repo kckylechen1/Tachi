@@ -196,7 +196,6 @@ pub(super) fn capture_search_options(
     top_k: usize,
 ) -> SearchOptions {
     SearchOptions {
-        collect_phase_receipt: false,
         top_k: top_k.max(1),
         path_prefix,
         query_vec: Some(query_vec),

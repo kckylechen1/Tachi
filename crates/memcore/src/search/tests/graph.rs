@@ -113,7 +113,6 @@ fn receipt_covers_graph_enabled_and_disabled_branches() {
         top_k: 1,
         record_access: false,
         graph_expand_hops: 1,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (results_on, receipt_on) =
@@ -123,6 +122,10 @@ fn receipt_covers_graph_enabled_and_disabled_branches() {
         .as_ref()
         .expect("graph_expansion receipt must be Some when sampled");
     assert!(graph_on.enabled, "graph_expand_hops=1 → enabled=true");
+    assert!(
+        !graph_on.failed,
+        "a successful graph expansion is not failed"
+    );
     assert_eq!(
         graph_on.expanded_count, 1,
         "exactly the support neighbor should be expanded"
@@ -140,7 +143,6 @@ fn receipt_covers_graph_enabled_and_disabled_branches() {
         top_k: 1,
         record_access: false,
         graph_expand_hops: 0,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (results_off, receipt_off) =
@@ -150,6 +152,7 @@ fn receipt_covers_graph_enabled_and_disabled_branches() {
         .as_ref()
         .expect("graph_expansion receipt must still be Some (the function was called)");
     assert!(!graph_off.enabled, "graph_expand_hops=0 → enabled=false");
+    assert!(!graph_off.failed, "a disabled graph phase is not failed");
     assert_eq!(graph_off.expanded_count, 0);
     assert!(
         !results_off.iter().any(|r| r.entry.id == "support"),

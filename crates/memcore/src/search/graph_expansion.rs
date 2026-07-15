@@ -31,6 +31,7 @@ pub(super) fn append_graph_expansion(
     if opts.graph_expand_hops == 0 || results.is_empty() {
         let receipt = phase_start.map(|s| GraphPhaseReceipt {
             enabled: false,
+            failed: false,
             elapsed: s.elapsed(),
             expanded_count: 0,
         });
@@ -45,6 +46,7 @@ pub(super) fn append_graph_expansion(
     else {
         let receipt = phase_start.map(|s| GraphPhaseReceipt {
             enabled: true,
+            failed: true,
             elapsed: s.elapsed(),
             expanded_count: 0,
         });
@@ -125,6 +127,7 @@ pub(super) fn append_graph_expansion(
     results.extend(new_entries.into_iter().map(|(_, sr)| sr));
     let receipt = phase_start.map(|s| GraphPhaseReceipt {
         enabled: true,
+        failed: false,
         elapsed: s.elapsed(),
         expanded_count,
     });

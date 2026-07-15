@@ -35,7 +35,6 @@ pub(crate) async fn handle_find_similar_memory(
     let top_k = params.normalized_top_k();
     let candidates_per_channel = params.normalized_candidates_per_channel();
     let global_opts = SearchOptions {
-        collect_phase_receipt: false,
         candidates_per_channel,
         top_k,
         weights: common_weights.clone(),
@@ -67,7 +66,6 @@ pub(crate) async fn handle_find_similar_memory(
             .with_named_project_store_read(project_name, |store| Ok(store.vec_available))
             .unwrap_or(false);
         let project_opts = SearchOptions {
-            collect_phase_receipt: false,
             candidates_per_channel,
             top_k,
             weights: common_weights.clone(),
@@ -103,7 +101,6 @@ pub(crate) async fn handle_find_similar_memory(
 
     if params.project.is_none() && server.has_project_db() {
         let project_opts = SearchOptions {
-            collect_phase_receipt: false,
             candidates_per_channel,
             top_k,
             weights: common_weights,

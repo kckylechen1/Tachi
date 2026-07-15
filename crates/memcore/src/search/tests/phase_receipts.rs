@@ -19,11 +19,11 @@
 use super::*;
 
 // ---------------------------------------------------------------------------
-// Default-off / sampling switch (#1097 D4)
+// Explicit receipt API (#1097 D4)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn receipt_is_not_sampled_by_default_and_returns_the_placeholder() {
+fn receipt_api_samples_without_changing_public_search_options() {
     let mut conn = setup();
     insert(&mut conn, "x", "rust performance memory safety", &["rust"]);
 
@@ -34,22 +34,15 @@ fn receipt_is_not_sampled_by_default_and_returns_the_placeholder() {
     };
     let (_, receipt) = hybrid_search_with_receipt(&conn, "rust performance", &opts).unwrap();
 
-    // Default-off posture (#1097 D4): when the caller did not opt in, the
-    // receipt is a placeholder. Every phase is None, every layer tag is
-    // NotSampled, total_elapsed is zero. Mechanism on this path: no
-    // `Instant::now` reads, no DB work, no Vec allocations — but the
-    // placeholder struct and the result tuple ARE still constructed, so this
-    // is **not** a zero-overhead claim. The false path's real cost is an S2
-    // measurement acceptance item (#1097).
-    assert!(!receipt.sampled, "collect_phase_receipt defaults to false");
-    assert_eq!(receipt.total_elapsed, std::time::Duration::ZERO);
-    assert!(receipt.candidates.is_none());
-    assert!(receipt.fetch.is_none());
-    assert!(receipt.rank.is_none());
-    assert!(receipt.graph_expansion.is_none());
-    assert!(receipt.access_recording.is_none());
-    assert_eq!(receipt.pool_wait, LayerAvailability::NotSampled);
-    assert_eq!(receipt.sqlite_retry, LayerAvailability::NotSampled);
+    // Sampling is chosen by the separate receipt entry point, not a field
+    // added to public `SearchOptions`; ordinary `hybrid_search` remains the
+    // default-off production path.
+    assert!(receipt.sampled);
+    assert!(receipt.candidates.is_some());
+    assert_eq!(receipt.operation, SearchReceiptOperation::HybridSearch);
+    assert_eq!(receipt.database_scope, SearchReceiptDatabaseScope::Unknown);
+    assert_eq!(receipt.pool_wait, LayerAvailability::Unavailable);
+    assert_eq!(receipt.sqlite_retry, LayerAvailability::NotApplicable);
 }
 
 // ---------------------------------------------------------------------------
@@ -67,7 +60,6 @@ fn receipt_marks_fetch_rank_graph_access_absent_on_empty_candidates() {
     let opts = SearchOptions {
         top_k: 3,
         record_access: true,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (results, receipt) = hybrid_search_with_receipt(&conn, "zzz qqq xxx", &opts).unwrap();
@@ -122,7 +114,6 @@ fn receipt_records_vector_channel_as_none_when_unavailable() {
         top_k: 3,
         vec_available: false,
         record_access: false,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (_, receipt) = hybrid_search_with_receipt(&conn, "voyage fallback", &opts).unwrap();
@@ -149,7 +140,6 @@ fn receipt_records_vector_channel_as_none_when_available_but_no_query_vec() {
         vec_available: true,
         query_vec: None,
         record_access: false,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (_, receipt) = hybrid_search_with_receipt(&conn, "voyage fallback", &opts).unwrap();
@@ -213,7 +203,6 @@ fn receipt_records_vector_channel_as_some_when_query_vec_supplied() {
         vec_available: true,
         query_vec: Some(vec![0.01; dim]),
         record_access: false,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (_, receipt) = hybrid_search_with_receipt(&conn, "voyage fallback", &opts).unwrap();
@@ -285,7 +274,6 @@ fn receipt_records_fts_or_fallback_group_when_conjunctive_fts_zeros() {
         },
         record_access: false,
         mmr_threshold: None,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (_, receipt) = hybrid_search_with_receipt(&conn, "quartz beacon absent", &opts).unwrap();
@@ -362,7 +350,6 @@ fn receipt_records_no_fts_fallback_group_when_conjunctive_fts_hits() {
     let opts = SearchOptions {
         top_k: 3,
         record_access: false,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (_, receipt) = hybrid_search_with_receipt(&conn, "rust performance", &opts).unwrap();
@@ -422,7 +409,6 @@ fn receipt_populates_access_recording_only_when_record_access_true() {
         top_k: 1,
         candidates_per_channel: 0,
         record_access: true,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (_, receipt_on) = hybrid_search_with_receipt(&conn, "AccessProbe", &opts_on).unwrap();
@@ -442,7 +428,6 @@ fn receipt_populates_access_recording_only_when_record_access_true() {
         top_k: 1,
         candidates_per_channel: 0,
         record_access: false,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (_, receipt_off) = hybrid_search_with_receipt(&conn, "AccessProbe", &opts_off).unwrap();
@@ -469,7 +454,6 @@ fn receipt_records_mmr_enabled_flag_under_both_states() {
         top_k: 3,
         mmr_threshold: Some(0.85),
         record_access: false,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (_, receipt_on) = hybrid_search_with_receipt(&conn, "rust performance", &opts_on).unwrap();
@@ -487,7 +471,6 @@ fn receipt_records_mmr_enabled_flag_under_both_states() {
         top_k: 3,
         mmr_threshold: None,
         record_access: false,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (_, receipt_off) =
@@ -526,7 +509,6 @@ fn receipt_marks_pool_wait_unavailable_and_sqlite_retry_not_applicable() {
     let opts = SearchOptions {
         top_k: 3,
         record_access: false,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (_, receipt) = hybrid_search_with_receipt(&conn, "rust performance", &opts).unwrap();
@@ -559,7 +541,6 @@ fn receipt_populates_all_running_phases_on_a_normal_successful_search() {
     let opts = SearchOptions {
         top_k: 3,
         record_access: true,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (results, receipt) = hybrid_search_with_receipt(&conn, "rust performance", &opts).unwrap();
@@ -610,7 +591,6 @@ fn receipt_keeps_rank_phase_when_candidate_filter_zeros_out() {
         top_k: 3,
         domain: Some("nonexistent-domain".to_string()),
         record_access: false,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (results, receipt) = hybrid_search_with_receipt(&conn, "rust performance", &opts).unwrap();
@@ -710,7 +690,6 @@ fn receipt_sampled_timers_actually_ran_and_subphases_fit_under_total() {
     let opts = SearchOptions {
         top_k: 3,
         record_access: true,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (results, receipt) = hybrid_search_with_receipt(&conn, "rust performance", &opts).unwrap();
@@ -915,7 +894,6 @@ fn graph_timer_reports_live_elapsed_on_the_enabled_path() {
         top_k: 1,
         record_access: false,
         graph_expand_hops: 1,
-        collect_phase_receipt: true,
         ..Default::default()
     };
     let (results, receipt) = hybrid_search_with_receipt(&conn, "TrendLock", &opts).unwrap();
@@ -933,6 +911,7 @@ fn graph_timer_reports_live_elapsed_on_the_enabled_path() {
         .as_ref()
         .expect("graph_expansion phase ran");
     assert!(graph.enabled, "graph_expand_hops=1 → enabled=true");
+    assert!(!graph.failed, "a successful graph query is not failed");
     assert_eq!(
         graph.expanded_count, 1,
         "exactly the support neighbor should be expanded"
@@ -950,4 +929,34 @@ fn graph_timer_reports_live_elapsed_on_the_enabled_path() {
          (phase_start timer wired around a real graph_expand DB call), got {:?}",
         graph.elapsed
     );
+}
+
+#[test]
+fn receipt_marks_best_effort_graph_query_failure_distinct_from_zero_expansion() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "seed",
+        "TrendLock durable decision rule",
+        &["trendlock"],
+    );
+    conn.execute_batch("DROP TABLE memory_edges")
+        .expect("break only graph expansion");
+
+    let opts = SearchOptions {
+        top_k: 1,
+        record_access: false,
+        graph_expand_hops: 1,
+        ..Default::default()
+    };
+    let (_, receipt) = hybrid_search_with_receipt(&conn, "TrendLock", &opts).unwrap();
+    let graph = receipt
+        .graph_expansion
+        .expect("best-effort graph phase remains reported");
+    assert!(graph.enabled);
+    assert!(
+        graph.failed,
+        "a graph DB error must not be reported as a successful zero expansion"
+    );
+    assert_eq!(graph.expanded_count, 0);
 }

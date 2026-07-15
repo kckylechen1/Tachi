@@ -79,30 +79,6 @@ pub struct SearchOptions {
     /// products (HyperMemory trading half-lives, chat affect decay) supply an
     /// `Arc<dyn DecayPolicy>` without forking the kernel scorer.
     pub decay_policy: Option<Arc<dyn DecayPolicy>>,
-    /// tachi#1097 PERF-T3 S1: per-call opt-in for phase-attribution
-    /// instrumentation. When `false` (the default), `hybrid_search` reads
-    /// **no** `Instant::now()`, does **no** DB I/O for instrumentation, and
-    /// allocates **no** `Vec` for it — it constructs only a
-    /// [`SearchPhaseReceipt::not_sampled()`] placeholder and discards it via
-    /// the tuple projection at the foot of [`hybrid_search_with_receipt`].
-    /// This is the contract's default-off production posture.
-    ///
-    /// This is NOT a "zero-overhead" claim: the placeholder struct and the
-    /// result tuple are still constructed, so the source-level cost is not
-    /// literally zero. Proving the runtime delta is negligible vs. a
-    /// non-instrumented baseline is an S2 acceptance item (a
-    /// `collect_phase_receipt:false` vs. baseline benchmark), not a
-    /// source-level assertion — see the honesty note on [`hybrid_search`]
-    /// for the mechanism facts and the S2 deferral.
-    ///
-    /// When `true`, `hybrid_search_with_receipt` returns a populated
-    /// [`SearchPhaseReceipt`] breaking down candidate collection / fetch /
-    /// rank / graph expansion / access recording. This is a sampling switch
-    /// only — it never changes ranking, expansion, access-recording, or any
-    /// other quality mechanism. Production search call sites stay out of
-    /// scope for this leaf; measurement happens in fixtures (contract
-    /// `Allowed Scope`).
-    pub collect_phase_receipt: bool,
 }
 
 impl Default for SearchOptions {
@@ -125,7 +101,6 @@ impl Default for SearchOptions {
             precision_matchers: Vec::new(),
             recall_config: None,
             decay_policy: None,
-            collect_phase_receipt: false,
         }
     }
 }
@@ -290,6 +265,10 @@ pub struct RankPhaseReceipt {
 #[derive(Debug, Clone)]
 pub struct GraphPhaseReceipt {
     pub enabled: bool,
+    /// `true` when graph expansion was enabled but its best-effort query
+    /// failed. This keeps an existing non-fatal graph error distinct from a
+    /// successful expansion that found zero neighbors.
+    pub failed: bool,
     pub elapsed: Duration,
     pub expanded_count: usize,
 }
@@ -309,21 +288,35 @@ pub struct AccessRecordingPhaseReceipt {
     pub updated_row_count: usize,
 }
 
+/// Entry point that produced a receipt. The direct function cannot know the
+/// caller's DB label; [`MemoryStore::search_with_receipt`] upgrades this to
+/// `MemoryStoreSearch` and attaches that store's label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchReceiptOperation {
+    HybridSearch,
+    MemoryStoreSearch,
+}
+
+/// Database identity carried by a receipt. Never a filesystem path: labels
+/// are the existing manifest identities (`global`, `wiki`, project name) and
+/// `Unknown` remains explicit for a bare `rusqlite::Connection` call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchReceiptDatabaseScope {
+    Unknown,
+    Label(String),
+}
+
 /// Per-phase attribution for one `hybrid_search_with_receipt` call. See the
 /// module-level honesty rules above for what is and is not populated, and
 /// what is intentionally marked unavailable / not-applicable.
 #[derive(Debug, Clone)]
 pub struct SearchPhaseReceipt {
-    /// `true` iff the caller opted in via `SearchOptions::collect_phase_receipt`.
-    /// When `false`, every field below is `None` / `Duration::ZERO` and the
-    /// two layer tags are `LayerAvailability::NotSampled` — this is the
-    /// default-off production posture (#1097 D4): no `Instant::now()` reads,
-    /// no DB I/O, no instrumentation `Vec` allocations, just the
-    /// [`SearchPhaseReceipt::not_sampled()`] placeholder. This is not a
-    /// "zero-overhead" claim: the placeholder struct + result tuple are
-    /// still constructed, so the runtime delta vs. a non-instrumented
-    /// baseline is an S2 measurement item, not a source-level assertion.
+    /// Receipt APIs always return `true`. `hybrid_search` uses an internal
+    /// unsampled placeholder that is discarded before results leave the
+    /// function; it is not exposed as a public sampling switch.
     pub sampled: bool,
+    pub operation: SearchReceiptOperation,
+    pub database_scope: SearchReceiptDatabaseScope,
     pub total_elapsed: Duration,
     /// Always `Some` when `sampled` (candidate collection always runs).
     pub candidates: Option<CandidatePhaseReceipt>,
@@ -354,6 +347,8 @@ impl SearchPhaseReceipt {
     fn not_sampled() -> Self {
         Self {
             sampled: false,
+            operation: SearchReceiptOperation::HybridSearch,
+            database_scope: SearchReceiptDatabaseScope::Unknown,
             total_elapsed: Duration::ZERO,
             candidates: None,
             fetch: None,
@@ -375,25 +370,17 @@ impl SearchPhaseReceipt {
 ///  4. Hybrid score merge (weighted sum) with ACT-R decay
 ///  5. Sort, take top_k, record access
 ///
-/// This is the production entry point. With respect to
-/// `SearchOptions::collect_phase_receipt`, the `false` path constructs only
-/// a [`SearchPhaseReceipt::not_sampled()`] placeholder receipt — zero
-/// `Instant::now()` reads, zero DB I/O, zero `Vec` allocations inside the
-/// receipt body — and discards it via the `.map(|(results, _)| results)`
-/// tuple projection at the foot of [`hybrid_search_with_receipt`]. The
-/// source-level cost is NOT literally zero (the placeholder struct + the
-/// result tuple are still constructed), so the unqualified "zero-overhead"
-/// claim of the first round is withdrawn pending measurement: actually
-/// proving the runtime delta is negligible vs. a non-instrumented baseline
-/// is an S2 acceptance item (a `collect_phase_receipt:false` vs. baseline
-/// benchmark), not a source-level assertion. See `hybrid_search_with_receipt`
-/// for the receipt contract (#1097).
+/// This is the default-off production entry point: it does not time or return
+/// phase attribution. It shares result plumbing with the receipt API, so this
+/// is deliberately not described as a zero-allocation or zero-overhead path.
+/// Fixtures that explicitly need attribution call [`hybrid_search_with_receipt`]
+/// instead.
 pub fn hybrid_search(
     conn: &Connection,
     query: &str,
     opts: &SearchOptions,
 ) -> Result<Vec<SearchResult>, MemoryError> {
-    hybrid_search_with_receipt(conn, query, opts).map(|(results, _)| results)
+    hybrid_search_inner(conn, query, opts, false).map(|(results, _)| results)
 }
 
 /// Instrumented twin of [`hybrid_search`]: returns the ranked `SearchResult`s
@@ -401,25 +388,24 @@ pub fn hybrid_search(
 /// executed phases. Pure observation — no ranking, expansion, access, or
 /// quality logic is added or changed.
 ///
-/// When `opts.collect_phase_receipt == false` the receipt is the
-/// [`SearchPhaseReceipt::not_sampled()`] placeholder — no `Instant::now()`
-/// reads, no DB I/O, no instrumentation `Vec` allocations; every phase field
-/// is `None` — and it is discarded by the tuple projection at the foot of
-/// [`hybrid_search`]. This is the default-off production posture, NOT a
-/// "zero-overhead" claim: the placeholder struct and the result tuple are
-/// still constructed, so the source-level cost is not literally zero.
-/// Proving the runtime delta is negligible vs. a non-instrumented baseline
-/// is an S2 acceptance item (a `collect_phase_receipt:false` vs. baseline
-/// benchmark), not a source-level assertion. Set it to `true` to populate
-/// the per-phase breakdown. Production search call sites stay out of scope
-/// for #1097 S1; measurement happens in benchmark/eval fixtures (contract
-/// `Allowed Scope`).
+/// This is the explicit, always-sampled receipt API. It is kept separate from
+/// [`SearchOptions`] so ordinary callers do not acquire a source-breaking
+/// instrumentation flag. Production search call sites use [`hybrid_search`];
+/// measurement happens in benchmark/eval fixtures.
 pub fn hybrid_search_with_receipt(
     conn: &Connection,
     query: &str,
     opts: &SearchOptions,
 ) -> Result<(Vec<SearchResult>, SearchPhaseReceipt), MemoryError> {
-    let sample = opts.collect_phase_receipt;
+    hybrid_search_inner(conn, query, opts, true)
+}
+
+fn hybrid_search_inner(
+    conn: &Connection,
+    query: &str,
+    opts: &SearchOptions,
+    sample: bool,
+) -> Result<(Vec<SearchResult>, SearchPhaseReceipt), MemoryError> {
     let total_start = sample.then(Instant::now);
 
     let as_of_utc = opts
@@ -535,6 +521,8 @@ fn finish_receipt(
     }
     let mut receipt = SearchPhaseReceipt {
         sampled: true,
+        operation: SearchReceiptOperation::HybridSearch,
+        database_scope: SearchReceiptDatabaseScope::Unknown,
         total_elapsed: total_start.map(|s| s.elapsed()).unwrap_or(Duration::ZERO),
         candidates: None,
         fetch: None,
