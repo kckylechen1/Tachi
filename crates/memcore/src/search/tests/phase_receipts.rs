@@ -170,13 +170,17 @@ fn receipt_records_vector_channel_as_some_when_query_vec_supplied() {
     let mut conn = setup();
     insert(&mut conn, "v", "voyage fallback lexical probe", &["voyage"]);
 
-    // vec_available=true + a dummy query_vec. sqlite-vec may or may not be
-    // loaded in the test env, but `search_vec` is still invoked and timed;
-    // even an empty KNN result populates the receipt's `vec` field.
+    // vec_available=true + a dummy query_vec, so `search_vec` is invoked and
+    // timed. The vector MUST be 1024-wide: that is the `embedding float[1024]`
+    // column `try_load_sqlite_vec` creates (db/sqlite_vec.rs:37), and sqlite-vec
+    // *validates* the query vector's width — a mismatch is a hard
+    // `SqliteFailure`, not a quiet zero-row result, so a short dummy vector
+    // fails the whole search instead of exercising the channel. (The dimension
+    // is a magic number on both sides today; no shared constant exists.)
     let opts = SearchOptions {
         top_k: 3,
         vec_available: true,
-        query_vec: Some(vec![0.01, 0.02, 0.03]),
+        query_vec: Some(vec![0.01; 1024]),
         record_access: false,
         collect_phase_receipt: true,
         ..Default::default()
