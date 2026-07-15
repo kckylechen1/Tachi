@@ -320,107 +320,6 @@ fn auto_link_receipt_sampling_enabled_from(value: Option<String>) -> bool {
     })
 }
 
-/// Preserve the pre-receipt auto-link behavior for normal saves. Receipt
-/// sampling is explicitly opt-in because this background side effect must not
-/// add timers, counters, or telemetry to every `auto_link=true` save.
-fn run_auto_linking_without_receipt(
-    server: &MemoryServer,
-    entry: &MemoryEntry,
-    entity_list: &[String],
-    target_db: DbScope,
-    named_project: Option<&str>,
-) {
-    for entity in entity_list {
-        let query = entity.clone();
-        let search_action = |store: &mut MemoryStore| {
-            store
-                .search(
-                    &query,
-                    Some(memcore::SearchOptions {
-                        top_k: 5,
-                        record_access: false,
-                        ..Default::default()
-                    }),
-                )
-                .map_err(|e| e.to_string())
-        };
-        let search_res = if let Some(project) = named_project {
-            server.with_named_project_store_read(project, search_action)
-        } else {
-            server.with_store_for_scope_read(target_db, search_action)
-        };
-
-        let Ok(results) = search_res else {
-            continue;
-        };
-        for result in results {
-            if result.entry.id == entry.id || is_training_seed(&result.entry) {
-                continue;
-            }
-            let shared = unique_shared_entities(entity_list, &result.entry.entities);
-            if shared.is_empty() {
-                continue;
-            }
-
-            let now = chrono::Utc::now().to_rfc3339();
-            let vector_similarity = vector_similarity_between(entry, &result.entry);
-            let supersedes =
-                should_supersede(entry, &result.entry, shared.len(), result.score.symbolic);
-            let reinforces = vector_similarity.is_some_and(|similarity| {
-                should_reinforce(entry, &result.entry, shared.len(), similarity, supersedes)
-            });
-            if !supersedes && !reinforces {
-                continue;
-            }
-            let relation = if supersedes {
-                "supersedes"
-            } else {
-                "reinforces"
-            };
-            let weight = if supersedes {
-                0.9
-            } else {
-                vector_similarity.unwrap_or(0.0)
-            };
-            let edge = memcore::MemoryEdge {
-                source_id: entry.id.clone(),
-                target_id: result.entry.id.clone(),
-                relation: relation.to_string(),
-                weight,
-                metadata: json!({
-                    "auto_link": true,
-                    "shared_entities": shared,
-                    "similarity": vector_similarity,
-                    "confidence_increment": reinforces.then(|| confidence_increment(weight)),
-                }),
-                created_at: now.clone(),
-                valid_from: String::new(),
-                valid_to: None,
-            };
-            let save_edge_action = |store: &mut MemoryStore| {
-                store.add_edge(&edge).map_err(|e| e.to_string())?;
-                if supersedes {
-                    store
-                        .mark_superseded_closing_validity(&result.entry.id, &entry.id, &now)
-                        .map_err(|e| e.to_string())?;
-                } else if reinforces {
-                    apply_confidence_reinforcement(
-                        store,
-                        &result.entry.id,
-                        confidence_increment(weight),
-                        &now,
-                    )?;
-                }
-                Ok(())
-            };
-            let _ = if let Some(project) = named_project {
-                server.with_named_project_store(project, save_edge_action)
-            } else {
-                server.with_store_for_scope(target_db, save_edge_action)
-            };
-        }
-    }
-}
 /// Spawn the background auto-link task for a freshly-saved `entry`. The save
 /// handler returns `"auto_link": "pending"` without awaiting it
 /// (handler.rs:261-262), so nothing downstream can observe the finished
@@ -482,23 +381,17 @@ pub(crate) fn spawn_auto_linking(
     let sample_receipt = auto_link_receipt_sampling_enabled();
 
     tokio::spawn(async move {
-        if !sample_receipt {
-            run_auto_linking_without_receipt(
-                &auto_link_server,
-                &auto_link_entry,
-                &auto_link_entity_list,
-                target_db,
-                named_project.as_deref(),
-            );
-            return;
-        }
         let receipt = run_auto_linking(
             &auto_link_server,
             &auto_link_entry,
             &auto_link_entity_list,
             target_db,
             named_project.as_deref(),
+            sample_receipt,
         );
+        let Some(receipt) = receipt else {
+            return;
+        };
         // Emit from inside the spawned task — the save handler returned
         // `"auto_link": "pending"` (handler.rs:261-262) long before this
         // point, so this is the only place the finished counts exist. Fields
@@ -528,7 +421,7 @@ pub(crate) fn spawn_auto_linking(
     });
 }
 
-/// Run one auto-link pass to completion and return its finalized
+/// Run one auto-link pass to completion, optionally returning a finalized
 /// [`AutoLinkReceipt`].
 ///
 /// This is the entire body of the task [`spawn_auto_linking`] spawns, lifted
@@ -544,8 +437,16 @@ pub(crate) fn spawn_auto_linking(
 ///
 /// Pure observation (#1097 S1): the four skip points (self-id, training-seed,
 /// no-shared-entities, neither-supersede-nor-reinforce) and the edge write are
-/// not changed — only counted and timed. `entry_id` redaction and the
-/// `total_elapsed` stamp are delegated to [`finalize_auto_link_receipt`].
+/// not changed — only counted and timed when `sample` is true. `entry_id`
+/// redaction and the `total_elapsed` stamp are delegated to
+/// [`finalize_auto_link_receipt`].
+///
+/// This is the only production loop for both sampling modes. With `sample`
+/// false it constructs no receipt, every timer start is guarded by
+/// `sample.then(Instant::now)`, and the caller receives `None`, so it emits no
+/// receipt log. The shared plumbing still performs `Option` checks around
+/// instrumentation sites, so this is deliberately not described as a
+/// zero-overhead path.
 ///
 /// `entity_list` is the caller's already-deduplicated entity set;
 /// [`spawn_auto_linking`] does that dedup so duplicate labels cannot inflate
@@ -556,8 +457,8 @@ pub(crate) fn run_auto_linking(
     entity_list: &[String],
     target_db: DbScope,
     named_project: Option<&str>,
-) -> AutoLinkReceipt {
-    let auto_link_id = entry.id.clone();
+    sample: bool,
+) -> Option<AutoLinkReceipt> {
     // #1097 S1 phase-attribution receipt (pure observation — no behavioral
     // change to the four skip points or the edge write). The receipt is
     // accumulated in place; the outcome→counter mapping for searches and edge
@@ -570,8 +471,8 @@ pub(crate) fn run_auto_linking(
     // #1097 r1 codex review ①: `entry_id` is filled in at the end via
     // `finalize_auto_link_receipt` so the raw (possibly caller-hostile) id is
     // never stored on the receipt before redaction.
-    let task_start = Instant::now();
-    let mut receipt = AutoLinkReceipt {
+    let task_start = sample.then(Instant::now);
+    let mut receipt = sample.then(|| AutoLinkReceipt {
         entry_id: String::new(),
         entity_count: entity_list.len(),
         searches_executed: 0,
@@ -587,7 +488,7 @@ pub(crate) fn run_auto_linking(
         read_elapsed: Duration::ZERO,
         write_elapsed: Duration::ZERO,
         total_elapsed: Duration::ZERO,
-    };
+    });
 
     for entity in entity_list {
         let query = entity.clone();
@@ -603,43 +504,55 @@ pub(crate) fn run_auto_linking(
                         ..Default::default()
                     }),
                 )
-                .map_err(|e| format!("{}", e))
+                .map_err(|e| e.to_string())
         };
 
-        let read_timer = Instant::now();
+        let read_timer = sample.then(Instant::now);
         let search_res = if let Some(p) = named_project {
             server.with_named_project_store_read(p, search_action)
         } else {
             server.with_store_for_scope_read(target_db, search_action)
         };
-        receipt.read_elapsed += read_timer.elapsed();
+        if let (Some(receipt), Some(read_timer)) = (receipt.as_mut(), read_timer) {
+            receipt.read_elapsed += read_timer.elapsed();
+        }
         // #1097 r1 codex review ③-A: count ONLY searches that produced
         // a result set. A named-project resolution failure
         // (server_methods/db.rs:280) returns Err WITHOUT ever invoking
         // the store's `search` call, so it is a FAILED attempt, not an
         // executed one — previously it inflated `searches_executed`.
-        let search_outcome = match &search_res {
-            Ok(_) => SearchOutcome::Executed,
-            Err(_) => SearchOutcome::Failed,
-        };
-        receipt.apply_search_outcome(search_outcome);
+        if let Some(receipt) = receipt.as_mut() {
+            let search_outcome = match &search_res {
+                Ok(_) => SearchOutcome::Executed,
+                Err(_) => SearchOutcome::Failed,
+            };
+            receipt.apply_search_outcome(search_outcome);
+        }
 
         if let Ok(results) = search_res {
             for result in results {
-                receipt.candidates_examined += 1;
-                if result.entry.id == auto_link_id {
-                    receipt.skipped_self_id += 1;
+                if let Some(receipt) = receipt.as_mut() {
+                    receipt.candidates_examined += 1;
+                }
+                if result.entry.id == entry.id {
+                    if let Some(receipt) = receipt.as_mut() {
+                        receipt.skipped_self_id += 1;
+                    }
                     continue;
                 }
                 if is_training_seed(&result.entry) {
-                    receipt.skipped_training_seed += 1;
+                    if let Some(receipt) = receipt.as_mut() {
+                        receipt.skipped_training_seed += 1;
+                    }
                     continue;
                 }
                 // Unique shared entities only — duplicate entity labels must not
                 // count as multi-entity agreement for related_to/supersede.
                 let shared = unique_shared_entities(entity_list, &result.entry.entities);
                 if shared.is_empty() {
-                    receipt.skipped_no_shared_entities += 1;
+                    if let Some(receipt) = receipt.as_mut() {
+                        receipt.skipped_no_shared_entities += 1;
+                    }
                     continue;
                 }
 
@@ -657,7 +570,9 @@ pub(crate) fn run_auto_linking(
                     // and isn't worth a persisted fog edge — and the memcore
                     // edge-write choke point (relation_ontology) would reject
                     // `related_to` on new writes anyway (item 1).
-                    receipt.skipped_no_supersede_or_reinforce += 1;
+                    if let Some(receipt) = receipt.as_mut() {
+                        receipt.skipped_no_supersede_or_reinforce += 1;
+                    }
                     continue;
                 }
                 let relation = if supersedes {
@@ -671,7 +586,7 @@ pub(crate) fn run_auto_linking(
                     vector_similarity.unwrap_or(0.0)
                 };
                 let edge = memcore::MemoryEdge {
-                    source_id: auto_link_id.clone(),
+                    source_id: entry.id.clone(),
                     target_id: result.entry.id.clone(),
                     relation: relation.to_string(),
                     weight,
@@ -686,58 +601,52 @@ pub(crate) fn run_auto_linking(
                     // Edges are only closed/expired when supersession is explicitly reversed.
                     valid_to: None,
                 };
-                // #1097 r1 codex review ③-B: classify the write outcome
-                // INSIDE the closure so the receipt can distinguish
-                // "insert landed" (edge persisted under its own
-                // savepoint at db/graph.rs:144, RELEASEd at :158) from
-                // "full success". The closure returns Ok(classification);
-                // an outer Err means store resolution failed and the
-                // closure never ran (insert never attempted) — folded
-                // to `InsertFailed` below since both leave nothing
-                // persisted.
-                let save_edge_action =
-                    |store: &mut MemoryStore| -> Result<EdgeWriteOutcome, String> {
-                        if store.add_edge(&edge).is_err() {
-                            return Ok(EdgeWriteOutcome::InsertFailed);
-                        }
-                        let post_ok = if supersedes {
-                            store
-                                .mark_superseded_closing_validity(
-                                    &result.entry.id,
-                                    &auto_link_id,
-                                    &now,
-                                )
-                                .is_ok()
-                        } else if reinforces {
-                            apply_confidence_reinforcement(
-                                store,
-                                &result.entry.id,
-                                confidence_increment(weight),
-                                &now,
-                            )
-                            .is_ok()
-                        } else {
-                            true
-                        };
-                        Ok(if post_ok {
-                            EdgeWriteOutcome::InsertAndPostWriteOk
-                        } else {
-                            EdgeWriteOutcome::InsertOkPostWriteFailed
-                        })
-                    };
-                let write_timer = Instant::now();
-                let write_res = if let Some(p) = named_project {
+                // #1097 r1 codex review ③-B: classify the write outcome inside
+                // the closure so the receipt can distinguish "insert landed"
+                // (edge persisted under its own savepoint at db/graph.rs:144,
+                // RELEASEd at :158) from "full success". The closure preserves
+                // the pre-receipt `Result<(), String>` error propagation; the
+                // side channel is sampled bookkeeping only. An outer Err before
+                // the closure runs leaves the default `InsertFailed` outcome.
+                let mut edge_outcome = EdgeWriteOutcome::InsertFailed;
+                let save_edge_action = |store: &mut MemoryStore| -> Result<(), String> {
+                    store.add_edge(&edge).map_err(|e| e.to_string())?;
+                    if sample {
+                        edge_outcome = EdgeWriteOutcome::InsertOkPostWriteFailed;
+                    }
+                    if supersedes {
+                        store
+                            .mark_superseded_closing_validity(&result.entry.id, &entry.id, &now)
+                            .map_err(|e| e.to_string())?;
+                    } else if reinforces {
+                        apply_confidence_reinforcement(
+                            store,
+                            &result.entry.id,
+                            confidence_increment(weight),
+                            &now,
+                        )?;
+                    }
+                    if sample {
+                        edge_outcome = EdgeWriteOutcome::InsertAndPostWriteOk;
+                    }
+                    Ok(())
+                };
+                let write_timer = sample.then(Instant::now);
+                let _ = if let Some(p) = named_project {
                     server.with_named_project_store(p, save_edge_action)
                 } else {
                     server.with_store_for_scope(target_db, save_edge_action)
                 };
-                receipt.write_elapsed += write_timer.elapsed();
+                if let (Some(receipt), Some(write_timer)) = (receipt.as_mut(), write_timer) {
+                    receipt.write_elapsed += write_timer.elapsed();
+                }
                 // Outer Err = store resolution failed (closure never ran,
                 // nothing persisted); fold to `InsertFailed` so the
                 // attempt is counted but neither `edges_written` nor
                 // `post_write_failures` moves.
-                let edge_outcome = write_res.unwrap_or(EdgeWriteOutcome::InsertFailed);
-                receipt.apply_edge_outcome(edge_outcome);
+                if let Some(receipt) = receipt.as_mut() {
+                    receipt.apply_edge_outcome(edge_outcome);
+                }
             }
         }
     }
@@ -747,7 +656,15 @@ pub(crate) fn run_auto_linking(
     // tests assert against; the `task_start.elapsed()` argument is covered by
     // `run_auto_linking_reports_live_read_write_and_total_timers` (stub it to
     // `Duration::ZERO` and that test's `total_elapsed` assertion goes red).
-    finalize_auto_link_receipt(receipt, &auto_link_id, task_start.elapsed())
+    match (receipt, task_start) {
+        (Some(receipt), Some(task_start)) => Some(finalize_auto_link_receipt(
+            receipt,
+            &entry.id,
+            task_start.elapsed(),
+        )),
+        (None, None) => None,
+        _ => unreachable!("receipt and timer sampling must stay paired"),
+    }
 }
 
 #[cfg(test)]
@@ -1281,7 +1198,15 @@ mod tests {
             .with_global_store(|store| store.upsert(&fresh).map_err(|e| format!("save: {e}")))
             .expect("save entry");
 
-        let receipt = run_auto_linking(&server, &fresh, &fresh.entities, DbScope::Global, None);
+        let receipt = run_auto_linking(
+            &server,
+            &fresh,
+            &fresh.entities,
+            DbScope::Global,
+            None,
+            true,
+        )
+        .expect("sampled auto-link pass must return a receipt");
 
         // Preconditions. These are asserted first and separately from the
         // timers so that a scenario which silently stops producing an edge
