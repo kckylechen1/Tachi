@@ -23,6 +23,7 @@ mod cross_domain;
 mod hub_lint;
 mod render;
 mod scan;
+mod schema_skew;
 mod secrets;
 mod types;
 
@@ -31,6 +32,7 @@ pub use classify::classify_one;
 pub use hub_lint::hub_capability_discovery_status_warnings;
 pub use render::render_report;
 pub use scan::{default_scan_roots, scan, ScanOptions};
+pub use schema_skew::schema_version_skew_warnings;
 // Unit tests assert on backup filename classification via `super::*`.
 #[cfg(test)]
 pub use scan::is_backup_filename;

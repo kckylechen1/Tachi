@@ -87,6 +87,7 @@ pub use db::session_claims::{
 pub use db::{anchor_id, anchor_path, AnchorKind};
 pub use db::{CategoryPathPrefixMemoryRow, FoundryJobStatusCounts, PathPrefixMemoryRow};
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
+pub use db::{DbOpenContext, MigrationAuthority, OpenIntent};
 pub use error::MemoryError;
 #[cfg(feature = "admin")]
 pub use foundry::{

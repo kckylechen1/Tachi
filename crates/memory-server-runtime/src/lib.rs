@@ -1,4 +1,5 @@
 use memcore::MemoryStore;
+use memcore::{DbOpenContext, MigrationAuthority, OpenIntent};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -517,6 +518,13 @@ pub struct DbRuntime {
     pub project_db: Arc<StdRwLock<Option<ProjectDbState>>>,
     pub attached_project_dbs: Arc<StdRwLock<HashMap<PathBuf, AttachedProjectEntry>>>,
     pub project_attach_init_gate: Arc<StdMutex<()>>,
+    /// #1119: migration authority for *dynamic* project DB opens (activate /
+    /// attach). Fail-closed [`MigrationAuthority::Deny`] by default; the
+    /// deploy-time daemon threads `Allow` from its `--allow-schema-migration`
+    /// flag so opening an older-schema project DB migrates instead of
+    /// refusing. The policy lives HERE, at the open site, not only in
+    /// bootstrap — every runtime project open must express it.
+    pub schema_migration: MigrationAuthority,
 }
 
 impl DbRuntime {
@@ -528,8 +536,12 @@ impl DbRuntime {
     }
 
     pub fn activate_project_db(&self, db_path: PathBuf) -> Result<bool, String> {
-        let state = ProjectDbState::open(db_path, configured_memory_read_pool_size())
-            .map_err(|e| format!("open project db: {e}"))?;
+        let state = ProjectDbState::open(
+            db_path,
+            configured_memory_read_pool_size(),
+            &self.schema_migration,
+        )
+        .map_err(|e| format!("open project db: {e}"))?;
 
         let mut guard = self.project_db.write().unwrap_or_else(|e| e.into_inner());
         let was_none = guard.is_none();
@@ -608,7 +620,11 @@ impl DbRuntime {
             return Ok(state);
         }
 
-        let state = ProjectDbState::open(key.clone(), configured_memory_read_pool_size())?;
+        let state = ProjectDbState::open(
+            key.clone(),
+            configured_memory_read_pool_size(),
+            &self.schema_migration,
+        )?;
         let mut guard = self
             .attached_project_dbs
             .write()
@@ -893,7 +909,16 @@ fn next_recency_tick() -> u64 {
 }
 
 impl ProjectDbState {
-    pub fn open(db_path: PathBuf, read_pool_size: usize) -> Result<Self, String> {
+    /// Open a project DB with an explicit #1119 [`MigrationAuthority`]. A
+    /// project DB is always opened with [`OpenIntent::OpenExisting`] — it is
+    /// operational data, never a fresh-provisioning target here — so the only
+    /// degree of freedom is whether this process may migrate an older-schema
+    /// project DB forward (`Allow`) or must refuse (`Deny`, fail-closed).
+    pub fn open(
+        db_path: PathBuf,
+        read_pool_size: usize,
+        migration: &MigrationAuthority,
+    ) -> Result<Self, String> {
         let db_str = db_path.to_str().ok_or_else(|| {
             format!(
                 "Project DB path contains invalid UTF-8: {}",
@@ -906,7 +931,11 @@ impl ProjectDbState {
             .and_then(|os| os.to_str())
             .unwrap_or("project")
             .to_string();
-        let store = MemoryStore::open_with_label(db_str, &project_label)
+        let ctx = DbOpenContext {
+            intent: OpenIntent::OpenExisting,
+            migration: migration.clone(),
+        };
+        let store = MemoryStore::open_with_label_and_context(db_str, &project_label, &ctx)
             .map_err(|e| format!("open project db: {e}"))?;
         let vec_available = store.vec_available;
         let read_pool = ReadStorePool::open_read_only(db_str, read_pool_size)
@@ -1066,6 +1095,7 @@ mod tests {
             project_db: Arc::new(StdRwLock::new(None)),
             attached_project_dbs: Arc::new(StdRwLock::new(HashMap::new())),
             project_attach_init_gate: Arc::new(StdMutex::new(())),
+            schema_migration: MigrationAuthority::Deny,
         }
     }
 

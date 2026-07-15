@@ -183,6 +183,119 @@ pub fn check_schema_version_gate(conn: &Connection) -> Result<(), MemoryError> {
     Ok(())
 }
 
+/// #1119 typed schema-migration gate. Runs at the DB-open funnel
+/// (`schema::init_schema_with_label_mut`), AFTER [`check_schema_version_gate`]
+/// (which owns the `stored > EXPECTED` refusal and is called first by every
+/// entry point) and BEFORE any DDL / data migration / version stamp mutates
+/// the DB. Decides purely from the caller's typed [`DbOpenContext`] and the
+/// stored `PRAGMA user_version` — **never from DB content, never from process
+/// env**. This is the single production choke point that closes the #1119
+/// incident: an unauthorized process can no longer forward-migrate a live DB
+/// a deployed daemon still depends on.
+///
+/// Decision table (`stored > EXPECTED` already refused upstream):
+///
+/// | intent        | stored == 0 | 1 ≤ stored < EXPECTED       | stored == EXPECTED |
+/// |---------------|-------------|-----------------------------|--------------------|
+/// | `CreateFresh` | build (Ok)  | refuse: create-on-existing  | refuse: create-on-existing |
+/// | `OpenExisting`| build (Ok)  | Deny→refuse / Allow→migrate  | Ok (current)       |
+///
+/// `CreateFresh` succeeds ONLY on an unstamped (`stored == 0`) file — even one
+/// whose tables `init_schema` already built (owner ruling A: that product IS
+/// fresh; the discriminator is the version stamp, never DB content). Any
+/// *stamped* DB (`stored >= 1`, older or current) is a pre-existing
+/// operational DB, not a create target, and is refused with
+/// [`MemoryError::DbCreateTargetExists`].
+///
+/// `stored == 0` is a *build*, not a *migration*, under both intents: the
+/// #1119 incident was a **stamped** older DB (17 → 18); an unstamped
+/// (`user_version == 0`) file has no deployed daemon depending on a prior
+/// stamp, so building schema onto it strands nobody. Crucially, this decision
+/// reads only the version stamp — it does NOT inspect `sqlite_master` to guess
+/// "fresh vs legacy" (the reverted wrong-layer discriminator: `init_schema`
+/// produces a full-table DB that still reads `user_version == 0`, so content
+/// cannot distinguish the two). The `1 ≤ stored < EXPECTED` band is the only
+/// place authority matters, and it is exactly the accident's shape.
+pub fn check_db_open_context_gate(
+    conn: &Connection,
+    db_path: &Path,
+    ctx: &crate::db::DbOpenContext,
+) -> Result<(), MemoryError> {
+    use crate::db::{MigrationAuthority, OpenIntent};
+
+    let stored = read_schema_version(conn)?;
+    match ctx.intent {
+        OpenIntent::CreateFresh => {
+            // Provisioning succeeds ONLY on an unstamped file (build fresh, no
+            // authority). Any stamped DB (older OR current) is a pre-existing
+            // operational DB, not a create target — refuse. Use OpenExisting
+            // (with authority) to open/migrate an existing DB.
+            if stored == 0 {
+                Ok(())
+            } else {
+                Err(MemoryError::DbCreateTargetExists {
+                    stored,
+                    db_path: db_path.display().to_string(),
+                })
+            }
+        }
+        OpenIntent::OpenExisting => {
+            if stored >= EXPECTED_SCHEMA_VERSION {
+                // == EXPECTED (current); > EXPECTED refused upstream.
+                return Ok(());
+            }
+            if stored == 0 {
+                // No stamp: a build, not a migration — see the doc comment.
+                return Ok(());
+            }
+            // 1 ≤ stored < EXPECTED: a real older DB. THE migration decision.
+            match &ctx.migration {
+                MigrationAuthority::Allow { approved_by } => {
+                    eprintln!(
+                        "{}",
+                        schema_migration_success_log_line(stored, db_path, approved_by)
+                    );
+                    Ok(())
+                }
+                MigrationAuthority::Deny => {
+                    Err(schema_migration_opt_in_required_error(stored, db_path))
+                }
+            }
+        }
+    }
+}
+
+/// The audit log line the #1119 incident report asked for when an authorized
+/// migration proceeds: who authorized it (`approved_by`) plus this binary's
+/// own version + pid (so an operator grepping logs after the fact can tell
+/// which process performed the migration), from/to version, and the DB path.
+/// Factored out of the `eprintln!` call site so it is directly unit-testable
+/// without capturing real stderr.
+fn schema_migration_success_log_line(stored: u32, db_path: &Path, approved_by: &str) -> String {
+    format!(
+        "[migration] authorized by {approved_by}: binary={} pid={} migrating db={} schema {stored} -> {EXPECTED_SCHEMA_VERSION}",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id(),
+        db_path.display()
+    )
+}
+
+/// Build the typed [`MemoryError::SchemaMigrationOptInRequired`] refusal. The
+/// backup/marker hints name THIS db's actual sibling paths (not a `<db>`
+/// template) — the marker path is exact (deterministic naming); the backup
+/// path's timestamp suffix is the one component genuinely unknown until a real
+/// migration attempt runs (see `schema::maybe_backup_before_migration`).
+fn schema_migration_opt_in_required_error(stored: u32, db_path: &Path) -> MemoryError {
+    let db_path_str = db_path.display().to_string();
+    MemoryError::SchemaMigrationOptInRequired {
+        stored,
+        expected: EXPECTED_SCHEMA_VERSION,
+        db_path: db_path_str.clone(),
+        backup_hint: format!("{db_path_str}.migration-bak.<UTC-timestamp-of-this-attempt>"),
+        marker_hint: format!("{db_path_str}.migration-marker"),
+    }
+}
+
 /// Run all data-fix migrations in order. Idempotent.
 ///
 /// `db_label` is the manifest role/project label for this DB ("global",
@@ -1031,10 +1144,138 @@ mod tests {
         write_schema_version(&conn, EXPECTED_SCHEMA_VERSION + 5).unwrap();
 
         // init_schema_with_label_mut (the real entry point) must refuse too.
-        let result = crate::db::init_schema_with_label_mut(&mut conn, "global", tmp.path());
+        let result = crate::db::init_schema_with_label_mut(
+            &mut conn,
+            "global",
+            tmp.path(),
+            &crate::db::DbOpenContext::create_fresh(),
+        );
         assert!(
             result.is_err(),
             "gate must reject via the schema.rs entry point too"
+        );
+    }
+
+    // --- #1119: typed DbOpenContext migration gate ------------------------
+
+    use crate::db::DbOpenContext;
+
+    fn is_opt_in_required(result: Result<(), MemoryError>) -> bool {
+        matches!(
+            result,
+            Err(MemoryError::SchemaMigrationOptInRequired { .. })
+        )
+    }
+
+    fn is_create_target_exists(result: Result<(), MemoryError>) -> bool {
+        matches!(result, Err(MemoryError::DbCreateTargetExists { .. }))
+    }
+
+    /// The frozen assertion this REPLACES (old route:
+    /// `opt_in_gate_with_is_noop_for_fresh_db`, which inferred "fresh" from a
+    /// `sqlite_master` table count). New semantics: a full-schema DB that still
+    /// reads `user_version == 0` — exactly what `init_schema` / `open_test_db`
+    /// produces — is a build, not a migration, under `CreateFresh`. Intent
+    /// carries "I am creating", so no authority is needed and DB content is
+    /// never consulted (owner ruling A: `init_schema`'s product IS fresh).
+    #[test]
+    fn create_fresh_needs_no_authority_regardless_of_db_content() {
+        let (conn, tmp) = open_test_db();
+        // Full tables present (open_test_db ran init_schema) but user_version==0.
+        assert_eq!(read_schema_version(&conn).unwrap(), 0);
+        let ctx = DbOpenContext::create_fresh();
+        check_db_open_context_gate(&conn, tmp.path(), &ctx)
+            .expect("CreateFresh builds a fresh (v0) DB with no authority");
+    }
+
+    #[test]
+    fn open_existing_deny_allows_fresh_zero_stamped_db() {
+        // stored == 0 is a build, not the incident (which was a stamped 17→18).
+        let (conn, tmp) = open_test_db();
+        let ctx = DbOpenContext::open_existing_deny();
+        check_db_open_context_gate(&conn, tmp.path(), &ctx)
+            .expect("a v0 file has no deployed daemon to strand");
+    }
+
+    #[test]
+    fn open_existing_deny_refuses_stamped_older_db() {
+        // The #1119 incident path: a stamped older DB (e.g. 17) opened by an
+        // 18-binary without authority MUST refuse before migrating in place.
+        let (conn, tmp) = open_test_db();
+        write_schema_version(&conn, EXPECTED_SCHEMA_VERSION - 1).unwrap();
+        let ctx = DbOpenContext::open_existing_deny();
+        assert!(
+            is_opt_in_required(check_db_open_context_gate(&conn, tmp.path(), &ctx)),
+            "Deny must refuse a stamped older DB"
+        );
+    }
+
+    #[test]
+    fn open_existing_allow_migrates_stamped_older_db() {
+        let (conn, tmp) = open_test_db();
+        write_schema_version(&conn, EXPECTED_SCHEMA_VERSION - 1).unwrap();
+        let ctx = DbOpenContext::open_existing_allow("test:deploy");
+        check_db_open_context_gate(&conn, tmp.path(), &ctx)
+            .expect("Allow authorizes migrating a stamped older DB");
+    }
+
+    #[test]
+    fn create_fresh_refuses_stamped_older_db_as_existing() {
+        // A real older operational DB is not a create target — refuse (use
+        // OpenExisting+Allow to migrate it).
+        let (conn, tmp) = open_test_db();
+        write_schema_version(&conn, EXPECTED_SCHEMA_VERSION - 1).unwrap();
+        let ctx = DbOpenContext::create_fresh();
+        assert!(
+            is_create_target_exists(check_db_open_context_gate(&conn, tmp.path(), &ctx)),
+            "CreateFresh must refuse a stamped older DB as already-existing"
+        );
+    }
+
+    /// Authorization must NOT travel through the process environment. Even
+    /// with the legacy opt-in env var (`TACHI_ALLOW_SCHEMA_MIGRATION`) set to a
+    /// truthy value, a `Deny` context still refuses a stamped older DB — the
+    /// gate consults only the typed `DbOpenContext`, never the environment.
+    /// Nothing else in the codebase reads this var, so setting it here cannot
+    /// affect any other test.
+    #[test]
+    fn authority_does_not_travel_through_process_env() {
+        let (conn, tmp) = open_test_db();
+        write_schema_version(&conn, EXPECTED_SCHEMA_VERSION - 1).unwrap();
+
+        std::env::set_var(crate::db::SCHEMA_MIGRATION_LEGACY_ENV, "1");
+        let refused = is_opt_in_required(check_db_open_context_gate(
+            &conn,
+            tmp.path(),
+            &DbOpenContext::open_existing_deny(),
+        ));
+        std::env::remove_var(crate::db::SCHEMA_MIGRATION_LEGACY_ENV);
+
+        assert!(
+            refused,
+            "Deny must refuse even when the legacy opt-in env var is set — \
+             authority is typed, not ambient"
+        );
+    }
+
+    #[test]
+    fn open_existing_deny_allows_current_version() {
+        let (conn, tmp) = open_test_db();
+        write_schema_version(&conn, EXPECTED_SCHEMA_VERSION).unwrap();
+        check_db_open_context_gate(&conn, tmp.path(), &DbOpenContext::open_existing_deny())
+            .expect("OpenExisting at current version is a no-op");
+    }
+
+    #[test]
+    fn create_fresh_refuses_current_version_db_as_existing() {
+        // "遇已存在库 → 拒绝": a current (stamped) operational DB is not a
+        // create target either — only stored == 0 is a fresh build.
+        let (conn, tmp) = open_test_db();
+        write_schema_version(&conn, EXPECTED_SCHEMA_VERSION).unwrap();
+        let ctx = DbOpenContext::create_fresh();
+        assert!(
+            is_create_target_exists(check_db_open_context_gate(&conn, tmp.path(), &ctx)),
+            "CreateFresh must refuse a stamped current DB as already-existing"
         );
     }
 

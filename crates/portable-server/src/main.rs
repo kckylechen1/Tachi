@@ -6,8 +6,12 @@
 //! or product surface can be compiled in.
 //!
 //! Boot: `portable-server [--global-db <path>] [--project-db <path>] [--decay-policy <name>]
-//! [--daemon] [--port <n>]` (env fallbacks `PORTABLE_MEMORY_DB` /
-//! `PORTABLE_DECAY_POLICY` / `PORTABLE_DAEMON` / `PORTABLE_PORT`).
+//! [--daemon] [--port <n>] [--allow-schema-migration]` (env fallbacks
+//! `PORTABLE_MEMORY_DB` / `PORTABLE_DECAY_POLICY` / `PORTABLE_DAEMON` /
+//! `PORTABLE_PORT` / `PORTABLE_ALLOW_SCHEMA_MIGRATION`). The last one is
+//! #1119: this is a persistent-DB deploy entry point exactly like
+//! `tachi-server serve`, so it carries the same typed schema-migration
+//! opt-in — see `build_server`'s doc comment.
 //!
 //! Two transports over the same [`PortableServer`] tool surface (tachi
 //! #938):
@@ -22,19 +26,40 @@ mod http;
 mod service;
 
 use config::{Config, IN_MEMORY};
-use portable_kernel::MemoryStore;
+use portable_kernel::{DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent};
 use service::PortableServer;
 
 fn build_server(config: Config) -> Result<PortableServer, String> {
-    fn open_store(path: &str) -> Result<MemoryStore, String> {
+    // #1119: persistent-path opens carry an explicit migration authority
+    // instead of the fail-closed default — this daemon/stdio boot is the same
+    // shape of deploy entry point as `tachi-server serve`, which has its own
+    // `--allow-schema-migration` → typed `MigrationAuthority` translation.
+    // Without this, upgrading portable-server and pointing it at a legitimate
+    // older-schema persistent DB would refuse to boot with no opt-in route.
+    let migration = if config.allow_schema_migration {
+        MigrationAuthority::Allow {
+            approved_by: "portable-server --allow-schema-migration".to_string(),
+        }
+    } else {
+        MigrationAuthority::Deny
+    };
+
+    fn open_store(path: &str, migration: &MigrationAuthority) -> Result<MemoryStore, String> {
         if path == IN_MEMORY {
+            // Always a fresh store — never gated, not affected by migration
+            // authority.
             MemoryStore::open_in_memory().map_err(|e| format!("open in-memory store: {e}"))
         } else {
-            MemoryStore::open(path).map_err(|e| format!("open store at {path}: {e}"))
+            let ctx = DbOpenContext {
+                intent: OpenIntent::OpenExisting,
+                migration: migration.clone(),
+            };
+            MemoryStore::open_with_context(path, &ctx)
+                .map_err(|e| format!("open store at {path}: {e}"))
         }
     }
 
-    let store = open_store(&config.db_path)?;
+    let store = open_store(&config.db_path, &migration)?;
     let project_stores = config
         .project_db_paths
         .iter()
@@ -45,7 +70,7 @@ fn build_server(config: Config) -> Result<PortableServer, String> {
             } else {
                 format!("project-{index}")
             };
-            open_store(path).map(|store| (name, path.clone(), store))
+            open_store(path, &migration).map(|store| (name, path.clone(), store))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(PortableServer::new(
@@ -119,6 +144,7 @@ mod tests {
             decay_policy: None,
             daemon: false,
             port: 7919,
+            allow_schema_migration: false,
         };
         let server = build_server(config).expect("build server");
         let status = server
@@ -129,5 +155,90 @@ mod tests {
 
         assert_eq!(status["databases"]["global"]["path"], IN_MEMORY);
         assert_eq!(status["databases"]["project"]["path"], IN_MEMORY);
+    }
+
+    // --- #1119: --allow-schema-migration wiring for persistent-path opens --
+
+    /// Fabricate a persistent (on-disk) DB file stamped at an older schema
+    /// version — a raw `PRAGMA user_version` write, since `MemoryStore`
+    /// exposes no public setter (by design: the stamp only ever advances
+    /// through a real migration run). No tables are created; `init_schema`'s
+    /// idempotent `CREATE TABLE IF NOT EXISTS` DDL builds them when the
+    /// authorized migration actually runs, exactly as it would for a real
+    /// legacy file.
+    fn fabricate_stamped_older_db() -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("portable-server-1119-{}.db", uuid::Uuid::new_v4()));
+        let conn = rusqlite::Connection::open(&path).expect("create raw sqlite file");
+        let older = portable_kernel::db::migrations::EXPECTED_SCHEMA_VERSION - 1;
+        conn.execute_batch(&format!("PRAGMA user_version = {older}"))
+            .expect("stamp older version");
+        drop(conn);
+        path
+    }
+
+    fn config_for_persistent_db(db_path: &std::path::Path, allow: bool) -> Config {
+        Config {
+            db_path: db_path.to_string_lossy().to_string(),
+            project_db_paths: Vec::new(),
+            decay_policy_name: "default".to_string(),
+            decay_policy: None,
+            daemon: false,
+            port: 7919,
+            allow_schema_migration: allow,
+        }
+    }
+
+    /// Discriminating test 2: `--allow-schema-migration` (config field `true`)
+    /// migrates a stamped-older persistent DB forward instead of refusing.
+    #[test]
+    fn allow_schema_migration_true_migrates_stamped_older_persistent_db() {
+        let path = fabricate_stamped_older_db();
+        let config = config_for_persistent_db(&path, true);
+
+        let result = build_server(config);
+        assert!(
+            result.is_ok(),
+            "Allow must migrate a stamped-older persistent DB, got: {:?}",
+            result.err()
+        );
+
+        // Prove it actually migrated (not just "didn't error"): the on-disk
+        // stamp now reads the current schema version.
+        let conn = rusqlite::Connection::open(&path).expect("reopen db");
+        let stored: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("read user_version");
+        assert_eq!(
+            stored as u32,
+            portable_kernel::db::migrations::EXPECTED_SCHEMA_VERSION,
+            "authorized migration must advance the stamp to the current version"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Discriminating test 3: without the flag (default `Deny`, fail-closed),
+    /// the same stamped-older persistent DB is refused with the typed
+    /// `SchemaMigrationOptInRequired` error, not silently migrated.
+    #[test]
+    fn allow_schema_migration_false_refuses_stamped_older_persistent_db() {
+        let path = fabricate_stamped_older_db();
+        let config = config_for_persistent_db(&path, false);
+
+        // Not `expect_err`: that would require `PortableServer: Debug`, and the
+        // server owns a store we deliberately don't want formatted into panics.
+        let err = match build_server(config) {
+            Ok(_) => panic!(
+                "Deny (default) must refuse a stamped-older persistent DB instead of migrating it"
+            ),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("refusing to migrate db schema"),
+            "expected the typed SchemaMigrationOptInRequired refusal, got: {err}"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }

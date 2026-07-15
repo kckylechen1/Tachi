@@ -64,3 +64,10 @@ rustls = { workspace = true }
 # instead of ~90s of real wall-clock sleep. Same pattern as tachi-server's
 # own `[dev-dependencies]` tokio bump (see its Cargo.toml).
 tokio = { version = "1", features = ["test-util", "macros", "rt", "time"] }
+# #1119: the `--allow-schema-migration` discriminating tests need to fabricate
+# a *persistent* DB file already stamped at an older schema version — a raw
+# `PRAGMA user_version` write, not anything `MemoryStore` exposes publicly.
+# Reuses the exact workspace-pinned version/features `memcore` already builds
+# with (`bundled`), so this adds no new compiled dependency to the workspace
+# build graph, only a dev-only edge onto one already present.
+rusqlite = { workspace = true }

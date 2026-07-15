@@ -24,6 +24,7 @@ mod hub_db;
 mod memory_crud;
 pub mod migrations;
 mod open;
+pub mod open_context;
 mod recall_cache;
 mod sandbox;
 mod schema;
@@ -106,6 +107,9 @@ pub use open::lock_retry_backoff_count;
 pub(crate) use open::{
     acquire_startup_lock, configure_connection, open_read_only, open_read_write,
     retry_memory_locked, sqlite_error_is_locked,
+};
+pub use open_context::{
+    DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
 };
 pub use recall_cache::{
     recall_cache_get, recall_cache_purge_stale, recall_cache_put, recall_cache_record_hit,

@@ -25,7 +25,13 @@ fn fresh_db(dir: &TempDir, name: &str) -> (PathBuf, Connection) {
     memcore::db::register_sqlite_vec();
     let path = dir.path().join(name);
     let mut conn = Connection::open(&path).unwrap();
-    memcore::db::init_schema_with_label_mut(&mut conn, "test", &path).unwrap();
+    memcore::db::init_schema_with_label_mut(
+        &mut conn,
+        "test",
+        &path,
+        &memcore::db::DbOpenContext::create_fresh(),
+    )
+    .unwrap();
     (path, conn)
 }
 
@@ -34,7 +40,13 @@ fn fresh_db_at(path: &PathBuf, label: &str) -> Connection {
     memcore::db::register_sqlite_vec();
     std::fs::create_dir_all(path.parent().expect("db parent")).unwrap();
     let mut conn = Connection::open(path).unwrap();
-    memcore::db::init_schema_with_label_mut(&mut conn, label, path).unwrap();
+    memcore::db::init_schema_with_label_mut(
+        &mut conn,
+        label,
+        path,
+        &memcore::db::DbOpenContext::create_fresh(),
+    )
+    .unwrap();
     conn
 }
 

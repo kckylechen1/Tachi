@@ -2,7 +2,7 @@
 
 use rusqlite::Connection;
 
-use crate::{db, error::MemoryError, path_router, MemoryEntry, MemoryStore};
+use crate::{db, db::DbOpenContext, error::MemoryError, path_router, MemoryEntry, MemoryStore};
 
 /// Test/operator escape hatch: when set to a truthy value, the path-routing
 /// validation in `MemoryStore::upsert` is bypassed entirely. Useful for test
@@ -18,20 +18,48 @@ fn path_validation_disabled() -> bool {
 
 impl MemoryStore {
     /// Open (or create) a memory database at the given path.
+    ///
+    /// Uses the fail-closed default [`DbOpenContext`] (`OpenExisting + Deny`):
+    /// a fresh file builds, a current DB opens, but a *stamped older* DB
+    /// refuses to migrate in place (#1119). Callers that are the intended
+    /// deploy-time migrator, or that are provisioning a brand-new DB, use
+    /// [`Self::open_with_context`] with an explicit context.
     pub fn open(db_path: &str) -> Result<Self, MemoryError> {
-        Self::open_with_label_inner(db_path, "unknown", false)
+        Self::open_with_label_inner(db_path, "unknown", false, &DbOpenContext::default())
     }
 
     /// Open (or create) a memory database with a known manifest label.
     /// Enables path-routing validation at write time and runs data migrations.
+    ///
+    /// Uses the fail-closed default [`DbOpenContext`] (`OpenExisting + Deny`);
+    /// see [`Self::open`] and [`Self::open_with_label_and_context`].
     pub fn open_with_label(db_path: &str, db_label: &str) -> Result<Self, MemoryError> {
-        Self::open_with_label_inner(db_path, db_label, true)
+        Self::open_with_label_inner(db_path, db_label, true, &DbOpenContext::default())
+    }
+
+    /// Open (or create) with an explicit [`DbOpenContext`] and no manifest
+    /// label (path-routing validation disabled, like [`Self::open`]).
+    pub fn open_with_context(db_path: &str, ctx: &DbOpenContext) -> Result<Self, MemoryError> {
+        Self::open_with_label_inner(db_path, "unknown", false, ctx)
+    }
+
+    /// Open (or create) with an explicit manifest label AND an explicit
+    /// [`DbOpenContext`] — the entry point the deploy-time migrator and
+    /// fresh-provisioning flows use to thread migration authority / open
+    /// intent down into the #1119 gate.
+    pub fn open_with_label_and_context(
+        db_path: &str,
+        db_label: &str,
+        ctx: &DbOpenContext,
+    ) -> Result<Self, MemoryError> {
+        Self::open_with_label_inner(db_path, db_label, true, ctx)
     }
 
     fn open_with_label_inner(
         db_path: &str,
         db_label: &str,
         path_validation: bool,
+        ctx: &DbOpenContext,
     ) -> Result<Self, MemoryError> {
         // Register extensions BEFORE opening the connection.
         libsimple::enable_auto_extension()
@@ -45,7 +73,7 @@ impl MemoryStore {
         // path_validation=false branch called init_schema directly, skipping
         // backups for all CLI/open_cli_store paths (#597 CP1).
         let p = std::path::PathBuf::from(db_path);
-        let _ = db::init_schema_with_label_mut(&mut conn, db_label, &p)?;
+        let _ = db::init_schema_with_label_mut(&mut conn, db_label, &p, ctx)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
