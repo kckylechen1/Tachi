@@ -9,6 +9,7 @@ pub(super) async fn run_pre_serve_command(
     global_db_path: &PathBuf,
     project_db_path: Option<&PathBuf>,
     git_root: Option<&PathBuf>,
+    schema_migration: &memcore::MigrationAuthority,
 ) -> Result<bool, Box<dyn Error>> {
     match command {
         Commands::Setup {
@@ -233,6 +234,7 @@ pub(super) async fn run_pre_serve_command(
                 global_db_path,
                 project_db_path,
                 app_home,
+                schema_migration,
             )
             .await?;
             Ok(true)

@@ -1,4 +1,5 @@
 use crate::server_state::MemoryServer;
+use memcore::MigrationAuthority;
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -46,6 +47,37 @@ pub(super) async fn dispatch_cli_tool<F, Fut>(
     global_db: &PathBuf,
     project_db: Option<&PathBuf>,
     app_home: &PathBuf,
+    in_process: F,
+) -> Result<String, Box<dyn std::error::Error>>
+where
+    F: FnOnce(MemoryServer, serde_json::Map<String, serde_json::Value>) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    let schema_migration = MigrationAuthority::Deny;
+    dispatch_cli_tool_with_migration_authority(
+        tool_name,
+        args,
+        global_db,
+        project_db,
+        app_home,
+        &schema_migration,
+        in_process,
+    )
+    .await
+}
+
+/// Dispatch a CLI tool with an explicit authority for its in-process fallback.
+///
+/// A compatible daemon receives only the tool request and returns before this
+/// authority reaches a local DB open. That preserves daemon ownership of its
+/// own migration capability even when a client CLI carries the flag.
+pub(super) async fn dispatch_cli_tool_with_migration_authority<F, Fut>(
+    tool_name: &str,
+    args: serde_json::Map<String, serde_json::Value>,
+    global_db: &PathBuf,
+    project_db: Option<&PathBuf>,
+    app_home: &PathBuf,
+    schema_migration: &MigrationAuthority,
     in_process: F,
 ) -> Result<String, Box<dyn std::error::Error>>
 where
@@ -142,7 +174,11 @@ where
     let mut args = args;
     let project_explicit = args.contains_key("project");
     crate::session_identity::stamp_project_explicit_marker(&mut args, project_explicit);
-    let server = crate::cli_client::build_in_process_server(global_db, project_db)?;
+    let server = crate::cli_client::build_in_process_server_with_migration_authority(
+        global_db,
+        project_db,
+        schema_migration.clone(),
+    )?;
     let body = in_process(server, args)
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;

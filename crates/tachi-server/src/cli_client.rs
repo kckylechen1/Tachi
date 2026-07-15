@@ -4,6 +4,8 @@
 
 use std::path::PathBuf;
 
+use memcore::MigrationAuthority;
+
 use crate::MemoryServer;
 
 mod detect;
@@ -42,7 +44,28 @@ pub(crate) fn build_in_process_server(
     global_db: &PathBuf,
     project_db: Option<&PathBuf>,
 ) -> Result<MemoryServer, Box<dyn std::error::Error>> {
-    let server = MemoryServer::new(global_db.clone(), project_db.cloned())?;
+    build_in_process_server_with_migration_authority(
+        global_db,
+        project_db,
+        MigrationAuthority::Deny,
+    )
+}
+
+/// Build a transient CLI server with an explicitly approved migration capability.
+///
+/// The caller owns the capability decision. The `remember` command is the only
+/// pre-serve CLI route that currently forwards the top-level migration flag;
+/// daemon forwarding returns before this constructor is reached.
+pub(crate) fn build_in_process_server_with_migration_authority(
+    global_db: &PathBuf,
+    project_db: Option<&PathBuf>,
+    schema_migration: MigrationAuthority,
+) -> Result<MemoryServer, Box<dyn std::error::Error>> {
+    let server = MemoryServer::new_with_migration_authority(
+        global_db.clone(),
+        project_db.cloned(),
+        schema_migration,
+    )?;
     crate::provider_config::bootstrap_provider_runtime(&server);
     Ok(server)
 }
