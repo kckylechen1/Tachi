@@ -13,13 +13,16 @@ use serde_json::json;
 use std::path::PathBuf;
 use tachi_bootstrap::cli::Commands;
 
-use self::tool_dispatch::{dispatch_cli_tool, print_cli_tool_result};
+use self::tool_dispatch::{
+    dispatch_cli_tool, dispatch_cli_tool_with_migration_authority, print_cli_tool_result,
+};
 
 pub(super) async fn run_cli_command(
     command: Commands,
     db_path: &PathBuf,
     project_db_path: Option<&PathBuf>,
     app_home: &PathBuf,
+    schema_migration: &memcore::MigrationAuthority,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Commands::Serve => Ok(()),
@@ -256,12 +259,13 @@ pub(super) async fn run_cli_command(
                 args.insert("force".into(), json!(true));
             }
 
-            let body = dispatch_cli_tool(
+            let body = dispatch_cli_tool_with_migration_authority(
                 "remember",
                 args,
                 db_path,
                 project_db_path,
                 app_home,
+                schema_migration,
                 |server, args_map| {
                     Box::pin(async move {
                         let params: RememberParams =
