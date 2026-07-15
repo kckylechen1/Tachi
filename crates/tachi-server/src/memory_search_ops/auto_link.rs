@@ -327,23 +327,60 @@ pub(crate) fn has_numeric_mismatch(new_entry: &MemoryEntry, old_entry: &MemoryEn
 /// finalization** (redacted `entry_id` + `total_elapsed`) is unit-tested
 /// through [`finalize_auto_link_receipt`], which this function routes the
 /// accumulated receipt through immediately before emit — reverting either
-/// assignment turns that test red.
+/// assignment *inside that function* turns its tests red.
+///
+/// Three production timers in this function are **not** discriminated by
+/// any unit test, and the paragraph above must not be read as covering
+/// them:
+///
+/// 1. `read_timer` → `receipt.read_elapsed` (the per-search accumulation).
+/// 2. `write_timer` → `receipt.write_elapsed` (the per-edge accumulation).
+/// 3. The `task_start.elapsed()` **argument** at the
+///    [`finalize_auto_link_receipt`] call site. `finalize`'s tests assert
+///    it stamps the total it is *given*; they cannot catch this call site
+///    handing it a `Duration::ZERO` instead.
+///
+/// All three sit inside the `tokio::spawn` below and hit the same wall
+/// described under the emission gap: reaching them from a unit test needs a
+/// live runtime. They are accepted-with-record rather than covered by a
+/// flaky end-to-end test (#1114 precedent).
+///
+/// What bounds them: these three timers *are* what the #1097 S2 workload
+/// measurement reads. A stubbed or dead timer surfaces there as an
+/// all-zero auto-link phase against live read/write work — so S2 is the
+/// discriminator of record for this trio, and confirming they report
+/// non-zero under load is an explicit S2 acceptance item.
 ///
 /// The `tracing::info!` emission point (the block at the foot of this
 /// function) is a **known discrimination gap**: it is not covered by any
-/// unit test. Closing it would require either a new dev-dependency
-/// (`tracing-test` / a capture subscriber) — which this repo does NOT
-/// currently carry (grep across all `Cargo.toml` finds only the production
-/// `tracing-subscriber` in `tachi-server`, nothing in any
-/// `[dev-dependencies]`) — or standing up a real `tokio` runtime to
-/// drive `tokio::spawn` end-to-end. Both are rejected here for the reasons
-/// codified under #1114: a process-global background-worker race in a test
-/// suite is a strictly worse outcome than an honestly-documented gap, and
-/// this leaf (#1097 S1) is observation-only — it must not mint a new
-/// dev-dependency or a flaky runtime test for coverage's sake. The gap
-/// should be revisited when (a) a tracing-capture convention already
-/// exists in the repo, or (b) a dedicated auto-link integration harness
-/// is introduced under a separate task.
+/// unit test.
+///
+/// The blocker is *not* a missing dependency. `tracing-subscriber` is
+/// already a production dependency of this crate (`tachi-server`'s
+/// `Cargo.toml:83`, default features on, so `registry`/`fmt` are
+/// available), and a crate's normal dependencies are usable from its own
+/// `#[cfg(test)]` modules — a capture layer could be built here with zero
+/// new deps.
+///
+/// The actual blocker is the `tokio::spawn` boundary below. The emit runs
+/// on a runtime worker thread, so a scoped, thread-local subscriber
+/// (`tracing::subscriber::with_default`) cannot see it; capturing it means
+/// `set_global_default`, which is process-global and settable once per
+/// process. That turns one test into a serialization point for every other
+/// test in the binary — and driving the spawn end-to-end additionally needs
+/// a live runtime. Both routes are rejected under the #1114 precedent: a
+/// process-global background-worker race in a test suite is a strictly
+/// worse outcome than an honestly-documented gap, and this leaf (#1097 S1)
+/// is observation-only — it must not mint a flaky runtime test for
+/// coverage's sake.
+///
+/// What bounds the risk of accepting it: everything the emit block decides
+/// is already covered upstream by [`finalize_auto_link_receipt`]'s
+/// pure-function tests; the block itself only forwards the finalized
+/// receipt. Revisit when (a) a tracing-capture convention with an agreed
+/// answer to the global-subscriber problem exists in the repo, or (b) a
+/// dedicated auto-link integration harness is introduced under a separate
+/// task.
 pub(crate) fn spawn_auto_linking(
     server: &MemoryServer,
     entry: &MemoryEntry,

@@ -23,7 +23,7 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 #[test]
-fn receipt_is_not_sampled_by_default_and_reports_zero_overhead() {
+fn receipt_is_not_sampled_by_default_and_returns_the_placeholder() {
     let mut conn = setup();
     insert(&mut conn, "x", "rust performance memory safety", &["rust"]);
 
@@ -36,8 +36,11 @@ fn receipt_is_not_sampled_by_default_and_reports_zero_overhead() {
 
     // Default-off posture (#1097 D4): when the caller did not opt in, the
     // receipt is a placeholder. Every phase is None, every layer tag is
-    // NotSampled, total_elapsed is zero. This is the "no Instant::now reads,
-    // no Vec allocations" zero-overhead production state.
+    // NotSampled, total_elapsed is zero. Mechanism on this path: no
+    // `Instant::now` reads, no DB work, no Vec allocations — but the
+    // placeholder struct and the result tuple ARE still constructed, so this
+    // is **not** a zero-overhead claim. The false path's real cost is an S2
+    // measurement acceptance item (#1097).
     assert!(!receipt.sampled, "collect_phase_receipt defaults to false");
     assert_eq!(receipt.total_elapsed, std::time::Duration::ZERO);
     assert!(receipt.candidates.is_none());
@@ -305,6 +308,17 @@ fn receipt_records_fts_or_fallback_group_when_conjunctive_fts_zeros() {
         candidates.fts_groups.iter().any(|g| !g.is_fallback),
         "non-fallback (conjunctive) group must also be recorded"
     );
+    // Discriminator for the fallback's own timer (expansion.rs:292). Group
+    // *presence* alone stays green even if `fallback_start` is replaced by a
+    // hardcoded `Duration::ZERO` — the group would still be pushed. This
+    // asserts the timer actually wraps the `search_fts_raw_match` call. The
+    // fallback issues a real SQLite query, so a live `Instant` (nanosecond
+    // resolution) cannot report exactly zero; a stubbed one always does.
+    assert!(
+        fallbacks[0].elapsed > std::time::Duration::ZERO,
+        "OR-fallback group must carry its own live timer, got {:?}",
+        fallbacks[0].elapsed
+    );
 }
 
 #[test]
@@ -436,7 +450,7 @@ fn receipt_records_mmr_enabled_flag_under_both_states() {
     // individual timers under both states.
     assert!(
         rank_off.get_superseded_ids.candidate_count > 0,
-        "get_superseded_ids candidate count is a free read of the existing fetched-ids vec"
+        "get_superseded_ids candidate count is read off the already-fetched ids vec (no extra DB query)"
     );
     let access_off = rank_off
         .get_access_times
@@ -444,7 +458,7 @@ fn receipt_records_mmr_enabled_flag_under_both_states() {
         .expect("get_access_times must be Some on a normal (non-filtered-to-zero) rank path");
     assert!(
         access_off.candidate_count > 0,
-        "get_access_times candidate count is a free read of the existing filtered-ids vec"
+        "get_access_times candidate count is read off the already-filtered ids vec (no extra DB query)"
     );
 }
 
@@ -569,7 +583,7 @@ fn receipt_keeps_rank_phase_when_candidate_filter_zeros_out() {
     );
     assert!(
         rank.get_superseded_ids.candidate_count > 0,
-        "get_superseded_ids ran on the fetched candidate set (count is a free read of the existing fetched-ids vec)"
+        "get_superseded_ids ran on the fetched candidate set (count is read off the already-fetched ids vec, no extra DB query)"
     );
     assert_eq!(
         rank.ranked_result_count, 0,

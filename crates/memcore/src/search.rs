@@ -300,8 +300,9 @@ pub struct GraphPhaseReceipt {
 #[derive(Debug, Clone)]
 pub struct AccessRecordingPhaseReceipt {
     pub elapsed: Duration,
-    /// Free read of an existing return value: this is
-    /// `record_access_with_updates(...).len()` — the number of existing
+    /// Read off a value the search already had — it adds **no extra DB query**
+    /// (that is the mechanism; it is not a claim that reading it is free):
+    /// this is `record_access_with_updates(...).len()` — the number of existing
     /// memory rows whose `access_count`/`recall_count`/`query_diversity`
     /// were bumped (access.rs:73 returns the map; we read `.len()` on it).
     /// **No new counter logic is added on the access-recording boundary.**

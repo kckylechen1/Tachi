@@ -44,8 +44,9 @@ fn fts_or_fallback_is_enabled_by_default_and_preserves_all_terms_precision() {
         None,
         &default_config,
         // sample = false: existing #708 Gate-1 test does not inspect the
-        // per-phase receipt; passing false keeps it on the zero-overhead
-        // path (tachi#1097 S1).
+        // per-phase receipt; passing false keeps it on the not-sampled path
+        // (no `Instant::now` reads, no group Vec) — that is the mechanism,
+        // not a measured zero-overhead claim (tachi#1097 S1).
         false,
     )
     .unwrap()
