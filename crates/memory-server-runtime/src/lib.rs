@@ -218,12 +218,18 @@ impl ReadStorePool {
     /// busy, this blocks on a release signal — notified once, by whichever
     /// checkout releases a slot next — and rescans; no busy-spin, no
     /// unbounded connections, pool size unchanged.
+    ///
+    /// Delegates to [`Self::checkout`] with `record: false` — this path
+    /// performs NO `Instant::now()` call and constructs no
+    /// [`ReadPoolCheckoutReceipt`] (kckylechen1/tachi#1125 cold review: the
+    /// unsampled path must stay free of the timing instrumentation that
+    /// `with_store_recording` opts into).
     pub fn with_store<T>(
         &self,
         label: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.with_store_recording(label, f).0
+        self.checkout(label, false, f).0
     }
 
     /// Same checkout behavior as [`Self::with_store`], plus a
@@ -231,14 +237,42 @@ impl ReadStorePool {
     /// slot (`pool_checkout_wait`) and how long `f` then ran
     /// (`operation_wall_time`). Exists for the before/after benchmark suite
     /// (see the `bench` test module below); production call sites use the
-    /// plain `with_store`, which pays only the cost of two `Instant::now()`
-    /// calls beyond this.
+    /// plain `with_store`, which — via [`Self::checkout`]'s `record: false`
+    /// — pays none of this timing cost.
     pub fn with_store_recording<T>(
         &self,
         label: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> (Result<T, String>, ReadPoolCheckoutReceipt) {
-        let checkout_started = Instant::now();
+        let (result, receipt) = self.checkout(label, true, f);
+        (
+            result,
+            receipt.expect("checkout(record: true) always returns a receipt"),
+        )
+    }
+
+    /// The single production checkout loop backing both [`Self::with_store`]
+    /// and [`Self::with_store_recording`] (kckylechen1/tachi#1125 cold
+    /// review: a second, timer-free copy of this loop would be a
+    /// pooling/locking divergence bomb — two implementations of the slot
+    /// scan, the `wait_while` park, and the release-signal wakeup that must
+    /// never drift apart). `record` gates ONLY the timing instrumentation,
+    /// using the same `sample.then(Instant::now)` idiom as
+    /// `memcore::search` / `auto_link.rs`: when `record` is `false`, neither
+    /// `Instant::now()` call below runs and no [`ReadPoolCheckoutReceipt`] is
+    /// built, so `with_store`'s production callers pay zero timing cost.
+    /// Every pooling/locking behavior — slot-scan order, the `try_lock`
+    /// availability check, the `wait_while` park, the release-signal
+    /// wakeup, and the `#[cfg(test)]` parked-observer notify — is identical
+    /// regardless of `record`; only the two `Instant` reads and the receipt
+    /// construction are conditional.
+    fn checkout<T>(
+        &self,
+        label: &str,
+        record: bool,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> (Result<T, String>, Option<ReadPoolCheckoutReceipt>) {
+        let checkout_started = record.then(Instant::now);
         loop {
             // Hold `release_signal` while scanning: any other in-flight
             // checkout whose `SlotCheckout` is being dropped (and so wants
@@ -258,20 +292,18 @@ impl ReadStorePool {
                     // self-deadlock on unwind (its Drop takes the same lock).
                     drop(gen_guard);
                     let mut checkout = SlotCheckout::new(candidate, &self.inner);
-                    let pool_checkout_wait = checkout_started.elapsed();
-                    let op_started = Instant::now();
+                    let pool_checkout_wait = checkout_started.map(|started| started.elapsed());
+                    let op_started = record.then(Instant::now);
                     let result = f(checkout
                         .store
                         .as_mut()
                         .expect("SlotCheckout store missing before drop"));
-                    let operation_wall_time = op_started.elapsed();
-                    return (
-                        result,
-                        ReadPoolCheckoutReceipt {
-                            pool_checkout_wait,
-                            operation_wall_time,
-                        },
-                    );
+                    let receipt = op_started.map(|op_started| ReadPoolCheckoutReceipt {
+                        pool_checkout_wait: pool_checkout_wait
+                            .expect("record gates checkout_started and op_started together"),
+                        operation_wall_time: op_started.elapsed(),
+                    });
+                    return (result, receipt);
                 }
             }
             // No idle slot: block until the next release (never spin), then
@@ -283,7 +315,8 @@ impl ReadStorePool {
             // `gen_guard` — a test that already registered an observer is
             // guaranteed this checkout is about to enter `wait_while` the
             // instant it receives this. No effect and no cost outside test
-            // builds.
+            // builds. Fires on both recording and non-recording checkouts —
+            // this is about the wait, not the timer.
             #[cfg(test)]
             self.notify_parked_observers_for_test();
             drop(
@@ -726,9 +759,10 @@ impl DbRuntime {
     /// remains the production path and is unchanged — the receipt is observed
     /// only when a caller opts into this twin (no new cost on the unsampled
     /// path). No pooling/locking semantics change: this delegates to
-    /// `ReadStorePool::with_store_recording`, the same checkout the plain
-    /// variant already runs (the doc on `with_store` notes it pays two
-    /// `Instant::now` calls either way).
+    /// `ReadStorePool::with_store_recording`, which shares its checkout loop
+    /// with `with_store` (`ReadStorePool::checkout`) — the plain variant's
+    /// `Instant::now` calls are gated off entirely (`record: false`), so it
+    /// pays none of this timing cost.
     pub fn with_global_store_read_recording<T>(
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
@@ -1426,11 +1460,14 @@ mod tests {
     /// show a strictly-positive `pool_checkout_wait`.
     ///
     /// **What this discriminates:** the `Instant::now` that seeds
-    /// `checkout_started` inside `with_store_recording` (the timer the new
-    /// `with_global_store_read_recording` delegates to). Stubbing that timer to
-    /// `Duration::ZERO` (e.g. `let checkout_started = Instant::now(); ... let
-    /// pool_checkout_wait = checkout_started.elapsed();` → `Duration::ZERO`)
-    /// turns the final assertion red even though B genuinely waited — that is
+    /// `checkout_started` inside `ReadStorePool::checkout` (the shared
+    /// checkout loop `with_store_recording` — and so
+    /// `with_global_store_read_recording` — delegates to with `record: true`).
+    /// Stubbing that timer to `Duration::ZERO` (e.g.
+    /// `let checkout_started = record.then(Instant::now); ... let
+    /// pool_checkout_wait = checkout_started.map(|s| s.elapsed());` →
+    /// `Duration::ZERO`) turns the final assertion red even though B genuinely
+    /// waited — that is
     /// exactly the mutation the build seat re-checks. `>= ZERO` is
     /// deliberately NOT used (it is a tautology and would not catch the
     /// mutation); the parked-observer handshake is what makes the wait a proven
