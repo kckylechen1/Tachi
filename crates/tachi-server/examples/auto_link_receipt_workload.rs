@@ -25,8 +25,8 @@
 //!   * `spawn_auto_linking`            — `pub(crate) fn`     at `src/memory_search_ops/auto_link.rs:365`
 //!   * `run_auto_linking`              — `pub(crate) fn`     at `src/memory_search_ops/auto_link.rs:454`
 //!   * `AutoLinkReceipt`               — `pub struct` at `auto_link.rs:70`, BUT its parent module
-//!                                       `memory_search_ops` is a private `mod` (`src/lib.rs:133`),
-//!                                       so the type is not nameable from outside the crate.
+//!     `memory_search_ops` is a private `mod` (`src/lib.rs:133`), so the type
+//!     is not nameable from outside the crate.
 //!   * `Parameters` / `SaveMemoryParams`— live in `tool_params`, a private `mod` (`src/lib.rs:163`).
 //!
 //! The only `pub` items `tachi_server` exposes are `run_cli`, `ensure_tls_provider`,
@@ -43,8 +43,8 @@
 //!   1. Widen the allowlist so an existing file may change: promote the
 //!      surface above from `pub(crate)` to `pub` (and make `memory_search_ops`
 //!      + `server_state` + `tools` + `server_methods` + `tool_params` at least
-//!      `pub` so the paths resolve). This leaks the internal server API, which
-//!      is presumably why it is `pub(crate)` today.
+//!      `pub` so the paths resolve). This leaks the internal server API,
+//!      which is presumably why it is `pub(crate)` today.
 //!   2. Add a single focused `pub` benchmark entrypoint on `MemoryServer`
 //!      (e.g. a `pub fn run_auto_link_workload(...)` that the example calls).
 //!      Smaller surface leak, but still an existing-file edit outside the
