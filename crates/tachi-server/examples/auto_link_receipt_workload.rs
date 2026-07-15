@@ -43,8 +43,8 @@
 //!   1. Widen the allowlist so an existing file may change: promote the
 //!      surface above from `pub(crate)` to `pub` (and make `memory_search_ops`
 //!      + `server_state` + `tools` + `server_methods` + `tool_params` at least
-//!      `pub` so the paths resolve). This leaks the internal server API,
-//!      which is presumably why it is `pub(crate)` today.
+//!        `pub` so the paths resolve). This leaks the internal server API,
+//!        which is presumably why it is `pub(crate)` today.
 //!   2. Add a single focused `pub` benchmark entrypoint on `MemoryServer`
 //!      (e.g. a `pub fn run_auto_link_workload(...)` that the example calls).
 //!      Smaller surface leak, but still an existing-file edit outside the
