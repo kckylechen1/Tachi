@@ -17,6 +17,7 @@ mod golden_corpus;
 mod graph;
 mod noise;
 mod ops_audit_corpus;
+mod phase_receipts;
 mod supersession;
 mod symbolic;
 

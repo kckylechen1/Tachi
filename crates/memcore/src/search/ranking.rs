@@ -2,6 +2,7 @@
 
 use rusqlite::Connection;
 use std::collections::HashMap;
+use std::time::Instant;
 
 use crate::{
     db::{get_access_times, get_superseded_ids},
@@ -14,7 +15,7 @@ use super::{
     decay_policy,
     expansion::symbolic_query_with_expansion,
     filtering::{is_search_noise_entry, newest_by_shared_entity, quality_multiplier, valid_at},
-    recall_config, resolve_weights, SearchOptions,
+    recall_config, resolve_weights, ChannelPhaseReceipt, RankPhaseReceipt, SearchOptions,
 };
 
 pub(super) struct CandidateRanking<'a> {
@@ -31,7 +32,9 @@ pub(super) struct CandidateRanking<'a> {
 pub(super) fn rank_candidate_entries(
     conn: &Connection,
     ranking: CandidateRanking<'_>,
-) -> Result<Vec<SearchResult>, MemoryError> {
+    sample: bool,
+) -> Result<(Vec<SearchResult>, Option<RankPhaseReceipt>), MemoryError> {
+    let phase_start = sample.then(Instant::now);
     let CandidateRanking {
         query,
         opts,
@@ -44,7 +47,13 @@ pub(super) fn rank_candidate_entries(
     } = ranking;
     let symbolic_scores = symbolic_scores(query, &entries_map);
     let fetched_ids_vec: Vec<String> = entries_map.keys().cloned().collect();
+    // Per #1097 D3: `get_superseded_ids` (ranking.rs:47) is one of two DB I/O
+    // hot spots inside `rank_candidate_entries`. Time it on its own so a
+    // "rank is slow" report can distinguish DB reads from scoring math.
+    let superseded_start = sample.then(Instant::now);
+    let fetched_ids_count = fetched_ids_vec.len();
     let superseded_ids = get_superseded_ids(conn, &fetched_ids_vec)?;
+    let superseded_elapsed = superseded_start.map(|s| s.elapsed());
 
     let entries_ref: HashMap<String, &MemoryEntry> = entries_map
         .iter()
@@ -75,11 +84,17 @@ pub(super) fn rank_candidate_entries(
         .collect();
 
     if entries_ref.is_empty() {
-        return Ok(vec![]);
+        // Honest "ranking never produced a result set" — the receipt stays
+        // `None` at the call site rather than reporting zero elapsed.
+        return Ok((vec![], None));
     }
 
     let candidate_ids_vec: Vec<String> = entries_ref.keys().cloned().collect();
+    // Per #1097 D3: `get_access_times` (ranking.rs:82) is the second DB I/O.
+    let access_start = sample.then(Instant::now);
+    let access_candidate_count = candidate_ids_vec.len();
     let access_times = get_access_times(conn, &candidate_ids_vec)?;
+    let access_elapsed = access_start.map(|s| s.elapsed());
     let weights = resolve_weights(opts);
     let mut scores = crate::scorer::hybrid_score_with_policy(
         &entries_ref,
@@ -140,6 +155,12 @@ pub(super) fn rank_candidate_entries(
         .collect();
     ranked.sort_by(|a, b| crate::scorer::cmp_recall_rank((a.1, a.2, a.0), (b.1, b.2, b.0)));
 
+    // #1097 D3: MMR is NOT separately timed — splitting it out would require
+    // restructuring this function (scoring logic), a quality change out of
+    // scope for an instrumentation leaf. The on/off state is recorded via
+    // `opts.mmr_threshold.is_some()` so a benchmark can compare the same
+    // query both ways without a per-MMR timer.
+    let mmr_enabled = opts.mmr_threshold.is_some();
     let ranked_ids: Vec<String> = if let Some(threshold) = opts.mmr_threshold {
         apply_mmr_diversity(&ranked, &entries_map, threshold, opts.top_k)
     } else {
@@ -148,7 +169,7 @@ pub(super) fn rank_candidate_entries(
     drop(entries_ref);
 
     let mut entries_map = entries_map;
-    Ok(ranked_ids
+    let results: Vec<SearchResult> = ranked_ids
         .iter()
         .take(opts.top_k)
         .filter_map(|id| {
@@ -156,7 +177,22 @@ pub(super) fn rank_candidate_entries(
             let score = scores.get(id)?.clone();
             Some(SearchResult { entry, score })
         })
-        .collect())
+        .collect();
+    let ranked_result_count = results.len();
+    let receipt = phase_start.map(|s| RankPhaseReceipt {
+        total_elapsed: s.elapsed(),
+        get_superseded_ids: ChannelPhaseReceipt {
+            elapsed: superseded_elapsed.unwrap_or_default(),
+            candidate_count: fetched_ids_count,
+        },
+        get_access_times: ChannelPhaseReceipt {
+            elapsed: access_elapsed.unwrap_or_default(),
+            candidate_count: access_candidate_count,
+        },
+        mmr_enabled,
+        ranked_result_count,
+    });
+    Ok((results, receipt))
 }
 
 fn symbolic_scores(

@@ -43,6 +43,10 @@ fn fts_or_fallback_is_enabled_by_default_and_preserves_all_terms_precision() {
         None,
         None,
         &default_config,
+        // sample = false: existing #708 Gate-1 test does not inspect the
+        // per-phase receipt; passing false keeps it on the zero-overhead
+        // path (tachi#1097 S1).
+        false,
     )
     .unwrap();
     assert!(
@@ -64,6 +68,7 @@ fn fts_or_fallback_is_enabled_by_default_and_preserves_all_terms_precision() {
         None,
         None,
         &tuned_config,
+        false,
     )
     .unwrap();
     let all_terms = tuned_scores
@@ -119,6 +124,7 @@ fn fts_or_fallback_cjk_phrase_recovers_when_ascii_term_is_missing() {
         None,
         None,
         &RecallConfig::default(),
+        false,
     )
     .unwrap();
     let target = scores

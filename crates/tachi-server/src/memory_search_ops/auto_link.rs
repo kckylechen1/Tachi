@@ -5,9 +5,75 @@ use crate::{DbScope, MemoryServer};
 use memcore::{MemoryEntry, MemoryStore};
 use serde_json::json;
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 const REINFORCEMENT_MIN_SIMILARITY: f64 = 0.75;
 const REINFORCEMENT_DUPLICATE_SIMILARITY: f64 = 0.95;
+
+// ---------------------------------------------------------------------------
+// tachi#1097 PERF-T3 S1 — Auto-link phase-attribution receipt.
+//
+// Pure observation: the four skip points (self-id :143, training-seed :146,
+// no-shared-entities :153, neither-supersede-nor-reinforce :175) are NOT
+// changed — we only count them. The edge write at :210-234 is NOT changed —
+// we only time it. Read time = per-entity `with_*_store_read` searches
+// (auto_link.rs:136/:138); write time = per-edge `with_*_store` writes
+// (:231/:233). No new DB I/O, no quality logic touched.
+//
+// Per #1097 D2 this receipt carries ONLY the existing `entry.id` (the save
+// response's UUID, captured into the spawned closure at auto_link.rs:110 —
+// no query/trace id is minted, none exists in the codebase). Per D5 it
+// contains no entity names (entities are the search queries here, so naming
+// them would log query text), no memory content, no DB path.
+//
+// The receipt is emitted from INSIDE the spawned task because the save
+// handler returns `"auto_link": "pending"` (handler.rs:261-262) without
+// awaiting it — the closure is the only place the finished counts exist.
+// ---------------------------------------------------------------------------
+
+/// Per-call receipt for one `spawn_auto_linking` invocation, emitted via
+/// `tracing::info!` from inside the spawned task. See the module-level
+/// honesty rules above for what is and is not populated.
+#[derive(Debug, Clone)]
+pub struct AutoLinkReceipt {
+    /// The save-generated UUID of the entry whose entities drove this
+    /// auto-link pass. Already in the save response (handler.rs:47-49 /
+    /// :261-262), contains no content; carried here per #1097 D2 so a log
+    /// reader can pair this receipt with its save response without minting
+    /// a new trace/operation id (none exists codebase-wide).
+    pub entry_id: String,
+    /// `entry.entities.iter().cloned().collect::<HashSet>().len()` —
+    /// deduplicated entity count driving the per-entity search loop.
+    pub entity_count: usize,
+    /// Number of per-entity searches actually executed. Equals
+    /// `entity_count` on the current code path (one search per entity) but
+    /// counted separately so future short-circuit logic does not silently
+    /// mis-state the executed work.
+    pub searches_executed: usize,
+    /// Number of search results examined across all per-entity searches
+    /// (the inner `for result in results` loop at auto_link.rs:142).
+    pub candidates_examined: usize,
+    /// Number of edges for which `save_edge_action` was actually invoked
+    /// (auto_link.rs:230-234) — every write attempt.
+    pub edges_attempted: usize,
+    /// Number of edge writes that returned `Ok(())`.
+    pub edges_written: usize,
+    /// Skip-counter breakdown covering the four `continue` points in the
+    /// per-hit loop (auto_link.rs:143/146/153/175). Their sum plus
+    /// `edges_attempted` equals `candidates_examined`.
+    pub skipped_self_id: usize,
+    pub skipped_training_seed: usize,
+    pub skipped_no_shared_entities: usize,
+    pub skipped_no_supersede_or_reinforce: usize,
+    /// Wall time inside per-entity `with_*_store_read` search calls
+    /// (auto_link.rs:136/:138).
+    pub read_elapsed: Duration,
+    /// Wall time inside per-edge `with_*_store` write calls
+    /// (auto_link.rs:231/:233).
+    pub write_elapsed: Duration,
+    /// Wall time of the whole spawned task end-to-end.
+    pub total_elapsed: Duration,
+}
 
 pub(crate) fn path_root(path: &str) -> &str {
     path.trim_matches('/').split('/').next().unwrap_or("")
@@ -115,6 +181,20 @@ pub(crate) fn spawn_auto_linking(
     let auto_link_entity_list: Vec<String> = auto_link_entities.iter().cloned().collect();
 
     tokio::spawn(async move {
+        // #1097 S1 phase-attribution counters (pure observation — no
+        // behavioral change to the four skip points or the edge write).
+        let mut searches_executed = 0_usize;
+        let mut candidates_examined = 0_usize;
+        let mut edges_attempted = 0_usize;
+        let mut edges_written = 0_usize;
+        let mut skipped_self_id = 0_usize;
+        let mut skipped_training_seed = 0_usize;
+        let mut skipped_no_shared_entities = 0_usize;
+        let mut skipped_no_supersede_or_reinforce = 0_usize;
+        let mut read_elapsed = Duration::ZERO;
+        let mut write_elapsed = Duration::ZERO;
+        let task_start = Instant::now();
+
         for entity in &auto_link_entity_list {
             let query = entity.clone();
             let search_action = |store: &mut MemoryStore| {
@@ -132,18 +212,24 @@ pub(crate) fn spawn_auto_linking(
                     .map_err(|e| format!("{}", e))
             };
 
+            let read_timer = Instant::now();
             let search_res = if let Some(ref p) = named_project {
                 auto_link_server.with_named_project_store_read(p, search_action)
             } else {
                 auto_link_server.with_store_for_scope_read(target_db, search_action)
             };
+            read_elapsed += read_timer.elapsed();
+            searches_executed += 1;
 
             if let Ok(results) = search_res {
                 for result in results {
+                    candidates_examined += 1;
                     if result.entry.id == auto_link_id {
+                        skipped_self_id += 1;
                         continue;
                     }
                     if is_training_seed(&result.entry) {
+                        skipped_training_seed += 1;
                         continue;
                     }
                     // Unique shared entities only — duplicate entity labels must not
@@ -151,6 +237,7 @@ pub(crate) fn spawn_auto_linking(
                     let shared =
                         unique_shared_entities(&auto_link_entity_list, &result.entry.entities);
                     if shared.is_empty() {
+                        skipped_no_shared_entities += 1;
                         continue;
                     }
 
@@ -179,6 +266,7 @@ pub(crate) fn spawn_auto_linking(
                         // and isn't worth a persisted fog edge — and the memcore
                         // edge-write choke point (relation_ontology) would reject
                         // `related_to` on new writes anyway (item 1).
+                        skipped_no_supersede_or_reinforce += 1;
                         continue;
                     }
                     let relation = if supersedes {
@@ -227,14 +315,60 @@ pub(crate) fn spawn_auto_linking(
                         }
                         Ok(())
                     };
-                    let _ = if let Some(ref p) = named_project {
+                    edges_attempted += 1;
+                    let write_timer = Instant::now();
+                    let write_res = if let Some(ref p) = named_project {
                         auto_link_server.with_named_project_store(p, save_edge_action)
                     } else {
                         auto_link_server.with_store_for_scope(target_db, save_edge_action)
                     };
+                    write_elapsed += write_timer.elapsed();
+                    if write_res.is_ok() {
+                        edges_written += 1;
+                    }
                 }
             }
         }
+
+        // Emit the receipt from inside the spawned task — the save handler
+        // returned `"auto_link": "pending"` (handler.rs:261-262) long before
+        // this point, so this closure is the only place the finished counts
+        // exist. Fields are whitelisted per #1097 D5: no entity names
+        // (entities ARE the search queries here), no memory content, no DB
+        // path. The `auto_link_id` is the save-generated UUID already in the
+        // save response, so a log reader pairs receipt↔save without minting
+        // a new trace id (none exists codebase-wide, per D2).
+        let receipt = AutoLinkReceipt {
+            entry_id: auto_link_id.clone(),
+            entity_count: auto_link_entity_list.len(),
+            searches_executed,
+            candidates_examined,
+            edges_attempted,
+            edges_written,
+            skipped_self_id,
+            skipped_training_seed,
+            skipped_no_shared_entities,
+            skipped_no_supersede_or_reinforce,
+            read_elapsed,
+            write_elapsed,
+            total_elapsed: task_start.elapsed(),
+        };
+        tracing::info!(
+            entry_id = %receipt.entry_id,
+            entity_count = receipt.entity_count,
+            searches_executed = receipt.searches_executed,
+            candidates_examined = receipt.candidates_examined,
+            edges_attempted = receipt.edges_attempted,
+            edges_written = receipt.edges_written,
+            skipped_self_id = receipt.skipped_self_id,
+            skipped_training_seed = receipt.skipped_training_seed,
+            skipped_no_shared_entities = receipt.skipped_no_shared_entities,
+            skipped_no_supersede_or_reinforce = receipt.skipped_no_supersede_or_reinforce,
+            read_elapsed_us = receipt.read_elapsed.as_micros() as u64,
+            write_elapsed_us = receipt.write_elapsed.as_micros() as u64,
+            total_elapsed_us = receipt.total_elapsed.as_micros() as u64,
+            "auto_link phase receipt (tachi#1097 S1)"
+        );
     });
 }
 

@@ -34,8 +34,15 @@ fn collect_candidates_never_surfaces_an_anchor_even_on_exact_text_match() {
         ..Default::default()
     };
     let as_of_utc: Option<String> = None;
-    let candidates =
-        collect_candidates(&conn, "issue 773 tachi", &opts, false, as_of_utc.as_deref()).unwrap();
+    let (candidates, _) = collect_candidates(
+        &conn,
+        "issue 773 tachi",
+        &opts,
+        false,
+        as_of_utc.as_deref(),
+        false,
+    )
+    .unwrap();
 
     assert!(
         !candidates.candidate_ids.contains(&anchor_id),

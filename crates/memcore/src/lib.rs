@@ -111,8 +111,10 @@ pub use scorer::{
     DefaultDecayPolicy, HybridWeights, PrecisionMatcher, DEFAULT_DECAY_POLICY,
 };
 pub use search::{
-    apply_blend_relevance, hybrid_search, merge_rerank_order_with_hybrid_floor, SearchOptions,
-    HYBRID_HEAD_FRACTION,
+    apply_blend_relevance, hybrid_search, hybrid_search_with_receipt,
+    merge_rerank_order_with_hybrid_floor, AccessRecordingPhaseReceipt, CandidatePhaseReceipt,
+    ChannelPhaseReceipt, FetchPhaseReceipt, FtsExpansionGroupReceipt, GraphPhaseReceipt,
+    LayerAvailability, RankPhaseReceipt, SearchOptions, SearchPhaseReceipt, HYBRID_HEAD_FRACTION,
 };
 pub use types::{
     AuthorityLevel, ContinuityCandidate, ContinuityCandidateBatch, ContinuityMetrics,
