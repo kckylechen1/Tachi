@@ -323,29 +323,46 @@ pub(crate) fn has_numeric_mismatch(new_entry: &MemoryEntry, old_entry: &MemoryEn
 /// counts — [`run_auto_linking`] produces the [`AutoLinkReceipt`] and this
 /// function emits it via `tracing::info!` from inside the spawned task.
 ///
-/// # Measured vs. unmeasured (tachi#1097 r4 codex review ③/④)
+/// # Measured vs. unmeasured (tachi#1097 r4/r5 codex review ③/④)
 ///
-/// Every value the receipt carries is asserted by a test:
+/// What is asserted, precisely, so this section does not overstate its own
+/// coverage (#1097 r5 codex review ⑤ flagged an earlier "every value...is
+/// asserted" phrasing here as overstated — it conflated "the mutation logic
+/// is unit-tested in isolation" with "every field's live-path value is
+/// asserted end-to-end", which are not the same claim):
 ///
-/// * Counter semantics — [`AutoLinkReceipt::apply_search_outcome`] /
-///   [`AutoLinkReceipt::apply_edge_outcome`] (the attempts-vs-executions and
-///   insert-landed-vs-full-success contracts).
+/// * Counter *mutation semantics* — [`AutoLinkReceipt::apply_search_outcome`]
+///   / [`AutoLinkReceipt::apply_edge_outcome`] (the attempts-vs-executions and
+///   insert-landed-vs-full-success contracts) — are unit-tested in isolation
+///   against a bare receipt, independent of any store or runtime.
 /// * Post-loop finalization (redacted `entry_id`, `total_elapsed` stamping) —
-///   [`finalize_auto_link_receipt`].
+///   [`finalize_auto_link_receipt`] — is unit-tested the same way.
 /// * The three production timers (`read_elapsed`, `write_elapsed`,
-///   `total_elapsed`) and the counters against a live store —
+///   `total_elapsed`), plus `searches_executed`, `edges_attempted`,
+///   `edges_written`, `entry_id` and `entity_count`, are asserted
+///   END-TO-END against a live store by
 ///   `run_auto_linking_reports_live_read_write_and_total_timers`, which calls
-///   [`run_auto_linking`] directly. Rounds r2/r3 of #1097 filed these three as
-///   an accepted gap, on the premise that the `tokio::spawn` boundary put them
-///   out of a test's reach and that the S2 workload measurement would catch a
-///   dead one. Both halves were wrong (a prose promise is not a mechanism, and
-///   a single dead timer does not produce an all-zero phase); lifting the task
-///   body into [`run_auto_linking`] removes the boundary, so the timers are
-///   asserted rather than documented.
+///   [`run_auto_linking`] directly. Rounds r2/r3 of #1097 filed the three
+///   timers as an accepted gap, on the premise that the `tokio::spawn`
+///   boundary put them out of a test's reach and that the S2 workload
+///   measurement would catch a dead one. Both halves were wrong (a prose
+///   promise is not a mechanism, and a single dead timer does not produce an
+///   all-zero phase); lifting the task body into [`run_auto_linking`] removes
+///   the boundary, so the timers are asserted rather than documented.
+/// * `candidates_examined`, `post_write_failures`, and the four
+///   `skipped_*` counters are NOT individually asserted to a specific value
+///   anywhere in this module's tests — their production increments run on
+///   every call (the loop that ticks them is not conditional on anything
+///   this leaf added), and other auto-link tests
+///   (`save_policy/auto_link.rs`) exercise paths that would move them, but no
+///   test here pins a value on any of the four. That is a real, narrower gap
+///   than the three timers were; it is stated rather than folded into a
+///   blanket "asserted" claim.
 ///
-/// The `tracing::info!` call below is the one step no test asserts. That is a
-/// value judgement, not a blocker, and two things should be stated plainly
-/// rather than left implied:
+/// The `tracing::info!` call below is the one step no test asserts at all —
+/// not the counters, not the timers, not the redaction. That is a value
+/// judgement, not a blocker, and two things should be stated plainly rather
+/// than left implied:
 ///
 /// * Capturing it is technically available — contrary to what r2/r3 asserted
 ///   here. `tracing-subscriber` is already a production dependency of this
@@ -354,9 +371,10 @@ pub(crate) fn has_numeric_mismatch(new_entry: &MemoryEntry, old_entry: &MemoryEn
 ///   `tracing::instrument::WithSubscriber::with_current_subscriber`
 ///   (tracing-0.1.44 `instrument.rs:136`/`:228`, whose own doc example is
 ///   `tokio::spawn(future.with_current_subscriber())`). Neither a new
-///   dependency nor `set_global_default` would be required. What is left
-///   unasserted is only the field-naming: [`run_auto_linking`] hands this
-///   block an already-finalized receipt whose every field is covered above.
+///   dependency nor `set_global_default` would be required. What capturing it
+///   would add is confirmation that the block below reads each field off the
+///   `receipt` it was handed (rather than, say, a stale local) — a
+///   plumbing check, not a check on any value new to this block.
 /// * The log line renders each timer through `as_micros() as u64`, so a phase
 ///   whose real duration is under one microsecond prints as `0`. The tests
 ///   assert the `Duration` fields on the receipt, not these rendered integers
@@ -1115,11 +1133,11 @@ mod tests {
     ///
     /// On the `> Duration::ZERO` form: `Instant` is only documented as
     /// nondecreasing, so "executed ⟹ elapsed > 0" is NOT an API guarantee and
-    /// is not claimed as one. It is a practical assertion. Each of these three
-    /// spans brackets real SQLite work — an FTS search, and an edge INSERT
-    /// plus a supersede UPDATE — which takes microseconds, while `Instant`'s
-    /// resolution on the platforms this suite runs on is nanoseconds. A zero
-    /// here therefore indicates a timer that never started, not a run that was
+    /// is not claimed as one. It is a practical assertion, and it holds not
+    /// because a specific duration is measured or claimed here, but because
+    /// each of these three spans brackets real SQLite work — an FTS search,
+    /// and an edge INSERT plus a supersede UPDATE — not a no-op. A zero
+    /// therefore indicates a timer that never started, not a run that was
     /// too fast to measure. Absolute upper bounds are deliberately not
     /// asserted (they would be flaky); `>= ZERO` is deliberately not used (it
     /// is a tautology).

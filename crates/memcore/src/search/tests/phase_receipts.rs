@@ -317,10 +317,10 @@ fn receipt_records_fts_or_fallback_group_when_conjunctive_fts_zeros() {
     // `receipt_sampled_timers_actually_ran_and_subphases_fit_under_total`):
     // this is a practical assertion, not an API guarantee. `Instant` is
     // documented only as nondecreasing, so `elapsed()` returning zero is
-    // permitted. The assertion holds because the fallback brackets a real
-    // SQLite query — microseconds of work — while `Instant`'s resolution on
-    // the platforms this suite runs on is nanoseconds. A zero here indicates a
-    // timer that never started, not a run too fast to measure.
+    // permitted. The assertion holds not because a specific duration is
+    // measured or claimed here, but because the span brackets real SQLite
+    // I/O (a query, not a no-op) — so a zero indicates a timer that never
+    // started, not a run too fast to measure.
     assert!(
         fallbacks[0].elapsed > std::time::Duration::ZERO,
         "OR-fallback group must carry its own live timer, got {:?}",
@@ -663,29 +663,41 @@ fn receipt_keeps_rank_phase_when_candidate_filter_zeros_out() {
 // Reverting ANY present timer point to ZERO turns the matching assertion red.
 // `>= ZERO` (a tautology) is deliberately NOT used.
 //
-// #1097 r4 codex review ② — what the `> ZERO` form does and does not claim.
+// #1097 r5 codex review ③ (correcting r4 codex review ②) — what the `> ZERO`
+// form does and does not claim.
+//
 // It is NOT an API guarantee that an executed phase has `elapsed > 0`:
-// `Instant` is documented only as *nondecreasing*, and `elapsed()` returning
-// `Duration::ZERO` is permitted. (Earlier rounds asserted the guarantee as
-// fact; that was wrong, and the assertions are kept on different grounds.)
-// These are *practical* assertions, resting on two facts about the platforms
-// this suite runs on (macOS/Linux, where `Instant` reads a nanosecond-
-// resolution monotonic clock):
+// `Instant` is documented only as *nondecreasing*, not strictly increasing,
+// so `elapsed()` returning `Duration::ZERO` is permitted even on a span that
+// genuinely executed. (An earlier round asserted the guarantee as fact; the
+// round after that called the mistake out correctly, then made a version of
+// the same mistake in the other direction — see the second bullet.)
 //
-//   * Most timers below bracket a real SQLite query — microseconds of work,
-//     three-plus orders of magnitude above the clock's resolution.
-//   * The one exception is `graph_expansion` when `graph_expand_hops == 0`,
-//     which brackets only an early return. That is nanoseconds, not
-//     microseconds — but the span still contains the *second* `Instant::now()`
-//     read, and two successive reads of a nanosecond-resolution clock do not
-//     return the same value. The margin is far thinner than the others'; it is
-//     called out rather than papered over.
+// These are *practical* assertions, and they are sound only where the
+// bracketed span contains real work:
 //
-// So a zero indicates a timer that never started (or one whose
-// `Instant::now`/`elapsed()` was reverted to a literal `Duration::ZERO`),
-// not a run too fast to measure. That inference is what makes these useful
-// discriminators. It is not a promise the standard library makes, and it is
-// not claimed as one.
+//   * Every `> ZERO` assertion below brackets a span that does real SQLite
+//     I/O — a query, an INSERT, or an UPDATE. How long that work takes is not
+//     measured or bounded here, but it is real database work, not a no-op —
+//     so on these spans a zero indicates a timer that never started (or one
+//     whose `Instant::now`/`elapsed()` call was reverted to a literal
+//     `Duration::ZERO`), not a run too fast to measure.
+//   * `graph_expansion` on the DISABLED path (`graph_expand_hops == 0`) is
+//     the opposite case, and is handled differently below: `phase_start`
+//     (graph_expansion.rs:26) is immediately followed by the early return at
+//     :31-38 — two adjacent `Instant::now()` reads with NO work between them.
+//     `Instant`'s nondecreasing-only guarantee means `elapsed() > ZERO` is NOT
+//     safe to assert there; it can legitimately read exactly zero with no
+//     timer bug at all. A prior revision of this file asserted it anyway,
+//     reasoning that "two successive reads... do not return the same value"
+//     — that is not a guarantee `Instant` makes, and the assertion has been
+//     REMOVED (see the disabled-graph section below). The same call site's
+//     timer is instead discriminated on the graph-ENABLED path, where the
+//     span contains a real `graph_expand` DB call — see
+//     `graph_timer_reports_live_elapsed_on_the_enabled_path`.
+//
+// `>= ZERO` is deliberately not used anywhere below (it is a tautology);
+// absolute upper bounds are deliberately not used either (flaky).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -823,25 +835,119 @@ fn receipt_sampled_timers_actually_ran_and_subphases_fit_under_total() {
         rank_access.elapsed > std::time::Duration::ZERO,
         "rank.get_access_times.elapsed must be > ZERO (rank access_start timer wired)"
     );
-    // graph_expansion.elapsed — graph_expansion.rs:26 phase_start. With
-    // `graph_expand_hops == 0` (enabled=false) the function is invoked and
-    // takes the early-return branch, so this span brackets nanoseconds, not
-    // the microseconds the DB-backed timers above do — it is the thin-margin
-    // case flagged in the module note. It still holds because the span
-    // contains the second `Instant::now()` read; reverting that
-    // `Instant::now`/`elapsed` to ZERO reds this.
+    // graph_expansion — graph_expansion.rs:26 phase_start, :31-38 early
+    // return. With `graph_expand_hops == 0` (enabled=false, the default here)
+    // the span brackets ONLY the early return: two adjacent `Instant::now()`
+    // reads with no work between them. `Instant` is documented only as
+    // nondecreasing, not strictly increasing, so `elapsed() > ZERO` is NOT
+    // safe to assert on this path — it can legitimately read exactly zero
+    // with no timer bug at all (#1097 r5 codex review ③: a prior revision of
+    // this test asserted it anyway and argued the flake away instead of
+    // removing it — see the module note above for the corrected reasoning).
+    // What IS honestly assertable here, and asserted below, is that the phase
+    // ran and was recorded as disabled rather than silently dropped. The
+    // SAME call site's timer IS discriminated — on the graph-ENABLED path,
+    // where the span contains a real DB-backed `graph_expand` call — by
+    // `graph_timer_reports_live_elapsed_on_the_enabled_path` below.
     let graph = receipt
         .graph_expansion
         .as_ref()
         .expect("graph_expansion function is always invoked when sampled");
     assert!(
-        graph.elapsed > std::time::Duration::ZERO,
-        "graph_expansion.elapsed must be > ZERO even when disabled (phase_start timer wired)"
+        !graph.enabled,
+        "graph_expand_hops defaults to 0 in this scenario → enabled=false"
     );
     // access_recording.elapsed — search.rs access_start
     // (`sample.then(Instant::now)` inside the `if opts.record_access` block).
     assert!(
         access.elapsed > std::time::Duration::ZERO,
         "access_recording.elapsed must be > ZERO (access_start timer wired)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #1097 r5 codex review ③ — the `graph_expansion` timer, discriminated on the
+// only path where `> ZERO` is sound: graph ENABLED
+// (`graph_expand_hops > 0`), where `phase_start`/`s.elapsed()`
+// (graph_expansion.rs:26/:128) bracket a real DB-backed `graph_expand` call.
+// The disabled-path assertion above this test was removed for the reason
+// documented at its call site and in the module note on
+// `receipt_sampled_timers_actually_ran_and_subphases_fit_under_total` — this
+// test is where that timer's discrimination now lives instead.
+//
+// Fixture shape reused, per #1097 D7, from the existing graph-enabled
+// fixture (tests/graph.rs:4-70 / :80-158) rather than minting a parallel
+// corpus: a seed entry with one graph-only neighbor reachable via a
+// `supports` edge.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn graph_timer_reports_live_elapsed_on_the_enabled_path() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "seed",
+        "TrendLock durable decision rule",
+        &["trendlock"],
+    );
+    insert(
+        &mut conn,
+        "support",
+        "Support note only reachable by graph",
+        &["support"],
+    );
+    add_edge(
+        &conn,
+        &MemoryEdge {
+            source_id: "seed".to_string(),
+            target_id: "support".to_string(),
+            relation: "supports".to_string(),
+            weight: 1.0,
+            metadata: json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        },
+    )
+    .unwrap();
+
+    let opts = SearchOptions {
+        top_k: 1,
+        record_access: false,
+        graph_expand_hops: 1,
+        collect_phase_receipt: true,
+        ..Default::default()
+    };
+    let (results, receipt) = hybrid_search_with_receipt(&conn, "TrendLock", &opts).unwrap();
+
+    // Preconditions, asserted before the timer: a fixture that stopped
+    // expanding would report itself as a broken fixture rather than
+    // masquerading as a dead timer.
+    assert!(
+        results.iter().any(|r| r.entry.id == "support"),
+        "graph expansion must surface the support neighbor for this timer to \
+         bracket real work"
+    );
+    let graph = receipt
+        .graph_expansion
+        .as_ref()
+        .expect("graph_expansion phase ran");
+    assert!(graph.enabled, "graph_expand_hops=1 → enabled=true");
+    assert_eq!(
+        graph.expanded_count, 1,
+        "exactly the support neighbor should be expanded"
+    );
+
+    // The discriminator: on this path `phase_start` brackets a real
+    // `graph_expand` DB call (plus `get_superseded_ids` when
+    // `include_superseded` is false), not an early return, so a zero here
+    // means the `phase_start`/`s.elapsed()` timer was never wired — stubbing
+    // either call site to a literal `Duration::ZERO` (or dropping
+    // `phase_start` entirely) turns this red.
+    assert!(
+        graph.elapsed > std::time::Duration::ZERO,
+        "graph_expansion.elapsed must be > ZERO on the enabled path \
+         (phase_start timer wired around a real graph_expand DB call), got {:?}",
+        graph.elapsed
     );
 }
