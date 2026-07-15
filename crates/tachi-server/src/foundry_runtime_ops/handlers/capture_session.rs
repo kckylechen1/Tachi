@@ -950,16 +950,12 @@ mod affinity_tests {
     }
 
     // #1114 codex round-2 item 4①/③ KNOWN LIMITATION: NOT reproduced as an
-    // integration test in this module — see `continuity_ops::storage::
-    // tests`' own note (right above its equivalent, removed test) for why:
-    // `RoutingConfig::get_checked()` caches for the rest of the PROCESS's
-    // lifetime once loaded, so a second `routing.json` rewrite mid-test
-    // would silently have no effect on a second `resolve_capture_write_
-    // target` call — and in a real daemon, routing.json is effectively
-    // frozen for that daemon's whole uptime the same way, so this scenario
-    // can only happen ACROSS a restart, not within one test process. The
-    // underlying gate mechanism's lack of memory across two calls with
-    // DIFFERENT configs is characterized at the DI level instead:
+    // integration test in this module. A provider caches its first
+    // successful load for the lifetime of its server, so a `routing.json`
+    // rewrite does not affect that same live daemon; this scenario happens
+    // across a restart. The underlying gate mechanism's lack of memory
+    // across two calls with DIFFERENT configs is characterized at the DI
+    // level instead:
     // `memory_search_ops::save_memory::write_affinity::tests::
     // config_change_between_calls_reroutes_a_stable_id_to_a_different_store`.
     // Closing this fully requires persistent per-id location tracking,

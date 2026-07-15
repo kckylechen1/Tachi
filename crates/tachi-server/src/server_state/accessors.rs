@@ -160,4 +160,10 @@ impl MemoryServer {
     pub(crate) fn tachi_home_dir(&self) -> PathBuf {
         (*self.home_dir).clone()
     }
+
+    pub(crate) fn routing_config(
+        &self,
+    ) -> &crate::memory_search_ops::routing_config::RoutingConfigProvider {
+        &self.routing_config
+    }
 }

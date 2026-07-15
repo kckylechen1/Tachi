@@ -3,10 +3,20 @@ use std::path::{Path, PathBuf};
 
 use super::scan::is_backup_filename;
 use super::{DbClassification, DoctorFinding, JobBreakdown};
+use crate::memory_search_ops::routing_config::RoutingConfigProvider;
 
 // ─── Classification ──────────────────────────────────────────────────────────
 
+#[cfg(test)]
 pub fn classify_one(path: &Path) -> DoctorFinding {
+    let provider = RoutingConfigProvider::new(crate::path_utils::tachi_home());
+    classify_one_with_provider(path, &provider)
+}
+
+pub(super) fn classify_one_with_provider(
+    path: &Path,
+    routing_config: &RoutingConfigProvider,
+) -> DoctorFinding {
     let path_str = path.display().to_string();
     let scope_hint = scope_hint_for(path);
     let file_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
@@ -280,7 +290,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
 
     // Detail probes (best-effort, all errors swallowed).
     let none_domain_count = memcore::db::count_memories_missing_domain(&conn).ok();
-    let cross_domain_probe = super::cross_domain::probe(&conn, &scope_hint);
+    let config = routing_config.get();
+    let cross_domain_probe = super::cross_domain::probe(&conn, &scope_hint, &config);
     let cross_domain_suspect_count = cross_domain_probe.as_ref().map(|probe| probe.count);
     let cross_domain_suspect_sample = cross_domain_probe
         .map(|probe| probe.sample_ids)

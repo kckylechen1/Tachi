@@ -394,8 +394,8 @@ mod tests {
     /// precisely, without needing any `RoutingConfig`/`routing.json`
     /// involvement at all: this pre-gate check runs unconditionally, before
     /// domain resolution or the write-affinity gate are ever reached, so
-    /// this test has NONE of the process-wide `RoutingConfig` cache
-    /// exposure #1114's OTHER, routing-dependent tests carry (see
+    /// this test has NONE of the routing-provider exposure #1114's OTHER,
+    /// routing-dependent tests carry (see
     /// `memory_search_ops::save_memory::write_affinity::tests::
     /// config_change_between_calls_reroutes_a_stable_id_to_a_different_store`'s
     /// doc for that limitation, and this file's own
@@ -557,19 +557,10 @@ mod tests {
     }
 
     // #1114 codex round-3 item 5 note (applies to BOTH tests below, not
-    // repeated per-test): these two rely on the REAL, cached
-    // `RoutingConfig::get_checked()` (via `apply_write_affinity_for_domain`)
-    // seeing THIS test's own `routing.json` — reliable under nextest (each
-    // test its own process, this repo's default/CI runner), not guaranteed
-    // under a shared-process plain `cargo test` if some OTHER test in the
-    // same binary already cached a conflicting config first. This is the
-    // SAME pre-existing, accepted characteristic every #1114 routing.json
-    // -dependent test in this crate already carries (see
-    // `memory_search_ops::save_memory::write_affinity::tests::
-    // config_change_between_calls_reroutes_a_stable_id_to_a_different_store`'s
-    // doc) — not a NEW isolation problem introduced here, and not solvable
-    // without a `#[cfg(test)]`-only cache-reset hook in `routing_config.rs`
-    // (a real production-infra change, out of scope for this bounded PR).
+    // repeated per-test): these two construct their own `MemoryServer`, so
+    // `apply_write_affinity_for_domain` reads that server's home-bound
+    // provider. Other servers in a shared-process `cargo test` cannot poison
+    // this route; this is the #1126 identity-bound cache invariant.
 
     /// #1114 codex round-3 item 3 point ① discriminating RED test: a live,
     /// explicit `action=project` call (`project_continuity_events`,

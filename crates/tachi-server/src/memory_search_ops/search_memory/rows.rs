@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use super::cache::recall_cache_recall_opted_in;
 use super::exact::{annotate_exact_token_matches, mark_exact_token_match};
 use super::filters::{
-    eval_recall_opted_in, is_eval_entry, project_filter_name, project_scope_allows_memory,
-    training_recall_opted_in,
+    eval_recall_opted_in, is_eval_entry, project_filter_name,
+    project_scope_allows_memory_with_config, training_recall_opted_in,
 };
 use super::store::{with_global_search, with_named_project_search, with_project_search};
 use crate::memory_search_ops::auto_link::is_training_seed;
@@ -170,6 +170,7 @@ pub(crate) async fn search_memory_rows_with_recall_config(
         };
 
     let mut searched_default_wiki = false;
+    let routing_config = server.routing_config().get();
 
     // #926: when query embedding fails/times out we fall back to lexical-only
     // recall. Capture a short reason so the response can carry a machine-
@@ -321,6 +322,7 @@ pub(crate) async fn search_memory_rows_with_recall_config(
                 &server.tachi_home_dir(),
                 &params.query,
                 params.domain.as_deref(),
+                &routing_config,
             );
             let inferred_db_path = inferred_project
                 .as_deref()
@@ -384,10 +386,19 @@ pub(crate) async fn search_memory_rows_with_recall_config(
     if !eval_recall_opted_in(&params) {
         combined_results.retain(|(result, _)| !is_eval_entry(&result.entry));
     }
-    if let Some(project_name) = project_filter_name(&server.tachi_home_dir(), &params, project_only)
-    {
+    if let Some(project_name) = project_filter_name(
+        &server.tachi_home_dir(),
+        &params,
+        project_only,
+        &routing_config,
+    ) {
         combined_results.retain(|(result, db_scope)| match db_scope {
-            DbScope::Project => project_scope_allows_memory(&project_name, &params, &result.entry),
+            DbScope::Project => project_scope_allows_memory_with_config(
+                &project_name,
+                &params,
+                &result.entry,
+                &routing_config,
+            ),
             DbScope::Global => true,
         });
     }

@@ -72,14 +72,6 @@ fn is_foreign_sigil_memory_with(entry: &memcore::MemoryEntry, config: &RoutingCo
             .any(|prefix| path.starts_with(prefix.as_str()))
 }
 
-pub(super) fn project_scope_allows_memory(
-    project_name: &str,
-    params: &SearchMemoryParams,
-    entry: &memcore::MemoryEntry,
-) -> bool {
-    project_scope_allows_memory_with_config(project_name, params, entry, &RoutingConfig::get())
-}
-
 pub(super) fn project_scope_allows_memory_with_config(
     project_name: &str,
     params: &SearchMemoryParams,
@@ -103,12 +95,13 @@ pub(super) fn project_filter_name(
     home: &std::path::Path,
     params: &SearchMemoryParams,
     project_only: bool,
+    config: &RoutingConfig,
 ) -> Option<String> {
     params.project.clone().or_else(|| {
         if project_only {
             crate::memory_search_ops::search_helpers::resolve_workspace_named_project()
         } else {
-            infer_search_project(home, &params.query, params.domain.as_deref())
+            infer_search_project(home, &params.query, params.domain.as_deref(), config)
         }
     })
 }

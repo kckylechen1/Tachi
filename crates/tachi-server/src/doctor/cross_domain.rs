@@ -68,16 +68,9 @@ pub(super) const SUSPECT_SAMPLE_LIMIT: usize = 5;
 /// "skip", not "scan with the trading default" — the caller surfaces that
 /// as `cross_domain_suspect_count: None` ("not evaluated"), never a
 /// misleading `Some(0)` ("evaluated, clean").
-fn suspect_keywords_for(scope_hint: &str) -> Option<&'static [&'static str]> {
-    suspect_keywords_for_with(
-        scope_hint,
-        &crate::memory_search_ops::routing_config::RoutingConfig::get(),
-    )
-}
-
 /// Config-injectable core (mirrors `write_affinity::apply_write_affinity_with`'s
-/// DI shape) so this stays unit-testable without touching the process-global
-/// `RoutingConfig::get()` cache or `~/.tachi/routing.json`.
+/// DI shape) so this stays unit-testable without touching a process-global
+/// cache or `~/.tachi/routing.json`.
 fn suspect_keywords_for_with(
     scope_hint: &str,
     config: &crate::memory_search_ops::routing_config::RoutingConfig,
@@ -101,8 +94,9 @@ fn suspect_keywords_for_with(
 pub(super) fn probe(
     conn: &rusqlite::Connection,
     scope_hint: &str,
+    config: &crate::memory_search_ops::routing_config::RoutingConfig,
 ) -> Option<memcore::db::KeywordSuspectProbe> {
-    let keywords = suspect_keywords_for(scope_hint)?;
+    let keywords = suspect_keywords_for_with(scope_hint, config)?;
     memcore::db::probe_keyword_suspects(conn, keywords, SUSPECT_SAMPLE_LIMIT).ok()
 }
 

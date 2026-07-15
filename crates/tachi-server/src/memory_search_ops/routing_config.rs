@@ -5,7 +5,7 @@
 //! the built-in defaults stay empty so coding-agent recall is domain-agnostic.
 
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 /// #1041 F4: a REAL routing-config load failure (file exists but is
@@ -129,44 +129,42 @@ fn cached_or_reload_with(
     Ok(cache.get().cloned().unwrap_or(cfg))
 }
 
-/// #1041 B4: the ONE process-wide cache slot shared by both [`RoutingConfig::get`]
-/// and [`RoutingConfig::get_checked`] — a module-level `static`, not one
-/// nested inside each function, is exactly what makes them share it. Only a
-/// successful load is ever stored here; see `cached_or_reload_with`'s doc for
-/// why a shared cache (versus each caller's own) is the actual fix.
-static ROUTING_CONFIG_CACHE: OnceLock<Arc<RoutingConfig>> = OnceLock::new();
+/// Lazy, identity-bound routing-config provider. A `MemoryServer` resolves its
+/// canonical home once and every clone shares this provider, so routing can
+/// never be loaded from a different environment-derived home.
+///
+/// A success is cached for this identity only. Invalid or unreadable input is
+/// deliberately never cached: reads receive a one-call empty fallback while
+/// writes fail typed, and either side retries after the file is repaired.
+pub(crate) struct RoutingConfigProvider {
+    home: PathBuf,
+    cache: OnceLock<Arc<RoutingConfig>>,
+}
+
+impl RoutingConfigProvider {
+    pub(crate) fn new(home: PathBuf) -> Self {
+        Self {
+            home,
+            cache: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn get(&self) -> Arc<RoutingConfig> {
+        cached_or_reload_with(&self.cache, || RoutingConfig::load_from_home(&self.home))
+            .unwrap_or_else(|err| {
+                tracing::warn!("{err}; using defaults (not cached — retried on the next call)");
+                Arc::new(RoutingConfig::default())
+            })
+    }
+
+    pub(crate) fn get_checked(&self) -> Result<Arc<RoutingConfig>, RoutingConfigError> {
+        cached_or_reload_with(&self.cache, || RoutingConfig::load_from_home(&self.home))
+    }
+}
 
 impl RoutingConfig {
-    /// Process-wide config, sharing [`ROUTING_CONFIG_CACHE`] with
-    /// [`Self::get_checked`] (see that static's doc for why). Falls back to
-    /// the behavior-preserving defaults on a missing file, or degrades a
-    /// real load error to defaults with a warning — read-side callers, e.g.
-    /// recall routing, must keep working even if the file is momentarily
-    /// broken. Write-side callers that need the #1041 F4 fail-loud contract
-    /// (a broken file must refuse a write, not silently disable the
-    /// affinity gate) use [`Self::get_checked`] instead.
-    pub(crate) fn get() -> Arc<RoutingConfig> {
-        cached_or_reload_with(&ROUTING_CONFIG_CACHE, Self::load).unwrap_or_else(|err| {
-            tracing::warn!("{err}; using defaults (not cached — retried on the next call)");
-            Arc::new(Self::default())
-        })
-    }
-
-    /// Like [`Self::get`], but surfaces a real load error instead of
-    /// silently degrading to an empty route table. A missing file is still
-    /// not an error (see [`Self::load`]). Errors are never cached: a load
-    /// failure is retried on the very next call (e.g. once the file is
-    /// repaired), so recovering does not require a daemon restart — only a
-    /// SUCCESSFUL load is cached for the process lifetime, and shared with
-    /// [`Self::get`] via [`ROUTING_CONFIG_CACHE`] (#1041 B4).
-    pub(crate) fn get_checked() -> Result<Arc<RoutingConfig>, RoutingConfigError> {
-        cached_or_reload_with(&ROUTING_CONFIG_CACHE, Self::load)
-    }
-
-    fn load() -> Result<RoutingConfig, RoutingConfigError> {
-        let Some(path) = Self::config_path() else {
-            return Ok(Self::default());
-        };
+    fn load_from_home(home: &Path) -> Result<RoutingConfig, RoutingConfigError> {
+        let path = home.join("routing.json");
         match std::fs::read_to_string(&path) {
             Ok(body) => serde_json::from_str(&body).map_err(|err| RoutingConfigError::Invalid {
                 path,
@@ -182,20 +180,6 @@ impl RoutingConfig {
                 detail: err.to_string(),
             }),
         }
-    }
-
-    fn config_path() -> Option<PathBuf> {
-        // Only resolve home_dir() when actually needed, so an absolute
-        // TACHI_HOME still works in sandboxed/headless environments where
-        // home_dir() returns None.
-        let app_home = match std::env::var("TACHI_HOME") {
-            Ok(home) => match home.strip_prefix("~/") {
-                Some(rest) => dirs::home_dir()?.join(rest),
-                None => PathBuf::from(home),
-            },
-            Err(_) => dirs::home_dir()?.join(".tachi"),
-        };
-        Some(app_home.join("routing.json"))
     }
 }
 
@@ -234,8 +218,10 @@ mod tests {
     // of silently treating a broken config as "no routes registered".
     #[test]
     fn load_missing_file_is_not_an_error() {
-        with_test_tachi_home(|_home| {
-            let config = RoutingConfig::load().expect("missing file must be Ok(default)");
+        with_test_tachi_home(|home| {
+            let config = RoutingConfigProvider::new(home.to_path_buf())
+                .get_checked()
+                .expect("missing file must be Ok(default)");
             assert!(config.domain_routes.is_empty());
         });
     }
@@ -244,7 +230,9 @@ mod tests {
     fn load_invalid_json_is_a_loud_error() {
         with_test_tachi_home(|home| {
             std::fs::write(home.join("routing.json"), b"{ not valid json").expect("write");
-            let err = RoutingConfig::load().expect_err("invalid JSON must be Err, not defaults");
+            let err = RoutingConfigProvider::new(home.to_path_buf())
+                .get_checked()
+                .expect_err("invalid JSON must be Err, not defaults");
             assert!(matches!(err, RoutingConfigError::Invalid { .. }));
         });
     }
@@ -262,8 +250,9 @@ mod tests {
             // reproduce the unreadable case at all.
             let is_root = std::fs::read_to_string(&path).is_ok();
             if !is_root {
-                let err =
-                    RoutingConfig::load().expect_err("unreadable file must be Err, not defaults");
+                let err = RoutingConfigProvider::new(home.to_path_buf())
+                    .get_checked()
+                    .expect_err("unreadable file must be Err, not defaults");
                 assert!(matches!(err, RoutingConfigError::Unreadable { .. }));
             }
             let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
@@ -278,7 +267,9 @@ mod tests {
                 br#"{"domain_routes": [{"project": "hapi", "domains": ["equity_trading"]}]}"#,
             )
             .expect("write");
-            let config = RoutingConfig::load().expect("valid JSON must load");
+            let config = RoutingConfigProvider::new(home.to_path_buf())
+                .get_checked()
+                .expect("valid JSON must load");
             assert_eq!(config.domain_routes.len(), 1);
             assert_eq!(config.domain_routes[0].project, "hapi");
         });
@@ -286,13 +277,10 @@ mod tests {
 
     // ── #1041 B4: shared read/write cache consistency ───────────────────────
     //
-    // These exercise `cached_or_reload_with` directly against a LOCAL
-    // `OnceLock`, not the real process-global `ROUTING_CONFIG_CACHE` —
-    // `cargo test` runs every test in one process, so asserting on the real
-    // static would be poisoned by whichever other test in this binary
-    // happens to touch `RoutingConfig::get`/`get_checked` first. The
-    // injectable core is exactly what makes the invariant testable at all
-    // (same DI shape as `apply_write_affinity`/`apply_write_affinity_with`).
+    // These exercise `cached_or_reload_with` directly against a local
+    // `OnceLock`. The production surface is a `RoutingConfigProvider` bound
+    // to one server home; its two-home outer-wrapper regression lives beside
+    // `apply_write_affinity`, where it can prove the actual server wiring.
 
     #[test]
     fn error_is_never_cached_and_retries_next_call() {
@@ -340,8 +328,8 @@ mod tests {
 
         // While broken: the write-side shape (get_checked) sees the error...
         assert!(cached_or_reload_with(&cache, bad).is_err());
-        // ...and the read-side shape (get) falls back to defaults, exactly
-        // like `RoutingConfig::get`'s own `unwrap_or_else`.
+        // ...and the read-side shape falls back to defaults, exactly like a
+        // provider's `get()` call.
         let read_during_break = cached_or_reload_with(&cache, bad)
             .unwrap_or_else(|_| Arc::new(RoutingConfig::default()));
         assert!(read_during_break.domain_routes.is_empty());
@@ -366,5 +354,35 @@ mod tests {
             "read and write must observe the literal same cached Arc, not \
              two independently-loaded copies"
         );
+    }
+
+    #[test]
+    fn provider_retries_after_repair_without_reconstruction() {
+        with_test_tachi_home(|home| {
+            let path = home.join("routing.json");
+            std::fs::write(&path, b"{ broken").expect("write broken config");
+            let provider = RoutingConfigProvider::new(home.to_path_buf());
+
+            assert!(matches!(
+                provider.get_checked(),
+                Err(RoutingConfigError::Invalid { .. })
+            ));
+            assert!(
+                provider.get().domain_routes.is_empty(),
+                "reads use only an ephemeral default while the file is broken"
+            );
+
+            std::fs::write(
+                &path,
+                br#"{"domain_routes": [{"project": "repaired", "domains": ["engineering"]}]}"#,
+            )
+            .expect("repair config");
+
+            let repaired = provider
+                .get_checked()
+                .expect("the next write must reload the repaired file");
+            assert_eq!(repaired.domain_routes[0].project, "repaired");
+            assert!(Arc::ptr_eq(&repaired, &provider.get(),));
+        });
     }
 }
