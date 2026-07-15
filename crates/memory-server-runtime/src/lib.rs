@@ -636,7 +636,7 @@ impl DbRuntime {
         if let Some(state) = cached {
             let _gate = read_or_recover(&state.rw_gate, "path_db_rw_gate");
             let (result, receipt) = state.read_pool.with_store_recording(label, f);
-            return Ok((result, Some(receipt)));
+            return Ok((result?, Some(receipt)));
         }
 
         let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
@@ -771,8 +771,10 @@ impl DbRuntime {
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<(T, ReadPoolCheckoutReceipt), String> {
         let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
-        self.global_read_pool
-            .with_store_recording("global_read_pool", f)
+        let (result, receipt) = self
+            .global_read_pool
+            .with_store_recording("global_read_pool", f);
+        Ok((result?, receipt))
     }
 
     pub fn with_project_store<T>(
@@ -813,7 +815,8 @@ impl DbRuntime {
             .as_ref()
             .ok_or_else(|| "No project database available".to_string())?;
         let _gate = read_or_recover(&state.rw_gate, "project_rw_gate");
-        state.read_pool.with_store_recording("project_read_pool", f)
+        let (result, receipt) = state.read_pool.with_store_recording("project_read_pool", f);
+        Ok((result?, receipt))
     }
 
     pub fn with_store_for_scope<T>(
