@@ -229,6 +229,16 @@ fn receipt_records_vector_channel_as_some_when_query_vec_supplied() {
         "vec channel must report the KNN match (seeded identical embedding), got count={}",
         vec_receipt.candidate_count
     );
+    // #1097 r3 codex review ④ gap-1: the vec sub-timer
+    // (candidates.rs:42 `vec_start` → :61 `s.elapsed()`) must be > ZERO when
+    // the channel actually ran a KNN query. `vec` is `None` in the
+    // all-phases timer test (no query_vec supplied there), so this is the
+    // home for the vec-timer discrimination assertion: revert the vec
+    // `Instant::now`/`elapsed` to `Duration::ZERO` and this goes red.
+    assert!(
+        vec_receipt.elapsed > std::time::Duration::ZERO,
+        "vec.elapsed must be > ZERO (vec_start timer wired — KNN actually executed)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -582,6 +592,15 @@ fn receipt_keeps_rank_phase_when_candidate_filter_zeros_out() {
 // these tests would still be green). This test falsifies both: total must
 // be non-zero on a real search, and the whole is at least as large as each
 // measured sub-phase (guards "timer pointed at the wrong phase").
+//
+// #1097 r3 codex review ④ (gap-1) — Discriminator 3 below: every present
+// (Some) sub-phase timer must be strictly greater than `Duration::ZERO`.
+// `Instant` is nanosecond-resolution, so any phase that actually executed
+// (even a single function call / early-return branch) has elapsed > 0; a
+// true zero is the bug signature of a timer that was never started or whose
+// `Instant::now`/`elapsed()` call someone reverted to a literal
+// `Duration::ZERO`. Reverting ANY present timer point to ZERO turns the
+// matching assertion red. `>= ZERO` (a tautology) is deliberately NOT used.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -648,5 +667,94 @@ fn receipt_sampled_timers_actually_ran_and_subphases_fit_under_total() {
     assert!(
         access.elapsed <= receipt.total_elapsed,
         "access_recording.elapsed must fit under total_elapsed"
+    );
+
+    // Discriminator 3 (#1097 r3 ④ gap-1): every present (Some) sub-phase
+    // timer must be strictly > ZERO. Each assertion below pins ONE concrete
+    // `Instant::now()` / `elapsed()` call site in the production code —
+    // reverting that single call site to a literal `Duration::ZERO` makes
+    // exactly the matching assertion fail. `>= ZERO` would be a tautology
+    // (the r3 codex finding) and is deliberately not used; absolute
+    // upper bounds are deliberately not used (flaky). The scenario runs a
+    // normal successful search with `record_access=true`, so every
+    // always-running phase is present here; the `vec` sub-timer is covered
+    // by `receipt_records_vector_channel_as_some_when_query_vec_supplied`
+    // (vec is `None` here because no query_vec is supplied).
+
+    // candidates.total_elapsed — candidates.rs:121 (`phase_start.map(|s| s.elapsed())`).
+    assert!(
+        candidates.total_elapsed > std::time::Duration::ZERO,
+        "candidates.total_elapsed must be > ZERO (candidates phase_start timer wired)"
+    );
+    // Each executed FTS group's elapsed — expansion.rs:260 / :292
+    // (per-group `group_start`/`fallback_start`). The query "rust
+    // performance" matches both seeded rows conjunctively, so at least one
+    // non-fallback group ran and was timed; a group whose timer was
+    // reverted to ZERO makes this red.
+    assert!(
+        !candidates.fts_groups.is_empty(),
+        "the conjunctive FTS group must be recorded for a matching query"
+    );
+    for (i, group) in candidates.fts_groups.iter().enumerate() {
+        assert!(
+            group.elapsed > std::time::Duration::ZERO,
+            "fts_groups[{i}] (idx={}, fallback={}) elapsed must be > ZERO \
+             (per-group Instant wired)",
+            group.idx,
+            group.is_fallback
+        );
+    }
+    // symbolic.elapsed — candidates.rs:92/103 (`symbolic_start`/`symbolic_elapsed`).
+    assert!(
+        candidates.symbolic.elapsed > std::time::Duration::ZERO,
+        "symbolic.elapsed must be > ZERO (symbolic_start timer wired)"
+    );
+    // fetch.elapsed — search.rs fetch_start (`sample.then(Instant::now)`).
+    assert!(
+        fetch.elapsed > std::time::Duration::ZERO,
+        "fetch.elapsed must be > ZERO (fetch_start timer wired)"
+    );
+    // rank phase — ranking.rs:37 phase_start, :53 superseded_start, :113
+    // access_start. The normal path leaves get_access_times `Some` (the
+    // candidate filter does not zero out here), so both rank DB I/O timers
+    // are present and individually asserted.
+    let rank = receipt
+        .rank
+        .as_ref()
+        .expect("rank runs when candidates non-empty");
+    assert!(
+        rank.total_elapsed > std::time::Duration::ZERO,
+        "rank.total_elapsed must be > ZERO (rank phase_start timer wired)"
+    );
+    assert!(
+        rank.get_superseded_ids.elapsed > std::time::Duration::ZERO,
+        "rank.get_superseded_ids.elapsed must be > ZERO (superseded_start timer wired)"
+    );
+    let rank_access = rank
+        .get_access_times
+        .as_ref()
+        .expect("get_access_times is Some on the normal (non-zeroed-filter) rank path");
+    assert!(
+        rank_access.elapsed > std::time::Duration::ZERO,
+        "rank.get_access_times.elapsed must be > ZERO (rank access_start timer wired)"
+    );
+    // graph_expansion.elapsed — graph_expansion.rs:26 phase_start. Even
+    // with `graph_expand_hops == 0` (enabled=false) the function is
+    // invoked and takes the early-return branch, which is still a real
+    // execution whose wall time the timer captures; reverting that
+    // `Instant::now`/`elapsed` to ZERO reds this.
+    let graph = receipt
+        .graph_expansion
+        .as_ref()
+        .expect("graph_expansion function is always invoked when sampled");
+    assert!(
+        graph.elapsed > std::time::Duration::ZERO,
+        "graph_expansion.elapsed must be > ZERO even when disabled (phase_start timer wired)"
+    );
+    // access_recording.elapsed — search.rs access_start
+    // (`sample.then(Instant::now)` inside the `if opts.record_access` block).
+    assert!(
+        access.elapsed > std::time::Duration::ZERO,
+        "access_recording.elapsed must be > ZERO (access_start timer wired)"
     );
 }

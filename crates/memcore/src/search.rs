@@ -80,18 +80,28 @@ pub struct SearchOptions {
     /// `Arc<dyn DecayPolicy>` without forking the kernel scorer.
     pub decay_policy: Option<Arc<dyn DecayPolicy>>,
     /// tachi#1097 PERF-T3 S1: per-call opt-in for phase-attribution
-    /// instrumentation. When `false` (the default), `hybrid_search` performs
-    /// **zero** `Instant::now()` reads and constructs **no** receipt — this is
-    /// the contract's default-off / zero-overhead posture for production.
+    /// instrumentation. When `false` (the default), `hybrid_search` reads
+    /// **no** `Instant::now()`, does **no** DB I/O for instrumentation, and
+    /// allocates **no** `Vec` for it — it constructs only a
+    /// [`SearchPhaseReceipt::not_sampled()`] placeholder and discards it via
+    /// the tuple projection at the foot of [`hybrid_search_with_receipt`].
+    /// This is the contract's default-off production posture.
+    ///
+    /// This is NOT a "zero-overhead" claim: the placeholder struct and the
+    /// result tuple are still constructed, so the source-level cost is not
+    /// literally zero. Proving the runtime delta is negligible vs. a
+    /// non-instrumented baseline is an S2 acceptance item (a
+    /// `collect_phase_receipt:false` vs. baseline benchmark), not a
+    /// source-level assertion — see the honesty note on [`hybrid_search`]
+    /// for the mechanism facts and the S2 deferral.
+    ///
     /// When `true`, `hybrid_search_with_receipt` returns a populated
     /// [`SearchPhaseReceipt`] breaking down candidate collection / fetch /
-    /// rank / graph expansion / access recording; `hybrid_search` itself
-    /// ignores the receipt and stays zero-overhead regardless.
-    ///
-    /// This is a sampling switch only — it never changes ranking, expansion,
-    /// access-recording, or any other quality mechanism. Production search
-    /// call sites stay out of scope for this leaf; measurement happens in
-    /// fixtures (contract `Allowed Scope`).
+    /// rank / graph expansion / access recording. This is a sampling switch
+    /// only — it never changes ranking, expansion, access-recording, or any
+    /// other quality mechanism. Production search call sites stay out of
+    /// scope for this leaf; measurement happens in fixtures (contract
+    /// `Allowed Scope`).
     pub collect_phase_receipt: bool,
 }
 
@@ -306,7 +316,12 @@ pub struct SearchPhaseReceipt {
     /// `true` iff the caller opted in via `SearchOptions::collect_phase_receipt`.
     /// When `false`, every field below is `None` / `Duration::ZERO` and the
     /// two layer tags are `LayerAvailability::NotSampled` — this is the
-    /// default-off / zero-overhead production posture (#1097 D4).
+    /// default-off production posture (#1097 D4): no `Instant::now()` reads,
+    /// no DB I/O, no instrumentation `Vec` allocations, just the
+    /// [`SearchPhaseReceipt::not_sampled()`] placeholder. This is not a
+    /// "zero-overhead" claim: the placeholder struct + result tuple are
+    /// still constructed, so the runtime delta vs. a non-instrumented
+    /// baseline is an S2 measurement item, not a source-level assertion.
     pub sampled: bool,
     pub total_elapsed: Duration,
     /// Always `Some` when `sampled` (candidate collection always runs).
@@ -386,10 +401,18 @@ pub fn hybrid_search(
 /// quality logic is added or changed.
 ///
 /// When `opts.collect_phase_receipt == false` the receipt is the
-/// [`SearchPhaseReceipt::not_sampled()`] placeholder (zero overhead, all
-/// phases `None`); set it to `true` to populate the per-phase breakdown.
-/// Production search call sites stay out of scope for #1097 S1; measurement
-/// happens in benchmark/eval fixtures (contract `Allowed Scope`).
+/// [`SearchPhaseReceipt::not_sampled()`] placeholder — no `Instant::now()`
+/// reads, no DB I/O, no instrumentation `Vec` allocations; every phase field
+/// is `None` — and it is discarded by the tuple projection at the foot of
+/// [`hybrid_search`]. This is the default-off production posture, NOT a
+/// "zero-overhead" claim: the placeholder struct and the result tuple are
+/// still constructed, so the source-level cost is not literally zero.
+/// Proving the runtime delta is negligible vs. a non-instrumented baseline
+/// is an S2 acceptance item (a `collect_phase_receipt:false` vs. baseline
+/// benchmark), not a source-level assertion. Set it to `true` to populate
+/// the per-phase breakdown. Production search call sites stay out of scope
+/// for #1097 S1; measurement happens in benchmark/eval fixtures (contract
+/// `Allowed Scope`).
 pub fn hybrid_search_with_receipt(
     conn: &Connection,
     query: &str,

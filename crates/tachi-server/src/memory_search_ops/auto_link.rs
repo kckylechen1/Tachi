@@ -197,6 +197,34 @@ impl AutoLinkReceipt {
     }
 }
 
+/// Finalize an accumulated [`AutoLinkReceipt`]: apply the redacted
+/// `entry_id` (#1097 r1 codex review ① — the raw id reaches the receipt
+/// ONLY when it parses as a legal UUID, otherwise the fixed
+/// [`REDACTED_NON_UUID_ID`] marker) and the end-to-end `total_elapsed`.
+///
+/// This is the pure, store/tokio/tracing-free tail of [`spawn_auto_linking`]
+/// — extracted so the two post-loop assignments (`receipt.entry_id =
+/// redacted_entry_id(...)` and `receipt.total_elapsed = task_start.elapsed()`,
+/// formerly two bare lines inside a `tokio::spawn` block a unit test cannot
+/// reach) are a unit-tested contract. `spawn_auto_linking` routes its
+/// accumulated receipt through here immediately before the `tracing::info!`
+/// emit point, so reverting the redaction (echoing the raw id) or dropping
+/// the total-elapsed assignment turns the `finalize_*` discrimination tests
+/// red.
+///
+/// The `tracing::info!` emission itself (the block at the foot of
+/// [`spawn_auto_linking`]) is NOT covered by this function — see the
+/// measurement-gap note on [`spawn_auto_linking`].
+pub(crate) fn finalize_auto_link_receipt(
+    mut receipt: AutoLinkReceipt,
+    raw_entry_id: &str,
+    total_elapsed: Duration,
+) -> AutoLinkReceipt {
+    receipt.entry_id = redacted_entry_id(raw_entry_id);
+    receipt.total_elapsed = total_elapsed;
+    receipt
+}
+
 pub(crate) fn path_root(path: &str) -> &str {
     path.trim_matches('/').split('/').next().unwrap_or("")
 }
@@ -284,6 +312,38 @@ pub(crate) fn has_numeric_mismatch(new_entry: &MemoryEntry, old_entry: &MemoryEn
     !new_numbers.is_empty() && !old_numbers.is_empty() && new_numbers != old_numbers
 }
 
+/// Spawn the background auto-link task for a freshly-saved `entry`. The
+/// save handler returns `"auto_link": "pending"` without awaiting this
+/// task, so the closure is the only place the finished counts exist — the
+/// [`AutoLinkReceipt`] is accumulated inside the task and emitted via
+/// `tracing::info!` from there.
+///
+/// # Measured vs. unmeasured (tachi#1097 r3 codex review ④ gap-2)
+///
+/// The receipt's **counter semantics** are unit-tested through
+/// [`AutoLinkReceipt::apply_search_outcome`] /
+/// [`AutoLinkReceipt::apply_edge_outcome`] (the `attempts-vs-executions`
+/// and `insert-landed-vs-full-success` contracts). The **post-loop
+/// finalization** (redacted `entry_id` + `total_elapsed`) is unit-tested
+/// through [`finalize_auto_link_receipt`], which this function routes the
+/// accumulated receipt through immediately before emit — reverting either
+/// assignment turns that test red.
+///
+/// The `tracing::info!` emission point (the block at the foot of this
+/// function) is a **known discrimination gap**: it is not covered by any
+/// unit test. Closing it would require either a new dev-dependency
+/// (`tracing-test` / a capture subscriber) — which this repo does NOT
+/// currently carry (grep across all `Cargo.toml` finds only the production
+/// `tracing-subscriber` in `tachi-server`, nothing in any
+/// `[dev-dependencies]`) — or standing up a real `tokio` runtime to
+/// drive `tokio::spawn` end-to-end. Both are rejected here for the reasons
+/// codified under #1114: a process-global background-worker race in a test
+/// suite is a strictly worse outcome than an honestly-documented gap, and
+/// this leaf (#1097 S1) is observation-only — it must not mint a new
+/// dev-dependency or a flaky runtime test for coverage's sake. The gap
+/// should be revisited when (a) a tracing-capture convention already
+/// exists in the repo, or (b) a dedicated auto-link integration harness
+/// is introduced under a separate task.
 pub(crate) fn spawn_auto_linking(
     server: &MemoryServer,
     entry: &MemoryEntry,
@@ -508,15 +568,22 @@ pub(crate) fn spawn_auto_linking(
         // (entities ARE the search queries here), no memory content, no DB
         // path.
         //
-        // #1097 r1 codex review ①: `entry_id` is the redacted form of
-        // `auto_link_id` — the raw id is echoed ONLY when it parses as a
-        // legal UUID; otherwise the fixed [`REDACTED_NON_UUID_ID`] marker
-        // is used. A caller can push arbitrary text into `params.id`
+        // #1097 r1 codex review ① + #1097 r3 ④ gap-2: the post-loop
+        // finalization (redacted `entry_id` + `total_elapsed`) is routed
+        // through `finalize_auto_link_receipt` so it is the SAME tested
+        // contract the unit tests assert against — a bare `receipt.entry_id
+        // = redacted_entry_id(...)` / `receipt.total_elapsed = ...` here
+        // would let someone revert the redaction or drop the total without
+        // any test going red. The raw id is echoed ONLY when it parses as a
+        // legal UUID; otherwise the fixed [`REDACTED_NON_UUID_ID`] marker is
+        // used. A caller can push arbitrary text into `params.id`
         // (handler.rs:46-49, tachi-params/src/memory.rs:104,
         // save_memory/validation.rs:13 only checks presence), so the raw
         // string can never reach telemetry.
-        receipt.entry_id = redacted_entry_id(&auto_link_id);
-        receipt.total_elapsed = task_start.elapsed();
+        //
+        // The `tracing::info!` block immediately below is NOT covered by a
+        // unit test — see the measurement-gap note on `spawn_auto_linking`.
+        let receipt = finalize_auto_link_receipt(receipt, &auto_link_id, task_start.elapsed());
         tracing::info!(
             entry_id = %receipt.entry_id,
             entity_count = receipt.entity_count,
@@ -773,6 +840,87 @@ mod tests {
             !redacted2.contains("dark mode"),
             "memory-content-shaped id must be fully redacted"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // #1097 r3 codex review ④ gap-2 — `finalize_auto_link_receipt` is the
+    // pure, testable tail of `spawn_auto_linking`. It owns the two post-loop
+    // assignments that used to live as bare lines inside the `tokio::spawn`
+    // block (the redacted `entry_id` and the end-to-end `total_elapsed`),
+    // which no unit test could reach. These tests feed it counter state +
+    // an id and assert the redaction + counter-preservation contract
+    // directly — reverting the redaction to echo the raw id, or dropping the
+    // total-elapsed assignment, turns these red.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn finalize_auto_link_receipt_redacts_hostile_id_and_preserves_counters() {
+        // A receipt as it would exist at the foot of the spawn block: counters
+        // accumulated via apply_*_outcome, but entry_id still the placeholder
+        // and total_elapsed still ZERO.
+        let mut r = zeroed_receipt();
+        r.entity_count = 4;
+        r.searches_executed = 2;
+        r.searches_failed = 1;
+        r.candidates_examined = 5;
+        r.edges_attempted = 3;
+        r.edges_written = 2;
+        r.post_write_failures = 1;
+        r.skipped_self_id = 1;
+        let total = Duration::from_micros(1234);
+        // A caller-hostile id (the #1097 r1 ① threat model): query text /
+        // SQL pushed into params.id.
+        let hostile = "select * from memories where secret='pwn'";
+
+        let finalized = finalize_auto_link_receipt(r, hostile, total);
+
+        // Redaction: the marker, and the raw hostile text must not appear.
+        assert_eq!(finalized.entry_id, REDACTED_NON_UUID_ID);
+        assert!(
+            !finalized.entry_id.contains(hostile),
+            "finalized entry_id must not echo the raw hostile input"
+        );
+        assert!(
+            !finalized.entry_id.contains("secret"),
+            "finalized entry_id must not leak any fragment of the hostile input"
+        );
+        // Counter preservation: every accumulated field passes through
+        // untouched.
+        assert_eq!(finalized.entity_count, 4);
+        assert_eq!(finalized.searches_executed, 2);
+        assert_eq!(finalized.searches_failed, 1);
+        assert_eq!(finalized.candidates_examined, 5);
+        assert_eq!(finalized.edges_attempted, 3);
+        assert_eq!(finalized.edges_written, 2);
+        assert_eq!(finalized.post_write_failures, 1);
+        assert_eq!(finalized.skipped_self_id, 1);
+        // total_elapsed assignment: a bare `receipt` that left total_elapsed
+        // at ZERO would fail this (revert the assignment → red).
+        assert_eq!(
+            finalized.total_elapsed, total,
+            "finalize must stamp the end-to-end total_elapsed"
+        );
+    }
+
+    #[test]
+    fn finalize_auto_link_receipt_passes_legal_uuid_verbatim() {
+        // A legal UUID is NOT redacted — the raw value is what a log reader
+        // pairs with the save response (no trace id exists codebase-wide).
+        let legal = "550e8400-e29b-41d4-a716-446655440000";
+        let finalized =
+            finalize_auto_link_receipt(zeroed_receipt(), legal, Duration::from_micros(10));
+        assert_eq!(finalized.entry_id, legal);
+        assert_eq!(finalized.total_elapsed, Duration::from_micros(10));
+    }
+
+    #[test]
+    fn finalize_auto_link_receipt_entity_shaped_id_is_redacted() {
+        // Entity-name-shaped and memory-content-shaped ids collapse to the
+        // marker too (entities ARE the search queries here, per the module
+        // D5 note) — redaction is content-blind.
+        let finalized =
+            finalize_auto_link_receipt(zeroed_receipt(), "Sigil", Duration::from_micros(10));
+        assert_eq!(finalized.entry_id, REDACTED_NON_UUID_ID);
     }
 
     // -----------------------------------------------------------------------
