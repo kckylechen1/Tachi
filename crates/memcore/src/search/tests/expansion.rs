@@ -43,8 +43,14 @@ fn fts_or_fallback_is_enabled_by_default_and_preserves_all_terms_precision() {
         None,
         None,
         &default_config,
+        // sample = false: existing #708 Gate-1 test does not inspect the
+        // per-phase receipt; passing false keeps it on the not-sampled path
+        // (no `Instant::now` reads, no group Vec) — that is the mechanism,
+        // not a measured zero-overhead claim (tachi#1097 S1).
+        false,
     )
-    .unwrap();
+    .unwrap()
+    .0;
     assert!(
         default_scores.contains_key("partial-term"),
         "tachi#708 Gate 1 turns OR fallback on by default when conjunctive FTS returns no candidates"
@@ -64,8 +70,10 @@ fn fts_or_fallback_is_enabled_by_default_and_preserves_all_terms_precision() {
         None,
         None,
         &tuned_config,
+        false,
     )
-    .unwrap();
+    .unwrap()
+    .0;
     let all_terms = tuned_scores
         .get("all-terms")
         .copied()
@@ -119,8 +127,10 @@ fn fts_or_fallback_cjk_phrase_recovers_when_ascii_term_is_missing() {
         None,
         None,
         &RecallConfig::default(),
+        false,
     )
-    .unwrap();
+    .unwrap()
+    .0;
     let target = scores
         .get("cjk-target")
         .copied()

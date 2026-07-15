@@ -1,5 +1,6 @@
 use rusqlite::Connection;
 use std::collections::HashMap;
+use std::time::Instant;
 
 use crate::{
     db::{search_fts, search_fts_raw_match},
@@ -7,6 +8,8 @@ use crate::{
     recall_config::RecallConfig,
     scorer::tokenize,
 };
+
+use super::FtsExpansionGroupReceipt;
 
 const MAX_SYMBOLIC_EXPANSION_TERMS: usize = 16;
 
@@ -226,6 +229,11 @@ pub(super) fn symbolic_query_with_expansion(query: &str) -> String {
     terms.join(" ")
 }
 
+/// FTS scores plus the per-expansion-group receipts (#1097 S1). Aliased so the
+/// signature stays under `clippy::type_complexity`; `None` groups means the
+/// caller did not opt into sampling, not "zero groups ran".
+type FtsScoresWithGroups = (HashMap<String, f64>, Option<Vec<FtsExpansionGroupReceipt>>);
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn search_fts_with_expansion_config(
     conn: &Connection,
@@ -236,8 +244,10 @@ pub(super) fn search_fts_with_expansion_config(
     path_prefix: Option<&str>,
     as_of: Option<&str>,
     recall_config: &RecallConfig,
-) -> Result<HashMap<String, f64>, MemoryError> {
+    sample: bool,
+) -> Result<FtsScoresWithGroups, MemoryError> {
     let mut merged = HashMap::new();
+    let mut groups: Option<Vec<FtsExpansionGroupReceipt>> = sample.then(Vec::new);
     for (idx, fts_query) in expanded_fts_queries(query, recall_config.max_expanded_fts_queries)
         .into_iter()
         .enumerate()
@@ -247,7 +257,8 @@ pub(super) fn search_fts_with_expansion_config(
         } else {
             recall_config.expanded_fts_score_factor
         };
-        for (id, score) in search_fts(
+        let group_start = sample.then(Instant::now);
+        let group_hits = search_fts(
             conn,
             &fts_query,
             limit,
@@ -255,19 +266,31 @@ pub(super) fn search_fts_with_expansion_config(
             include_superseded,
             path_prefix,
             as_of,
-        )? {
+        )?;
+        let group_elapsed = group_start.map(|s| s.elapsed());
+        let group_hit_count = group_hits.len();
+        for (id, score) in group_hits {
             let adjusted = score * factor;
             merged
                 .entry(id)
                 .and_modify(|existing: &mut f64| *existing = existing.max(adjusted))
                 .or_insert(adjusted);
         }
+        if let (Some(elapsed), Some(buf)) = (group_elapsed, groups.as_mut()) {
+            buf.push(FtsExpansionGroupReceipt {
+                idx,
+                is_fallback: false,
+                elapsed,
+                hit_count: group_hit_count,
+            });
+        }
     }
     if merged.is_empty() && recall_config.or_fallback_fts_score_factor > 0.0 {
         if let Some(or_query) =
             fts_or_fallback_match_query(query, recall_config.or_fallback_fts_max_terms)
         {
-            for (id, score) in search_fts_raw_match(
+            let fallback_start = sample.then(Instant::now);
+            let fallback_hits = search_fts_raw_match(
                 conn,
                 &or_query,
                 limit,
@@ -275,14 +298,32 @@ pub(super) fn search_fts_with_expansion_config(
                 include_superseded,
                 path_prefix,
                 as_of,
-            )? {
+            )?;
+            let fallback_elapsed = fallback_start.map(|s| s.elapsed());
+            let fallback_hit_count = fallback_hits.len();
+            for (id, score) in fallback_hits {
                 let adjusted = score * recall_config.or_fallback_fts_score_factor;
                 merged
                     .entry(id)
                     .and_modify(|existing: &mut f64| *existing = existing.max(adjusted))
                     .or_insert(adjusted);
             }
+            if let Some(elapsed) = fallback_elapsed {
+                if let Some(groups_buf) = groups.as_mut() {
+                    // `idx == 0` here is the original-query slot — we reuse
+                    // it with `is_fallback = true` because the fallback
+                    // query is a degenerated form of the original, not an
+                    // expansion variant. The flag carries the distinction
+                    // explicitly so a reader does not have to infer it.
+                    groups_buf.push(FtsExpansionGroupReceipt {
+                        idx: 0,
+                        is_fallback: true,
+                        elapsed,
+                        hit_count: fallback_hit_count,
+                    });
+                }
+            }
         }
     }
-    Ok(merged)
+    Ok((merged, groups))
 }

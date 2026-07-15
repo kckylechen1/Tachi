@@ -2,6 +2,7 @@
 
 use rusqlite::Connection;
 use std::collections::HashSet;
+use std::time::Instant;
 
 use crate::{
     db::{get_superseded_ids, graph_expand},
@@ -11,7 +12,7 @@ use crate::{
 
 use super::{
     filtering::{is_search_noise_entry, normalized_seed_weights, valid_at},
-    SearchOptions,
+    GraphPhaseReceipt, SearchOptions,
 };
 
 pub(super) fn append_graph_expansion(
@@ -20,9 +21,21 @@ pub(super) fn append_graph_expansion(
     opts: &SearchOptions,
     include_superseded: bool,
     as_of_utc: Option<&str>,
-) -> Result<(), MemoryError> {
+    sample: bool,
+) -> Result<((), Option<GraphPhaseReceipt>), MemoryError> {
+    let phase_start = sample.then(Instant::now);
+    // The "graph disabled" branch is the `graph_expand_hops == 0 || results
+    // .is_empty()` early return at graph_expansion.rs:24-26. We still produce
+    // a receipt (`enabled = false`) when sampling so the empty phase is
+    // visibly recorded as "did not run" rather than absent.
     if opts.graph_expand_hops == 0 || results.is_empty() {
-        return Ok(());
+        let receipt = phase_start.map(|s| GraphPhaseReceipt {
+            enabled: false,
+            failed: false,
+            elapsed: s.elapsed(),
+            expanded_count: 0,
+        });
+        return Ok(((), receipt));
     }
 
     let seed_ids: Vec<String> = results.iter().map(|r| r.entry.id.clone()).collect();
@@ -31,7 +44,13 @@ pub(super) fn append_graph_expansion(
     // Graph expansion is a best-effort enrichment; failures are non-fatal.
     let Ok(expand_result) = graph_expand(conn, &seed_ids, opts.graph_expand_hops, rel_filter)
     else {
-        return Ok(());
+        let receipt = phase_start.map(|s| GraphPhaseReceipt {
+            enabled: true,
+            failed: true,
+            elapsed: s.elapsed(),
+            expanded_count: 0,
+        });
+        return Ok(((), receipt));
     };
 
     let existing_ids: HashSet<String> = results.iter().map(|r| r.entry.id.clone()).collect();
@@ -104,6 +123,13 @@ pub(super) fn append_graph_expansion(
         )
     });
 
+    let expanded_count = new_entries.len();
     results.extend(new_entries.into_iter().map(|(_, sr)| sr));
-    Ok(())
+    let receipt = phase_start.map(|s| GraphPhaseReceipt {
+        enabled: true,
+        failed: false,
+        elapsed: s.elapsed(),
+        expanded_count,
+    });
+    Ok(((), receipt))
 }

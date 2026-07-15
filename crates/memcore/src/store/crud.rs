@@ -5,7 +5,10 @@ use rusqlite::Connection;
 use crate::{
     db,
     error::MemoryError,
-    search::{hybrid_search, SearchOptions},
+    search::{
+        hybrid_search, hybrid_search_with_receipt, SearchOptions, SearchPhaseReceipt,
+        SearchReceiptDatabaseScope, SearchReceiptOperation,
+    },
     types::{MemoryEntry, SearchResult, StatsResult},
     MemoryStore,
 };
@@ -20,6 +23,22 @@ impl MemoryStore {
         let mut options = opts.unwrap_or_default();
         options.vec_available = self.vec_available;
         hybrid_search(&self.conn, query, &options)
+    }
+
+    /// Instrumented search for benchmark/evaluation fixtures. Unlike the
+    /// bare-connection helper, this preserves the store's actual vector
+    /// capability and adds the manifest DB label without disclosing a path.
+    pub fn search_with_receipt(
+        &self,
+        query: &str,
+        opts: Option<SearchOptions>,
+    ) -> Result<(Vec<SearchResult>, SearchPhaseReceipt), MemoryError> {
+        let mut options = opts.unwrap_or_default();
+        options.vec_available = self.vec_available;
+        let (results, mut receipt) = hybrid_search_with_receipt(&self.conn, query, &options)?;
+        receipt.operation = SearchReceiptOperation::MemoryStoreSearch;
+        receipt.database_scope = SearchReceiptDatabaseScope::Label(self.db_label.clone());
+        Ok((results, receipt))
     }
 
     /// Fetch a single entry by ID.
@@ -162,5 +181,39 @@ impl MemoryStore {
     /// Get aggregate statistics about the memory store.
     pub fn stats(&self, include_archived: bool) -> Result<StatsResult, MemoryError> {
         db::stats(&self.conn, include_archived)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_with_receipt_preserves_store_vector_capability_and_db_label() {
+        let store = MemoryStore::open_in_memory().expect("open test store");
+        let (_, receipt) = store
+            .search_with_receipt(
+                "no matching content",
+                Some(SearchOptions {
+                    vec_available: !store.vec_available,
+                    record_access: false,
+                    ..Default::default()
+                }),
+            )
+            .expect("receipt search");
+
+        assert_eq!(receipt.operation, SearchReceiptOperation::MemoryStoreSearch);
+        assert_eq!(
+            receipt.database_scope,
+            SearchReceiptDatabaseScope::Label("unknown".to_string())
+        );
+        assert_eq!(
+            receipt
+                .candidates
+                .expect("candidate phase ran")
+                .vec_available,
+            store.vec_available,
+            "store capability, not caller input, controls the vector channel"
+        );
     }
 }
