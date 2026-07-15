@@ -323,46 +323,25 @@ pub(crate) fn has_numeric_mismatch(new_entry: &MemoryEntry, old_entry: &MemoryEn
 /// counts — [`run_auto_linking`] produces the [`AutoLinkReceipt`] and this
 /// function emits it via `tracing::info!` from inside the spawned task.
 ///
-/// # Measured vs. unmeasured (tachi#1097 r4/r5 codex review ③/④)
+/// # Measured vs. unmeasured (tachi#1097 r4/r5/r6 codex review)
 ///
-/// What is asserted, precisely, so this section does not overstate its own
-/// coverage (#1097 r5 codex review ⑤ flagged an earlier "every value...is
-/// asserted" phrasing here as overstated — it conflated "the mutation logic
-/// is unit-tested in isolation" with "every field's live-path value is
-/// asserted end-to-end", which are not the same claim):
+/// This section used to carry a per-field enumeration of which receipt
+/// fields are covered by which test. That enumeration was wrong in three
+/// consecutive revisions of this doc comment — first an overclaim, then,
+/// while correcting the overclaim, an underclaim in the opposite direction
+/// (falsely naming several counters as unasserted when tests in `mod tests`
+/// below already covered them). Per #1097 r6 codex review it has been
+/// removed rather than corrected a fourth time: a hand-maintained coverage
+/// inventory in a doc comment is a claim that rots every time a test is
+/// added, renamed, or moved. What is asserted against which field is not
+/// duplicated here — read `mod tests` below, where it cannot drift from the
+/// code it describes.
 ///
-/// * Counter *mutation semantics* — [`AutoLinkReceipt::apply_search_outcome`]
-///   / [`AutoLinkReceipt::apply_edge_outcome`] (the attempts-vs-executions and
-///   insert-landed-vs-full-success contracts) — are unit-tested in isolation
-///   against a bare receipt, independent of any store or runtime.
-/// * Post-loop finalization (redacted `entry_id`, `total_elapsed` stamping) —
-///   [`finalize_auto_link_receipt`] — is unit-tested the same way.
-/// * The three production timers (`read_elapsed`, `write_elapsed`,
-///   `total_elapsed`), plus `searches_executed`, `edges_attempted`,
-///   `edges_written`, `entry_id` and `entity_count`, are asserted
-///   END-TO-END against a live store by
-///   `run_auto_linking_reports_live_read_write_and_total_timers`, which calls
-///   [`run_auto_linking`] directly. Rounds r2/r3 of #1097 filed the three
-///   timers as an accepted gap, on the premise that the `tokio::spawn`
-///   boundary put them out of a test's reach and that the S2 workload
-///   measurement would catch a dead one. Both halves were wrong (a prose
-///   promise is not a mechanism, and a single dead timer does not produce an
-///   all-zero phase); lifting the task body into [`run_auto_linking`] removes
-///   the boundary, so the timers are asserted rather than documented.
-/// * `candidates_examined`, `post_write_failures`, and the four
-///   `skipped_*` counters are NOT individually asserted to a specific value
-///   anywhere in this module's tests — their production increments run on
-///   every call (the loop that ticks them is not conditional on anything
-///   this leaf added), and other auto-link tests
-///   (`save_policy/auto_link.rs`) exercise paths that would move them, but no
-///   test here pins a value on any of the four. That is a real, narrower gap
-///   than the three timers were; it is stated rather than folded into a
-///   blanket "asserted" claim.
-///
-/// The `tracing::info!` call below is the one step no test asserts at all —
-/// not the counters, not the timers, not the redaction. That is a value
-/// judgement, not a blocker, and two things should be stated plainly rather
-/// than left implied:
+/// What follows is mechanism, not coverage bookkeeping — true regardless of
+/// what tests get added later. The `tracing::info!` call at the foot of the
+/// spawned task is the one step no test asserts. That is a value judgement,
+/// not a blocker, and two things should be stated plainly rather than left
+/// implied:
 ///
 /// * Capturing it is technically available — contrary to what r2/r3 asserted
 ///   here. `tracing-subscriber` is already a production dependency of this
