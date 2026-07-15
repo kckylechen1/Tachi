@@ -608,6 +608,43 @@ impl DbRuntime {
         f(&mut store)
     }
 
+    /// Recording twin of [`Self::with_path_store_read_with_label`]. Returns
+    /// the checkout receipt ONLY on the cached/attached branch, which checks a
+    /// slot out of the project read pool; the uncached branch opens a fresh
+    /// read-only connection with NO pool, so there is no checkout to measure
+    /// and it returns `None` — callers report `Unavailable` there rather than
+    /// fake a zero (#1125 honesty clause: "never report a wait you did not
+    /// measure"). Pool/locking/gate semantics are byte-for-byte identical to
+    /// the non-recording variant; only the observation is added on the pool
+    /// branch.
+    pub fn with_path_store_read_with_label_recording<T>(
+        &self,
+        db_path: &Path,
+        label: &str,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<(T, Option<ReadPoolCheckoutReceipt>), String> {
+        let key = project_db_read_cache_key(db_path)?;
+        let cached = self
+            .attached_project_dbs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .map(|entry| {
+                entry.touch();
+                entry.state.clone()
+            });
+        if let Some(state) = cached {
+            let _gate = read_or_recover(&state.rw_gate, "path_db_rw_gate");
+            let (result, receipt) = state.read_pool.with_store_recording(label, f);
+            return Ok((result, Some(receipt)));
+        }
+
+        let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
+        let mut store = open_read_store(&key, label)?;
+        let result = f(&mut store)?;
+        Ok((result, None))
+    }
+
     fn attached_project_state(&self, db_path: &Path) -> Result<ProjectDbState, String> {
         let key = project_db_cache_key(db_path)?;
         if let Some(state) = Self::touch_and_clone(&self.attached_project_dbs, &key) {
@@ -718,6 +755,26 @@ impl DbRuntime {
         self.global_read_pool.with_store("global_read_pool", f)
     }
 
+    /// Recording twin of [`Self::with_global_store_read`]: identical
+    /// read-gate + pool-checkout semantics, additionally returning the
+    /// [`ReadPoolCheckoutReceipt`] so a sampled recall path (#1125) can carry
+    /// a MEASURED `pool_checkout_wait` instead of leaving it
+    /// `LayerAvailability::Unavailable`. The plain `with_global_store_read`
+    /// remains the production path and is unchanged — the receipt is observed
+    /// only when a caller opts into this twin (no new cost on the unsampled
+    /// path). No pooling/locking semantics change: this delegates to
+    /// `ReadStorePool::with_store_recording`, the same checkout the plain
+    /// variant already runs (the doc on `with_store` notes it pays two
+    /// `Instant::now` calls either way).
+    pub fn with_global_store_read_recording<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<(T, ReadPoolCheckoutReceipt), String> {
+        let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
+        self.global_read_pool
+            .with_store_recording("global_read_pool", f)
+    }
+
     pub fn with_project_store<T>(
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
@@ -741,6 +798,22 @@ impl DbRuntime {
             .ok_or_else(|| "No project database available".to_string())?;
         let _gate = read_or_recover(&state.rw_gate, "project_rw_gate");
         state.read_pool.with_store("project_read_pool", f)
+    }
+
+    /// Recording twin of [`Self::with_project_store_read`] — see
+    /// [`Self::with_global_store_read_recording`]. Same project-db read gate
+    /// and pool checkout; additionally returns the [`ReadPoolCheckoutReceipt`]
+    /// for #1125's measured `pool_checkout_wait`.
+    pub fn with_project_store_read_recording<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<(T, ReadPoolCheckoutReceipt), String> {
+        let guard = self.project_db.read().unwrap_or_else(|e| e.into_inner());
+        let state = guard
+            .as_ref()
+            .ok_or_else(|| "No project database available".to_string())?;
+        let _gate = read_or_recover(&state.rw_gate, "project_rw_gate");
+        state.read_pool.with_store_recording("project_read_pool", f)
     }
 
     pub fn with_store_for_scope<T>(
@@ -1387,6 +1460,114 @@ mod tests {
              (recv_timeout expired waiting for its result)"
         );
 
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    /// kckylechen1/tachi#1125 acceptance 1 — the busy-slot test.
+    ///
+    /// A production recall that goes through the recording checkout must carry
+    /// a REAL, measured `pool_checkout_wait`, not an admission of ignorance.
+    /// `test_runtime` builds a `DbRuntime` whose `global_read_pool` has
+    /// exactly ONE slot. Thread A checks that sole slot out via
+    /// `with_global_store_read_recording` (the #1125 wiring the search recall
+    /// path uses) and holds it on a release gate; thread B then attempts the
+    /// same recording checkout and is provably parked in `wait_while` (via the
+    /// `observe_next_parked_checkout_for_test` causal observation point) before
+    /// A releases. B's returned [`ReadPoolCheckoutReceipt`] must therefore
+    /// show a strictly-positive `pool_checkout_wait`.
+    ///
+    /// **What this discriminates:** the `Instant::now` that seeds
+    /// `checkout_started` inside `with_store_recording` (the timer the new
+    /// `with_global_store_read_recording` delegates to). Stubbing that timer to
+    /// `Duration::ZERO` (e.g. `let checkout_started = Instant::now(); ... let
+    /// pool_checkout_wait = checkout_started.elapsed();` → `Duration::ZERO`)
+    /// turns the final assertion red even though B genuinely waited — that is
+    /// exactly the mutation the build seat re-checks. `>= ZERO` is
+    /// deliberately NOT used (it is a tautology and would not catch the
+    /// mutation); the parked-observer handshake is what makes the wait a proven
+    /// fact rather than a timing probability, so `> ZERO` is sound here.
+    #[test]
+    fn recording_checkout_reports_positive_pool_wait_under_contention() {
+        let temp = unique_temp_dir("recording-pool-wait");
+        let global_db = temp.join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global dir");
+        let runtime = Arc::new(test_runtime(global_db));
+
+        // Pool size is 1 (test_runtime). Thread A holds the sole slot on a
+        // release gate so it deterministically stays checked out until we let
+        // it go — B cannot find an idle slot and must park.
+        let release = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+        let (occupier_entered_tx, occupier_entered_rx) = std::sync::mpsc::channel();
+        let occupier_runtime = Arc::clone(&runtime);
+        let occupier_release = Arc::clone(&release);
+        let occupier = std::thread::spawn(move || {
+            occupier_runtime
+                .with_global_store_read_recording(|_store| {
+                    occupier_entered_tx
+                        .send(())
+                        .expect("occupier entrance signal");
+                    let (released, wake) = &*occupier_release;
+                    let mut released = released.lock().expect("lock release gate");
+                    while !*released {
+                        released = wake.wait(released).expect("wait release gate");
+                    }
+                    Ok(())
+                })
+                .expect("occupier recording checkout")
+        });
+        occupier_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("occupier should hold the sole slot before we proceed");
+
+        // Register the parked observer BEFORE spawning B (closes the window in
+        // which B could reach the wait before we are listening — same causal
+        // discipline as the panic-wakeup test).
+        let parked_rx = runtime
+            .global_read_pool
+            .observe_next_parked_checkout_for_test();
+
+        let waiter_runtime = Arc::clone(&runtime);
+        let (waiter_receipt_tx, waiter_receipt_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let result = waiter_runtime.with_global_store_read_recording(|_store| Ok(()));
+            // Send the receipt (or a failure marker) regardless of outcome so
+            // the main thread's recv_timeout can never hang on a panicked
+            // worker masquerading as a stuck checkout.
+            let payload = result.map(|(_, receipt)| receipt.pool_checkout_wait);
+            let _ = waiter_receipt_tx.send(payload);
+        });
+
+        // Prove B is genuinely parked in wait_while before we release A —
+        // without this, a scheduler delay could let the assertion observe a
+        // B that has not actually waited yet.
+        parked_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("test infrastructure: waiter never reached wait_while");
+
+        // Release A: B's parked checkout wakes, finds the now-free slot, and
+        // its `pool_checkout_wait` reflects the time it actually spent
+        // blocked.
+        {
+            let (released, wake) = &*release;
+            *released.lock().expect("lock release gate") = true;
+            wake.notify_all();
+        }
+        occupier.join().expect("occupier thread should join");
+
+        let waiter_wait = waiter_receipt_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("waiter should report its receipt within the bound")
+            .expect("waiter recording checkout should succeed");
+        // The acceptance assertion: a measured wait that is strictly positive
+        // because B was PROVEN parked. Mutation target =
+        // `with_store_recording`'s `checkout_started`/`elapsed()` timer.
+        assert!(
+            waiter_wait > Duration::ZERO,
+            "contended recording checkout must report a strictly-positive \
+             pool_checkout_wait (B was proven parked); got {waiter_wait:?}"
+        );
+
+        waiter.join().expect("waiter thread should join");
         let _ = std::fs::remove_dir_all(temp);
     }
 
