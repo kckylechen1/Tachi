@@ -48,7 +48,8 @@ fn fts_or_fallback_is_enabled_by_default_and_preserves_all_terms_precision() {
         // path (tachi#1097 S1).
         false,
     )
-    .unwrap();
+    .unwrap()
+    .0;
     assert!(
         default_scores.contains_key("partial-term"),
         "tachi#708 Gate 1 turns OR fallback on by default when conjunctive FTS returns no candidates"
@@ -70,7 +71,8 @@ fn fts_or_fallback_is_enabled_by_default_and_preserves_all_terms_precision() {
         &tuned_config,
         false,
     )
-    .unwrap();
+    .unwrap()
+    .0;
     let all_terms = tuned_scores
         .get("all-terms")
         .copied()
@@ -126,7 +128,8 @@ fn fts_or_fallback_cjk_phrase_recovers_when_ascii_term_is_missing() {
         &RecallConfig::default(),
         false,
     )
-    .unwrap();
+    .unwrap()
+    .0;
     let target = scores
         .get("cjk-target")
         .copied()

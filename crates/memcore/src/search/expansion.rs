@@ -229,6 +229,11 @@ pub(super) fn symbolic_query_with_expansion(query: &str) -> String {
     terms.join(" ")
 }
 
+/// FTS scores plus the per-expansion-group receipts (#1097 S1). Aliased so the
+/// signature stays under `clippy::type_complexity`; `None` groups means the
+/// caller did not opt into sampling, not "zero groups ran".
+type FtsScoresWithGroups = (HashMap<String, f64>, Option<Vec<FtsExpansionGroupReceipt>>);
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn search_fts_with_expansion_config(
     conn: &Connection,
@@ -240,7 +245,7 @@ pub(super) fn search_fts_with_expansion_config(
     as_of: Option<&str>,
     recall_config: &RecallConfig,
     sample: bool,
-) -> Result<(HashMap<String, f64>, Option<Vec<FtsExpansionGroupReceipt>>), MemoryError> {
+) -> Result<FtsScoresWithGroups, MemoryError> {
     let mut merged = HashMap::new();
     let mut groups: Option<Vec<FtsExpansionGroupReceipt>> = sample.then(Vec::new);
     for (idx, fts_query) in expanded_fts_queries(query, recall_config.max_expanded_fts_queries)
