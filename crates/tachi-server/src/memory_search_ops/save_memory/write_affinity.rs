@@ -143,7 +143,7 @@ pub(crate) enum WriteAffinityError {
         store: String,
         bound: String,
     },
-    /// #1041 F4: `RoutingConfig::load` used to collapse an unreadable file or
+    /// #1041 F4: routing-config loading used to collapse an unreadable file or
     /// invalid JSON into an empty route table with only a `tracing::warn!` —
     /// a broken config silently disabled the S1 gate rather than being
     /// treated as "can't evaluate this write's affinity, so don't risk it".
@@ -214,7 +214,7 @@ pub(crate) struct AffinityOutcome {
 }
 
 /// Apply the write-affinity gate against the live process state (real
-/// `RoutingConfig::get_checked()`, the real daemon-bound project label, and
+/// the server-bound `RoutingConfigProvider`, the real daemon-bound project label, and
 /// a real filesystem `named_project_db_exists` check). See
 /// [`apply_write_affinity_with`] for the injectable core used by tests.
 ///
@@ -229,11 +229,10 @@ pub(in crate::memory_search_ops::save_memory) fn apply_write_affinity(
     named_project: Option<&str>,
     id_resolves_at_target: bool,
 ) -> Result<AffinityOutcome, WriteAffinityError> {
-    // #1041 B4: `get_checked()` now returns a shared `Arc<RoutingConfig>` (see
-    // `routing_config::ROUTING_CONFIG_CACHE`'s doc) rather than a `&'static
-    // RoutingConfig` — `&config` derefs it for `apply_write_affinity_with`.
-    let config =
-        RoutingConfig::get_checked().map_err(WriteAffinityError::RoutingConfigUnavailable)?;
+    let config = server
+        .routing_config()
+        .get_checked()
+        .map_err(WriteAffinityError::RoutingConfigUnavailable)?;
     apply_write_affinity_with(
         params,
         target_db,
@@ -322,8 +321,10 @@ pub(crate) fn apply_write_affinity_for_domain(
     explicit_project: bool,
     id_resolves_at_target: bool,
 ) -> Result<AffinityOutcome, WriteAffinityError> {
-    let config =
-        RoutingConfig::get_checked().map_err(WriteAffinityError::RoutingConfigUnavailable)?;
+    let config = server
+        .routing_config()
+        .get_checked()
+        .map_err(WriteAffinityError::RoutingConfigUnavailable)?;
     apply_write_affinity_for_domain_with(
         domain,
         target_db,
@@ -501,6 +502,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::EnvRestore;
 
     fn base_params() -> SaveMemoryParams {
         SaveMemoryParams {
@@ -539,6 +541,63 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// #1126 Route D discrimination: two servers constructed under different
+    /// homes in one process must keep their own routing identity. This drives
+    /// the real `apply_write_affinity` wrapper, not its injectable core.
+    ///
+    /// Before the provider was server-bound, whichever construction or call
+    /// first loaded a route populated one process-global cache. The other
+    /// server then incorrectly reused that route, making this test red on
+    /// the pre-fix code.
+    #[test]
+    fn outer_write_gate_keeps_two_servers_routing_configs_separate() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let homes = tempfile::tempdir().expect("temporary homes");
+        let home_a = homes.path().join("home-a");
+        let home_b = homes.path().join("home-b");
+        std::fs::create_dir_all(&home_a).expect("create home A");
+        std::fs::create_dir_all(&home_b).expect("create home B");
+        std::fs::write(
+            home_a.join("routing.json"),
+            br#"{"domain_routes": [{"project": "store-a", "domains": ["equity_trading"]}]}"#,
+        )
+        .expect("write home A config");
+        std::fs::write(
+            home_b.join("routing.json"),
+            br#"{"domain_routes": [{"project": "store-b", "domains": ["equity_trading"]}]}"#,
+        )
+        .expect("write home B config");
+
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &home_a);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        let server_a =
+            MemoryServer::new(home_a.join("global/memory.db"), None).expect("construct server A");
+
+        std::env::set_var("TACHI_HOME", &home_b);
+        let server_b =
+            MemoryServer::new(home_b.join("global/memory.db"), None).expect("construct server B");
+
+        let mut params = base_params();
+        params.domain = Some("equity_trading".to_string());
+
+        let a = apply_write_affinity(&server_a, &params, DbScope::Project, None, false)
+            .expect_err("unmounted route must refuse");
+        assert!(matches!(
+            a,
+            WriteAffinityError::UnmountedRoute { ref store, .. } if store == "store-a"
+        ));
+
+        let b = apply_write_affinity(&server_b, &params, DbScope::Project, None, false)
+            .expect_err("unmounted route must refuse");
+        assert!(matches!(
+            b,
+            WriteAffinityError::UnmountedRoute { ref store, .. } if store == "store-b"
+        ));
     }
 
     #[test]
@@ -1011,12 +1070,10 @@ mod tests {
     /// KNOWN, ACCEPTED limitation, not a target this PR claims to hit): the
     /// gate has no memory of a PRIOR call's decision across two calls with
     /// DIFFERENT `RoutingConfig`s for the SAME domain/id. In production
-    /// this happens across a daemon restart after a `routing.json` edit
-    /// (see `continuity_ops::storage::tests`' note on why
-    /// `RoutingConfig::get_checked()`'s process-wide cache makes this
-    /// untestable as a same-process integration test — that cache is
-    /// exactly what makes it possible to characterize ONLY at this DI
-    /// level, where `config` is a plain parameter, not a cached global).
+    /// this happens across a daemon restart after a `routing.json` edit: a
+    /// server-bound provider intentionally keeps one successful config for
+    /// its daemon lifetime. That makes this a DI-level characterization,
+    /// where `config` is a plain parameter, not a cached provider.
     /// A caller can only ever check "does this id exist at the PRE-gate
     /// target" (never at wherever a PRIOR run under the OLD config actually
     /// placed it) — so when the registered route changes, the SAME

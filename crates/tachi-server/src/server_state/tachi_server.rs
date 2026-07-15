@@ -2,6 +2,7 @@ use super::cache::ToolDiscovery;
 use super::runtime::{AgentRuntime, EnrichmentRuntime, FoundryRuntime};
 use super::{DbRuntime, RateLimiter, VaultState};
 use crate::mcp_pool::McpClientPool;
+use crate::memory_search_ops::routing_config::RoutingConfigProvider;
 use rmcp::handler::server::tool::ToolRouter;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 
@@ -70,4 +71,7 @@ pub(crate) struct MemoryServer {
     /// `memory_server_tachi_home_dir_matches_canonical_resolution` in
     /// `server_state/init.rs`'s test module for the equality check.
     pub(crate) home_dir: Arc<std::path::PathBuf>,
+    /// Routing configuration belongs to the same immutable home identity as
+    /// this server. Clones share its success-only cache.
+    pub(crate) routing_config: Arc<RoutingConfigProvider>,
 }

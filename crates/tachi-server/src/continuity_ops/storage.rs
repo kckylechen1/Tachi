@@ -697,19 +697,11 @@ mod tests {
     // #1114 codex round-2 item 4①/③ KNOWN LIMITATION (registry changes its
     // route for a domain between two projection runs of the SAME
     // deterministic id): NOT reproduced as an integration test in THIS
-    // module. `RoutingConfig::get_checked()` caches successfully-loaded
-    // config in a process-wide `OnceLock` for the rest of the process's
-    // lifetime (see that module's own "#1041 B4: shared read/write cache
-    // consistency" test-doc note: "cargo test runs every test in one
-    // process, so asserting on the real static would be poisoned") — a
-    // SECOND `routing.json` rewrite mid-test would silently have NO effect
-    // on a SECOND `resolve_projection_write_target` call, because it goes
-    // through the SAME cached, real `apply_write_affinity_for_domain`. This
-    // is also true of a REAL daemon: routing.json is effectively frozen for
-    // that daemon's entire uptime once first read, so the "domain routes to
-    // A, then later to B" scenario can only happen ACROSS a daemon restart
-    // — which needs two independent processes to reproduce faithfully, not
-    // one test function. The underlying GATE MECHANISM'S lack of memory
+    // module. A server-bound provider caches a successful config for that
+    // daemon's lifetime, so a SECOND `routing.json` rewrite has no effect
+    // on a SECOND `resolve_projection_write_target` call from that daemon.
+    // The "domain routes to A, then later to B" scenario happens ACROSS a
+    // restart. The underlying GATE MECHANISM'S lack of memory
     // across two calls with DIFFERENT configs — the actual thing that
     // would let the same id split across two stores — IS characterized at
     // the DI level, where config is a plain parameter with no caching

@@ -28,6 +28,7 @@ mod secrets;
 mod types;
 
 pub use autofix::auto_fix_safe;
+#[cfg(test)]
 pub use classify::classify_one;
 pub use hub_lint::hub_capability_discovery_status_warnings;
 pub use render::render_report;

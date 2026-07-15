@@ -360,13 +360,9 @@ pub(crate) fn infer_search_project(
     home: &std::path::Path,
     query: &str,
     domain: Option<&str>,
+    config: &super::routing_config::RoutingConfig,
 ) -> Option<String> {
-    infer_search_project_with(
-        home,
-        query,
-        domain,
-        &super::routing_config::RoutingConfig::get(),
-    )
+    infer_search_project_with(home, query, domain, config)
 }
 
 /// Config-injectable core. Domain-specific routing is supplied by

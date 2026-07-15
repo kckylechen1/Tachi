@@ -14,6 +14,7 @@ use crate::foundry_runtime_ops::{
 };
 use crate::mcp_pool::McpClientPool;
 use crate::mcp_proxy::McpToolExposureMode;
+use crate::memory_search_ops::routing_config::RoutingConfigProvider;
 use crate::utils::parse_env_u64;
 use memcore::MemoryStore;
 use memcore::{DbOpenContext, MigrationAuthority, OpenIntent};
@@ -148,6 +149,7 @@ impl MemoryServer {
         // resolution instead of each independently re-reading
         // TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME (#1096 leaf-2a).
         let home_dir = Arc::new(crate::path_utils::tachi_home());
+        let routing_config = Arc::new(RoutingConfigProvider::new((*home_dir).clone()));
         let claude_pool_max = std::env::var("CLAUDE_POOL_MAX_CONCURRENT")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -267,6 +269,7 @@ impl MemoryServer {
             })),
             bound_agent_id: Arc::new(StdRwLock::new(bound_agent_id)),
             home_dir,
+            routing_config,
         };
 
         if background_workers_enabled() {

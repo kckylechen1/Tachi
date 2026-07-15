@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use super::cache::recall_cache_key;
-use super::filters::{project_scope_allows_memory, project_scope_allows_memory_with_config};
+use super::filters::project_scope_allows_memory_with_config;
 use crate::memory_search_ops::routing_config::RoutingConfig;
 use crate::tool_params::SearchMemoryParams;
 
@@ -182,15 +182,17 @@ fn recall_cache_key_ignores_rerank_intent() {
 fn sigil_project_scope_defaults_do_not_special_case_domain_pack_rows() {
     let params = params("Tachi 召回 向量 有没有问题");
 
-    assert!(project_scope_allows_memory(
+    assert!(project_scope_allows_memory_with_config(
         "sigil",
         &params,
-        &entry(Some("domain_pack"), "/domain-pack/v4")
+        &entry(Some("domain_pack"), "/domain-pack/v4"),
+        &RoutingConfig::default(),
     ));
-    assert!(project_scope_allows_memory(
+    assert!(project_scope_allows_memory_with_config(
         "sigil",
         &params,
-        &entry(Some("scratch"), "/scratch/sigil/recall")
+        &entry(Some("scratch"), "/scratch/sigil/recall"),
+        &RoutingConfig::default(),
     ));
 }
 

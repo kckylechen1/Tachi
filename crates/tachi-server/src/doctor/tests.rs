@@ -88,8 +88,7 @@ fn classify_flags_cross_domain_suspect_in_engineering_store() {
     // hit and not a false clean. The keyword-selection logic itself
     // (trading-registered store -> engineering vocabulary, and vice versa)
     // is covered directly and deterministically in `cross_domain`'s own
-    // `#[cfg(test)]` module, which injects a `RoutingConfig` instead of
-    // depending on the process-global `RoutingConfig::get()` cache.
+    // `#[cfg(test)]` module, which injects a `RoutingConfig` directly.
     let dir = tempdir().unwrap();
     let p = dir.path().join("memory.db");
     make_engineering_store_with_trading_leak(&p);

@@ -2,9 +2,9 @@ use chrono::Utc;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{
-    auto_fix_safe, classify_one, DbClassification, DoctorFinding, DoctorReport, SummaryByClass,
-};
+use super::classify::classify_one_with_provider;
+use super::{auto_fix_safe, DbClassification, DoctorFinding, DoctorReport, SummaryByClass};
+use crate::memory_search_ops::routing_config::RoutingConfigProvider;
 
 // ─── Scanning ────────────────────────────────────────────────────────────────
 
@@ -134,7 +134,11 @@ pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> 
         .into_iter()
         .filter(|path| !path_is_under(path, quarantine_root))
         .collect();
-    let findings: Vec<DoctorFinding> = candidates.iter().map(|p| classify_one(p)).collect();
+    let routing_config = RoutingConfigProvider::new(crate::path_utils::tachi_home());
+    let findings: Vec<DoctorFinding> = candidates
+        .iter()
+        .map(|path| classify_one_with_provider(path, &routing_config))
+        .collect();
 
     let mut summary = SummaryByClass::default();
     summary.total_databases = findings.len();
