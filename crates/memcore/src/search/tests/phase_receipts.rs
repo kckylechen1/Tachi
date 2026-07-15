@@ -311,14 +311,45 @@ fn receipt_records_fts_or_fallback_group_when_conjunctive_fts_zeros() {
     // Discriminator for the fallback's own timer (expansion.rs:292). Group
     // *presence* alone stays green even if `fallback_start` is replaced by a
     // hardcoded `Duration::ZERO` — the group would still be pushed. This
-    // asserts the timer actually wraps the `search_fts_raw_match` call. The
-    // fallback issues a real SQLite query, so a live `Instant` (nanosecond
-    // resolution) cannot report exactly zero; a stubbed one always does.
+    // asserts the timer actually wraps the `search_fts_raw_match` call.
+    //
+    // On the `> ZERO` form (see the module note on
+    // `receipt_sampled_timers_actually_ran_and_subphases_fit_under_total`):
+    // this is a practical assertion, not an API guarantee. `Instant` is
+    // documented only as nondecreasing, so `elapsed()` returning zero is
+    // permitted. The assertion holds because the fallback brackets a real
+    // SQLite query — microseconds of work — while `Instant`'s resolution on
+    // the platforms this suite runs on is nanoseconds. A zero here indicates a
+    // timer that never started, not a run too fast to measure.
     assert!(
         fallbacks[0].elapsed > std::time::Duration::ZERO,
         "OR-fallback group must carry its own live timer, got {:?}",
         fallbacks[0].elapsed
     );
+    // #1097 r4 codex review ①: the `hit_count` fields
+    // (expansion.rs:271/:284 and :303/:322) had no discriminator — replacing
+    // either with a literal `0` stayed green. Here the two groups are
+    // distinguishable *by count*, which pins each field to its own source:
+    // the fallback only runs BECAUSE every conjunctive group merged to
+    // nothing, so the non-fallback groups must report exactly zero hits, and
+    // the fallback must report the rows it recovered. Wiring `hit_count` to
+    // the wrong group's hits, or stubbing the fallback's to `0`, turns this
+    // red.
+    assert!(
+        fallbacks[0].hit_count >= 1,
+        "the OR-fallback ran a relaxed query that recovered the \
+         partial-coverage target, so its hit_count must be non-zero, got {:?}",
+        candidates.fts_groups
+    );
+    for group in candidates.fts_groups.iter().filter(|g| !g.is_fallback) {
+        assert_eq!(
+            group.hit_count, 0,
+            "the fallback fires only when every conjunctive group merged to \
+             nothing (expansion.rs:288 `merged.is_empty()`), so non-fallback \
+             group idx={} must report 0 hits, got {:?}",
+            group.idx, candidates.fts_groups
+        );
+    }
 }
 
 #[test]
@@ -346,6 +377,24 @@ fn receipt_records_no_fts_fallback_group_when_conjunctive_fts_hits() {
         !candidates.fts_groups.is_empty(),
         "the conjunctive group itself should be recorded"
     );
+    // #1097 r4 codex review ①: discriminator for the non-fallback
+    // `hit_count` (expansion.rs:271 `group_hits.len()` → :284). Stubbing it to
+    // a literal `0` stayed green before this assertion existed. idx 0 is the
+    // original conjunctive query; "rust performance" matches the seeded row
+    // "rust performance memory safety", and the fact that NO fallback group
+    // was recorded above independently proves the merged set was non-empty —
+    // so the original group must report at least one hit.
+    let original = candidates
+        .fts_groups
+        .iter()
+        .find(|g| g.idx == 0)
+        .expect("the original conjunctive query is group idx 0");
+    assert!(
+        original.hit_count >= 1,
+        "the conjunctive group matched (no fallback was triggered), so its \
+         hit_count must be non-zero, got {:?}",
+        candidates.fts_groups
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -364,9 +413,11 @@ fn receipt_populates_access_recording_only_when_record_access_true() {
     insert_entry(&mut conn, entry);
 
     // record_access=true: the entire `if opts.record_access { ... }` block
-    // runs and `access_recording` is populated. The free `updated_row_count`
-    // is `record_access_with_updates(...).len()` — the existing return value
-    // (access.rs:73), NOT a new counter on the access boundary.
+    // runs and `access_recording` is populated. `updated_row_count` is
+    // `record_access_with_updates(...).len()` — the existing return value
+    // (access.rs:73), so no extra DB query and no new counter on the access
+    // boundary. (That is the mechanism; the cost of the `.len()` itself is
+    // not claimed or measured.)
     let opts_on = SearchOptions {
         top_k: 1,
         candidates_per_channel: 0,
@@ -609,12 +660,32 @@ fn receipt_keeps_rank_phase_when_candidate_filter_zeros_out() {
 //
 // #1097 r3 codex review ④ (gap-1) — Discriminator 3 below: every present
 // (Some) sub-phase timer must be strictly greater than `Duration::ZERO`.
-// `Instant` is nanosecond-resolution, so any phase that actually executed
-// (even a single function call / early-return branch) has elapsed > 0; a
-// true zero is the bug signature of a timer that was never started or whose
-// `Instant::now`/`elapsed()` call someone reverted to a literal
-// `Duration::ZERO`. Reverting ANY present timer point to ZERO turns the
-// matching assertion red. `>= ZERO` (a tautology) is deliberately NOT used.
+// Reverting ANY present timer point to ZERO turns the matching assertion red.
+// `>= ZERO` (a tautology) is deliberately NOT used.
+//
+// #1097 r4 codex review ② — what the `> ZERO` form does and does not claim.
+// It is NOT an API guarantee that an executed phase has `elapsed > 0`:
+// `Instant` is documented only as *nondecreasing*, and `elapsed()` returning
+// `Duration::ZERO` is permitted. (Earlier rounds asserted the guarantee as
+// fact; that was wrong, and the assertions are kept on different grounds.)
+// These are *practical* assertions, resting on two facts about the platforms
+// this suite runs on (macOS/Linux, where `Instant` reads a nanosecond-
+// resolution monotonic clock):
+//
+//   * Most timers below bracket a real SQLite query — microseconds of work,
+//     three-plus orders of magnitude above the clock's resolution.
+//   * The one exception is `graph_expansion` when `graph_expand_hops == 0`,
+//     which brackets only an early return. That is nanoseconds, not
+//     microseconds — but the span still contains the *second* `Instant::now()`
+//     read, and two successive reads of a nanosecond-resolution clock do not
+//     return the same value. The margin is far thinner than the others'; it is
+//     called out rather than papered over.
+//
+// So a zero indicates a timer that never started (or one whose
+// `Instant::now`/`elapsed()` was reverted to a literal `Duration::ZERO`),
+// not a run too fast to measure. That inference is what makes these useful
+// discriminators. It is not a promise the standard library makes, and it is
+// not claimed as one.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -637,10 +708,9 @@ fn receipt_sampled_timers_actually_ran_and_subphases_fit_under_total() {
     // non-zero total. If `total_start = sample.then(Instant::now)` were
     // ever broken (sample flag ignored, timer never started, or
     // `finish_receipt` returning the `not_sampled()` placeholder), this
-    // would be exactly `Duration::ZERO`. (On any real machine searching
-    // an in-memory SQLite DB, elapsed is microseconds — `Instant` has
-    // nanosecond resolution, so a true zero is the bug signature, not a
-    // fast-run artifact.)
+    // would be exactly `Duration::ZERO`. See the module note above for why
+    // `> ZERO` is a sound practical assertion here rather than an API
+    // guarantee about `Instant`.
     assert!(
         receipt.total_elapsed > std::time::Duration::ZERO,
         "sampled total_elapsed must be non-zero on a real search (timer wired / started)"
@@ -684,11 +754,12 @@ fn receipt_sampled_timers_actually_ran_and_subphases_fit_under_total() {
     );
 
     // Discriminator 3 (#1097 r3 ④ gap-1): every present (Some) sub-phase
-    // timer must be strictly > ZERO. Each assertion below pins ONE concrete
-    // `Instant::now()` / `elapsed()` call site in the production code —
-    // reverting that single call site to a literal `Duration::ZERO` makes
-    // exactly the matching assertion fail. `>= ZERO` would be a tautology
-    // (the r3 codex finding) and is deliberately not used; absolute
+    // timer must be strictly > ZERO — on the practical grounds set out in the
+    // module note above, not as an API guarantee. Each assertion below pins
+    // ONE concrete `Instant::now()` / `elapsed()` call site in the production
+    // code — reverting that single call site to a literal `Duration::ZERO`
+    // makes exactly the matching assertion fail. `>= ZERO` would be a
+    // tautology (the r3 codex finding) and is deliberately not used; absolute
     // upper bounds are deliberately not used (flaky). The scenario runs a
     // normal successful search with `record_access=true`, so every
     // always-running phase is present here; the `vec` sub-timer is covered
@@ -752,10 +823,12 @@ fn receipt_sampled_timers_actually_ran_and_subphases_fit_under_total() {
         rank_access.elapsed > std::time::Duration::ZERO,
         "rank.get_access_times.elapsed must be > ZERO (rank access_start timer wired)"
     );
-    // graph_expansion.elapsed — graph_expansion.rs:26 phase_start. Even
-    // with `graph_expand_hops == 0` (enabled=false) the function is
-    // invoked and takes the early-return branch, which is still a real
-    // execution whose wall time the timer captures; reverting that
+    // graph_expansion.elapsed — graph_expansion.rs:26 phase_start. With
+    // `graph_expand_hops == 0` (enabled=false) the function is invoked and
+    // takes the early-return branch, so this span brackets nanoseconds, not
+    // the microseconds the DB-backed timers above do — it is the thin-margin
+    // case flagged in the module note. It still holds because the span
+    // contains the second `Instant::now()` read; reverting that
     // `Instant::now`/`elapsed` to ZERO reds this.
     let graph = receipt
         .graph_expansion

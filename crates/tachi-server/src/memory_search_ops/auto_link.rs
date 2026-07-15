@@ -13,18 +13,21 @@ const REINFORCEMENT_DUPLICATE_SIMILARITY: f64 = 0.95;
 // ---------------------------------------------------------------------------
 // tachi#1097 PERF-T3 S1 — Auto-link phase-attribution receipt.
 //
-// Pure observation: the four skip points (self-id :143, training-seed :146,
-// no-shared-entities :153, neither-supersede-nor-reinforce :175) are NOT
-// changed — we only count them. The edge write at :210-234 is NOT changed —
-// we only time it. Read time = per-entity `with_*_store_read` searches
-// (auto_link.rs:136/:138); write time = per-edge `with_*_store` writes
-// (:231/:233). No new DB I/O, no quality logic touched.
+// Pure observation: the four skip points in `run_auto_linking`'s per-hit loop
+// (self-id, training-seed, no-shared-entities,
+// neither-supersede-nor-reinforce) are NOT changed — we only count them. The
+// edge write is NOT changed — we only time it. Read time = the per-entity
+// `with_*_store_read` searches; write time = the per-edge `with_*_store`
+// writes. The mechanism that keeps this observation-only: the instrumentation
+// issues no store call of its own, so it adds no DB I/O; it touches no
+// scoring, gating or relation-selection input. (Whether the added
+// `Instant::now` reads and counter increments are cheap relative to the DB
+// work they bracket is NOT claimed here — nothing in this leaf measures that.)
 //
-// Per #1097 D2 this receipt carries ONLY the existing `entry.id` (captured
-// into the spawned closure at auto_link.rs:110 — no query/trace id is
-// minted, none exists in the codebase). Per D5 it contains no entity names
-// (entities are the search queries here, so naming them would log query
-// text), no memory content, no DB path.
+// Per #1097 D2 this receipt carries ONLY the existing `entry.id` — no
+// query/trace id is minted, none exists in the codebase. Per D5 it contains no
+// entity names (entities are the search queries here, so naming them would log
+// query text), no memory content, no DB path.
 //
 // #1097 r1 codex review ① (D5 hard line): `entry.id` is NOT necessarily a
 // save-generated UUID — `save_memory` accepts a caller-supplied
@@ -40,7 +43,10 @@ const REINFORCEMENT_DUPLICATE_SIMILARITY: f64 = 0.95;
 //
 // The receipt is emitted from INSIDE the spawned task because the save
 // handler returns `"auto_link": "pending"` (handler.rs:261-262) without
-// awaiting it — the closure is the only place the finished counts exist.
+// awaiting it — the task is the only place the finished counts exist. The
+// task's body is `run_auto_linking`, a plain synchronous function, so the
+// receipt (timers included) is assertable from a test without a runtime;
+// `spawn_auto_linking` is only the spawn + emit shell around it.
 // ---------------------------------------------------------------------------
 
 /// Fixed marker placed in [`AutoLinkReceipt::entry_id`] (and the log line)
@@ -202,19 +208,19 @@ impl AutoLinkReceipt {
 /// ONLY when it parses as a legal UUID, otherwise the fixed
 /// [`REDACTED_NON_UUID_ID`] marker) and the end-to-end `total_elapsed`.
 ///
-/// This is the pure, store/tokio/tracing-free tail of [`spawn_auto_linking`]
-/// — extracted so the two post-loop assignments (`receipt.entry_id =
-/// redacted_entry_id(...)` and `receipt.total_elapsed = task_start.elapsed()`,
-/// formerly two bare lines inside a `tokio::spawn` block a unit test cannot
-/// reach) are a unit-tested contract. `spawn_auto_linking` routes its
-/// accumulated receipt through here immediately before the `tracing::info!`
-/// emit point, so reverting the redaction (echoing the raw id) or dropping
-/// the total-elapsed assignment turns the `finalize_*` discrimination tests
-/// red.
+/// This is the pure tail of [`run_auto_linking`]: it needs no store, no
+/// runtime and no subscriber, so the two post-loop assignments
+/// (`receipt.entry_id = redacted_entry_id(...)` and `receipt.total_elapsed =
+/// <the total it is handed>`) are a unit-tested contract. [`run_auto_linking`]
+/// returns its accumulated receipt through here, so reverting the redaction
+/// (echoing the raw id) or dropping the total-elapsed assignment turns the
+/// `finalize_*` tests red.
 ///
-/// The `tracing::info!` emission itself (the block at the foot of
-/// [`spawn_auto_linking`]) is NOT covered by this function — see the
-/// measurement-gap note on [`spawn_auto_linking`].
+/// Note the split of duties, because it is easy to over-read: these tests
+/// prove `finalize` stamps the total it is *given*. They cannot see the
+/// `task_start.elapsed()` argument at the call site — that is covered
+/// separately by `run_auto_linking_reports_live_read_write_and_total_timers`,
+/// which drives [`run_auto_linking`] against a live store.
 pub(crate) fn finalize_auto_link_receipt(
     mut receipt: AutoLinkReceipt,
     raw_entry_id: &str,
@@ -311,76 +317,51 @@ pub(crate) fn has_numeric_mismatch(new_entry: &MemoryEntry, old_entry: &MemoryEn
     let old_numbers = numbers_in_text(&old_entry.text);
     !new_numbers.is_empty() && !old_numbers.is_empty() && new_numbers != old_numbers
 }
-
-/// Spawn the background auto-link task for a freshly-saved `entry`. The
-/// save handler returns `"auto_link": "pending"` without awaiting this
-/// task, so the closure is the only place the finished counts exist — the
-/// [`AutoLinkReceipt`] is accumulated inside the task and emitted via
-/// `tracing::info!` from there.
+/// Spawn the background auto-link task for a freshly-saved `entry`. The save
+/// handler returns `"auto_link": "pending"` without awaiting it
+/// (handler.rs:261-262), so nothing downstream can observe the finished
+/// counts — [`run_auto_linking`] produces the [`AutoLinkReceipt`] and this
+/// function emits it via `tracing::info!` from inside the spawned task.
 ///
-/// # Measured vs. unmeasured (tachi#1097 r3 codex review ④ gap-2)
+/// # Measured vs. unmeasured (tachi#1097 r4 codex review ③/④)
 ///
-/// The receipt's **counter semantics** are unit-tested through
-/// [`AutoLinkReceipt::apply_search_outcome`] /
-/// [`AutoLinkReceipt::apply_edge_outcome`] (the `attempts-vs-executions`
-/// and `insert-landed-vs-full-success` contracts). The **post-loop
-/// finalization** (redacted `entry_id` + `total_elapsed`) is unit-tested
-/// through [`finalize_auto_link_receipt`], which this function routes the
-/// accumulated receipt through immediately before emit — reverting either
-/// assignment *inside that function* turns its tests red.
+/// Every value the receipt carries is asserted by a test:
 ///
-/// Three production timers in this function are **not** discriminated by
-/// any unit test, and the paragraph above must not be read as covering
-/// them:
+/// * Counter semantics — [`AutoLinkReceipt::apply_search_outcome`] /
+///   [`AutoLinkReceipt::apply_edge_outcome`] (the attempts-vs-executions and
+///   insert-landed-vs-full-success contracts).
+/// * Post-loop finalization (redacted `entry_id`, `total_elapsed` stamping) —
+///   [`finalize_auto_link_receipt`].
+/// * The three production timers (`read_elapsed`, `write_elapsed`,
+///   `total_elapsed`) and the counters against a live store —
+///   `run_auto_linking_reports_live_read_write_and_total_timers`, which calls
+///   [`run_auto_linking`] directly. Rounds r2/r3 of #1097 filed these three as
+///   an accepted gap, on the premise that the `tokio::spawn` boundary put them
+///   out of a test's reach and that the S2 workload measurement would catch a
+///   dead one. Both halves were wrong (a prose promise is not a mechanism, and
+///   a single dead timer does not produce an all-zero phase); lifting the task
+///   body into [`run_auto_linking`] removes the boundary, so the timers are
+///   asserted rather than documented.
 ///
-/// 1. `read_timer` → `receipt.read_elapsed` (the per-search accumulation).
-/// 2. `write_timer` → `receipt.write_elapsed` (the per-edge accumulation).
-/// 3. The `task_start.elapsed()` **argument** at the
-///    [`finalize_auto_link_receipt`] call site. `finalize`'s tests assert
-///    it stamps the total it is *given*; they cannot catch this call site
-///    handing it a `Duration::ZERO` instead.
+/// The `tracing::info!` call below is the one step no test asserts. That is a
+/// value judgement, not a blocker, and two things should be stated plainly
+/// rather than left implied:
 ///
-/// All three sit inside the `tokio::spawn` below and hit the same wall
-/// described under the emission gap: reaching them from a unit test needs a
-/// live runtime. They are accepted-with-record rather than covered by a
-/// flaky end-to-end test (#1114 precedent).
-///
-/// What bounds them: these three timers *are* what the #1097 S2 workload
-/// measurement reads. A stubbed or dead timer surfaces there as an
-/// all-zero auto-link phase against live read/write work — so S2 is the
-/// discriminator of record for this trio, and confirming they report
-/// non-zero under load is an explicit S2 acceptance item.
-///
-/// The `tracing::info!` emission point (the block at the foot of this
-/// function) is a **known discrimination gap**: it is not covered by any
-/// unit test.
-///
-/// The blocker is *not* a missing dependency. `tracing-subscriber` is
-/// already a production dependency of this crate (`tachi-server`'s
-/// `Cargo.toml:83`, default features on, so `registry`/`fmt` are
-/// available), and a crate's normal dependencies are usable from its own
-/// `#[cfg(test)]` modules — a capture layer could be built here with zero
-/// new deps.
-///
-/// The actual blocker is the `tokio::spawn` boundary below. The emit runs
-/// on a runtime worker thread, so a scoped, thread-local subscriber
-/// (`tracing::subscriber::with_default`) cannot see it; capturing it means
-/// `set_global_default`, which is process-global and settable once per
-/// process. That turns one test into a serialization point for every other
-/// test in the binary — and driving the spawn end-to-end additionally needs
-/// a live runtime. Both routes are rejected under the #1114 precedent: a
-/// process-global background-worker race in a test suite is a strictly
-/// worse outcome than an honestly-documented gap, and this leaf (#1097 S1)
-/// is observation-only — it must not mint a flaky runtime test for
-/// coverage's sake.
-///
-/// What bounds the risk of accepting it: everything the emit block decides
-/// is already covered upstream by [`finalize_auto_link_receipt`]'s
-/// pure-function tests; the block itself only forwards the finalized
-/// receipt. Revisit when (a) a tracing-capture convention with an agreed
-/// answer to the global-subscriber problem exists in the repo, or (b) a
-/// dedicated auto-link integration harness is introduced under a separate
-/// task.
+/// * Capturing it is technically available — contrary to what r2/r3 asserted
+///   here. `tracing-subscriber` is already a production dependency of this
+///   crate (`Cargo.toml:83`, default features on), and a scoped subscriber CAN
+///   cross a `tokio::spawn` boundary via
+///   `tracing::instrument::WithSubscriber::with_current_subscriber`
+///   (tracing-0.1.44 `instrument.rs:136`/`:228`, whose own doc example is
+///   `tokio::spawn(future.with_current_subscriber())`). Neither a new
+///   dependency nor `set_global_default` would be required. What is left
+///   unasserted is only the field-naming: [`run_auto_linking`] hands this
+///   block an already-finalized receipt whose every field is covered above.
+/// * The log line renders each timer through `as_micros() as u64`, so a phase
+///   whose real duration is under one microsecond prints as `0`. The tests
+///   assert the `Duration` fields on the receipt, not these rendered integers
+///   — a `0` in a log line is therefore not by itself evidence of a dead
+///   timer.
 pub(crate) fn spawn_auto_linking(
     server: &MemoryServer,
     entry: &MemoryEntry,
@@ -392,7 +373,6 @@ pub(crate) fn spawn_auto_linking(
     }
 
     let auto_link_server = server.clone();
-    let auto_link_id = entry.id.clone();
     let auto_link_entry = entry.clone();
     // Dedup source entities so duplicate labels cannot inflate shared_count
     // past the #773 related_to fog floor (Gemini #905 review).
@@ -400,227 +380,21 @@ pub(crate) fn spawn_auto_linking(
     let auto_link_entity_list: Vec<String> = auto_link_entities.iter().cloned().collect();
 
     tokio::spawn(async move {
-        // #1097 S1 phase-attribution receipt (pure observation — no
-        // behavioral change to the four skip points or the edge write).
-        // The receipt is accumulated in place; the outcome→counter mapping
-        // for searches and edge writes is routed THROUGH
-        // `AutoLinkReceipt::apply_search_outcome` /
-        // `apply_edge_outcome` so the #1097 r1 codex review ③ semantics
-        // (attempts-vs-executions, insert-landed-vs-full-success) are the
-        // TESTED contract, not ad-hoc inline arithmetic — reverting either
-        // method turns its discrimination test red and this call site
-        // follows.
-        //
-        // #1097 r1 codex review ①: `entry_id` is filled in at the end via
-        // `redacted_entry_id` so the raw (possibly caller-hostile) id is
-        // never stored on the receipt before redaction.
-        let task_start = Instant::now();
-        let mut receipt = AutoLinkReceipt {
-            entry_id: String::new(),
-            entity_count: auto_link_entity_list.len(),
-            searches_executed: 0,
-            searches_failed: 0,
-            candidates_examined: 0,
-            edges_attempted: 0,
-            edges_written: 0,
-            post_write_failures: 0,
-            skipped_self_id: 0,
-            skipped_training_seed: 0,
-            skipped_no_shared_entities: 0,
-            skipped_no_supersede_or_reinforce: 0,
-            read_elapsed: Duration::ZERO,
-            write_elapsed: Duration::ZERO,
-            total_elapsed: Duration::ZERO,
-        };
-
-        for entity in &auto_link_entity_list {
-            let query = entity.clone();
-            let search_action = |store: &mut MemoryStore| {
-                store
-                    .search(
-                        &query,
-                        Some(memcore::SearchOptions {
-                            top_k: 5,
-                            // Auto-link is a write-side side effect that probes related memories.
-                            // It must not bias ACT-R access stats for entries the user never read.
-                            record_access: false,
-                            ..Default::default()
-                        }),
-                    )
-                    .map_err(|e| format!("{}", e))
-            };
-
-            let read_timer = Instant::now();
-            let search_res = if let Some(ref p) = named_project {
-                auto_link_server.with_named_project_store_read(p, search_action)
-            } else {
-                auto_link_server.with_store_for_scope_read(target_db, search_action)
-            };
-            receipt.read_elapsed += read_timer.elapsed();
-            // #1097 r1 codex review ③-A: count ONLY searches that produced
-            // a result set. A named-project resolution failure
-            // (server_methods/db.rs:280) returns Err WITHOUT ever invoking
-            // the store's `search` call, so it is a FAILED attempt, not an
-            // executed one — previously it inflated `searches_executed`.
-            let search_outcome = match &search_res {
-                Ok(_) => SearchOutcome::Executed,
-                Err(_) => SearchOutcome::Failed,
-            };
-            receipt.apply_search_outcome(search_outcome);
-
-            if let Ok(results) = search_res {
-                for result in results {
-                    receipt.candidates_examined += 1;
-                    if result.entry.id == auto_link_id {
-                        receipt.skipped_self_id += 1;
-                        continue;
-                    }
-                    if is_training_seed(&result.entry) {
-                        receipt.skipped_training_seed += 1;
-                        continue;
-                    }
-                    // Unique shared entities only — duplicate entity labels must not
-                    // count as multi-entity agreement for related_to/supersede.
-                    let shared =
-                        unique_shared_entities(&auto_link_entity_list, &result.entry.entities);
-                    if shared.is_empty() {
-                        receipt.skipped_no_shared_entities += 1;
-                        continue;
-                    }
-
-                    let now = chrono::Utc::now().to_rfc3339();
-                    let vector_similarity =
-                        vector_similarity_between(&auto_link_entry, &result.entry);
-                    let supersedes = should_supersede(
-                        &auto_link_entry,
-                        &result.entry,
-                        shared.len(),
-                        result.score.symbolic,
-                    );
-                    let reinforces = vector_similarity.is_some_and(|similarity| {
-                        should_reinforce(
-                            &auto_link_entry,
-                            &result.entry,
-                            shared.len(),
-                            similarity,
-                            supersedes,
-                        )
-                    });
-                    if !supersedes && !reinforces {
-                        // tachi#773 item 2: auto_link no longer emits `related_to` at
-                        // all. Entity co-occurrence without a supersede/reinforce
-                        // signal is query-time recoverable (shared-entity search)
-                        // and isn't worth a persisted fog edge — and the memcore
-                        // edge-write choke point (relation_ontology) would reject
-                        // `related_to` on new writes anyway (item 1).
-                        receipt.skipped_no_supersede_or_reinforce += 1;
-                        continue;
-                    }
-                    let relation = if supersedes {
-                        "supersedes"
-                    } else {
-                        "reinforces"
-                    };
-                    let weight = if supersedes {
-                        0.9
-                    } else {
-                        vector_similarity.unwrap_or(0.0)
-                    };
-                    let edge = memcore::MemoryEdge {
-                        source_id: auto_link_id.clone(),
-                        target_id: result.entry.id.clone(),
-                        relation: relation.to_string(),
-                        weight,
-                        metadata: json!({
-                            "auto_link": true,
-                            "shared_entities": shared,
-                            "similarity": vector_similarity,
-                            "confidence_increment": reinforces.then(|| confidence_increment(weight)),
-                        }),
-                        created_at: now.clone(),
-                        valid_from: String::new(),
-                        // Edges are only closed/expired when supersession is explicitly reversed.
-                        valid_to: None,
-                    };
-                    // #1097 r1 codex review ③-B: classify the write outcome
-                    // INSIDE the closure so the receipt can distinguish
-                    // "insert landed" (edge persisted under its own
-                    // savepoint at db/graph.rs:144, RELEASEd at :158) from
-                    // "full success". The closure returns Ok(classification);
-                    // an outer Err means store resolution failed and the
-                    // closure never ran (insert never attempted) — folded
-                    // to `InsertFailed` below since both leave nothing
-                    // persisted.
-                    let save_edge_action =
-                        |store: &mut MemoryStore| -> Result<EdgeWriteOutcome, String> {
-                            if store.add_edge(&edge).is_err() {
-                                return Ok(EdgeWriteOutcome::InsertFailed);
-                            }
-                            let post_ok = if supersedes {
-                                store
-                                    .mark_superseded_closing_validity(
-                                        &result.entry.id,
-                                        &auto_link_id,
-                                        &now,
-                                    )
-                                    .is_ok()
-                            } else if reinforces {
-                                apply_confidence_reinforcement(
-                                    store,
-                                    &result.entry.id,
-                                    confidence_increment(weight),
-                                    &now,
-                                )
-                                .is_ok()
-                            } else {
-                                true
-                            };
-                            Ok(if post_ok {
-                                EdgeWriteOutcome::InsertAndPostWriteOk
-                            } else {
-                                EdgeWriteOutcome::InsertOkPostWriteFailed
-                            })
-                        };
-                    let write_timer = Instant::now();
-                    let write_res = if let Some(ref p) = named_project {
-                        auto_link_server.with_named_project_store(p, save_edge_action)
-                    } else {
-                        auto_link_server.with_store_for_scope(target_db, save_edge_action)
-                    };
-                    receipt.write_elapsed += write_timer.elapsed();
-                    // Outer Err = store resolution failed (closure never ran,
-                    // nothing persisted); fold to `InsertFailed` so the
-                    // attempt is counted but neither `edges_written` nor
-                    // `post_write_failures` moves.
-                    let edge_outcome = write_res.unwrap_or(EdgeWriteOutcome::InsertFailed);
-                    receipt.apply_edge_outcome(edge_outcome);
-                }
-            }
-        }
-
-        // Emit the receipt from inside the spawned task — the save handler
-        // returned `"auto_link": "pending"` (handler.rs:261-262) long before
-        // this point, so this closure is the only place the finished counts
-        // exist. Fields are whitelisted per #1097 D5: no entity names
-        // (entities ARE the search queries here), no memory content, no DB
-        // path.
-        //
-        // #1097 r1 codex review ① + #1097 r3 ④ gap-2: the post-loop
-        // finalization (redacted `entry_id` + `total_elapsed`) is routed
-        // through `finalize_auto_link_receipt` so it is the SAME tested
-        // contract the unit tests assert against — a bare `receipt.entry_id
-        // = redacted_entry_id(...)` / `receipt.total_elapsed = ...` here
-        // would let someone revert the redaction or drop the total without
-        // any test going red. The raw id is echoed ONLY when it parses as a
-        // legal UUID; otherwise the fixed [`REDACTED_NON_UUID_ID`] marker is
-        // used. A caller can push arbitrary text into `params.id`
-        // (handler.rs:46-49, tachi-params/src/memory.rs:104,
-        // save_memory/validation.rs:13 only checks presence), so the raw
-        // string can never reach telemetry.
-        //
-        // The `tracing::info!` block immediately below is NOT covered by a
-        // unit test — see the measurement-gap note on `spawn_auto_linking`.
-        let receipt = finalize_auto_link_receipt(receipt, &auto_link_id, task_start.elapsed());
+        let receipt = run_auto_linking(
+            &auto_link_server,
+            &auto_link_entry,
+            &auto_link_entity_list,
+            target_db,
+            named_project.as_deref(),
+        );
+        // Emit from inside the spawned task — the save handler returned
+        // `"auto_link": "pending"` (handler.rs:261-262) long before this
+        // point, so this is the only place the finished counts exist. Fields
+        // are whitelisted per #1097 D5: no entity names (entities ARE the
+        // search queries here), no memory content, no DB path. `entry_id`
+        // arrives already redacted from `finalize_auto_link_receipt` (#1097 r1
+        // codex review ①), so the raw — possibly caller-hostile — id cannot
+        // reach telemetry through here.
         tracing::info!(
             entry_id = %receipt.entry_id,
             entity_count = receipt.entity_count,
@@ -640,6 +414,228 @@ pub(crate) fn spawn_auto_linking(
             "auto_link phase receipt (tachi#1097 S1)"
         );
     });
+}
+
+/// Run one auto-link pass to completion and return its finalized
+/// [`AutoLinkReceipt`].
+///
+/// This is the entire body of the task [`spawn_auto_linking`] spawns, lifted
+/// out of the `tokio::spawn` closure (#1097 r4 codex review ③) so the receipt
+/// — including its `read_elapsed` / `write_elapsed` / `total_elapsed` timers —
+/// is directly assertable from a test instead of being filed as a gap.
+///
+/// It is deliberately NOT `async`: this path contains no `.await`. Every store
+/// call it makes is synchronous (`server_methods/db.rs:69`/`:280`), so the
+/// blocking work is exactly what the spawned task already did — just reachable
+/// without a runtime. [`spawn_auto_linking`]'s signature is unchanged, so its
+/// only caller (`save_memory/handler.rs:261`) is untouched.
+///
+/// Pure observation (#1097 S1): the four skip points (self-id, training-seed,
+/// no-shared-entities, neither-supersede-nor-reinforce) and the edge write are
+/// not changed — only counted and timed. `entry_id` redaction and the
+/// `total_elapsed` stamp are delegated to [`finalize_auto_link_receipt`].
+///
+/// `entity_list` is the caller's already-deduplicated entity set;
+/// [`spawn_auto_linking`] does that dedup so duplicate labels cannot inflate
+/// `shared_count` past the #773 fog floor.
+pub(crate) fn run_auto_linking(
+    server: &MemoryServer,
+    entry: &MemoryEntry,
+    entity_list: &[String],
+    target_db: DbScope,
+    named_project: Option<&str>,
+) -> AutoLinkReceipt {
+    let auto_link_id = entry.id.clone();
+    // #1097 S1 phase-attribution receipt (pure observation — no behavioral
+    // change to the four skip points or the edge write). The receipt is
+    // accumulated in place; the outcome→counter mapping for searches and edge
+    // writes is routed THROUGH `AutoLinkReceipt::apply_search_outcome` /
+    // `apply_edge_outcome` so the #1097 r1 codex review ③ semantics
+    // (attempts-vs-executions, insert-landed-vs-full-success) are the TESTED
+    // contract, not ad-hoc inline arithmetic — reverting either method turns
+    // its discrimination test red and this call site follows.
+    //
+    // #1097 r1 codex review ①: `entry_id` is filled in at the end via
+    // `finalize_auto_link_receipt` so the raw (possibly caller-hostile) id is
+    // never stored on the receipt before redaction.
+    let task_start = Instant::now();
+    let mut receipt = AutoLinkReceipt {
+        entry_id: String::new(),
+        entity_count: entity_list.len(),
+        searches_executed: 0,
+        searches_failed: 0,
+        candidates_examined: 0,
+        edges_attempted: 0,
+        edges_written: 0,
+        post_write_failures: 0,
+        skipped_self_id: 0,
+        skipped_training_seed: 0,
+        skipped_no_shared_entities: 0,
+        skipped_no_supersede_or_reinforce: 0,
+        read_elapsed: Duration::ZERO,
+        write_elapsed: Duration::ZERO,
+        total_elapsed: Duration::ZERO,
+    };
+
+    for entity in entity_list {
+        let query = entity.clone();
+        let search_action = |store: &mut MemoryStore| {
+            store
+                .search(
+                    &query,
+                    Some(memcore::SearchOptions {
+                        top_k: 5,
+                        // Auto-link is a write-side side effect that probes related memories.
+                        // It must not bias ACT-R access stats for entries the user never read.
+                        record_access: false,
+                        ..Default::default()
+                    }),
+                )
+                .map_err(|e| format!("{}", e))
+        };
+
+        let read_timer = Instant::now();
+        let search_res = if let Some(p) = named_project {
+            server.with_named_project_store_read(p, search_action)
+        } else {
+            server.with_store_for_scope_read(target_db, search_action)
+        };
+        receipt.read_elapsed += read_timer.elapsed();
+        // #1097 r1 codex review ③-A: count ONLY searches that produced
+        // a result set. A named-project resolution failure
+        // (server_methods/db.rs:280) returns Err WITHOUT ever invoking
+        // the store's `search` call, so it is a FAILED attempt, not an
+        // executed one — previously it inflated `searches_executed`.
+        let search_outcome = match &search_res {
+            Ok(_) => SearchOutcome::Executed,
+            Err(_) => SearchOutcome::Failed,
+        };
+        receipt.apply_search_outcome(search_outcome);
+
+        if let Ok(results) = search_res {
+            for result in results {
+                receipt.candidates_examined += 1;
+                if result.entry.id == auto_link_id {
+                    receipt.skipped_self_id += 1;
+                    continue;
+                }
+                if is_training_seed(&result.entry) {
+                    receipt.skipped_training_seed += 1;
+                    continue;
+                }
+                // Unique shared entities only — duplicate entity labels must not
+                // count as multi-entity agreement for related_to/supersede.
+                let shared = unique_shared_entities(entity_list, &result.entry.entities);
+                if shared.is_empty() {
+                    receipt.skipped_no_shared_entities += 1;
+                    continue;
+                }
+
+                let now = chrono::Utc::now().to_rfc3339();
+                let vector_similarity = vector_similarity_between(entry, &result.entry);
+                let supersedes =
+                    should_supersede(entry, &result.entry, shared.len(), result.score.symbolic);
+                let reinforces = vector_similarity.is_some_and(|similarity| {
+                    should_reinforce(entry, &result.entry, shared.len(), similarity, supersedes)
+                });
+                if !supersedes && !reinforces {
+                    // tachi#773 item 2: auto_link no longer emits `related_to` at
+                    // all. Entity co-occurrence without a supersede/reinforce
+                    // signal is query-time recoverable (shared-entity search)
+                    // and isn't worth a persisted fog edge — and the memcore
+                    // edge-write choke point (relation_ontology) would reject
+                    // `related_to` on new writes anyway (item 1).
+                    receipt.skipped_no_supersede_or_reinforce += 1;
+                    continue;
+                }
+                let relation = if supersedes {
+                    "supersedes"
+                } else {
+                    "reinforces"
+                };
+                let weight = if supersedes {
+                    0.9
+                } else {
+                    vector_similarity.unwrap_or(0.0)
+                };
+                let edge = memcore::MemoryEdge {
+                    source_id: auto_link_id.clone(),
+                    target_id: result.entry.id.clone(),
+                    relation: relation.to_string(),
+                    weight,
+                    metadata: json!({
+                        "auto_link": true,
+                        "shared_entities": shared,
+                        "similarity": vector_similarity,
+                        "confidence_increment": reinforces.then(|| confidence_increment(weight)),
+                    }),
+                    created_at: now.clone(),
+                    valid_from: String::new(),
+                    // Edges are only closed/expired when supersession is explicitly reversed.
+                    valid_to: None,
+                };
+                // #1097 r1 codex review ③-B: classify the write outcome
+                // INSIDE the closure so the receipt can distinguish
+                // "insert landed" (edge persisted under its own
+                // savepoint at db/graph.rs:144, RELEASEd at :158) from
+                // "full success". The closure returns Ok(classification);
+                // an outer Err means store resolution failed and the
+                // closure never ran (insert never attempted) — folded
+                // to `InsertFailed` below since both leave nothing
+                // persisted.
+                let save_edge_action =
+                    |store: &mut MemoryStore| -> Result<EdgeWriteOutcome, String> {
+                        if store.add_edge(&edge).is_err() {
+                            return Ok(EdgeWriteOutcome::InsertFailed);
+                        }
+                        let post_ok = if supersedes {
+                            store
+                                .mark_superseded_closing_validity(
+                                    &result.entry.id,
+                                    &auto_link_id,
+                                    &now,
+                                )
+                                .is_ok()
+                        } else if reinforces {
+                            apply_confidence_reinforcement(
+                                store,
+                                &result.entry.id,
+                                confidence_increment(weight),
+                                &now,
+                            )
+                            .is_ok()
+                        } else {
+                            true
+                        };
+                        Ok(if post_ok {
+                            EdgeWriteOutcome::InsertAndPostWriteOk
+                        } else {
+                            EdgeWriteOutcome::InsertOkPostWriteFailed
+                        })
+                    };
+                let write_timer = Instant::now();
+                let write_res = if let Some(p) = named_project {
+                    server.with_named_project_store(p, save_edge_action)
+                } else {
+                    server.with_store_for_scope(target_db, save_edge_action)
+                };
+                receipt.write_elapsed += write_timer.elapsed();
+                // Outer Err = store resolution failed (closure never ran,
+                // nothing persisted); fold to `InsertFailed` so the
+                // attempt is counted but neither `edges_written` nor
+                // `post_write_failures` moves.
+                let edge_outcome = write_res.unwrap_or(EdgeWriteOutcome::InsertFailed);
+                receipt.apply_edge_outcome(edge_outcome);
+            }
+        }
+    }
+    // #1097 r1 codex review ① + r4 ③: the post-loop finalization (redacted
+    // `entry_id` + `total_elapsed`) is routed through
+    // `finalize_auto_link_receipt` so it is the SAME tested contract the unit
+    // tests assert against; the `task_start.elapsed()` argument is covered by
+    // `run_auto_linking_reports_live_read_write_and_total_timers` (stub it to
+    // `Duration::ZERO` and that test's `total_elapsed` assertion goes red).
+    finalize_auto_link_receipt(receipt, &auto_link_id, task_start.elapsed())
 }
 
 #[cfg(test)]
@@ -780,12 +776,17 @@ mod tests {
     }
 
     /// tachi#773 item 2: auto_link must never select `related_to` as the
-    /// emitted relation string. This mirrors `spawn_auto_linking`'s decision
+    /// emitted relation string. This mirrors [`run_auto_linking`]'s decision
     /// logic (supersedes -> "supersedes", reinforces -> "reinforces",
-    /// otherwise -> skip entirely) without the async/store plumbing, so it
-    /// stays a fast unit test. Red pre-#773-item-2: this same shape of
+    /// otherwise -> skip entirely) without the store plumbing — it opens no
+    /// DB and issues no query (that is the mechanism; how long it takes is not
+    /// claimed or measured here). Red pre-#773-item-2: this same shape of
     /// decision used to fall through to `Some("related_to")` whenever
     /// entities were shared without a supersede/reinforce signal.
+    ///
+    /// Being a mirror, it can drift from the real decision logic; the
+    /// authoritative check that a live pass emits `supersedes` is
+    /// `run_auto_linking_reports_live_read_write_and_total_timers`.
     fn auto_link_emitted_relation(supersedes: bool, reinforces: bool) -> Option<&'static str> {
         if supersedes {
             Some("supersedes")
@@ -1079,5 +1080,146 @@ mod tests {
         assert_eq!(r.edges_attempted, 3);
         assert_eq!(r.edges_written, 2);
         assert_eq!(r.post_write_failures, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // #1097 r4 codex review ③ — the three production timers (`read_timer`,
+    // `write_timer`, `task_start`) against a live store.
+    //
+    // Rounds r2/r3 filed these as an accepted gap and nominated the #1097 S2
+    // workload measurement as their "discriminator of record". That was a
+    // prose promise rather than a mechanism, and its supporting reasoning did
+    // not hold up: a single dead timer does not make the auto-link phase read
+    // all-zero (the other two still report), `write_elapsed == 0` is
+    // *legitimate* whenever no edge is attempted, and the log line's
+    // `as_micros() as u64` rendering prints a real sub-microsecond duration as
+    // `0` regardless. Lifting the task body into `run_auto_linking` (a plain
+    // sync fn) removes the `tokio::spawn` boundary that made the gap look
+    // unavoidable, so the timers are asserted here instead.
+    // -----------------------------------------------------------------------
+
+    /// Drive a real auto-link pass against a live store and assert all three
+    /// production timers are wired.
+    ///
+    /// Acceptance bar (#1097 r4 ③) — stub any ONE of the three assignments to
+    /// `Duration::ZERO` and exactly the matching assertion below goes red:
+    ///
+    /// * `receipt.read_elapsed += read_timer.elapsed()` → the `read_elapsed`
+    ///   assertion.
+    /// * `receipt.write_elapsed += write_timer.elapsed()` → the
+    ///   `write_elapsed` assertion.
+    /// * the `task_start.elapsed()` argument at the
+    ///   `finalize_auto_link_receipt` call site → the `total_elapsed`
+    ///   assertion. (`finalize`'s own tests cannot catch this one: they prove
+    ///   it stamps the total it is *given*.)
+    ///
+    /// On the `> Duration::ZERO` form: `Instant` is only documented as
+    /// nondecreasing, so "executed ⟹ elapsed > 0" is NOT an API guarantee and
+    /// is not claimed as one. It is a practical assertion. Each of these three
+    /// spans brackets real SQLite work — an FTS search, and an edge INSERT
+    /// plus a supersede UPDATE — which takes microseconds, while `Instant`'s
+    /// resolution on the platforms this suite runs on is nanoseconds. A zero
+    /// here therefore indicates a timer that never started, not a run that was
+    /// too fast to measure. Absolute upper bounds are deliberately not
+    /// asserted (they would be flaky); `>= ZERO` is deliberately not used (it
+    /// is a tautology).
+    #[test]
+    fn run_auto_linking_reports_live_read_write_and_total_timers() {
+        let server = crate::tests::make_server();
+
+        // Seed a target that `should_supersede` will fire on, so an edge write
+        // is actually attempted and `write_elapsed` has real work to bracket.
+        // Its gate: both categories "fact" (test_entry's default), 2 shared
+        // entities, same path (hence same path root), and an older timestamp
+        // than the new entry.
+        let seeded_id = format!("auto-link-timer-target-{}", uuid::Uuid::new_v4());
+        let mut seeded = test_entry(
+            &seeded_id,
+            "Original notes about sigil tachi-server internals",
+        );
+        seeded.entities = vec!["sigil".to_string(), "tachi-server".to_string()];
+        seeded.path = "/alpha".to_string();
+        seeded.timestamp = "2026-01-01T00:00:00Z".to_string();
+        server
+            .with_global_store(|store| store.upsert(&seeded).map_err(|e| format!("seed: {e}")))
+            .expect("seed entry");
+
+        // The freshly-"saved" entry, mirroring what `save_memory` upserts
+        // before it calls `spawn_auto_linking`.
+        let fresh_id = uuid::Uuid::new_v4().to_string();
+        let mut fresh = test_entry(&fresh_id, "New observation about sigil rotation");
+        fresh.entities = vec!["sigil".to_string(), "tachi-server".to_string()];
+        fresh.path = "/alpha".to_string();
+        fresh.timestamp = "2026-01-02T00:00:00Z".to_string();
+        server
+            .with_global_store(|store| store.upsert(&fresh).map_err(|e| format!("save: {e}")))
+            .expect("save entry");
+
+        let receipt = run_auto_linking(&server, &fresh, &fresh.entities, DbScope::Global, None);
+
+        // Preconditions. These are asserted first and separately from the
+        // timers so that a scenario which silently stops producing an edge
+        // reports itself as a broken fixture rather than masquerading as a
+        // dead `write_timer`.
+        assert_eq!(
+            receipt.searches_executed, 2,
+            "both entities must have been searched, got executed={} failed={}",
+            receipt.searches_executed, receipt.searches_failed
+        );
+        assert!(
+            receipt.edges_attempted >= 1,
+            "fixture must trigger a supersede edge write or `write_elapsed` \
+             would be legitimately zero; got attempted={} examined={} \
+             skipped(self={}, seed={}, no_shared={}, no_signal={})",
+            receipt.edges_attempted,
+            receipt.candidates_examined,
+            receipt.skipped_self_id,
+            receipt.skipped_training_seed,
+            receipt.skipped_no_shared_entities,
+            receipt.skipped_no_supersede_or_reinforce
+        );
+        assert!(
+            receipt.edges_written >= 1,
+            "the supersede insert must have landed, got written={} post_write_failures={}",
+            receipt.edges_written,
+            receipt.post_write_failures
+        );
+
+        // Timer 1 — `read_timer` (brackets the per-entity store search).
+        assert!(
+            receipt.read_elapsed > Duration::ZERO,
+            "read_elapsed must be > ZERO: {} searches executed against a live \
+             store, so a zero means `read_timer` never started",
+            receipt.searches_executed
+        );
+        // Timer 2 — `write_timer` (brackets the per-edge store write).
+        assert!(
+            receipt.write_elapsed > Duration::ZERO,
+            "write_elapsed must be > ZERO: {} edge write(s) attempted against a \
+             live store, so a zero means `write_timer` never started",
+            receipt.edges_attempted
+        );
+        // Timer 3 — `task_start`, via the `finalize_auto_link_receipt`
+        // argument. It spans both of the above, so it is also the containment
+        // check: a `total_elapsed` smaller than a phase it encloses would mean
+        // the timer is pointed at the wrong span.
+        assert!(
+            receipt.total_elapsed > Duration::ZERO,
+            "total_elapsed must be > ZERO (the `task_start.elapsed()` argument \
+             at the finalize call site is live)"
+        );
+        assert!(
+            receipt.total_elapsed >= receipt.read_elapsed + receipt.write_elapsed,
+            "total_elapsed ({:?}) must contain read ({:?}) + write ({:?}) — \
+             both accumulate strictly inside the task_start..finalize window",
+            receipt.total_elapsed,
+            receipt.read_elapsed,
+            receipt.write_elapsed
+        );
+
+        // The redaction choke point is live on this path too: `fresh_id` is a
+        // legal UUID, so it passes through verbatim.
+        assert_eq!(receipt.entry_id, fresh_id);
+        assert_eq!(receipt.entity_count, 2);
     }
 }

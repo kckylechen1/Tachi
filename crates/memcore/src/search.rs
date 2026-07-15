@@ -500,8 +500,11 @@ pub fn hybrid_search_with_receipt(
         }
         access_start.map(|s| AccessRecordingPhaseReceipt {
             elapsed: s.elapsed(),
-            // Free: `.len()` on the existing return value (access.rs:73). No
-            // new counter logic on the access-recording boundary.
+            // `.len()` on the existing return value (access.rs:73) — the
+            // mechanism is that no extra DB query and no new counter logic are
+            // added on the access-recording boundary; the map was already
+            // built and returned. This is not a claim that reading it costs
+            // nothing: nothing in this leaf measures that.
             updated_row_count: access_updates.len(),
         })
     } else {
