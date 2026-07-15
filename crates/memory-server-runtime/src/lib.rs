@@ -608,43 +608,6 @@ impl DbRuntime {
         f(&mut store)
     }
 
-    /// Recording twin of [`Self::with_path_store_read_with_label`]. Returns
-    /// the checkout receipt ONLY on the cached/attached branch, which checks a
-    /// slot out of the project read pool; the uncached branch opens a fresh
-    /// read-only connection with NO pool, so there is no checkout to measure
-    /// and it returns `None` — callers report `Unavailable` there rather than
-    /// fake a zero (#1125 honesty clause: "never report a wait you did not
-    /// measure"). Pool/locking/gate semantics are byte-for-byte identical to
-    /// the non-recording variant; only the observation is added on the pool
-    /// branch.
-    pub fn with_path_store_read_with_label_recording<T>(
-        &self,
-        db_path: &Path,
-        label: &str,
-        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
-    ) -> Result<(T, Option<ReadPoolCheckoutReceipt>), String> {
-        let key = project_db_read_cache_key(db_path)?;
-        let cached = self
-            .attached_project_dbs
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-            .map(|entry| {
-                entry.touch();
-                entry.state.clone()
-            });
-        if let Some(state) = cached {
-            let _gate = read_or_recover(&state.rw_gate, "path_db_rw_gate");
-            let (result, receipt) = state.read_pool.with_store_recording(label, f);
-            return Ok((result?, Some(receipt)));
-        }
-
-        let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
-        let mut store = open_read_store(&key, label)?;
-        let result = f(&mut store)?;
-        Ok((result, None))
-    }
-
     fn attached_project_state(&self, db_path: &Path) -> Result<ProjectDbState, String> {
         let key = project_db_cache_key(db_path)?;
         if let Some(state) = Self::touch_and_clone(&self.attached_project_dbs, &key) {
@@ -800,23 +763,6 @@ impl DbRuntime {
             .ok_or_else(|| "No project database available".to_string())?;
         let _gate = read_or_recover(&state.rw_gate, "project_rw_gate");
         state.read_pool.with_store("project_read_pool", f)
-    }
-
-    /// Recording twin of [`Self::with_project_store_read`] — see
-    /// [`Self::with_global_store_read_recording`]. Same project-db read gate
-    /// and pool checkout; additionally returns the [`ReadPoolCheckoutReceipt`]
-    /// for #1125's measured `pool_checkout_wait`.
-    pub fn with_project_store_read_recording<T>(
-        &self,
-        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
-    ) -> Result<(T, ReadPoolCheckoutReceipt), String> {
-        let guard = self.project_db.read().unwrap_or_else(|e| e.into_inner());
-        let state = guard
-            .as_ref()
-            .ok_or_else(|| "No project database available".to_string())?;
-        let _gate = read_or_recover(&state.rw_gate, "project_rw_gate");
-        let (result, receipt) = state.read_pool.with_store_recording("project_read_pool", f);
-        Ok((result?, receipt))
     }
 
     pub fn with_store_for_scope<T>(

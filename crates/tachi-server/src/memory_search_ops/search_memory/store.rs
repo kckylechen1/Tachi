@@ -1,6 +1,7 @@
 use crate::tool_params::SearchMemoryParams;
 use crate::MemoryServer;
 use memcore::{MemoryStore, RecallConfig};
+#[cfg(test)]
 use memory_server_runtime::ReadPoolCheckoutReceipt;
 use std::path::Path;
 
@@ -80,61 +81,6 @@ pub(super) fn with_named_project_search(
     }
 }
 
-/// Test-proven, production-dormant (#1125): the consumer that flips search
-/// sampling on operationally does not exist yet — same dormancy as the whole
-/// receipt API. Lift this gate in the leaf that adds that consumer.
-#[cfg(test)]
-/// #1125 recording twin of [`with_named_project_search`]. Returns the search
-/// results + phase receipt PLUS the pool checkout receipt, as a 3-tuple. The
-/// pool receipt is `Some` on the attached/cached branch (which checks a slot
-/// out of the project read pool) and `None` on the uncached branch (a fresh
-/// read-only connection with no pool) — the rows call site maps `None` to
-/// `Unavailable`, never to a fake zero. When `record_access` routes through
-/// the WRITE store there is no read pool at all, so it returns `None` too.
-pub(super) fn with_named_project_search_recording(
-    server: &MemoryServer,
-    project_name: &str,
-    params: &SearchMemoryParams,
-    record_access: bool,
-    recall_config: Option<&RecallConfig>,
-    context: impl Into<String>,
-) -> Result<
-    (
-        Vec<memcore::SearchResult>,
-        memcore::SearchPhaseReceipt,
-        Option<ReadPoolCheckoutReceipt>,
-    ),
-    String,
-> {
-    let context = context.into();
-    let effective_record_access =
-        record_access && named_project_is_bound_project(server, project_name);
-    let action = |store: &mut MemoryStore| {
-        search_store_recording(store, params, effective_record_access, recall_config)
-            .map_err(|e| format!("{context}: {e}"))
-    };
-    if effective_record_access {
-        // Write store: no read pool → no checkout to measure.
-        let (results, receipt) = server.with_named_project_store(project_name, action)?;
-        Ok((results, receipt, None))
-    } else {
-        // `with_named_project_store_read` resolves the path then calls
-        // `DbRuntime::with_path_store_read_with_label`. Reaching the
-        // recording checkout without adding a MemoryServer method (which is
-        // outside this leaf's allowlist) requires resolving the path the same
-        // way and calling the DbRuntime recording twin directly via the
-        // pub(crate) `db` field — same path resolution, same label, identical
-        // semantics, only the receipt is observed.
-        let db_path = MemoryServer::resolve_named_project_db_path(project_name)?;
-        let ((results, receipt), pool) = server.db.with_path_store_read_with_label_recording(
-            &db_path,
-            &format!("named-project:{project_name}"),
-            action,
-        )?;
-        Ok((results, receipt, pool))
-    }
-}
-
 fn named_project_is_bound_project(server: &MemoryServer, project_name: &str) -> bool {
     let Some(bound_project_db) = server.project_db_path_buf() else {
         return false;
@@ -175,43 +121,6 @@ pub(super) fn with_project_search(
     }
 }
 
-/// Test-proven, production-dormant (#1125): the consumer that flips search
-/// sampling on operationally does not exist yet — same dormancy as the whole
-/// receipt API. Lift this gate in the leaf that adds that consumer.
-#[cfg(test)]
-/// #1125 recording twin of [`with_project_search`] — see
-/// [`with_named_project_search_recording`]. The project read path always
-/// checks a slot out of the project read pool, so the pool receipt is `Some`
-/// whenever `record_access` is false; the write-store branch returns `None`
-/// (no read pool).
-pub(super) fn with_project_search_recording(
-    server: &MemoryServer,
-    params: &SearchMemoryParams,
-    record_access: bool,
-    recall_config: Option<&RecallConfig>,
-    context: impl Into<String>,
-) -> Result<
-    (
-        Vec<memcore::SearchResult>,
-        memcore::SearchPhaseReceipt,
-        Option<ReadPoolCheckoutReceipt>,
-    ),
-    String,
-> {
-    let context = context.into();
-    let action = |store: &mut MemoryStore| {
-        search_store_recording(store, params, record_access, recall_config)
-            .map_err(|e| format!("{context}: {e}"))
-    };
-    if record_access {
-        let (results, receipt) = server.with_project_store(action)?;
-        Ok((results, receipt, None))
-    } else {
-        let ((results, receipt), pool) = server.db.with_project_store_read_recording(action)?;
-        Ok((results, receipt, Some(pool)))
-    }
-}
-
 pub(super) fn with_global_search(
     server: &MemoryServer,
     params: &SearchMemoryParams,
@@ -235,11 +144,12 @@ pub(super) fn with_global_search(
 /// sampling on operationally does not exist yet — same dormancy as the whole
 /// receipt API. Lift this gate in the leaf that adds that consumer.
 #[cfg(test)]
-/// #1125 recording twin of [`with_global_search`] — see
-/// [`with_named_project_search_recording`]. The global read path always
-/// checks a slot out of the global read pool, so the pool receipt is `Some`
-/// whenever `record_access` is false; the write-store branch returns `None`
-/// (no read pool).
+/// #1125 recording twin of [`with_global_search`]. The global read path
+/// always checks a slot out of the global read pool, so the pool receipt is
+/// `Some` whenever `record_access` is false; the write-store branch returns
+/// `None` (no read pool). Project / named-project twins were deliberately NOT
+/// kept: they had zero callers (test or production) — the leaf that needs
+/// project-path sampling mints them WITH their discriminating tests.
 pub(super) fn with_global_search_recording(
     server: &MemoryServer,
     params: &SearchMemoryParams,
