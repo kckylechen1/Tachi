@@ -217,8 +217,17 @@ async fn vault_unlock_rejects_fifo_and_keychain_together() {
 // test that mutates process-global env vars (see
 // `auto_lock_clears_key_but_preserves_provider_secrets` above for the same
 // pattern).
-#[tokio::test]
-async fn vault_unlock_use_keychain_succeeds_via_injected_password() {
+// Plain `#[test]` + `block_on` (not `#[tokio::test]`), matching the
+// `global_test_lock` convention used elsewhere in this crate (e.g.
+// `dispatch_ops/prompt.rs`, `bootstrap::serve::stdio::tests`): the guard
+// serializes the process-wide `TACHI_TEST_KEYCHAIN_PASSWORD` env var against
+// other tests, so it must stay held across the whole init/lock/unlock
+// sequence including its internal awaits — `block_on` runs that future to
+// completion synchronously on this thread, so there is no `.await`
+// expression in scope for clippy's `await_holding_lock` lint, while the
+// guard's actual coverage is unchanged.
+#[test]
+fn vault_unlock_use_keychain_succeeds_via_injected_password() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -229,28 +238,32 @@ async fn vault_unlock_use_keychain_succeeds_via_injected_password() {
         uuid::Uuid::new_v4()
     ));
     let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "correct-password".to_string(),
-        },
-    )
-    .await
-    .expect("vault init should succeed");
-    handle_vault_lock(&server)
-        .await
-        .expect("vault lock should succeed");
+    let body = tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async {
+            handle_vault_init(
+                &server,
+                VaultInitParams {
+                    password: "correct-password".to_string(),
+                },
+            )
+            .await
+            .expect("vault init should succeed");
+            handle_vault_lock(&server)
+                .await
+                .expect("vault lock should succeed");
 
-    let body = handle_vault_unlock(
-        &server,
-        VaultUnlockParams {
-            password: String::new(),
-            password_fifo_path: None,
-            use_keychain: true,
-        },
-    )
-    .await
-    .expect("use_keychain unlock should succeed via the injected Keychain password");
+            handle_vault_unlock(
+                &server,
+                VaultUnlockParams {
+                    password: String::new(),
+                    password_fifo_path: None,
+                    use_keychain: true,
+                },
+            )
+            .await
+            .expect("use_keychain unlock should succeed via the injected Keychain password")
+        });
 
     let body_json: serde_json::Value =
         serde_json::from_str(&body).expect("vault_unlock response should be JSON");
@@ -262,8 +275,11 @@ async fn vault_unlock_use_keychain_succeeds_via_injected_password() {
     );
 }
 
-#[tokio::test]
-async fn vault_unlock_use_keychain_reports_missing_entry_without_leaking_process_error() {
+// Same `#[test]` + `block_on` conversion as
+// `vault_unlock_use_keychain_succeeds_via_injected_password` above — the
+// guard here serializes `TACHI_TEST_FORCE_KEYCHAIN_MISSING`.
+#[test]
+fn vault_unlock_use_keychain_reports_missing_entry_without_leaking_process_error() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -274,28 +290,32 @@ async fn vault_unlock_use_keychain_reports_missing_entry_without_leaking_process
         uuid::Uuid::new_v4()
     ));
     let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "correct-password".to_string(),
-        },
-    )
-    .await
-    .expect("vault init should succeed");
-    handle_vault_lock(&server)
-        .await
-        .expect("vault lock should succeed");
+    let err = tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async {
+            handle_vault_init(
+                &server,
+                VaultInitParams {
+                    password: "correct-password".to_string(),
+                },
+            )
+            .await
+            .expect("vault init should succeed");
+            handle_vault_lock(&server)
+                .await
+                .expect("vault lock should succeed");
 
-    let err = handle_vault_unlock(
-        &server,
-        VaultUnlockParams {
-            password: String::new(),
-            password_fifo_path: None,
-            use_keychain: true,
-        },
-    )
-    .await
-    .expect_err("missing Keychain entry should fail, not silently succeed");
+            handle_vault_unlock(
+                &server,
+                VaultUnlockParams {
+                    password: String::new(),
+                    password_fifo_path: None,
+                    use_keychain: true,
+                },
+            )
+            .await
+            .expect_err("missing Keychain entry should fail, not silently succeed")
+        });
 
     assert!(
         err.contains("use_keychain unlock failed"),
