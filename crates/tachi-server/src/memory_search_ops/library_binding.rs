@@ -56,8 +56,13 @@ pub(crate) fn scope_downgrade_warning(
         // (bootstrap/serve.rs: the `cli.no_project_db` branch of the project-DB
         // resolution), so "run inside the project repo" is not sufficient — the
         // adapter never binds via cwd on that route. Name the flag explicitly
-        // rather than imply cwd alone fixes it.
-        "unbound session only writes global — for project scope, connect a bound session (HTTP direct-connect: send X-Tachi-Project at initialize; or restart the stdio daemon inside the project repo without --no-project-db — the adapter cannot bind via cwd while --no-project-db detaches the launch cwd)"
+        // rather than imply cwd alone fixes it. Kept short (fix-round for the
+        // Oz receipt-golden gate, #1178): the save/checkpoint receipt this
+        // string lands in is byte-budgeted (<500B, `receipt_golden.rs`), so
+        // this omits the elaboration above and states only the three load-
+        // bearing facts — no `project=` advice, the two binding routes, and
+        // the `--no-project-db` exclusion.
+        "unbound session: writes land in global — connect a bound session via X-Tachi-Project (HTTP) or stdio inside the repo without --no-project-db"
     };
     format!(
         "{WARN_SCOPE_DOWNGRADED_PREFIX}: requested scope={requested_scope:?} but saved to db_scope={effective_db_scope:?} — {guidance}"
