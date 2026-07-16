@@ -278,12 +278,16 @@ pub(crate) async fn assemble_prompt_with_trace(
                                 .get("path")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown");
-                            let body = format!("### {path}\n{}", sanitize_untrusted(&text));
-                            let section = memory_budget.admit(&body).unwrap_or_else(|| {
-                                format!(
+                            // Budget the raw body BEFORE wrapping it in the untrusted-content
+                            // boundary so a mid-budget cut can never sever the closing tag.
+                            let section = match memory_budget.admit(&text) {
+                                Some(admitted) => {
+                                    format!("### {path}\n{}", sanitize_untrusted(&admitted))
+                                }
+                                None => format!(
                                     "### {path}\n- Context body omitted by the memory input budget; retrieve this reference only if it becomes necessary."
-                                )
-                            });
+                                ),
+                            };
                             sections.push(section);
                         }
                     }
@@ -336,16 +340,18 @@ pub(crate) async fn assemble_prompt_with_trace(
                                 .get("path")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown");
-                            let body = format!(
-                                "### {}\n{}",
-                                path,
-                                sanitize_untrusted(&compact_example_text(&text, 900))
-                            );
-                            let section = memory_budget.admit(&body).unwrap_or_else(|| {
-                                format!(
+                            // Same ordering fix as the memory-context branch above: budget
+                            // the compacted raw body, then wrap so the closing boundary tag
+                            // can never be cut off by truncation.
+                            let compact = compact_example_text(&text, 900);
+                            let section = match memory_budget.admit(&compact) {
+                                Some(admitted) => {
+                                    format!("### {path}\n{}", sanitize_untrusted(&admitted))
+                                }
+                                None => format!(
                                     "### {path}\n- SFT body omitted by the memory input budget; retrieve this reference only if it becomes necessary."
-                                )
-                            });
+                                ),
+                            };
                             sections.push(section);
                         }
                     }
@@ -431,16 +437,17 @@ pub(crate) async fn assemble_prompt_with_trace(
                             .get("path")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown");
-                        let body = format!(
-                            "- **{}**: {}",
-                            path,
-                            sanitize_untrusted(&text.chars().take(300).collect::<String>())
-                        );
-                        let section = memory_budget.admit(&body).unwrap_or_else(|| {
-                            format!(
+                        // Same ordering fix: budget the capped raw note before wrapping it
+                        // in the untrusted boundary so the closing tag is never truncated.
+                        let capped = text.chars().take(300).collect::<String>();
+                        let section = match memory_budget.admit(&capped) {
+                            Some(admitted) => {
+                                format!("- **{path}**: {}", sanitize_untrusted(&admitted))
+                            }
+                            None => format!(
                                 "- **{path}**: avoidance note body omitted by the memory input budget."
-                            )
-                        });
+                            ),
+                        };
                         sections.push(section);
                     }
                 }
