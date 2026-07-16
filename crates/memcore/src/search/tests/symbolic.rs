@@ -278,6 +278,71 @@ fn symbolic_pre_cap_relevance_scores_keyword_and_entity_json() {
         Some("expanded-metadata-target"),
         "pre-cap selection must score parsed keywords and entities, not raw JSON substrings"
     );
+    assert_eq!(
+        results.first().map(|result| result.score.symbolic),
+        Some(1.0),
+        "both JSON columns are necessary: omitting either leaves only half of the expanded tokens"
+    );
+}
+
+/// A legacy table can contain NULL JSON columns even though the current DDL
+/// forbids them. Candidate selection must mirror `row_to_entry`'s empty-array
+/// fallback instead of failing inside the SQLite scalar function.
+#[test]
+fn symbolic_pre_cap_legacy_null_json_columns_fall_back_to_empty_arrays() {
+    let conn = Connection::open_in_memory().expect("open legacy fixture database");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE memories (
+            id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            text TEXT NOT NULL,
+            importance REAL NOT NULL,
+            timestamp TEXT NOT NULL,
+            valid_from TEXT,
+            valid_until TEXT,
+            category TEXT NOT NULL,
+            topic TEXT NOT NULL,
+            keywords TEXT,
+            entities TEXT,
+            source TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            archived INTEGER NOT NULL,
+            superseded_by TEXT,
+            access_count INTEGER NOT NULL,
+            last_access TEXT,
+            revision INTEGER,
+            metadata TEXT NOT NULL,
+            retention_policy TEXT,
+            domain TEXT,
+            recall_count INTEGER,
+            query_diversity INTEGER,
+            tier TEXT
+        );
+        INSERT INTO memories (
+            id, path, summary, text, importance, timestamp, valid_from,
+            valid_until, category, topic, keywords, entities, source, scope,
+            archived, access_count, last_access, revision, metadata,
+            retention_policy, domain, recall_count, query_diversity, tier
+        ) VALUES (
+            'legacy-null-symbolic', '/legacy', 'legacy symbolic row',
+            'controlplane legacy text match', 0.7, '2026-01-01T00:00:00Z',
+            NULL, NULL, 'fact', '', NULL, NULL, 'legacy', 'general',
+            0, 0, NULL, 1, '{}', NULL, NULL, 0, 0, 'raw'
+        );
+        "#,
+    )
+    .expect("create legacy row with NULL JSON columns");
+
+    let candidates =
+        crate::db::search_symbolic_candidates(&conn, "controlplane", 1, false, false, None, None)
+            .expect("legacy NULL JSON columns must not fail symbolic search");
+    let candidate = candidates.first().expect("legacy row remains searchable");
+
+    assert_eq!(candidate.id, "legacy-null-symbolic");
+    assert!(candidate.keywords.is_empty());
+    assert!(candidate.entities.is_empty());
 }
 
 /// Timestamp only breaks true symbolic-score ties. It must compare parsed
