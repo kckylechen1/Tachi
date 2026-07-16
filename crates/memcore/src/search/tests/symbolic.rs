@@ -233,6 +233,53 @@ fn symbolic_pre_cap_relevance_rejects_substring_coverage_false_positive() {
     );
 }
 
+/// Stored keywords and entities participate in the exact same pre-cap score
+/// as final ranking. This target has no query token in text, so recovering it
+/// proves the SQLite scalar function decodes both JSON columns before scoring.
+#[test]
+fn symbolic_pre_cap_relevance_scores_keyword_and_entity_json() {
+    let mut conn = setup();
+
+    let mut target = memory_entry(
+        "expanded-metadata-target",
+        "older metadata-only symbolic target",
+        &["mcp", "model"],
+    );
+    target.entities = vec!["context protocol".to_string()];
+    target.timestamp = "2020-01-01T00:00:00Z".to_string();
+    insert_entry(&mut conn, target);
+
+    let mut newer_substring = memory_entry(
+        "expanded-metadata-substring-distractor",
+        "amcpmodelcontextprotocolx",
+        &[],
+    );
+    newer_substring.timestamp = "2027-01-01T00:00:00Z".to_string();
+    insert_entry(&mut conn, newer_substring);
+
+    let opts = SearchOptions {
+        candidates_per_channel: 0,
+        top_k: 1,
+        weights: HybridWeights {
+            semantic: 0.0,
+            fts: 0.0,
+            symbolic: 1.0,
+            decay: 0.0,
+            use_rrf: false,
+        },
+        record_access: false,
+        mmr_threshold: None,
+        ..Default::default()
+    };
+    let results = hybrid_search(&conn, "mcp", &opts).expect("symbolic search succeeds");
+
+    assert_eq!(
+        results.first().map(|result| result.entry.id.as_str()),
+        Some("expanded-metadata-target"),
+        "pre-cap selection must score parsed keywords and entities, not raw JSON substrings"
+    );
+}
+
 /// Timestamp only breaks true symbolic-score ties. It must compare parsed
 /// instants, rather than lexically ordering mixed RFC3339 representations.
 #[test]

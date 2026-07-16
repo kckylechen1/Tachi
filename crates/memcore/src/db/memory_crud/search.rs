@@ -311,8 +311,11 @@ fn register_symbolic_score_function(conn: &Connection) -> Result<(), MemoryError
             let topic = context.get::<String>(3)?;
             let summary = context.get::<String>(4)?;
             let text = context.get::<String>(5)?;
-            let keywords = context.get::<String>(6)?;
-            let entities = context.get::<String>(7)?;
+            // `row_to_entry` treats a legacy NULL JSON column as an empty
+            // array. Mirror that fallback so candidate selection cannot fail
+            // before final ranking sees the same row.
+            let keywords = context.get::<Option<String>>(6)?.unwrap_or_default();
+            let entities = context.get::<Option<String>>(7)?.unwrap_or_default();
             Ok(crate::scorer::symbolic_score_stored_entry(
                 &query,
                 &[&id, &path, &topic, &summary, &text],
