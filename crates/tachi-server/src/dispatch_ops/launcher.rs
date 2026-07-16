@@ -85,6 +85,37 @@ pub(super) fn build_custom_command(
     build_custom_launch(&launch_params(params), prompt).map(command_from_launch)
 }
 
+/// `agent='opencode'` shares its launch mechanics with `agent='custom'` (both
+/// resolve to `build_custom_launch`), but that launcher has no notion of which
+/// alias the caller actually used, so its errors are written in `custom`
+/// vocabulary. That's fine when the caller said `custom`; it's an abstraction
+/// leak when the caller said `opencode` (#1174) — `opencode` is a host adapter,
+/// not a launchable backend on its own, and the caller needs pointing at the
+/// profiles that resolve to it, not at an internal backend name they never
+/// typed. Check the one precondition that trips this in practice (missing
+/// `command`) before delegating, so the error stays in the caller's own words.
+pub(super) fn build_opencode_command(
+    params: &TachiDispatchParams,
+    prompt: &str,
+) -> Result<Command, String> {
+    if params.command.is_empty() {
+        return Err(opencode_missing_command_error());
+    }
+    build_custom_command(params, prompt)
+}
+
+fn opencode_missing_command_error() -> String {
+    let profiles: Vec<&str> = tachi_dispatch::DISPATCH_PROFILES
+        .iter()
+        .filter(|profile| tachi_dispatch::profile_uses_opencode_adapter(profile))
+        .map(|profile| profile.name)
+        .collect();
+    format!(
+        "agent='opencode' cannot be dispatched directly: opencode is a host adapter, not a launchable backend. Use profile dispatch instead (available: {}).",
+        profiles.join(", ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +233,57 @@ mod tests {
             build_custom_command(&params, "run task").is_err(),
             "trusted basenames should not bless untrusted paths"
         );
+    }
+
+    /// #1174: `agent='opencode'` with no `command` must not leak the internal
+    /// `custom` backend name it happens to share launch mechanics with — the
+    /// error must speak the caller's own vocabulary and point at profile
+    /// dispatch, with the profile list sourced live from the registry (not
+    /// hardcoded), so it can't drift from what `DISPATCH_PROFILES` actually has.
+    #[test]
+    fn opencode_agent_missing_command_keeps_user_vocabulary_and_points_at_profiles() {
+        let params = dispatch_params("opencode");
+        let err = build_opencode_command(&params, "run task")
+            .expect_err("agent='opencode' with no command must fail");
+
+        assert!(
+            err.contains("agent='opencode'"),
+            "error must keep the caller's own vocabulary, got: {err}"
+        );
+        assert!(
+            !err.contains("custom"),
+            "error must not leak the internal 'custom' backend name, got: {err}"
+        );
+        assert!(
+            err.to_ascii_lowercase().contains("profile"),
+            "error must point the caller at profile dispatch, got: {err}"
+        );
+
+        let expected_profiles: Vec<&str> = tachi_dispatch::DISPATCH_PROFILES
+            .iter()
+            .filter(|profile| tachi_dispatch::profile_uses_opencode_adapter(profile))
+            .map(|profile| profile.name)
+            .collect();
+        assert!(
+            !expected_profiles.is_empty(),
+            "registry must have at least one opencode-adapter profile for this test to be meaningful"
+        );
+        for name in expected_profiles {
+            assert!(
+                err.contains(name),
+                "error must list opencode-adapter profile '{name}' (dynamic from registry), got: {err}"
+            );
+        }
+    }
+
+    /// A non-empty `command` still delegates to the normal custom/opencode
+    /// launch path untouched.
+    #[test]
+    fn opencode_agent_with_command_delegates_to_custom_launch() {
+        let mut params = dispatch_params("opencode");
+        params.command = vec!["opencode".to_string(), "run".to_string()];
+
+        let cmd = build_opencode_command(&params, "run task").expect("opencode command");
+        assert_eq!(command_args(&cmd), vec!["run", "run task"]);
     }
 }
