@@ -551,3 +551,149 @@ pub(crate) async fn search_memory_rows_with_recall_config(
 
     Ok(output)
 }
+
+/// Test-proven, production-dormant (#1125): the consumer that flips search
+/// sampling on operationally does not exist yet — same dormancy as the whole
+/// receipt API. Lift this gate in the leaf that adds that consumer.
+#[cfg(test)]
+/// #1125 — the rows-layer receipt-assembly point.
+///
+/// The store layer returns the per-phase search receipt (whose `pool_wait` is
+/// `LayerAvailability::Unavailable`, because `hybrid_search` takes a bare
+/// `&Connection` and cannot see the read-pool checkout that happened ABOVE it)
+/// and the pool checkout receipt separately. THIS function combines them:
+/// `Some(wait)` → `Measured(wait)`; `None` → the receipt keeps whatever it
+/// already carried (the store layer returns `Unavailable` for the write-store
+/// path and the uncached named-project open — both have no read pool, so no
+/// checkout was measured, and we never convert that admission into a fake
+/// zero).
+///
+/// This is the ONLY place `pool_wait` becomes `Measured`. The bare
+/// `MemoryStore::search_with_receipt` path never reaches here, so it keeps
+/// reporting `Unavailable` — exactly the "measured only where actually
+/// measured" flip #1125 asks for.
+pub(super) fn inject_measured_pool_wait(
+    mut receipt: memcore::SearchPhaseReceipt,
+    pool: Option<&memory_server_runtime::ReadPoolCheckoutReceipt>,
+) -> memcore::SearchPhaseReceipt {
+    if let Some(measured) = pool {
+        receipt.pool_wait = memcore::LayerAvailability::Measured(measured.pool_checkout_wait);
+    }
+    receipt
+}
+
+#[cfg(test)]
+mod receipt_assembly_tests {
+    use super::inject_measured_pool_wait;
+    // `with_global_search_recording` lives in the sibling `store` module
+    // (`search_memory::store`); from this grandchild test module the path is
+    // up two levels (`super` = rows, `super::super` = search_memory) then into
+    // `store`. It is `pub(super)`-visible to `search_memory` and descendants.
+    use super::super::store::with_global_search_recording;
+    use crate::tool_params::SearchMemoryParams;
+
+    /// Minimal global-scope params (no project, no embedding) — enough to drive
+    /// a sampled search through the tachi-server path and inspect its receipt.
+    fn global_params(query: &str) -> SearchMemoryParams {
+        SearchMemoryParams {
+            query: query.into(),
+            query_vec: None,
+            top_k: 5,
+            path_prefix: None,
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: 5,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            context_symbols: Vec::new(),
+            agent_role: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+        }
+    }
+
+    /// kckylechen1/tachi#1125 acceptance 2 — end-to-end through the
+    /// tachi-server recall path.
+    ///
+    /// A sampled global search that goes through the recording checkout must
+    /// carry a MEASURED `pool_wait` (`Measured`, not `Unavailable`), because
+    /// the global read path checks a slot out of the real global read pool and
+    /// the receipt is threaded out + injected. The receipt's other phase
+    /// fields are untouched by the injection. And the BARE
+    /// `MemoryStore::search_with_receipt` path — which we did NOT wire to a
+    /// checkout — must REMAIN `Unavailable`, proving the flip is honest
+    /// ("measured only where actually measured") rather than a blanket change.
+    #[test]
+    fn wired_global_search_carries_measured_pool_wait_and_bare_path_stays_unavailable() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let global_db = tmp.path().join("global.db");
+        let server = crate::MemoryServer::new(global_db, None).expect("test server");
+        let params = global_params("recall pool wait probe");
+
+        // ── Wired path: recording checkout + injection ──────────────────────
+        let (results, receipt, pool) = with_global_search_recording(
+            &server,
+            &params,
+            false, // record_access=false → read pool path (the measurable one)
+            None,
+            "global search receipt probe",
+        )
+        .expect("recording search");
+
+        // Before injection, the store layer's receipt honestly admits it
+        // cannot see the pool (the discrimination point this leaf closes):
+        assert_eq!(
+            receipt.pool_wait,
+            memcore::LayerAvailability::Unavailable,
+            "the search receipt arrives from hybrid_search with pool_wait=Unavailable \
+             (it cannot see the pool above it); injection is what flips it"
+        );
+        // The store layer DID hand back the measured checkout receipt...
+        let pool_receipt = pool
+            .as_ref()
+            .expect("global read path always checks a slot out of the read pool → Some");
+        // ...so the rows-layer assembly flips pool_wait to the measured form:
+        let assembled = inject_measured_pool_wait(receipt, pool.as_ref());
+        assert!(
+            matches!(assembled.pool_wait, memcore::LayerAvailability::Measured(_)),
+            "wired path: pool_wait must be the Measured form after injection, got {:?}",
+            assembled.pool_wait
+        );
+        if let memcore::LayerAvailability::Measured(d) = assembled.pool_wait {
+            assert!(
+                d >= std::time::Duration::ZERO,
+                "a measured Duration is honest even at zero; got {d:?}"
+            );
+            // Same Duration object the checkout measured — no guessing:
+            assert_eq!(d, pool_receipt.pool_checkout_wait);
+        }
+        // The injection touched ONLY pool_wait — every other phase field is
+        // unchanged (results identity + total_elapsed carry through).
+        let _ = results;
+
+        // ── Unwired path: bare store.search_with_receipt stays Unavailable ──
+        // We did not route this through a recording checkout, so it must keep
+        // reporting Unavailable — never a fake zero, never Measured.
+        let bare = server
+            .with_global_store_read(|store| {
+                let (_, receipt) = store
+                    .search_with_receipt("recall pool wait probe", None)
+                    .map_err(|e| e.to_string())?;
+                Ok(receipt)
+            })
+            .expect("bare receipt search");
+        assert_eq!(
+            bare.pool_wait,
+            memcore::LayerAvailability::Unavailable,
+            "unwired path: bare search_with_receipt must stay Unavailable (no higher \
+             layer measured a checkout for this call)"
+        );
+    }
+}

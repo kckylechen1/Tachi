@@ -960,3 +960,71 @@ fn receipt_marks_best_effort_graph_query_failure_distinct_from_zero_expansion() 
     );
     assert_eq!(graph.expanded_count, 0);
 }
+
+// ---------------------------------------------------------------------------
+// #1125 acceptance 3 — sampled vs unsampled search results must be identical.
+//
+// `hybrid_search` and `hybrid_search_with_receipt` share `hybrid_search_inner`;
+// the `sample` flag toggles ONLY timing observation (`sample.then(Instant::now)`),
+// never scoring, MMR, expansion, or access. This paired discriminator pins that
+// invariant: if a future change let sampling perturb results (e.g. a timing
+// branch that re-ordered candidates, or a receipt field that bled into scoring),
+// the ids/scores would diverge and this goes red. It extends the existing
+// paired-discriminator pattern in this file rather than duplicating it.
+//
+// `record_access=false` so neither run mutates the DB — the second run sees the
+// exact state the first did (record_access=true would bump access_count between
+// runs and desynchronize ranking).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sampled_and_unsampled_search_return_identical_results() {
+    let mut conn = setup();
+    insert(&mut conn, "a", "rust performance memory safety", &["rust"]);
+    insert(&mut conn, "b", "rust async runtime tokio", &["rust"]);
+    insert(&mut conn, "c", "rust ownership borrow checker", &["rust"]);
+
+    let opts = SearchOptions {
+        top_k: 3,
+        record_access: false,
+        ..Default::default()
+    };
+    let query = "rust performance";
+    let unsampled = hybrid_search(&conn, query, &opts).expect("unsampled search");
+    let (sampled, receipt) =
+        hybrid_search_with_receipt(&conn, query, &opts).expect("sampled search");
+
+    assert!(
+        receipt.sampled,
+        "the receipt entry point opted into sampling"
+    );
+    assert_eq!(
+        unsampled.len(),
+        sampled.len(),
+        "sampled vs unsampled must surface the same number of results"
+    );
+    for (i, (u, s)) in unsampled.iter().zip(sampled.iter()).enumerate() {
+        assert_eq!(
+            u.entry.id, s.entry.id,
+            "result[{i}] identity/order must match between sampled and unsampled"
+        );
+        // Bit-identical scores: sampling adds observation only, never a
+        // scoring change. `to_bits` (not partial_cmp) so a NaN or a
+        // reordering-induced tiebreak difference is caught exactly.
+        assert_eq!(
+            u.score.final_score.to_bits(),
+            s.score.final_score.to_bits(),
+            "result[{i}] final_score must be bit-identical (sampling perturbs nothing)"
+        );
+    }
+    // And the layer this leaf is about stays honest on the bare path: with no
+    // higher layer measuring a checkout, pool_wait is Unavailable, never a
+    // fake Measured/zero. (The Measured form is injected only by the
+    // tachi-server assembly point — unreachable from a bare &Connection.)
+    assert_eq!(
+        receipt.pool_wait,
+        LayerAvailability::Unavailable,
+        "bare hybrid_search_with_receipt keeps pool_wait Unavailable; the Measured \
+         form is reachable only via the higher-layer checkout injection (#1125)"
+    );
+}

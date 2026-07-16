@@ -144,11 +144,17 @@ pub(super) fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
 //   * Only the whitelisted counters below are ever populated. Raw query text,
 //     memory content/summaries, DB file paths, credentials, embedding vectors,
 //     and entity names are NEVER placed in the receipt or any log.
-//   * `pool_wait` is [`LayerAvailability::Unavailable`] — `hybrid_search` takes
-//     a bare `&Connection`, so the read-pool checkout receipt (whose type
-//     lives in `memory-server-runtime::ReadPoolCheckoutReceipt`) is owned by
-//     a higher layer whose production path (`with_store`) currently discards
-//     it. We refuse to fake a zero (#1097 D1).
+//   * `pool_wait` is [`LayerAvailability::Unavailable`] on the path
+//     `hybrid_search` can see — it takes a bare `&Connection`, so the
+//     read-pool checkout receipt (whose type lives in
+//     `memory-server-runtime::ReadPoolCheckoutReceipt`) is owned by a higher
+//     layer. We refuse to fake a zero (#1097 D1). #1125 adds a
+//     [`LayerAvailability::Measured`] form that the tachi-server recall path
+//     injects AFTER checkout: `hybrid_search` itself never produces it (it
+//     cannot — the pool is above it), so any receipt still holding
+//     `Unavailable` here honestly means "no higher layer measured it for this
+//     call" (the bare `hybrid_search_with_receipt` entry point, and any
+//     unsampled path).
 //   * `sqlite_retry` is [`LayerAvailability::NotApplicable`] —
 //     `retry_memory_locked` is wired only into write paths
 //     (db::memory_crud::{crud, derived, enrichment, open}); the read path the
@@ -177,6 +183,17 @@ pub enum LayerAvailability {
     /// BUSY/LOCKED retry loop is wired only into write paths; recall is
     /// read-only, so the retry counter would always read zero here).
     NotApplicable,
+    /// #1125: the layer WAS measured at the owning layer and the value is
+    /// carried down here. The read-pool checkout wait is measured by
+    /// `ReadStorePool::with_store_recording` (memory-server-runtime), which
+    /// lives ABOVE `hybrid_search` — a bare `&Connection` cannot observe the
+    /// pool. The tachi-server recall path threads that measured `Duration`
+    /// out of the checkout and injects it into `pool_wait`; the bare
+    /// `hybrid_search_with_receipt` path (no pool above it) keeps reporting
+    /// [`LayerAvailability::Unavailable`]. `Duration` (not a magic number) is
+    /// the honest unit: zero is a real measurement here, distinct from
+    /// `Unavailable`'s admission that no measurement happened.
+    Measured(Duration),
 }
 
 /// One retrieval channel's wall-time + count snapshot.
