@@ -633,8 +633,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn over_budget_skill_contracts_keep_references_without_raw_bodies() {
+    // Plain `#[test]` + `block_on` (not `#[tokio::test]`), matching the
+    // `global_test_lock` convention used everywhere else in this crate (e.g.
+    // `bootstrap::serve::stdio::tests`): the guard protects the process-wide
+    // `SKILL_TEXT_BUDGET_ENV` var against a parallel test racing the same
+    // env key, so it must stay held for the entire `assemble_prompt` call
+    // including its internal awaits -- `block_on` runs that future to
+    // completion synchronously on this thread, so there is no `.await`
+    // expression in scope for clippy's `await_holding_lock` lint to flag,
+    // while the guard's actual coverage is unchanged.
+    #[test]
+    fn over_budget_skill_contracts_keep_references_without_raw_bodies() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -645,7 +654,9 @@ mod tests {
         register_skill(&server, "skill:second", "SECOND_RAW_BODY_");
         let params = params_with_skills(vec!["skill:first", "skill:second"]);
 
-        let prompt = assemble_prompt(&server, &params).await;
+        let prompt = tokio::runtime::Runtime::new()
+            .expect("tokio runtime")
+            .block_on(assemble_prompt(&server, &params));
 
         assert!(prompt.contains("### skill:first"), "{prompt}");
         assert!(

@@ -11,8 +11,17 @@ use super::*;
 /// the rest of the prompt). This test fails on the pre-fix ordering because
 /// the closing tag for the over-budget entry never appears in the prompt at
 /// all.
-#[tokio::test]
-async fn over_budget_memory_context_keeps_paired_untrusted_boundary() {
+// Plain `#[test]` + `block_on` (not `#[tokio::test]`), matching the
+// `global_test_lock` convention used everywhere else in this crate (e.g.
+// `bootstrap::serve::stdio::tests`): the guard protects the process-wide
+// `TACHI_DISPATCH_MEMORY_CONTEXT_BUDGET_CHARS` var against a parallel test
+// racing the same env key, so it must stay held for the entire
+// `assemble_prompt` call including its internal awaits -- `block_on` runs
+// that future to completion synchronously on this thread, so there is no
+// `.await` expression in scope for clippy's `await_holding_lock` lint to
+// flag, while the guard's actual coverage is unchanged.
+#[test]
+fn over_budget_memory_context_keeps_paired_untrusted_boundary() {
     // TACHI_DISPATCH_MEMORY_CONTEXT_BUDGET_CHARS is a process-global env var
     // read by every concurrent `assemble_prompt` call in this test binary;
     // guard it the same way the skill-budget regression test in
@@ -41,8 +50,12 @@ async fn over_budget_memory_context_keeps_paired_untrusted_boundary() {
         })
         .expect("seed over-budget memory entry");
 
-    let prompt =
-        crate::dispatch_ops::assemble_prompt(&server, &dispatch_params(Some("codex"), task)).await;
+    let prompt = tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(crate::dispatch_ops::assemble_prompt(
+            &server,
+            &dispatch_params(Some("codex"), task),
+        ));
 
     // Each rendered entry is one element of the prompt's `parts` vector,
     // joined with "\n\n"; our filler has no blank lines in it, so the first
