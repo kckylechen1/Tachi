@@ -317,6 +317,18 @@ async fn recommend_skill_host_bonus_ignores_definition_paths() {
 /// amplifier (the old `definition.contains(host)` substring scan) is gone —
 /// it fails against pre-#1166 `main`, where the same fixture flips
 /// `skill:zeta` ahead of `skill:alpha`.
+///
+/// The two `content` strings are word-for-word identical except at one
+/// position, where alpha carries a neutral filler token (`plumbob`) and
+/// zeta carries the host token (`codex`). Neither word is a query token, so
+/// this keeps token count, query-intersection size, and union size exactly
+/// equal between the two fixtures — meaning `definition_overlap` (and thus
+/// `capability_score`'s overall total) is provably identical by construction,
+/// isolating the host bonus as the *only* variable the `assert_eq!` below can
+/// be sensitive to. An earlier version of this fixture used content strings
+/// with different token counts (8 vs 11), which made `definition_overlap`
+/// diverge for reasons unrelated to host affinity and made the assertion
+/// flaky/wrong independent of the fix under test.
 #[tokio::test]
 async fn recommend_skill_host_bonus_ignores_free_text_mentions() {
     let server = make_server();
@@ -333,7 +345,7 @@ async fn recommend_skill_host_bonus_ignores_free_text_mentions() {
         "listed",
     );
     alpha.definition = json!({
-        "content": "host affinity fixture with no host mention in prose",
+        "content": "host affinity fixture that happens to mention plumbob in its prose",
     })
     .to_string();
     zeta.definition = json!({

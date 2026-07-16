@@ -148,6 +148,13 @@ fn definition_declares_host(definition: &str, host: &str) -> bool {
     let Ok(Value::Object(fields)) = serde_json::from_str::<Value>(definition) else {
         return false;
     };
+    // Review checkpoint 1.1 (round-2, codex cross-review of #1166): only the
+    // top-level `host`/`hosts`/`tags` keys are consulted here — a nested
+    // object under one of those keys is not walked. This is intentional, not
+    // an oversight: a value nested arbitrarily deep inside declared metadata
+    // is structurally closer to free-text content than to an author's
+    // explicit host declaration, so it gets no bonus, matching the same
+    // fail-safe default `HOST_METADATA_KEYS` exists to enforce (#1140).
     HOST_METADATA_KEYS
         .iter()
         .filter_map(|key| fields.get(*key))
