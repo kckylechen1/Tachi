@@ -285,23 +285,31 @@ async fn consolidate_promote_distilled_after_diverse_recall() {
 }
 
 #[tokio::test]
-async fn consolidate_refuses_to_propose_archive_for_protected_wiki() {
+async fn consolidate_accounts_protected_rows_and_allows_an_eligible_peer() {
     let server = make_server();
     let mut wiki = make_entry("life-wiki-1");
-    wiki.path = "/wiki/general/important".to_string();
+    wiki.path = "/scope/protected".to_string();
     wiki.category = "wiki".to_string();
     wiki.importance = 0.2;
     wiki.access_count = 0;
     wiki.timestamp = (Utc::now() - Duration::days(400)).to_rfc3339();
     wiki.summary = "Old wiki page".into();
     wiki.text = "Old wiki page body".into();
+    let mut eligible = make_entry("life-eligible-stale-1");
+    eligible.path = "/scope/eligible".to_string();
+    eligible.importance = 0.2;
+    eligible.access_count = 0;
+    eligible.timestamp = (Utc::now() - Duration::days(400)).to_rfc3339();
     server
-        .with_global_store(|store| store.upsert(&wiki).map_err(|e| e.to_string()))
+        .with_global_store(|store| {
+            store.upsert(&wiki).map_err(|e| e.to_string())?;
+            store.upsert(&eligible).map_err(|e| e.to_string())
+        })
         .expect("seed wiki");
 
     let mut propose = tachi_memory_params("consolidate");
     propose.format = Some("json".to_string());
-    propose.path_prefix = Some("/wiki".to_string());
+    propose.path_prefix = Some("/scope".to_string());
     let body = crate::facade_memory_ops::handle_tachi_memory(&server, propose)
         .await
         .expect("propose");
@@ -313,6 +321,26 @@ async fn consolidate_refuses_to_propose_archive_for_protected_wiki() {
     assert!(
         !hits_wiki,
         "wiki rows must not appear as archive/supersede sources: {parsed}"
+    );
+    assert!(
+        generated
+            .iter()
+            .any(|p| p.get("source_id").and_then(Value::as_str) == Some("life-eligible-stale-1")),
+        "an eligible peer must still be proposed: {parsed}"
+    );
+    assert_eq!(parsed["scope_accounting"]["examined"], json!(2));
+    assert_eq!(parsed["scope_accounting"]["evaluated"], json!(1));
+    assert_eq!(
+        parsed["scope_accounting"]["expected_exclusions"]["count"],
+        json!(1)
+    );
+    assert!(
+        parsed["scope_accounting"]["expected_exclusions"]["samples"]
+            .as_array()
+            .is_some_and(|samples| samples.iter().any(|sample| {
+                sample["id"] == "life-wiki-1" && sample["reason"] == "wiki_category"
+            })),
+        "the protected row must be named in scope accounting: {parsed}"
     );
 }
 

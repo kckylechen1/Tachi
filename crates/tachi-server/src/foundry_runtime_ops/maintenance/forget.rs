@@ -8,6 +8,35 @@ use tachi_foundry::build_foundry_distill_root;
 /// behind when the newest window is dense (#775 forget policy).
 const FOUNDRY_DISTILL_SCAN_EXTRA: usize = 48;
 
+/// A forget sweep cannot report only the number archived: safety refusals are
+/// part of the requested scope and must survive through the worker receipt.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct ForgetSweepOutcome {
+    pub(super) archived: usize,
+    pub(super) kept: usize,
+    pub(super) protected_at_selection: Vec<String>,
+    pub(super) protected_at_apply: Vec<String>,
+}
+
+impl ForgetSweepOutcome {
+    pub(super) fn receipt(&self) -> String {
+        format!(
+            "forget_sweep archived={} kept={} protected_at_selection={} protected_at_apply={}",
+            self.archived,
+            self.kept,
+            self.protected_at_selection.len(),
+            self.protected_at_apply.len()
+        )
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct ForgetSweepSelection {
+    pub(super) archive_ids: Vec<String>,
+    pub(super) kept: usize,
+    pub(super) protected_ids: Vec<String>,
+}
+
 /// Foundry forget_sweep policy (#775 / neural-foundry harden):
 ///
 /// 1. List distill-root rows with `source=FOUNDRY_DISTILL_SOURCE`.
@@ -18,7 +47,7 @@ const FOUNDRY_DISTILL_SCAN_EXTRA: usize = 48;
 pub(super) fn process_forget_sweep_job(
     server: &MemoryServer,
     item: &FoundryMaintenanceItem,
-) -> Result<usize, String> {
+) -> Result<ForgetSweepOutcome, String> {
     let agent_id = item
         .job
         .target_agent_id
@@ -46,10 +75,14 @@ pub(super) fn process_forget_sweep_job(
             .then_with(|| b.id.cmp(&a.id))
     });
 
-    let stale_ids = select_forget_sweep_archive_ids(&distill_entries, FOUNDRY_DISTILL_KEEP);
+    let selection = select_forget_sweep_archive_ids(&distill_entries, FOUNDRY_DISTILL_KEEP);
+    let mut outcome = ForgetSweepOutcome {
+        kept: selection.kept,
+        protected_at_selection: selection.protected_ids,
+        ..ForgetSweepOutcome::default()
+    };
 
-    let mut archived = 0usize;
-    for stale_id in stale_ids {
+    for stale_id in selection.archive_ids {
         let changed = with_foundry_store(server, item, |store| {
             // Re-check protection at apply time (retention may have changed).
             if let Some(entry) = store
@@ -57,41 +90,46 @@ pub(super) fn process_forget_sweep_job(
                 .map_err(|e| format!("load distill {stale_id}: {e}"))?
             {
                 if is_protected_distill(&entry) {
-                    return Ok(false);
+                    return Ok(Err(stale_id.clone()));
                 }
             }
             store
                 .archive_memory(&stale_id)
+                .map(|changed| Ok(changed))
                 .map_err(|e| format!("Failed to archive stale foundry distill {stale_id}: {e}"))
         })?;
-        if changed {
-            archived += 1;
+        match changed {
+            Ok(true) => outcome.archived += 1,
+            Ok(false) => outcome.kept += 1,
+            Err(protected_id) => outcome.protected_at_apply.push(protected_id),
         }
     }
 
-    Ok(archived)
+    Ok(outcome)
 }
 
 /// Pure selection of archive candidates (testable without a DB).
 pub(super) fn select_forget_sweep_archive_ids(
     newest_first: &[MemoryEntry],
     keep: usize,
-) -> Vec<String> {
+) -> ForgetSweepSelection {
     let mut kept = 0usize;
-    let mut archive = Vec::new();
+    let mut selection = ForgetSweepSelection::default();
     for entry in newest_first {
         if is_protected_distill(entry) {
             // Protected rows never count against the keep budget and are never
-            // archived by this sweep.
+            // archived by this sweep, but they remain visible in the receipt.
+            selection.protected_ids.push(entry.id.clone());
             continue;
         }
         if kept < keep {
             kept += 1;
+            selection.kept += 1;
             continue;
         }
-        archive.push(entry.id.clone());
+        selection.archive_ids.push(entry.id.clone());
     }
-    archive
+    selection
 }
 
 fn is_protected_distill(entry: &MemoryEntry) -> bool {
@@ -152,9 +190,31 @@ mod tests {
             distill("old", "2026-04-01T00:00:00Z", None),
             distill("pinned", "2026-03-01T00:00:00Z", Some("pinned")),
         ];
-        let archive = select_forget_sweep_archive_ids(&rows, 2);
-        assert_eq!(archive, vec!["old".to_string()]);
-        assert!(!archive.iter().any(|id| id == "durable" || id == "pinned"));
-        assert!(!archive.iter().any(|id| id == "new" || id == "mid"));
+        let selection = select_forget_sweep_archive_ids(&rows, 2);
+        assert_eq!(selection.archive_ids, vec!["old".to_string()]);
+        assert_eq!(selection.kept, 2);
+        assert_eq!(
+            selection.protected_ids,
+            vec!["durable".to_string(), "pinned".to_string()]
+        );
+        assert!(!selection
+            .archive_ids
+            .iter()
+            .any(|id| id == "durable" || id == "pinned"));
+    }
+
+    #[test]
+    fn forget_sweep_receipt_keeps_progress_and_safety_refusals_distinct() {
+        let outcome = ForgetSweepOutcome {
+            archived: 3,
+            kept: 6,
+            protected_at_selection: vec!["durable".to_string()],
+            protected_at_apply: vec!["became-pinned".to_string()],
+        };
+
+        assert_eq!(
+            outcome.receipt(),
+            "forget_sweep archived=3 kept=6 protected_at_selection=1 protected_at_apply=1"
+        );
     }
 }

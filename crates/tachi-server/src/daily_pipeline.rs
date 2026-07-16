@@ -41,9 +41,7 @@ pub(crate) async fn run_daily_pipeline(
     }
     let (health_stage, health_json, report_path) =
         run_health_check(server, &app_home, &date).await?;
-    if let Err(e) = run_truth_maintenance_stage(server, &app_home).await {
-        eprintln!("[daily_pipeline] truth maintenance skipped: {e}");
-    }
+    let truth_maintenance = run_truth_maintenance_stage(server, &app_home).await;
 
     let skill_stage = run_skill_evolution_stage(server).await;
     let routing_stage = run_routing_analysis_stage(server, &date).await;
@@ -52,6 +50,7 @@ pub(crate) async fn run_daily_pipeline(
         date: date.clone(),
         report_path: Some(report_path.display().to_string()),
         health_check: health_stage,
+        truth_maintenance,
         skill_evolution: skill_stage,
         routing_analysis: routing_stage,
     };

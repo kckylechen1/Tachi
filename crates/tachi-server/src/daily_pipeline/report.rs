@@ -17,6 +17,10 @@ pub(crate) fn render_daily_report_markdown(
         report.health_check.summary
     ));
     out.push_str(&format!(
+        "- Truth Maintenance: {}\n",
+        report.truth_maintenance.summary
+    ));
+    out.push_str(&format!(
         "- Skill Evolution: {}\n",
         report.skill_evolution.summary
     ));
@@ -34,6 +38,14 @@ pub(crate) fn render_daily_report_markdown(
     out.push_str("```json\n");
     out.push_str(
         &serde_json::to_string_pretty(&report.skill_evolution.details)
+            .unwrap_or_else(|_| "{}".to_string()),
+    );
+    out.push_str("\n```\n\n");
+
+    out.push_str("## Truth Maintenance\n\n");
+    out.push_str("```json\n");
+    out.push_str(
+        &serde_json::to_string_pretty(&report.truth_maintenance.details)
             .unwrap_or_else(|_| "{}".to_string()),
     );
     out.push_str("\n```\n\n");
@@ -112,4 +124,35 @@ pub(crate) fn parse_llm_json(raw: &str) -> Result<Value, String> {
 
 pub(crate) fn parse_json_or_raw(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| json!({ "raw": raw }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daily_pipeline::{DailyPipelineReport, DailyStageReport};
+
+    fn stage(summary: &str) -> DailyStageReport {
+        DailyStageReport {
+            status: "completed".to_string(),
+            summary: summary.to_string(),
+            details: json!({ "scope_accounting": { "expected_exclusions": [] } }),
+        }
+    }
+
+    #[test]
+    fn daily_report_persists_truth_maintenance_accounting() {
+        let report = DailyPipelineReport {
+            date: "2026-07-16".to_string(),
+            report_path: None,
+            health_check: stage("healthy"),
+            truth_maintenance: stage("1 expected exclusion"),
+            skill_evolution: stage("none"),
+            routing_analysis: stage("none"),
+        };
+
+        let markdown = render_daily_report_markdown(&report, &json!({}));
+        assert!(markdown.contains("Truth Maintenance: 1 expected exclusion"));
+        assert!(markdown.contains("## Truth Maintenance"));
+        assert!(markdown.contains("expected_exclusions"));
+    }
 }

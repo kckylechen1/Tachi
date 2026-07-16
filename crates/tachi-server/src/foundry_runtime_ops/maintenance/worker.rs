@@ -86,9 +86,14 @@ async fn handle_foundry_maintenance_item(
                     Some(reason),
                 ),
             }),
-        memcore::FoundryJobKind::ForgetSweep => process_forget_sweep_job(server, item).map(|_| {
-            FoundryMaintenanceOutcome::Terminal(memcore::FoundryJobStatus::Completed, None)
-        }),
+        memcore::FoundryJobKind::ForgetSweep => {
+            process_forget_sweep_job(server, item).map(|outcome| {
+                FoundryMaintenanceOutcome::Terminal(
+                    memcore::FoundryJobStatus::Completed,
+                    Some(outcome.receipt()),
+                )
+            })
+        }
         _ => Ok(FoundryMaintenanceOutcome::Terminal(
             memcore::FoundryJobStatus::Skipped,
             Some(unsupported_foundry_job_reason(&item.job.kind)),

@@ -24,7 +24,7 @@ use crate::MemoryServer;
 use chrono::{Duration, Utc};
 use memcore::MemoryEntry;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 const LIFECYCLE_PROPOSAL_NS: &str = "memory_lifecycle_proposals";
 const SCRATCH_PREFIX: &str = "/scratch";
@@ -33,6 +33,111 @@ const ARCHIVE_IMPORTANCE_MAX: f64 = 0.55;
 /// Same gate as `MemoryStore::promote_diversely_recalled_raw_memories`.
 const PROMOTE_RECALL_MIN: i64 = 3;
 const PROMOTE_DIVERSITY_MIN: i64 = 3;
+/// A report should identify enough protected rows to make a zero-work scan
+/// debuggable, without turning a broad maintenance response into a dump of
+/// every memory body or identifier.
+const SCOPE_ACCOUNTING_SAMPLE_LIMIT: usize = 20;
+
+/// The proposal generators must not receive a bare filtered list: doing so
+/// makes an all-protected prefix indistinguishable from an empty one.  Keep
+/// the safety decision and its accounting together at the scan boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Ord, PartialOrd)]
+enum ConsolidationExclusionReason {
+    OutsideRequestedPrefix,
+    AlreadyArchived,
+    PatternTier,
+    WikiCategory,
+    WikiPath,
+    RetentionPolicy,
+}
+
+impl ConsolidationExclusionReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::OutsideRequestedPrefix => "outside_requested_prefix",
+            Self::AlreadyArchived => "already_archived",
+            Self::PatternTier => "pattern_tier",
+            Self::WikiCategory => "wiki_category",
+            Self::WikiPath => "wiki_path",
+            Self::RetentionPolicy => "retention_policy",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConsolidationExclusion {
+    id: String,
+    reason: ConsolidationExclusionReason,
+}
+
+struct ConsolidationScope {
+    eligible: Vec<MemoryEntry>,
+    exclusions: Vec<ConsolidationExclusion>,
+}
+
+impl ConsolidationScope {
+    fn from_entries(entries: Vec<MemoryEntry>, path_prefix: &str) -> Self {
+        let mut eligible = Vec::new();
+        let mut exclusions = Vec::new();
+
+        for entry in entries {
+            let exclusion = if !entry.path.starts_with(path_prefix) {
+                Some(ConsolidationExclusionReason::OutsideRequestedPrefix)
+            } else {
+                protection_reason(&entry)
+            };
+            if let Some(reason) = exclusion {
+                exclusions.push(ConsolidationExclusion {
+                    id: entry.id,
+                    reason,
+                });
+            } else {
+                eligible.push(entry);
+            }
+        }
+
+        Self {
+            eligible,
+            exclusions,
+        }
+    }
+
+    fn examined(&self) -> usize {
+        self.eligible.len() + self.exclusions.len()
+    }
+
+    fn as_json(&self) -> Value {
+        let excluded_count = self.exclusions.len();
+        let by_reason = self
+            .exclusions
+            .iter()
+            .fold(BTreeMap::new(), |mut counts, exclusion| {
+                *counts.entry(exclusion.reason.as_str()).or_insert(0usize) += 1;
+                counts
+            });
+        let samples = self
+            .exclusions
+            .iter()
+            .take(SCOPE_ACCOUNTING_SAMPLE_LIMIT)
+            .map(|exclusion| {
+                json!({
+                    "id": exclusion.id,
+                    "reason": exclusion.reason.as_str(),
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "examined": self.examined(),
+            "evaluated": self.eligible.len(),
+            "expected_exclusions": {
+                "count": excluded_count,
+                "by_reason": by_reason,
+                "samples": samples,
+                "sample_limit": SCOPE_ACCOUNTING_SAMPLE_LIMIT,
+            }
+        })
+    }
+}
 /// Minimum summary-token Jaccard to prefer `merge_into` over plain `supersede`.
 const MERGE_SUMMARY_JACCARD_MIN: f64 = 0.50;
 
@@ -76,8 +181,9 @@ async fn handle_propose(
         "kind": "memory_lifecycle",
         "requires_human_approval": true,
         "path_prefix": path_prefix,
-        "generated_count": generated.len(),
-        "generated": generated,
+        "generated_count": generated.proposals.len(),
+        "generated": generated.proposals,
+        "scope_accounting": generated.scope.as_json(),
         "count": proposals.len(),
         "proposals": proposals,
         "next_actions": [
@@ -91,7 +197,7 @@ async fn handle_propose(
     }
     Ok(format!(
         "Tachi consolidate\nstatus: dry_run\ngenerated: {}\npending proposals: {}\nnext: review then confirm=true to apply",
-        generated.len(),
+        generated.proposals.len(),
         proposals
             .iter()
             .filter(|p| p.get("status").and_then(Value::as_str) == Some("pending"))
@@ -486,24 +592,30 @@ fn refuse_if_protected(
     Ok(())
 }
 
+struct ProposalGeneration {
+    proposals: Vec<Value>,
+    scope: ConsolidationScope,
+}
+
 fn generate_and_persist_proposals(
     server: &MemoryServer,
     params: &TachiMemoryParams,
     path_prefix: &str,
-) -> Result<Vec<Value>, String> {
+) -> Result<ProposalGeneration, String> {
     let entries = with_memory_store_read(server, params, |store| {
         store
             .list_by_path(path_prefix, 500, false)
             .map_err(|e| format!("list_by_path: {e}"))
     })?;
 
+    let scope = ConsolidationScope::from_entries(entries, path_prefix);
     let mut proposals = Vec::new();
-    proposals.extend(propose_same_path_lifecycle(&entries, path_prefix));
-    proposals.extend(propose_stale_archives(&entries, path_prefix));
-    proposals.extend(propose_promote_distilled(&entries, path_prefix));
+    proposals.extend(propose_same_path_lifecycle(&scope.eligible, path_prefix));
+    proposals.extend(propose_stale_archives(&scope.eligible, path_prefix));
+    proposals.extend(propose_promote_distilled(&scope.eligible, path_prefix));
 
     if proposals.is_empty() {
-        return Ok(proposals);
+        return Ok(ProposalGeneration { proposals, scope });
     }
 
     with_proposal_store(server, params, |store| {
@@ -534,7 +646,7 @@ fn generate_and_persist_proposals(
         }
         Ok(())
     })?;
-    Ok(proposals)
+    Ok(ProposalGeneration { proposals, scope })
 }
 
 /// Same-path duplicates → `merge_into` when summaries overlap enough, else
@@ -741,23 +853,33 @@ fn parse_entry_utc(raw: &str) -> Option<chrono::DateTime<Utc>> {
 }
 
 fn is_protected(entry: &MemoryEntry) -> bool {
+    protection_reason(entry).is_some()
+}
+
+fn protection_reason(entry: &MemoryEntry) -> Option<ConsolidationExclusionReason> {
     if entry.archived {
-        return true;
+        return Some(ConsolidationExclusionReason::AlreadyArchived);
     }
     if entry.tier.eq_ignore_ascii_case("pattern") {
-        return true;
+        return Some(ConsolidationExclusionReason::PatternTier);
     }
-    if entry.is_wiki() || entry.path.starts_with("/wiki") {
-        return true;
+    if entry.is_wiki() {
+        return Some(ConsolidationExclusionReason::WikiCategory);
     }
-    matches!(
+    if entry.path.starts_with("/wiki") {
+        return Some(ConsolidationExclusionReason::WikiPath);
+    }
+    if matches!(
         entry
             .retention_policy
             .as_deref()
             .map(str::to_ascii_lowercase)
             .as_deref(),
         Some("permanent" | "pinned" | "durable")
-    )
+    ) {
+        return Some(ConsolidationExclusionReason::RetentionPolicy);
+    }
+    None
 }
 
 fn list_proposals(server: &MemoryServer, params: &TachiMemoryParams) -> Result<Vec<Value>, String> {
