@@ -97,6 +97,16 @@ async fn tachi_memory_search_defaults_to_json_and_keeps_markdown_escape_hatch() 
     let parsed: Value = serde_json::from_str(&json_body).expect("default search JSON");
     assert_eq!(parsed["status"], json!("completed"));
     assert_eq!(parsed["query"], json!("facade default json no matches"));
+    for section in parsed["sections"].as_array().expect("search sections") {
+        assert!(
+            section["rows"].is_array(),
+            "section must keep array rows: {section:#}"
+        );
+        assert!(
+            section.get("error").is_none(),
+            "successful sections retain their existing shape: {section:#}"
+        );
+    }
 
     let mut markdown_params = tachi_memory_params("search");
     markdown_params.query = Some("facade markdown output".to_string());
@@ -104,6 +114,45 @@ async fn tachi_memory_search_defaults_to_json_and_keeps_markdown_escape_hatch() 
         .await
         .expect("markdown search should succeed");
     assert!(markdown.starts_with("## Tachi search:"), "{markdown}");
+}
+
+#[tokio::test]
+async fn tachi_memory_search_json_failure_keeps_rows_an_array_and_exposes_typed_error() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            store
+                .connection()
+                .execute_batch("DROP TABLE memories")
+                .map_err(|err| format!("force deterministic search failure: {err}"))
+        })
+        .expect("drop only this test server's memory table");
+
+    let mut params = tachi_memory_params("search");
+    params.format = None;
+    params.scope = Some("memory".to_string());
+    params.query = Some("forced search failure".to_string());
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect("JSON wrapper must represent a failed section");
+    let parsed: Value = serde_json::from_str(&body).expect("search JSON");
+    let memory = parsed["sections"]
+        .as_array()
+        .and_then(|sections| {
+            sections
+                .iter()
+                .find(|section| section["name"] == json!("Memory"))
+        })
+        .expect("memory section");
+
+    assert_eq!(memory["rows"], json!([]), "failure is not row data");
+    assert_eq!(memory["error"]["kind"], json!("search_failure"));
+    assert!(
+        memory["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("Search failed")),
+        "failure must remain observable: {memory:#}"
+    );
 }
 
 #[tokio::test]
