@@ -21,6 +21,7 @@ async fn vault_unlock_does_not_reset_failed_attempts_before_password_verificatio
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "still-wrong-after-expiry".to_string(),
             password_fifo_path: None,
+            use_keychain: false,
         }))
         .await
         .expect_err("wrong password after lockout expiry should relock immediately");

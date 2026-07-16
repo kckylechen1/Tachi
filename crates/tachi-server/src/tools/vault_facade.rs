@@ -21,7 +21,9 @@ impl MemoryServer {
         handle_vault_init(self, params).await
     }
 
-    #[tool(description = "Unlock the vault by verifying the master password.")]
+    #[tool(
+        description = "Unlock the vault by verifying the master password. Provide exactly one of password, password_fifo_path, or use_keychain (macOS Keychain, service tachi-vault/default — same source as `tachi vault unlock --keychain`) so the password never has to appear in the tool call or transcript."
+    )]
     pub(crate) async fn vault_unlock(
         &self,
         Parameters(params): Parameters<VaultUnlockParams>,

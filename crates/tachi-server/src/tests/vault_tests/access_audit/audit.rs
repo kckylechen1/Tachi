@@ -43,6 +43,7 @@ async fn vault_operations_record_audit_entries() {
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "wrong-audit-password".to_string(),
             password_fifo_path: None,
+            use_keychain: false,
         }))
         .await
         .expect_err("wrong password should fail");
@@ -52,6 +53,7 @@ async fn vault_operations_record_audit_entries() {
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "audit-password".to_string(),
             password_fifo_path: None,
+            use_keychain: false,
         }))
         .await
         .expect("vault_unlock should succeed");

@@ -24,6 +24,15 @@ pub(crate) struct VaultUnlockParams {
     pub password: String,
     #[serde(default)]
     pub password_fifo_path: Option<String>,
+    /// Read the vault password from macOS Keychain (service `tachi-vault`,
+    /// account `default`) instead of an inline `password` or
+    /// `password_fifo_path`. Same source as the CLI's `tachi vault unlock
+    /// --keychain` flag. Use this so the password never has to appear in the
+    /// tool call arguments or an agent's conversation transcript. Mutually
+    /// exclusive with `password` and `password_fifo_path`; only supported on
+    /// macOS. Defaults to `false`.
+    #[serde(default)]
+    pub use_keychain: bool,
 }
 
 impl Drop for VaultUnlockParams {

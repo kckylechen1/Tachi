@@ -83,9 +83,18 @@ pub(crate) async fn handle_vault_unlock(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-        if fifo_path.is_some() && !params.password.is_empty() {
+        let sources_given = [
+            fifo_path.is_some(),
+            !params.password.is_empty(),
+            params.use_keychain,
+        ]
+        .into_iter()
+        .filter(|given| *given)
+        .count();
+        if sources_given > 1 {
             return Err(
-                "vault_unlock accepts either password or password_fifo_path, not both".to_string(),
+                "vault_unlock accepts exactly one of password, password_fifo_path, or use_keychain"
+                    .to_string(),
             );
         }
         let mut fifo_password = match fifo_path {
@@ -99,11 +108,34 @@ pub(crate) async fn handle_vault_unlock(
             }
             None => None,
         };
-        let password = match fifo_password.as_deref() {
-            Some(password) => password,
-            None => {
+        // tachi#1175: same low-level Keychain-read primitive as the CLI's
+        // `tachi vault unlock --keychain` (`crypto::read_password_from_macos_keychain`,
+        // shared with `vault_cli::read_vault_password`) — so an agent can
+        // unlock without the password ever appearing in the tool call
+        // arguments or shell history. `spawn_blocking` because it shells out
+        // to `security`, mirroring the FIFO reader above.
+        let mut keychain_password = if params.use_keychain {
+            Some(
+                tokio::task::spawn_blocking(crypto::read_password_from_macos_keychain)
+                    .await
+                    .map_err(|e| format!("Keychain reader task failed: {e}"))?
+                    .map_err(|e| format!("use_keychain unlock failed: {e}"))?,
+            )
+        } else {
+            None
+        };
+        let password = match (fifo_password.as_deref(), keychain_password.as_deref()) {
+            (Some(password), None) => password,
+            (None, Some(password)) => password,
+            (Some(_), Some(_)) => {
+                unreachable!("sources_given check above rejects fifo + keychain together")
+            }
+            (None, None) => {
                 if params.password.is_empty() {
-                    return Err("vault_unlock requires password or password_fifo_path".to_string());
+                    return Err(
+                        "vault_unlock requires one of password, password_fifo_path, or use_keychain"
+                            .to_string(),
+                    );
                 }
                 &params.password
             }
@@ -124,10 +156,16 @@ pub(crate) async fn handle_vault_unlock(
                 if let Some(password) = fifo_password.as_mut() {
                     crypto::zero_string(password);
                 }
+                if let Some(password) = keychain_password.as_mut() {
+                    crypto::zero_string(password);
+                }
                 return Err(err);
             }
         };
         if let Some(password) = fifo_password.as_mut() {
+            crypto::zero_string(password);
+        }
+        if let Some(password) = keychain_password.as_mut() {
             crypto::zero_string(password);
         }
 
