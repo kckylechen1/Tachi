@@ -101,6 +101,26 @@ async fn tachi_memory_save_scope_downgrade_unbound_session_warning_is_actionable
         "unbound session's scope_warning must point at how to become bound \
          instead: {scope_warning}"
     );
+    // codex 2.4 (fix-round): `--no-project-db` detaches the daemon's launch
+    // cwd and forces `project_db_path = None` regardless of cwd
+    // (bootstrap/serve.rs), so "run inside the project repo" alone is not
+    // sufficient guidance on that route — the stdio adapter never binds via
+    // cwd while that flag is set. The message must name the flag explicitly
+    // so an unbound session running under `--no-project-db` doesn't try the
+    // same cwd trick and land unbound again.
+    //
+    // This facade-level test can't distinguish *why* a session is unbound
+    // (`--no-project-db` vs. an HTTP session that never sent X-Tachi-Project
+    // vs. stdio launched outside a project repo) — `session_bound` is a
+    // single boolean fed by `session_project()`, with no CLI-flag context
+    // reaching this layer — so this only asserts the text carries the
+    // exclusion, not that it's reached via a simulated `--no-project-db`
+    // session (see PR comment for the seam limitation).
+    assert!(
+        scope_warning.contains("--no-project-db"),
+        "unbound session's scope_warning must explicitly name --no-project-db \
+         as the route where cwd-binding does not apply: {scope_warning}"
+    );
 }
 
 /// tachi#1176 counterpart: a BOUND session's scope_warning is unchanged —

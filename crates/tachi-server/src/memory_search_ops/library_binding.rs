@@ -50,7 +50,14 @@ pub(crate) fn scope_downgrade_warning(
     let guidance = if session_bound {
         "pass project=<name> or restart the daemon with a project DB bound to get the requested scope"
     } else {
-        "unbound session only writes global — for project scope, connect a bound session (HTTP direct-connect: send X-Tachi-Project at initialize; stdio: run inside the project repo so the adapter binds via cwd)"
+        // #1176 codex 2.4: `--no-project-db` detaches the daemon's launch cwd
+        // to `<app_home>/runtime` (bootstrap/serve.rs: `no_project_serve_detaches_launch_cwd`)
+        // and forces `project_db_path = None` regardless of cwd
+        // (bootstrap/serve.rs: the `cli.no_project_db` branch of the project-DB
+        // resolution), so "run inside the project repo" is not sufficient — the
+        // adapter never binds via cwd on that route. Name the flag explicitly
+        // rather than imply cwd alone fixes it.
+        "unbound session only writes global — for project scope, connect a bound session (HTTP direct-connect: send X-Tachi-Project at initialize; or restart the stdio daemon inside the project repo without --no-project-db — the adapter cannot bind via cwd while --no-project-db detaches the launch cwd)"
     };
     format!(
         "{WARN_SCOPE_DOWNGRADED_PREFIX}: requested scope={requested_scope:?} but saved to db_scope={effective_db_scope:?} — {guidance}"
