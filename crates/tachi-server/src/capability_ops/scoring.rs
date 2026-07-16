@@ -294,72 +294,6 @@ fn pattern_signal_bonus(
     (round3(bonus.min(3.0)), refs)
 }
 
-#[cfg(test)]
-mod pattern_signal_tests {
-    use super::*;
-
-    fn skill(id: &str, definition: Value) -> HubCapability {
-        HubCapability {
-            id: id.to_string(),
-            cap_type: "skill".to_string(),
-            name: "neutral".to_string(),
-            version: 1,
-            description: "neutral description".to_string(),
-            definition: definition.to_string(),
-            enabled: true,
-            review_status: "approved".to_string(),
-            health_status: "healthy".to_string(),
-            last_error: None,
-            last_success_at: None,
-            last_failure_at: None,
-            fail_streak: 0,
-            active_version: None,
-            exposure_mode: "direct".to_string(),
-            uses: 0,
-            successes: 0,
-            failures: 0,
-            avg_rating: 0.0,
-            last_used: None,
-            created_at: "2026-07-16T00:00:00Z".to_string(),
-            updated_at: "2026-07-16T00:00:00Z".to_string(),
-        }
-    }
-
-    #[test]
-    fn pattern_bonus_ignores_resolved_path_tokens() {
-        let alpha = skill(
-            "skill:alpha",
-            serde_json::json!({
-                "content": "neutral",
-                "resolved_path": "/work/sigil/skills/fixture/SKILL.md"
-            }),
-        );
-        let zeta = skill(
-            "skill:zeta",
-            serde_json::json!({
-                "content": "neutral",
-                "resolved_path": "/work/codex-issue/skills/fixture/SKILL.md"
-            }),
-        );
-        let signals = [PatternSignal {
-            pattern_ref: serde_json::json!({"projection_key": "path-bridge"}),
-            projection_key: "path-bridge".to_string(),
-            tokens: vec!["query".to_string(), "codex".to_string()],
-        }];
-        let query_tokens = vec!["query".to_string()];
-        let bonus = |cap: &HubCapability| {
-            let mut reasons = Vec::new();
-            pattern_signal_bonus(cap, &query_tokens, &signals, &mut reasons).0
-        };
-
-        assert_eq!(
-            bonus(&alpha),
-            bonus(&zeta),
-            "an active pattern must not bridge through a runtime-resolved path"
-        );
-    }
-}
-
 fn telemetry_bonus(cap: &HubCapability, reasons: &mut Vec<String>) -> f64 {
     let mut bonus = 0.0;
     if cap.uses > 0 {
@@ -604,4 +538,70 @@ pub(crate) fn recommend_capabilities_inner(
     });
     ranked.truncate(limit.max(1));
     Ok(ranked)
+}
+
+#[cfg(test)]
+mod pattern_signal_tests {
+    use super::*;
+
+    fn skill(id: &str, definition: Value) -> HubCapability {
+        HubCapability {
+            id: id.to_string(),
+            cap_type: "skill".to_string(),
+            name: "neutral".to_string(),
+            version: 1,
+            description: "neutral description".to_string(),
+            definition: definition.to_string(),
+            enabled: true,
+            review_status: "approved".to_string(),
+            health_status: "healthy".to_string(),
+            last_error: None,
+            last_success_at: None,
+            last_failure_at: None,
+            fail_streak: 0,
+            active_version: None,
+            exposure_mode: "direct".to_string(),
+            uses: 0,
+            successes: 0,
+            failures: 0,
+            avg_rating: 0.0,
+            last_used: None,
+            created_at: "2026-07-16T00:00:00Z".to_string(),
+            updated_at: "2026-07-16T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn pattern_bonus_ignores_resolved_path_tokens() {
+        let alpha = skill(
+            "skill:alpha",
+            serde_json::json!({
+                "content": "neutral",
+                "resolved_path": "/work/sigil/skills/fixture/SKILL.md"
+            }),
+        );
+        let zeta = skill(
+            "skill:zeta",
+            serde_json::json!({
+                "content": "neutral",
+                "resolved_path": "/work/codex-issue/skills/fixture/SKILL.md"
+            }),
+        );
+        let signals = [PatternSignal {
+            pattern_ref: serde_json::json!({"projection_key": "path-bridge"}),
+            projection_key: "path-bridge".to_string(),
+            tokens: vec!["query".to_string(), "codex".to_string()],
+        }];
+        let query_tokens = vec!["query".to_string()];
+        let bonus = |cap: &HubCapability| {
+            let mut reasons = Vec::new();
+            pattern_signal_bonus(cap, &query_tokens, &signals, &mut reasons).0
+        };
+
+        assert_eq!(
+            bonus(&alpha),
+            bonus(&zeta),
+            "an active pattern must not bridge through a runtime-resolved path"
+        );
+    }
 }
