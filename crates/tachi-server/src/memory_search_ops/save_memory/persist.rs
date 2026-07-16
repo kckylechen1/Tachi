@@ -1,7 +1,7 @@
 use super::error::format_save_error;
 use crate::memory_search_ops::contradiction::apply_auto_contradiction_detection;
 use crate::{DbScope, MemoryServer};
-use memcore::{MemoryEntry, MemoryStore};
+use memcore::{db::IdlessUpsertResult, MemoryEntry, MemoryStore};
 
 /// Return the id of an active row with the same normalized path and exact
 /// text. #1041 F6: this used to fetch `list_by_path(path, 64, false)` (exact
@@ -69,6 +69,28 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_save_entry(
         server.with_store_for_scope(target_db, |store: &mut MemoryStore| {
             store
                 .upsert(entry)
+                .map_err(|e| format_save_error(server, target_db, None, &e))
+        })
+    }
+}
+
+pub(in crate::memory_search_ops::save_memory) fn upsert_idless_save_entry(
+    server: &MemoryServer,
+    entry: &MemoryEntry,
+    identity: &str,
+    target_db: DbScope,
+    named_project: Option<&str>,
+) -> Result<IdlessUpsertResult, String> {
+    if let Some(project_name) = named_project {
+        server.with_named_project_store(project_name, |store: &mut MemoryStore| {
+            store
+                .upsert_idless(entry, identity)
+                .map_err(|e| format_save_error(server, target_db, Some(project_name), &e))
+        })
+    } else {
+        server.with_store_for_scope(target_db, |store: &mut MemoryStore| {
+            store
+                .upsert_idless(entry, identity)
                 .map_err(|e| format_save_error(server, target_db, None, &e))
         })
     }

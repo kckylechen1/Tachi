@@ -33,6 +33,7 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
                 revision        INTEGER NOT NULL DEFAULT 1,
                 metadata        TEXT NOT NULL DEFAULT '{}',
                 superseded_by   TEXT,
+                idless_identity TEXT,
                 recall_count    INTEGER NOT NULL DEFAULT 0,
                 query_diversity INTEGER NOT NULL DEFAULT 0,
                 tier            TEXT NOT NULL DEFAULT 'raw'

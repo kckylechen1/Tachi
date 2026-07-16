@@ -2,7 +2,7 @@ use super::enrichment::enqueue_save_enrichment;
 use super::entry::build_save_entry;
 use super::persist::{
     find_exact_path_text_duplicate, lookup_existing_entry, spawn_save_contradiction_detection,
-    upsert_save_entry,
+    upsert_idless_save_entry, upsert_save_entry,
 };
 use super::response::{build_duplicate_save_response, build_save_response};
 use super::validation::{validate_save_text, SaveTextValidation};
@@ -11,8 +11,24 @@ use crate::memory_search_ops::auto_link::{is_training_seed, spawn_auto_linking};
 use crate::memory_search_ops::text_scrub::{scrub_secrets, scrub_think_tags};
 use crate::tool_params::SaveMemoryParams;
 use crate::{DbScope, MemoryServer};
+use blake2::{Blake2s256, Digest};
 use chrono::Utc;
 use serde_json::json;
+
+fn idless_save_identity(path: &str, text: &str) -> String {
+    let path = memcore::path_router::normalize_path(path);
+    let mut hasher = Blake2s256::new();
+    hasher.update(b"tachi:idless-memory:v1\0");
+    hasher.update((path.len() as u64).to_be_bytes());
+    hasher.update(path.as_bytes());
+    hasher.update((text.len() as u64).to_be_bytes());
+    hasher.update(text.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 /// Render a #1041 S1 write-affinity note into the compact JSON shape
 /// surfaced on the save response (`domain_affinity`), never blocking the
@@ -44,6 +60,9 @@ pub(crate) async fn handle_save_memory(
         SaveTextValidation::Rejected(body) => return Ok(body),
     };
     let requested_id = params.id.clone();
+    let idless_identity = requested_id
+        .is_none()
+        .then(|| idless_save_identity(&params.path, &safe_text));
     let id = requested_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -125,13 +144,10 @@ pub(crate) async fn handle_save_memory(
     // Path+text identity is unaffected by `force` from here on; a caller
     // that truly wants a second, distinct row can still pass its own `id`.
     //
-    // KNOWN LIMITATION (#1041 F6, tracked for a follow-up, not fixed here):
-    // this lookup-then-upsert is not atomic and `memories` has no path+text
-    // uniqueness constraint (only `id` is unique) — two concurrent id-less
-    // saves with identical path+text can both observe "no existing row" and
-    // insert two distinct UUIDs. Closing that requires either a DB-level
-    // unique index + upsert-on-conflict (a migration) or an application
-    // lock broader than this single request; out of scope for this PR.
+    // This lookup preserves the existing fast duplicate response. It is not
+    // the race boundary: the v19 id-less identity constraint below is the
+    // authoritative single-winner decision when concurrent callers both miss
+    // this read.
     if params.id.is_none() {
         if let Some(existing_id) = find_exact_path_text_duplicate(
             server,
@@ -210,7 +226,24 @@ pub(crate) async fn handle_save_memory(
         }
     }
 
-    upsert_save_entry(server, &entry, target_db, named_project.as_deref())?;
+    if let Some(identity) = idless_identity.as_deref() {
+        match upsert_idless_save_entry(
+            server,
+            &entry,
+            identity,
+            target_db,
+            named_project.as_deref(),
+        )? {
+            memcore::db::IdlessUpsertResult::Saved => {}
+            memcore::db::IdlessUpsertResult::Duplicate { id } => {
+                let response = build_duplicate_save_response(&id, &entry.path, target_db);
+                return serde_json::to_string(&serde_json::Value::Object(response))
+                    .map_err(|error| format!("Failed to serialize response: {error}"));
+            }
+        }
+    } else {
+        upsert_save_entry(server, &entry, target_db, named_project.as_deref())?;
+    }
 
     let continuity_event = if emit_continuity {
         Some(crate::continuity_ops::emit_memory_saved_event(

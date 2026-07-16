@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::error::MemoryError;
@@ -134,12 +134,45 @@ fn canonical_entities_json(entry: &MemoryEntry) -> Result<String, MemoryError> {
 
 // ─── UPSERT ───────────────────────────────────────────────────────────────────
 
+/// Outcome of an id-less write protected by the modern identity constraint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdlessUpsertResult {
+    Saved,
+    Duplicate { id: String },
+}
+
 /// Insert or update a memory entry (and its embedding vector if provided).
 pub fn upsert(
     conn: &mut Connection,
     entry: &MemoryEntry,
     vec_available: bool,
 ) -> Result<(), MemoryError> {
+    upsert_with_idless_identity(conn, entry, vec_available, None).map(|_| ())
+}
+
+/// Insert an id-less entry once. A unique modern identity chooses one winner
+/// without rewriting legacy rows that predate the constraint.
+pub fn upsert_idless(
+    conn: &mut Connection,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    identity: &str,
+) -> Result<IdlessUpsertResult, MemoryError> {
+    let identity = identity.trim();
+    if identity.is_empty() {
+        return Err(MemoryError::InvalidArg(
+            "id-less identity must be non-empty".to_string(),
+        ));
+    }
+    upsert_with_idless_identity(conn, entry, vec_available, Some(identity))
+}
+
+fn upsert_with_idless_identity(
+    conn: &mut Connection,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    idless_identity: Option<&str>,
+) -> Result<IdlessUpsertResult, MemoryError> {
     if entry.id.trim().is_empty() {
         return Err(MemoryError::InvalidArg(
             "entry.id must be provided by caller".to_string(),
@@ -214,7 +247,7 @@ pub fn upsert(
         |r| r.get::<_, i64>(0),
     )? == 0;
 
-    if is_new {
+    if is_new && idless_identity.is_none() {
         // Run FTS search for potential overlapping entries
         let safe_query = simple_query_input(
             &entry
@@ -334,21 +367,21 @@ pub fn upsert(
                         ],
                     )?;
                     tx.commit()?;
-                    return Ok(());
+                    return Ok(IdlessUpsertResult::Saved);
                 }
             }
         }
     }
 
     // Write to main table
-    tx.execute(
+    let rows_written = tx.execute(
         r#"INSERT INTO memories
               (id, path, summary, text, importance,
                timestamp, valid_from, valid_until, category, topic, keywords, entities,
                source, scope, archived, created_at, updated_at,
                access_count, last_access, revision, metadata,
-               retention_policy, domain, recall_count, query_diversity, tier)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)
+               retention_policy, domain, idless_identity, recall_count, query_diversity, tier)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)
            ON CONFLICT(id) DO UPDATE SET
                path         = excluded.path,
                summary      = excluded.summary,
@@ -372,7 +405,11 @@ pub fn upsert(
                metadata     = excluded.metadata,
                retention_policy = excluded.retention_policy,
                domain       = excluded.domain,
-               tier         = CASE WHEN memories.tier IN ('consolidated','pattern') THEN memories.tier ELSE excluded.tier END"#,
+               idless_identity = excluded.idless_identity,
+               tier         = CASE WHEN memories.tier IN ('consolidated','pattern') THEN memories.tier ELSE excluded.tier END
+           ON CONFLICT(idless_identity)
+             WHERE idless_identity IS NOT NULL AND archived = 0 AND superseded_by IS NULL
+             DO NOTHING"#,
         params![
             entry.id,
             &path,
@@ -397,11 +434,33 @@ pub fn upsert(
             metadata_json,
             &retention_policy,
             entry.domain,
+            idless_identity,
             entry.recall_count,
             entry.query_diversity,
             &entry.tier,
         ],
     )?;
+
+    if rows_written == 0 {
+        let identity = idless_identity.ok_or_else(|| {
+            MemoryError::Internal("ordinary upsert unexpectedly wrote zero rows".to_string())
+        })?;
+        let winner_id = tx
+            .query_row(
+                "SELECT id FROM memories
+                 WHERE idless_identity = ?1 AND archived = 0 AND superseded_by IS NULL",
+                params![identity],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                MemoryError::Internal(format!(
+                    "id-less identity conflict without an active winner: {identity}"
+                ))
+            })?;
+        tx.commit()?;
+        return Ok(IdlessUpsertResult::Duplicate { id: winner_id });
+    }
 
     let kws = entry.keywords.join(" ");
     let mut ents_vec = entry.entities.clone();
@@ -431,7 +490,152 @@ pub fn upsert(
     }
 
     tx.commit()?;
-    Ok(())
+    Ok(IdlessUpsertResult::Saved)
+}
+
+#[cfg(test)]
+mod idless_upsert_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    fn entry(id: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: "/notes/atomic-idless".to_string(),
+            summary: "atomic id-less save".to_string(),
+            text: "identical concurrent id-less save payload".to_string(),
+            importance: 0.7,
+            timestamp: "2026-07-16T00:00:00Z".to_string(),
+            valid_from: "2026-07-16T00:00:00Z".to_string(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: String::new(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "mcp".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: serde_json::json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    #[test]
+    fn two_concurrent_same_identity_idless_saves_choose_one_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("memory.db")
+            .to_string_lossy()
+            .to_string();
+        {
+            let store = crate::MemoryStore::open(&path).unwrap();
+            let has_identity_column: bool = store
+                .connection()
+                .query_row(
+                    "SELECT EXISTS (\
+                         SELECT 1 FROM pragma_table_info('memories') \
+                         WHERE name = 'idless_identity'\
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let has_identity_index: bool = store
+                .connection()
+                .query_row(
+                    "SELECT EXISTS (\
+                         SELECT 1 FROM sqlite_master \
+                         WHERE type = 'index' \
+                           AND name = 'idx_memories_idless_identity_active'\
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(has_identity_column);
+            assert!(has_identity_index);
+        }
+        let barrier = Arc::new(Barrier::new(2));
+        let identity = "idless:concurrent-fixture".to_string();
+
+        let workers = ["candidate-a", "candidate-b"].map(|id| {
+            let path = path.clone();
+            let identity = identity.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let mut store = crate::MemoryStore::open(&path).unwrap();
+                barrier.wait();
+                match store.upsert_idless(&entry(id), &identity).unwrap() {
+                    IdlessUpsertResult::Saved => id.to_string(),
+                    IdlessUpsertResult::Duplicate { id } => id,
+                }
+            })
+        });
+        let winner_ids = workers.map(|worker| worker.join().unwrap());
+
+        assert_eq!(
+            winner_ids[0], winner_ids[1],
+            "both concurrent writers must resolve the same persisted id"
+        );
+        let store = crate::MemoryStore::open(&path).unwrap();
+        let active_rows: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM memories
+                 WHERE idless_identity = ?1 AND archived = 0 AND superseded_by IS NULL",
+                params![identity],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            active_rows, 1,
+            "the identity constraint must leave one active row"
+        );
+    }
+
+    #[test]
+    fn explicit_id_update_clears_stale_idless_identity() {
+        let mut store = crate::MemoryStore::open_in_memory().unwrap();
+        assert_eq!(
+            store
+                .upsert_idless(&entry("shared-id"), "old-identity")
+                .unwrap(),
+            IdlessUpsertResult::Saved
+        );
+
+        let mut replacement = entry("shared-id");
+        replacement.path = "/notes/replaced".to_string();
+        replacement.text = "replacement explicit-id payload".to_string();
+        store.upsert(&replacement).unwrap();
+
+        assert_eq!(
+            store
+                .upsert_idless(&entry("new-id"), "old-identity")
+                .unwrap(),
+            IdlessUpsertResult::Saved,
+            "an explicit-ID rewrite must release the obsolete id-less identity"
+        );
+        let old_identity: Option<String> = store
+            .connection()
+            .query_row(
+                "SELECT idless_identity FROM memories WHERE id = 'shared-id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_identity, None);
+    }
 }
 
 /// Maximum IDs per batch for IN clause queries (SQLite has a 999 parameter limit).

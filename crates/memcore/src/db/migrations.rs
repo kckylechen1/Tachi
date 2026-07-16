@@ -76,7 +76,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 18;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 19;
 
 mod basic;
 mod cross_db;
@@ -87,6 +87,7 @@ mod dispatch_outcomes_reported;
 mod domain_retire;
 mod exec_env_class;
 mod hard_state_index;
+mod idless_identity;
 mod legacy_columns;
 mod pack_retire;
 mod sentinel;
@@ -101,6 +102,7 @@ use dispatch_outcomes_reported::*;
 use domain_retire::*;
 use exec_env_class::*;
 use hard_state_index::*;
+use idless_identity::*;
 use legacy_columns::*;
 pub use legacy_columns::{
     fold_and_drop_legacy_persons_column, migrate_v9_relocate_and_drop_location,
@@ -134,6 +136,7 @@ pub struct MigrationReport {
     pub dispatch_outcomes_identity_receipt_added: usize,
     pub dispatch_outcomes_attribution_basis_backfilled: usize,
     pub dispatch_adjudications_created: usize,
+    pub idless_identity_constraint_added: usize,
 }
 
 /// Read the schema version stamp (`PRAGMA user_version`). Absent/fresh DBs
@@ -476,6 +479,13 @@ pub(crate) fn run_data_migrations_in_tx(
         conn,
         "v18_dispatch_adjudications",
         migrate_v18_dispatch_adjudications,
+    )?
+    .unwrap_or(0);
+
+    report.idless_identity_constraint_added = apply_versioned_migration(
+        conn,
+        "v19_idless_memory_identity",
+        migrate_v19_add_idless_memory_identity,
     )?
     .unwrap_or(0);
 
@@ -1095,6 +1105,54 @@ mod tests {
         // report is all-zero; the assertion under test is the re-stamp.
         assert_eq!(report.domains_table_dropped, 0);
         assert_eq!(read_schema_version(&conn).unwrap(), EXPECTED_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v19_open_pipeline_preserves_legacy_duplicates_and_adds_identity_constraint() {
+        let (conn, tmp) = open_test_db();
+        conn.execute_batch(
+            "DROP INDEX idx_memories_idless_identity_active;
+             ALTER TABLE memories DROP COLUMN idless_identity;
+             INSERT INTO memories (id, path, text, timestamp)
+             VALUES
+                 ('legacy-idless-a', '/legacy/duplicate', 'same legacy text', '2026-07-16T00:00:00Z'),
+                 ('legacy-idless-b', '/legacy/duplicate', 'same legacy text', '2026-07-16T00:00:00Z');",
+        )
+        .unwrap();
+        write_schema_version(&conn, EXPECTED_SCHEMA_VERSION - 1).unwrap();
+        drop(conn);
+
+        let path = tmp.path().to_str().unwrap();
+        let ctx = DbOpenContext::open_existing_allow("test:#1115");
+        let store = crate::MemoryStore::open_with_context(path, &ctx).unwrap();
+
+        assert_eq!(
+            read_schema_version(store.connection()).unwrap(),
+            EXPECTED_SCHEMA_VERSION
+        );
+        assert!(
+            table_has_column(store.connection(), "memories", "idless_identity").unwrap(),
+            "the v19 open pipeline must add the modern identity column"
+        );
+        assert!(
+            index_present(store.connection(), "idx_memories_idless_identity_active"),
+            "the v19 open pipeline must add the modern identity constraint"
+        );
+        let legacy_rows: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM memories
+                 WHERE path = '/legacy/duplicate'
+                   AND text = 'same legacy text'
+                   AND idless_identity IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            legacy_rows, 2,
+            "migration must leave legacy duplicates untouched"
+        );
     }
 
     /// #984 F3(a): a genuine fixture for "DB last migrated by an older
