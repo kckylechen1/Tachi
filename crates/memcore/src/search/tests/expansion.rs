@@ -141,6 +141,145 @@ fn fts_or_fallback_cjk_phrase_recovers_when_ascii_term_is_missing() {
     );
 }
 
+/// tachi#1143 kill-test: `simple` indexes a contiguous Han run as individual
+/// tokenizer units. When an all-Han conjunctive query misses on two units, the
+/// fallback must OR those same units; treating the run as one quoted phrase
+/// skips fallback entirely because it appears to have only one term.
+#[test]
+fn fts_or_fallback_recovers_pure_han_query_with_tokenizer_units() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "pure-han-target",
+        "量子风暴稳定控制记录",
+        &["量子", "风暴", "控制"],
+    );
+    insert(
+        &mut conn,
+        "pure-han-common-fragment-decoy",
+        "量子无关的运维记录",
+        &["量子", "运维"],
+    );
+
+    let query = "量子风暴故障";
+    let primary = search_fts(&conn, query, 10, false, false, None, None).unwrap();
+    assert!(
+        primary.is_empty(),
+        "the missing 故/障 units must zero the primary conjunctive FTS query"
+    );
+
+    let opts = SearchOptions {
+        top_k: 2,
+        candidates_per_channel: 10,
+        weights: HybridWeights {
+            semantic: 0.0,
+            fts: 1.0,
+            symbolic: 0.0,
+            decay: 0.0,
+            use_rrf: false,
+        },
+        record_access: false,
+        mmr_threshold: None,
+        ..Default::default()
+    };
+    let (results, receipt) = hybrid_search_with_receipt(&conn, query, &opts).unwrap();
+    let candidates = receipt.candidates.expect("candidate phase ran");
+    let fallback_groups: Vec<&FtsExpansionGroupReceipt> = candidates
+        .fts_groups
+        .iter()
+        .filter(|group| group.is_fallback)
+        .collect();
+    assert_eq!(
+        fallback_groups.len(),
+        1,
+        "a pure-Han miss with multiple simple-tokenizer units gets exactly one fallback group"
+    );
+    assert!(
+        fallback_groups[0].hit_count >= 2,
+        "the fallback must recover both the target and its common-fragment decoy"
+    );
+
+    let target = results
+        .iter()
+        .find(|result| result.entry.id == "pure-han-target")
+        .expect("the labeled pure-Han target must survive the fallback");
+    let decoy = results
+        .iter()
+        .find(|result| result.entry.id == "pure-han-common-fragment-decoy")
+        .expect("the common-fragment decoy proves this is not a phrase-only fixture");
+    assert!(
+        target.score.fts > 0.0,
+        "the target enters through FTS fallback"
+    );
+    assert!(
+        target.score.fts > decoy.score.fts,
+        "more matching tokenizer units must outrank the common-fragment decoy"
+    );
+
+    let disabled = RecallConfig {
+        or_fallback_fts_score_factor: 0.0,
+        ..RecallConfig::default()
+    };
+    let disabled_scores = search_fts_with_expansion_config(
+        &conn, query, 10, false, false, None, None, &disabled, false,
+    )
+    .unwrap()
+    .0;
+    assert!(
+        disabled_scores.is_empty(),
+        "the same pure-Han miss stays at zero when OR fallback is explicitly disabled"
+    );
+}
+
+/// A repeated-only Han query is already a primary FTS hit: `simple_query`
+/// tokenizes both characters to the same term, so it never enters fallback.
+#[test]
+fn repeated_han_units_stay_on_the_primary_fts_path() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "repeated-han-target",
+        "哈运维诊断记录",
+        &["哈", "诊断"],
+    );
+
+    let query = "哈哈";
+    let primary = search_fts(&conn, query, 10, false, false, None, None).unwrap();
+    assert!(
+        primary.contains_key("repeated-han-target"),
+        "duplicate Han query units match the same primary FTS term"
+    );
+
+    let opts = SearchOptions {
+        top_k: 2,
+        candidates_per_channel: 10,
+        weights: HybridWeights {
+            semantic: 0.0,
+            fts: 1.0,
+            symbolic: 0.0,
+            decay: 0.0,
+            use_rrf: false,
+        },
+        record_access: false,
+        mmr_threshold: None,
+        ..Default::default()
+    };
+    let (results, receipt) = hybrid_search_with_receipt(&conn, query, &opts).unwrap();
+    let candidates = receipt.candidates.expect("candidate phase ran");
+    let fallback_groups: Vec<&FtsExpansionGroupReceipt> = candidates
+        .fts_groups
+        .iter()
+        .filter(|group| group.is_fallback)
+        .collect();
+    assert!(
+        fallback_groups.is_empty(),
+        "a primary hit must not enter the OR fallback path"
+    );
+    assert!(results
+        .iter()
+        .any(|result| result.entry.id == "repeated-han-target" && result.score.fts > 0.0));
+}
+
 #[test]
 fn hybrid_search_treats_unbalanced_parentheses_as_literal_noise() {
     let mut conn = setup();
