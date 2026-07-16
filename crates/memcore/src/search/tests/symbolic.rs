@@ -63,3 +63,72 @@ fn hybrid_symbolic_candidates_rank_exact_probe_token_above_siblings() {
     assert_eq!(results[0].entry.id, "alpha");
     assert!(results[0].score.symbolic > results[1].score.symbolic);
 }
+
+/// tachi#1144 kill-test: the symbolic channel's candidate cap is an
+/// eligibility boundary, so relevance must choose its survivors before
+/// timestamp is allowed to break a tie. The target is deliberately old and
+/// all 201 newer rows match only one query token. With the old SQL
+/// `ORDER BY timestamp DESC LIMIT`, the target never reached scoring.
+#[test]
+fn symbolic_pre_cap_relevance_recovers_older_stronger_symbolic_only_target() {
+    let mut conn = setup();
+    let query = "controlplane rehome ledger proof";
+
+    let mut target = memory_entry(
+        "symbolic-strongest-target",
+        "controlplane rehome ledger proof",
+        &[],
+    );
+    target.timestamp = "2020-01-01T00:00:00Z".to_string();
+    insert_entry(&mut conn, target);
+
+    for idx in 0..201 {
+        let mut newer_partial = memory_entry(
+            &format!("newer-partial-symbolic-{idx:03}"),
+            "controlplane only partial distractor",
+            &[],
+        );
+        newer_partial.timestamp = format!(
+            "2027-{:02}-{:02}T{:02}:00:00Z",
+            1 + idx / (24 * 28),
+            1 + (idx / 24) % 28,
+            idx % 24,
+        );
+        insert_entry(&mut conn, newer_partial);
+    }
+
+    let opts = SearchOptions {
+        // `0` suppresses FTS (and vec is unavailable); the symbolic channel
+        // still keeps one candidate because `top_k` is its minimum cap. This
+        // makes the target's survival a symbolic-only eligibility proof.
+        candidates_per_channel: 0,
+        top_k: 1,
+        weights: HybridWeights {
+            semantic: 0.0,
+            fts: 0.0,
+            symbolic: 1.0,
+            decay: 0.0,
+            use_rrf: false,
+        },
+        record_access: false,
+        mmr_threshold: None,
+        ..Default::default()
+    };
+    let results = hybrid_search(&conn, query, &opts).expect("symbolic search succeeds");
+
+    let recovered = results
+        .first()
+        .expect("the relevance oracle's target must survive the symbolic cap");
+    assert_eq!(
+        recovered.entry.id, "symbolic-strongest-target",
+        "the older four-token target must beat 201 newer one-token partial matches before the cap"
+    );
+    assert_eq!(
+        recovered.score.fts, 0.0,
+        "FTS is deliberately disabled: this is a symbolic-only recall proof"
+    );
+    assert_eq!(
+        recovered.score.symbolic, 1.0,
+        "the returned target covers every query token"
+    );
+}

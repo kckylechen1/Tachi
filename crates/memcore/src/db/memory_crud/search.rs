@@ -187,8 +187,18 @@ fn search_fts_match(
         .collect())
 }
 
-/// Pull a small lexical candidate set for exact IDs, path slugs, keywords, and
-/// short technical terms that FTS tokenization may miss.
+/// Pull a bounded lexical candidate set for exact IDs, path slugs, keywords,
+/// and short technical terms that FTS tokenization may miss.
+///
+/// The SQL predicate finds the symbolic match set, but it MUST NOT apply the
+/// candidate cap by recency. A newer partial match is not more relevant than
+/// an older row that covers more of the query. Score every matching row first,
+/// then keep the best `limit`; timestamp is only the stable tie-breaker.
+///
+/// This deliberately evaluates the same `symbolic_score_entry` primitive the
+/// ranker uses. Replacing it with `ORDER BY timestamp DESC LIMIT` makes an
+/// older strong symbolic-only result structurally unable to compete at all
+/// (tachi#1144).
 pub fn search_symbolic_candidates(
     conn: &Connection,
     query: &str,
@@ -261,16 +271,20 @@ pub fn search_symbolic_candidates(
         sql.push(')');
     }
 
-    params.push((limit.max(1) as i64).into());
-    let limit_idx = params.len();
-    sql.push_str(&format!(" ORDER BY timestamp DESC LIMIT ?{limit_idx}"));
-
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), row_to_entry)?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
     }
+
+    out.sort_by(|left, right| {
+        crate::scorer::symbolic_score_entry(query, right)
+            .total_cmp(&crate::scorer::symbolic_score_entry(query, left))
+            .then_with(|| right.timestamp.cmp(&left.timestamp))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    out.truncate(limit.max(1));
     Ok(out)
 }
 
