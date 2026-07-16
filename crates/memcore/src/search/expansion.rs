@@ -129,10 +129,18 @@ fn fts_or_fallback_match_query(query: &str, max_terms: usize) -> Option<String> 
         ascii.clear();
     };
     let flush_cjk = |terms: &mut Vec<String>, cjk: &mut String| {
-        if !cjk.is_empty() {
-            let phrase = format!("\"{cjk}\"");
-            if !terms.iter().any(|existing| existing == &phrase) {
-                terms.push(phrase);
+        // The `simple` FTS tokenizer indexes a contiguous Han run as one
+        // token per CJK character. Feed the fallback those same quoted units,
+        // rather than treating the entire run as a phrase: a pure-Han query
+        // otherwise has one apparent term and is rejected by the >=2-term
+        // fallback guard before it can recover a primary FTS miss (tachi#1143).
+        for unit in cjk.chars() {
+            if terms.len() >= max_terms {
+                break;
+            }
+            let term = format!("\"{unit}\"");
+            if !terms.iter().any(|existing| existing == &term) {
+                terms.push(term);
             }
         }
         cjk.clear();
