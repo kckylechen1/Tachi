@@ -35,14 +35,61 @@ fn drop_claims_table(server: &crate::server_state::MemoryServer) {
 #[test]
 fn auto_register_hook_with_no_identity_writes_nothing() {
     let server = make_server();
-    assert!(list_live_claims_for_briefing(&server).is_empty());
+    let cases = [
+        (None, None),
+        (Some(""), None),
+        (Some(" \t"), None),
+        (None, Some("")),
+        (None, Some(" \n")),
+        (Some(""), Some(" ")),
+    ];
 
-    auto_register_or_heartbeat_claim(&server, &ClaimHookInput::default());
+    for (issue_ref, flow_id) in cases {
+        let before = server
+            .with_global_store(|store| {
+                let row_count: i64 = store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM session_claims", [], |row| row.get(0))
+                    .expect("count session claims before no-identity hook");
+                let changes: i64 = store
+                    .connection()
+                    .query_row("SELECT total_changes()", [], |row| row.get(0))
+                    .expect("read SQLite total_changes before no-identity hook");
+                Ok((row_count, changes))
+            })
+            .expect("read no-identity hook baseline");
 
-    assert!(
-        list_live_claims_for_briefing(&server).is_empty(),
-        "a hook call without issue_ref or flow_id must not create a claim"
-    );
+        auto_register_or_heartbeat_claim(
+            &server,
+            &ClaimHookInput {
+                issue_ref: issue_ref.map(str::to_string),
+                flow_id: flow_id.map(str::to_string),
+                dispatch_id: Some("dispatch-metadata-must-not-be-an-identity".to_string()),
+                branch: Some("feat/no-identity".to_string()),
+                declared_file_scope: Some(
+                    vec!["crates/tachi-server/src/claims_ops.rs".to_string()],
+                ),
+            },
+        );
+
+        let after = server
+            .with_global_store(|store| {
+                let row_count: i64 = store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM session_claims", [], |row| row.get(0))
+                    .expect("count session claims after no-identity hook");
+                let changes: i64 = store
+                    .connection()
+                    .query_row("SELECT total_changes()", [], |row| row.get(0))
+                    .expect("read SQLite total_changes after no-identity hook");
+                Ok((row_count, changes))
+            })
+            .expect("read no-identity hook result");
+        assert_eq!(
+            after, before,
+            "issue_ref={issue_ref:?}, flow_id={flow_id:?} must not create a claim or any SQLite side effect"
+        );
+    }
 }
 
 #[tokio::test]

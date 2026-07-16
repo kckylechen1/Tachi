@@ -258,11 +258,16 @@ pub(crate) struct ClaimHookInput {
 /// swallowed after a `tracing::warn!`, matching the non-fatal
 /// lease-insert-failure precedent in `exec_env_ops::provision_managed_env`.
 ///
-/// A no-op when both `issue_ref` and `flow_id` are absent — there is nothing
-/// identifiable to claim (matches nothing in the briefing/collision surfaces
-/// either).
+/// A no-op when both `issue_ref` and `flow_id` are absent or blank — there is
+/// nothing identifiable to claim (matches nothing in the briefing/collision
+/// surfaces either). The values themselves remain verbatim for real claims;
+/// trimming here only decides whether there is an identity at all.
 pub(crate) fn auto_register_or_heartbeat_claim(server: &MemoryServer, input: &ClaimHookInput) {
-    if input.issue_ref.is_none() && input.flow_id.is_none() {
+    let has_identity = [input.issue_ref.as_deref(), input.flow_id.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.trim().is_empty());
+    if !has_identity {
         return;
     }
     let session_client = resolve_session_client(server);
