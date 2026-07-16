@@ -754,6 +754,10 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
     let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
     let _sigil_home = EnvRestore::remove("SIGIL_HOME");
     let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+    // This fixture asserts stdio's concurrent forwarding and JSON row shape. Query
+    // embedding is outside that contract: an ambient Voyage key can turn each read
+    // into an auth-health write against this fixture's global SQLite database.
+    let _disable_query_embedding = EnvRestore::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "1");
     seed_project_db(&tachi_home, &project);
 
     let rt = test_runtime();
