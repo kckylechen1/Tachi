@@ -35,9 +35,25 @@ pub(crate) const WARN_SCOPE_DOWNGRADED_PREFIX: &str =
 
 /// Build the loud, stable warning for a save/checkpoint whose requested
 /// `scope` differs from the `db_scope` it actually landed in.
-pub(crate) fn scope_downgrade_warning(requested_scope: &str, effective_db_scope: &str) -> String {
+///
+/// `session_bound` mirrors the same signal `reject_unbound_cross_project_write`
+/// (`session_identity.rs`) gates on: an unbound session has `project=<name>`
+/// hard-rejected (-32602) on the very next call, so suggesting it here would
+/// send the caller in a circle (#1176). Only a bound session — where the
+/// `project=` escape hatch actually works — gets that advice; an unbound
+/// session gets pointed at how to *become* bound instead.
+pub(crate) fn scope_downgrade_warning(
+    requested_scope: &str,
+    effective_db_scope: &str,
+    session_bound: bool,
+) -> String {
+    let guidance = if session_bound {
+        "pass project=<name> or restart the daemon with a project DB bound to get the requested scope"
+    } else {
+        "unbound session only writes global — for project scope, connect a bound session (HTTP direct-connect: send X-Tachi-Project at initialize; stdio: run inside the project repo so the adapter binds via cwd)"
+    };
     format!(
-        "{WARN_SCOPE_DOWNGRADED_PREFIX}: requested scope={requested_scope:?} but saved to db_scope={effective_db_scope:?} — pass project=<name> or restart the daemon with a project DB bound to get the requested scope"
+        "{WARN_SCOPE_DOWNGRADED_PREFIX}: requested scope={requested_scope:?} but saved to db_scope={effective_db_scope:?} — {guidance}"
     )
 }
 

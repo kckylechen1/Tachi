@@ -70,8 +70,19 @@ pub(crate) async fn handle_save_memory(
     // the compact save/checkpoint receipt (`save_receipt_value`). Surface a
     // dedicated, stable `scope`/`scope_warning` pair so the fallback stays
     // loud through every response shape.
+    //
+    // #1176: the actionable half of that warning depends on whether THIS
+    // session is bound to a project (`session_project()` — the same signal
+    // `reject_unbound_cross_project_write` gates the -32602 on). Suggesting
+    // `project=<name>` to an unbound session is a circular instruction: the
+    // very next call with that param gets hard-rejected.
+    let session_bound = server.session_project().is_some();
     let scope_warning = warning.as_ref().map(|_| {
-        crate::memory_search_ops::scope_downgrade_warning(&requested_scope, target_db.as_str())
+        crate::memory_search_ops::scope_downgrade_warning(
+            &requested_scope,
+            target_db.as_str(),
+            session_bound,
+        )
     });
 
     // #1041 F2: resolve whether a caller-supplied `id` already exists at the
