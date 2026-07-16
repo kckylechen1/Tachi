@@ -12,15 +12,54 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+RUST_MANIFEST_PATHS = (
+    "crates/memcore/Cargo.toml",
+    "crates/memory-server-capture-gate/Cargo.toml",
+    "crates/memory-server-hub-cli/Cargo.toml",
+    "crates/memory-server-manifest-audit/Cargo.toml",
+    "crates/tachi-server/Cargo.toml",
+    "crates/tachi-params/Cargo.toml",
+    "crates/memory-server-prompt-envelope/Cargo.toml",
+    "crates/memory-server-rescue/Cargo.toml",
+    "crates/memory-server-runtime/Cargo.toml",
+    "crates/memory-node/Cargo.toml",
+    "crates/tachi-bootstrap/Cargo.toml",
+    "crates/tachi-dispatch/Cargo.toml",
+    "crates/tachi-foundry/Cargo.toml",
+    "crates/tachi-hub/Cargo.toml",
+    "crates/tachi-llm/Cargo.toml",
+    "crates/tachi-merge-ops/Cargo.toml",
+)
+
+JS_PACKAGE_PATHS = (
+    "crates/memory-node/package.json",
+    "integrations/openclaw/package.json",
+    "packages/tachi-cli/package.json",
+)
+
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def cargo_version(path: str) -> str:
+def cargo_package(path: str) -> tuple[str, str]:
     with (ROOT / path).open("rb") as fh:
         data = tomllib.load(fh)
-    return str(data["package"]["version"])
+    package = data.get("package")
+    if not isinstance(package, dict):
+        raise ValueError(f"{path}: missing [package]")
+
+    name = str(package.get("name", "")).strip()
+    version = str(package.get("version", "")).strip()
+    if not name:
+        raise ValueError(f"{path}: missing package.name")
+    if not version:
+        raise ValueError(f"{path}: missing package.version")
+    return name, version
+
+
+def cargo_version(path: str) -> str:
+    return cargo_package(path)[1]
 
 
 def package_json_version(path: str) -> str:
@@ -34,6 +73,10 @@ def package_lock_versions(path: str) -> list[str]:
     if "version" in root_pkg:
         versions.append(str(root_pkg["version"]))
     return versions
+
+
+def package_lock_path(package_path: str) -> str:
+    return str(Path(package_path).with_name("package-lock.json"))
 
 
 def cargo_lock_versions(names: set[str]) -> dict[str, str]:
@@ -59,87 +102,44 @@ def require_contains(label: str, text: str, needle: str, errors: list[str]) -> N
 
 
 def main() -> int:
-    expected = cargo_version("crates/tachi-server/Cargo.toml")
-    tag = f"v{expected}"
     errors: list[str] = []
+    cargo_packages: list[tuple[str, str, str]] = []
+    for path in RUST_MANIFEST_PATHS:
+        try:
+            name, version = cargo_package(path)
+        except (OSError, ValueError, tomllib.TOMLDecodeError) as error:
+            errors.append(str(error))
+            continue
+        cargo_packages.append((path, name, version))
 
-    cargo_files = [
-        "crates/memcore/Cargo.toml",
-        "crates/memory-server-capture-gate/Cargo.toml",
-        "crates/memory-server-hub-cli/Cargo.toml",
-        "crates/memory-server-manifest-audit/Cargo.toml",
-        "crates/tachi-server/Cargo.toml",
-        "crates/tachi-params/Cargo.toml",
-        "crates/memory-server-prompt-envelope/Cargo.toml",
-        "crates/memory-server-rescue/Cargo.toml",
-        "crates/memory-server-runtime/Cargo.toml",
-        "crates/memory-node/Cargo.toml",
-        "crates/tachi-bootstrap/Cargo.toml",
-        "crates/tachi-dispatch/Cargo.toml",
-        "crates/tachi-foundry/Cargo.toml",
-        "crates/tachi-hub/Cargo.toml",
-        "crates/tachi-llm/Cargo.toml",
-        "crates/tachi-merge-ops/Cargo.toml",
-    ]
-    for path in cargo_files:
-        require_match(path, cargo_version(path), expected, errors)
-
-    lock_versions = cargo_lock_versions(
-        {
-            "memcore",
-            "memory-server-capture-gate",
-            "memory-server-hub-cli",
-            "memory-server-manifest-audit",
-            "tachi-server",
-            "tachi-params",
-            "memory-server-prompt-envelope",
-            "memory-server-rescue",
-            "memory-server-runtime",
-            "memory-node",
-            "tachi-bootstrap",
-            "tachi-dispatch",
-            "tachi-foundry",
-            "tachi-hub",
-            "tachi-llm",
-            "tachi-merge-ops",
-        }
+    tachi_server = next(
+        (version for path, _, version in cargo_packages if path == "crates/tachi-server/Cargo.toml"),
+        "",
     )
-    for name in [
-        "memcore",
-        "memory-server-capture-gate",
-        "memory-server-hub-cli",
-        "memory-server-manifest-audit",
-        "tachi-server",
-        "tachi-params",
-        "memory-server-prompt-envelope",
-        "memory-server-rescue",
-        "memory-server-runtime",
-        "memory-node",
-        "tachi-bootstrap",
-        "tachi-dispatch",
-        "tachi-foundry",
-        "tachi-hub",
-        "tachi-llm",
-        "tachi-merge-ops",
-    ]:
+    if not tachi_server:
+        errors.append("crates/tachi-server/Cargo.toml: missing release version")
+    expected = tachi_server
+    tag = f"v{expected}"
+
+    for path, _, version in cargo_packages:
+        require_match(path, version, expected, errors)
+
+    cargo_names = [name for _, name, _ in cargo_packages]
+    duplicate_names = sorted({name for name in cargo_names if cargo_names.count(name) > 1})
+    if duplicate_names:
+        errors.append(
+            "Cargo manifests: duplicate package name(s): " + ", ".join(duplicate_names)
+        )
+
+    lock_versions = cargo_lock_versions(set(cargo_names))
+    for name in cargo_names:
         require_match(f"Cargo.lock {name}", lock_versions.get(name, ""), expected, errors)
 
-    json_files = [
-        "crates/memory-node/package.json",
-        "integrations/openclaw/package.json",
-        "packages/tachi-cli/package.json",
-    ]
-    for path in json_files:
+    for path in JS_PACKAGE_PATHS:
         require_match(path, package_json_version(path), expected, errors)
-
-    lock_files = [
-        "crates/memory-node/package-lock.json",
-        "integrations/openclaw/package-lock.json",
-        "packages/tachi-cli/package-lock.json",
-    ]
-    for path in lock_files:
-        for index, version in enumerate(package_lock_versions(path)):
-            require_match(f"{path} version[{index}]", version, expected, errors)
+        lock_path = package_lock_path(path)
+        for index, version in enumerate(package_lock_versions(lock_path)):
+            require_match(f"{lock_path} version[{index}]", version, expected, errors)
 
     yaml_release = re.search(r"^release:\s*(\S+)", read("docs/current-state.agent.yaml"), re.M)
     require_match(
