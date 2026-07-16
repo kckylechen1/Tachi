@@ -35,9 +35,37 @@ pub(crate) const WARN_SCOPE_DOWNGRADED_PREFIX: &str =
 
 /// Build the loud, stable warning for a save/checkpoint whose requested
 /// `scope` differs from the `db_scope` it actually landed in.
-pub(crate) fn scope_downgrade_warning(requested_scope: &str, effective_db_scope: &str) -> String {
+///
+/// `session_bound` mirrors the same signal `reject_unbound_cross_project_write`
+/// (`session_identity.rs`) gates on: an unbound session has `project=<name>`
+/// hard-rejected (-32602) on the very next call, so suggesting it here would
+/// send the caller in a circle (#1176). Only a bound session — where the
+/// `project=` escape hatch actually works — gets that advice; an unbound
+/// session gets pointed at how to *become* bound instead.
+pub(crate) fn scope_downgrade_warning(
+    requested_scope: &str,
+    effective_db_scope: &str,
+    session_bound: bool,
+) -> String {
+    let guidance = if session_bound {
+        "pass project=<name> or restart the daemon with a project DB bound to get the requested scope"
+    } else {
+        // #1176 codex 2.4: `--no-project-db` detaches the daemon's launch cwd
+        // to `<app_home>/runtime` (bootstrap/serve.rs: `no_project_serve_detaches_launch_cwd`)
+        // and forces `project_db_path = None` regardless of cwd
+        // (bootstrap/serve.rs: the `cli.no_project_db` branch of the project-DB
+        // resolution), so "run inside the project repo" is not sufficient — the
+        // adapter never binds via cwd on that route. Name the flag explicitly
+        // rather than imply cwd alone fixes it. Kept short (fix-round for the
+        // Oz receipt-golden gate, #1178): the save/checkpoint receipt this
+        // string lands in is byte-budgeted (<500B, `receipt_golden.rs`), so
+        // this omits the elaboration above and states only the three load-
+        // bearing facts — no `project=` advice, the two binding routes, and
+        // the `--no-project-db` exclusion.
+        "unbound session: writes land in global — connect a bound session via X-Tachi-Project (HTTP) or stdio inside the repo without --no-project-db"
+    };
     format!(
-        "{WARN_SCOPE_DOWNGRADED_PREFIX}: requested scope={requested_scope:?} but saved to db_scope={effective_db_scope:?} — pass project=<name> or restart the daemon with a project DB bound to get the requested scope"
+        "{WARN_SCOPE_DOWNGRADED_PREFIX}: requested scope={requested_scope:?} but saved to db_scope={effective_db_scope:?} — {guidance}"
     )
 }
 
