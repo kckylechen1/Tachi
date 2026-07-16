@@ -4,7 +4,7 @@ use crate::tool_params::{
     ArchiveMemoryParams, DeleteMemoryParams, GetMemoryParams, ListMemoriesParams,
 };
 use crate::{DbScope, MemoryServer};
-use memcore::{GcConfig, MemoryEntry};
+use memcore::{GcConfig, MemoryEntry, MemoryStore};
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -425,19 +425,32 @@ pub(crate) async fn handle_archive_memory(
     .map_err(|e| format!("Failed to serialize: {}", e))
 }
 
+/// The GC participants shared by global and project stores. Keep their exact
+/// order: `gc_tables` observes pre-kanban rows for its diversity reconciliation.
+fn gc_common_store(store: &mut MemoryStore, db_label: &str) -> Result<serde_json::Value, String> {
+    let mut gc = store
+        .gc_tables(&GcConfig::default())
+        .map_err(|error| format!("GC failed on {db_label} DB: {error}"))?;
+    let kanban_deleted = gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
+    let handoff_deleted = crate::handoff_ops::gc_expired_handoff_memories(store, 30)?;
+    let sticky_expired = crate::sticky_ops::gc_expired_sticky_memories(store)?;
+    // Branch #5: GC foundry jobs in terminal state >= 30 days old
+    // (was 7d, see project owner's lifecycle spec).
+    let foundry_deleted = memcore::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
+    if let Some(object) = gc.as_object_mut() {
+        object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
+        object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
+        object.insert("handoff_memories_pruned".into(), json!(handoff_deleted));
+        object.insert("sticky_memories_expired".into(), json!(sticky_expired));
+    }
+    Ok(gc)
+}
+
 pub(crate) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, String> {
     let mut results = serde_json::Map::new();
 
     let global_gc = server.with_global_store(|store| {
-        let mut gc = store
-            .gc_tables(&GcConfig::default())
-            .map_err(|e| format!("GC failed on global DB: {}", e))?;
-        let kanban_deleted = gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
-        let handoff_deleted = crate::handoff_ops::gc_expired_handoff_memories(store, 30)?;
-        let sticky_expired = crate::sticky_ops::gc_expired_sticky_memories(store)?;
-        // Branch #5: GC foundry jobs in terminal state >= 30 days old
-        // (was 7d, see project owner's lifecycle spec).
-        let foundry_deleted = memcore::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
+        let mut gc = gc_common_store(store, "global")?;
         // #1001 follow-up (R2 review of #1007 CONCERN, #1029 lesson):
         // `session_claims` shipped with no reaper — `released` rows were
         // retained forever and a dead `active` heartbeat (crashed/killed
@@ -449,10 +462,6 @@ pub(crate) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, St
         let claims_gc = memcore::gc_session_claims(store.connection(), chrono::Utc::now(), 7, 30)
             .map_err(|e| format!("GC session_claims failed on global DB: {e}"))?;
         if let Some(object) = gc.as_object_mut() {
-            object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
-            object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
-            object.insert("handoff_memories_pruned".into(), json!(handoff_deleted));
-            object.insert("sticky_memories_expired".into(), json!(sticky_expired));
             object.insert(
                 "session_claims_released_pruned".into(),
                 json!(claims_gc.released_pruned),
@@ -467,22 +476,7 @@ pub(crate) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, St
     results.insert("global".into(), global_gc);
 
     if server.has_project_db() {
-        let project_gc = server.with_project_store(|store| {
-            let mut gc = store
-                .gc_tables(&GcConfig::default())
-                .map_err(|e| format!("GC failed on project DB: {}", e))?;
-            let kanban_deleted = gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
-            let handoff_deleted = crate::handoff_ops::gc_expired_handoff_memories(store, 30)?;
-            let sticky_expired = crate::sticky_ops::gc_expired_sticky_memories(store)?;
-            let foundry_deleted = memcore::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
-            if let Some(object) = gc.as_object_mut() {
-                object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
-                object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
-                object.insert("handoff_memories_pruned".into(), json!(handoff_deleted));
-                object.insert("sticky_memories_expired".into(), json!(sticky_expired));
-            }
-            Ok(gc)
-        })?;
+        let project_gc = server.with_project_store(|store| gc_common_store(store, "project"))?;
         results.insert("project".into(), project_gc);
     }
 
