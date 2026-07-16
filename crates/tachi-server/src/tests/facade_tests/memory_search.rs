@@ -107,6 +107,42 @@ async fn tachi_memory_search_defaults_to_json_and_keeps_markdown_escape_hatch() 
 }
 
 #[tokio::test]
+async fn tachi_memory_json_search_failure_keeps_rows_as_an_array() {
+    let server = make_server();
+    let mut params = tachi_memory_params("search");
+    params.format = None;
+    params.scope = Some("memory".to_string());
+    params.query = Some("forced search failure".to_string());
+    params.as_of = Some("not-an-rfc3339-timestamp".to_string());
+
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect("a section-level search failure remains a JSON response");
+    let parsed: Value = serde_json::from_str(&body).expect("search JSON");
+    let memory = parsed["sections"]
+        .as_array()
+        .and_then(|sections| {
+            sections
+                .iter()
+                .find(|section| section["name"] == json!("Memory"))
+        })
+        .expect("memory section");
+
+    assert!(
+        memory["rows"].is_array(),
+        "search failure must not type-pun rows into a string: {memory}"
+    );
+    assert_eq!(memory["rows"], json!([]));
+    assert_eq!(memory["error"]["kind"], json!("search_failed"));
+    assert!(
+        memory["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("invalid timestamp format")),
+        "the explicit error must preserve the failed search cause: {memory}"
+    );
+}
+
+#[tokio::test]
 async fn tachi_memory_search_records_user_access_history() {
     let server = make_server();
     let entry_id = format!("explicit-recall-access-{}", uuid::Uuid::new_v4());

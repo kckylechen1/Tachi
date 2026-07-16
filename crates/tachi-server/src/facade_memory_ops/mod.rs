@@ -68,7 +68,7 @@ pub(crate) async fn handle_tachi_memory(
                         .await;
                 let sections = sections
                     .into_iter()
-                    .map(|(name, rows)| json!({ "name": name, "rows": rows }))
+                    .map(|(name, rows)| json_search_section(name, rows))
                     .collect::<Vec<_>>();
                 let binding = crate::memory_search_ops::library_binding_receipt(
                     server,
@@ -386,6 +386,28 @@ pub(crate) async fn handle_tachi_memory(
             "Invalid action '{}'. Use 'search', 'get', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'recall_simulate', 'recall_proposals', 'review_recall_proposal', 'apply_recall_proposals', 'pattern_feedback', 'progress', 'readiness', 'claim', 'release', 'delete', 'gc', 'doctor_scan', 'ingest', 'ingest_source', 'sticky_leave', or 'sticky_check'.",
             params.action
         )),
+    }
+}
+
+/// JSON search sections keep result data and failure data in distinct fields.
+/// `collect_tachi_search_sections` keeps its legacy string error value so the
+/// Markdown formatter can render it, but machine clients require `rows` to
+/// remain an array even when one section fails (#1156).
+fn json_search_section(name: String, rows: serde_json::Value) -> serde_json::Value {
+    if let Some(error) = rows
+        .as_str()
+        .and_then(|message| message.strip_prefix("Error: "))
+    {
+        json!({
+            "name": name,
+            "rows": [],
+            "error": {
+                "kind": "search_failed",
+                "message": error,
+            },
+        })
+    } else {
+        json!({ "name": name, "rows": rows })
     }
 }
 
