@@ -38,6 +38,7 @@ async fn vault_unlock_with_corrupted_verifier_errs_without_counting_against_lock
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "correct-password".to_string(),
             password_fifo_path: None,
+            use_keychain: false,
         }))
         .await
         .expect_err("a corrupted verifier must fail unlock");

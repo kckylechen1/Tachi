@@ -32,6 +32,7 @@ async fn vault_unlock_succeeds_for_default_kdf_params_after_wiring() {
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "correct-password".to_string(),
             password_fifo_path: None,
+            use_keychain: false,
         }))
         .await
         .expect("vault_unlock must still succeed for the default kdf_params");
@@ -86,6 +87,7 @@ async fn vault_unlock_rejects_unsupported_kdf_params_with_versioned_error() {
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "correct-password".to_string(),
             password_fifo_path: None,
+            use_keychain: false,
         }))
         .await
         .expect_err("an unsupported kdf_params must fail unlock");
@@ -151,6 +153,7 @@ async fn vault_unlock_rejects_malformed_kdf_params_json_with_versioned_error() {
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "correct-password".to_string(),
             password_fifo_path: None,
+            use_keychain: false,
         }))
         .await
         .expect_err("a malformed kdf_params must fail unlock");

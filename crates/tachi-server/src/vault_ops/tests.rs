@@ -102,14 +102,233 @@ async fn vault_unlock_rejects_password_and_fifo_path_together() {
         VaultUnlockParams {
             password: "correct-password".to_string(),
             password_fifo_path: Some("/tmp/tachi-unlock-test.fifo".to_string()),
+            use_keychain: false,
         },
     )
     .await
     .expect_err("mixed password transports should be rejected");
 
     assert!(
-        err.contains("either password or password_fifo_path"),
+        err.contains("exactly one of password, password_fifo_path, or use_keychain"),
         "expected mixed-transport rejection, got: {err}"
+    );
+}
+
+// codex 3.3 (fix-round): the mutual-exclusion check (`sources_given > 1`)
+// covers all three pairwise combinations of password/password_fifo_path/
+// use_keychain, but only the password+fifo pair had a discriminating test.
+// These two cover the remaining pairs. Both must be rejected BEFORE any
+// actual Keychain/FIFO read is attempted (the `sources_given` check runs
+// first in `handle_vault_unlock`), so neither test needs a working FIFO or
+// a Keychain injection seam — a nonexistent FIFO path and no
+// `TACHI_TEST_KEYCHAIN_PASSWORD` override are both fine, since the mutex
+// check must short-circuit before either is touched.
+#[tokio::test]
+async fn vault_unlock_rejects_password_and_keychain_together() {
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-unlock-keychain-password-test-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "correct-password".to_string(),
+        },
+    )
+    .await
+    .expect("vault init should succeed");
+    handle_vault_lock(&server)
+        .await
+        .expect("vault lock should succeed");
+
+    let err = handle_vault_unlock(
+        &server,
+        VaultUnlockParams {
+            password: "correct-password".to_string(),
+            password_fifo_path: None,
+            use_keychain: true,
+        },
+    )
+    .await
+    .expect_err("mixed password transports should be rejected");
+
+    assert!(
+        err.contains("exactly one of password, password_fifo_path, or use_keychain"),
+        "expected mixed-transport rejection, got: {err}"
+    );
+    let v = server.vault_read();
+    assert!(
+        v.key.is_none(),
+        "vault must stay locked when the request is rejected as mixed-transport"
+    );
+}
+
+#[tokio::test]
+async fn vault_unlock_rejects_fifo_and_keychain_together() {
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-unlock-keychain-fifo-test-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "correct-password".to_string(),
+        },
+    )
+    .await
+    .expect("vault init should succeed");
+    handle_vault_lock(&server)
+        .await
+        .expect("vault lock should succeed");
+
+    let err = handle_vault_unlock(
+        &server,
+        VaultUnlockParams {
+            password: String::new(),
+            password_fifo_path: Some("/tmp/tachi-unlock-test-fifo-keychain.fifo".to_string()),
+            use_keychain: true,
+        },
+    )
+    .await
+    .expect_err("mixed password transports should be rejected");
+
+    assert!(
+        err.contains("exactly one of password, password_fifo_path, or use_keychain"),
+        "expected mixed-transport rejection, got: {err}"
+    );
+    let v = server.vault_read();
+    assert!(
+        v.key.is_none(),
+        "vault must stay locked when the request is rejected as mixed-transport"
+    );
+}
+
+// tachi#1175: `use_keychain` walks the same shared low-level primitive as
+// the CLI's `tachi vault unlock --keychain`
+// (`vault_crypto::read_password_from_macos_keychain`) so an agent never has
+// to put a plaintext password in the tool call or shell. These two tests
+// drive that primitive through its `TACHI_TEST_KEYCHAIN_PASSWORD` /
+// `TACHI_TEST_FORCE_KEYCHAIN_MISSING` injection seam rather than the real
+// macOS Keychain (a unit test must never depend on — or mutate — whatever
+// `tachi-vault`/`default` Keychain entry happens to exist on the machine
+// running the suite). `global_test_lock` serializes them against every other
+// test that mutates process-global env vars (see
+// `auto_lock_clears_key_but_preserves_provider_secrets` above for the same
+// pattern).
+// Plain `#[test]` + `block_on` (not `#[tokio::test]`), matching the
+// `global_test_lock` convention used elsewhere in this crate (e.g.
+// `dispatch_ops/prompt.rs`, `bootstrap::serve::stdio::tests`): the guard
+// serializes the process-wide `TACHI_TEST_KEYCHAIN_PASSWORD` env var against
+// other tests, so it must stay held across the whole init/lock/unlock
+// sequence including its internal awaits — `block_on` runs that future to
+// completion synchronously on this thread, so there is no `.await`
+// expression in scope for clippy's `await_holding_lock` lint, while the
+// guard's actual coverage is unchanged.
+#[test]
+fn vault_unlock_use_keychain_succeeds_via_injected_password() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _keychain_env = EnvRestore::set("TACHI_TEST_KEYCHAIN_PASSWORD", "correct-password");
+
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-unlock-keychain-ok-test-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    let body = tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async {
+            handle_vault_init(
+                &server,
+                VaultInitParams {
+                    password: "correct-password".to_string(),
+                },
+            )
+            .await
+            .expect("vault init should succeed");
+            handle_vault_lock(&server)
+                .await
+                .expect("vault lock should succeed");
+
+            handle_vault_unlock(
+                &server,
+                VaultUnlockParams {
+                    password: String::new(),
+                    password_fifo_path: None,
+                    use_keychain: true,
+                },
+            )
+            .await
+            .expect("use_keychain unlock should succeed via the injected Keychain password")
+        });
+
+    let body_json: serde_json::Value =
+        serde_json::from_str(&body).expect("vault_unlock response should be JSON");
+    assert_eq!(body_json["unlocked"], serde_json::json!(true));
+    let v = server.vault_read();
+    assert!(
+        v.key.is_some(),
+        "vault key should be cached after a successful use_keychain unlock"
+    );
+}
+
+// Same `#[test]` + `block_on` conversion as
+// `vault_unlock_use_keychain_succeeds_via_injected_password` above — the
+// guard here serializes `TACHI_TEST_FORCE_KEYCHAIN_MISSING`.
+#[test]
+fn vault_unlock_use_keychain_reports_missing_entry_without_leaking_process_error() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _keychain_env = EnvRestore::set("TACHI_TEST_FORCE_KEYCHAIN_MISSING", "1");
+
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-unlock-keychain-missing-test-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    let err = tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async {
+            handle_vault_init(
+                &server,
+                VaultInitParams {
+                    password: "correct-password".to_string(),
+                },
+            )
+            .await
+            .expect("vault init should succeed");
+            handle_vault_lock(&server)
+                .await
+                .expect("vault lock should succeed");
+
+            handle_vault_unlock(
+                &server,
+                VaultUnlockParams {
+                    password: String::new(),
+                    password_fifo_path: None,
+                    use_keychain: true,
+                },
+            )
+            .await
+            .expect_err("missing Keychain entry should fail, not silently succeed")
+        });
+
+    assert!(
+        err.contains("use_keychain unlock failed"),
+        "expected the use_keychain wrapper context, got: {err}"
+    );
+    assert!(
+        err.contains("no vault password found in Keychain"),
+        "expected the real missing-entry message, got: {err}"
+    );
+    let v = server.vault_read();
+    assert!(
+        v.key.is_none(),
+        "vault must stay locked when the Keychain entry is missing"
     );
 }
 

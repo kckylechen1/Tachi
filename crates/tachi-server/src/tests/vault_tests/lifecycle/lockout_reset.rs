@@ -20,6 +20,7 @@ async fn vault_unlock_enforces_bruteforce_lockout_and_resets_on_success() {
             .vault_unlock(Parameters(VaultUnlockParams {
                 password: format!("wrong-password-{attempt}"),
                 password_fifo_path: None,
+                use_keychain: false,
             }))
             .await
             .expect_err("wrong password should fail");
@@ -33,6 +34,7 @@ async fn vault_unlock_enforces_bruteforce_lockout_and_resets_on_success() {
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "still-wrong".to_string(),
             password_fifo_path: None,
+            use_keychain: false,
         }))
         .await
         .expect_err("fifth failed attempt should trigger lockout");
@@ -45,6 +47,7 @@ async fn vault_unlock_enforces_bruteforce_lockout_and_resets_on_success() {
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "correct-password".to_string(),
             password_fifo_path: None,
+            use_keychain: false,
         }))
         .await
         .expect_err("correct password should still be blocked during lockout");
@@ -59,6 +62,7 @@ async fn vault_unlock_enforces_bruteforce_lockout_and_resets_on_success() {
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "correct-password".to_string(),
             password_fifo_path: None,
+            use_keychain: false,
         }))
         .await
         .expect("vault_unlock should succeed after lockout expiry");

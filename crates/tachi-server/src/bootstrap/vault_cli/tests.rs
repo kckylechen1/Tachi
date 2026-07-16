@@ -7,7 +7,9 @@ use super::keys::{
 use super::output::vault_get_output;
 use super::password::{
     read_password_file, read_vault_init_password, read_vault_init_password_stdin_lines,
+    read_vault_password,
 };
+use crate::test_support::EnvRestore;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
@@ -322,4 +324,64 @@ fn password_file_accepts_owner_only() {
     let password = read_password_file(&password_file, false)
         .expect("owner-only password file should be accepted");
     assert_eq!(password, "correct horse battery staple");
+}
+
+// tachi#1175: without a TTY, `rpassword::prompt_password` fails opening
+// /dev/tty with the raw errno text "Device not configured (os error 6)" —
+// meaningless to an agent shell with no controlling terminal. These assert
+// the CLI now reports the real cause and names the actual non-interactive
+// flags (verified against the `VaultAction` clap definitions in
+// `tachi-bootstrap/src/cli/vault_actions.rs`) instead of leaking that OS
+// errno. Uses the `TACHI_TEST_FORCE_NO_TTY` injection seam rather than
+// detaching a real terminal from the test process.
+//
+// codex 3.1 (fix-round): `can_prompt_interactively` now probes `/dev/tty`
+// directly (the same channel `rpassword` itself prompts on) instead of
+// `stdin().is_terminal()`. The `TACHI_TEST_FORCE_NO_TTY` seam still short-
+// circuits before that probe runs, so these tests stay deterministic
+// regardless of whether the `cargo test` process happens to have a
+// controlling terminal of its own.
+#[test]
+fn read_vault_password_reports_no_tty_hint_instead_of_os_error() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = EnvRestore::set("TACHI_TEST_FORCE_NO_TTY", "1");
+
+    let err = read_vault_password(false, false, None, false)
+        .expect_err("no TTY and no non-interactive flag should fail");
+    let msg = err.to_string();
+
+    assert!(
+        !msg.contains("os error 6") && !msg.contains("Device not configured"),
+        "raw rpassword/TTY errno must not leak through: {msg}"
+    );
+    assert!(msg.contains("--keychain"), "{msg}");
+    assert!(msg.contains("--stdin-password"), "{msg}");
+    assert!(msg.contains("--password-file"), "{msg}");
+}
+
+#[test]
+fn read_vault_init_password_reports_no_tty_hint_instead_of_os_error() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = EnvRestore::set("TACHI_TEST_FORCE_NO_TTY", "1");
+
+    let err = read_vault_init_password(false, false, None, None, false)
+        .expect_err("no TTY and no non-interactive flag should fail");
+    let msg = err.to_string();
+
+    assert!(
+        !msg.contains("os error 6") && !msg.contains("Device not configured"),
+        "raw rpassword/TTY errno must not leak through: {msg}"
+    );
+    assert!(msg.contains("--keychain"), "{msg}");
+    assert!(msg.contains("--stdin-password"), "{msg}");
+    assert!(msg.contains("--password-file"), "{msg}");
+    // codex 3.2: `vault init`'s no-TTY hint must also point at
+    // --confirm-password-file — a bare --password-file is not enough for
+    // init (there's nothing to check it against), unlike unlock where one
+    // password file suffices on its own.
+    assert!(msg.contains("--confirm-password-file"), "{msg}");
 }

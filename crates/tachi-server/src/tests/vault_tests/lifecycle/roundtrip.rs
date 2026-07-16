@@ -81,6 +81,7 @@ async fn vault_init_set_get_lock_unlock_roundtrip() {
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "correct horse battery staple".to_string(),
             password_fifo_path: None,
+            use_keychain: false,
         }))
         .await
         .expect("vault_unlock should succeed");
