@@ -1,3 +1,4 @@
+use rusqlite::functions::FunctionFlags;
 use rusqlite::types::Value;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
@@ -237,11 +238,12 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
     as_of: Option<&str>,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let terms = symbolic_terms(query);
-    let relevance_terms = symbolic_terms(relevance_query);
 
     if terms.is_empty() && path_prefix.is_none() {
         return Ok(Vec::new());
     }
+
+    register_symbolic_score_function(conn)?;
 
     let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
@@ -274,32 +276,18 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
         sql.push(')');
     }
 
-    // Rank candidate eligibility by the same expansion-aware term coverage
-    // the final symbolic rank uses, while keeping this selection SQL-bounded.
-    // The raw `terms` predicate above intentionally stays unchanged: expansion
-    // changes relevance among symbolic matches, not what this channel matches.
-    let mut relevance_parts = Vec::new();
-    for term in &relevance_terms {
-        let pattern = format!("%{}%", escape_like_pattern(term));
-        params.push(pattern.into());
-        let idx = params.len();
-        relevance_parts.push(format!(
-            "CASE WHEN {} THEN 1 ELSE 0 END",
-            symbolic_term_match_clause(idx)
-        ));
-    }
-    let relevance_score = if relevance_parts.is_empty() {
-        "0".to_string()
-    } else {
-        relevance_parts.join(" + ")
-    };
+    // The pre-cap score is the final ranker's exact token scorer, not a SQL
+    // LIKE-count approximation. The scalar function keeps ordering and LIMIT
+    // in SQLite while preventing substring coverage from changing eligibility.
+    params.push(relevance_query.to_owned().into());
+    let relevance_query_idx = params.len();
     params.push((limit.max(1) as i64).into());
     let limit_idx = params.len();
     // `julianday` compares parsed instants, not the raw TEXT representation:
     // mixed RFC3339 precision/offset rows otherwise mis-order an equal-score
     // tie (tachi#718 CP2, tachi#1144).
     sql.push_str(&format!(
-        " ORDER BY ({relevance_score}) DESC, julianday(timestamp) DESC, id ASC LIMIT ?{limit_idx}"
+        " ORDER BY tachi_symbolic_score(?{relevance_query_idx}, id, path, topic, summary, text, keywords, entities) DESC, julianday(timestamp) DESC, id ASC LIMIT ?{limit_idx}"
     ));
 
     let mut stmt = conn.prepare(&sql)?;
@@ -309,6 +297,31 @@ pub(crate) fn search_symbolic_candidates_with_relevance(
         out.push(r?);
     }
     Ok(out)
+}
+
+fn register_symbolic_score_function(conn: &Connection) -> Result<(), MemoryError> {
+    conn.create_scalar_function(
+        "tachi_symbolic_score",
+        8,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| {
+            let query = context.get::<String>(0)?;
+            let id = context.get::<String>(1)?;
+            let path = context.get::<String>(2)?;
+            let topic = context.get::<String>(3)?;
+            let summary = context.get::<String>(4)?;
+            let text = context.get::<String>(5)?;
+            let keywords = context.get::<String>(6)?;
+            let entities = context.get::<String>(7)?;
+            Ok(crate::scorer::symbolic_score_stored_entry(
+                &query,
+                &[&id, &path, &topic, &summary, &text],
+                &keywords,
+                &entities,
+            ))
+        },
+    )?;
+    Ok(())
 }
 
 fn symbolic_terms(query: &str) -> Vec<String> {

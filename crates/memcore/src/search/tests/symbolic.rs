@@ -186,6 +186,53 @@ fn symbolic_pre_cap_relevance_uses_the_rankers_expanded_query() {
     );
 }
 
+/// The SQL eligibility scorer must preserve the final ranker's token
+/// boundaries. A substring containing every expansion term is not four token
+/// matches: `amcpmodelcontextprotocolx` has no `mcp`, `model`, `context`, or
+/// `protocol` token, so it must not evict the older exact-token target.
+#[test]
+fn symbolic_pre_cap_relevance_rejects_substring_coverage_false_positive() {
+    let mut conn = setup();
+
+    let mut target = memory_entry(
+        "expanded-token-boundary-target",
+        "mcp model context protocol",
+        &[],
+    );
+    target.timestamp = "2020-01-01T00:00:00Z".to_string();
+    insert_entry(&mut conn, target);
+
+    let mut newer_substring = memory_entry(
+        "expanded-substring-distractor",
+        "amcpmodelcontextprotocolx",
+        &[],
+    );
+    newer_substring.timestamp = "2027-01-01T00:00:00Z".to_string();
+    insert_entry(&mut conn, newer_substring);
+
+    let opts = SearchOptions {
+        candidates_per_channel: 0,
+        top_k: 1,
+        weights: HybridWeights {
+            semantic: 0.0,
+            fts: 0.0,
+            symbolic: 1.0,
+            decay: 0.0,
+            use_rrf: false,
+        },
+        record_access: false,
+        mmr_threshold: None,
+        ..Default::default()
+    };
+    let results = hybrid_search(&conn, "mcp", &opts).expect("symbolic search succeeds");
+
+    assert_eq!(
+        results.first().map(|result| result.entry.id.as_str()),
+        Some("expanded-token-boundary-target"),
+        "pre-cap eligibility must call the final token scorer, not count LIKE substrings"
+    );
+}
+
 /// Timestamp only breaks true symbolic-score ties. It must compare parsed
 /// instants, rather than lexically ordering mixed RFC3339 representations.
 #[test]
@@ -235,5 +282,30 @@ fn symbolic_pre_cap_timestamp_tie_break_uses_real_instants() {
         results.first().map(|result| result.entry.id.as_str()),
         Some("timestamp-tie-newer"),
         "fractional-second RFC3339 timestamps must be ordered by instant, not raw text"
+    );
+}
+
+/// ID is the final deterministic tie-break once both exact token relevance and
+/// timestamp are equal. This keeps the bounded symbolic candidate set stable.
+#[test]
+fn symbolic_pre_cap_id_tie_break_is_stable() {
+    let mut conn = setup();
+    for (id, text) in [
+        ("symbolic-id-tie-a", "controlplane alpha context"),
+        ("symbolic-id-tie-b", "controlplane beta context"),
+    ] {
+        let mut entry = memory_entry(id, text, &[]);
+        entry.timestamp = "2026-01-01T00:00:00Z".to_string();
+        insert_entry(&mut conn, entry);
+    }
+
+    let symbolic_candidates =
+        crate::db::search_symbolic_candidates(&conn, "controlplane", 1, false, false, None, None)
+            .expect("symbolic candidate query succeeds");
+
+    assert_eq!(
+        symbolic_candidates.first().map(|entry| entry.id.as_str()),
+        Some("symbolic-id-tie-a"),
+        "ID must be the deterministic final tie-break after equal relevance and timestamp"
     );
 }

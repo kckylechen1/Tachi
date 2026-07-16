@@ -14,11 +14,11 @@ mod text;
 pub use graph::{
     graph_relation_activation_weight, graph_spreading_activation_with_seed_weights, local_pagerank,
 };
-pub(crate) use text::generic_precision_multiplier_impl_with_config;
 pub use text::{
     entry_has_exact_query_token, generic_precision_multiplier, is_id_like_exact_query,
     symbolic_score, symbolic_score_entry, tokenize, PrecisionMatcher,
 };
+pub(crate) use text::{generic_precision_multiplier_impl_with_config, symbolic_score_stored_entry};
 
 fn tier_half_life_with_config(tier: &str, recall_config: &RecallConfig) -> f64 {
     recall_config.half_life_days_for_tier(tier)

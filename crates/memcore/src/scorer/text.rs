@@ -48,48 +48,58 @@ pub fn symbolic_score(
     keywords: &[String],
     entities: &[String],
 ) -> f64 {
-    let query_tokens: HashSet<String> = tokenize(query).into_iter().collect();
-    if query_tokens.is_empty() {
-        return 0.0;
-    }
-
-    let mut text_tokens: HashSet<String> = tokenize(entry_text).into_iter().collect();
-    for kw in keywords {
-        text_tokens.extend(tokenize(kw));
-    }
-    for ent in entities {
-        let trimmed = ent.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        text_tokens.extend(tokenize(trimmed));
-        text_tokens.insert(trimmed.to_ascii_lowercase());
-    }
-
-    let overlap = query_tokens.intersection(&text_tokens).count();
-    (overlap as f64) / (query_tokens.len().max(1) as f64)
+    symbolic_score_fields(query, &[entry_text], keywords, entities)
 }
 
 pub fn symbolic_score_entry(query: &str, entry: &MemoryEntry) -> f64 {
+    symbolic_score_fields(
+        query,
+        &[
+            entry.id.as_str(),
+            entry.path.as_str(),
+            entry.topic.as_str(),
+            entry.summary.as_str(),
+            entry.text.as_str(),
+        ],
+        &entry.keywords,
+        &entry.entities,
+    )
+}
+
+/// Scores the text columns stored in SQLite with exactly the token semantics
+/// used by [`symbolic_score_entry`]. The symbolic candidate query calls this
+/// through a SQLite scalar function before applying its cap, so a LIKE
+/// substring cannot outrank an exact token match (tachi#1144).
+pub(crate) fn symbolic_score_stored_entry(
+    query: &str,
+    fields: &[&str; 5],
+    keywords_json: &str,
+    entities_json: &str,
+) -> f64 {
+    let keywords = serde_json::from_str::<Vec<String>>(keywords_json).unwrap_or_default();
+    let entities = serde_json::from_str::<Vec<String>>(entities_json).unwrap_or_default();
+    symbolic_score_fields(query, fields, &keywords, &entities)
+}
+
+fn symbolic_score_fields(
+    query: &str,
+    fields: &[&str],
+    keywords: &[String],
+    entities: &[String],
+) -> f64 {
     let query_tokens: HashSet<String> = tokenize(query).into_iter().collect();
     if query_tokens.is_empty() {
         return 0.0;
     }
 
     let mut text_tokens: HashSet<String> = HashSet::new();
-    for field in [
-        entry.id.as_str(),
-        entry.path.as_str(),
-        entry.topic.as_str(),
-        entry.summary.as_str(),
-        entry.text.as_str(),
-    ] {
+    for field in fields {
         text_tokens.extend(tokenize(field));
     }
-    for kw in &entry.keywords {
+    for kw in keywords {
         text_tokens.extend(tokenize(kw));
     }
-    for ent in &entry.entities {
+    for ent in entities {
         let trimmed = ent.trim();
         if trimmed.is_empty() {
             continue;
