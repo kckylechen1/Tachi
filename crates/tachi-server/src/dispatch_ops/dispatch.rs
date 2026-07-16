@@ -9,7 +9,7 @@ use super::dispatch_v2::{
 use super::kanban_helpers::{close_kanban_row_on_early_exit, init_kanban_task};
 use super::launcher::{
     build_claude_command, build_codex_command, build_custom_command, build_grok_command,
-    build_kimi_command,
+    build_kimi_command, build_opencode_command,
 };
 use super::mcp_config::generate_mcp_config;
 use super::prompt::{assemble_prompt_with_trace, resolve_effective_skills};

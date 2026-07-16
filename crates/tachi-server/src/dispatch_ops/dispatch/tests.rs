@@ -401,6 +401,47 @@ async fn opencode_serve_preflight_uses_dispatch_credential_env() {
     assert!(result.contains("credential-ok"), "result={result}");
 }
 
+/// #1174 (codex review round): `build_opencode_command`'s unit tests
+/// (`dispatch_ops::launcher::tests`) prove the seam in isolation, but the
+/// live wiring — `prepare_dispatch_backend` actually calling
+/// `build_opencode_command` instead of `build_custom_command` for
+/// `agent='opencode'` — was only exercised by hand. This drives the real
+/// `handle_tachi_dispatch` entry point with `agent='opencode'` and no
+/// `command`, so a regression that reverts the `"opencode" =>
+/// build_opencode_command(...)` dispatch arm back to `build_custom_command`
+/// fails a runtime test, not just the isolated unit test. On `origin/main`
+/// (pre-fix) this is red: the error carries the internal 'custom' backend
+/// name instead of the caller's own 'opencode' vocabulary.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn opencode_agent_missing_command_keeps_vocabulary_through_full_dispatch() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let server = crate::tests::make_server();
+
+    let params = test_dispatch_params(Some("opencode"), "should fail before any spawn");
+
+    let err = handle_tachi_dispatch(&server, params)
+        .await
+        .expect_err("agent='opencode' with no command must fail end-to-end");
+
+    assert!(
+        err.contains("opencode"),
+        "error must keep the caller's own 'opencode' vocabulary, got: {err}"
+    );
+    assert!(
+        err.to_ascii_lowercase().contains("profile"),
+        "error must point the caller at profile dispatch, got: {err}"
+    );
+    assert!(
+        !err.contains("custom"),
+        "error must not leak the internal 'custom' backend name, got: {err}"
+    );
+}
+
 /// #894 S0 round 2 (cross-vendor review): the entry-point sandbox check must
 /// fire before ANY stage/preflight/spawn work — in particular before the V2
 /// plan stage's `ClaudePool` call. Proven two ways without needing to mock
