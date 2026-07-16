@@ -2,6 +2,165 @@ use serde_json::json;
 
 use super::connection::sanitize_receipt_field;
 use super::permission::{classify_acp_request_kind, native_permission_decision, AcpRequestKind};
+use super::protocol::{extract_model_config_option, extract_model_config_update};
+
+#[test]
+fn model_config_option_uses_only_the_typed_current_model_value() {
+    let setup = json!({
+        "configOptions": [
+            {"id": "verbosity", "category": "other", "currentValue": "high"},
+            {"id": "model", "category": "model", "currentValue": " openai/gpt-5.2 "}
+        ]
+    });
+    assert_eq!(
+        extract_model_config_option(&setup).as_deref(),
+        Some("openai/gpt-5.2")
+    );
+
+    let untyped_or_empty = json!({
+        "configOptions": [
+            {"id": "model", "currentValue": "do-not-trust-labels"},
+            {"id": "another-model", "category": "model", "currentValue": "   "}
+        ]
+    });
+    assert_eq!(extract_model_config_option(&untyped_or_empty), None);
+
+    let runtime_switch = json!({
+        "sessionUpdate": "config_option_update",
+        "configOptions": [
+            {"id": "model", "category": "model", "currentValue": "openai/gpt-5.3"}
+        ]
+    });
+    assert_eq!(
+        extract_model_config_update(&runtime_switch),
+        Some(Some("openai/gpt-5.3".to_string()))
+    );
+    assert_eq!(
+        extract_model_config_update(&json!({
+            "sessionUpdate": "config_option_update",
+            "configOptions": []
+        })),
+        Some(None),
+        "a complete update with no model must clear stale model evidence"
+    );
+    assert_eq!(
+        extract_model_config_update(&json!({
+            "sessionUpdate": "agent_message",
+            "configOptions": runtime_switch["configOptions"]
+        })),
+        None
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn native_acp_runner_uses_the_latest_reported_model_config() {
+    use std::collections::HashMap;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().expect("temp ACP run directory");
+    let adapter = temp.path().join("adapter.sh");
+    std::fs::write(
+        &adapter,
+        r#"#!/bin/sh
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-1","result":{"protocolVersion":1}}'
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-2","result":{"sessionId":"s-1","configOptions":[{"id":"model","category":"model","currentValue":"openai/gpt-5.2"}]}}'
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-1","update":{"sessionUpdate":"config_option_update","configOptions":[{"id":"model","category":"model","currentValue":"openai/gpt-5.3"}]}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":"text","text":"done"}]}}'
+"#,
+    )
+    .expect("write ACP adapter fixture");
+    let mut permissions = std::fs::metadata(&adapter)
+        .expect("adapter metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&adapter, permissions).expect("make adapter executable");
+
+    let outcome = super::run_native_acp_dispatch(
+        super::NativeAcpRunSpec {
+            command: "/bin/sh".to_string(),
+            args: vec![adapter.to_string_lossy().to_string()],
+            cwd: temp.path().to_path_buf(),
+            prompt: "test prompt".to_string(),
+            mode: super::NativeAcpRunMode::OneShot,
+            permission_label: "approve-reads".to_string(),
+            session: None,
+            session_record_path: None,
+            session_distill_path: None,
+            metadata: json!({}),
+            env: HashMap::new(),
+        },
+        temp.path(),
+        &temp.path().join("trajectory.jsonl"),
+        "test-dispatch",
+        "codex",
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("native ACP dispatch");
+
+    assert_eq!(outcome.output, "done");
+    assert_eq!(outcome.observed_model.as_deref(), Some("openai/gpt-5.3"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn native_acp_runner_preserves_interleaved_setup_model_update() {
+    use std::collections::HashMap;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().expect("temp ACP run directory");
+    let adapter = temp.path().join("adapter.sh");
+    std::fs::write(
+        &adapter,
+        r#"#!/bin/sh
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-1","result":{"protocolVersion":1}}'
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-1","update":{"sessionUpdate":"config_option_update","configOptions":[{"id":"model","category":"model","currentValue":"openai/gpt-5.2"}]}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-2","result":{"sessionId":"s-1"}}'
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":"text","text":"done"}]}}'
+"#,
+    )
+    .expect("write ACP adapter fixture");
+    let mut permissions = std::fs::metadata(&adapter)
+        .expect("adapter metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&adapter, permissions).expect("make adapter executable");
+
+    let outcome = super::run_native_acp_dispatch(
+        super::NativeAcpRunSpec {
+            command: "/bin/sh".to_string(),
+            args: vec![adapter.to_string_lossy().to_string()],
+            cwd: temp.path().to_path_buf(),
+            prompt: "test prompt".to_string(),
+            mode: super::NativeAcpRunMode::OneShot,
+            permission_label: "approve-reads".to_string(),
+            session: None,
+            session_record_path: None,
+            session_distill_path: None,
+            metadata: json!({}),
+            env: HashMap::new(),
+        },
+        temp.path(),
+        &temp.path().join("trajectory.jsonl"),
+        "test-dispatch",
+        "codex",
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("native ACP dispatch");
+
+    assert_eq!(outcome.output, "done");
+    assert_eq!(outcome.observed_model.as_deref(), Some("openai/gpt-5.2"));
+}
 
 /// Realistic ACP `PermissionOption` list: every option carries the typed
 /// `kind` the real protocol sends (`allow_once` / `reject_once`), not just a

@@ -112,6 +112,10 @@ fn opencode_sop_label(agent_norm: &str, params: &TachiDispatchParams) -> Option<
 pub(crate) struct DispatchResult {
     pub output: String,
     pub exit_code: Option<i32>,
+    /// A concrete model only when the native ACP carrier explicitly reported
+    /// it through its typed runtime config options. CLI subprocesses have no
+    /// corresponding acknowledgement channel and leave this absent.
+    pub observed_model: Option<String>,
 }
 
 mod artifacts;

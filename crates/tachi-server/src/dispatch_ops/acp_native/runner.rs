@@ -191,5 +191,6 @@ async fn run_native_acp_dispatch_inner(
     Ok(DispatchResult {
         output: outcome.output,
         exit_code: Some(0),
+        observed_model: outcome.observed_model,
     })
 }
