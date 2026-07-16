@@ -25,6 +25,28 @@ pub(crate) use evidence_format::{
 pub(crate) use recall_simulate_ops::build_recall_simulation_report;
 use serde_json::json;
 
+fn json_search_section(name: String, value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(rows) => json!({ "name": name, "rows": rows }),
+        serde_json::Value::String(message) => json!({
+            "name": name,
+            "rows": [],
+            "error": {
+                "kind": "search_failure",
+                "message": message,
+            },
+        }),
+        other => json!({
+            "name": name,
+            "rows": [],
+            "error": {
+                "kind": "invalid_search_section",
+                "message": format!("search section returned unexpected value: {other}"),
+            },
+        }),
+    }
+}
+
 pub(crate) async fn handle_tachi_memory(
     server: &MemoryServer,
     params: TachiMemoryParams,
@@ -68,7 +90,7 @@ pub(crate) async fn handle_tachi_memory(
                         .await;
                 let sections = sections
                     .into_iter()
-                    .map(|(name, rows)| json!({ "name": name, "rows": rows }))
+                    .map(|(name, rows)| json_search_section(name, rows))
                     .collect::<Vec<_>>();
                 let binding = crate::memory_search_ops::library_binding_receipt(
                     server,
