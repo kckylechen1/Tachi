@@ -58,6 +58,39 @@ pub(super) fn extract_agent_session_id(result: &Value) -> Option<String> {
     .find_map(|key| meta.get(*key).and_then(Value::as_str).map(str::to_string))
 }
 
+/// ACP config options are the carrier's runtime report, not a projection of
+/// the requested profile. Only the typed model category can acknowledge a
+/// dispatch identity; labels and other option values are not model evidence.
+pub(super) fn extract_model_config_option(value: &Value) -> Option<String> {
+    value
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .and_then(|options| {
+            options.iter().find_map(|option| {
+                (option.get("category").and_then(Value::as_str) == Some("model"))
+                    .then(|| option.get("currentValue").and_then(Value::as_str))
+                    .flatten()
+            })
+        })
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+}
+
+/// `session/update` carries a complete config-option snapshot only for a
+/// config-option update. `Some(None)` deliberately clears stale model evidence
+/// when that snapshot no longer exposes a concrete model.
+pub(super) fn extract_model_config_update(value: &Value) -> Option<Option<String>> {
+    (value
+        .get("sessionUpdate")
+        .or_else(|| value.get("type"))
+        .or_else(|| value.get("kind"))
+        .and_then(Value::as_str)
+        == Some("config_option_update")
+        && value.get("configOptions").is_some())
+    .then(|| extract_model_config_option(value))
+}
+
 pub(super) fn extract_update_text(value: &Value) -> Option<String> {
     if let Some(content) = value.get("content") {
         if let Some(text) = content.get("text").and_then(Value::as_str) {

@@ -11,8 +11,12 @@ use crate::credential_profile::cleanup_ephemeral_credential_materializations;
 use crate::{MemoryServer, SaveMemoryParams};
 use chrono::Utc;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tachi_dispatch::{
+    model_lineage_id, provider_model_parts, DispatchAcknowledgement, DispatchIdentityEffective,
+    DispatchIdentityReceipt, UNKNOWN_IDENTITY,
+};
 use tokio::process::Command;
 
 pub(super) enum DispatchExecution {
@@ -120,6 +124,30 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             }
         };
         let execute_duration_ms = execute_started_instant.elapsed().as_millis() as u64;
+
+        // CLI subprocesses intentionally never acknowledge a receipt: they
+        // have no protocol field that reports an executed model. Native ACP is
+        // the sole carrier with that evidence surface.
+        if is_native_acp_transport(&harness_transport_for_spawn) {
+            let observed_model = result
+                .as_ref()
+                .ok()
+                .and_then(|outcome| outcome.observed_model.as_deref());
+            if let Err(error) =
+                persist_acp_model_acknowledgement(&workspace_dir_for_spawn, observed_model)
+            {
+                append_trajectory_event(
+                    &traj_path_for_spawn,
+                    json!({
+                        "event": "acp_identity_acknowledgement_persist_failed",
+                        "dispatch_id": d_id,
+                        "agent": agent_for_watchdog,
+                        "error": error,
+                        "timestamp": Utc::now().to_rfc3339(),
+                    }),
+                );
+            }
+        }
 
         // Append subprocess_finished event to trajectory.jsonl
         let mut full_output = match &result {
@@ -543,6 +571,96 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     });
 }
 
+/// Persist a model value reported by the native ACP session into the existing
+/// identity receipt. The carrier reported only the concrete model, so every
+/// other observed identity field deliberately stays `unknown`.
+fn persist_acp_model_acknowledgement(
+    run_dir: &Path,
+    observed_model: Option<&str>,
+) -> Result<bool, String> {
+    let Some(observed_model) = observed_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    else {
+        return Ok(false);
+    };
+    let status_path = run_dir.join("status.json");
+    let mut status = crate::task_lifecycle::read_json_file(&status_path)?
+        .ok_or_else(|| format!("ACP acknowledgement requires {}", status_path.display()))?;
+    let receipt_value = status.get("identity_receipt").cloned().ok_or_else(|| {
+        format!(
+            "ACP acknowledgement requires identity_receipt in {}",
+            status_path.display()
+        )
+    })?;
+    let mut receipt =
+        serde_json::from_value::<DispatchIdentityReceipt>(receipt_value).map_err(|error| {
+            format!(
+                "parse identity_receipt in {}: {error}",
+                status_path.display()
+            )
+        })?;
+
+    let observed = acp_model_only_identity(observed_model);
+    let acknowledgement = if receipt.planned.model.as_deref() == Some(observed_model) {
+        DispatchAcknowledgement::Acknowledged
+    } else {
+        DispatchAcknowledgement::Substituted
+    };
+    if acknowledgement == DispatchAcknowledgement::Substituted
+        && observed.model_lineage_id == UNKNOWN_IDENTITY
+    {
+        return Err(
+            "ACP reported a different model without canonical provider/family lineage evidence"
+                .to_string(),
+        );
+    }
+    receipt
+        .acknowledge(
+            observed,
+            acknowledgement,
+            "native ACP session config option reported the concrete model".to_string(),
+        )
+        .map_err(|error| format!("acknowledge ACP identity: {error}"))?;
+
+    let status_object = status
+        .as_object_mut()
+        .ok_or_else(|| format!("status is not an object: {}", status_path.display()))?;
+    status_object.insert(
+        "identity_receipt".to_string(),
+        serde_json::to_value(receipt)
+            .map_err(|error| format!("serialize ACP identity receipt: {error}"))?,
+    );
+    let body = serde_json::to_vec_pretty(&status)
+        .map_err(|error| format!("serialize {}: {error}", status_path.display()))?;
+    crate::utils::write_owner_only_file_atomic(&status_path, &body)
+        .map_err(|error| format!("persist {}: {error}", status_path.display()))?;
+    Ok(true)
+}
+
+fn acp_model_only_identity(model: &str) -> DispatchIdentityEffective {
+    // These values are derived solely from the concrete model the ACP carrier
+    // reported. They are never copied from the requested/planned receipt, so
+    // `acknowledge` can still reject a cross-lineage substitution.
+    let (concrete_model_release, provider_model, provider_model_version) =
+        provider_model_parts(Some(model));
+    DispatchIdentityEffective {
+        profile: None,
+        model: Some(model.to_string()),
+        backend: UNKNOWN_IDENTITY.to_string(),
+        harness: UNKNOWN_IDENTITY.to_string(),
+        model_lineage_id: model_lineage_id(Some(model), UNKNOWN_IDENTITY),
+        concrete_model_release,
+        provider_model,
+        provider_model_version,
+        role: UNKNOWN_IDENTITY.to_string(),
+        seat: UNKNOWN_IDENTITY.to_string(),
+        transport: UNKNOWN_IDENTITY.to_string(),
+        adapter_version: UNKNOWN_IDENTITY.to_string(),
+        carrier_version: UNKNOWN_IDENTITY.to_string(),
+    }
+}
+
 fn watchdog_poll_config() -> (usize, Duration) {
     let default_polls = if cfg!(test) { 1 } else { 10 };
     let default_poll_ms = if cfg!(test) { 10 } else { 300 };
@@ -565,4 +683,134 @@ fn bounded_env_u64(name: &str, default: u64, max: u64) -> u64 {
         .and_then(|raw| raw.parse::<u64>().ok())
         .unwrap_or(default)
         .clamp(1, max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tachi_dispatch::{
+        DispatchAcknowledgement, DispatchIdentityReceipt, DispatchIdentityRequest, UNKNOWN_IDENTITY,
+    };
+
+    fn write_planned_receipt(run_dir: &Path, planned_model: &str) {
+        let receipt = DispatchIdentityReceipt::planned(
+            DispatchIdentityRequest {
+                profile: None,
+                model: Some(planned_model.to_string()),
+                agent: Some("codex".to_string()),
+                harness: Some("acp".to_string()),
+            },
+            acp_model_only_identity(planned_model),
+            "test planned identity".to_string(),
+            false,
+        );
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::to_vec_pretty(&json!({ "identity_receipt": receipt }))
+                .expect("serialize receipt"),
+        )
+        .expect("write status");
+    }
+
+    fn read_receipt(run_dir: &Path) -> DispatchIdentityReceipt {
+        let status: Value = serde_json::from_slice(
+            &std::fs::read(run_dir.join("status.json")).expect("read status"),
+        )
+        .expect("parse status");
+        serde_json::from_value(status["identity_receipt"].clone()).expect("parse receipt")
+    }
+
+    #[test]
+    fn acp_matching_model_acknowledges_without_fabricating_identity_fields() {
+        let temp = tempfile::tempdir().expect("temp run dir");
+        write_planned_receipt(temp.path(), "openai/gpt-5.2");
+
+        assert!(
+            persist_acp_model_acknowledgement(temp.path(), Some("openai/gpt-5.2"))
+                .expect("persist acknowledgement"),
+            "a concrete ACP model must acknowledge the frozen receipt"
+        );
+
+        let receipt = read_receipt(temp.path());
+        assert_eq!(
+            receipt.observed.acknowledgement,
+            DispatchAcknowledgement::Acknowledged
+        );
+        assert!(!receipt.observed.mismatch);
+        assert_eq!(
+            receipt.observed.effective.model.as_deref(),
+            Some("openai/gpt-5.2")
+        );
+        assert_eq!(receipt.observed.effective.backend, UNKNOWN_IDENTITY);
+        assert_eq!(receipt.observed.effective.model_lineage_id, "openai/gpt");
+    }
+
+    #[test]
+    fn acp_different_model_is_substituted_with_only_the_reported_model() {
+        let temp = tempfile::tempdir().expect("temp run dir");
+        write_planned_receipt(temp.path(), "openai/gpt-5.1");
+
+        assert!(
+            persist_acp_model_acknowledgement(temp.path(), Some("openai/gpt-5.2"))
+                .expect("persist acknowledgement"),
+            "a concrete ACP substitution must be persisted"
+        );
+
+        let receipt = read_receipt(temp.path());
+        assert_eq!(
+            receipt.observed.acknowledgement,
+            DispatchAcknowledgement::Substituted
+        );
+        assert!(receipt.observed.mismatch);
+        assert_eq!(
+            receipt.observed.effective.model.as_deref(),
+            Some("openai/gpt-5.2")
+        );
+        assert_eq!(receipt.observed.effective.backend, UNKNOWN_IDENTITY);
+        assert_eq!(receipt.observed.effective.model_lineage_id, "openai/gpt");
+    }
+
+    #[test]
+    fn acp_cross_lineage_substitution_is_not_persisted_without_authorization() {
+        let temp = tempfile::tempdir().expect("temp run dir");
+        write_planned_receipt(temp.path(), "zhipuai-coding-plan/glm-5.2");
+
+        let error = persist_acp_model_acknowledgement(temp.path(), Some("openai/gpt-5.2"))
+            .expect_err("cross-lineage ACP model must be rejected by the frozen receipt");
+        assert!(error.contains("cross-lineage"), "error={error}");
+        assert_eq!(
+            read_receipt(temp.path()).observed.acknowledgement,
+            DispatchAcknowledgement::Unconfirmed,
+            "a rejected acknowledgement must leave the persisted receipt unchanged"
+        );
+    }
+
+    #[test]
+    fn acp_unqualified_substitution_is_not_persisted_without_lineage_evidence() {
+        let temp = tempfile::tempdir().expect("temp run dir");
+        write_planned_receipt(temp.path(), "zhipuai-coding-plan/glm-5.2");
+
+        let error = persist_acp_model_acknowledgement(temp.path(), Some("gpt-5.2"))
+            .expect_err("a different unqualified ACP model has no lineage evidence");
+        assert!(error.contains("canonical provider/family"), "error={error}");
+        assert_eq!(
+            read_receipt(temp.path()).observed.acknowledgement,
+            DispatchAcknowledgement::Unconfirmed,
+            "a rejected acknowledgement must leave the persisted receipt unchanged"
+        );
+    }
+
+    #[test]
+    fn missing_acp_model_leaves_the_receipt_unconfirmed() {
+        let temp = tempfile::tempdir().expect("temp run dir");
+        write_planned_receipt(temp.path(), "openai/gpt-5.2");
+
+        assert!(!persist_acp_model_acknowledgement(temp.path(), None)
+            .expect("no observation is a successful no-op"));
+
+        assert_eq!(
+            read_receipt(temp.path()).observed.acknowledgement,
+            DispatchAcknowledgement::Unconfirmed
+        );
+    }
 }

@@ -8,9 +8,10 @@ use tokio::process::{ChildStdin, ChildStdout};
 use super::super::dispatch_v2::append_trajectory_event;
 use super::permission::{native_permission_decision, AcpPermissionDecision};
 use super::protocol::{
-    compact_json, ensure_session_id, extract_agent_session_id, extract_session_id,
-    extract_text_recursive, extract_update_text, format_json_rpc_error, is_json_rpc_notification,
-    is_json_rpc_request, is_session_update, response_id_matches,
+    compact_json, ensure_session_id, extract_agent_session_id, extract_model_config_option,
+    extract_model_config_update, extract_session_id, extract_text_recursive, extract_update_text,
+    format_json_rpc_error, is_json_rpc_notification, is_json_rpc_request, is_session_update,
+    response_id_matches,
 };
 use super::session::read_stored_acp_session_id;
 use super::{
@@ -34,6 +35,7 @@ impl NativeAcpConnection {
             raw_messages: Vec::new(),
             final_text_parts: Vec::new(),
             mapped_events: 0,
+            observed_model: None,
             request_index: 0,
             permission_label: spec.permission_label.clone(),
             dispatch_id: dispatch_id.to_string(),
@@ -108,6 +110,14 @@ impl NativeAcpConnection {
                 compact_json(&session_result)
             )
         })?;
+        // A session result with configOptions is a complete current snapshot;
+        // an absent configOptions field is not. In particular, session/load
+        // may send a config_option_update before its response, and that
+        // interleaved carrier evidence must survive a response that simply
+        // omits the optional config surface.
+        if session_result.get("configOptions").is_some() {
+            self.observed_model = extract_model_config_option(&session_result);
+        }
         let agent_session_id = extract_agent_session_id(&session_result);
         let prompt_result = self
             .request(
@@ -138,6 +148,7 @@ impl NativeAcpConnection {
             mapped_events: self.mapped_events,
             prompt_result,
             used_existing_session,
+            observed_model: self.observed_model.clone(),
         })
     }
 
@@ -331,6 +342,12 @@ impl NativeAcpConnection {
             .unwrap_or("session/update");
         let text = extract_update_text(update).or_else(|| extract_update_text(params));
         let lower = kind.to_ascii_lowercase();
+        if let Some(model) = extract_model_config_update(update) {
+            // ACP sends the complete current option list for this update. A
+            // missing model category means the carrier no longer gives us
+            // model evidence, so do not retain an older value as observed.
+            self.observed_model = model;
+        }
         let event = if lower.contains("message") || text.is_some() {
             "acp_native_message"
         } else if lower.contains("tool") {

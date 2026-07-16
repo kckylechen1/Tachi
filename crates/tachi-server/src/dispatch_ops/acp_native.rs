@@ -56,6 +56,7 @@ struct NativeAcpPromptOutcome {
     mapped_events: usize,
     prompt_result: Value,
     used_existing_session: bool,
+    observed_model: Option<String>,
 }
 
 struct NativeAcpConnection {
@@ -64,6 +65,7 @@ struct NativeAcpConnection {
     raw_messages: Vec<Value>,
     final_text_parts: Vec<String>,
     mapped_events: usize,
+    observed_model: Option<String>,
     request_index: u64,
     permission_label: String,
     dispatch_id: String,
