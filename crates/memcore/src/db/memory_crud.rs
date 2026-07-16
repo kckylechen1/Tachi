@@ -21,6 +21,7 @@ pub use read::{
     list_by_path, list_by_path_recent, list_wiki_duplicate_candidates,
 };
 pub(crate) use search::search_fts_raw_match;
+pub(crate) use search::search_symbolic_candidates_with_relevance;
 pub use search::{search_fts, search_symbolic_candidates, search_vec};
 pub use update::{
     record_enrichment_failure, release_event_claim, set_keyword_enrichment_pending_if_unset,

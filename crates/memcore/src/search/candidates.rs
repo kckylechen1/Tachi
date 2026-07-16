@@ -5,13 +5,13 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use crate::{
-    db::{search_symbolic_candidates, search_vec},
+    db::{search_symbolic_candidates_with_relevance, search_vec},
     error::MemoryError,
 };
 
 use super::{
-    expansion::search_fts_with_expansion_config, recall_config, CandidatePhaseReceipt,
-    ChannelPhaseReceipt, SearchOptions,
+    expansion::{search_fts_with_expansion_config, symbolic_query_with_expansion},
+    recall_config, CandidatePhaseReceipt, ChannelPhaseReceipt, SearchOptions,
 };
 
 const SYMBOLIC_CANDIDATE_MULTIPLIER: usize = 10;
@@ -90,9 +90,11 @@ pub(super) fn collect_candidates(
     // (`clean-cli`, `dry-run`, `RECALL_PROBE_*`). Pull a bounded lexical set so
     // symbolic scoring can add candidates instead of merely re-ranking FTS/vec.
     let symbolic_start = sample.then(Instant::now);
-    let symbolic_candidate_entries = search_symbolic_candidates(
+    let symbolic_relevance_query = symbolic_query_with_expansion(query);
+    let symbolic_candidate_entries = search_symbolic_candidates_with_relevance(
         conn,
         query,
+        &symbolic_relevance_query,
         n.saturating_mul(SYMBOLIC_CANDIDATE_MULTIPLIER)
             .max(opts.top_k),
         opts.include_archived,

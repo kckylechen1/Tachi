@@ -132,3 +132,108 @@ fn symbolic_pre_cap_relevance_recovers_older_stronger_symbolic_only_target() {
         "the returned target covers every query token"
     );
 }
+
+/// The pre-cap scorer must use the same expansion-aware symbolic query as the
+/// final ranker. Raw `mcp` ties the two rows; the final scorer expands it to
+/// model/context/protocol, making only the older target fully relevant.
+#[test]
+fn symbolic_pre_cap_relevance_uses_the_rankers_expanded_query() {
+    let mut conn = setup();
+
+    let mut target = memory_entry(
+        "expanded-symbolic-target",
+        "mcp model context protocol",
+        &[],
+    );
+    target.timestamp = "2020-01-01T00:00:00Z".to_string();
+    insert_entry(&mut conn, target);
+
+    for idx in 0..201 {
+        let mut newer_partial = memory_entry(
+            &format!("expanded-symbolic-partial-{idx:03}"),
+            "mcp only partial distractor",
+            &[],
+        );
+        newer_partial.timestamp = format!(
+            "2027-{:02}-{:02}T{:02}:00:00Z",
+            1 + idx / (24 * 28),
+            1 + (idx / 24) % 28,
+            idx % 24,
+        );
+        insert_entry(&mut conn, newer_partial);
+    }
+
+    let opts = SearchOptions {
+        candidates_per_channel: 0,
+        top_k: 1,
+        weights: HybridWeights {
+            semantic: 0.0,
+            fts: 0.0,
+            symbolic: 1.0,
+            decay: 0.0,
+            use_rrf: false,
+        },
+        record_access: false,
+        mmr_threshold: None,
+        ..Default::default()
+    };
+    let results = hybrid_search(&conn, "mcp", &opts).expect("symbolic search succeeds");
+
+    assert_eq!(
+        results.first().map(|result| result.entry.id.as_str()),
+        Some("expanded-symbolic-target"),
+        "pre-cap eligibility must use the final ranker's expanded query, not raw `mcp` alone"
+    );
+}
+
+/// Timestamp only breaks true symbolic-score ties. It must compare parsed
+/// instants, rather than lexically ordering mixed RFC3339 representations.
+#[test]
+fn symbolic_pre_cap_timestamp_tie_break_uses_real_instants() {
+    let mut conn = setup();
+    let mut older = memory_entry(
+        "timestamp-tie-older",
+        "controlplane older isolated context",
+        &[],
+    );
+    older.timestamp = "2026-01-01T00:00:00Z".to_string();
+    insert_entry(&mut conn, older);
+
+    let mut newer = memory_entry(
+        "timestamp-tie-newer",
+        "controlplane newer distinct context",
+        &[],
+    );
+    newer.timestamp = "2026-01-01T00:00:00.500Z".to_string();
+    insert_entry(&mut conn, newer);
+
+    let opts = SearchOptions {
+        candidates_per_channel: 0,
+        top_k: 1,
+        weights: HybridWeights {
+            semantic: 0.0,
+            fts: 0.0,
+            symbolic: 1.0,
+            decay: 0.0,
+            use_rrf: false,
+        },
+        record_access: false,
+        mmr_threshold: None,
+        ..Default::default()
+    };
+    let symbolic_candidates =
+        crate::db::search_symbolic_candidates(&conn, "controlplane", 1, false, false, None, None)
+            .expect("symbolic candidate query succeeds");
+    assert_eq!(
+        symbolic_candidates.first().map(|entry| entry.id.as_str()),
+        Some("timestamp-tie-newer"),
+        "the pre-cap SQL tie-break itself must select the newer instant"
+    );
+    let results = hybrid_search(&conn, "controlplane", &opts).expect("symbolic search succeeds");
+
+    assert_eq!(
+        results.first().map(|result| result.entry.id.as_str()),
+        Some("timestamp-tie-newer"),
+        "fractional-second RFC3339 timestamps must be ordered by instant, not raw text"
+    );
+}
