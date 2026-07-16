@@ -142,6 +142,86 @@ fn fts_or_fallback_cjk_phrase_recovers_when_ascii_term_is_missing() {
 }
 
 #[test]
+fn fts_or_fallback_pure_cjk_recovers_when_primary_fts_misses() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "pure-cjk-target",
+        "中文检索回退诊断记录",
+        &["中文", "检索", "回退"],
+    );
+    // These decoys ensure the fallback is genuinely an OR over CJK tokenizer
+    // units, not an accidental exact-phrase match for the labeled target.
+    insert(
+        &mut conn,
+        "pure-cjk-common-zh-decoy",
+        "中文例行告警记录",
+        &["中文"],
+    );
+    insert(
+        &mut conn,
+        "pure-cjk-common-search-decoy",
+        "检索例行告警记录",
+        &["检索"],
+    );
+
+    let query = "中文检索失配";
+    let primary = search_fts(&conn, query, 10, false, false, None, None).unwrap();
+    assert!(
+        primary.is_empty(),
+        "the primary simple_query path must miss because no row contains every CJK unit"
+    );
+
+    let (scores, groups) = search_fts_with_expansion_config(
+        &conn,
+        query,
+        10,
+        false,
+        false,
+        None,
+        None,
+        &RecallConfig::default(),
+        true,
+    )
+    .unwrap();
+    let fallbacks: Vec<&FtsExpansionGroupReceipt> = groups
+        .as_ref()
+        .expect("sampled search records FTS groups")
+        .iter()
+        .filter(|group| group.is_fallback)
+        .collect();
+    assert_eq!(
+        fallbacks.len(),
+        1,
+        "a pure-CJK primary miss must execute exactly one bounded OR fallback"
+    );
+    assert!(
+        fallbacks[0].hit_count > 0,
+        "the CJK fallback must recover rows, got {fallbacks:?}"
+    );
+    assert!(
+        scores
+            .get("pure-cjk-target")
+            .is_some_and(|score| *score > 0.0),
+        "the labeled target must receive a positive FTS fallback score"
+    );
+
+    let disabled = RecallConfig {
+        or_fallback_fts_score_factor: 0.0,
+        ..RecallConfig::default()
+    };
+    let disabled_scores = search_fts_with_expansion_config(
+        &conn, query, 10, false, false, None, None, &disabled, false,
+    )
+    .unwrap()
+    .0;
+    assert!(
+        disabled_scores.is_empty(),
+        "disabling the fallback must preserve the conjunctive primary miss"
+    );
+}
+
+#[test]
 fn hybrid_search_treats_unbalanced_parentheses_as_literal_noise() {
     let mut conn = setup();
     insert(

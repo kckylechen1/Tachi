@@ -120,7 +120,6 @@ fn fts_or_fallback_match_query(query: &str, max_terms: usize) -> Option<String> 
     let max_terms = max_terms.max(1);
     let mut terms = Vec::new();
     let mut ascii = String::new();
-    let mut cjk = String::new();
 
     let flush_ascii = |terms: &mut Vec<String>, ascii: &mut String| {
         if ascii.len() >= 2 {
@@ -128,19 +127,9 @@ fn fts_or_fallback_match_query(query: &str, max_terms: usize) -> Option<String> 
         }
         ascii.clear();
     };
-    let flush_cjk = |terms: &mut Vec<String>, cjk: &mut String| {
-        if !cjk.is_empty() {
-            let phrase = format!("\"{cjk}\"");
-            if !terms.iter().any(|existing| existing == &phrase) {
-                terms.push(phrase);
-            }
-        }
-        cjk.clear();
-    };
 
     for ch in query.chars() {
         if ch.is_ascii_alphanumeric() {
-            flush_cjk(&mut terms, &mut cjk);
             if terms.len() >= max_terms {
                 break;
             }
@@ -150,10 +139,13 @@ fn fts_or_fallback_match_query(query: &str, max_terms: usize) -> Option<String> 
             if terms.len() >= max_terms {
                 break;
             }
-            cjk.push(ch);
+            // `simple` tokenizes each CJK code point independently, so a
+            // pure-Han fallback needs multiple quoted units rather than one
+            // phrase. Keep duplicate units: they still count toward the
+            // supported-query threshold and preserve source order.
+            terms.push(format!("\"{ch}\""));
         } else {
             flush_ascii(&mut terms, &mut ascii);
-            flush_cjk(&mut terms, &mut cjk);
             if terms.len() >= max_terms {
                 break;
             }
@@ -161,9 +153,6 @@ fn fts_or_fallback_match_query(query: &str, max_terms: usize) -> Option<String> 
     }
     if terms.len() < max_terms {
         flush_ascii(&mut terms, &mut ascii);
-    }
-    if terms.len() < max_terms {
-        flush_cjk(&mut terms, &mut cjk);
     }
     terms.truncate(max_terms);
     if terms.len() < 2 {
