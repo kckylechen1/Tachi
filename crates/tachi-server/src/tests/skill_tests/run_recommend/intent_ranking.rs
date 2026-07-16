@@ -241,3 +241,73 @@ async fn recommend_skill_uses_active_patterns_as_ranking_context() {
         "expected active pattern reason in {json}"
     );
 }
+
+#[tokio::test]
+async fn recommend_skill_host_bonus_ignores_definition_paths() {
+    let server = make_server();
+    let mut alpha = make_skill_capability(
+        "skill:alpha",
+        "host affinity fixture",
+        "Fixture isolates host affinity from filesystem paths.",
+        "listed",
+    );
+    let mut zeta = make_skill_capability(
+        "skill:zeta",
+        "host affinity fixture",
+        "Fixture isolates host affinity from filesystem paths.",
+        "listed",
+    );
+    alpha.definition = json!({
+        "content": "host affinity fixture",
+        "resolved_path": "/work/sigil/skills/fixture/SKILL.md"
+    })
+    .to_string();
+    zeta.definition = json!({
+        "content": "host affinity fixture",
+        "resolved_path": "/work/codex-issue/skills/fixture/SKILL.md"
+    })
+    .to_string();
+
+    server
+        .with_global_store(|store| {
+            store.hub_register(&alpha).map_err(|e| e.to_string())?;
+            store.hub_register(&zeta).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("register path-variant skills");
+
+    let result = server
+        .recommend_skill(Parameters(RecommendSkillParams {
+            query: "host affinity fixture".to_string(),
+            host: Some("codex".to_string()),
+            limit: 10,
+            include_uncallable: false,
+        }))
+        .await
+        .expect("recommend_skill should succeed");
+    let json: Value = serde_json::from_str(&result).expect("json");
+    let fixtures = json["skills"]
+        .as_array()
+        .expect("skills array")
+        .iter()
+        .filter(|skill| matches!(skill["id"].as_str(), Some("skill:alpha" | "skill:zeta")))
+        .collect::<Vec<_>>();
+
+    assert_eq!(fixtures.len(), 2, "both path-variant skills must rank");
+    assert_eq!(
+        fixtures[0]["id"],
+        json!("skill:alpha"),
+        "definition paths must not give skill:zeta a codex host bonus"
+    );
+    assert_eq!(
+        fixtures[0]["score"], fixtures[1]["score"],
+        "the absolute checkout path is not host affinity"
+    );
+    assert!(
+        fixtures
+            .iter()
+            .flat_map(|skill| skill["reasons"].as_array().into_iter().flatten())
+            .all(|reason| reason.as_str() != Some("mentions host 'codex'")),
+        "a host bonus must come from stable capability metadata, never an implementation path"
+    );
+}

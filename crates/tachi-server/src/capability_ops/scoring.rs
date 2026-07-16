@@ -101,6 +101,33 @@ pub(super) fn token_overlap_ratio(query_tokens: &[String], candidate_tokens: &[S
     intersection as f64 / union as f64
 }
 
+/// Runtime-resolved filesystem locations identify where a capability was
+/// loaded, not what it can do. They must not alter recommendation scores.
+fn scoring_definition(definition: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(definition) else {
+        return definition.to_string();
+    };
+    strip_resolved_paths(&mut value);
+    value.to_string()
+}
+
+fn strip_resolved_paths(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            fields.remove("resolved_path");
+            for child in fields.values_mut() {
+                strip_resolved_paths(child);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                strip_resolved_paths(child);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn tokens_from_parts(parts: &[&str]) -> Vec<String> {
     let mut tokens = parts
         .iter()
@@ -193,11 +220,12 @@ fn pattern_signal_bonus(
     if pattern_signals.is_empty() {
         return (0.0, Vec::new());
     }
+    let definition = scoring_definition(&cap.definition);
     let cap_tokens = bridge_tokens_from_parts(&[
         cap.id.as_str(),
         cap.name.as_str(),
         cap.description.as_str(),
-        cap.definition.as_str(),
+        definition.as_str(),
     ]);
     if cap_tokens.is_empty() {
         return (0.0, Vec::new());
@@ -223,6 +251,72 @@ fn pattern_signal_bonus(
         ));
     }
     (round3(bonus.min(3.0)), refs)
+}
+
+#[cfg(test)]
+mod pattern_signal_tests {
+    use super::*;
+
+    fn skill(id: &str, definition: Value) -> HubCapability {
+        HubCapability {
+            id: id.to_string(),
+            cap_type: "skill".to_string(),
+            name: "neutral".to_string(),
+            version: 1,
+            description: "neutral description".to_string(),
+            definition: definition.to_string(),
+            enabled: true,
+            review_status: "approved".to_string(),
+            health_status: "healthy".to_string(),
+            last_error: None,
+            last_success_at: None,
+            last_failure_at: None,
+            fail_streak: 0,
+            active_version: None,
+            exposure_mode: "direct".to_string(),
+            uses: 0,
+            successes: 0,
+            failures: 0,
+            avg_rating: 0.0,
+            last_used: None,
+            created_at: "2026-07-16T00:00:00Z".to_string(),
+            updated_at: "2026-07-16T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn pattern_bonus_ignores_resolved_path_tokens() {
+        let alpha = skill(
+            "skill:alpha",
+            serde_json::json!({
+                "content": "neutral",
+                "resolved_path": "/work/sigil/skills/fixture/SKILL.md"
+            }),
+        );
+        let zeta = skill(
+            "skill:zeta",
+            serde_json::json!({
+                "content": "neutral",
+                "resolved_path": "/work/codex-issue/skills/fixture/SKILL.md"
+            }),
+        );
+        let signals = [PatternSignal {
+            pattern_ref: serde_json::json!({"projection_key": "path-bridge"}),
+            projection_key: "path-bridge".to_string(),
+            tokens: vec!["query".to_string(), "codex".to_string()],
+        }];
+        let query_tokens = vec!["query".to_string()];
+        let bonus = |cap: &HubCapability| {
+            let mut reasons = Vec::new();
+            pattern_signal_bonus(cap, &query_tokens, &signals, &mut reasons).0
+        };
+
+        assert_eq!(
+            bonus(&alpha),
+            bonus(&zeta),
+            "an active pattern must not bridge through a runtime-resolved path"
+        );
+    }
 }
 
 fn telemetry_bonus(cap: &HubCapability, reasons: &mut Vec<String>) -> f64 {
@@ -264,7 +358,7 @@ fn capability_score(
     let id = cap.id.to_ascii_lowercase();
     let name = cap.name.to_ascii_lowercase();
     let desc = cap.description.to_ascii_lowercase();
-    let definition = cap.definition.to_ascii_lowercase();
+    let definition = scoring_definition(&cap.definition).to_ascii_lowercase();
     let id_tokens = tokenize_query(&id);
     let name_tokens = tokenize_query(&name);
     let desc_tokens = tokenize_query(&desc);
@@ -337,11 +431,7 @@ fn capability_score(
     }
 
     if let Some(host) = host {
-        if id.contains(host)
-            || name.contains(host)
-            || desc.contains(host)
-            || definition.contains(host)
-        {
+        if id.contains(host) || name.contains(host) || desc.contains(host) {
             score += 1.2;
             reasons.push(format!("mentions host '{}'", host));
         }
