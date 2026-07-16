@@ -231,6 +231,55 @@ fn fts_or_fallback_recovers_pure_han_query_with_tokenizer_units() {
     );
 }
 
+/// A repeated-only Han query is already a primary FTS hit: `simple_query`
+/// tokenizes both characters to the same term, so it never enters fallback.
+#[test]
+fn repeated_han_units_stay_on_the_primary_fts_path() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "repeated-han-target",
+        "哈运维诊断记录",
+        &["哈", "诊断"],
+    );
+
+    let query = "哈哈";
+    let primary = search_fts(&conn, query, 10, false, false, None, None).unwrap();
+    assert!(
+        primary.contains_key("repeated-han-target"),
+        "duplicate Han query units match the same primary FTS term"
+    );
+
+    let opts = SearchOptions {
+        top_k: 2,
+        candidates_per_channel: 10,
+        weights: HybridWeights {
+            semantic: 0.0,
+            fts: 1.0,
+            symbolic: 0.0,
+            decay: 0.0,
+            use_rrf: false,
+        },
+        record_access: false,
+        mmr_threshold: None,
+        ..Default::default()
+    };
+    let (results, receipt) = hybrid_search_with_receipt(&conn, query, &opts).unwrap();
+    let candidates = receipt.candidates.expect("candidate phase ran");
+    let fallback_groups: Vec<&FtsExpansionGroupReceipt> = candidates
+        .fts_groups
+        .iter()
+        .filter(|group| group.is_fallback)
+        .collect();
+    assert!(
+        fallback_groups.is_empty(),
+        "a primary hit must not enter the OR fallback path"
+    );
+    assert!(results
+        .iter()
+        .any(|result| result.entry.id == "repeated-han-target" && result.score.fts > 0.0));
+}
+
 #[test]
 fn hybrid_search_treats_unbalanced_parentheses_as_literal_noise() {
     let mut conn = setup();
