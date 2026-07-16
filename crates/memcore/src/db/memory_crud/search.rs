@@ -1,3 +1,4 @@
+use rusqlite::functions::FunctionFlags;
 use rusqlite::types::Value;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
@@ -187,8 +188,20 @@ fn search_fts_match(
         .collect())
 }
 
-/// Pull a small lexical candidate set for exact IDs, path slugs, keywords, and
-/// short technical terms that FTS tokenization may miss.
+/// Pull a bounded lexical candidate set for exact IDs, path slugs, keywords,
+/// and short technical terms that FTS tokenization may miss.
+///
+/// The SQL predicate finds the symbolic match set, but it MUST NOT apply the
+/// candidate cap by recency. A newer partial match is not more relevant than
+/// an older row that covers more of the query. Score every matching row first,
+/// then keep the best `limit`; timestamp is only the stable tie-breaker.
+///
+/// The caller provides the final ranker's expansion-aware query separately
+/// from the raw match query. Its token coverage is evaluated in SQL, so the
+/// database can still enforce the cap without materializing or scoring an
+/// unbounded result set in Rust. Replacing this with `ORDER BY timestamp DESC
+/// LIMIT` makes an older strong symbolic-only result structurally unable to
+/// compete at all (tachi#1144).
 pub fn search_symbolic_candidates(
     conn: &Connection,
     query: &str,
@@ -198,29 +211,39 @@ pub fn search_symbolic_candidates(
     path_prefix: Option<&str>,
     as_of: Option<&str>,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
-    let mut terms: Vec<String> = crate::scorer::tokenize(query)
-        .into_iter()
-        .filter(|term| term.len() >= 3)
-        .collect();
-    terms.extend(
-        query
-            .split_whitespace()
-            .map(|term| {
-                term.trim_matches(|c: char| {
-                    !c.is_alphanumeric() && !matches!(c, '-' | '_' | '/' | '.')
-                })
-                .to_ascii_lowercase()
-            })
-            .filter(|term| term.len() >= 3),
-    );
-    terms.sort();
-    terms.dedup();
-    terms.sort_by_key(|term| std::cmp::Reverse(term.len()));
-    terms.truncate(12);
+    search_symbolic_candidates_with_relevance(
+        conn,
+        query,
+        query,
+        limit,
+        include_archived,
+        include_superseded,
+        path_prefix,
+        as_of,
+    )
+}
+
+/// In-crate variant used by hybrid search, where the final ranker's expanded
+/// symbolic query must decide pre-cap eligibility. The public helper above
+/// preserves its existing raw-query API for other consumers.
+#[allow(clippy::too_many_arguments)] // matches the established raw-query helper plus relevance query
+pub(crate) fn search_symbolic_candidates_with_relevance(
+    conn: &Connection,
+    query: &str,
+    relevance_query: &str,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_prefix: Option<&str>,
+    as_of: Option<&str>,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let terms = symbolic_terms(query);
 
     if terms.is_empty() && path_prefix.is_none() {
         return Ok(Vec::new());
     }
+
+    register_symbolic_score_function(conn)?;
 
     let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
@@ -246,24 +269,26 @@ pub fn search_symbolic_candidates(
             let pattern = format!("%{}%", escape_like_pattern(term));
             params.push(pattern.into());
             let idx = params.len();
-            term_clauses.push(format!(
-                "(id LIKE ?{idx} ESCAPE '\\'
-                  OR path LIKE ?{idx} ESCAPE '\\'
-                  OR summary LIKE ?{idx} ESCAPE '\\'
-                  OR text LIKE ?{idx} ESCAPE '\\'
-                  OR keywords LIKE ?{idx} ESCAPE '\\'
-                  OR entities LIKE ?{idx} ESCAPE '\\'
-                  OR topic LIKE ?{idx} ESCAPE '\\')"
-            ));
+            term_clauses.push(symbolic_term_match_clause(idx));
         }
         sql.push_str(" AND (");
         sql.push_str(&term_clauses.join(" OR "));
         sql.push(')');
     }
 
+    // The pre-cap score is the final ranker's exact token scorer, not a SQL
+    // LIKE-count approximation. The scalar function keeps ordering and LIMIT
+    // in SQLite while preventing substring coverage from changing eligibility.
+    params.push(relevance_query.to_owned().into());
+    let relevance_query_idx = params.len();
     params.push((limit.max(1) as i64).into());
     let limit_idx = params.len();
-    sql.push_str(&format!(" ORDER BY timestamp DESC LIMIT ?{limit_idx}"));
+    // `julianday` compares parsed instants, not the raw TEXT representation:
+    // mixed RFC3339 precision/offset rows otherwise mis-order an equal-score
+    // tie (tachi#718 CP2, tachi#1144).
+    sql.push_str(&format!(
+        " ORDER BY tachi_symbolic_score(?{relevance_query_idx}, id, path, topic, summary, text, keywords, entities) DESC, julianday(timestamp) DESC, id ASC LIMIT ?{limit_idx}"
+    ));
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), row_to_entry)?;
@@ -272,6 +297,69 @@ pub fn search_symbolic_candidates(
         out.push(r?);
     }
     Ok(out)
+}
+
+fn register_symbolic_score_function(conn: &Connection) -> Result<(), MemoryError> {
+    conn.create_scalar_function(
+        "tachi_symbolic_score",
+        8,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| {
+            let query = context.get::<String>(0)?;
+            let id = context.get::<String>(1)?;
+            let path = context.get::<String>(2)?;
+            let topic = context.get::<String>(3)?;
+            let summary = context.get::<String>(4)?;
+            let text = context.get::<String>(5)?;
+            // `row_to_entry` treats a legacy NULL JSON column as an empty
+            // array. Mirror that fallback so candidate selection cannot fail
+            // before final ranking sees the same row.
+            let keywords = context.get::<Option<String>>(6)?.unwrap_or_default();
+            let entities = context.get::<Option<String>>(7)?.unwrap_or_default();
+            Ok(crate::scorer::symbolic_score_stored_entry(
+                &query,
+                &[&id, &path, &topic, &summary, &text],
+                &keywords,
+                &entities,
+            ))
+        },
+    )?;
+    Ok(())
+}
+
+fn symbolic_terms(query: &str) -> Vec<String> {
+    let mut terms: Vec<String> = crate::scorer::tokenize(query)
+        .into_iter()
+        .filter(|term| term.len() >= 3)
+        .collect();
+    terms.extend(
+        query
+            .split_whitespace()
+            .map(|term| {
+                term.trim_matches(|c: char| {
+                    !c.is_alphanumeric() && !matches!(c, '-' | '_' | '/' | '.')
+                })
+                .to_ascii_lowercase()
+            })
+            .filter(|term| term.len() >= 3),
+    );
+    terms.sort();
+    terms.dedup();
+    terms.sort_by_key(|term| std::cmp::Reverse(term.len()));
+    terms.truncate(12);
+    terms
+}
+
+fn symbolic_term_match_clause(parameter_index: usize) -> String {
+    format!(
+        "(id LIKE ?{parameter_index} ESCAPE '\\'
+          OR path LIKE ?{parameter_index} ESCAPE '\\'
+          OR summary LIKE ?{parameter_index} ESCAPE '\\'
+          OR text LIKE ?{parameter_index} ESCAPE '\\'
+          OR keywords LIKE ?{parameter_index} ESCAPE '\\'
+          OR entities LIKE ?{parameter_index} ESCAPE '\\'
+          OR topic LIKE ?{parameter_index} ESCAPE '\\')"
+    )
 }
 
 fn escape_like_pattern(value: &str) -> String {

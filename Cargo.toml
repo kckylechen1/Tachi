@@ -62,7 +62,7 @@ debug = "line-tables-only"
 #   - CVE-2025-29087 / -3277: concat_ws() integer overflow (fixed 3.49.1)
 #   - CVE-2025-29088: lookaside allocator DoS via sqlite3_db_config (fixed 3.49.1)
 # memcore asserts sqlite_version() >= 3.50.3 at test time.
-rusqlite = { version = "0.38", features = ["backup", "bundled", "vtab"] }
+rusqlite = { version = "0.38", features = ["backup", "bundled", "vtab", "functions"] }
 sqlite-vec = "0.1.7-alpha.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
