@@ -140,6 +140,17 @@ fn memory_text_count(db_path: &Path, text: &str) -> i64 {
         .expect("count memories")
 }
 
+fn memory_access_count(db_path: &Path, id: &str) -> i64 {
+    rusqlite::Connection::open(db_path)
+        .expect("open db")
+        .query_row(
+            "SELECT access_count FROM memories WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .expect("read access count")
+}
+
 fn memory_id_count(db_path: &Path, id: &str) -> i64 {
     rusqlite::Connection::open(db_path)
         .expect("open db")
@@ -754,6 +765,9 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
     let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
     let _sigil_home = EnvRestore::remove("SIGIL_HOME");
     let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+    // This row-shape/forwarding contract must not inherit an ambient provider
+    // key and fan out 32 provider-health writes against the fixture DB.
+    let _embedding_disabled = EnvRestore::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "1");
     seed_project_db(&tachi_home, &project);
 
     let rt = test_runtime();
@@ -844,6 +858,11 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
 
     ct.cancel();
     rt.block_on(daemon_task).expect("daemon task");
+    assert_eq!(
+        memory_access_count(&global, "global-proxy-row-shape-e2e"),
+        32,
+        "the isolated forwarding test must retain per-search access recording"
+    );
 }
 
 #[test]
