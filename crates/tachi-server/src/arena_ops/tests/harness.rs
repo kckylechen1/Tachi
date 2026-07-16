@@ -1,6 +1,10 @@
 use super::*;
 use crate::test_support::EnvRestore;
 
+const TERMINAL_DISPATCH_STATUS_ATTEMPTS: usize = 200;
+const DISPATCH_STATUS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+const TEST_WATCHDOG_POLL_MILLIS: &str = "250";
+
 // Same worst-case ceiling as before (40 * 100ms = 200 * 20ms = 4s); a finer
 // poll interval lets the common fast-resolving case return sooner without
 // weakening the timeout safety margin (issue #682 busy-wait sweep).
@@ -14,6 +18,27 @@ async fn wait_for_nonempty_file(path: &Path) -> String {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     std::fs::read_to_string(path).unwrap_or_default()
+}
+
+async fn wait_for_terminal_dispatch_status(run_dir: &Path) -> Value {
+    let status_path = run_dir.join("status.json");
+    for _ in 0..TERMINAL_DISPATCH_STATUS_ATTEMPTS {
+        if let Ok(raw) = std::fs::read_to_string(&status_path) {
+            if let Ok(status) = serde_json::from_str::<Value>(&raw) {
+                if matches!(
+                    status["state"].as_str(),
+                    Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED")
+                ) {
+                    return status;
+                }
+            }
+        }
+        tokio::time::sleep(DISPATCH_STATUS_POLL_INTERVAL).await;
+    }
+    panic!(
+        "dispatch did not reach a terminal state: {}",
+        status_path.display()
+    );
 }
 
 #[tokio::test]
@@ -89,6 +114,8 @@ async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
         }
         EnvRestore::set_os("PATH", &std::env::join_paths(paths).expect("join PATH"))
     };
+    let _watchdog_poll =
+        EnvRestore::set("TACHI_DISPATCH_WATCHDOG_POLL_MS", TEST_WATCHDOG_POLL_MILLIS);
 
     let server = server();
     let mut open = params("open");
@@ -151,6 +178,12 @@ async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
     assert!(spawned["status"]["dispatch_link"].get("run_dir").is_none());
     let dispatch_result = wait_for_nonempty_file(&run_dir.join("result.md")).await;
     assert!(dispatch_result.contains("fake opencode completed"));
+    let terminal_status = wait_for_terminal_dispatch_status(&run_dir).await;
+    assert_eq!(
+        terminal_status["state"],
+        json!("TASK_STATE_FAILED"),
+        "fake opencode exits 7, so teardown must report failure: {terminal_status:#}"
+    );
 
     let mut board = params("board");
     board.arena_id = Some(arena_id.clone());
@@ -255,6 +288,8 @@ async fn arena_opencode_executor_fallback_uses_glm_registry_model() {
         }
         EnvRestore::set_os("PATH", &std::env::join_paths(paths).expect("join PATH"))
     };
+    let _watchdog_poll =
+        EnvRestore::set("TACHI_DISPATCH_WATCHDOG_POLL_MS", TEST_WATCHDOG_POLL_MILLIS);
     let _model = EnvRestore::set("TACHI_DISPATCH_GLM_CODING_MODEL", "zhipuai/glm-5.2-arena");
 
     let server = server();
@@ -280,6 +315,12 @@ async fn arena_opencode_executor_fallback_uses_glm_registry_model() {
     );
     let dispatch_result = wait_for_nonempty_file(&run_dir.join("result.md")).await;
     assert!(dispatch_result.contains("fake opencode completed"));
+    let terminal_status = wait_for_terminal_dispatch_status(&run_dir).await;
+    assert_eq!(
+        terminal_status["state"],
+        json!("TASK_STATE_COMPLETED"),
+        "successful fake opencode must finish teardown before the fixture drops: {terminal_status:#}"
+    );
 
     let args = std::fs::read_to_string(args_path).expect("captured opencode args");
     assert!(args.contains("--model\nzhipuai/glm-5.2-arena"), "{args}");
