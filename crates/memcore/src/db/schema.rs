@@ -124,6 +124,13 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     ensure_column(conn, "memories", "retention_policy", "TEXT")?;
     ensure_column(conn, "memories", "domain", "TEXT")?;
     ensure_column(conn, "memories", "superseded_by", "TEXT")?;
+    ensure_column(conn, "memories", "idless_identity", "TEXT")?;
+    conn.execute(
+        r#"CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_idless_identity_active
+           ON memories(idless_identity)
+           WHERE idless_identity IS NOT NULL AND archived = 0 AND superseded_by IS NULL"#,
+        [],
+    )?;
 
     // Memory lifecycle columns for tier-based decay and historical training flags.
     ensure_column(
@@ -659,6 +666,11 @@ fn rebuild_memories_with_check_constraints(conn: &Connection) -> Result<(), Memo
     } else {
         "'raw'"
     };
+    let idless_identity_expr = if has_column(conn, "memories", "idless_identity")? {
+        "idless_identity"
+    } else {
+        "NULL"
+    };
     let rebuild_sql = r#"
         CREATE TABLE memories_new (
             id           TEXT PRIMARY KEY,
@@ -681,10 +693,11 @@ fn rebuild_memories_with_check_constraints(conn: &Connection) -> Result<(), Memo
             access_count INTEGER NOT NULL DEFAULT 0,
             last_access  TEXT,
             revision     INTEGER NOT NULL DEFAULT 1,
-            metadata     TEXT NOT NULL DEFAULT '{}',
+             metadata     TEXT NOT NULL DEFAULT '{}',
              retention_policy TEXT,
              domain       TEXT,
              superseded_by TEXT,
+             idless_identity TEXT,
              recall_count    INTEGER NOT NULL DEFAULT 0,
              query_diversity INTEGER NOT NULL DEFAULT 0,
              tier            TEXT NOT NULL DEFAULT 'raw',
@@ -701,15 +714,15 @@ fn rebuild_memories_with_check_constraints(conn: &Connection) -> Result<(), Memo
             (id, path, summary, text, importance, timestamp, valid_from, valid_until,
              category, topic, keywords, entities, source, scope, archived,
              created_at, updated_at, access_count, last_access, revision,
-             metadata, retention_policy, domain, superseded_by,
+             metadata, retention_policy, domain, superseded_by, idless_identity,
              recall_count, query_diversity, tier)
         SELECT
              id, path, summary, text, importance, timestamp,
              COALESCE(NULLIF(valid_from, ''), timestamp), NULLIF(valid_until, ''),
              category, topic, keywords, entities, source, scope, archived,
              created_at, updated_at, access_count, last_access, revision,
-             metadata, retention_policy, domain, superseded_by,
-              __RECALL_COUNT_EXPR__, __QUERY_DIVERSITY_EXPR__, __TIER_EXPR__
+             metadata, retention_policy, domain, superseded_by, __IDLESS_IDENTITY_EXPR__,
+             __RECALL_COUNT_EXPR__, __QUERY_DIVERSITY_EXPR__, __TIER_EXPR__
         FROM memories;
 
         DROP TABLE memories;
@@ -727,11 +740,15 @@ fn rebuild_memories_with_check_constraints(conn: &Connection) -> Result<(), Memo
         CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier);
         CREATE INDEX IF NOT EXISTS idx_memories_recall ON memories(recall_count DESC);
         CREATE INDEX IF NOT EXISTS idx_memories_path_active_ts ON memories(path, timestamp DESC) WHERE archived = 0 AND superseded_by IS NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_idless_identity_active
+            ON memories(idless_identity)
+            WHERE idless_identity IS NOT NULL AND archived = 0 AND superseded_by IS NULL;
 
         "#
         .replace("__RECALL_COUNT_EXPR__", recall_count_expr)
         .replace("__QUERY_DIVERSITY_EXPR__", query_diversity_expr)
-        .replace("__TIER_EXPR__", tier_expr);
+        .replace("__TIER_EXPR__", tier_expr)
+        .replace("__IDLESS_IDENTITY_EXPR__", idless_identity_expr);
     conn.execute_batch(&rebuild_sql)?;
     Ok(())
 }
@@ -980,6 +997,45 @@ fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
     s.push(".");
     s.push(suffix);
     PathBuf::from(s)
+}
+
+#[cfg(test)]
+mod idless_identity_tests {
+    use super::*;
+
+    #[test]
+    fn enum_rebuild_preserves_modern_idless_identity_constraint() {
+        let _ = libsimple::enable_auto_extension();
+        crate::db::register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, path, text, timestamp, idless_identity)
+             VALUES ('modern-idless', '/modern', 'identity survives rebuild', '2026-07-16T00:00:00Z', 'identity')",
+            [],
+        )
+        .unwrap();
+
+        rebuild_memories_with_check_constraints(&conn).unwrap();
+
+        let identity: Option<String> = conn
+            .query_row(
+                "SELECT idless_identity FROM memories WHERE id = 'modern-idless'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(identity.as_deref(), Some("identity"));
+        assert!(
+            conn.execute(
+                "INSERT INTO memories (id, path, text, timestamp, idless_identity)
+                 VALUES ('second-modern-idless', '/modern', 'another text', '2026-07-16T00:00:00Z', 'identity')",
+                [],
+            )
+            .is_err(),
+            "the active identity constraint must survive the enum rebuild"
+        );
+    }
 }
 
 #[cfg(test)]

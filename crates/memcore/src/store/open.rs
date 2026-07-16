@@ -134,8 +134,7 @@ impl MemoryStore {
         })
     }
 
-    /// Insert or update a memory entry (with optional embedding vector).
-    pub fn upsert(&mut self, entry: &MemoryEntry) -> Result<(), MemoryError> {
+    fn validate_write_path(&self, entry: &MemoryEntry) -> Result<(), MemoryError> {
         if self.path_validation && !path_validation_disabled() {
             let allow_cross = entry
                 .metadata
@@ -152,9 +151,29 @@ impl MemoryStore {
                 return Err(MemoryError::InvalidArg(e.to_string()));
             }
         }
+        Ok(())
+    }
+
+    /// Insert or update a memory entry (with optional embedding vector).
+    pub fn upsert(&mut self, entry: &MemoryEntry) -> Result<(), MemoryError> {
+        self.validate_write_path(entry)?;
         let db_label = self.db_label.clone();
         db::retry_memory_locked("upsert", &db_label, || {
             db::upsert(&mut self.conn, entry, self.vec_available)
+        })
+    }
+
+    /// Atomically save a modern id-less entry. The DB identity chooses a
+    /// winner, while legacy rows without an identity remain untouched.
+    pub fn upsert_idless(
+        &mut self,
+        entry: &MemoryEntry,
+        identity: &str,
+    ) -> Result<db::IdlessUpsertResult, MemoryError> {
+        self.validate_write_path(entry)?;
+        let db_label = self.db_label.clone();
+        db::retry_memory_locked("upsert_idless", &db_label, || {
+            db::upsert_idless(&mut self.conn, entry, self.vec_available, identity)
         })
     }
 }

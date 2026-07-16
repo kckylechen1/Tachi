@@ -100,7 +100,8 @@ pub use memory_crud::{
     list_wiki_duplicate_candidates, normalize_for_write, record_enrichment_failure,
     release_event_claim, search_fts, search_symbolic_candidates, search_vec,
     set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status, supersede_memory,
-    try_claim_event, update_enrichment_fields, update_with_revision, upsert,
+    try_claim_event, update_enrichment_fields, update_with_revision, upsert, upsert_idless,
+    IdlessUpsertResult,
 };
 /// Public: benchmarks/diagnostics outside this crate read the process-wide
 /// lock-retry backoff counter without needing a tracing subscriber (see
