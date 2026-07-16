@@ -132,6 +132,13 @@ fn merge_into_jaccard_candidate(
         return Ok(None);
     }
     let fts_candidates: Vec<(String, String)> = {
+        // `AND m.id != ?2` is a necessary adaptation of this recovery path,
+        // not a deviation from origin/main's inline dedup: this function now
+        // runs *after* the atomic identity insert has already committed
+        // `entry` as a row, so the candidate scan would otherwise find
+        // `entry` matching itself (Jaccard 1.0) and "merge" it into itself.
+        // origin/main's inline version runs the search *before* insertion,
+        // when `entry` has no row yet, so it has no self-match to exclude.
         let mut stmt = tx.prepare(
             "SELECT m.id, m.text FROM memories_fts
              JOIN memories m ON m.id = memories_fts.id
@@ -709,10 +716,13 @@ mod idless_upsert_tests {
     fn idless_save_near_duplicate_merges_into_existing_active_row() {
         let mut store = crate::MemoryStore::open_in_memory().unwrap();
 
-        // 19 shared tokens + one differing tail token each => Jaccard =
-        // 19/20 = 0.95, inside the (0.9, 1.0) exclusive band — similar
-        // enough to merge, but NOT identical (so the exact-identity unique
-        // index never fires; only the Jaccard path can catch this).
+        // 19 shared tokens + one differing tail token each => Jaccard is
+        // set-based (intersection / union), not count-based: intersection =
+        // 19, union = 19 shared + 2 unique tail tokens ("tango", "uniform")
+        // = 21, so Jaccard = 19/21 ≈ 0.905, inside the (0.9, 1.0) exclusive
+        // band — similar enough to merge, but NOT identical (so the
+        // exact-identity unique index never fires; only the Jaccard path can
+        // catch this).
         let shared = "alpha bravo charlie delta echo foxtrot golf hotel india juliet \
                        kilo lima mike november oscar papa quebec romeo sierra";
         let base_text = format!("{shared} tango");
