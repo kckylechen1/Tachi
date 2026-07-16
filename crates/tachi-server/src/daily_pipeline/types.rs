@@ -8,6 +8,7 @@ pub(crate) struct DailyPipelineReport {
     pub date: String,
     pub report_path: Option<String>,
     pub health_check: DailyStageReport,
+    pub truth_maintenance: DailyStageReport,
     pub skill_evolution: DailyStageReport,
     pub routing_analysis: DailyStageReport,
 }
@@ -15,9 +16,10 @@ pub(crate) struct DailyPipelineReport {
 impl DailyPipelineReport {
     pub(crate) fn summary(&self) -> String {
         format!(
-            "date={} health={} skill_evolution={} routing={}",
+            "date={} health={} truth_maintenance={} skill_evolution={} routing={}",
             self.date,
             self.health_check.status,
+            self.truth_maintenance.status,
             self.skill_evolution.status,
             self.routing_analysis.status
         )

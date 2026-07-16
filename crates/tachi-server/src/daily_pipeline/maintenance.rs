@@ -1,17 +1,164 @@
-use super::{load_manifest_targets, ManifestDbTarget, TruthMaintenanceRoute};
+use super::{load_manifest_targets, DailyStageReport, ManifestDbTarget, TruthMaintenanceRoute};
 use crate::server_state::{DbScope, MemoryServer};
 use memcore::MemoryStore;
+use serde_json::{json, Value};
+
+struct TruthMaintenanceScope {
+    runnable: Vec<ManifestDbTarget>,
+    exclusions: Vec<TruthMaintenanceExclusion>,
+}
+
+struct TruthMaintenanceExclusion {
+    target: String,
+    label: String,
+    path: std::path::PathBuf,
+}
+
+impl TruthMaintenanceExclusion {
+    fn as_json(&self) -> Value {
+        json!({
+            "outcome": "expected_exclusion",
+            "reason": "manifest_allow_write_false",
+            "target": self.target,
+            "label": self.label,
+            "path": self.path,
+        })
+    }
+}
+
+impl TruthMaintenanceScope {
+    fn examined(&self) -> usize {
+        self.runnable.len() + self.exclusions.len()
+    }
+
+    fn exclusion_details(&self) -> Vec<Value> {
+        self.exclusions
+            .iter()
+            .map(TruthMaintenanceExclusion::as_json)
+            .collect()
+    }
+}
+
+fn account_truth_maintenance_scope(targets: Vec<ManifestDbTarget>) -> TruthMaintenanceScope {
+    let mut runnable = Vec::new();
+    let mut exclusions = Vec::new();
+    for target in targets {
+        if target.allow_write {
+            runnable.push(target);
+        } else {
+            exclusions.push(TruthMaintenanceExclusion {
+                target: target.name,
+                label: target.label,
+                path: target.path,
+            });
+        }
+    }
+    TruthMaintenanceScope {
+        runnable,
+        exclusions,
+    }
+}
+
+fn truth_maintenance_stage(
+    status: &str,
+    summary: String,
+    examined: usize,
+    progressed: Vec<Value>,
+    exclusions: Vec<Value>,
+    incomplete: Vec<Value>,
+) -> DailyStageReport {
+    DailyStageReport {
+        status: status.to_string(),
+        summary,
+        details: json!({
+            "scope_accounting": {
+                "examined": examined,
+                "progressed": progressed,
+                "expected_exclusions": exclusions,
+                "incomplete": incomplete,
+            }
+        }),
+    }
+}
 
 pub(crate) async fn run_truth_maintenance_stage(
     server: &MemoryServer,
     app_home: &std::path::Path,
-) -> Result<(), String> {
-    let targets = load_manifest_targets(server, &app_home.join("manifest.json"))?;
-    for target in targets.into_iter().filter(|target| target.allow_write) {
+) -> DailyStageReport {
+    let targets = match load_manifest_targets(server, &app_home.join("manifest.json")) {
+        Ok(targets) => targets,
+        Err(error) => {
+            return truth_maintenance_stage(
+                "failed",
+                format!("truth maintenance could not load manifest targets: {error}"),
+                0,
+                Vec::new(),
+                Vec::new(),
+                vec![json!({
+                    "outcome": "incomplete",
+                    "reason": "manifest_load_failed",
+                    "error": error,
+                })],
+            );
+        }
+    };
+    let scope = account_truth_maintenance_scope(targets);
+    let examined = scope.examined();
+    let exclusions = scope.exclusion_details();
+    let excluded = exclusions.len();
+    let mut progressed = Vec::new();
+    let mut runnable = scope.runnable.into_iter();
+    while let Some(target) = runnable.next() {
         let route = resolve_truth_maintenance_route(server, &target);
-        run_truth_maintenance_for_target(server, target, route).await?;
+        let target_name = target.name.clone();
+        let target_label = target.label.clone();
+        let target_path = target.path.display().to_string();
+        if let Err(error) = run_truth_maintenance_for_target(server, target, route).await {
+            let mut incomplete = vec![json!({
+                "outcome": "incomplete",
+                "reason": "maintenance_error",
+                "target": target_name,
+                "label": target_label,
+                "path": target_path,
+                "error": error,
+            })];
+            incomplete.extend(runnable.map(|remaining| {
+                json!({
+                    "outcome": "incomplete",
+                    "reason": "not_started_after_peer_error",
+                    "target": remaining.name,
+                    "label": remaining.label,
+                    "path": remaining.path,
+                })
+            }));
+            return truth_maintenance_stage(
+                "failed",
+                "truth maintenance stopped after an incomplete target; see scope accounting"
+                    .to_string(),
+                examined,
+                progressed,
+                exclusions,
+                incomplete,
+            );
+        }
+        progressed.push(json!({
+            "outcome": "progressed",
+            "target": target_name,
+            "label": target_label,
+            "path": target_path,
+        }));
     }
-    Ok(())
+    truth_maintenance_stage(
+        "completed",
+        format!(
+            "truth maintenance accounted for {examined} target(s): {} progressed, {excluded} expected exclusion(s)",
+            progressed.len()
+        ),
+        examined,
+        progressed,
+        exclusions,
+        Vec::new(),
+    )
 }
 
 pub(crate) fn resolve_truth_maintenance_route(
@@ -161,4 +308,37 @@ async fn run_truth_maintenance_for_target(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(name: &str, allow_write: bool) -> ManifestDbTarget {
+        ManifestDbTarget {
+            name: name.to_string(),
+            label: format!("{name}-label"),
+            path: std::path::PathBuf::from(format!("/{name}.db")),
+            role: "project".to_string(),
+            owner: "tachi".to_string(),
+            schema_kind: "tachi".to_string(),
+            allow_write,
+            last_classification: "healthy".to_string(),
+        }
+    }
+
+    #[test]
+    fn excluded_target_is_reported_while_writable_peer_remains_runnable() {
+        let scope = account_truth_maintenance_scope(vec![
+            target("read-only", false),
+            target("writable", true),
+        ]);
+
+        assert_eq!(scope.examined(), 2);
+        assert_eq!(scope.runnable.len(), 1);
+        assert_eq!(scope.runnable[0].name, "writable");
+        assert_eq!(scope.exclusions.len(), 1);
+        assert_eq!(scope.exclusions[0].target, "read-only");
+        assert_eq!(scope.exclusions[0].label, "read-only-label");
+    }
 }
