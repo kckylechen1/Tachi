@@ -10,13 +10,55 @@ use std::path::Path;
 pub(in crate::bootstrap) const NO_TTY_HINT: &str =
     "no TTY to prompt for vault password; use --keychain, --stdin-password or --password-file";
 
-/// Whether we can prompt interactively for a password on the controlling
-/// terminal. Real check is `stdin` being a TTY (same convention as
-/// `atty_stdout` elsewhere in bootstrap). Test builds only: overridable via
-/// `TACHI_TEST_FORCE_NO_TTY=1` so a test can exercise the no-TTY error path
-/// deterministically without needing an actual detached-terminal process
-/// (mirrors the `TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK` test-escape-hatch
-/// convention in `provider_config.rs` — never compiled into a release build).
+/// #1175 codex 3.2: the same hint, but for `vault init`. A bare
+/// `--password-file` isn't sufficient there the way it is for unlock — init
+/// needs something to check the password against, so it also requires
+/// `--confirm-password-file` (see the dedicated error a few lines below this
+/// hint's other call site). Built on demand rather than folded into the
+/// shared `NO_TTY_HINT` constant so the unlock path's hint stays free of
+/// init-only guidance.
+fn no_tty_hint_for_init() -> String {
+    format!("{NO_TTY_HINT} (vault init also requires --confirm-password-file)")
+}
+
+/// Whether we can prompt interactively for a password.
+///
+/// #1175 codex 3.1: this must probe the same channel `rpassword::prompt_password`
+/// actually prompts on, not the process's own stdin. `rpassword` 7.5.4 opens
+/// the *controlling terminal device* directly (`/dev/tty` on unix — see
+/// `rpassword::unix::DEFAULT_INPUT_PATH` — `CONIN$`/`CONOUT$` on Windows), so
+/// it ignores stdin redirection entirely: a process with stdin piped or
+/// redirected from `/dev/null` but still attached to a controlling terminal
+/// can successfully prompt on `/dev/tty` even though `stdin().is_terminal()`
+/// is false, and (more rarely) an inherited TTY-shaped stdin with no real
+/// controlling terminal would wrongly report "can prompt" under the old
+/// stdin-based check. Opening `/dev/tty` here is the identical probe
+/// `rpassword` performs internally, so success/failure here matches its real
+/// behavior exactly instead of approximating it via a different fd.
+///
+/// Test builds only: overridable via `TACHI_TEST_FORCE_NO_TTY=1` so a test
+/// can exercise the no-TTY error path deterministically. This seam remains
+/// load-bearing even with the `/dev/tty` probe below: the test process's own
+/// controlling-terminal state is whatever `cargo test`'s harness happens to
+/// leave it as (present when run from an interactive shell, absent under most
+/// CI runners) — not something a test can control — so the explicit override
+/// is still the only deterministic way to force the no-TTY branch (mirrors
+/// the `TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK` test-escape-hatch convention in
+/// `provider_config.rs` — never compiled into a release build).
+#[cfg(unix)]
+fn can_prompt_interactively() -> bool {
+    #[cfg(test)]
+    if std::env::var_os("TACHI_TEST_FORCE_NO_TTY").is_some() {
+        return false;
+    }
+    std::fs::File::open("/dev/tty").is_ok()
+}
+
+/// Non-unix fallback (this crate ships for macOS/Linux; Windows is not a
+/// shipped target today). Kept stdin-based rather than probing `CONIN$`
+/// directly since there is no build/test coverage on this platform to verify
+/// a `CONIN$` open behaves the way `rpassword`'s windows backend expects.
+#[cfg(not(unix))]
 fn can_prompt_interactively() -> bool {
     #[cfg(test)]
     if std::env::var_os("TACHI_TEST_FORCE_NO_TTY").is_some() {
@@ -76,7 +118,7 @@ pub(super) fn read_vault_init_password(
         };
         (password, read_password_file(path, insecure_password_file)?)
     } else if !can_prompt_interactively() {
-        return Err(NO_TTY_HINT.into());
+        return Err(no_tty_hint_for_init().into());
     } else {
         let password = rpassword::prompt_password("New vault password: ")?;
         let confirm = rpassword::prompt_password("Confirm password: ")?;

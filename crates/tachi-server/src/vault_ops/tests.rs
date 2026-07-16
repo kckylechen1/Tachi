@@ -114,6 +114,97 @@ async fn vault_unlock_rejects_password_and_fifo_path_together() {
     );
 }
 
+// codex 3.3 (fix-round): the mutual-exclusion check (`sources_given > 1`)
+// covers all three pairwise combinations of password/password_fifo_path/
+// use_keychain, but only the password+fifo pair had a discriminating test.
+// These two cover the remaining pairs. Both must be rejected BEFORE any
+// actual Keychain/FIFO read is attempted (the `sources_given` check runs
+// first in `handle_vault_unlock`), so neither test needs a working FIFO or
+// a Keychain injection seam — a nonexistent FIFO path and no
+// `TACHI_TEST_KEYCHAIN_PASSWORD` override are both fine, since the mutex
+// check must short-circuit before either is touched.
+#[tokio::test]
+async fn vault_unlock_rejects_password_and_keychain_together() {
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-unlock-keychain-password-test-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "correct-password".to_string(),
+        },
+    )
+    .await
+    .expect("vault init should succeed");
+    handle_vault_lock(&server)
+        .await
+        .expect("vault lock should succeed");
+
+    let err = handle_vault_unlock(
+        &server,
+        VaultUnlockParams {
+            password: "correct-password".to_string(),
+            password_fifo_path: None,
+            use_keychain: true,
+        },
+    )
+    .await
+    .expect_err("mixed password transports should be rejected");
+
+    assert!(
+        err.contains("exactly one of password, password_fifo_path, or use_keychain"),
+        "expected mixed-transport rejection, got: {err}"
+    );
+    let v = server.vault_read();
+    assert!(
+        v.key.is_none(),
+        "vault must stay locked when the request is rejected as mixed-transport"
+    );
+}
+
+#[tokio::test]
+async fn vault_unlock_rejects_fifo_and_keychain_together() {
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-unlock-keychain-fifo-test-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "correct-password".to_string(),
+        },
+    )
+    .await
+    .expect("vault init should succeed");
+    handle_vault_lock(&server)
+        .await
+        .expect("vault lock should succeed");
+
+    let err = handle_vault_unlock(
+        &server,
+        VaultUnlockParams {
+            password: String::new(),
+            password_fifo_path: Some("/tmp/tachi-unlock-test-fifo-keychain.fifo".to_string()),
+            use_keychain: true,
+        },
+    )
+    .await
+    .expect_err("mixed password transports should be rejected");
+
+    assert!(
+        err.contains("exactly one of password, password_fifo_path, or use_keychain"),
+        "expected mixed-transport rejection, got: {err}"
+    );
+    let v = server.vault_read();
+    assert!(
+        v.key.is_none(),
+        "vault must stay locked when the request is rejected as mixed-transport"
+    );
+}
+
 // tachi#1175: `use_keychain` walks the same shared low-level primitive as
 // the CLI's `tachi vault unlock --keychain`
 // (`vault_crypto::read_password_from_macos_keychain`) so an agent never has

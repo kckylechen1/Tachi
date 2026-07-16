@@ -334,6 +334,13 @@ fn password_file_accepts_owner_only() {
 // `tachi-bootstrap/src/cli/vault_actions.rs`) instead of leaking that OS
 // errno. Uses the `TACHI_TEST_FORCE_NO_TTY` injection seam rather than
 // detaching a real terminal from the test process.
+//
+// codex 3.1 (fix-round): `can_prompt_interactively` now probes `/dev/tty`
+// directly (the same channel `rpassword` itself prompts on) instead of
+// `stdin().is_terminal()`. The `TACHI_TEST_FORCE_NO_TTY` seam still short-
+// circuits before that probe runs, so these tests stay deterministic
+// regardless of whether the `cargo test` process happens to have a
+// controlling terminal of its own.
 #[test]
 fn read_vault_password_reports_no_tty_hint_instead_of_os_error() {
     let _lock = crate::utils::global_test_lock()
@@ -372,4 +379,9 @@ fn read_vault_init_password_reports_no_tty_hint_instead_of_os_error() {
     assert!(msg.contains("--keychain"), "{msg}");
     assert!(msg.contains("--stdin-password"), "{msg}");
     assert!(msg.contains("--password-file"), "{msg}");
+    // codex 3.2: `vault init`'s no-TTY hint must also point at
+    // --confirm-password-file — a bare --password-file is not enough for
+    // init (there's nothing to check it against), unlike unlock where one
+    // password file suffices on its own.
+    assert!(msg.contains("--confirm-password-file"), "{msg}");
 }

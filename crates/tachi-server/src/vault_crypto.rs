@@ -209,10 +209,18 @@ pub fn read_password_from_macos_keychain() -> Result<String, String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let password = String::from_utf8(output.stdout)
-        .map_err(|e| format!("Keychain password is not valid UTF-8: {e}"))?
-        .trim()
-        .to_string();
+    // #1175 codex 3.5: `.trim().to_string()` on the raw `security` stdout
+    // makes a *second* copy of the password (the trimmed one returned below)
+    // without clearing the untrimmed intermediate — that intermediate would
+    // otherwise be dropped and freed with the plaintext password still
+    // sitting in its backing buffer. Keep the untrimmed String bound so it
+    // can be zeroed with the same `zero_string` primitive `password.rs`
+    // already uses for its own password buffers, after the trimmed copy is
+    // taken.
+    let mut raw = String::from_utf8(output.stdout)
+        .map_err(|e| format!("Keychain password is not valid UTF-8: {e}"))?;
+    let password = raw.trim().to_string();
+    zero_string(&mut raw);
     if password.is_empty() {
         return Err("Keychain entry for tachi-vault/default is empty".to_string());
     }
