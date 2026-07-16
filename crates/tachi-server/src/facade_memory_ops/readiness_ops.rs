@@ -1,6 +1,10 @@
 //! Alert, ask, and readiness handlers for `tachi_memory`.
 //! Consolidate lifecycle lives in `consolidate_ops` (#775).
 
+use super::current_work_anchor::{
+    compute_anchor_gated_confidence, extract_exact_issue_anchors, overall_grounding_status,
+    prepend_anchor_evidence_rows, resolve_current_work_anchors,
+};
 use super::evidence_format::{
     build_thinking_scaffold, evidence_rows, format_agent_status, json_string, parse_json_or_empty,
     sections_to_evidence, synthesis_markdown_text, wants_json,
@@ -10,6 +14,10 @@ use crate::facade_search_ops::collect_tachi_search_sections;
 use crate::tool_params::*;
 use crate::MemoryServer;
 use serde_json::{json, Value};
+
+/// #1071: synthesis is called with a bounded timeout so a stalled provider
+/// degrades the response to `partial`, never hangs `ask`.
+const ASK_SYNTHESIS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Alerts
@@ -83,7 +91,43 @@ pub(crate) async fn handle_memory_ask(
         .any(|row| row.get("db").and_then(Value::as_str) == Some("global"));
     let cross_store = params.project.is_none() && has_project_db && uses_global;
     let evidence = inject_project_tags(evidence);
-    let thinking = build_thinking_scaffold("ask", &query, &evidence);
+
+    // #1071: resolve exact issue anchors BEFORE the thinking scaffold runs,
+    // so a live-resolved (or live-failed) anchor can override the generic
+    // evidence-volume confidence heuristic — never the reverse. See
+    // `current_work_anchor` module doc for the frozen-contract basis and
+    // the documented scope gaps (issue anchors only, no bare `#N`).
+    let exact_anchor_targets = extract_exact_issue_anchors(&query);
+    let required_anchors = if exact_anchor_targets.is_empty() {
+        Vec::new()
+    } else {
+        resolve_current_work_anchors(server, &exact_anchor_targets).await
+    };
+    let grounding_status = overall_grounding_status(&required_anchors);
+    let evidence = prepend_anchor_evidence_rows(evidence, &required_anchors);
+
+    let mut thinking = build_thinking_scaffold("ask", &query, &evidence);
+    if !required_anchors.is_empty() {
+        let confidence = compute_anchor_gated_confidence(&required_anchors);
+        if let Some(obj) = thinking.as_object_mut() {
+            obj.insert("confidence".to_string(), json!(confidence));
+            if confidence == "low" {
+                if let Some(gaps) = obj.get_mut("gaps").and_then(Value::as_array_mut) {
+                    for anchor in required_anchors.iter().filter(|anchor| {
+                        anchor.grounding_status == GroundingStatusV1::MissingAnchor
+                    }) {
+                        for reason in &anchor.contradictions {
+                            gaps.push(json!(format!(
+                                "current-work anchor {} unresolved: {reason}",
+                                anchor.source_ref
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let synthesis = if params.synthesize {
         Some(
             synthesize_answer(
@@ -98,9 +142,21 @@ pub(crate) async fn handle_memory_ask(
     } else {
         None
     };
+    // #1071: "Provider timeout/fallback preserves evidence but returns
+    // overall partial/preview-only." Evidence confidence (`thinking`) is
+    // computed above, before synthesis runs, and is never touched here —
+    // only the top-level response status reflects a degraded synthesis.
+    let overall_status = match synthesis
+        .as_ref()
+        .and_then(|s| s.get("status"))
+        .and_then(Value::as_str)
+    {
+        Some("timeout") | Some("failed") => "partial",
+        _ => "completed",
+    };
     if wants_json(params.format.as_deref()) {
         return json_string(&json!({
-            "status": "completed",
+            "status": overall_status,
             "query": query,
             "evidence": evidence,
             "thinking": thinking,
@@ -112,11 +168,13 @@ pub(crate) async fn handle_memory_ask(
             } else {
                 None
             },
+            "grounding_status": grounding_status.as_str(),
+            "required_anchors": required_anchors,
         }));
     }
     let synthesis_text = synthesis.as_ref().and_then(synthesis_markdown_text);
     let mut fields: Vec<(&str, String)> = vec![
-        ("status", "completed".to_string()),
+        ("status", overall_status.to_string()),
         ("query", query),
         (
             "evidence",
@@ -147,6 +205,9 @@ pub(crate) async fn handle_memory_ask(
                 .to_string(),
         ),
     ];
+    if !required_anchors.is_empty() {
+        fields.push(("grounding_status", grounding_status.as_str().to_string()));
+    }
     if cross_store {
         fields.push((
             "cross_store",
@@ -512,23 +573,53 @@ If evidence is insufficient, say what is missing. Keep the answer concise and ci
     let user = format!(
         "Question:\n{query}\n\nAuthoritative runtime binding JSON:\n{runtime_text}\n\nEvidence JSON:\n{evidence_text}"
     );
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        server.llm.call_extract_llm(system, &user, model, 0.2, 700),
+    let started_at = std::time::Instant::now();
+    // #1071: "Synthesis uses an answer/reasoning capability, not Extract."
+    // `call_reasoning_llm` is the Reasoning chat lane (falls back to a
+    // higher-quality CLI path first, see `chat_lanes::claude_cli`), never
+    // the Extract lane `ask` used to share with fact-atomization callers.
+    let outcome = tokio::time::timeout(
+        ASK_SYNTHESIS_TIMEOUT,
+        server
+            .llm
+            .call_reasoning_llm(system, &user, model, 0.2, 700),
     )
-    .await
-    {
+    .await;
+    let latency_ms = started_at.elapsed().as_millis();
+    // #1071: a minimal, honest `EngineReceiptV1` — `effective_provider` is
+    // deliberately `None` (`call_reasoning_llm` does not expose which
+    // backend actually served the request, including its own claude-cli
+    // fallback path), matching #1002's precedent that unknown identity is
+    // declared, never guessed. `EngineReceiptV1` has no `latency_ms` field
+    // in its #1002-frozen shape, so latency is carried as a sibling field
+    // instead of widening that type without adjudication.
+    let receipt = |fallback: bool, degraded: bool| {
+        json!(EngineReceiptV1 {
+            requested_role: "reasoning".to_string(),
+            effective_provider: None,
+            effective_model: model.map(str::to_string),
+            fallback,
+            degraded,
+        })
+    };
+    match outcome {
         Ok(Ok(answer)) => json!({
             "status": "completed",
             "answer": answer,
+            "engine_receipt": receipt(false, false),
+            "latency_ms": latency_ms,
         }),
         Ok(Err(err)) => json!({
             "status": "failed",
             "error": err,
+            "engine_receipt": receipt(false, true),
+            "latency_ms": latency_ms,
         }),
         Err(_) => json!({
             "status": "timeout",
-            "error": "LLM synthesis timed out after 30s",
+            "error": format!("LLM synthesis timed out after {}s", ASK_SYNTHESIS_TIMEOUT.as_secs()),
+            "engine_receipt": receipt(false, true),
+            "latency_ms": latency_ms,
         }),
     }
 }

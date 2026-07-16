@@ -262,3 +262,87 @@ async fn tachi_memory_ask_keeps_controlled_probe_evidence_aligned_with_search() 
         "ask should not force rerank when enable_rerank=false: {ask_json}"
     );
 }
+
+/// #1071 RED corpus case 1/2: `ask` must resolve an exact issue anchor
+/// mentioned in the query and degrade honestly — never report `high`
+/// confidence purely because a pile of unrelated memory evidence exists —
+/// when that anchor cannot be confirmed live. This targets a repo that does
+/// not exist so the outcome is deterministic (`missing_anchor`) regardless
+/// of whether the test host has `gh` installed/authenticated or network
+/// access: `read_issue_snapshot_bounded` either times out (bounded, no
+/// hang — see `gh_ops::issues::ANCHOR_GH_TIMEOUT`) or `gh` itself reports
+/// the repo unresolvable. Either way this must never surface as `Grounded`.
+#[tokio::test]
+async fn tachi_memory_ask_caps_confidence_when_exact_anchor_is_unresolvable() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            for idx in 0..8 {
+                let mut row = make_entry(&format!("ask-anchor-crowd-{idx}"));
+                row.path = format!("/scratch/tachi/ask-anchor-crowd-{idx}");
+                row.summary = format!("crowding evidence {idx}");
+                row.text = "tachi-1071-anchor-test crowding evidence unrelated to the exact anchor"
+                    .to_string();
+                row.keywords = vec!["tachi-1071-anchor-test".to_string()];
+                store.upsert(&row).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .expect("seed crowding evidence");
+
+    let mut ask_params = tachi_memory_params("ask");
+    ask_params.format = Some("json".to_string());
+    ask_params.query = Some(
+        "tachi-1071-anchor-test what is the status of \
+         kckylechen1-tachi-1071-nonexistent-repo/does-not-exist#1 right now?"
+            .to_string(),
+    );
+    ask_params.top_k = 10;
+
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, ask_params)
+        .await
+        .expect("ask should succeed even when the anchor cannot be resolved");
+    let parsed: Value = serde_json::from_str(&body).expect("ask JSON");
+
+    assert_eq!(
+        parsed["grounding_status"],
+        json!("missing_anchor"),
+        "unresolvable repo must never report grounded: {parsed}"
+    );
+    assert_eq!(
+        parsed["thinking"]["confidence"],
+        json!("low"),
+        "confidence must be capped by the missing anchor, not by generic evidence volume: {parsed}"
+    );
+    let required_anchors = parsed["required_anchors"]
+        .as_array()
+        .expect("required_anchors array");
+    assert_eq!(required_anchors.len(), 1);
+    assert_eq!(
+        required_anchors[0]["grounding_status"],
+        json!("missing_anchor")
+    );
+    assert_eq!(
+        required_anchors[0]["source_ref"],
+        json!("kckylechen1-tachi-1071-nonexistent-repo/does-not-exist#1")
+    );
+}
+
+/// Plain semantic queries with no exact anchor must be entirely unaffected
+/// by #1071's grounding path — no `required_anchors`/live gh call, and the
+/// legacy evidence-volume confidence heuristic still applies.
+#[tokio::test]
+async fn tachi_memory_ask_without_exact_anchor_skips_anchor_grounding() {
+    let server = make_server();
+    let mut ask_params = tachi_memory_params("ask");
+    ask_params.format = Some("json".to_string());
+    ask_params.query = Some("what did we implement".to_string());
+
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, ask_params)
+        .await
+        .expect("ask should succeed");
+    let parsed: Value = serde_json::from_str(&body).expect("ask JSON");
+
+    assert_eq!(parsed["grounding_status"], json!("grounded"));
+    assert_eq!(parsed["required_anchors"], json!([]));
+}
