@@ -157,4 +157,34 @@ impl MemoryStore {
             db::upsert(&mut self.conn, entry, self.vec_available)
         })
     }
+
+    /// Atomically write an id-less save or return the already-reserved row.
+    ///
+    /// Explicit-id callers must keep using [`Self::upsert`]: their id is an
+    /// update key and intentionally remains outside the id-less identity law.
+    pub fn upsert_idless_deduplicated(
+        &mut self,
+        entry: &MemoryEntry,
+    ) -> Result<db::IdlessSaveWrite, MemoryError> {
+        if self.path_validation && !path_validation_disabled() {
+            let allow_cross = entry
+                .metadata
+                .get("allow_cross_project")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if let Err(e) =
+                path_router::validate_path_for_db(&entry.path, &self.db_label, allow_cross)
+            {
+                eprintln!(
+                    "warning: path-routing validation rejected id-less write db_label={} path={} error={}",
+                    self.db_label, entry.path, e
+                );
+                return Err(MemoryError::InvalidArg(e.to_string()));
+            }
+        }
+        let db_label = self.db_label.clone();
+        db::retry_memory_locked("upsert_idless_deduplicated", &db_label, || {
+            db::upsert_idless_deduplicated(&mut self.conn, entry, self.vec_available)
+        })
+    }
 }

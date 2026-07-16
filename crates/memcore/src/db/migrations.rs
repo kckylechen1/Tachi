@@ -33,6 +33,8 @@
 //! - v18: `dispatch_adjudications` + `dispatch_adjudication_signatures`
 //!   tables (#1035) — append-only leader terminal-judgment events linked
 //!   to a dispatch outcome by `outcome_id`.
+//! - v19: `idless_save_identities` table (#1115) — atomic reservations for
+//!   new id-less saves; legacy duplicate rows are deliberately exempt.
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -44,9 +46,9 @@
 //! written by a newer kernel fails loudly instead of silently proceeding
 //! against data/columns it doesn't understand yet.
 //!
-//! [`EXPECTED_SCHEMA_VERSION`] counts the migration sequence above: 18
-//! sentinel migrations (v1..v18) plus the pre-sentinel baseline schema (v0),
-//! so the current stamp is 18. Bump this const (and add a `vN` doc line
+//! [`EXPECTED_SCHEMA_VERSION`] counts the migration sequence above: 19
+//! sentinel migrations (v1..v19) plus the pre-sentinel baseline schema (v0),
+//! so the current stamp is 19. Bump this const (and add a `vN` doc line
 //! above) whenever a new migration is appended to [`run_data_migrations`].
 //!
 //! ### Compatibility transaction widened to cover `init_schema_inner` (#984 F1 round 3)
@@ -76,7 +78,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 18;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 19;
 
 mod basic;
 mod cross_db;
@@ -87,6 +89,7 @@ mod dispatch_outcomes_reported;
 mod domain_retire;
 mod exec_env_class;
 mod hard_state_index;
+mod idless_save_identity;
 mod legacy_columns;
 mod pack_retire;
 mod sentinel;
@@ -101,6 +104,7 @@ use dispatch_outcomes_reported::*;
 use domain_retire::*;
 use exec_env_class::*;
 use hard_state_index::*;
+use idless_save_identity::*;
 use legacy_columns::*;
 pub use legacy_columns::{
     fold_and_drop_legacy_persons_column, migrate_v9_relocate_and_drop_location,
@@ -478,6 +482,12 @@ pub(crate) fn run_data_migrations_in_tx(
         migrate_v18_dispatch_adjudications,
     )?
     .unwrap_or(0);
+
+    let _ = apply_versioned_migration(
+        conn,
+        "v19_idless_save_identity",
+        migrate_v19_idless_save_identity,
+    )?;
 
     Ok(report)
 }

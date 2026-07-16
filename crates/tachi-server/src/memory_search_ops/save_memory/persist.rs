@@ -58,19 +58,28 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_save_entry(
     entry: &MemoryEntry,
     target_db: DbScope,
     named_project: Option<&str>,
-) -> Result<(), String> {
+    idless_save: bool,
+) -> Result<Option<String>, String> {
+    let upsert = |store: &mut MemoryStore| {
+        if idless_save {
+            match store
+                .upsert_idless_deduplicated(entry)
+                .map_err(|e| format_save_error(server, target_db, named_project, &e))?
+            {
+                memcore::db::IdlessSaveWrite::Stored => Ok(None),
+                memcore::db::IdlessSaveWrite::Duplicate { existing_id } => Ok(Some(existing_id)),
+            }
+        } else {
+            store
+                .upsert(entry)
+                .map_err(|e| format_save_error(server, target_db, named_project, &e))?;
+            Ok(None)
+        }
+    };
     if let Some(project_name) = named_project {
-        server.with_named_project_store(project_name, |store: &mut MemoryStore| {
-            store
-                .upsert(entry)
-                .map_err(|e| format_save_error(server, target_db, Some(project_name), &e))
-        })
+        server.with_named_project_store(project_name, upsert)
     } else {
-        server.with_store_for_scope(target_db, |store: &mut MemoryStore| {
-            store
-                .upsert(entry)
-                .map_err(|e| format_save_error(server, target_db, None, &e))
-        })
+        server.with_store_for_scope(target_db, upsert)
     }
 }
 

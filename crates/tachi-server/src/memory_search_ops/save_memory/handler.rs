@@ -125,13 +125,11 @@ pub(crate) async fn handle_save_memory(
     // Path+text identity is unaffected by `force` from here on; a caller
     // that truly wants a second, distinct row can still pass its own `id`.
     //
-    // KNOWN LIMITATION (#1041 F6, tracked for a follow-up, not fixed here):
-    // this lookup-then-upsert is not atomic and `memories` has no path+text
-    // uniqueness constraint (only `id` is unique) — two concurrent id-less
-    // saves with identical path+text can both observe "no existing row" and
-    // insert two distinct UUIDs. Closing that requires either a DB-level
-    // unique index + upsert-on-conflict (a migration) or an application
-    // lock broader than this single request; out of scope for this PR.
+    // The read is an inexpensive fast path for pre-#1115 rows as well as a
+    // normal duplicate response. The write below remains authoritative for
+    // concurrent id-less saves: it reserves the identity in the same SQLite
+    // transaction as the memory/FTS/vector write, so two callers cannot both
+    // mint a fresh UUID after racing this read.
     if params.id.is_none() {
         if let Some(existing_id) = find_exact_path_text_duplicate(
             server,
@@ -180,6 +178,8 @@ pub(crate) async fn handle_save_memory(
     let needs_embedding = params.vector.is_none();
     let auto_link = params.auto_link;
     let emit_continuity = params.emit_continuity;
+    let idless_save = requested_id.is_none();
+    let duplicate_response_path = params.path.clone();
     let mut entry = build_save_entry(
         server,
         params,
@@ -210,7 +210,18 @@ pub(crate) async fn handle_save_memory(
         }
     }
 
-    upsert_save_entry(server, &entry, target_db, named_project.as_deref())?;
+    if let Some(existing_id) = upsert_save_entry(
+        server,
+        &entry,
+        target_db,
+        named_project.as_deref(),
+        idless_save,
+    )? {
+        let response =
+            build_duplicate_save_response(&existing_id, &duplicate_response_path, target_db);
+        return serde_json::to_string(&serde_json::Value::Object(response))
+            .map_err(|e| format!("Failed to serialize response: {e}"));
+    }
 
     let continuity_event = if emit_continuity {
         Some(crate::continuity_ops::emit_memory_saved_event(

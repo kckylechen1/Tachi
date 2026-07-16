@@ -42,6 +42,17 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_memories_importance  ON memories(importance DESC);
         CREATE INDEX IF NOT EXISTS idx_memories_timestamp   ON memories(timestamp DESC);
 
+        -- #1115: atomic identity reservation for id-less save requests.
+        -- Legacy rows intentionally have no reservation; their re-homing or
+        -- cleanup remains an explicit owner-approved data operation.
+        CREATE TABLE IF NOT EXISTS idless_save_identities (
+            identity  TEXT PRIMARY KEY,
+            path      TEXT NOT NULL,
+            text      TEXT NOT NULL,
+            memory_id TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT ''
+        );
+
         -- Standalone FTS5 table with Chinese + Pinyin tokenizer.
         -- Uses wangfenjin/simple for CJK segmentation.
         CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(

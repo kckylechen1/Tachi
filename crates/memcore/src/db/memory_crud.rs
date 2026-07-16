@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::error::MemoryError;
@@ -134,12 +134,39 @@ fn canonical_entities_json(entry: &MemoryEntry) -> Result<String, MemoryError> {
 
 // ─── UPSERT ───────────────────────────────────────────────────────────────────
 
+/// Result of atomically reserving an id-less save identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdlessSaveWrite {
+    Stored,
+    Duplicate { existing_id: String },
+}
+
 /// Insert or update a memory entry (and its embedding vector if provided).
 pub fn upsert(
     conn: &mut Connection,
     entry: &MemoryEntry,
     vec_available: bool,
 ) -> Result<(), MemoryError> {
+    upsert_inner(conn, entry, vec_available, false).map(|_| ())
+}
+
+/// Store an id-less save with an identity reservation that is atomic with the
+/// memory/FTS/vector write. Legacy rows deliberately have no reservation, so
+/// this only governs id-less saves created after the #1115 migration.
+pub fn upsert_idless_deduplicated(
+    conn: &mut Connection,
+    entry: &MemoryEntry,
+    vec_available: bool,
+) -> Result<IdlessSaveWrite, MemoryError> {
+    upsert_inner(conn, entry, vec_available, true)
+}
+
+fn upsert_inner(
+    conn: &mut Connection,
+    entry: &MemoryEntry,
+    vec_available: bool,
+    reserve_idless_identity: bool,
+) -> Result<IdlessSaveWrite, MemoryError> {
     if entry.id.trim().is_empty() {
         return Err(MemoryError::InvalidArg(
             "entry.id must be provided by caller".to_string(),
@@ -205,6 +232,44 @@ pub fn upsert(
 
     // All writes for one upsert must be atomic across main table + FTS + vec.
     let tx = conn.transaction()?;
+
+    if reserve_idless_identity {
+        let identity = idless_save_identity(&path, &clean_text);
+        let reserved = tx.execute(
+            "INSERT INTO idless_save_identities(identity, path, text, memory_id, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(identity) DO NOTHING",
+            params![&identity, &path, &clean_text, &entry.id, &write_time_utc],
+        )?;
+        if reserved == 0 {
+            let (stored_path, stored_text, existing_id): (String, String, String) = tx.query_row(
+                "SELECT path, text, memory_id FROM idless_save_identities WHERE identity = ?1",
+                params![&identity],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            if stored_path != path || stored_text != clean_text {
+                return Err(MemoryError::InvalidArg(
+                    "id-less save identity collision for distinct path/text payloads".to_string(),
+                ));
+            }
+            let active_identity_target: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM memories WHERE id = ?1 AND archived = 0 \
+                     AND path = ?2 AND text = ?3",
+                    params![&existing_id, &path, &clean_text],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if active_identity_target.is_some() {
+                tx.commit()?;
+                return Ok(IdlessSaveWrite::Duplicate { existing_id });
+            }
+            tx.execute(
+                "UPDATE idless_save_identities \
+                 SET memory_id = ?1, created_at = ?2 WHERE identity = ?3",
+                params![&entry.id, &write_time_utc, &identity],
+            )?;
+        }
+    }
 
     // ── Write-time Jaccard deduplication (new entries only) ──────────────────
     // Only for net-new IDs; ON CONFLICT path below handles updates.
@@ -334,7 +399,7 @@ pub fn upsert(
                         ],
                     )?;
                     tx.commit()?;
-                    return Ok(());
+                    return Ok(IdlessSaveWrite::Stored);
                 }
             }
         }
@@ -431,7 +496,15 @@ pub fn upsert(
     }
 
     tx.commit()?;
-    Ok(())
+    Ok(IdlessSaveWrite::Stored)
+}
+
+fn idless_save_identity(path: &str, text: &str) -> String {
+    let mut seed = Vec::with_capacity(path.len() + text.len() + 1);
+    seed.extend_from_slice(path.as_bytes());
+    seed.push(0);
+    seed.extend_from_slice(text.as_bytes());
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, &seed).to_string()
 }
 
 /// Maximum IDs per batch for IN clause queries (SQLite has a 999 parameter limit).

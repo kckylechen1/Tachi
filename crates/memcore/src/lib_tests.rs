@@ -99,6 +99,62 @@ fn upsert_retries_short_lived_sqlite_writer_lock() {
 }
 
 #[test]
+fn idless_save_identity_is_atomic_across_store_connections() {
+    let temp = tempfile::NamedTempFile::new().expect("temp db");
+    let db_path = temp.path().to_string_lossy().to_string();
+    MemoryStore::open(&db_path).expect("precreate shared database");
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let path = format!("/facts/idless-save-{}", uuid::Uuid::new_v4());
+    let text = "Two concurrent id-less saves must share one durable identity.".to_string();
+    let mut workers = Vec::new();
+    for worker in 0..2 {
+        let barrier = std::sync::Arc::clone(&barrier);
+        let db_path = db_path.clone();
+        let path = path.clone();
+        let text = text.clone();
+        workers.push(std::thread::spawn(move || {
+            let mut store = MemoryStore::open(&db_path).expect("open shared store");
+            let mut entry = test_entry(&format!("idless-race-{worker}"));
+            entry.path = path;
+            entry.text = text;
+            barrier.wait();
+            store
+                .upsert_idless_deduplicated(&entry)
+                .expect("id-less save")
+        }));
+    }
+    let outcomes: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("id-less writer should join"))
+        .collect();
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, db::IdlessSaveWrite::Stored))
+            .count(),
+        1,
+        "exactly one writer may reserve the id-less identity: {outcomes:#?}"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, db::IdlessSaveWrite::Duplicate { .. }))
+            .count(),
+        1,
+        "the other writer must receive the durable duplicate identity: {outcomes:#?}"
+    );
+
+    let store = MemoryStore::open_read_only(&db_path).expect("open shared store readonly");
+    let rows = store.get_all(10).expect("list saved rows");
+    assert_eq!(
+        rows.len(),
+        1,
+        "identical id-less saves must not mint two independent rows: {rows:#?}"
+    );
+}
+
+#[test]
 fn checkpoint_wal_truncate_reclaims_wal_file() {
     let temp = tempfile::NamedTempFile::new().expect("temp db");
     let db_path = temp.path().to_string_lossy().to_string();
