@@ -3,6 +3,30 @@
 //! The limit applies to untrusted/recalled bodies and skill contracts only. It
 //! deliberately leaves the task and dispatch envelope intact, and callers keep
 //! a short reference when an item's body cannot fit.
+//!
+//! ## Budget contract (round-2, codex cross-review checkpoint 2.2)
+//!
+//! The character budget in [`PromptInputBudget`] constrains the raw
+//! **untrusted payload itself** — the body text callers pass to [`admit`],
+//! before any structural wrapping. It does **not** count:
+//!
+//! - the `### {path}\n` header a caller prepends to an admitted body, or
+//! - the `<untrusted_content>`/`</untrusted_content>` delimiter tags
+//!   `super::sanitize_untrusted` wraps around it.
+//!
+//! Both are trusted structure the assembler itself controls (not attacker
+//! input), so they're applied *after* [`admit`] returns — this is also why
+//! callers budget the raw body first and wrap second: a mid-budget
+//! truncation can land inside the payload but can never sever a boundary
+//! tag or header. This is an accepted, deliberate scoping (leader
+//! disposition on codex checkpoint 2.2: "semantically acceptable, make it
+//! explicit"), not a gap — total rendered prompt length is separately
+//! guarded by the unrelated, coarser 50K-character global warning in
+//! `assemble_prompt_with_trace` (`prompt.rs`'s `MAX_PROMPT_CHARS` check),
+//! which exists to flag oversized prompts overall, not to re-bound the
+//! per-item untrusted budget this module already enforces.
+//!
+//! [`admit`]: PromptInputBudget::admit
 
 const ELLIPSIS: &str = "...";
 
