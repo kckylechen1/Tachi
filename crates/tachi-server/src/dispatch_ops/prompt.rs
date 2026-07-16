@@ -1,3 +1,4 @@
+mod budget;
 mod completion;
 mod context;
 mod overlays;
@@ -11,6 +12,7 @@ use crate::tool_params::{SearchMemoryParams, TachiDispatchParams};
 use crate::MemoryServer;
 use serde_json::{json, Value};
 
+use self::budget::PromptInputBudget;
 use self::completion::dispatch_can_self_complete;
 use self::context::{compact_example_text, prompt_row_text};
 use self::overlays::{
@@ -20,6 +22,12 @@ use self::skills::render_skill_invocation_contract;
 
 const UNTRUSTED_OPEN: &str = "<untrusted_content>";
 const UNTRUSTED_CLOSE: &str = "</untrusted_content>";
+// Operator-configurable ceilings for untrusted recall and embedded skill text.
+// Zero is a valid explicit choice: emit references only, never the raw bodies.
+const MEMORY_CONTEXT_BUDGET_ENV: &str = "TACHI_DISPATCH_MEMORY_CONTEXT_BUDGET_CHARS";
+const SKILL_TEXT_BUDGET_ENV: &str = "TACHI_DISPATCH_SKILL_TEXT_BUDGET_CHARS";
+const DEFAULT_MEMORY_CONTEXT_BUDGET_CHARS: usize = 6_000;
+const DEFAULT_SKILL_TEXT_BUDGET_CHARS: usize = 6_000;
 
 fn sanitize_untrusted(text: &str) -> String {
     let cleaned = text
@@ -35,6 +43,12 @@ pub(crate) async fn assemble_prompt_with_trace(
     params: &TachiDispatchParams,
 ) -> PromptAssembly {
     let mut parts: Vec<String> = Vec::new();
+    let mut memory_budget = PromptInputBudget::from_env(
+        MEMORY_CONTEXT_BUDGET_ENV,
+        DEFAULT_MEMORY_CONTEXT_BUDGET_CHARS,
+    );
+    let mut skill_budget =
+        PromptInputBudget::from_env(SKILL_TEXT_BUDGET_ENV, DEFAULT_SKILL_TEXT_BUDGET_CHARS);
 
     let agent = params.agent.as_deref().unwrap_or("unknown");
     if let Some(overlay) =
@@ -255,7 +269,7 @@ pub(crate) async fn assemble_prompt_with_trace(
                     })
                     .collect::<Vec<_>>();
                 if !rows.is_empty() {
-                    parts.push("## Relevant context from Tachi memory/wiki".to_string());
+                    let mut sections = Vec::new();
                     for row in &rows {
                         if let Some(text) =
                             prompt_row_text(server, row, params.project.as_deref()).await
@@ -264,10 +278,20 @@ pub(crate) async fn assemble_prompt_with_trace(
                                 .get("path")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown");
-                            parts.push(format!("### {}\n{}", path, sanitize_untrusted(&text)));
+                            let body = format!("### {path}\n{}", sanitize_untrusted(&text));
+                            let section = memory_budget.admit(&body).unwrap_or_else(|| {
+                                format!(
+                                    "### {path}\n- Context body omitted by the memory input budget; retrieve this reference only if it becomes necessary."
+                                )
+                            });
+                            sections.push(section);
                         }
                     }
-                    parts.push(String::new());
+                    if !sections.is_empty() {
+                        parts.push("## Relevant context from Tachi memory/wiki".to_string());
+                        parts.extend(sections);
+                        parts.push(String::new());
+                    }
                 }
             }
             Err(err) => tracing::warn!("dispatch prompt memory context search failed: {err}"),
@@ -303,11 +327,7 @@ pub(crate) async fn assemble_prompt_with_trace(
         {
             Ok(rows) => {
                 if !rows.is_empty() {
-                    parts.push("## SFT gold examples (style only, not live facts)".to_string());
-                    parts.push(
-                        "Use these as answer-shape references. Do not treat historical SFT samples as current project truth."
-                            .to_string(),
-                    );
+                    let mut sections = Vec::new();
                     for row in &rows {
                         if let Some(text) =
                             prompt_row_text(server, row, params.project.as_deref()).await
@@ -316,14 +336,28 @@ pub(crate) async fn assemble_prompt_with_trace(
                                 .get("path")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown");
-                            parts.push(format!(
+                            let body = format!(
                                 "### {}\n{}",
                                 path,
                                 sanitize_untrusted(&compact_example_text(&text, 900))
-                            ));
+                            );
+                            let section = memory_budget.admit(&body).unwrap_or_else(|| {
+                                format!(
+                                    "### {path}\n- SFT body omitted by the memory input budget; retrieve this reference only if it becomes necessary."
+                                )
+                            });
+                            sections.push(section);
                         }
                     }
-                    parts.push(String::new());
+                    if !sections.is_empty() {
+                        parts.push("## SFT gold examples (style only, not live facts)".to_string());
+                        parts.push(
+                            "Use these as answer-shape references. Do not treat historical SFT samples as current project truth."
+                                .to_string(),
+                        );
+                        parts.extend(sections);
+                        parts.push(String::new());
+                    }
                 }
             }
             Err(err) => tracing::warn!("dispatch prompt SFT context search failed: {err}"),
@@ -333,14 +367,20 @@ pub(crate) async fn assemble_prompt_with_trace(
     // 2. Skill invocation contract (effective = explicit + stage/intent defaults)
     let mut skill_sections = Vec::new();
     for skill_id in &effective_skills {
-        if let Ok(cap) = server.get_capability(skill_id) {
+        let section = if let Ok(cap) = server.get_capability(skill_id) {
             let def: serde_json::Value = serde_json::from_str(&cap.definition).unwrap_or_default();
-            skill_sections.push(render_skill_invocation_contract(skill_id, &cap, &def));
+            render_skill_invocation_contract(skill_id, &cap, &def)
         } else {
-            skill_sections.push(format!(
+            format!(
                 "### {skill_id}\n- registry_status: missing\n- instruction: If `tachi_skill` is available, first run `tachi_skill(action='discover', query='{skill_id}')`; otherwise continue with the task route and report that the skill capability was unavailable."
-            ));
-        }
+            )
+        };
+        let section = skill_budget.admit(&section).unwrap_or_else(|| {
+            format!(
+                "### {skill_id}\n- embedded_contract: omitted by the skill input budget; use `tachi_skill(action='run', skill_id='{skill_id}')` when available."
+            )
+        });
+        skill_sections.push(section);
     }
     if !skill_sections.is_empty() {
         parts.push("## Required skill invocation".to_string());
@@ -384,21 +424,31 @@ pub(crate) async fn assemble_prompt_with_trace(
     {
         Ok(eval_rows) => {
             if !eval_rows.is_empty() {
-                parts.push("## Prior pitfalls / avoidance notes".to_string());
+                let mut sections = Vec::new();
                 for row in &eval_rows {
                     if let Some(text) = row.get("text").and_then(|v| v.as_str()) {
                         let path = row
                             .get("path")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown");
-                        parts.push(format!(
+                        let body = format!(
                             "- **{}**: {}",
                             path,
                             sanitize_untrusted(&text.chars().take(300).collect::<String>())
-                        ));
+                        );
+                        let section = memory_budget.admit(&body).unwrap_or_else(|| {
+                            format!(
+                                "- **{path}**: avoidance note body omitted by the memory input budget."
+                            )
+                        });
+                        sections.push(section);
                     }
                 }
-                parts.push(String::new());
+                if !sections.is_empty() {
+                    parts.push("## Prior pitfalls / avoidance notes".to_string());
+                    parts.extend(sections);
+                    parts.push(String::new());
+                }
             }
         }
         Err(err) => tracing::warn!("dispatch prompt eval avoidance search failed: {err}"),
@@ -424,6 +474,19 @@ pub(crate) async fn assemble_prompt_with_trace(
     // 5. Extra instruction from stage (e.g. auto → "plan first")
     if let Some(ref instr) = extra_instruction {
         parts.push(instr.clone());
+        parts.push(String::new());
+    }
+
+    let mut budget_summaries = Vec::new();
+    if let Some(summary) = memory_budget.summary("memory") {
+        budget_summaries.push(summary);
+    }
+    if let Some(summary) = skill_budget.summary("skill") {
+        budget_summaries.push(summary);
+    }
+    if !budget_summaries.is_empty() {
+        parts.push("## Prompt input budget".to_string());
+        parts.extend(budget_summaries);
         parts.push(String::new());
     }
 
@@ -457,7 +520,88 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_untrusted, UNTRUSTED_CLOSE, UNTRUSTED_OPEN};
+    use super::{
+        assemble_prompt, sanitize_untrusted, SKILL_TEXT_BUDGET_ENV, UNTRUSTED_CLOSE, UNTRUSTED_OPEN,
+    };
+    use crate::test_support::EnvRestore;
+    use crate::tool_params::TachiDispatchParams;
+    use crate::MemoryServer;
+    use memcore::HubCapability;
+    use serde_json::json;
+
+    fn params_with_skills(skills: Vec<&str>) -> TachiDispatchParams {
+        TachiDispatchParams {
+            agent: Some("codex".to_string()),
+            profile: None,
+            task: "review the bounded prompt".to_string(),
+            execution_level: None,
+            cwd: None,
+            env_id: None,
+            unmanaged_cwd: None,
+            skills: skills.into_iter().map(str::to_string).collect(),
+            context_query: None,
+            model: None,
+            timeout_secs: 5,
+            permission_profile: None,
+            allowed_tools: Vec::new(),
+            completion_predicate: None,
+            max_turns: None,
+            sandbox: None,
+            inject_tachi_mcp: None,
+            inject_hub_mcps: None,
+            command: Vec::new(),
+            harness_transport: None,
+            harness_server_url: None,
+            project: None,
+            stage: None,
+            credential_profiles: Vec::new(),
+            issue_ref: None,
+            pr_ref: None,
+            flow_id: None,
+            tool_profile: None,
+            auto_capability_bundle: Some(false),
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
+        }
+    }
+
+    fn register_skill(server: &MemoryServer, id: &str, raw_marker: &str) {
+        let capability = HubCapability {
+            id: id.to_string(),
+            cap_type: "skill".to_string(),
+            name: id.to_string(),
+            version: 1,
+            description: "budget regression fixture".to_string(),
+            definition: json!({
+                "source_path": format!("/skills/{id}/SKILL.md"),
+                "content": raw_marker.repeat(200),
+            })
+            .to_string(),
+            enabled: true,
+            review_status: "approved".to_string(),
+            health_status: "healthy".to_string(),
+            last_error: None,
+            last_success_at: None,
+            last_failure_at: None,
+            fail_streak: 0,
+            active_version: None,
+            exposure_mode: "gateway".to_string(),
+            uses: 0,
+            successes: 0,
+            failures: 0,
+            avg_rating: 0.0,
+            last_used: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        server
+            .with_global_store(|store| {
+                store
+                    .hub_register(&capability)
+                    .map_err(|error| error.to_string())
+            })
+            .expect("register fixture skill");
+    }
 
     #[test]
     fn sanitize_untrusted_neutralizes_closing_tag_injection() {
@@ -479,6 +623,37 @@ mod tests {
         assert_eq!(
             prompt,
             format!("{UNTRUSTED_OPEN}\nnormal context line\nsecond line\n{UNTRUSTED_CLOSE}")
+        );
+    }
+
+    #[tokio::test]
+    async fn over_budget_skill_contracts_keep_references_without_raw_bodies() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _budget = EnvRestore::set(SKILL_TEXT_BUDGET_ENV, "400");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        register_skill(&server, "skill:first", "FIRST_RAW_BODY_");
+        register_skill(&server, "skill:second", "SECOND_RAW_BODY_");
+        let params = params_with_skills(vec!["skill:first", "skill:second"]);
+
+        let prompt = assemble_prompt(&server, &params).await;
+
+        assert!(prompt.contains("### skill:first"), "{prompt}");
+        assert!(
+            prompt.contains(
+                "### skill:second\n- embedded_contract: omitted by the skill input budget"
+            ),
+            "the selected skill must remain auditable as a reference: {prompt}"
+        );
+        assert!(
+            !prompt.contains("SECOND_RAW_BODY_"),
+            "the omitted skill's raw contract must not enter the prompt: {prompt}"
+        );
+        assert!(
+            prompt.contains("truncated 1 item(s), omitted 1 body item(s)"),
+            "the prompt must disclose its aggregate skill-budget decision: {prompt}"
         );
     }
 }
