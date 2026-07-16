@@ -102,7 +102,7 @@ mod tests {
     use crate::db::schema::init_schema;
 
     fn open_test_db() -> Connection {
-        let _ = libsimple::enable_auto_extension();
+        let _ = crate::db::enable_simple_auto_extension();
         crate::db::sqlite_vec::register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();

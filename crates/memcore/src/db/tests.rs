@@ -45,7 +45,7 @@ mod tier;
 mod write_ops;
 
 fn make_conn() -> Connection {
-    libsimple::enable_auto_extension().unwrap();
+    crate::db::enable_simple_auto_extension().unwrap();
     register_sqlite_vec();
     let conn = Connection::open_in_memory().unwrap();
     init_schema(&conn).unwrap();

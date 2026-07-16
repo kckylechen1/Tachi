@@ -22,7 +22,7 @@ mod supersession;
 mod symbolic;
 
 fn setup() -> Connection {
-    libsimple::enable_auto_extension().unwrap();
+    crate::db::enable_simple_auto_extension().unwrap();
     register_sqlite_vec();
     let conn = Connection::open_in_memory().unwrap();
     init_schema(&conn).unwrap();

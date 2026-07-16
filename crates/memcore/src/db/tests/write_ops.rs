@@ -316,7 +316,7 @@ fn upsert_defaults_valid_from_to_timestamp() {
 
 #[test]
 fn init_schema_backfills_valid_from_for_legacy_rows() {
-    libsimple::enable_auto_extension().unwrap();
+    crate::db::enable_simple_auto_extension().unwrap();
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
         r#"

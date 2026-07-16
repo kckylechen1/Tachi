@@ -131,7 +131,7 @@ mod tests {
     use crate::db::{init_schema, register_sqlite_vec, try_load_sqlite_vec};
 
     fn open_test_db() -> Connection {
-        let _ = libsimple::enable_auto_extension();
+        let _ = crate::db::enable_simple_auto_extension();
         register_sqlite_vec();
         let conn = Connection::open_in_memory().expect("open");
         let _ = try_load_sqlite_vec(&conn);

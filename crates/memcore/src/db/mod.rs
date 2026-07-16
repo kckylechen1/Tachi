@@ -30,6 +30,7 @@ mod sandbox;
 mod schema;
 #[cfg(feature = "admin")]
 pub mod session_claims;
+mod sqlite_extensions;
 mod sqlite_vec;
 mod state;
 mod stats_gc;
@@ -121,6 +122,7 @@ pub use sandbox::{
     path_matches_pattern, set_sandbox_policy, set_sandbox_rule,
 };
 pub use schema::{init_schema, init_schema_with_label_mut};
+pub use sqlite_extensions::enable_simple_auto_extension;
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
 pub use state::{
     delete_state, get_state, insert_state_if_absent, list_derived_by_source, list_state,

@@ -86,7 +86,7 @@ mod tests {
     fn open_test_db() -> Connection {
         // Match the convention used by db::tests so init_schema can build FTS5
         // tables that depend on the libsimple tokenizer + sqlite-vec extension.
-        let _ = libsimple::enable_auto_extension();
+        let _ = crate::db::enable_simple_auto_extension();
         crate::db::sqlite_vec::register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();

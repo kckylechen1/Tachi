@@ -1024,7 +1024,7 @@ mod tests {
     fn open_conn() -> Connection {
         // Same raw-connection fixture as `exec_env`'s tests: schema init
         // creates FTS tables needing the registered simple tokenizer.
-        libsimple::enable_auto_extension().unwrap();
+        crate::db::enable_simple_auto_extension().unwrap();
         crate::db::register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
@@ -1037,7 +1037,7 @@ mod tests {
     /// which is what makes the loser of a write-lock race wait instead of
     /// erroring.
     fn open_file_conn(db_path: &std::path::Path) -> Connection {
-        libsimple::enable_auto_extension().unwrap();
+        crate::db::enable_simple_auto_extension().unwrap();
         crate::db::register_sqlite_vec();
         let conn = Connection::open(db_path).unwrap();
         crate::db::init_schema(&conn).unwrap();

@@ -368,7 +368,7 @@ fn migration_updates_stale_enum_checks() {
         )
         .unwrap();
 
-    libsimple::enable_auto_extension().unwrap();
+    crate::db::enable_simple_auto_extension().unwrap();
     init_schema(&conn).unwrap();
     let sql: String = conn
         .query_row(
@@ -447,7 +447,7 @@ fn migration_adds_lifecycle_columns_when_rebuilding_legacy_table() {
         )
         .unwrap();
 
-    libsimple::enable_auto_extension().unwrap();
+    crate::db::enable_simple_auto_extension().unwrap();
     init_schema(&conn).unwrap();
     let (recall_count, query_diversity, tier): (i64, i64, String) = conn
         .query_row(
@@ -509,7 +509,7 @@ fn migration_preserves_fts_rows() {
 
 #[test]
 fn migration_repairs_partial_fts_drift() {
-    libsimple::enable_auto_extension().unwrap();
+    crate::db::enable_simple_auto_extension().unwrap();
     let conn = Connection::open_in_memory().unwrap();
     init_schema(&conn).unwrap();
     conn.execute_batch(
