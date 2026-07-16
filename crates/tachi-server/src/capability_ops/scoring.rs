@@ -101,6 +101,74 @@ pub(super) fn token_overlap_ratio(query_tokens: &[String], candidate_tokens: &[S
     intersection as f64 / union as f64
 }
 
+/// Runtime-resolved filesystem locations identify where a capability was
+/// loaded, not what it can do. They must not alter recommendation scores.
+fn scoring_definition(definition: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(definition) else {
+        return definition.to_string();
+    };
+    strip_resolved_paths(&mut value);
+    value.to_string()
+}
+
+fn strip_resolved_paths(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            fields.remove("resolved_path");
+            for child in fields.values_mut() {
+                strip_resolved_paths(child);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                strip_resolved_paths(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Declared-metadata keys a capability author can use to state host
+/// affinity. Host bonus matching is scoped to these keys only — never to
+/// free-text fields (`content`, `prompt`, …) or runtime-resolved paths.
+/// See kckylechen1/tachi#1140 fix direction B: "match `host` against
+/// declared metadata (tags/host fields), not raw substring over the whole
+/// definition blob." `tags` is the metadata key builtin capabilities
+/// already populate (`crates/tachi-server/src/builtins/*.rs`); `host` /
+/// `hosts` are included for capabilities that declare host affinity
+/// directly.
+const HOST_METADATA_KEYS: &[&str] = &["host", "hosts", "tags"];
+
+/// True when `host` appears in one of `cap`'s declared metadata fields
+/// (`host`, `hosts`, or `tags`) rather than anywhere in its free-text
+/// content. This is the scoped replacement for the old
+/// `definition.contains(host)` substring test, which matched runtime
+/// filesystem paths and prose alike (#1140).
+fn definition_declares_host(definition: &str, host: &str) -> bool {
+    let Ok(Value::Object(fields)) = serde_json::from_str::<Value>(definition) else {
+        return false;
+    };
+    // Review checkpoint 1.1 (round-2, codex cross-review of #1166): only the
+    // top-level `host`/`hosts`/`tags` keys are consulted here — a nested
+    // object under one of those keys is not walked. This is intentional, not
+    // an oversight: a value nested arbitrarily deep inside declared metadata
+    // is structurally closer to free-text content than to an author's
+    // explicit host declaration, so it gets no bonus, matching the same
+    // fail-safe default `HOST_METADATA_KEYS` exists to enforce (#1140).
+    HOST_METADATA_KEYS
+        .iter()
+        .filter_map(|key| fields.get(*key))
+        .any(|field| host_value_matches(field, host))
+}
+
+fn host_value_matches(value: &Value, host: &str) -> bool {
+    match value {
+        Value::String(text) => text.to_ascii_lowercase().contains(host),
+        Value::Array(values) => values.iter().any(|entry| host_value_matches(entry, host)),
+        _ => false,
+    }
+}
+
 fn tokens_from_parts(parts: &[&str]) -> Vec<String> {
     let mut tokens = parts
         .iter()
@@ -193,11 +261,12 @@ fn pattern_signal_bonus(
     if pattern_signals.is_empty() {
         return (0.0, Vec::new());
     }
+    let definition = scoring_definition(&cap.definition);
     let cap_tokens = bridge_tokens_from_parts(&[
         cap.id.as_str(),
         cap.name.as_str(),
         cap.description.as_str(),
-        cap.definition.as_str(),
+        definition.as_str(),
     ]);
     if cap_tokens.is_empty() {
         return (0.0, Vec::new());
@@ -264,7 +333,7 @@ fn capability_score(
     let id = cap.id.to_ascii_lowercase();
     let name = cap.name.to_ascii_lowercase();
     let desc = cap.description.to_ascii_lowercase();
-    let definition = cap.definition.to_ascii_lowercase();
+    let definition = scoring_definition(&cap.definition).to_ascii_lowercase();
     let id_tokens = tokenize_query(&id);
     let name_tokens = tokenize_query(&name);
     let desc_tokens = tokenize_query(&desc);
@@ -340,7 +409,7 @@ fn capability_score(
         if id.contains(host)
             || name.contains(host)
             || desc.contains(host)
-            || definition.contains(host)
+            || definition_declares_host(&cap.definition, host)
         {
             score += 1.2;
             reasons.push(format!("mentions host '{}'", host));
@@ -469,4 +538,70 @@ pub(crate) fn recommend_capabilities_inner(
     });
     ranked.truncate(limit.max(1));
     Ok(ranked)
+}
+
+#[cfg(test)]
+mod pattern_signal_tests {
+    use super::*;
+
+    fn skill(id: &str, definition: Value) -> HubCapability {
+        HubCapability {
+            id: id.to_string(),
+            cap_type: "skill".to_string(),
+            name: "neutral".to_string(),
+            version: 1,
+            description: "neutral description".to_string(),
+            definition: definition.to_string(),
+            enabled: true,
+            review_status: "approved".to_string(),
+            health_status: "healthy".to_string(),
+            last_error: None,
+            last_success_at: None,
+            last_failure_at: None,
+            fail_streak: 0,
+            active_version: None,
+            exposure_mode: "direct".to_string(),
+            uses: 0,
+            successes: 0,
+            failures: 0,
+            avg_rating: 0.0,
+            last_used: None,
+            created_at: "2026-07-16T00:00:00Z".to_string(),
+            updated_at: "2026-07-16T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn pattern_bonus_ignores_resolved_path_tokens() {
+        let alpha = skill(
+            "skill:alpha",
+            serde_json::json!({
+                "content": "neutral",
+                "resolved_path": "/work/sigil/skills/fixture/SKILL.md"
+            }),
+        );
+        let zeta = skill(
+            "skill:zeta",
+            serde_json::json!({
+                "content": "neutral",
+                "resolved_path": "/work/codex-issue/skills/fixture/SKILL.md"
+            }),
+        );
+        let signals = [PatternSignal {
+            pattern_ref: serde_json::json!({"projection_key": "path-bridge"}),
+            projection_key: "path-bridge".to_string(),
+            tokens: vec!["query".to_string(), "codex".to_string()],
+        }];
+        let query_tokens = vec!["query".to_string()];
+        let bonus = |cap: &HubCapability| {
+            let mut reasons = Vec::new();
+            pattern_signal_bonus(cap, &query_tokens, &signals, &mut reasons).0
+        };
+
+        assert_eq!(
+            bonus(&alpha),
+            bonus(&zeta),
+            "an active pattern must not bridge through a runtime-resolved path"
+        );
+    }
 }
