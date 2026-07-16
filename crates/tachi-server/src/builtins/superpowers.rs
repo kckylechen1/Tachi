@@ -93,7 +93,7 @@ Do not say the task is complete if required verification is missing, failed, or 
     SUPERPOWERS_SKILLS
         .iter()
         .map(|(id, name, description, source)| {
-            let (content, resolved_path, content_hash, source_path) =
+            let (content, _resolved_path, content_hash, source_path) =
                 resolve_skill_content_source(name, source);
             make_skill_capability(
                 id,
@@ -108,7 +108,6 @@ Do not say the task is complete if required verification is missing, failed, or 
                     "policy": { "visibility": "discoverable" },
                     "tags": ["superpowers", "workflow", "builtin", "skill-set"],
                     "source_path": source_path,
-                    "resolved_path": resolved_path,
                     "skill_path": format!("/skills/superpowers/{name}"),
                     "retention_policy": "permanent",
                     "inputSchema": {

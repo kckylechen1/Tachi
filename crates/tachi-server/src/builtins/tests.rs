@@ -205,3 +205,30 @@ fn builtin_waza_and_superpowers_seed_successfully_regardless_of_library_state() 
         );
     }
 }
+
+#[test]
+fn builtin_skill_definitions_keep_runtime_paths_out_of_scored_content() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let waza = super::waza::builtin_waza_skills().expect("seed Waza builtins");
+    let superpowers =
+        super::superpowers::builtin_superpowers_skills().expect("seed Superpowers builtins");
+
+    for capability in waza.iter().chain(superpowers.iter()) {
+        let definition: serde_json::Value =
+            serde_json::from_str(&capability.definition).expect("builtin definition JSON");
+        assert!(
+            definition.get("resolved_path").is_none(),
+            "runtime filesystem paths must not enter the scored definition for {}: {definition}",
+            capability.id
+        );
+        let source_path = definition["source_path"]
+            .as_str()
+            .expect("builtin definition has a source_path");
+        assert!(
+            !std::path::Path::new(source_path).is_absolute(),
+            "source_path stays relative to the vendored corpus: {source_path}"
+        );
+    }
+}
