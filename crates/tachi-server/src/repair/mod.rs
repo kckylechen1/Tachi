@@ -169,7 +169,7 @@ pub async fn run_repair(
     // Register the FTS5 `simple` tokenizer + sqlite-vec auto-extensions once,
     // BEFORE any Connection::open. Required for any DB whose schema includes
     // `memories_fts` (i.e. every tachi-schema DB).
-    if let Err(e) = libsimple::enable_auto_extension() {
+    if let Err(e) = memcore::db::enable_simple_auto_extension() {
         eprintln!("warning: simple tokenizer init failed: {e}");
     }
     memcore::db::register_sqlite_vec();
@@ -352,7 +352,7 @@ fn resolve_rules(rule_filter: &[String]) -> Vec<String> {
 pub fn backup_db(path: &Path) -> std::io::Result<PathBuf> {
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let backup = sibling_with_suffix(path, &format!("bak.{ts}"));
-    let _ = libsimple::enable_auto_extension();
+    let _ = memcore::db::enable_simple_auto_extension();
     memcore::db::register_sqlite_vec();
     let src = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(sqlite_io_error)?;

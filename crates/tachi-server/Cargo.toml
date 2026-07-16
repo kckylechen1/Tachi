@@ -101,7 +101,6 @@ dialoguer = "0.12"
 rpassword = "7"
 glob = "0.3"
 url = "2"
-libsimple = "~0.7"
 # Unicode `General_Category` lookup (`icu_properties::props::GeneralCategory`)
 # for `claims_ops::sanitize_presence_field`'s Cf (Format) strip — real
 # category data via `compiled_data` (default feature, no network fetch),
@@ -118,7 +117,6 @@ vault-kit = { path = "../vault-kit" }
 
 [dev-dependencies]
 tempfile = "3"
-libsimple = "~0.7"
 tachi-llm = { path = "../tachi-llm", features = ["test-support"] }
 # Unifies in vault-kit's lightweight Argon2 test profile (m=64 KiB vs the
 # production m=65536 KiB) for tachi-server's own test binary only — Cargo

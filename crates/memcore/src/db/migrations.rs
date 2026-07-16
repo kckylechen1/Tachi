@@ -514,7 +514,7 @@ mod tests {
 
     fn open_test_db() -> (Connection, tempfile::NamedTempFile) {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-        let _ = libsimple::enable_auto_extension();
+        let _ = crate::db::enable_simple_auto_extension();
         register_sqlite_vec();
         let conn = Connection::open(tmp.path()).expect("open");
         let _ = try_load_sqlite_vec(&conn);
@@ -1285,7 +1285,7 @@ mod tests {
     fn read_only_open_rejects_db_stamped_newer_than_supported() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         {
-            let _ = libsimple::enable_auto_extension();
+            let _ = crate::db::enable_simple_auto_extension();
             register_sqlite_vec();
             let conn = Connection::open(tmp.path()).expect("open");
             let _ = try_load_sqlite_vec(&conn);
@@ -1315,7 +1315,7 @@ mod tests {
     fn read_only_open_permits_older_stamped_db() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         {
-            let _ = libsimple::enable_auto_extension();
+            let _ = crate::db::enable_simple_auto_extension();
             register_sqlite_vec();
             let conn = Connection::open(tmp.path()).expect("open");
             let _ = try_load_sqlite_vec(&conn);
@@ -1334,7 +1334,7 @@ mod tests {
     fn read_only_open_permits_db_at_current_version() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         {
-            let _ = libsimple::enable_auto_extension();
+            let _ = crate::db::enable_simple_auto_extension();
             register_sqlite_vec();
             let conn = Connection::open(tmp.path()).expect("open");
             let _ = try_load_sqlite_vec(&conn);

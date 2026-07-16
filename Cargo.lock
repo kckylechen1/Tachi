@@ -2382,7 +2382,6 @@ dependencies = [
  "http",
  "icu_properties",
  "libc",
- "libsimple",
  "memcore",
  "memory-server-capture-gate",
  "memory-server-hub-cli",

@@ -21,7 +21,7 @@ use super::{DbContext, RepairRule};
 
 fn fresh_db(dir: &TempDir, name: &str) -> (PathBuf, Connection) {
     // FTS5 + the `simple` tokenizer is required by `init_schema`.
-    libsimple::enable_auto_extension().ok();
+    memcore::db::enable_simple_auto_extension().ok();
     memcore::db::register_sqlite_vec();
     let path = dir.path().join(name);
     let mut conn = Connection::open(&path).unwrap();
@@ -36,7 +36,7 @@ fn fresh_db(dir: &TempDir, name: &str) -> (PathBuf, Connection) {
 }
 
 fn fresh_db_at(path: &PathBuf, label: &str) -> Connection {
-    libsimple::enable_auto_extension().ok();
+    memcore::db::enable_simple_auto_extension().ok();
     memcore::db::register_sqlite_vec();
     std::fs::create_dir_all(path.parent().expect("db parent")).unwrap();
     let mut conn = Connection::open(path).unwrap();

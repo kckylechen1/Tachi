@@ -147,7 +147,7 @@ mod tests {
 
     fn make_tachi_db_at_version(version: u32) -> tempfile::NamedTempFile {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
-        let _ = libsimple::enable_auto_extension();
+        let _ = memcore::db::enable_simple_auto_extension();
         memcore::db::register_sqlite_vec();
         let conn = rusqlite::Connection::open(tmp.path()).expect("open");
         let _ = memcore::db::try_load_sqlite_vec(&conn);

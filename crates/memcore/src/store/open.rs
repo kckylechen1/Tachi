@@ -62,7 +62,7 @@ impl MemoryStore {
         ctx: &DbOpenContext,
     ) -> Result<Self, MemoryError> {
         // Register extensions BEFORE opening the connection.
-        libsimple::enable_auto_extension()
+        crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
         let _startup_guard = db::acquire_startup_lock();
@@ -103,7 +103,7 @@ impl MemoryStore {
     /// for legacy/foreign/possibly-corrupt files, by design (see that
     /// module's doc comment).
     pub fn open_read_only(db_path: &str) -> Result<Self, MemoryError> {
-        libsimple::enable_auto_extension()
+        crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
         let conn = db::open_read_only(db_path)?;
@@ -119,7 +119,7 @@ impl MemoryStore {
 
     /// In-memory database (useful for tests and scripts).
     pub fn open_in_memory() -> Result<Self, MemoryError> {
-        libsimple::enable_auto_extension()
+        crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
         let conn = Connection::open_in_memory()?;

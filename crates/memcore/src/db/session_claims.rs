@@ -488,7 +488,7 @@ mod tests {
     use super::*;
 
     fn open_conn() -> Connection {
-        libsimple::enable_auto_extension().unwrap();
+        crate::db::enable_simple_auto_extension().unwrap();
         crate::db::register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
@@ -499,11 +499,56 @@ mod tests {
     /// multi-connection concurrency test — two `:memory:` connections are
     /// two independent databases, so they cannot race each other at all.
     fn open_file_conn(path: &std::path::Path) -> Connection {
-        libsimple::enable_auto_extension().unwrap();
+        crate::db::enable_simple_auto_extension().unwrap();
         crate::db::register_sqlite_vec();
         let conn = Connection::open(path).unwrap();
         crate::db::init_schema(&conn).unwrap();
         conn
+    }
+
+    const AUTO_EXTENSION_RACE_CHILD: &str = "TACHI_SESSION_CLAIMS_AUTO_EXTENSION_RACE_CHILD";
+
+    /// Runs the concurrent file-open path in a fresh test process.  The
+    /// extension registry is process-global, so an in-process test could be
+    /// accidentally pre-initialized by an earlier test and miss the race.
+    #[test]
+    fn concurrent_file_opens_do_not_race_simple_auto_extension_registration() {
+        if std::env::var_os(AUTO_EXTENSION_RACE_CHILD).is_some() {
+            let temp_dir = tempfile::tempdir().expect("tempdir");
+            let workers = 32;
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(workers));
+            let mut handles = Vec::with_capacity(workers);
+
+            for worker in 0..workers {
+                let path = temp_dir.path().join(format!("worker-{worker}.sqlite"));
+                let barrier = std::sync::Arc::clone(&barrier);
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    let _conn = open_file_conn(&path);
+                }));
+            }
+
+            for handle in handles {
+                handle.join().expect("file-open worker must not panic");
+            }
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "db::session_claims::tests::concurrent_file_opens_do_not_race_simple_auto_extension_registration",
+            ])
+            .env(AUTO_EXTENSION_RACE_CHILD, "1")
+            .output()
+            .expect("run isolated concurrent file-open test");
+
+        assert!(
+            output.status.success(),
+            "concurrent file opens must not race extension registration:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     fn new_claim(claim_id: &str, issue_ref: &str) -> NewSessionClaim {
