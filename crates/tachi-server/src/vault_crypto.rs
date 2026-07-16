@@ -158,6 +158,92 @@ pub fn derive_verified_key_from_stored_config(
     Ok(key)
 }
 
+/// Read the Vault master password from macOS Keychain (service `tachi-vault`,
+/// account `default`). Single low-level Keychain-read primitive (tachi#1175):
+/// the CLI `--keychain` flag (`vault_cli::read_vault_password`) and the MCP
+/// `vault_unlock` `use_keychain` parameter both call this instead of each
+/// shelling out to `security` with their own copy of the args and error
+/// handling. Returns `Err` with a message naming the exact failure
+/// (unsupported platform, `security` invocation failure, missing entry, or
+/// non-UTF8 value) — never a bare io/process error.
+///
+/// Distinct from `derive_verified_key_from_stored_config`'s callers
+/// (`provider_config::auto_unlock_vault_from_keychain` and the status-health
+/// Keychain loader): those are best-effort background auto-unlock paths that
+/// silently no-op when Keychain has no entry. This function backs an
+/// *explicit* keychain-unlock request, so it surfaces every failure loudly
+/// instead of degrading to a silent `false`.
+pub fn read_password_from_macos_keychain() -> Result<String, String> {
+    // Test builds only: never shell out to the real `security` binary from a
+    // unit test (that would read/depend on whatever `tachi-vault`/`default`
+    // Keychain entry happens to exist on the machine running the test suite
+    // — non-hermetic, and on a dev box that has actually run `tachi vault
+    // unlock --keychain` it would silently succeed against real state).
+    // These overrides make both the success and the missing-entry paths
+    // deterministic. Never compiled into a release build.
+    #[cfg(test)]
+    if let Some(result) = test_keychain_override() {
+        return result;
+    }
+    if !cfg!(target_os = "macos") {
+        return Err(
+            "Keychain unlock is only supported on macOS; use --password-file (CLI) or a direct \
+             password on Linux/Windows"
+                .to_string(),
+        );
+    }
+    let output = std::process::Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            "tachi-vault",
+            "-a",
+            "default",
+            "-w",
+        ])
+        .output()
+        .map_err(|e| format!("failed to invoke `security` for Keychain read: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "no vault password found in Keychain (service: tachi-vault, account: default): {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let password = String::from_utf8(output.stdout)
+        .map_err(|e| format!("Keychain password is not valid UTF-8: {e}"))?
+        .trim()
+        .to_string();
+    if password.is_empty() {
+        return Err("Keychain entry for tachi-vault/default is empty".to_string());
+    }
+    Ok(password)
+}
+
+/// Test-only injection seam for [`read_password_from_macos_keychain`] (tachi#1175).
+/// `TACHI_TEST_KEYCHAIN_PASSWORD=<value>` returns `Ok(value)` (or the
+/// real empty-entry error if `value` is empty); `TACHI_TEST_FORCE_KEYCHAIN_MISSING=1`
+/// returns the real missing-entry error text without invoking `security`.
+/// Neither var set (the default for every other test) falls through to `None`
+/// and the function runs its normal platform/`security` logic.
+#[cfg(test)]
+fn test_keychain_override() -> Option<Result<String, String>> {
+    if std::env::var_os("TACHI_TEST_FORCE_KEYCHAIN_MISSING").is_some() {
+        return Some(Err(
+            "no vault password found in Keychain (service: tachi-vault, account: default): \
+             test override (TACHI_TEST_FORCE_KEYCHAIN_MISSING)"
+                .to_string(),
+        ));
+    }
+    if let Ok(value) = std::env::var("TACHI_TEST_KEYCHAIN_PASSWORD") {
+        return Some(if value.is_empty() {
+            Err("Keychain entry for tachi-vault/default is empty".to_string())
+        } else {
+            Ok(value)
+        });
+    }
+    None
+}
+
 /// Authenticate associated data with AES-256-GCM detached tag and no ciphertext.
 ///
 /// This is used for Vault sync bundles where the payload is already encrypted

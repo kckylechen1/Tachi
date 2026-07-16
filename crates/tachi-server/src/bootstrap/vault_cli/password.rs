@@ -1,6 +1,30 @@
 use std::io::BufRead;
 use std::path::Path;
 
+/// Message shown when an interactive password prompt is needed but no TTY is
+/// available to prompt on. This replaces the raw `rpassword` I/O error
+/// (`Device not configured (os error 6)` on macOS/Linux), which is the errno
+/// for "failed to open /dev/tty" and gives the caller zero indication of
+/// what to do instead. Kept as a shared constant so the CLI error text and
+/// its tests can't drift apart.
+pub(in crate::bootstrap) const NO_TTY_HINT: &str =
+    "no TTY to prompt for vault password; use --keychain, --stdin-password or --password-file";
+
+/// Whether we can prompt interactively for a password on the controlling
+/// terminal. Real check is `stdin` being a TTY (same convention as
+/// `atty_stdout` elsewhere in bootstrap). Test builds only: overridable via
+/// `TACHI_TEST_FORCE_NO_TTY=1` so a test can exercise the no-TTY error path
+/// deterministically without needing an actual detached-terminal process
+/// (mirrors the `TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK` test-escape-hatch
+/// convention in `provider_config.rs` — never compiled into a release build).
+fn can_prompt_interactively() -> bool {
+    #[cfg(test)]
+    if std::env::var_os("TACHI_TEST_FORCE_NO_TTY").is_some() {
+        return false;
+    }
+    std::io::IsTerminal::is_terminal(&std::io::stdin())
+}
+
 pub(in crate::bootstrap) fn read_vault_password(
     stdin_password: bool,
     keychain: bool,
@@ -8,36 +32,15 @@ pub(in crate::bootstrap) fn read_vault_password(
     insecure_password_file: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let password = if keychain {
-        if !cfg!(target_os = "macos") {
-            return Err(
-                "--keychain is only supported on macOS; use --password-file on Linux/Windows"
-                    .into(),
-            );
-        }
-        let output = std::process::Command::new("security")
-            .args([
-                "find-generic-password",
-                "-s",
-                "tachi-vault",
-                "-a",
-                "default",
-                "-w",
-            ])
-            .output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "Failed to read from Keychain: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
-        }
-        String::from_utf8(output.stdout)?.trim().to_string()
+        crate::vault_crypto::read_password_from_macos_keychain()?
     } else if let Some(path) = password_file {
         read_password_file(path, insecure_password_file)?
     } else if stdin_password {
         let mut buf = String::new();
         std::io::stdin().read_line(&mut buf)?;
         buf.trim().to_string()
+    } else if !can_prompt_interactively() {
+        return Err(NO_TTY_HINT.into());
     } else {
         rpassword::prompt_password("Vault password: ")?
     };
@@ -72,6 +75,8 @@ pub(super) fn read_vault_init_password(
             );
         };
         (password, read_password_file(path, insecure_password_file)?)
+    } else if !can_prompt_interactively() {
+        return Err(NO_TTY_HINT.into());
     } else {
         let password = rpassword::prompt_password("New vault password: ")?;
         let confirm = rpassword::prompt_password("Confirm password: ")?;
