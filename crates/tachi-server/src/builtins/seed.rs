@@ -16,6 +16,36 @@ fn builtin_capabilities() -> Result<Vec<HubCapability>, String> {
     Ok(caps)
 }
 
+/// A builtin definition is owned by the seed corpus, while these fields are
+/// live operational state owned by the running Hub. Re-seeding a changed
+/// definition must not erase ranking feedback or an operator's availability
+/// choices (#1140).
+fn retain_operational_state(mut seeded: HubCapability, existing: &HubCapability) -> HubCapability {
+    seeded.enabled = existing.enabled;
+    seeded.review_status = existing.review_status.clone();
+    seeded.health_status = existing.health_status.clone();
+    seeded.last_error = existing.last_error.clone();
+    seeded.last_success_at = existing.last_success_at.clone();
+    seeded.last_failure_at = existing.last_failure_at.clone();
+    seeded.fail_streak = existing.fail_streak;
+    seeded.active_version = existing.active_version.clone();
+    seeded.exposure_mode = existing.exposure_mode.clone();
+    seeded.uses = existing.uses;
+    seeded.successes = existing.successes;
+    seeded.failures = existing.failures;
+    seeded.avg_rating = existing.avg_rating;
+    seeded.last_used = existing.last_used.clone();
+    seeded
+}
+
+fn builtin_static_fields_differ(existing: &HubCapability, seeded: &HubCapability) -> bool {
+    existing.cap_type != seeded.cap_type
+        || existing.name != seeded.name
+        || existing.version != seeded.version
+        || existing.description != seeded.description
+        || existing.definition != seeded.definition
+}
+
 fn seed_builtin_sandbox_policy(server: &MemoryServer, capability_id: &str) -> Result<(), String> {
     server.with_global_store(|store| {
         let existing = store
@@ -49,22 +79,16 @@ pub(crate) fn seed_builtin_capabilities(server: &MemoryServer) -> Result<(), Str
             let existing = store
                 .hub_get(&cap.id)
                 .map_err(|e| format!("lookup builtin capability {}: {e}", cap.id))?;
-            let should_upsert = match existing {
-                None => true,
-                Some(ref prev) => {
-                    prev.definition != cap.definition
-                        || prev.description != cap.description
-                        || prev.version != cap.version
-                        || prev.enabled != cap.enabled
-                        || prev.review_status != cap.review_status
-                        || prev.health_status != cap.health_status
-                }
+            let replacement = match existing {
+                None => Some(cap.clone()),
+                Some(ref prev) => builtin_static_fields_differ(prev, cap)
+                    .then(|| retain_operational_state(cap.clone(), prev)),
             };
-            if should_upsert {
+            if let Some(replacement) = replacement {
                 store
-                    .hub_register(cap)
+                    .hub_register(&replacement)
                     .map_err(|e| format!("register builtin capability {}: {e}", cap.id))?;
-                changed.push(cap.clone());
+                changed.push(replacement);
             }
         }
         Ok(changed)

@@ -205,3 +205,114 @@ fn builtin_waza_and_superpowers_seed_successfully_regardless_of_library_state() 
         );
     }
 }
+
+#[test]
+fn builtin_skill_definitions_keep_runtime_paths_out_of_scored_content() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let waza = super::waza::builtin_waza_skills().expect("seed Waza builtins");
+    let superpowers =
+        super::superpowers::builtin_superpowers_skills().expect("seed Superpowers builtins");
+
+    for capability in waza.iter().chain(superpowers.iter()) {
+        let definition: serde_json::Value =
+            serde_json::from_str(&capability.definition).expect("builtin definition JSON");
+        assert!(
+            definition.get("resolved_path").is_none(),
+            "runtime filesystem paths must not enter the scored definition for {}: {definition}",
+            capability.id
+        );
+        let source_path = definition["source_path"]
+            .as_str()
+            .expect("builtin definition has a source_path");
+        assert!(
+            !std::path::Path::new(source_path).is_absolute(),
+            "source_path stays relative to the vendored corpus: {source_path}"
+        );
+    }
+}
+
+#[test]
+fn reseeding_changed_builtin_definition_preserves_operational_ranking_state() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let server = crate::tests::make_server();
+    let builtin = super::waza::builtin_waza_skills()
+        .expect("seed Waza builtins")
+        .into_iter()
+        .next()
+        .expect("a Waza builtin");
+
+    server
+        .with_global_store(|store| {
+            let mut existing = store
+                .hub_get(&builtin.id)
+                .map_err(|error| format!("load builtin {}: {error}", builtin.id))?
+                .expect("server startup seeded builtin");
+            let mut definition: serde_json::Value =
+                serde_json::from_str(&existing.definition).expect("builtin definition JSON");
+            definition["resolved_path"] = serde_json::json!("/tmp/codex-worktree/SKILL.md");
+            existing.definition =
+                serde_json::to_string(&definition).expect("serialize old definition");
+            existing.enabled = false;
+            existing.review_status = "pending".to_string();
+            existing.health_status = "degraded".to_string();
+            existing.last_error = Some("previous transient failure".to_string());
+            existing.last_success_at = Some("2026-07-15T00:00:00Z".to_string());
+            existing.last_failure_at = Some("2026-07-14T00:00:00Z".to_string());
+            existing.fail_streak = 2;
+            existing.active_version = Some("skill:waza-check@2".to_string());
+            existing.exposure_mode = "disabled_by_operator".to_string();
+            existing.uses = 17;
+            existing.successes = 13;
+            existing.failures = 4;
+            existing.avg_rating = 4.25;
+            existing.last_used = Some("2026-07-15T12:00:00Z".to_string());
+            store
+                .hub_register(&existing)
+                .map_err(|error| format!("store simulated pre-upgrade builtin: {error}"))
+        })
+        .expect("prepare pre-upgrade builtin");
+
+    super::seed::seed_builtin_capabilities(&server).expect("reseed changed builtin definition");
+
+    let updated = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get(&builtin.id)
+                .map_err(|error| format!("reload builtin {}: {error}", builtin.id))
+        })
+        .expect("load reseeded builtin")
+        .expect("reseeded builtin exists");
+    let definition: serde_json::Value =
+        serde_json::from_str(&updated.definition).expect("updated definition JSON");
+    assert!(definition.get("resolved_path").is_none());
+    assert!(!updated.enabled);
+    assert_eq!(updated.review_status, "pending");
+    assert_eq!(updated.health_status, "degraded");
+    assert_eq!(
+        updated.last_error.as_deref(),
+        Some("previous transient failure")
+    );
+    assert_eq!(
+        updated.last_success_at.as_deref(),
+        Some("2026-07-15T00:00:00Z")
+    );
+    assert_eq!(
+        updated.last_failure_at.as_deref(),
+        Some("2026-07-14T00:00:00Z")
+    );
+    assert_eq!(updated.fail_streak, 2);
+    assert_eq!(
+        updated.active_version.as_deref(),
+        Some("skill:waza-check@2")
+    );
+    assert_eq!(updated.exposure_mode, "disabled_by_operator");
+    assert_eq!(updated.uses, 17);
+    assert_eq!(updated.successes, 13);
+    assert_eq!(updated.failures, 4);
+    assert_eq!(updated.avg_rating, 4.25);
+    assert_eq!(updated.last_used.as_deref(), Some("2026-07-15T12:00:00Z"));
+}

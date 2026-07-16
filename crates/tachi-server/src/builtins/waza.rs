@@ -66,7 +66,7 @@ pub(super) fn builtin_waza_skills() -> Result<Vec<HubCapability>, String> {
     WAZA_SKILLS
         .iter()
         .map(|(id, name, description, source)| {
-            let (content, resolved_path, content_hash, source_path) =
+            let (content, _resolved_path, content_hash, source_path) =
                 resolve_skill_content_source(name, source);
             make_skill_capability(
                 id,
@@ -81,7 +81,6 @@ pub(super) fn builtin_waza_skills() -> Result<Vec<HubCapability>, String> {
                     "policy": { "visibility": "discoverable" },
                     "tags": ["waza", "workflow", "builtin", "skill-set"],
                     "source_path": source_path,
-                    "resolved_path": resolved_path,
                     "skill_path": format!("/skills/waza/{name}"),
                     "retention_policy": "permanent",
                     "inputSchema": {
