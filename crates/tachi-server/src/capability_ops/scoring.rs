@@ -128,6 +128,40 @@ fn strip_resolved_paths(value: &mut Value) {
     }
 }
 
+/// Declared-metadata keys a capability author can use to state host
+/// affinity. Host bonus matching is scoped to these keys only — never to
+/// free-text fields (`content`, `prompt`, …) or runtime-resolved paths.
+/// See kckylechen1/tachi#1140 fix direction B: "match `host` against
+/// declared metadata (tags/host fields), not raw substring over the whole
+/// definition blob." `tags` is the metadata key builtin capabilities
+/// already populate (`crates/tachi-server/src/builtins/*.rs`); `host` /
+/// `hosts` are included for capabilities that declare host affinity
+/// directly.
+const HOST_METADATA_KEYS: &[&str] = &["host", "hosts", "tags"];
+
+/// True when `host` appears in one of `cap`'s declared metadata fields
+/// (`host`, `hosts`, or `tags`) rather than anywhere in its free-text
+/// content. This is the scoped replacement for the old
+/// `definition.contains(host)` substring test, which matched runtime
+/// filesystem paths and prose alike (#1140).
+fn definition_declares_host(definition: &str, host: &str) -> bool {
+    let Ok(Value::Object(fields)) = serde_json::from_str::<Value>(definition) else {
+        return false;
+    };
+    HOST_METADATA_KEYS
+        .iter()
+        .filter_map(|key| fields.get(*key))
+        .any(|field| host_value_matches(field, host))
+}
+
+fn host_value_matches(value: &Value, host: &str) -> bool {
+    match value {
+        Value::String(text) => text.to_ascii_lowercase().contains(host),
+        Value::Array(values) => values.iter().any(|entry| host_value_matches(entry, host)),
+        _ => false,
+    }
+}
+
 fn tokens_from_parts(parts: &[&str]) -> Vec<String> {
     let mut tokens = parts
         .iter()
@@ -431,7 +465,11 @@ fn capability_score(
     }
 
     if let Some(host) = host {
-        if id.contains(host) || name.contains(host) || desc.contains(host) {
+        if id.contains(host)
+            || name.contains(host)
+            || desc.contains(host)
+            || definition_declares_host(&cap.definition, host)
+        {
             score += 1.2;
             reasons.push(format!("mentions host '{}'", host));
         }
