@@ -337,6 +337,7 @@ fn stdio_proxy_call_writes_bound_project_via_global_only_daemon() {
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = StdioProxyServer {
+            adapter_started_at: chrono::Utc::now(),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -419,6 +420,7 @@ fn stdio_proxy_same_db_alias_write_normalizes_to_bound_identity() {
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = StdioProxyServer {
+            adapter_started_at: chrono::Utc::now(),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -494,6 +496,7 @@ fn stdio_proxy_call_rejects_cross_project_override_before_daemon_write() {
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = StdioProxyServer {
+            adapter_started_at: chrono::Utc::now(),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -566,6 +569,7 @@ fn stdio_proxy_tachi_search_returns_global_and_bound_project_rows() {
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = StdioProxyServer {
+            adapter_started_at: chrono::Utc::now(),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -673,6 +677,7 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let daemon = std::sync::Arc::new(std::sync::RwLock::new(daemon));
         let bound_proxy = StdioProxyServer {
+            adapter_started_at: chrono::Utc::now(),
             daemon: daemon.clone(),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -680,6 +685,7 @@ fn stdio_proxy_allows_explicit_cross_project_read() {
             client_project: Some(bound_project_name.to_string()),
         };
         let other_proxy = StdioProxyServer {
+            adapter_started_at: chrono::Utc::now(),
             daemon,
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -775,6 +781,7 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = StdioProxyServer {
+            adapter_started_at: chrono::Utc::now(),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
@@ -865,6 +872,210 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
     );
 }
 
+// tachi#1222: `runtime_info` must re-derive the daemon identity block on
+// every call instead of echoing whatever `DaemonInfo` the adapter happened to
+// cache at startup. This test seeds the `StdioProxyServer`'s cached RwLock
+// with a deliberately WRONG identity (pid 9999, an unreachable port), then
+// writes the real scoped pid/lock file the adapter is supposed to re-read.
+// If `runtime_info` reflected the cache, it would report the fake identity;
+// if it re-derives fresh (as `tachi#1222` requires), it reports whatever the
+// pid file says right now -- and reflects it again after the pid file is
+// mutated to point at a second listener, without ever touching the cache.
+#[test]
+fn stdio_proxy_runtime_info_reflects_pid_file_changes_not_cached_snapshot() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+    let rt = test_runtime();
+    rt.block_on(async {
+        let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener a");
+        let port_a = listener_a.local_addr().expect("addr a").port();
+        let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener b");
+        let port_b = listener_b.local_addr().expect("addr b").port();
+
+        let pid_path = crate::daemon_lock::scoped_daemon_pid_path(&tachi_home, &global);
+        std::fs::write(
+            &pid_path,
+            serde_json::json!({
+                "pid": 1111,
+                "port": port_a,
+                "url": format!("http://127.0.0.1:{port_a}/mcp"),
+                "global_db": global.display().to_string(),
+                "project_db": null,
+                "version": env!("CARGO_PKG_VERSION"),
+            })
+            .to_string(),
+        )
+        .expect("write pid file (first identity)");
+
+        // Cached snapshot is deliberately a different identity that does not
+        // even resolve (127.0.0.1:1 has nothing listening) -- if
+        // `runtime_info` ever fell back to this, the reachability probe below
+        // would fail, proving the bug this test guards against.
+        let stale_cached = crate::cli_client::DaemonInfo {
+            url: "http://127.0.0.1:1/mcp".to_string(),
+            global_db: Some(global.display().to_string()),
+            project_db: None,
+            version: Some("0.0.0-stale-cache".to_string()),
+            pid: Some(9999),
+        };
+        let proxy = StdioProxyServer {
+            adapter_started_at: chrono::Utc::now(),
+            daemon: std::sync::Arc::new(std::sync::RwLock::new(stale_cached)),
+            app_home: tachi_home.clone(),
+            global_db_path: global.clone(),
+            project_db_path: None,
+            client_project: None,
+        };
+
+        let first = call_tool_via_stdio_proxy(proxy.clone(), "runtime_info", serde_json::Map::new())
+            .await
+            .expect("runtime_info should succeed (first identity)");
+        assert_tool_ok(&first);
+        let first_body = first_text_json(&first);
+        assert_eq!(
+            first_body["daemon"]["reachable"], true,
+            "runtime_info should report the pid-file daemon as reachable: {first_body:#}"
+        );
+        assert_eq!(
+            first_body["daemon"]["pid"], 1111,
+            "runtime_info should report the freshly-read pid, not the cached 9999: {first_body:#}"
+        );
+        assert_eq!(
+            first_body["transport"]["target"],
+            format!("http://127.0.0.1:{port_a}/mcp"),
+            "runtime_info should target the freshly-read port, not the cached stale URL: {first_body:#}"
+        );
+        assert!(
+            first_body.get("adapter_started_at").and_then(|v| v.as_str()).is_some(),
+            "runtime_info should carry adapter_started_at: {first_body:#}"
+        );
+        assert!(
+            first_body
+                .get("daemon_identity_as_of")
+                .and_then(|v| v.as_str())
+                .is_some(),
+            "runtime_info should carry daemon_identity_as_of: {first_body:#}"
+        );
+
+        // Mutate the pid file in place to a second, distinct identity, without
+        // ever touching the proxy's cached RwLock.
+        std::fs::write(
+            &pid_path,
+            serde_json::json!({
+                "pid": 2222,
+                "port": port_b,
+                "url": format!("http://127.0.0.1:{port_b}/mcp"),
+                "global_db": global.display().to_string(),
+                "project_db": null,
+                "version": env!("CARGO_PKG_VERSION"),
+            })
+            .to_string(),
+        )
+        .expect("write pid file (second identity)");
+
+        let second = call_tool_via_stdio_proxy(proxy, "runtime_info", serde_json::Map::new())
+            .await
+            .expect("runtime_info should succeed (second identity)");
+        assert_tool_ok(&second);
+        let second_body = first_text_json(&second);
+        assert_eq!(
+            second_body["daemon"]["pid"], 2222,
+            "runtime_info should reflect the mutated pid file's new pid: {second_body:#}"
+        );
+        assert_eq!(
+            second_body["transport"]["target"],
+            format!("http://127.0.0.1:{port_b}/mcp"),
+            "runtime_info should reflect the mutated pid file's new port: {second_body:#}"
+        );
+
+        drop(listener_a);
+        drop(listener_b);
+    });
+}
+
+// tachi#1222: when no daemon answers for this global DB (pid file missing,
+// or pointing at a dead port), `runtime_info` must say so explicitly rather
+// than serving the last-known-good cached identity as if it were current.
+#[test]
+fn stdio_proxy_runtime_info_reports_unreachable_when_daemon_absent() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+    // No pid file is written at all: `detect_daemon_for_global_db` has
+    // nothing to read (neither the scoped nor legacy path exists).
+
+    let rt = test_runtime();
+    rt.block_on(async {
+        let cached_but_dead = crate::cli_client::DaemonInfo {
+            url: "http://127.0.0.1:1/mcp".to_string(),
+            global_db: Some(global.display().to_string()),
+            project_db: None,
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            pid: Some(4242),
+        };
+        let proxy = StdioProxyServer {
+            adapter_started_at: chrono::Utc::now(),
+            daemon: std::sync::Arc::new(std::sync::RwLock::new(cached_but_dead)),
+            app_home: tachi_home.clone(),
+            global_db_path: global.clone(),
+            project_db_path: None,
+            client_project: None,
+        };
+
+        let result = call_tool_via_stdio_proxy(proxy, "runtime_info", serde_json::Map::new())
+            .await
+            .expect("runtime_info should still succeed as a tool call when the daemon is absent");
+        // Explicit-unreachable must not be surfaced as an MCP tool error --
+        // it is a truthful data field, not a failed call.
+        assert_tool_ok(&result);
+        let body = first_text_json(&result);
+        assert_eq!(
+            body["daemon"]["reachable"], false,
+            "runtime_info should mark the daemon unreachable rather than echo the stale cache: {body:#}"
+        );
+        assert!(
+            body["daemon"]["pid"].is_null(),
+            "unreachable daemon block should not leak the stale cached pid: {body:#}"
+        );
+        assert!(
+            body["transport"]["target"].is_null(),
+            "unreachable daemon block should not leak the stale cached target URL: {body:#}"
+        );
+        assert!(
+            body.get("adapter_started_at").and_then(|v| v.as_str()).is_some(),
+            "runtime_info should still carry adapter_started_at when unreachable: {body:#}"
+        );
+        assert!(
+            body.get("daemon_identity_as_of")
+                .and_then(|v| v.as_str())
+                .is_some(),
+            "runtime_info should still carry daemon_identity_as_of when unreachable: {body:#}"
+        );
+    });
+}
+
 #[test]
 fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
     let _guard = crate::utils::global_test_lock()
@@ -891,6 +1102,7 @@ fn stdio_proxy_delete_and_archive_global_rows_with_bound_project() {
         server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = StdioProxyServer {
+            adapter_started_at: chrono::Utc::now(),
             daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
             app_home: tachi_home.clone(),
             global_db_path: global.clone(),
