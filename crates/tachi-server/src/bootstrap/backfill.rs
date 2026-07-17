@@ -219,7 +219,15 @@ pub(super) async fn run_backfill_summaries(
     })?;
     let open_ctx = backfill_write_open_context(schema_migration);
 
-    let store = MemoryStore::open_with_context(db_str, &open_ctx)?;
+    // Codex review (2026-07-17, checkpoint 4, MERGE-BLOCKING): dry-run must
+    // never open migration-capable — the CLI help promises "don't generate
+    // ... only show stats". Mirror run_backfill_vectors's pattern: read-only
+    // when dry_run, migration-capable only for a real write.
+    let store = if dry_run {
+        MemoryStore::open_read_only(db_str)?
+    } else {
+        MemoryStore::open_with_context(db_str, &open_ctx)?
+    };
     let total = store.stats(false)?.total;
     let entries = store.entries_missing_summaries()?;
     let missing = entries.len();
@@ -230,13 +238,13 @@ pub(super) async fn run_backfill_summaries(
     println!("Summaries: {with_summary}");
     println!("Missing:   {missing}");
 
-    if missing == 0 {
-        println!("\n✅ All entries have summaries!");
+    if dry_run {
+        println!("\n(dry-run mode, opened read-only; no changes made)");
         return Ok(());
     }
 
-    if dry_run {
-        println!("\n(dry-run mode, no changes made)");
+    if missing == 0 {
+        println!("\n✅ All entries have summaries!");
         return Ok(());
     }
 
@@ -317,7 +325,15 @@ pub(super) async fn run_backfill_metadata(
     })?;
     let open_ctx = backfill_write_open_context(schema_migration);
 
-    let store = MemoryStore::open_with_context(db_str, &open_ctx)?;
+    // Codex review (2026-07-17, checkpoint 4, MERGE-BLOCKING): dry-run must
+    // never open migration-capable — the CLI help promises "don't extract
+    // ... only show stats". Mirror run_backfill_vectors's pattern: read-only
+    // when dry_run, migration-capable only for a real write.
+    let store = if dry_run {
+        MemoryStore::open_read_only(db_str)?
+    } else {
+        MemoryStore::open_with_context(db_str, &open_ctx)?
+    };
     let (total, with_metadata) = store.metadata_stats()?;
     let entries = store.entries_missing_metadata()?;
     let missing = entries.len();
@@ -327,13 +343,13 @@ pub(super) async fn run_backfill_metadata(
     println!("Metadata: {with_metadata}");
     println!("Missing:  {missing}");
 
-    if missing == 0 {
-        println!("\n✅ All entries have recall keywords!");
+    if dry_run {
+        println!("\n(dry-run mode, opened read-only; no changes made)");
         return Ok(());
     }
 
-    if dry_run {
-        println!("\n(dry-run mode, no changes made)");
+    if missing == 0 {
+        println!("\n✅ All entries have recall keywords!");
         return Ok(());
     }
 
@@ -509,7 +525,15 @@ pub(super) async fn run_backfill_fts(
     })?;
     let open_ctx = backfill_write_open_context(schema_migration);
 
-    let store = MemoryStore::open_with_context(db_str, &open_ctx)?;
+    // Codex review (2026-07-17, checkpoint 4, MERGE-BLOCKING): dry-run must
+    // never open migration-capable — the CLI help promises "only show
+    // stats, don't modify". Mirror run_backfill_vectors's pattern:
+    // read-only when dry_run, migration-capable only for a real write.
+    let store = if dry_run {
+        MemoryStore::open_read_only(db_str)?
+    } else {
+        MemoryStore::open_with_context(db_str, &open_ctx)?
+    };
     let (total, with_fts) = store.fts_stats()?;
     let missing = total.saturating_sub(with_fts);
 
@@ -522,13 +546,13 @@ pub(super) async fn run_backfill_fts(
         if full { "full rebuild" } else { "incremental" }
     );
 
-    if !full && missing == 0 {
-        println!("\n✅ All entries have FTS index!");
+    if dry_run {
+        println!("\n(dry-run mode, opened read-only; no changes made)");
         return Ok(());
     }
 
-    if dry_run {
-        println!("\n(dry-run mode, no changes made)");
+    if !full && missing == 0 {
+        println!("\n✅ All entries have FTS index!");
         return Ok(());
     }
 
@@ -947,6 +971,64 @@ mod tests {
         );
     }
 
+    /// Codex review (2026-07-17, checkpoint 6): every discrimination test
+    /// above seeds a zero-row DB, so `run_backfill_*`'s "nothing to do"
+    /// early return fires before `drop(store); MemoryStore::open_with_context`
+    /// (the write-pass reopen) is ever reached — a future refactor that
+    /// reverted just that second call site to a bare `MemoryStore::open`
+    /// would escape all of them. `backfill-fts` is the one backfill command
+    /// whose write pass needs no LLM client (`backfill_fts_missing` is pure
+    /// SQL), so it is the one we can drive through the reopen without a
+    /// network dependency. Seeds real FTS-missing rows on a stamped-older DB
+    /// and proves the reopen actually completes the backfill under `Allow`.
+    #[tokio::test]
+    async fn backfill_fts_write_pass_reopen_runs_under_allow_on_stamped_older_db() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("backfill-fts-write-pass.db");
+        {
+            let store = MemoryStore::open(db_path.to_str().expect("utf8 db path"))
+                .expect("seed current-schema db");
+            insert_memory(&store, "fts-missing-1", "manual", "note");
+            insert_memory(&store, "fts-missing-2", "manual", "note");
+        }
+        let conn = rusqlite::Connection::open(&db_path).expect("reopen to roll back stamp");
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {}",
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1
+        ))
+        .expect("stamp older schema version");
+        drop(conn);
+
+        run_backfill_fts(
+            &db_path,
+            false,
+            false,
+            &MigrationAuthority::Allow {
+                approved_by: "test:1181-backfill-fts-write-pass".to_string(),
+            },
+        )
+        .await
+        .expect("backfill-fts with the flag must migrate and backfill the isolated DB");
+
+        assert_eq!(
+            read_user_version(&db_path),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION,
+            "the first (stats-pass) open must have migrated the DB"
+        );
+
+        let verify_store =
+            MemoryStore::open(db_path.to_str().expect("utf8 db path")).expect("reopen to verify");
+        let (total, with_fts) = verify_store.fts_stats().expect("fts_stats");
+        assert_eq!(total, 2, "both seeded rows must be present");
+        assert_eq!(
+            with_fts, 2,
+            "the write-pass reopen must have actually run backfill_fts_missing \
+             (a bare MemoryStore::open at that call site would still succeed here, \
+             since the DB is already migrated by the first open — but a wrong \
+             db_str/path regression at the reopen would leave this at 0)"
+        );
+    }
+
     #[tokio::test]
     async fn backfill_vectors_requires_flag_to_migrate_stamped_older_db_in_process() {
         let dir = tempfile::tempdir().expect("tmp");
@@ -1064,6 +1146,82 @@ mod tests {
             read_user_version(&db_path),
             memcore::db::migrations::EXPECTED_SCHEMA_VERSION,
             "allow must re-stamp the DB at the current schema version"
+        );
+    }
+
+    // --- #1181 checkpoint 4 (codex review, 2026-07-17, MERGE-BLOCKING) -----
+    //
+    // Pre-fix, `run_backfill_summaries` / `_metadata` / `_fts` opened
+    // migration-capable (`MemoryStore::open_with_context`) BEFORE checking
+    // `dry_run`, so a `--dry-run` run against a stamped-older DB either (a)
+    // silently migrated it under `Allow`, contradicting the CLI help's
+    // "don't generate / don't extract / only show stats" promise, or (b)
+    // under `Deny` (the common case — nobody passes `--allow-schema-migration`
+    // to a dry-run), incorrectly REFUSED entirely instead of just reporting
+    // read-only stats. Both are RED on pre-fix code. Post-fix, dry-run always
+    // opens `MemoryStore::open_read_only`, which never runs
+    // `check_db_open_context_gate` (memcore/src/store/open.rs) — so dry-run
+    // succeeds without the flag and never mutates the stamp.
+
+    #[tokio::test]
+    async fn dry_run_summaries_backfill_opens_read_only_on_stamped_older_db() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("dry-run-summaries-schema.db");
+        let vault_path = dir.path().join("vault.db");
+        seed_and_stamp_older_schema_version(&db_path);
+
+        run_backfill_summaries(&db_path, &vault_path, true, &MigrationAuthority::Deny)
+            .await
+            .expect(
+                "dry-run must succeed read-only even without --allow-schema-migration \
+                 (pre-fix: this errored with the migration refusal)",
+            );
+
+        assert_eq!(
+            read_user_version(&db_path),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
+            "dry-run must never mutate the schema stamp, even under Allow"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_metadata_backfill_opens_read_only_on_stamped_older_db() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("dry-run-metadata-schema.db");
+        let vault_path = dir.path().join("vault.db");
+        seed_and_stamp_older_schema_version(&db_path);
+
+        run_backfill_metadata(&db_path, &vault_path, true, &MigrationAuthority::Deny)
+            .await
+            .expect(
+                "dry-run must succeed read-only even without --allow-schema-migration \
+                 (pre-fix: this errored with the migration refusal)",
+            );
+
+        assert_eq!(
+            read_user_version(&db_path),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
+            "dry-run must never mutate the schema stamp, even under Allow"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_fts_backfill_opens_read_only_on_stamped_older_db() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("dry-run-fts-schema.db");
+        seed_and_stamp_older_schema_version(&db_path);
+
+        run_backfill_fts(&db_path, false, true, &MigrationAuthority::Deny)
+            .await
+            .expect(
+                "dry-run must succeed read-only even without --allow-schema-migration \
+                 (pre-fix: this errored with the migration refusal)",
+            );
+
+        assert_eq!(
+            read_user_version(&db_path),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
+            "dry-run must never mutate the schema stamp, even under Allow"
         );
     }
 }
