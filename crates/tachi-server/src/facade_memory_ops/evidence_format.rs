@@ -125,8 +125,16 @@ fn receipt_eval_entry(value: Option<&Value>) -> Value {
 /// returns the same `{recorded, skipped}` shape and has the identical latent
 /// gap; it is not added here because fixing it is outside this fix's scope,
 /// but the same one-line addition is the fix if/when it's picked up.
-const PIPELINE_VARIANT_OBJECT_STAGES: &[&str] =
-    &["pattern_feedback", "kanban_update", "precedent_recording"];
+// `precedent_candidate_decomposition` (#1076, `precedent_candidate_ops.rs`)
+// returns the identical `{recorded, skipped}` shape as `precedent_recording`
+// for the identical reason — listed here from day one rather than knowingly
+// re-introducing the gap the doc comment above flags for `signature_recording`.
+const PIPELINE_VARIANT_OBJECT_STAGES: &[&str] = &[
+    "pattern_feedback",
+    "kanban_update",
+    "precedent_recording",
+    "precedent_candidate_decomposition",
+];
 
 fn pipeline_stage_status(value: &Value) -> Option<Value> {
     match value {

@@ -45,6 +45,21 @@ const BASE_BUCKETS: &[&str] = &[
     "sft",
     "eval",
     "precedents",
+    // #1076: pending principle-level precedent candidates fanned out from
+    // captured `rulings[]` (see `precedent_candidate_ops`) — first-class
+    // sibling of `precedents`, registered here the same way #950 registered
+    // `precedents` itself, not a test-only bypass.
+    "precedent_candidates",
+    // #1192 (D2 forge pilot): pending lesson candidates persisted via
+    // `lesson_forge_ops::storage::persist_pending_lesson_candidate`, which
+    // reuses this same `save_eval_memory` → capture-gate path. Landed on
+    // main without registering the bucket; under the default `Warn` gate
+    // mode this was invisible (Warn always accepts), but it fails the same
+    // "not in the allowed set" way as `/precedent_candidates` under
+    // `TACHI_CAPTURE_GATE=enforce`. Registered alongside `precedent_candidates`
+    // here since both are pending-candidate buckets discovered missing by
+    // the same gate audit (#1183).
+    "lesson_candidates",
     "checkpoints",
     "foundry",
     "ghost",

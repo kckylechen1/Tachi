@@ -680,6 +680,116 @@ pub struct RulingRecordParams {
     /// When `outcome` is "overturned", the ruling/precedent that overturned it.
     #[serde(default)]
     pub overturned_by: Option<String>,
+
+    /// Who made this specific ruling (the leader/owner seat identity). Feeds
+    /// #1076 principle-candidate decomposition's `authority_complete` gate —
+    /// omitting it never fails capture, but the resulting candidate(s) stay
+    /// unable to claim adjudicator authority (see `precedent_candidate_ops`).
+    #[serde(default)]
+    pub adjudicator: Option<String>,
+
+    /// Immutable evidence refs (issue/comment/PR/commit/doc/verification)
+    /// backing this ruling, each pinned to a specific revision (#1076).
+    /// Optional and additive: an empty array leaves `complete` byte-compatible
+    /// with pre-#1076 callers and simply means the resulting candidate(s)
+    /// cannot claim source authority.
+    #[serde(default)]
+    pub source_refs: Vec<RulingSourceRefParams>,
+
+    /// Effective decomposition/adjudication engine identity for this ruling
+    /// (#1076). Absence, an unknown provider/model, a non-empty fallback
+    /// chain, or a degraded run all mark the resulting candidate(s)
+    /// `identity_status = "preview_only"` rather than `"known"`.
+    #[serde(default)]
+    pub engine_receipt: Option<RulingEngineReceiptParams>,
+}
+
+/// One immutable evidence reference backing a [`RulingRecordParams`] (#1076
+/// principle-candidate decomposition). Conceptually mirrors the canon doc's
+/// `EvidenceRefV1` / `ImmutableRevisionV1`
+/// (`docs/engineering/architecture/issue-refinery-memory-lanes.md` §3), but
+/// is deliberately its own flat, always-tagged wire type rather than a reuse
+/// of `tachi_params::refinery::ImmutableRevisionV1` — that type's own doc
+/// comment flags an unresolved `#[serde(untagged)]` deserialize ambiguity
+/// across its six bare-string variants (ok for its current outward-only
+/// serialization use, not safe as an *inbound* wire shape). `target_kind`
+/// plus whichever concrete revision fields are present disambiguate which
+/// immutable-revision shape this ref carries without inheriting that
+/// ambiguity.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct RulingSourceRefParams {
+    /// How this evidence relates to the ruling: "derived_from" | "supports" |
+    /// "contradicts" | "supersedes" | "applies_to". Defaults to "supports".
+    #[serde(default)]
+    pub relation: Option<String>,
+
+    /// Source kind: "issue" | "comment" | "pr" | "commit" | "canonical_doc" |
+    /// "verification" (required).
+    pub target_kind: String,
+
+    /// The source's own reference, e.g. "kckylechen1/tachi#530" or
+    /// "kckylechen1/tachi#530#issuecomment-123" (required).
+    pub target_ref: String,
+
+    /// Comment id, when `target_kind == "comment"`. Combined with
+    /// `updated_at` + `body_hash`, pins the exact comment revision this
+    /// ruling relied on — an edited comment (same `comment_id`, different
+    /// `updated_at`/`body_hash`) is a different immutable revision and, per
+    /// #1076, must not be treated as an identical replay.
+    #[serde(default)]
+    pub comment_id: Option<String>,
+
+    /// The source's `updated_at` at capture time.
+    #[serde(default)]
+    pub updated_at: Option<String>,
+
+    /// Content hash of the pinned revision (comment body hash, issue body
+    /// hash, PR snapshot hash, blob SHA, ...) depending on `target_kind`.
+    #[serde(default)]
+    pub body_hash: Option<String>,
+
+    /// Repo-revision anchor, when applicable (commit SHA / PR head SHA).
+    #[serde(default)]
+    pub commit_sha: Option<String>,
+
+    /// Optional section/span within the source this evidence covers.
+    #[serde(default)]
+    pub section_or_span: Option<String>,
+}
+
+/// Effective decomposition/adjudication engine identity for a
+/// [`RulingRecordParams`] (#1076 required behavior: "Record effective
+/// provider/model/version/fallback/degraded receipt. Unknown/fallback
+/// identity is preview-only.").
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct RulingEngineReceiptParams {
+    /// Role requested for this ruling (e.g. "leader", "adjudicator").
+    #[serde(default)]
+    pub requested_role: Option<String>,
+
+    /// Provider actually used (e.g. "anthropic"). Absence makes identity
+    /// unknown.
+    #[serde(default)]
+    pub effective_provider: Option<String>,
+
+    /// Model actually used (e.g. "claude-sonnet-5"). Absence makes identity
+    /// unknown.
+    #[serde(default)]
+    pub effective_model: Option<String>,
+
+    /// Model/version string, when known.
+    #[serde(default)]
+    pub effective_version: Option<String>,
+
+    /// Non-empty when the run fell back from its originally requested
+    /// provider/model.
+    #[serde(default)]
+    pub fallback_chain: Vec<String>,
+
+    /// True when the run completed in a degraded state (timeout, partial
+    /// tool access, etc.).
+    #[serde(default)]
+    pub degraded: bool,
 }
 
 /// One leader-adjudicated error signature (or resolution) recorded at
