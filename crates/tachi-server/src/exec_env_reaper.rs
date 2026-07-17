@@ -4417,6 +4417,92 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **tachi#1210: the checkpoint-2 fix (codex-9178d) itself has no discriminating
+    /// coverage.** The test above swaps on `probe`'s FIRST call — the eligibility check
+    /// at `run_orphan_reap_uncertified`'s `candidate.holders = Some(probe(...))`, which
+    /// runs before `delete_resource_bytes` is even entered — so it is caught by
+    /// `delete_resource_bytes`'s FIRST `(dev, ino)` recheck (right before its own
+    /// `probe(path)` call), never reaching the SECOND recheck
+    /// (`identity_at_unlink`, right before `remove_dir_all`) that checkpoint 2 added.
+    /// Neither existing test exercises a swap that survives past the deleter's own
+    /// probe call.
+    ///
+    /// This test makes the swap fire on `probe`'s SECOND invocation instead — the one
+    /// `delete_resource_bytes` itself makes — so by the time this closure runs, the
+    /// eligibility check and the deleter's FIRST identity recheck have both already
+    /// passed against the original (unswapped) directory. The swap then lands in the
+    /// window the FIRST recheck cannot see: between the deleter's `probe(path)` call and
+    /// its `remove_dir_all`. Only the SECOND recheck — checkpoint 2's own addition — can
+    /// catch this.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_replaced_between_the_deleters_own_probe_and_unlink_is_refused() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let root = unique_temp_dir("tachi-reaper-post-probe-swap");
+        let target = make_target_dir(&root, "swapped-target");
+        let mut store = open_store(&root);
+
+        // `probe` is invoked twice per candidate: once during
+        // `run_orphan_reap_uncertified`'s eligibility check (BEFORE `delete_resource_bytes`
+        // runs a single fence), and once again inside `delete_resource_bytes` itself
+        // (its own defense-in-depth holder check, right before the byte walk and the
+        // second `(dev, ino)` recheck). This closure counts invocations and only swaps
+        // on the SECOND one, so the FIRST identity recheck inside `delete_resource_bytes`
+        // (which runs before its own `probe` call) still sees the original, unswapped
+        // directory and passes — leaving only the second recheck to catch this.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let target_for_probe = target.clone();
+        let swap_on_second_call = move |_path: &Path| {
+            let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == 2 {
+                std::fs::remove_dir_all(&target_for_probe).unwrap();
+                std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
+                std::fs::write(
+                    target_for_probe.join("debug/replacement.rlib"),
+                    vec![9u8; 4096],
+                )
+                .unwrap();
+            }
+            HolderCheck::None
+        };
+
+        let report = reap_uncertified(
+            store.connection_mut(),
+            &opts(&root, true),
+            aged_now(30),
+            &swap_on_second_call,
+        );
+
+        assert!(
+            target.join("debug/replacement.rlib").exists(),
+            "the replacement directory — swapped in after the deleter's own probe — must \
+             survive: {report:?}"
+        );
+        assert!(report.reclaimed.is_empty(), "{report:?}");
+        assert_eq!(report.candidates.len(), 1, "{report:?}");
+        assert_eq!(report.candidates[0].decision, "refused", "{report:?}");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("(dev, ino) identity changed again")
+                    && warning.contains("a second time")),
+            "the refusal must name the SECOND recheck's own language (\"changed again\" / \
+             \"a second time\"), proving checkpoint 2's own recheck fired — not the first \
+             recheck's \"replaced between judgement and delete\" wording: {report:?}"
+        );
+        assert!(
+            !report.errors.is_empty(),
+            "an identity that changed after the deleter's own probe must land in errors, not \
+             just a warning: {report:?}"
+        );
+        assert!(report.incomplete, "{report:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     // ── sol audit · BUG 4: the scan keeps books ─────────────────────────────
 
     /// **sol's frozen invariant, as a test.** Every unit the scan examines lands in
