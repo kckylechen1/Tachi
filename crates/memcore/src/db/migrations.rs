@@ -33,6 +33,11 @@
 //! - v18: `dispatch_adjudications` + `dispatch_adjudication_signatures`
 //!   tables (#1035) — append-only leader terminal-judgment events linked
 //!   to a dispatch outcome by `outcome_id`.
+//! - v19: `memories.idless_identity` column + unique partial index (#1115) —
+//!   reserves a DB-level identity for new id-less saves only.
+//! - v20: `mirror_eval_runs` + `mirror_eval_observations` +
+//!   `mirror_eval_adjudications` tables (#1066) — first-class mirror eval
+//!   intake for harness-native subagents (register/observe/adjudicate/get).
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -76,7 +81,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 19;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 20;
 
 mod basic;
 mod cross_db;
@@ -89,6 +94,7 @@ mod exec_env_class;
 mod hard_state_index;
 mod idless_identity;
 mod legacy_columns;
+mod mirror_eval;
 mod pack_retire;
 mod sentinel;
 mod session_claims_identity;
@@ -107,6 +113,7 @@ use legacy_columns::*;
 pub use legacy_columns::{
     fold_and_drop_legacy_persons_column, migrate_v9_relocate_and_drop_location,
 };
+use mirror_eval::*;
 use pack_retire::*;
 use sentinel::*;
 use session_claims_identity::*;
@@ -137,6 +144,7 @@ pub struct MigrationReport {
     pub dispatch_outcomes_attribution_basis_backfilled: usize,
     pub dispatch_adjudications_created: usize,
     pub idless_identity_constraint_added: usize,
+    pub mirror_eval_tables_created: usize,
 }
 
 /// Read the schema version stamp (`PRAGMA user_version`). Absent/fresh DBs
@@ -488,6 +496,10 @@ pub(crate) fn run_data_migrations_in_tx(
         migrate_v19_add_idless_memory_identity,
     )?
     .unwrap_or(0);
+
+    report.mirror_eval_tables_created =
+        apply_versioned_migration(conn, "v20_mirror_eval", migrate_v20_mirror_eval)?
+            .unwrap_or(0);
 
     Ok(report)
 }

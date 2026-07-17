@@ -71,6 +71,14 @@ pub use db::exec_env_resources::{
 #[cfg(feature = "admin")]
 pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};
 #[cfg(feature = "admin")]
+pub use db::mirror_eval::{
+    append_mirror_eval_adjudication, get_mirror_eval_run_view, get_observation, get_run_by_id,
+    get_run_by_native_child_id, list_adjudications_for_run, record_mirror_eval_observation,
+    register_mirror_eval_run, run_is_adjudicated, MirrorEvalAdjudication, MirrorEvalObservation,
+    MirrorEvalRun, MirrorEvalRunView, NewMirrorEvalAdjudication, NewMirrorEvalObservation,
+    NewMirrorEvalRun,
+};
+#[cfg(feature = "admin")]
 pub use db::foundry_jobs::{
     claim_foundry_job_for_run, find_foundry_jobs_for_memory, gc_foundry_jobs, insert_foundry_job,
     job_status_histogram, load_pending_foundry_jobs, requeue_retryable_foundry_jobs,
