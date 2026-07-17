@@ -99,6 +99,60 @@ fn issue_ref_from_kanban(server: &MemoryServer, dispatch_id: &str) -> Option<Str
     server.with_global_store_read(read).ok().flatten()
 }
 
+/// tachi#1200 item 1: eval/subagent rows written by `tachi_complete` without a
+/// leader `profile` id can never be matched by policy replay
+/// (`tachi_task(action='route_simulate')`/`recommend`) — both filter live
+/// `/eval` rows on an exact `EvalRow.profile` match against a known dispatch
+/// profile name (see `tachi_dispatch::routing::simulate_route_policy` and
+/// `build_profile_candidate`'s `live_samples` count), so a `None` profile
+/// silently drops the row out of every replay computation rather than merely
+/// degrading it.
+///
+/// The dispatch's own kanban card already has `profile` on file from launch
+/// (`init_kanban_task` writes `params.profile` into
+/// `/kanban/tasks/{dispatch_id}` metadata unconditionally — see
+/// `dispatch_ops::kanban_helpers`), so auto-inject it here the same
+/// explicit-value-wins-then-lookup shape as `resolve_issue_ref_for_dispatch`.
+/// Fail-safe: any lookup miss (no card, no project/global store, no `profile`
+/// on file) returns `None` — a manual `tachi_complete` call with no
+/// `dispatch_id` has nothing to look up and must NEVER have a profile
+/// fabricated for it.
+pub(super) fn resolve_profile_for_dispatch(
+    server: &MemoryServer,
+    dispatch_id: &str,
+    explicit_profile: Option<&str>,
+) -> Option<String> {
+    if let Some(profile) = explicit_profile.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(profile.to_string());
+    }
+    profile_from_kanban(server, dispatch_id)
+}
+
+fn profile_from_kanban(server: &MemoryServer, dispatch_id: &str) -> Option<String> {
+    let path = format!("/kanban/tasks/{dispatch_id}");
+    let read = |store: &mut MemoryStore| -> Result<Option<String>, String> {
+        let entries = store
+            .list_by_path(&path, 1, false)
+            .map_err(|e| format!("kanban profile lookup: {e}"))?;
+        Ok(entries.into_iter().next().and_then(|entry| {
+            entry
+                .metadata
+                .get("profile")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .filter(|profile| !profile.trim().is_empty())
+        }))
+    };
+    if server.has_project_db() {
+        if let Ok(value) = server.with_project_store_read(read) {
+            if value.is_some() {
+                return value;
+            }
+        }
+    }
+    server.with_global_store_read(read).ok().flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,6 +313,113 @@ mod tests {
 
         let resolved =
             resolve_issue_ref_for_dispatch(&server, "20260702T011640Z-no-such-dispatch", None);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn resolve_profile_reads_kanban_metadata_when_param_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global_db = dir.path().join("global.sqlite");
+        let project_db = dir.path().join("project.sqlite");
+        let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+        let dispatch_id = "20260717T000001Z-custom-profilelink";
+        let profile = "opencode_builder";
+
+        let save = SaveMemoryParams {
+            text: "kanban card for profile linkage resolution".to_string(),
+            summary: "kanban".to_string(),
+            path: format!("/kanban/tasks/{dispatch_id}"),
+            importance: 0.7,
+            category: "fact".to_string(),
+            topic: "kanban".to_string(),
+            keywords: vec!["kanban".to_string()],
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            scope: "global".to_string(),
+            vector: None,
+            id: None,
+            force: true,
+            auto_link: false,
+            project: None,
+            project_explicit: false,
+            retention_policy: Some("pinned".to_string()),
+            domain: Some("system".to_string()),
+            timestamp: None,
+            valid_from: None,
+            valid_until: None,
+            metadata: Some(json!({
+                "profile": profile,
+                "dispatch_id": dispatch_id,
+                "a2a_state": "TASK_STATE_WORKING",
+            })),
+            emit_continuity: false,
+        };
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(handle_save_memory(&server, save))
+            .expect("seed kanban");
+
+        let resolved = resolve_profile_for_dispatch(&server, dispatch_id, None)
+            .expect("profile from kanban");
+        assert_eq!(resolved, profile);
+    }
+
+    #[test]
+    fn resolve_profile_prefers_explicit_value_over_kanban() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global_db = dir.path().join("global.sqlite");
+        let project_db = dir.path().join("project.sqlite");
+        let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+        let dispatch_id = "20260717T000002Z-explicit-profilelink";
+
+        let save = SaveMemoryParams {
+            text: "kanban card".to_string(),
+            summary: "kanban".to_string(),
+            path: format!("/kanban/tasks/{dispatch_id}"),
+            importance: 0.7,
+            category: "fact".to_string(),
+            topic: "kanban".to_string(),
+            keywords: vec!["kanban".to_string()],
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            scope: "global".to_string(),
+            vector: None,
+            id: None,
+            force: true,
+            auto_link: false,
+            project: None,
+            project_explicit: false,
+            retention_policy: Some("pinned".to_string()),
+            domain: Some("system".to_string()),
+            timestamp: None,
+            valid_from: None,
+            valid_until: None,
+            metadata: Some(json!({
+                "profile": "stale_profile",
+                "dispatch_id": dispatch_id,
+                "a2a_state": "TASK_STATE_WORKING",
+            })),
+            emit_continuity: false,
+        };
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(handle_save_memory(&server, save))
+            .expect("seed kanban");
+
+        let resolved = resolve_profile_for_dispatch(&server, dispatch_id, Some("glm_impl"))
+            .expect("explicit profile wins");
+        assert_eq!(resolved, "glm_impl");
+    }
+
+    #[test]
+    fn resolve_profile_returns_none_when_no_dispatch_record_or_profile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let global_db = dir.path().join("global.sqlite");
+        let project_db = dir.path().join("project.sqlite");
+        let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+
+        let resolved =
+            resolve_profile_for_dispatch(&server, "20260717T000003Z-no-such-dispatch", None);
         assert_eq!(resolved, None);
     }
 }

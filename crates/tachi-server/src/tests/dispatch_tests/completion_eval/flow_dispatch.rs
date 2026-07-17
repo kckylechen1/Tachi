@@ -303,6 +303,161 @@ async fn tachi_complete_proceeds_without_issue_ref_when_no_dispatch_record_found
     );
 }
 
+/// tachi#1200 item 1: eval rows written by `tachi_complete` carry
+/// `dispatch_id` but almost never a leader `profile` id (agents omit it, and
+/// only the `tachi_task(action='complete')` bridge had any inference at
+/// all — from a filesystem run artifact that frequently isn't on file).
+/// Live policy replay (`route_simulate`/`recommend`) matches eval rows on
+/// `EvalRow.profile` against a known dispatch profile name and silently
+/// DROPS a row with no profile from every replay computation. This
+/// auto-injects `profile` from the dispatch's own kanban card (populated at
+/// launch by `init_kanban_task`) the same way `issue_ref` is auto-injected,
+/// closing the gap for BOTH callers — including the direct `tachi_complete`
+/// tool, which had zero profile inference before this fix.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn tachi_complete_auto_injects_profile_from_kanban_card_when_missing() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let dispatch_id = "20260717T000001Z-custom-profile-autoinject";
+    let profile = "opencode_builder";
+
+    // Seed the kanban card the way a real dispatch launch would
+    // (`dispatch_ops::kanban_helpers::init_kanban_task`), with profile on
+    // file from launch but no explicit flow_id — this exercises the
+    // stand-alone kanban lookup, not any flow_id-mediated path.
+    crate::memory_search_ops::handle_save_memory(
+        &server,
+        crate::tool_params::SaveMemoryParams {
+            text: "Dispatch Task\nAgent: custom\nTask: profile autoinject fixture".to_string(),
+            summary: "Kanban: profile autoinject fixture".to_string(),
+            path: format!("/kanban/tasks/{dispatch_id}"),
+            importance: 0.7,
+            category: "fact".to_string(),
+            topic: "kanban".to_string(),
+            keywords: vec!["kanban".to_string(), "dispatch".to_string()],
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            scope: "project".to_string(),
+            vector: None,
+            id: None,
+            force: true,
+            auto_link: true,
+            project: None,
+            project_explicit: false,
+            retention_policy: Some(memcore::RetentionPolicy::Pinned.as_str().to_string()),
+            domain: Some("system".to_string()),
+            timestamp: None,
+            valid_from: None,
+            valid_until: None,
+            metadata: Some(json!({
+                "type": "a2a_task",
+                "dispatch_id": dispatch_id,
+                "a2a_state": "TASK_STATE_WORKING",
+                "agent": "custom",
+                "profile": profile,
+                "eval_ledger_id": null,
+            })),
+            emit_continuity: false,
+        },
+    )
+    .await
+    .expect("seed kanban card with profile on file");
+
+    let mut complete_params = task_params("complete");
+    complete_params.format = Some("full".to_string());
+    complete_params.task = Some("Auto-inject profile at completion".to_string());
+    complete_params.agent = Some("custom".to_string());
+    complete_params.outcome = Some("success".to_string());
+    complete_params.task_id = Some("eval-profile-autoinject".to_string());
+    complete_params.dispatch_id = Some(dispatch_id.to_string());
+    complete_params.evidence_refs = vec!["result.md".to_string()];
+    complete_params.scope = Some("project".to_string());
+    // Deliberately no profile supplied — this is the propagation gap.
+    let raw = server
+        .tachi_task(Parameters(complete_params))
+        .await
+        .expect("complete should succeed");
+    let bundle: Value = serde_json::from_str(&raw).expect("complete bundle");
+
+    assert_eq!(
+        bundle["profile"],
+        json!(profile),
+        "review bundle should reflect the auto-injected profile: {bundle:#}"
+    );
+
+    // Confirm the persisted eval memory row's metadata itself carries the
+    // auto-injected profile (not just the transient response bundle) — this
+    // is the exact field `eval_row_from_memory` reads for policy replay.
+    let eval_id = bundle["eval_entry"]["id"]
+        .as_str()
+        .expect("eval entry should return memory id")
+        .to_string();
+    let fetched_str = server
+        .get_memory(Parameters(GetMemoryParams {
+            id: eval_id,
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("get_memory should succeed");
+    let fetched: Value = serde_json::from_str(&fetched_str).expect("memory JSON");
+    assert_eq!(
+        fetched["metadata"]["profile"],
+        json!(profile),
+        "eval record metadata should carry the auto-injected profile: {fetched:#}"
+    );
+}
+
+/// Fail-safe half of #1200: when there is no dispatch record to look up (or
+/// the record has no profile on file), completion must proceed without error
+/// and without a profile — never fabricate linkage that was never recorded.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn tachi_complete_does_not_fabricate_profile_without_dispatch_record() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let dispatch_id = "20260717T000002Z-custom-no-kanban-profile";
+
+    let mut complete_params = task_params("complete");
+    complete_params.format = Some("full".to_string());
+    complete_params.task = Some("Complete with dispatch_id but no kanban card".to_string());
+    complete_params.agent = Some("custom".to_string());
+    complete_params.outcome = Some("success".to_string());
+    complete_params.task_id = Some("eval-no-profile".to_string());
+    complete_params.dispatch_id = Some(dispatch_id.to_string());
+    complete_params.evidence_refs = vec!["result.md".to_string()];
+    complete_params.scope = Some("project".to_string());
+    let raw = server
+        .tachi_task(Parameters(complete_params))
+        .await
+        .expect("complete should still succeed with no dispatch record on file");
+    let bundle: Value = serde_json::from_str(&raw).expect("complete bundle");
+
+    assert_eq!(bundle["recorded"], json!(true), "{bundle:#}");
+    assert!(
+        bundle["profile"].is_null(),
+        "no profile should be present when there is nothing to look up: {bundle:#}"
+    );
+
+    let eval_id = bundle["eval_entry"]["id"]
+        .as_str()
+        .expect("eval entry should return memory id")
+        .to_string();
+    let fetched_str = server
+        .get_memory(Parameters(GetMemoryParams {
+            id: eval_id,
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("get_memory should succeed");
+    let fetched: Value = serde_json::from_str(&fetched_str).expect("memory JSON");
+    assert!(
+        fetched["metadata"].get("profile").is_none(),
+        "eval metadata must not gain a phantom profile key: {fetched:#}"
+    );
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_complete_surfaces_warning_when_kanban_card_is_missing() {
