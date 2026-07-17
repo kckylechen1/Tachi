@@ -79,6 +79,7 @@ fn task_params(action: &str) -> TachiTaskParams {
         trajectory: None,
         diff: None,
         subagents: Vec::new(),
+        eval_run_ids: Vec::new(),
         feedback_rules_applied: Vec::new(),
         signatures: Vec::new(),
         rulings: Vec::new(),

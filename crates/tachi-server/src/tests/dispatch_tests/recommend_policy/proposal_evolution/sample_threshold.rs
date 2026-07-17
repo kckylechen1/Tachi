@@ -43,6 +43,7 @@ async fn tachi_task_proposals_requires_loadout_evolution_sample_threshold() {
                 signatures: Vec::new(),
                 rulings: Vec::new(),
                 adjudication: None,
+                eval_run_ids: Vec::new(),
             }))
             .await
             .expect("seed below-threshold loadout eval row");

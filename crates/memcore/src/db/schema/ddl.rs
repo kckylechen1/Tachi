@@ -671,6 +671,72 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         );
         CREATE INDEX IF NOT EXISTS idx_dispatch_adjudication_signatures_signature
             ON dispatch_adjudication_signatures(signature_id);
+
+        -- #1066: first-class mirror eval intake for harness-native
+        -- subagents — a NEW ledger backing the SAME `tachi_agent_eval`
+        -- facade's register/observe/adjudicate/get actions, mirroring the
+        -- dispatch_outcomes/dispatch_adjudications split above for work
+        -- Tachi did not dispatch (a host-native subagent Tachi only
+        -- observes). See `memcore::db::mirror_eval` for the write contract.
+        CREATE TABLE IF NOT EXISTS mirror_eval_runs (
+            eval_run_id         TEXT PRIMARY KEY,
+            register_key        TEXT NOT NULL UNIQUE,
+            frozen_contract_ref TEXT NOT NULL CHECK (length(trim(frozen_contract_ref)) > 0),
+            execution_origin    TEXT NOT NULL CHECK (length(trim(execution_origin)) > 0),
+            lifecycle_owner     TEXT NOT NULL CHECK (length(trim(lifecycle_owner)) > 0),
+            harness             TEXT,
+            native_child_id     TEXT,
+            requested_profile   TEXT,
+            requested_model     TEXT,
+            requested_agent     TEXT,
+            created_at          TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_mirror_eval_runs_native_child
+            ON mirror_eval_runs(native_child_id, created_at);
+
+        -- At most one terminal observation per run: carrier-observed facts
+        -- only, no judgment field exists on this table (#1066 AC-3).
+        CREATE TABLE IF NOT EXISTS mirror_eval_observations (
+            observation_id   TEXT PRIMARY KEY,
+            eval_run_id      TEXT NOT NULL UNIQUE,
+            terminal_outcome TEXT NOT NULL CHECK (length(trim(terminal_outcome)) > 0),
+            duration_ms      INTEGER,
+            cost_tokens      INTEGER,
+            cost_usd         REAL,
+            result_ref       TEXT,
+            artifacts        TEXT NOT NULL DEFAULT '[]',
+            effective_model    TEXT,
+            effective_backend  TEXT,
+            effective_harness  TEXT,
+            created_at       TEXT NOT NULL DEFAULT ''
+        );
+
+        -- Append-only leader/independent-reviewer judgment events, one row
+        -- per adjudication event, linked to a run by eval_run_id (#1035
+        -- pattern reused verbatim: event_key idempotency + durable
+        -- per-run insertion_seq for ordered corrections).
+        CREATE TABLE IF NOT EXISTS mirror_eval_adjudications (
+            adjudication_id       TEXT PRIMARY KEY,
+            eval_run_id           TEXT NOT NULL,
+            event_key             TEXT NOT NULL UNIQUE,
+            actor                 TEXT NOT NULL CHECK (length(trim(actor)) > 0),
+            verifier_model        TEXT,
+            usefulness            TEXT NOT NULL CHECK (length(trim(usefulness)) > 0),
+            failure_mode          TEXT,
+            first_review_findings TEXT NOT NULL DEFAULT '[]',
+            plan_delta            TEXT,
+            next_prompt_delta     TEXT,
+            evidence_usable       INTEGER NOT NULL CHECK (evidence_usable IN (0, 1)),
+            used_in_final_claim   INTEGER NOT NULL DEFAULT 0 CHECK (used_in_final_claim IN (0, 1)),
+            human_override        INTEGER NOT NULL DEFAULT 0 CHECK (human_override IN (0, 1)),
+            evidence_ref          TEXT NOT NULL CHECK (length(trim(evidence_ref)) > 0),
+            created_at            TEXT NOT NULL DEFAULT '',
+            insertion_seq         INTEGER NOT NULL,
+            UNIQUE (eval_run_id, insertion_seq)
+        );
+        CREATE INDEX IF NOT EXISTS idx_mirror_eval_adjudications_run
+            ON mirror_eval_adjudications(eval_run_id, created_at);
+
         -- Cross-session presence claims (#1001). Advisory "who's working on
         -- what" lease rows — NOT a mutual-exclusion lock. A session/dispatch
         -- registers a claim on an issue/lane when it starts touching it and

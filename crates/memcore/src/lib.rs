@@ -77,6 +77,14 @@ pub use db::foundry_jobs::{
     update_foundry_job_status_with_reason, FoundryJobLease, FoundryJobSummary, FoundryRetryPolicy,
     JobStatusHistogram, PersistedFoundryJob, RequeueOutcome,
 };
+#[cfg(feature = "admin")]
+pub use db::mirror_eval::{
+    append_mirror_eval_adjudication, get_mirror_eval_run_view, get_observation, get_run_by_id,
+    get_run_by_native_child_id, list_adjudications_for_run, record_mirror_eval_observation,
+    register_mirror_eval_run, run_is_adjudicated, MirrorEvalAdjudication, MirrorEvalObservation,
+    MirrorEvalRun, MirrorEvalRunView, NewMirrorEvalAdjudication, NewMirrorEvalObservation,
+    NewMirrorEvalRun,
+};
 pub use db::row_to_entry;
 #[cfg(feature = "admin")]
 pub use db::session_claims::{

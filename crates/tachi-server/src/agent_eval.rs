@@ -7,6 +7,7 @@ use std::path::Path;
 
 mod fixture;
 mod live;
+mod mirror;
 
 pub(crate) use self::fixture::*;
 pub(crate) use self::live::*;
@@ -21,6 +22,35 @@ pub(crate) async fn handle_agent_eval(
 ) -> Result<String, String> {
     let action = params.action.trim().to_ascii_lowercase();
     match action.as_str() {
+        // #1066: first-class mirror eval intake for harness-native
+        // subagents. Extends this SAME facade tool — not a second ledger —
+        // with a register -> observe -> adjudicate -> get lifecycle that
+        // records carrier-observed execution facts separately from
+        // leader/independent-reviewer judgment.
+        "register" => {
+            let register = params
+                .register
+                .ok_or_else(|| "register payload is required for action='register'".to_string())?;
+            self::mirror::handle_register(_server, register)
+        }
+        "observe" => {
+            let observe = params
+                .observe
+                .ok_or_else(|| "observe payload is required for action='observe'".to_string())?;
+            self::mirror::handle_observe(_server, observe)
+        }
+        "adjudicate" => {
+            let adjudicate = params.adjudicate.ok_or_else(|| {
+                "adjudicate payload is required for action='adjudicate'".to_string()
+            })?;
+            self::mirror::handle_adjudicate(_server, adjudicate)
+        }
+        "get" => {
+            let get = params
+                .get
+                .ok_or_else(|| "get payload is required for action='get'".to_string())?;
+            self::mirror::handle_get(_server, get)
+        }
         "aggregate" => {
             if !eval_fixture_replay_allowed() {
                 return Err(format!(
@@ -74,7 +104,8 @@ pub(crate) async fn handle_agent_eval(
             .map_err(|e| format!("serialize telemetry: {e}"))
         }
         _ => Err(format!(
-            "Invalid eval action '{}'. Use aggregate, aggregate_live, telemetry, or perf.",
+            "Invalid eval action '{}'. Use aggregate, aggregate_live, telemetry, perf, \
+             register, observe, adjudicate, or get.",
             params.action
         )),
     }

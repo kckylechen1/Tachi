@@ -61,6 +61,7 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             signatures: Vec::new(),
             rulings: Vec::new(),
             adjudication: None,
+            eval_run_ids: Vec::new(),
         }))
         .await
         .expect("tachi_complete should succeed");
@@ -223,6 +224,10 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             action: "aggregate_live".to_string(),
             fixture_path: None,
             limit: Some(50),
+            register: None,
+            observe: None,
+            adjudicate: None,
+            get: None,
         }))
         .await
         .expect("aggregate_live should succeed");
@@ -267,6 +272,10 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             action: "telemetry".to_string(),
             fixture_path: None,
             limit: Some(50),
+            register: None,
+            observe: None,
+            adjudicate: None,
+            get: None,
         }))
         .await
         .expect("telemetry alias should succeed");
@@ -378,6 +387,7 @@ async fn tachi_complete_accepts_stringified_trajectory_array() {
             signatures: Vec::new(),
             rulings: Vec::new(),
             adjudication: None,
+            eval_run_ids: Vec::new(),
         }))
         .await
         .expect("tachi_complete should accept stringified trajectory");

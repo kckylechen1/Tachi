@@ -23,6 +23,8 @@ mod graph;
 mod hub_db;
 mod memory_crud;
 pub mod migrations;
+#[cfg(feature = "admin")]
+pub mod mirror_eval;
 mod open;
 pub mod open_context;
 mod recall_cache;

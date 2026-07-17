@@ -138,6 +138,7 @@ pub(super) async fn handle_tachi_task_facade(
                 diff: params.diff.clone(),
                 worktree: params.worktree.clone(),
                 subagents: params.subagents.clone(),
+                eval_run_ids: params.eval_run_ids.clone(),
                 feedback_rules_applied: params.feedback_rules_applied.clone(),
                 dispatch_id: params.dispatch_id.clone(),
                 flow_id: params.flow_id.clone(),
