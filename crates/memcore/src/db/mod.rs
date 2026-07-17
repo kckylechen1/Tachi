@@ -74,7 +74,8 @@ pub use doctor_probe::{
 };
 pub use event_ledger::{continuity_metrics, insert_tachi_event, list_tachi_events};
 pub use filename::{
-    migrate_legacy_filename_if_present, LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
+    is_memory_db_filename, migrate_legacy_filename_if_present, LEGACY_MEMORY_DB_FILENAME,
+    MEMORY_DB_FILENAME,
 };
 pub use gc_candidates::{
     list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,

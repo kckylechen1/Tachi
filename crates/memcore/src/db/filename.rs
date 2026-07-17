@@ -79,6 +79,17 @@ pub fn migrate_legacy_filename_if_present(db_path: &Path) -> Result<(), MemoryEr
     leave_compat_symlink(&legacy_path)
 }
 
+/// True if `name` is either the canonical or the legacy memory-database
+/// filename. For detection/classification code (doctor scans, manifest
+/// classification, "does this directory look like a tachi home" checks) that
+/// must recognize a DB file regardless of which side of the #1132 rename it's
+/// on. Path-construction code that decides what to CREATE should use
+/// [`MEMORY_DB_FILENAME`] directly, never this predicate — this exists only
+/// for "is this file relevant" checks, not "what should I name a new file".
+pub fn is_memory_db_filename(name: &str) -> bool {
+    name == MEMORY_DB_FILENAME || name == LEGACY_MEMORY_DB_FILENAME
+}
+
 #[cfg(unix)]
 fn leave_compat_symlink(legacy_path: &Path) -> Result<(), MemoryError> {
     std::os::unix::fs::symlink(MEMORY_DB_FILENAME, legacy_path).map_err(|e| {
