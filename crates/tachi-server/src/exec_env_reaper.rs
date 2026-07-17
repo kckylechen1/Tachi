@@ -4484,11 +4484,9 @@ mod tests {
         assert_eq!(report.candidates.len(), 1, "{report:?}");
         assert_eq!(report.candidates[0].decision, "refused", "{report:?}");
         assert!(
-            report
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("(dev, ino) identity changed again")
-                    && warning.contains("a second time")),
+            report.warnings.iter().any(|warning| warning
+                .contains("(dev, ino) identity changed again")
+                && warning.contains("a second time")),
             "the refusal must name the SECOND recheck's own language (\"changed again\" / \
              \"a second time\"), proving checkpoint 2's own recheck fired — not the first \
              recheck's \"replaced between judgement and delete\" wording: {report:?}"

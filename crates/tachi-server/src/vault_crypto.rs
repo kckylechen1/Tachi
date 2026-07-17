@@ -671,9 +671,8 @@ mod tests {
     fn seam_whitespace_only_kdf_algorithm_is_refused_not_defaulted() {
         let mut config = make_stored_config_for_password("correct-pw");
         config.kdf_algorithm = " ".to_string();
-        let err = derive_verified_key_from_stored_config(&config, "correct-pw").expect_err(
-            "whitespace-only kdf_algorithm must not silently default to argon2id",
-        );
+        let err = derive_verified_key_from_stored_config(&config, "correct-pw")
+            .expect_err("whitespace-only kdf_algorithm must not silently default to argon2id");
         assert!(
             matches!(&err, StoredVaultKeyDerivationError::KdfAlgorithmMismatch(_)),
             "whitespace-only kdf_algorithm must surface as a typed KdfAlgorithmMismatch \
