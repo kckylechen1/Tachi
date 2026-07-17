@@ -556,10 +556,23 @@ mod tests {
     // surfacing the mismatch; with a differently-derived stored verifier
     // (the real-world shape — the fork actually derived under its own KDF)
     // it produces `Ok(false)` -> `WrongPassword`, feeding the brute-force
-    // lockout counter for a config problem, not a password problem. These
-    // tests are RED on that pre-fix code (no algorithm check exists to
-    // short-circuit before parsing/deriving) and GREEN once the seam checks
-    // `kdf_algorithm` fail-closed before touching `kdf_params`/Argon2id.
+    // lockout counter for a config problem, not a password problem.
+    //
+    // #1187 fix-round correction (codex cross-vendor review, checkpoint 3):
+    // only (e) and (f) below are genuinely RED on pre-fix `origin/main` — a
+    // stored config using the fixture's own real password always verifies
+    // successfully pre-fix (no algorithm check exists to short-circuit
+    // before parsing/deriving), so `.expect_err(...)` in (e) and the
+    // `Ok(_) => panic!(...)` arm in (f) both fail loudly. (g) is GREEN on
+    // BOTH pre-fix and post-fix code — pre-fix already ignored
+    // `kdf_algorithm` entirely, so an empty value already derived
+    // successfully; (g) is compatibility regression coverage for the
+    // legacy carve-out, not a discriminator. See also the live-handler
+    // test `vault_unlock_kdf_algorithm_mismatch_does_not_feed_lockout_counter`
+    // in `vault_ops/tests.rs`, added in the same fix-round, which is the
+    // test that actually proves the production `handle_vault_unlock`
+    // lockout counter stays untouched — (f) below only proves it against a
+    // synthetic local match, not the real dispatch.
 
     /// (e) `kdf_algorithm` naming an unsupported KDF, with an otherwise VALID
     /// `kdf_params` shape and the objectively CORRECT password -> a typed
@@ -587,16 +600,18 @@ mod tests {
         );
     }
 
-    /// (f) Same shape as (e), but proves the specific claim from the
+    /// (f) Same shape as (e), documenting the specific claim from the
     /// attack-pass verdict: this error class must never feed a caller's
-    /// brute-force lockout counter. Mirrors the exact dispatch pattern
-    /// `vault_ops::handlers::lifecycle::handle_vault_unlock` uses in
-    /// production — `record_vault_unlock_failure` (which increments the
-    /// counter) is only ever reached when the seam's `WrongPassword` variant
-    /// is matched; every other variant, including the new
-    /// `KdfAlgorithmMismatch`, returns before that call. Pre-fix this test is
-    /// vacuously moot (the seam had no algorithm check to test), but as
-    /// written against the fixed seam it pins the counter at zero.
+    /// brute-force lockout counter. This exercises only the PURE seam with a
+    /// local synthetic counter/match, not the real production dispatch —
+    /// #1187 fix-round correction (codex checkpoint 3/4): despite the match
+    /// arm below being shaped like `handle_vault_unlock`'s real dispatch
+    /// (now literally the seam it calls, after the fix-round wired the
+    /// handler to this function), a synthetic local counter proves only
+    /// itself. The production-lockout-counter claim is proven by
+    /// `vault_unlock_kdf_algorithm_mismatch_does_not_feed_lockout_counter`
+    /// (`vault_ops/tests.rs`), which drives the real `handle_vault_unlock`
+    /// handler and asserts the real `failed_attempts` counter.
     #[test]
     fn seam_algorithm_mismatch_does_not_feed_lockout_counter() {
         let mut config = make_stored_config_for_password("correct-pw");
