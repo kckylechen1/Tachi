@@ -188,7 +188,11 @@ pub fn parse_stored_kdf_params(config_kdf_params: &str) -> Result<KdfParams, Kdf
 /// `bootstrap::vault_sync::ensure_importable_kdf`'s same day-one-brick-fix
 /// carve-out: `kdf_algorithm` is a `NOT NULL DEFAULT 'argon2id'` column with
 /// no `#[serde(default)]`, so the only reachable "no algorithm recorded"
-/// shape is an explicit empty string in an older/hand-crafted row). Any other
+/// shape is an explicit empty string in an older/hand-crafted row). This is
+/// an exact-empty check, not a trimmed one (tachi#1210): a whitespace-only
+/// value is not a reachable "no algorithm recorded" shape from the schema
+/// default, so it falls through to the mismatch branch below rather than
+/// silently widening the default carve-out. Any other
 /// mismatch returns [`StoredVaultKeyDerivationError::KdfAlgorithmMismatch`] —
 /// a typed peer of [`StoredVaultKeyDerivationError::KdfParamsFormat`], so it
 /// is never misread as [`StoredVaultKeyDerivationError::WrongPassword`] and
@@ -199,7 +203,7 @@ pub fn derive_verified_key_from_stored_config(
     config: &memcore::vault::VaultConfig,
     password: &str,
 ) -> Result<DerivedVaultKey, StoredVaultKeyDerivationError> {
-    let algorithm = if config.kdf_algorithm.trim().is_empty() {
+    let algorithm = if config.kdf_algorithm.is_empty() {
         SUPPORTED_KDF_ALGORITHM
     } else {
         config.kdf_algorithm.as_str()
@@ -653,6 +657,26 @@ mod tests {
             key.is_ok(),
             "empty stored kdf_algorithm must fall back to the implicit argon2id default, not fail; got: {:?}",
             key.err()
+        );
+    }
+
+    /// (h) tachi#1210: a WHITESPACE-ONLY stored `kdf_algorithm` is not the
+    /// schema's "no algorithm recorded" shape (the column is `NOT NULL
+    /// DEFAULT 'argon2id'` with no serde default, so the only reachable
+    /// empty-shape row is an exact empty string) and must NOT silently widen
+    /// the (g) default carve-out. It must be refused as a typed
+    /// `KdfAlgorithmMismatch`, the same fail-closed branch as any other
+    /// unrecognized algorithm label — never misdiagnosed as `WrongPassword`.
+    #[test]
+    fn seam_whitespace_only_kdf_algorithm_is_refused_not_defaulted() {
+        let mut config = make_stored_config_for_password("correct-pw");
+        config.kdf_algorithm = " ".to_string();
+        let err = derive_verified_key_from_stored_config(&config, "correct-pw")
+            .expect_err("whitespace-only kdf_algorithm must not silently default to argon2id");
+        assert!(
+            matches!(&err, StoredVaultKeyDerivationError::KdfAlgorithmMismatch(_)),
+            "whitespace-only kdf_algorithm must surface as a typed KdfAlgorithmMismatch \
+             (not a password error, not a silent default); got: {err}"
         );
     }
 }
