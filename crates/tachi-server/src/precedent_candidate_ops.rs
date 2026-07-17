@@ -63,8 +63,7 @@ use crate::precedent_ops::{
     summary_line_with_prefix, NormalizedRuling,
 };
 use crate::tool_params::{
-    RulingEngineReceiptParams, RulingRecordParams, RulingSourceRefParams, SaveMemoryParams,
-    TachiCompleteParams,
+    RulingEngineReceiptParams, RulingSourceRefParams, SaveMemoryParams, TachiCompleteParams,
 };
 use crate::MemoryServer;
 
@@ -219,7 +218,12 @@ fn hash16(seed: &str) -> String {
 
 /// The case/principle identity seed shared by `candidate_group_id` and
 /// `candidate_short_id` — see module doc "Candidate identity".
-fn group_seed(project: &str, issue_ref: Option<&str>, principle: &str, n: &NormalizedRuling) -> String {
+fn group_seed(
+    project: &str,
+    issue_ref: Option<&str>,
+    principle: &str,
+    n: &NormalizedRuling,
+) -> String {
     let mut seed = String::new();
     seed.push_str(&frame_field(project));
     seed.push_str(&frame_field(issue_ref.unwrap_or("")));
@@ -298,7 +302,10 @@ fn render_candidate_body(
     } else {
         lines.push(format!("Source refs ({}):", source_refs.len()));
         for r in source_refs {
-            lines.push(format!("  - {} {} {}", r.relation, r.target_kind, r.target_ref));
+            lines.push(format!(
+                "  - {} {} {}",
+                r.relation, r.target_kind, r.target_ref
+            ));
         }
     }
     lines.push("Coverage: full (no truncation, no dropped source refs)".to_string());
@@ -360,21 +367,19 @@ fn build_candidate_metadata(
     }
     map.insert(
         "source_refs".into(),
-        json!(
-            source_refs
-                .iter()
-                .map(|r| json!({
-                    "relation": r.relation,
-                    "target_kind": r.target_kind,
-                    "target_ref": r.target_ref,
-                    "comment_id": r.comment_id,
-                    "updated_at": r.updated_at,
-                    "body_hash": r.body_hash,
-                    "commit_sha": r.commit_sha,
-                    "section_or_span": r.section_or_span,
-                }))
-                .collect::<Vec<_>>()
-        ),
+        json!(source_refs
+            .iter()
+            .map(|r| json!({
+                "relation": r.relation,
+                "target_kind": r.target_kind,
+                "target_ref": r.target_ref,
+                "comment_id": r.comment_id,
+                "updated_at": r.updated_at,
+                "body_hash": r.body_hash,
+                "commit_sha": r.commit_sha,
+                "section_or_span": r.section_or_span,
+            }))
+            .collect::<Vec<_>>()),
     );
     map.insert("source_ref_count".into(), json!(source_refs.len()));
     if !source_ref_warnings.is_empty() {
@@ -519,8 +524,7 @@ pub(crate) async fn record_complete_precedent_candidates(
                 &source_refs,
                 adjudicator.as_deref(),
             );
-            let summary =
-                summary_line_with_prefix("[precedent-candidate]", &normalized.case, 80);
+            let summary = summary_line_with_prefix("[precedent-candidate]", &normalized.case, 80);
 
             let mut keywords = vec![
                 "precedent_candidate".to_string(),
@@ -653,6 +657,7 @@ pub(crate) async fn record_complete_precedent_candidates(
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+    use crate::tool_params::RulingRecordParams;
 
     fn base_ruling() -> RulingRecordParams {
         RulingRecordParams {
