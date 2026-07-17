@@ -739,6 +739,18 @@ mod tests {
         let receipt = approve(&proposal);
         let mut tampered = proposal.clone();
         tampered.wiki_text = "A different body written after approval.".to_string();
+        // Re-derive `proposal_hash` from the tampered content so `tampered`
+        // is internally self-consistent (as it would be after a real
+        // edit-and-resubmit, e.g. another `build_closure_proposal` call) —
+        // this exercises the receipt/proposal MISMATCH check (case 6a's
+        // actual target). Leaving the stale `proposal_hash` field on the
+        // clone instead trips the *earlier* internal-corruption guard
+        // (`recomputed_proposal_hash != proposal.proposal_hash`, "has a
+        // corrupted proposal_hash field") before the receipt comparison is
+        // ever reached — a different failure mode than this RED case
+        // documents, and not what "cannot be replayed" describes.
+        tampered.proposal_hash =
+            recompute_proposal_hash(&tampered).expect("recompute tampered proposal hash");
         // RED: a naive apply that only checks `receipt.decision == "approved"`
         // and never recomputes the proposal hash would let this replay
         // silently. GREEN: the mismatch is caught and apply is refused.
