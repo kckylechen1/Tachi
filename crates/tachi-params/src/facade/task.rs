@@ -47,11 +47,6 @@ pub struct TachiTaskParams {
     /// rather than just name/backend/model/role.
     #[serde(default)]
     pub verbose: Option<bool>,
-    /// [action=dispatch] tachi#1202/#993: suppress the `/cards/<seat>`
-    /// lane-card countermeasures overlay for this dispatch. Forwarded
-    /// verbatim to `TachiDispatchParams::inject_card`.
-    #[serde(default)]
-    pub inject_card: Option<bool>,
     // plan fields
     #[serde(default)]
     #[schemars(
@@ -495,4 +490,13 @@ pub struct TachiTaskParams {
         description = "Bypass wiki noise filtering for action='close_loop'. Does not force dispatch or merge behavior."
     )]
     pub force: bool,
+    /// [action=dispatch] tachi#1202/#993: suppress the `/cards/<seat>`
+    /// lane-card countermeasures overlay for this dispatch. Forwarded
+    /// verbatim to `TachiDispatchParams::inject_card`. Placed as a trailing
+    /// field (rather than next to `verbose`, its semantic sibling) to keep
+    /// this additive slice out of the high-churn action=recommend/profiles
+    /// region other in-flight tachi#1201 work also edits — same trailing
+    /// pattern as `eval_run_ids`/`project_explicit` above.
+    #[serde(default)]
+    pub inject_card: Option<bool>,
 }

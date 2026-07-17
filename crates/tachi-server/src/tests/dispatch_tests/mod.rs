@@ -125,7 +125,6 @@ fn task_params(action: &str) -> TachiTaskParams {
         mcp_access: None,
         allowed_mcp_servers: Vec::new(),
         verbose: None,
-        inject_card: None,
         state_filter: None,
         limit: None,
         proposal_id: None,
@@ -149,6 +148,7 @@ fn task_params(action: &str) -> TachiTaskParams {
         wiki_scope: None,
         wiki_domain: None,
         force: false,
+        inject_card: None,
     }
 }
 
