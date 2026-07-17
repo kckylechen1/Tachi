@@ -65,6 +65,10 @@ async fn aggregate_live_filters_auto_synthesized_watchdog_rows() {
             action: "aggregate_live".to_string(),
             fixture_path: None,
             limit: Some(50),
+            register: None,
+            observe: None,
+            adjudicate: None,
+            get: None,
         }))
         .await
         .expect("aggregate_live should succeed");
@@ -233,6 +237,10 @@ async fn aggregate_live_uses_harness_native_mirror_eval_without_owning_lifecycle
             action: "aggregate_live".to_string(),
             fixture_path: None,
             limit: Some(50),
+            register: None,
+            observe: None,
+            adjudicate: None,
+            get: None,
         }))
         .await
         .expect("aggregate_live should succeed");

@@ -224,6 +224,10 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             action: "aggregate_live".to_string(),
             fixture_path: None,
             limit: Some(50),
+            register: None,
+            observe: None,
+            adjudicate: None,
+            get: None,
         }))
         .await
         .expect("aggregate_live should succeed");
@@ -268,6 +272,10 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             action: "telemetry".to_string(),
             fixture_path: None,
             limit: Some(50),
+            register: None,
+            observe: None,
+            adjudicate: None,
+            get: None,
         }))
         .await
         .expect("telemetry alias should succeed");
