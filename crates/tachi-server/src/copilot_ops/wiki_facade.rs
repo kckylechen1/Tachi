@@ -54,8 +54,13 @@ pub(crate) async fn handle_tachi_wiki_write(
     } else {
         Vec::new()
     };
-    let layer_metadata =
-        wiki_layer_metadata(&path, &params.scope, target_project.as_deref(), &references);
+    let layer_metadata = wiki_layer_metadata(
+        &path,
+        &params.scope,
+        target_project.as_deref(),
+        &references,
+        params.metadata.as_ref(),
+    );
     let mut wiki_metadata = params.metadata.clone().unwrap_or_else(|| json!({}));
     if !wiki_metadata.is_object() {
         return Err("metadata must be a JSON object when supplied for wiki write".to_string());

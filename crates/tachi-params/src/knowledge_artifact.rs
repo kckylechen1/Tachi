@@ -225,6 +225,16 @@ pub fn build_evidence_refs_v1(references: &[String], captured_at: &str) -> Vec<W
         .collect()
 }
 
+/// Canon doc §7's `KnowledgeArtifactV1` shape. `source_bundle_hash` is
+/// deliberately NOT `Option` (unlike `valid_from`/`valid_until`/
+/// `review_receipt`) — the canon doc's own wire shape lists it without a
+/// `?`, and the frozen invariant this leaf's cross-vendor review restored
+/// (`Active ⇒ validated sources + approval`) depends on every constructed
+/// artifact carrying a real source-bundle hash, not an easily-omitted
+/// optional field. `engine_receipt` remains out of scope for this leaf (see
+/// module doc) — no live write path constructs one yet, so adding the field
+/// here would be an unenforced, dishonest gesture rather than a real
+/// invariant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeArtifactV1 {
     pub artifact_kind: WikiArtifactKindV1,
@@ -235,8 +245,7 @@ pub struct KnowledgeArtifactV1 {
     pub valid_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_until: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_bundle_hash: Option<String>,
+    pub source_bundle_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_receipt: Option<WikiReviewReceiptV1>,
 }
@@ -249,13 +258,20 @@ pub struct KnowledgeArtifactV1 {
 /// already stamps on `/wiki/drafts/...` entries, and finally the
 /// `/wiki/drafts/` path convention itself as defense-in-depth for entries
 /// missing both metadata markers. Defaults to `Active` — this is the
-/// pre-#1072 behavior for every entry not otherwise marked, so existing
-/// non-draft wiki reads stay behavior-frozen.
+/// pre-#1072 behavior for every entry not otherwise marked (no lifecycle
+/// field at all), so existing non-draft wiki reads stay behavior-frozen.
+///
+/// Fail-closed correction (cross-vendor review, #1215): a *present but
+/// malformed* `metadata.lifecycle` string (garbage/typo, not simply absent)
+/// used to fall through to every later check and could land on the `Active`
+/// default — a corrupted/unrecognized lifecycle marker must never resolve to
+/// the most-trusted state. It now resolves to `PendingReview` (not
+/// default-retrievable) instead, regardless of path or `review_status`.
 pub fn derive_wiki_lifecycle(metadata: &serde_json::Value, path: &str) -> WikiLifecycleV1 {
     if let Some(explicit) = metadata.get("lifecycle").and_then(|v| v.as_str()) {
-        if let Ok(parsed) = explicit.parse::<WikiLifecycleV1>() {
-            return parsed;
-        }
+        return explicit
+            .parse::<WikiLifecycleV1>()
+            .unwrap_or(WikiLifecycleV1::PendingReview);
     }
     if metadata
         .get("review_status")
@@ -543,7 +559,7 @@ mod tests {
             scope: "global".to_string(),
             valid_from: None,
             valid_until: None,
-            source_bundle_hash: Some("deadbeef".to_string()),
+            source_bundle_hash: "deadbeef".to_string(),
             review_receipt: None,
         };
         let wire = serde_json::to_string(&artifact).expect("serialize");
@@ -584,6 +600,28 @@ mod tests {
             "/wiki/engineering/foo",
         );
         assert_eq!(lifecycle, WikiLifecycleV1::Stale);
+    }
+
+    /// Cross-vendor review (#1215, BUG 1): "Malformed lifecycle values
+    /// silently default to Active (knowledge_artifact.rs:254–270)." A
+    /// present-but-garbage `metadata.lifecycle` string must fail CLOSED
+    /// (`PendingReview`, not default-retrievable) — never fall through to
+    /// the most-trusted `Active` default. This is the RED that the old
+    /// `if let Ok(parsed) = ... { return parsed }` — with no `else` —
+    /// allowed: parse failure silently continued past the explicit-field
+    /// check into the drafts-path/default-Active fallback below.
+    #[test]
+    fn derive_wiki_lifecycle_malformed_explicit_value_fails_closed_to_pending_review() {
+        let lifecycle = derive_wiki_lifecycle(
+            &serde_json::json!({"lifecycle": "bogus-not-a-real-lifecycle"}),
+            "/wiki/engineering/ordinary-path",
+        );
+        assert_eq!(
+            lifecycle,
+            WikiLifecycleV1::PendingReview,
+            "malformed lifecycle must fail closed, not default to Active"
+        );
+        assert!(!lifecycle.is_default_retrievable());
     }
 
     #[test]
