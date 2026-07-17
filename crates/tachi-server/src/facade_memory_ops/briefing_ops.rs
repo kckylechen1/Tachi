@@ -1,8 +1,13 @@
 //! Briefing handler for `tachi_memory(action="briefing")`.
 //!
-//! Memories/wiki are **workspace-scoped** (`project_only` search). Cross-project
-//! signal lives in global **handoff** memos (like a local issue board) — not
-//! generic global hybrid search.
+//! Memories/wiki are **workspace-scoped** (`project_only` search).
+//!
+//! #1099: the "Cross-project (global handoffs)" section that used to live
+//! here (`crate::handoff_ops::list_pending_handoffs_for_briefing`) is
+//! retired along with `handoff_ops`'s write path — see `handoff_ops.rs`'s
+//! module doc for the caller-sweep evidence and legacy-row data policy.
+//! Cross-session coordination now goes through the `stickies` section
+//! (`sticky_ops`, #964) below.
 
 use super::evidence_format::{
     json_string, parse_evidence_array, parse_json_or_empty, slim_kanban, slim_memory_rows,
@@ -124,7 +129,6 @@ pub(crate) async fn handle_memory_briefing(
     let wiki_cap = if compact { 3 } else { 5 };
     let kanban_cap = if compact { 3 } else { 5 };
     let checkpoint_cap = if compact { 2 } else { 3 };
-    let cross_project_cap = if compact { 3 } else { 5 };
     let verification_cap = if compact { 3 } else { 6 };
 
     let mem_params = SearchMemoryParams {
@@ -186,7 +190,7 @@ pub(crate) async fn handle_memory_briefing(
     };
 
     let sticky_cap = if compact { 3 } else { 5 };
-    let (memories_result, wiki_result, cross_project_result, sticky_result) = tokio::join!(
+    let (memories_result, wiki_result, sticky_result) = tokio::join!(
         handle_search_memory(server, mem_params, true),
         async {
             if let Some(wp) = wiki_params {
@@ -195,7 +199,6 @@ pub(crate) async fn handle_memory_briefing(
                 Ok(vec![])
             }
         },
-        async { crate::handoff_ops::list_pending_handoffs_for_briefing(server, cross_project_cap) },
         // #964: unread stickies for the caller. A caller with no seat
         // identity (agent_id absent) is treated as leader (frozen semantics
         // #3/#4) — worker seats only see stickies explicitly addressed to
@@ -237,7 +240,6 @@ pub(crate) async fn handle_memory_briefing(
     } else {
         json!([])
     };
-    let cross_project = json!(cross_project_result?);
     let stickies = json!(sticky_result?);
 
     let (warnings_res, board_res, checkpoints_res, wiki_counts_res) = tokio::join!(
@@ -395,7 +397,6 @@ pub(crate) async fn handle_memory_briefing(
             insert_non_empty_compact_section(&mut response, "stickies", stickies.clone());
             insert_non_empty_compact_section(&mut response, "memories", memories);
             insert_non_empty_compact_section(&mut response, "wiki", wiki);
-            insert_non_empty_compact_section(&mut response, "cross_project", cross_project);
             insert_non_empty_compact_section(&mut response, "verification", json!(verification));
             insert_non_empty_compact_section(&mut response, "kanban", board);
             insert_non_empty_compact_section(&mut response, "open_loops", json!(open_loops));
@@ -433,7 +434,6 @@ pub(crate) async fn handle_memory_briefing(
             "stickies": stickies,
             "memories": memories,
             "wiki": wiki,
-            "cross_project": cross_project,
             "health": health_summary,
             "verification": verification,
             "kanban": board,
@@ -460,7 +460,6 @@ pub(crate) async fn handle_memory_briefing(
                 "wiki": wiki_cap,
                 "kanban": kanban_cap,
                 "checkpoints": checkpoint_cap,
-                "cross_project": cross_project_cap,
                 "verification": verification_cap,
             },
         }));
@@ -476,7 +475,6 @@ pub(crate) async fn handle_memory_briefing(
         &stickies,
         &memories,
         &wiki,
-        &cross_project,
         &health_summary,
         &verification,
         &board,

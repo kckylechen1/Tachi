@@ -258,7 +258,7 @@ graph TD
 ### 7. 跨 Agent 协调
 - **幽灵低语** —— Agent 间持久化主题发布/订阅（`ghost_publish`、`ghost_subscribe`、`ghost_ack`、`ghost_reflect`、`ghost_promote`）。
 - **看板** —— 跨 Agent 卡片，支持 `ack` / `progress` / `result` 状态（`post_card`、`check_inbox`、`update_card`）。
-- **交接令牌** —— Agent 会话之间结构化上下文传递（`handoff_leave`、`handoff_check`）。
+- **交接 Issue 晋升** —— 从已有交接备忘录创建/关联 GitHub issue（`tachi_handoff(action='promote_issue')`）。#1099:旧的 `handoff_leave`/`handoff_check` 备忘录传递路由已退役——短消息用 `tachi_memory(action='sticky_leave'|'sticky_check')`,结构化任务交接用 `tachi_orchestrator(action='handoff_write'|'handoff_read')`。
 
 > 幽灵与看板工具属于 `admin` Profile 的原生门面（未纳入 `standard`/`coordinate` bundle）。大多数 Agent 通过 `tachi_handoff`、`tachi_workflow`、`tachi_orchestrator`、`tachi_task` 门面进行协调。
 
@@ -286,7 +286,7 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 | Profile | 暴露内容 | 适用场景 |
 |---------|----------|----------|
 | `standard` | 日常门面：`tachi_save`、`tachi_memory`、`tachi_task`、`tachi_arena`、`tachi_verify`、`tachi_web_search`、`tachi_wiki`、`tachi_skill`、`tachi_gh`、`vault_status`，以及 `runtime_info`、`tachi_status`、`tachi_briefing` 和 `tachi_tools`。 | IDE Agent：Claude、Cursor、Codex、Windsurf、Trae、Antigravity。 |
-| `coordinate` | `remember` + `coordinate` bundles：增加 `handoff_check`/`handoff_leave`、`tachi_handoff`、`tachi_workflow`、`tachi_orchestrator`、`tachi_agents`、`approve_merge`、`tachi_gh`、`tachi_shell`、`tachi_arena`、`tachi_verify`；派发通过 `tachi_task(action='dispatch')`。 | 主控/编排 Agent，负责派发任务并协调多 Agent。 |
+| `coordinate` | `remember` + `coordinate` bundles：增加 `tachi_handoff`、`tachi_workflow`、`tachi_orchestrator`、`tachi_agents`、`approve_merge`、`tachi_gh`、`tachi_shell`、`tachi_arena`、`tachi_verify`；派发通过 `tachi_task(action='dispatch')`。 | 主控/编排 Agent，负责派发任务并协调多 Agent。 |
 | `operate` | `remember` + `operate` bundles：增加 Foundry 生命周期、`hub_call`、`vault_unlock`/`lock`/`status`、`wiki_lint`。 | 运行时适配器、OpenClaw、运维自动化。 |
 | `delegate` | 精选 worker 工具面：`tachi_tools`、`runtime_info`、`tachi_memory`、`tachi_event`、`tachi_web_search`、`tachi_browse`、`tachi_unstick`、`tachi_task`、`tachi_complete`、`tachi_skill(action='discover'|'run'|'bundle')`。独立 `run_skill` 仍是默认 delegate profile 之外的旧兼容入口。 | `tachi_task(action='dispatch')` 派生的工作 Agent。无派发、无交接、无技能候选注册。 |
 | `admin` | 完整目录。 | 维护、开发与治理。 |

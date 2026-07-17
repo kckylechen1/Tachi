@@ -32,6 +32,10 @@ fn response_keys(value: &Value) -> std::collections::BTreeSet<String> {
 }
 
 fn expected_gc_keys(include_session_claims: bool) -> std::collections::BTreeSet<String> {
+    // #1099: `handoff_memories_pruned` is gone — the dedicated handoff GC
+    // branch (`gc_expired_handoff_memories`) was retired along with
+    // handoff_ops's write path. See handoff_ops.rs's module doc for the
+    // legacy-row data policy (retain read-only).
     let mut keys = [
         "access_history_pruned",
         "query_diversity_reconciled",
@@ -42,7 +46,6 @@ fn expected_gc_keys(include_session_claims: bool) -> std::collections::BTreeSet<
         "orphaned_agent_known_state",
         "kanban_cards_pruned",
         "foundry_jobs_pruned",
-        "handoff_memories_pruned",
         "sticky_memories_expired",
     ]
     .into_iter()

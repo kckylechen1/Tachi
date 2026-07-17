@@ -70,8 +70,9 @@ pub(super) fn sticky_to_memory_entry(server: &MemoryServer, memo: &StickyMemo) -
         }),
     );
     // Stickies live in the global DB but use a non-/global path prefix,
-    // matching handoff's own cross-project routing opt-in (see
-    // handoff_ops::memo::memo_to_memory_entry for the identical pattern).
+    // the same cross-project routing opt-in the retired `handoff_leave`
+    // writer used to need (#1099: that writer is gone; this comment is
+    // kept as the pattern's provenance, not a live reference to it).
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert(
             "allow_cross_project".to_string(),

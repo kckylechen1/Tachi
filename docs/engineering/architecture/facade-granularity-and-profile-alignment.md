@@ -169,6 +169,15 @@ this ruling only marks the surface deprecated (module doc, facade tool descripti
 `deprecated` field on `handoff_leave`/`handoff_check` responses) so agents see the pointer at call
 time. Refs #1016.
 
+**Update (#1099, 2026-07-17): that later cut landed.** The caller-sweep evidence gate this
+paragraph was waiting on came back clean (zero live external callers), so `handoff_leave`,
+`handoff_check`, and `tachi_handoff`'s 'leave'/'check' actions are deleted — not just
+deprecated — along with the briefing "Cross-project (global handoffs)" projection and the
+dedicated handoff-memory GC branch. `tachi_handoff` survives narrowed to `promote_issue`
+only, which is now a wind-down capability over pre-existing `handoff:<id>` rows (no writer
+remains); those rows are retained read-only rather than migrated or force-deleted. See
+`handoff_ops.rs`'s module doc for the full evidence and data-policy record.
+
 ## 5. DispatchProfile — keep it
 
 `DispatchProfile` (`claude_plan`, `codex_55_review`, `kimi_arch`, …) answers "which sub-agent/model to

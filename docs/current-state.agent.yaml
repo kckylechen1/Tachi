@@ -86,14 +86,21 @@ implemented_now:
 
   cross_agent_handoff:
     tools:
-      - handoff_leave
-      - handoff_check
+      - tachi_handoff (action=promote_issue only)
     features:
-      - target filtering by agent name
-      - acknowledgment tracking
-      - priority levels (low, normal, high, critical)
-      - memory persistence (handoff: category)
-      - LRU eviction at 50 memos
+      - "#1099 (2026-07-17): handoff_leave/handoff_check routes and tachi_handoff's
+        'leave'/'check' actions retired — zero live external callers found in the
+        caller sweep. Short agent-to-agent notes now go through
+        tachi_memory(action='sticky_leave'|'sticky_check') (#964); structured
+        task batons go through tachi_orchestrator(action='handoff_write'|'handoff_read')."
+      - "promote_issue (memo -> GitHub issue) survives as the one documented
+        capability without a replacement (#1037 is the deferred future leaf for
+        explicit issue/global handoff publication); it only reads pre-existing
+        handoff:<id> memory entries, so it is now a wind-down capability rather
+        than a going concern (no writer remains)."
+      - "legacy handoff:<id> memory rows are retained read-only: still fully
+        readable/searchable/promotable, just no longer specially GC-swept (the
+        dedicated 30-day handoff GC branch was retired along with the write path)"
 
   dispatch_v2:
     stages: brainstorm / plan / dispatch / review / ship

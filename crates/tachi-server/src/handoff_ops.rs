@@ -1,12 +1,12 @@
-//! Handoff memos (#157-era) — **deprecated**, see #1016 ruling below.
+//! Handoff memos (#157-era) — **mostly retired**, see #1099 below.
 //!
-//! `handoff_leave` / `handoff_check` predate two purpose-built replacements
-//! that have since split its two use cases cleanly:
+//! `handoff_leave` / `handoff_check` predated two purpose-built replacements
+//! that split its two use cases cleanly:
 //!
 //! - **Short agent-to-agent memo, read-once** → `sticky_ops` (#964,
 //!   `tachi_memory(action='sticky_leave'|'sticky_check')`). Atomic-claim
-//!   delivery, TTL, addressing — everything `handoff_ops::pending`'s
-//!   read-then-write acknowledge loop only approximated.
+//!   delivery, TTL, addressing — everything the old read-then-write
+//!   acknowledge loop only approximated.
 //! - **Structured baton for a resumed/handed-off task** →
 //!   `orchestrator_ops::HandoffPacket` (`tachi_orchestrator(action='handoff_write'|'handoff_read')`).
 //!   Carries objective/current_state/completed_steps/remaining_steps/
@@ -14,40 +14,58 @@
 //!   the shape a resuming session actually needs, keyed by `task_id`
 //!   rather than a loosely-addressed "next agent".
 //!
-//! **Ruling (#1016, owner-ratified 2026-07-11): `handoff_ops` is deprecated,
-//! not deleted.** Existing callers keep working; `handoff_leave` /
-//! `handoff_check` / `tachi_handoff` responses carry a `deprecated` field
-//! pointing at the replacement. `promote_issue` (memo → GitHub issue) has
-//! no direct replacement yet and is unaffected by this ruling. Deletion is a
-//! later, separately-audited cut (#757-style) once in-tree/production
-//! callers are confirmed migrated — this pass does not remove any code path.
-mod gc;
-mod handlers;
+//! **#1016 first deprecated this module without deleting anything.** **#1099
+//! (owner-ratified 2026-07-17) retires the write/read cycle for real**: the
+//! `handoff_leave`/`handoff_check` routes, `tachi_handoff`'s 'leave'/'check'
+//! actions, the pending-memo briefing projection, and the dedicated
+//! handoff-memory GC branch are all gone — caller sweep found zero live
+//! external callers (repo-wide grep: only in-crate tests called them; the
+//! OpenClaw experimental passthrough that referenced the raw names is
+//! default-off and is retired alongside them, see
+//! `integrations/openclaw/index.ts`).
+//!
+//! `promote_issue` is the one documented capability without a replacement
+//! (#1037 is the deferred future replacement for "explicit issue/global
+//! handoff publication") and survives as the sole action `tachi_handoff`
+//! still supports. It only *reads* pre-existing `handoff:<id>` memory
+//! entries — with the writer gone, it becomes a wind-down capability for
+//! whatever handoff memos already exist rather than a going concern, which
+//! the owner ruling accepted explicitly rather than inventing a new writer
+//! here (that would be scope creep beyond #1099's bounded retirement wave).
+//!
+//! **Legacy-row data policy (required evidence, #1099): retain read-only.**
+//! Existing persisted `handoff:<id>` memory entries are ordinary
+//! `MemoryEntry` rows (category="handoff") — they are not deleted, migrated,
+//! or specially reaped by this change. They remain fully readable/searchable
+//! (`tachi_memory(search)`, `get_memory`) and remain promotable via
+//! `promote_issue`. The only thing that goes away is the dedicated 30-day
+//! GC sweep that used to force-delete acknowledged/promoted/superseded rows
+//! (`gc_expired_handoff_memories`, ex-`gc.rs`) — since nothing can produce
+//! "acknowledged"/"superseded" status anymore (those came from the retired
+//! `handoff_check`/`handoff_leave` write paths), that branch had nothing
+//! left to do except delete `promoted` rows, which is not a disposition
+//! this pass invents. Never silently orphaned: the rows stay visible, just
+//! no longer specially swept.
 mod identity;
 mod issue;
 mod memo;
-mod pending;
 
 #[cfg(test)]
 mod tests;
 
+// #1099: `HANDOFF_PATH` is now only consumed by the test-only `test_entry`
+// helper (the non-test writer that used it, `memo_to_memory_entry`, was
+// retired along with `handoff_leave`) — gate it so a normal build doesn't
+// carry a dead `pub(super)` const.
+#[cfg(test)]
 pub(super) const HANDOFF_PATH: &str = "/handoff";
-pub(super) const HANDOFF_MEMORY_LIMIT: usize = 50;
-pub(super) const HANDOFF_DB_LIMIT: usize = 500;
 
-/// Deprecation pointer surfaced in `handoff_leave`/`handoff_check` responses
-/// (#1016 ruling) — leave/check split into two purpose-built replacements.
-pub(crate) const DEPRECATION_NOTICE: &str = "handoff_ops leave/check is deprecated (#1016): use tachi_memory(action='sticky_leave'|'sticky_check') for a short agent-to-agent note, or tachi_orchestrator(action='handoff_write'|'handoff_read') for a structured task baton.";
-
-pub(crate) use gc::gc_expired_handoff_memories;
-pub(crate) use handlers::{handle_handoff_check, handle_handoff_leave};
 pub(crate) use issue::handle_handoff_promote_issue;
-pub(crate) use pending::list_pending_handoffs_for_briefing;
 
 #[cfg(test)]
 use crate::server_state::{HandoffMemo, MemoryServer};
 #[cfg(test)]
-use crate::tool_params::{HandoffCheckParams, HandoffLeaveParams, HandoffPromoteIssueParams};
+use crate::tool_params::HandoffPromoteIssueParams;
 #[cfg(test)]
 use chrono::Utc;
 #[cfg(test)]
@@ -59,9 +77,5 @@ use issue::{
 };
 #[cfg(test)]
 use memcore::{MemoryEntry, MemoryStore};
-#[cfg(test)]
-use memo::memo_from_entry;
-#[cfg(test)]
-use pending::{pending_handoff_entries, supersede_pending_handoffs, upsert_acknowledged_entry};
 #[cfg(test)]
 use serde_json::json;

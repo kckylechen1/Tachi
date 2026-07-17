@@ -1,5 +1,33 @@
 use super::*;
 
+/// #1099: `handoff_leave` (the MCP tool) is retired, so tests that need a
+/// promotable handoff memo now seed the store directly — mirroring exactly
+/// what `handle_handoff_leave` used to persist (`handoff:<id>`, category
+/// "handoff", `status: "pending"` metadata) via the pre-existing
+/// `test_entry` helper. `promote_issue` only ever *read* this shape; it
+/// never depended on the leave handler itself.
+fn seed_pending_memo(server: &MemoryServer, memo: HandoffMemo) -> String {
+    let memo_id = memo.id.clone();
+    let entry = test_entry(memo);
+    server
+        .with_global_store(|store| store.upsert(&entry).map_err(|e| e.to_string()))
+        .expect("seed pending handoff memo");
+    memo_id
+}
+
+fn pending_memo(id: &str, summary: &str, next_steps: Vec<String>) -> HandoffMemo {
+    HandoffMemo {
+        id: id.to_string(),
+        from_agent: "agent-a".to_string(),
+        target_agent: Some("next-agent".to_string()),
+        summary: summary.to_string(),
+        next_steps,
+        context: Some(json!({"risk": "medium"})),
+        created_at: Utc::now().to_rfc3339(),
+        acknowledged: false,
+    }
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn promote_handoff_issue_updates_memory_and_flow_artifacts() {
@@ -14,17 +42,14 @@ async fn promote_handoff_issue_updates_memory_and_flow_artifacts() {
     std::env::set_var("TACHI_RUN_ROOT", &run_root);
 
     let server = test_server(db_path.clone());
-    let left = server
-        .handoff_leave(Parameters(HandoffLeaveParams {
-            summary: "Promote this memo".to_string(),
-            next_steps: vec!["Create a tracked GitHub issue".to_string()],
-            target_agent: Some("next-agent".to_string()),
-            context: Some(json!({"risk": "medium"})),
-        }))
-        .await
-        .expect("leave handoff");
-    let left_json: serde_json::Value = serde_json::from_str(&left).expect("leave json");
-    let memo_id = left_json["memo_id"].as_str().expect("memo id").to_string();
+    let memo_id = seed_pending_memo(
+        &server,
+        pending_memo(
+            "memo-promote-1",
+            "Promote this memo",
+            vec!["Create a tracked GitHub issue".to_string()],
+        ),
+    );
     let client = crate::gh_safe_merge::MockGhClient::new();
 
     let promoted = promote_handoff_issue_with_client(
@@ -85,17 +110,10 @@ async fn promote_rejects_invalid_flow_id_before_issue_creation() {
         uuid::Uuid::new_v4()
     ));
     let server = test_server(db_path.clone());
-    let left = server
-        .handoff_leave(Parameters(HandoffLeaveParams {
-            summary: "Invalid flow id test".to_string(),
-            next_steps: vec![],
-            target_agent: None,
-            context: None,
-        }))
-        .await
-        .expect("leave");
-    let left_json: serde_json::Value = serde_json::from_str(&left).expect("json");
-    let memo_id = left_json["memo_id"].as_str().expect("memo id").to_string();
+    let memo_id = seed_pending_memo(
+        &server,
+        pending_memo("memo-invalid-flow", "Invalid flow id test", vec![]),
+    );
     let client = crate::gh_safe_merge::MockGhClient::new();
 
     let err = promote_handoff_issue_with_client(
@@ -129,17 +147,10 @@ async fn promote_dedup_returns_already_promoted_without_force() {
     std::env::set_var("TACHI_RUN_ROOT", &run_root);
 
     let server = test_server(db_path.clone());
-    let left = server
-        .handoff_leave(Parameters(HandoffLeaveParams {
-            summary: "Dedup test memo".to_string(),
-            next_steps: vec!["step".to_string()],
-            target_agent: None,
-            context: None,
-        }))
-        .await
-        .expect("leave");
-    let left_json: serde_json::Value = serde_json::from_str(&left).expect("json");
-    let memo_id = left_json["memo_id"].as_str().expect("memo id").to_string();
+    let memo_id = seed_pending_memo(
+        &server,
+        pending_memo("memo-dedup", "Dedup test memo", vec!["step".to_string()]),
+    );
     let client = crate::gh_safe_merge::MockGhClient::new();
 
     // First promote succeeds
@@ -201,17 +212,10 @@ async fn promote_force_creates_new_issue_even_if_already_promoted() {
     std::env::set_var("TACHI_RUN_ROOT", &run_root);
 
     let server = test_server(db_path.clone());
-    let left = server
-        .handoff_leave(Parameters(HandoffLeaveParams {
-            summary: "Force re-promote test".to_string(),
-            next_steps: vec![],
-            target_agent: None,
-            context: None,
-        }))
-        .await
-        .expect("leave");
-    let left_json: serde_json::Value = serde_json::from_str(&left).expect("json");
-    let memo_id = left_json["memo_id"].as_str().expect("memo id").to_string();
+    let memo_id = seed_pending_memo(
+        &server,
+        pending_memo("memo-force", "Force re-promote test", vec![]),
+    );
     let client = crate::gh_safe_merge::MockGhClient::new();
 
     // First promote
@@ -292,27 +296,6 @@ fn promoting_intermediate_state_is_set_before_issue_creation() {
         .expect("exists");
     assert_eq!(reverted.metadata["status"], json!("pending"));
     assert!(reverted.metadata.get("promoting_at").is_none());
-}
-
-#[test]
-fn promoted_status_is_not_pending() {
-    let mut store = test_store();
-    let memo = HandoffMemo {
-        id: "memo-promoted".to_string(),
-        from_agent: "agent-a".to_string(),
-        target_agent: None,
-        summary: "promoted memo".to_string(),
-        next_steps: vec![],
-        context: None,
-        created_at: Utc::now().to_rfc3339(),
-        acknowledged: false,
-    };
-    let mut entry = test_entry(memo);
-    entry.metadata["status"] = json!("promoted");
-    store.upsert(&entry).expect("upsert");
-
-    let entries = pending_handoff_entries(&mut store).expect("pending entries");
-    assert!(entries.is_empty());
 }
 
 #[test]

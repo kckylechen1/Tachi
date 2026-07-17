@@ -146,8 +146,8 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     "compact_rollup",
     "compact_session_memory",
     "extract_facts",
-    "handoff_check",
-    "handoff_leave",
+    // #1099: "handoff_check"/"handoff_leave" retired — the routes no longer
+    // exist. "tachi_handoff" (below) survives as a non-admin write route.
     "ingest_event",
     "sync_memories",
     "tachi_complete",

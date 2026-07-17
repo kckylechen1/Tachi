@@ -61,8 +61,9 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "sandbox_set_rule",
     "sandbox_set_policy",
     "tachi_init_project_db",
-    "handoff_leave",
-    "handoff_check",
+    // #1099: "handoff_leave"/"handoff_check" retired — the routes no longer
+    // exist. "tachi_handoff" (below) stays, still mixed read/write via its
+    // one surviving action (promote_issue).
     "post_card",
     "update_card",
     "distill_trajectory",

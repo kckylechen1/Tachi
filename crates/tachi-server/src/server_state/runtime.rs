@@ -1,6 +1,6 @@
 use crate::enrichment::EnrichmentItem;
 use crate::foundry_runtime_ops::{FoundryMaintenanceItem, FoundryWorkerStats};
-use memory_server_runtime::{AgentProfile, HandoffMemo};
+use memory_server_runtime::AgentProfile;
 use std::sync::Arc;
 use tachi_hub::ToolProfile;
 use tokio::sync::mpsc;
@@ -11,7 +11,11 @@ pub(crate) struct AgentRuntime {
     pub(crate) tool_profile: Option<ToolProfile>,
     pub(crate) session_client: Option<String>,
     pub(crate) session_project: Option<String>,
-    pub(crate) handoff_memos: Vec<HandoffMemo>,
+    // #1099: `handoff_memos` (in-memory duplicate of the persisted
+    // `handoff:<id>` store rows, LRU-capped, populated only by the retired
+    // `handoff_leave`/`handoff_check` handlers) removed — it was the
+    // "second memo lifecycle" the #1099 acceptance criteria call out;
+    // nothing wrote or read it once those handlers went away.
 }
 
 /// Bounded channel capacity for enrichment batcher
