@@ -6,6 +6,10 @@ async fn tachi_task_recommend_falls_back_to_builtin_profiles_without_eval_rows()
     let mut params = task_params("recommend");
     params.task = Some("plan a low-risk documentation update".to_string());
     params.limit = Some(10);
+    // tachi#1201 item 2: the JSON candidate-summary shape now omits the
+    // top-level mbit_card by default; opt in explicitly since this test
+    // checks it downstream.
+    params.include_card = Some(true);
 
     let raw = server
         .tachi_task(Parameters(params))
