@@ -177,7 +177,10 @@ async fn cross_model_independence_requires_two_known_differing_engines() {
         "cross-event",
     )
     .await;
-    assert_eq!(cross_adj["cross_model_independent"], serde_json::json!(true));
+    assert_eq!(
+        cross_adj["cross_model_independent"],
+        serde_json::json!(true)
+    );
     assert_eq!(cross_adj["self_eval"], serde_json::json!(false));
 
     // Self-eval: producer and verifier are the same lineage (claude family).
@@ -194,7 +197,10 @@ async fn cross_model_independence_requires_two_known_differing_engines() {
         "self-event",
     )
     .await;
-    assert_eq!(same_adj["cross_model_independent"], serde_json::json!(false));
+    assert_eq!(
+        same_adj["cross_model_independent"],
+        serde_json::json!(false)
+    );
     assert_eq!(same_adj["self_eval"], serde_json::json!(true));
 
     // Unknown identity on either side: never independent, never self-eval.
@@ -334,8 +340,9 @@ async fn complete_projects_only_eligible_eval_run_ids_into_aggregation() {
     assert!(
         !aggregate["subagent_scores"]
             .as_array()
-            .is_some_and(|rows| rows.iter().any(|row| row["role"] == "explore"
-                && row["useful_rate"] == 0.0)),
+            .is_some_and(|rows| rows
+                .iter()
+                .any(|row| row["role"] == "explore" && row["useful_rate"] == 0.0)),
         "the evidence_usable=false / unadjudicated runs must not feed subagent scores: \
          {aggregate:#}"
     );

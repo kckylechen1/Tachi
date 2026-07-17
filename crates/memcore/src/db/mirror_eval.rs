@@ -181,9 +181,8 @@ pub fn register_mirror_eval_run(
             created_at,
         ],
     )?;
-    get_run_by_id(conn, &eval_run_id)?.ok_or_else(|| {
-        MemoryError::Internal("inserted mirror eval run vanished".to_string())
-    })
+    get_run_by_id(conn, &eval_run_id)?
+        .ok_or_else(|| MemoryError::Internal("inserted mirror eval run vanished".to_string()))
 }
 
 pub fn get_run_by_id(
@@ -337,8 +336,7 @@ pub fn record_mirror_eval_observation(
 
     let observation_id = uuid::Uuid::new_v4().to_string();
     let created_at = normalize_utc_iso_or_now("");
-    let artifacts_json =
-        serde_json::to_string(&new.artifacts).unwrap_or_else(|_| "[]".to_string());
+    let artifacts_json = serde_json::to_string(&new.artifacts).unwrap_or_else(|_| "[]".to_string());
     conn.execute(
         "INSERT INTO mirror_eval_observations
          (observation_id, eval_run_id, terminal_outcome, duration_ms, cost_tokens, cost_usd,
@@ -610,7 +608,8 @@ fn get_adjudication_by_event_key(
 
 fn row_to_adjudication(row: &rusqlite::Row<'_>) -> rusqlite::Result<MirrorEvalAdjudication> {
     let findings_raw: String = row.get(7)?;
-    let first_review_findings: Vec<String> = serde_json::from_str(&findings_raw).unwrap_or_default();
+    let first_review_findings: Vec<String> =
+        serde_json::from_str(&findings_raw).unwrap_or_default();
     Ok(MirrorEvalAdjudication {
         adjudication_id: row.get(0)?,
         eval_run_id: row.get(1)?,
@@ -916,11 +915,9 @@ mod tests {
         assert!(err.to_string().contains("unknown eval_run_id"));
 
         let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM mirror_eval_adjudications",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM mirror_eval_adjudications", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(count, 0);
     }

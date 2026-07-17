@@ -49,7 +49,8 @@ fn to_subagent_eval_params(view: &memcore::MirrorEvalRunView) -> Option<TachiSub
     if !adjudication.evidence_usable {
         return None;
     }
-    let producer_lineage = lineage_of(producer_model(&view.run, view.observation.as_ref()).as_deref());
+    let producer_lineage =
+        lineage_of(producer_model(&view.run, view.observation.as_ref()).as_deref());
     let verifier_lineage = lineage_of(adjudication.verifier_model.as_deref());
     if is_self_eval(&producer_lineage, &verifier_lineage) {
         return None;
@@ -121,7 +122,10 @@ pub(super) fn project_eval_run_ids(
         let view = match view {
             Ok(Some(view)) => view,
             Ok(None) => {
-                tracing::warn!(eval_run_id, "eval_run_ids: no mirror eval run found, skipping");
+                tracing::warn!(
+                    eval_run_id,
+                    "eval_run_ids: no mirror eval run found, skipping"
+                );
                 continue;
             }
             Err(error) => {

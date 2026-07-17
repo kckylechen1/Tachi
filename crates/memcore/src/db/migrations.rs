@@ -498,8 +498,7 @@ pub(crate) fn run_data_migrations_in_tx(
     .unwrap_or(0);
 
     report.mirror_eval_tables_created =
-        apply_versioned_migration(conn, "v20_mirror_eval", migrate_v20_mirror_eval)?
-            .unwrap_or(0);
+        apply_versioned_migration(conn, "v20_mirror_eval", migrate_v20_mirror_eval)?.unwrap_or(0);
 
     Ok(report)
 }

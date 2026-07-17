@@ -102,8 +102,7 @@ pub(crate) fn handle_observe(
         effective_harness: params.effective_harness,
     };
     let observation = server.with_global_store(|store| {
-        memcore::record_mirror_eval_observation(store.connection(), &new)
-            .map_err(|e| e.to_string())
+        memcore::record_mirror_eval_observation(store.connection(), &new).map_err(|e| e.to_string())
     })?;
     serde_json::to_string(&json!({
         "eval_run_id": observation.eval_run_id,
