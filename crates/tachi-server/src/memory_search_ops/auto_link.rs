@@ -341,6 +341,35 @@ fn auto_link_receipt_sampling_enabled() -> bool {
     auto_link_receipt_sampling_enabled_from(std::env::var("TACHI_AUTO_LINK_PHASE_RECEIPTS").ok())
 }
 
+/// tachi#1185 fix-round (codex review checkpoint 4, CRITICAL): pure,
+/// directly-testable aggregation for [`AutoLinkReceipt::pool_checkout_wait`]
+/// across the per-entity search loop in [`run_auto_linking`]. `Unavailable`
+/// is STICKY: once any per-entity read in the loop reports `Unavailable`,
+/// the aggregate must stay `Unavailable` for the rest of the loop — the
+/// prior version's `_ => next` fallback let a LATER `Measured` entity
+/// re-promote the field back to `Measured`, silently erasing an EARLIER
+/// entity's unmeasured read (order-dependent fail-open: `HashSet` entity
+/// iteration order — `auto_link.rs:381-382` — made which entity landed last
+/// nondeterministic). `Measured` values accumulate as summed wall time,
+/// matching the pre-existing `read_elapsed` accumulation pattern; the
+/// initial `NotSampled` seed is replaced outright by the first real
+/// classification. See `pool_checkout_wait_aggregation_*` tests below for
+/// the exact scenario this closes.
+fn accumulate_pool_checkout_wait(
+    acc: LayerAvailability,
+    next: LayerAvailability,
+) -> LayerAvailability {
+    match (acc, next) {
+        (LayerAvailability::Measured(prior), LayerAvailability::Measured(this)) => {
+            LayerAvailability::Measured(prior + this)
+        }
+        (LayerAvailability::Unavailable, _) | (_, LayerAvailability::Unavailable) => {
+            LayerAvailability::Unavailable
+        }
+        (_, next) => next,
+    }
+}
+
 fn auto_link_receipt_sampling_enabled_from(value: Option<String>) -> bool {
     value.is_some_and(|value| {
         matches!(
@@ -638,15 +667,16 @@ pub(crate) fn run_auto_linking(
             // `read_elapsed` does above — one entity list can drive several
             // searches, each with its own pool checkout. The branch this
             // block is reached from is loop-invariant (`sample`,
-            // `named_project`, `target_db` never change mid-loop), so this
-            // only ever sums two `Measured` values or repeatedly overwrites
-            // the same `Unavailable`/`NotSampled` classification.
-            receipt.pool_checkout_wait = match (receipt.pool_checkout_wait, pool_checkout_wait) {
-                (LayerAvailability::Measured(prior), LayerAvailability::Measured(this)) => {
-                    LayerAvailability::Measured(prior + this)
-                }
-                _ => pool_checkout_wait,
-            };
+            // `named_project`, `target_db` never change mid-loop), but the
+            // Ok/Err OUTCOME of each individual recording call is NOT
+            // loop-invariant — one entity's read can error while another's
+            // succeeds. tachi#1185 fix-round (checkpoint 4): route through
+            // `accumulate_pool_checkout_wait`, which keeps `Unavailable`
+            // sticky across that mix instead of letting a later `Measured`
+            // entity re-promote an earlier failed-to-measure entity's
+            // classification.
+            receipt.pool_checkout_wait =
+                accumulate_pool_checkout_wait(receipt.pool_checkout_wait, pool_checkout_wait);
         }
         // #1097 r1 codex review ③-A: count ONLY searches that produced
         // a result set. A named-project resolution failure
@@ -1493,6 +1523,112 @@ mod tests {
         );
     }
 
+    /// tachi#1185 fix-round (codex review checkpoint 8): the two
+    /// `Unavailable` tests above are both confounded — they trigger through
+    /// a search that also ERRORS (an unresolvable project name / a missing
+    /// project DB), so neither can distinguish "Unavailable by design,
+    /// because this path has no recording twin at all" from a hypothetical
+    /// buggy implementation that returns `Unavailable` only on error while
+    /// GUESSING `Measured(0)` on an unwired-but-successful read. This test
+    /// drives an actually SUCCESSFUL named-project search (a real, freshly
+    /// initialized project DB, an entity that legitimately returns zero
+    /// results rather than erroring) and still requires `Unavailable`.
+    #[test]
+    fn pool_checkout_wait_is_unavailable_for_successful_named_project_read() {
+        crate::test_support::with_tachi_home(|home| {
+            let project_db = home.join("projects/probe-project/memory.db");
+            // Full schema init via the real constructor (same route
+            // `tests/mod.rs`'s template-DB builder uses) — dropped
+            // immediately after; `run_auto_linking` below reopens it
+            // through the normal named-project resolution path.
+            drop(MemoryServer::new(project_db, None).expect("init named-project db schema"));
+
+            let server = crate::tests::make_server();
+            let entry = test_entry("named-project-success-probe", "probe entry");
+            let entities = vec!["probe-entity".to_string()];
+
+            let receipt = run_auto_linking(
+                &server,
+                &entry,
+                &entities,
+                DbScope::Global,
+                Some("probe-project"),
+                true,
+            )
+            .expect("sampled auto-link pass must return a receipt");
+
+            assert_eq!(
+                receipt.pool_checkout_wait,
+                LayerAvailability::Unavailable,
+                "a SUCCESSFUL named-project read must still report \
+                 Unavailable — this path has no recording twin regardless \
+                 of whether the read itself succeeds or fails; a Measured \
+                 value here would mean the classification is secretly keyed \
+                 off Ok/Err rather than which path was actually taken"
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // tachi#1185 fix-round (codex review checkpoint 4, CRITICAL) —
+    // `accumulate_pool_checkout_wait` must keep `Unavailable` sticky across a
+    // mixed per-entity outcome: this is the exact fail-open scenario the
+    // review caught (an earlier entity's read errors, a later entity's read
+    // succeeds, and the old `_ => next` fallback let the later `Measured`
+    // silently re-promote the aggregate, masking the earlier unmeasured
+    // read). Testing the pure function directly (rather than trying to force
+    // a genuine mixed Ok/Err pair through the full `run_auto_linking`
+    // pipeline) makes the discrimination deterministic and exhaustive.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pool_checkout_wait_aggregation_unavailable_is_not_re_promoted_by_later_measured() {
+        let acc = LayerAvailability::Unavailable;
+        let acc = accumulate_pool_checkout_wait(
+            acc,
+            LayerAvailability::Measured(Duration::from_micros(5)),
+        );
+        assert_eq!(
+            acc,
+            LayerAvailability::Unavailable,
+            "an earlier entity's Unavailable read must not be erased by a \
+             later entity's Measured read — that is the checkpoint 4 \
+             fail-open bug this fix closes"
+        );
+    }
+
+    #[test]
+    fn pool_checkout_wait_aggregation_measured_becomes_unavailable_after_later_failure() {
+        let acc = LayerAvailability::Measured(Duration::from_micros(10));
+        let acc = accumulate_pool_checkout_wait(acc, LayerAvailability::Unavailable);
+        assert_eq!(
+            acc,
+            LayerAvailability::Unavailable,
+            "a later entity's Unavailable read must degrade the aggregate \
+             — Unavailable is sticky in both directions, never just a \
+             one-way ratchet toward Measured"
+        );
+    }
+
+    #[test]
+    fn pool_checkout_wait_aggregation_sums_multiple_measured() {
+        let acc = LayerAvailability::NotSampled;
+        let acc = accumulate_pool_checkout_wait(
+            acc,
+            LayerAvailability::Measured(Duration::from_micros(3)),
+        );
+        let acc = accumulate_pool_checkout_wait(
+            acc,
+            LayerAvailability::Measured(Duration::from_micros(4)),
+        );
+        assert_eq!(
+            acc,
+            LayerAvailability::Measured(Duration::from_micros(7)),
+            "two genuinely Measured entities must sum, matching the \
+             pre-existing read_elapsed accumulation convention"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // tachi#1145 — `spawn_queue_wait` measures REAL tokio dispatch delay, not
     // a placeholder. `LayerAvailability` cannot express this one: unlike
@@ -1527,14 +1663,25 @@ mod tests {
         // `spawn_auto_linking_for_test` goes through `spawn_and_run_auto_linking`,
         // which (unlike `run_auto_linking`'s explicit `sample: bool` param)
         // reads the sampling gate from this env var — the production entry
-        // point's real gate, unchanged for this test. No other test in this
-        // crate reads or sets `TACHI_AUTO_LINK_PHASE_RECEIPTS` (grep-verified
-        // at write time), so this is safe without `global_test_lock`'s
-        // cross-test mutual exclusion — which cannot be held across this
-        // test's `.await` points anyway (`std::sync::MutexGuard` is `!Send`,
-        // and this test's future must be `Send` for
-        // `flavor = "multi_thread"`). `EnvRestore` itself holds no lock, only
-        // plain owned data, so it is `.await`-safe.
+        // point's real gate, unchanged for this test.
+        //
+        // tachi#1185 fix-round (codex review checkpoint 6): the prior
+        // comment here claimed this was safe without `global_test_lock`
+        // because no other test in the crate touches this env var — that
+        // was false (`auto_link_latency_w5.rs:259` sets the same var), and
+        // the `!Send`-guard justification for skipping the lock was also
+        // wrong: `#[tokio::test]` (tokio-macros 2.7) pins the test body to
+        // `Pin<&mut dyn Future>` with NO `Send` bound and drives it via
+        // `Runtime::block_on`, which itself has no `Send` requirement on the
+        // future it polls (only `tokio::spawn`, used below for the INNER
+        // task, requires `Send` — and this guard is never moved into that
+        // inner task). Holding a `std::sync::MutexGuard` across this test's
+        // own `.await` points is therefore fine, and is what actually
+        // prevents interleaving with `w5_auto_link_latency_under_saturation`
+        // under `--include-ignored`.
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _env = crate::test_support::EnvRestore::set("TACHI_AUTO_LINK_PHASE_RECEIPTS", "1");
 
         let server = crate::tests::make_server();

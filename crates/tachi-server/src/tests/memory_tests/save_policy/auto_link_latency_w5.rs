@@ -251,11 +251,21 @@ async fn w5_auto_link_latency_under_saturation() {
     // `spawn_auto_linking_for_test` reads this env var (via
     // `spawn_and_run_auto_linking`) to decide whether to sample at all —
     // without it every receipt would be `None` and this workload would hang
-    // waiting on a channel nothing ever sends to. `EnvRestore` holds no lock
-    // (just owned data), so it is safe to keep alive across this test's many
-    // `.await` points; see `spawn_queue_wait_measures_dispatch_delay_under_worker_contention`
-    // in `memory_search_ops/auto_link.rs` for why a `std::sync::Mutex`-based
-    // cross-test lock is NOT used here (`!Send` guard across `.await`).
+    // waiting on a channel nothing ever sends to.
+    //
+    // tachi#1185 fix-round (codex review checkpoint 6): this test and
+    // `spawn_queue_wait_measures_dispatch_delay_under_worker_contention`
+    // (`memory_search_ops/auto_link.rs`) both mutate the SAME process-wide
+    // env var; under `cargo test -- --include-ignored` both can run in the
+    // same process concurrently. The prior comment here justified skipping
+    // `global_test_lock()` with a `!Send`-guard-across-`.await` claim that
+    // was factually wrong for `#[tokio::test]` (tokio-macros 2.7 pins the
+    // test body to `Pin<&mut dyn Future>` with no `Send` bound; only
+    // `tokio::spawn`, never used to move this guard, needs `Send`) — see the
+    // sibling test for the full explanation. Hold the lock for real.
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let _env = crate::test_support::EnvRestore::set("TACHI_AUTO_LINK_PHASE_RECEIPTS", "1");
 
     let server = make_server();
@@ -297,6 +307,32 @@ async fn w5_auto_link_latency_under_saturation() {
             receipts.len(),
             unmeasured_pool_wait
         );
+
+        // tachi#1185 fix-round (codex review checkpoint 5): the loop above
+        // only ever printed percentiles — nothing asserted that contention
+        // was actually OBSERVED during measurement, so a version of this
+        // harness with a broken/no-op foreground load would print numbers
+        // and pass regardless. This does not causally prove all `pool_size`
+        // slots were checked out simultaneously (that needs a test-only
+        // hook into `memory-server-runtime`'s pool internals, which are
+        // private to that crate today and out of this fix-round's scope —
+        // flagged as a follow-up, not silently dropped). It DOES require
+        // that at concurrency >= pool_size, WITH the same-shaped foreground
+        // load contending for the whole run, at least one sample actually
+        // waited for a slot — a genuine, falsifiable claim the harness was
+        // not making before.
+        if concurrency >= pool_size {
+            let max_pool_wait_us = pool_wait_us.iter().copied().max().unwrap_or(0);
+            assert!(
+                max_pool_wait_us > 0,
+                "at concurrency {concurrency} (>= pool_size {pool_size}), with \
+                 {concurrency} foreground W2-shaped readers contending for \
+                 the whole run, EVERY sample reported a zero pool_checkout_wait \
+                 — that means no contention was actually observed during \
+                 measurement, so this level's percentiles below would not be \
+                 evidence of anything under load"
+            );
+        }
 
         let (spawn_p50, spawn_p95, spawn_p99) = percentiles_us(spawn_queue_us);
         let (pool_p50, pool_p95, pool_p99) = percentiles_us(pool_wait_us);
