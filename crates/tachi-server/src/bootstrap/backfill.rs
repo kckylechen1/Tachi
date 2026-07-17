@@ -4,7 +4,7 @@ use crate::vector_backfill::{
     VectorSweepStateUpdate,
 };
 use futures::{stream, StreamExt};
-use memcore::MemoryStore;
+use memcore::{DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent};
 use std::error::Error;
 use std::fmt::Display;
 use std::io::{Error as IoError, ErrorKind};
@@ -14,6 +14,22 @@ use tachi_llm::LlmClient;
 
 const DEFAULT_BACKFILL_LLM_CONCURRENCY: usize = 4;
 const MAX_BACKFILL_LLM_CONCURRENCY: usize = 32;
+
+/// #1181: build the write-open [`DbOpenContext`] every `backfill-*` in-process
+/// open uses, threading the top-level `--allow-schema-migration` decision
+/// (resolved once into a typed [`MigrationAuthority`] at CLI startup,
+/// `bootstrap::serve::initialize_startup_context`) instead of silently
+/// carrying the fail-closed `Deny` every `MemoryStore::open` default builds.
+/// `--help` documents the flag as reaching every in-process DB open; before
+/// this fix, `backfill-*` opens ignored it, blocking the exact rehearsal
+/// workflow #1168 prescribes (verify migration on a disposable copy of a
+/// real legacy DB before deploying).
+fn backfill_write_open_context(schema_migration: &MigrationAuthority) -> DbOpenContext {
+    DbOpenContext {
+        intent: OpenIntent::OpenExisting,
+        migration: schema_migration.clone(),
+    }
+}
 
 /// Total / with-vector counts for `tachi backfill-vectors`'s Total/Missing
 /// report, over "durable" rows.
@@ -66,6 +82,7 @@ pub(super) async fn run_backfill_vectors(
     batch_size: usize,
     dry_run: bool,
     include_cache: bool,
+    schema_migration: &MigrationAuthority,
 ) -> Result<(), Box<dyn Error>> {
     let db_str = db_path.to_str().ok_or_else(|| {
         IoError::new(
@@ -73,11 +90,12 @@ pub(super) async fn run_backfill_vectors(
             format!("DB path contains invalid UTF-8: {}", db_path.display()),
         )
     })?;
+    let open_ctx = backfill_write_open_context(schema_migration);
 
     let store = if dry_run {
         MemoryStore::open_read_only(db_str)?
     } else {
-        MemoryStore::open(db_str)?
+        MemoryStore::open_with_context(db_str, &open_ctx)?
     };
     let skip_recall_cache = !include_cache;
     let (total, with_vec) = durable_vector_counts(&store, skip_recall_cache)?;
@@ -117,7 +135,7 @@ pub(super) async fn run_backfill_vectors(
     println!("\nBackfilling {total_missing} entries (batch_size={batch_size})...\n");
 
     drop(store);
-    let mut store = MemoryStore::open(db_str)?;
+    let mut store = MemoryStore::open_with_context(db_str, &open_ctx)?;
 
     for chunk in entries.chunks(batch_size) {
         match embed_and_write_batch(&mut store, &llm, chunk).await {
@@ -191,6 +209,7 @@ pub(super) async fn run_backfill_summaries(
     db_path: &PathBuf,
     vault_db_path: &PathBuf,
     dry_run: bool,
+    schema_migration: &MigrationAuthority,
 ) -> Result<(), Box<dyn Error>> {
     let db_str = db_path.to_str().ok_or_else(|| {
         IoError::new(
@@ -198,8 +217,9 @@ pub(super) async fn run_backfill_summaries(
             format!("DB path contains invalid UTF-8: {}", db_path.display()),
         )
     })?;
+    let open_ctx = backfill_write_open_context(schema_migration);
 
-    let store = MemoryStore::open(db_str)?;
+    let store = MemoryStore::open_with_context(db_str, &open_ctx)?;
     let total = store.stats(false)?.total;
     let entries = store.entries_missing_summaries()?;
     let missing = entries.len();
@@ -228,7 +248,7 @@ pub(super) async fn run_backfill_summaries(
     println!("\nBackfilling {missing} entries (concurrency={concurrency})...\n");
 
     drop(store);
-    let mut store = MemoryStore::open(db_str)?;
+    let mut store = MemoryStore::open_with_context(db_str, &open_ctx)?;
     let tasks = stream::iter(entries.into_iter().map(|(id, text, revision)| {
         let llm = llm.clone();
         let input: String = text.chars().take(8000).collect();
@@ -287,6 +307,7 @@ pub(super) async fn run_backfill_metadata(
     db_path: &PathBuf,
     vault_db_path: &PathBuf,
     dry_run: bool,
+    schema_migration: &MigrationAuthority,
 ) -> Result<(), Box<dyn Error>> {
     let db_str = db_path.to_str().ok_or_else(|| {
         IoError::new(
@@ -294,8 +315,9 @@ pub(super) async fn run_backfill_metadata(
             format!("DB path contains invalid UTF-8: {}", db_path.display()),
         )
     })?;
+    let open_ctx = backfill_write_open_context(schema_migration);
 
-    let store = MemoryStore::open(db_str)?;
+    let store = MemoryStore::open_with_context(db_str, &open_ctx)?;
     let (total, with_metadata) = store.metadata_stats()?;
     let entries = store.entries_missing_metadata()?;
     let missing = entries.len();
@@ -323,7 +345,7 @@ pub(super) async fn run_backfill_metadata(
     println!("\nBackfilling metadata for {missing} entries (concurrency={concurrency})...\n");
 
     drop(store);
-    let mut store = MemoryStore::open(db_str)?;
+    let mut store = MemoryStore::open_with_context(db_str, &open_ctx)?;
     let tasks = stream::iter(entries.into_iter().map(|(id, text, _summary, revision)| {
         let llm = llm.clone();
         let input: String = text.chars().take(8000).collect();
@@ -477,6 +499,7 @@ pub(super) async fn run_backfill_fts(
     db_path: &PathBuf,
     full: bool,
     dry_run: bool,
+    schema_migration: &MigrationAuthority,
 ) -> Result<(), Box<dyn Error>> {
     let db_str = db_path.to_str().ok_or_else(|| {
         IoError::new(
@@ -484,8 +507,9 @@ pub(super) async fn run_backfill_fts(
             format!("DB path contains invalid UTF-8: {}", db_path.display()),
         )
     })?;
+    let open_ctx = backfill_write_open_context(schema_migration);
 
-    let store = MemoryStore::open(db_str)?;
+    let store = MemoryStore::open_with_context(db_str, &open_ctx)?;
     let (total, with_fts) = store.fts_stats()?;
     let missing = total.saturating_sub(with_fts);
 
@@ -509,7 +533,7 @@ pub(super) async fn run_backfill_fts(
     }
 
     drop(store);
-    let mut store = MemoryStore::open(db_str)?;
+    let mut store = MemoryStore::open_with_context(db_str, &open_ctx)?;
 
     if full {
         println!("\nDropping and rebuilding FTS table...");
@@ -527,8 +551,11 @@ pub(super) async fn run_backfill_fts(
 
 #[cfg(test)]
 mod tests {
-    use super::{durable_vector_counts, record_cli_vector_sweep_state, run_backfill_vectors};
-    use memcore::MemoryStore;
+    use super::{
+        durable_vector_counts, record_cli_vector_sweep_state, run_backfill_fts,
+        run_backfill_metadata, run_backfill_summaries, run_backfill_vectors,
+    };
+    use memcore::{MemoryStore, MigrationAuthority};
     use rusqlite::params;
     use std::path::Path;
 
@@ -685,9 +712,16 @@ mod tests {
         std::fs::remove_file(&migration_marker).expect("remove migration marker");
         let before = dry_run_db_snapshot(&db_path);
 
-        run_backfill_vectors(&db_path, &vault_path, 16, true, false)
-            .await
-            .expect("dry-run vector backfill");
+        run_backfill_vectors(
+            &db_path,
+            &vault_path,
+            16,
+            true,
+            false,
+            &MigrationAuthority::Deny,
+        )
+        .await
+        .expect("dry-run vector backfill");
 
         let after = dry_run_db_snapshot(&db_path);
         assert!(
@@ -774,9 +808,16 @@ mod tests {
         )
         .expect("seed existing state");
 
-        run_backfill_vectors(&db_path, &vault_path, 16, true, false)
-            .await
-            .expect("dry-run vector backfill");
+        run_backfill_vectors(
+            &db_path,
+            &vault_path,
+            16,
+            true,
+            false,
+            &MigrationAuthority::Deny,
+        )
+        .await
+        .expect("dry-run vector backfill");
 
         let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
             .expect("read state")
@@ -816,9 +857,16 @@ mod tests {
         )
         .expect("seed daemon schedule");
 
-        run_backfill_vectors(&db_path, &vault_path, 16, false, false)
-            .await
-            .expect("cli vector backfill");
+        run_backfill_vectors(
+            &db_path,
+            &vault_path,
+            16,
+            false,
+            false,
+            &MigrationAuthority::Deny,
+        )
+        .await
+        .expect("cli vector backfill");
 
         let state = crate::vector_backfill::read_vector_sweep_state_for_status(&db_path)
             .expect("read state")
@@ -831,6 +879,191 @@ mod tests {
         assert!(
             state.next_run_after.is_some(),
             "manual CLI backfill must not clear daemon next_run_after"
+        );
+    }
+
+    // --- #1181: --allow-schema-migration must reach every backfill-*
+    // in-process open -----------------------------------------------------
+    //
+    // Mirrors `bootstrap::serve::tests::
+    // remember_cli_requires_flag_to_migrate_stamped_older_db_in_process`
+    // (the #1131/#1138 pattern already established for the `remember`
+    // fallback): seed a current-schema DB, roll `PRAGMA user_version` back
+    // to simulate "this is really a stamped-older DB", then prove Deny
+    // refuses (typed `SchemaMigrationOptInRequired`, stamp untouched) and
+    // Allow migrates (re-stamped at EXPECTED_SCHEMA_VERSION). Every DB here
+    // starts with zero rows, so each function's "nothing to do" early return
+    // (which requires the gated open to have already succeeded) fires before
+    // any LLM client is constructed — no network dependency.
+
+    fn seed_and_stamp_older_schema_version(db_path: &std::path::Path) {
+        MemoryStore::open(db_path.to_str().expect("utf8 db path")).expect("seed current-schema db");
+        let conn = rusqlite::Connection::open(db_path).expect("reopen to roll back stamp");
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {}",
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1
+        ))
+        .expect("stamp older schema version");
+    }
+
+    fn read_user_version(db_path: &std::path::Path) -> u32 {
+        let conn = rusqlite::Connection::open(db_path).expect("open for version read");
+        memcore::db::migrations::read_schema_version(&conn).expect("read schema version")
+    }
+
+    #[tokio::test]
+    async fn backfill_fts_requires_flag_to_migrate_stamped_older_db_in_process() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("backfill-fts-schema.db");
+        seed_and_stamp_older_schema_version(&db_path);
+
+        let err = run_backfill_fts(&db_path, false, false, &MigrationAuthority::Deny)
+            .await
+            .expect_err("backfill-fts without the flag must preserve OpenExisting + Deny");
+        assert!(
+            err.to_string().contains("refusing to migrate db schema"),
+            "unexpected deny error: {err}"
+        );
+        assert_eq!(
+            read_user_version(&db_path),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
+            "deny must not mutate the old schema stamp"
+        );
+
+        run_backfill_fts(
+            &db_path,
+            false,
+            false,
+            &MigrationAuthority::Allow {
+                approved_by: "test:1181-backfill-fts".to_string(),
+            },
+        )
+        .await
+        .expect("backfill-fts with the flag must migrate the isolated DB");
+        assert_eq!(
+            read_user_version(&db_path),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION,
+            "allow must re-stamp the DB at the current schema version"
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_vectors_requires_flag_to_migrate_stamped_older_db_in_process() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("backfill-vectors-schema.db");
+        let vault_path = dir.path().join("vault.db");
+        seed_and_stamp_older_schema_version(&db_path);
+
+        let err = run_backfill_vectors(
+            &db_path,
+            &vault_path,
+            16,
+            false,
+            false,
+            &MigrationAuthority::Deny,
+        )
+        .await
+        .expect_err("backfill-vectors without the flag must preserve OpenExisting + Deny");
+        assert!(
+            err.to_string().contains("refusing to migrate db schema"),
+            "unexpected deny error: {err}"
+        );
+        assert_eq!(
+            read_user_version(&db_path),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
+            "deny must not mutate the old schema stamp"
+        );
+
+        run_backfill_vectors(
+            &db_path,
+            &vault_path,
+            16,
+            false,
+            false,
+            &MigrationAuthority::Allow {
+                approved_by: "test:1181-backfill-vectors".to_string(),
+            },
+        )
+        .await
+        .expect("backfill-vectors with the flag must migrate the isolated DB");
+        assert_eq!(
+            read_user_version(&db_path),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION,
+            "allow must re-stamp the DB at the current schema version"
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_summaries_requires_flag_to_migrate_stamped_older_db_in_process() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("backfill-summaries-schema.db");
+        let vault_path = dir.path().join("vault.db");
+        seed_and_stamp_older_schema_version(&db_path);
+
+        let err = run_backfill_summaries(&db_path, &vault_path, false, &MigrationAuthority::Deny)
+            .await
+            .expect_err("backfill-summaries without the flag must preserve OpenExisting + Deny");
+        assert!(
+            err.to_string().contains("refusing to migrate db schema"),
+            "unexpected deny error: {err}"
+        );
+        assert_eq!(
+            read_user_version(&db_path),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
+            "deny must not mutate the old schema stamp"
+        );
+
+        run_backfill_summaries(
+            &db_path,
+            &vault_path,
+            false,
+            &MigrationAuthority::Allow {
+                approved_by: "test:1181-backfill-summaries".to_string(),
+            },
+        )
+        .await
+        .expect("backfill-summaries with the flag must migrate the isolated DB");
+        assert_eq!(
+            read_user_version(&db_path),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION,
+            "allow must re-stamp the DB at the current schema version"
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_metadata_requires_flag_to_migrate_stamped_older_db_in_process() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("backfill-metadata-schema.db");
+        let vault_path = dir.path().join("vault.db");
+        seed_and_stamp_older_schema_version(&db_path);
+
+        let err = run_backfill_metadata(&db_path, &vault_path, false, &MigrationAuthority::Deny)
+            .await
+            .expect_err("backfill-metadata without the flag must preserve OpenExisting + Deny");
+        assert!(
+            err.to_string().contains("refusing to migrate db schema"),
+            "unexpected deny error: {err}"
+        );
+        assert_eq!(
+            read_user_version(&db_path),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
+            "deny must not mutate the old schema stamp"
+        );
+
+        run_backfill_metadata(
+            &db_path,
+            &vault_path,
+            false,
+            &MigrationAuthority::Allow {
+                approved_by: "test:1181-backfill-metadata".to_string(),
+            },
+        )
+        .await
+        .expect("backfill-metadata with the flag must migrate the isolated DB");
+        assert_eq!(
+            read_user_version(&db_path),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION,
+            "allow must re-stamp the DB at the current schema version"
         );
     }
 }

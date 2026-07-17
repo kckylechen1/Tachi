@@ -382,7 +382,17 @@ async fn run_startup_hygiene(
     global_db_path: &PathBuf,
 ) -> Result<Option<StartupHygiene>, Box<dyn std::error::Error>> {
     // Backfill commands need async LLM clients, so handle them before generic CLI dispatch.
-    if run_if_backfill_command(&ctx.command, &ctx.home, global_db_path).await? {
+    // #1181: thread the top-level `--allow-schema-migration` decision through
+    // so a rehearsal `backfill-*` run against a disposable copy of a real
+    // legacy DB is not blocked by the fail-closed default.
+    if run_if_backfill_command(
+        &ctx.command,
+        &ctx.home,
+        global_db_path,
+        &ctx.schema_migration,
+    )
+    .await?
+    {
         return Ok(None);
     }
 
