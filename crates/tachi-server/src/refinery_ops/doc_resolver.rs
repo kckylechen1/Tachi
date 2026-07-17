@@ -48,7 +48,20 @@ pub(crate) enum CommitReachability {
     Unavailable(String),
 }
 
-pub(crate) trait DocRefResolver {
+/// #1105/fix-round final-gate: `Send + Sync` supertraits are required, not
+/// cosmetic — `handle_refine_issues` (`mod.rs`) holds `Box<dyn
+/// DocRefResolver>` across `.await` points inside an async fn whose future
+/// must itself be `Send` (the MCP tool-dispatch layer drives every tool
+/// handler's future on a multi-threaded executor). Without these
+/// supertraits, `dyn DocRefResolver`/`Box<dyn DocRefResolver>` are neither
+/// `Send` nor `Sync` by default (trait objects don't inherit auto traits
+/// from their concrete implementor unless the trait itself declares them),
+/// so the crate fails to compile with a "future cannot be sent between
+/// threads safely" error. Every real implementor (`GitRefResolver`,
+/// `NullDocResolver`, `FixtureDocResolver` in `fixtures.rs`) is built from
+/// plain owned `String`/`PathBuf` fields and already satisfies both bounds
+/// — this only makes that fact visible to the trait-object boundary.
+pub(crate) trait DocRefResolver: Send + Sync {
     #[allow(clippy::too_many_arguments)]
     fn resolve(
         &self,
