@@ -19,11 +19,18 @@ pub(crate) use tachi_dispatch::{
     DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES, PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
 };
 
-/// tachi#1173 item 2: `verbose=false` (the default) returns one slim row per
-/// profile — name/backend/model/role — instead of the full mbit_card
+/// tachi#1173 item 2: `verbose=false` returns one slim row per profile —
+/// name/backend/model/role — instead of the full mbit_card
 /// (stats/guidance/moves/personality/skill_loadout/evidence_contract) that a
 /// listing call doesn't need. `verbose=true` preserves the pre-#1173 full-card
 /// shape for callers that need it (e.g. the `tachi card` CLI).
+///
+/// Callers: `tachi_task(action='profiles')` (the listing) passes the
+/// caller's `verbose` straight through, defaulting to slim. Per #1182
+/// checkpoint 2, `action='profile'`/`action='card'` (the issue's "or
+/// action=profile" escape hatch) invert that default — they call this same
+/// function but default to `verbose=true` unless the caller explicitly asks
+/// for the slim shape.
 pub(crate) fn dispatch_profiles_json_for_server(
     server: &MemoryServer,
     verbose: bool,

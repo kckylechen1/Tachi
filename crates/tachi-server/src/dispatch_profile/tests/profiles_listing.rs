@@ -8,13 +8,23 @@ fn listing_test_server() -> MemoryServer {
     MemoryServer::new(db_path, None).expect("test memory server")
 }
 
-/// tachi#1173 item 2 discriminator: on origin/main (pre-#1173)
-/// `dispatch_profiles_json_for_server` always returned the full mbit_card
-/// (stats/guidance/moves/personality/skill_loadout/evidence_contract) for
-/// every profile row, so this assertion is RED before the fix (mbit_card is
-/// always present) and GREEN after (absent by default; present at
-/// verbose=true). The default row must still carry the four fields the issue
-/// names: name, backend, model, role.
+/// tachi#1173 item 2. Structural note (#1182 checkpoint 3, codex review round
+/// 2): `dispatch_profiles_json_for_server` gained a required second
+/// parameter (`verbose: bool`) as part of this fix — on origin/main it took
+/// only `&MemoryServer`, so this test file **cannot compile against base at
+/// all**, let alone run and fail at runtime. That is a structural,
+/// unavoidable consequence of adding a required parameter to the function
+/// under test, not a weakened discriminator: the actual behavioral claim
+/// (base's single-arg function always returned the full mbit_card
+/// unconditionally, confirmed by reading `dispatch_profile/mod.rs` at
+/// origin/main) is validated by these assertions passing against head's slim
+/// shape. Router-level (`tachi_task(action='profiles')` vs
+/// `action='profile'`) coverage that exercises the same behavior through the
+/// wire-level `MemoryServer::tachi_task` entry point (whose JSON-facing shape
+/// is backward compatible — `verbose` is an optional wire field, so a real
+/// caller's existing request bodies are unaffected) lives in
+/// `tests/dispatch_tests/profiles_action.rs`. The default row here must
+/// still carry the four fields the issue names: name, backend, model, role.
 #[test]
 fn dispatch_profiles_listing_default_is_slim_rows() {
     let server = listing_test_server();

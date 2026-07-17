@@ -915,19 +915,16 @@ async fn dispatch_response_default_omits_fat_routing_card() {
         .expect("dispatch should start");
     let response: Value = serde_json::from_str(&dispatch_response).expect("response JSON");
 
-    // The four fields the issue names as the default receipt shape.
-    assert!(response["dispatch_id"].is_string(), "{response}");
-    assert_eq!(response["state"], json!("TASK_STATE_WORKING"), "{response}");
-    assert!(response["run_dir"].is_string(), "{response}");
-    assert!(
-        response["suggested_complete_command"].is_object(),
-        "{response}"
-    );
-
-    // The fat fields must be entirely absent by default, not just null —
-    // `serde_json::Value::get` returning `Value::Null` for a present-but-null
-    // key would let a weakened "not truthy" check pass without actually
-    // slimming the payload.
+    // #1182 checkpoint 3 (codex review round 2): the slimming assertions run
+    // FIRST, before the `state`/`dispatch_id`/etc. shape checks below. On
+    // origin/main (pre-#1173) `profile`/`identity_receipt`/`dispatch_profile`
+    // are unconditionally present, so this is the assertion that actually
+    // fails first when run against base — the behavioral claim this test
+    // exists to discriminate. The `state` field further down is a legitimate
+    // but separate addition (base only nested it at `task.status.state`);
+    // ordering it after the slimming checks keeps this test's first failure
+    // pointing at the fat-payload regression it's named for, not an
+    // unrelated shape addition.
     assert!(
         response.get("profile").is_none(),
         "default dispatch response must not carry the full routing card: {response}"
@@ -945,6 +942,19 @@ async fn dispatch_response_default_omits_fat_routing_card() {
         "{dispatch_response}"
     );
     assert_eq!(response["verbose"], json!(false), "{response}");
+
+    // The remaining fields the issue names as the default receipt shape.
+    // `state` is a genuinely new top-level field this PR adds (pre-#1173 it
+    // was only nested at `task.status.state`) — a separate, additive change
+    // from the slimming above, asserted here rather than mixed into the
+    // slimming block.
+    assert!(response["dispatch_id"].is_string(), "{response}");
+    assert_eq!(response["state"], json!("TASK_STATE_WORKING"), "{response}");
+    assert!(response["run_dir"].is_string(), "{response}");
+    assert!(
+        response["suggested_complete_command"].is_object(),
+        "{response}"
+    );
 }
 
 /// tachi#1173 item 1 discriminator (verbose escape hatch): verbose=true must
@@ -989,6 +999,19 @@ async fn dispatch_response_verbose_true_restores_full_routing_card() {
     assert!(
         response["dispatch_profile"].is_object(),
         "verbose=true must carry the dispatch_profile mbit_card: {response}"
+    );
+    // #1182 checkpoint 3 (weak verbose proof): both `response["profile"]["mbit_card"]`
+    // and `response["dispatch_profile"]` are built from the SAME underlying
+    // value (`resolved_profile.mbit_card`, see response_helpers.rs's
+    // `object.insert("dispatch_profile", inputs.resolved_profile.mbit_card...)`
+    // vs `profile_payload = serde_json::to_value(&resolved_profile)` in
+    // start.rs) — PR #1182's own review-hint #2 calls this the self-nesting
+    // duplication the issue names. Assert the equality directly instead of
+    // only checking `is_object()`, which would pass even if the two values
+    // diverged.
+    assert_eq!(
+        response["profile"]["mbit_card"], response["dispatch_profile"],
+        "self-nested mbit_card copies must be the exact same value: {response}"
     );
 }
 
