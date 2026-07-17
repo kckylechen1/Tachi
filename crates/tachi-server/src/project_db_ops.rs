@@ -15,7 +15,7 @@ impl MemoryServer {
     /// `_meta.tachiWorkspaceRoot`) declaration to the project identity name
     /// [`MemoryServer::resolve_named_project_db_path`] will later resolve,
     /// auto-registering the project DB (creating `<git_root>/.tachi/memory.db`
-    /// + the Plan C alias symlink) on first contact instead of requiring a
+    /// plus the Plan C alias symlink) on first contact instead of requiring a
     /// prior explicit `tachi_init_project_db` call.
     ///
     /// `raw_root` is resolved against the **daemon's own filesystem** — only
