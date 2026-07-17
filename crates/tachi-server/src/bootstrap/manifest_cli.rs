@@ -332,8 +332,17 @@ mod tests {
         memcore::db::migrations::read_schema_version(&conn).expect("read schema version")
     }
 
-    #[tokio::test]
-    async fn doctor_run_daily_requires_flag_to_migrate_stamped_older_global_db() {
+    // Plain `#[test]` + `block_on` (not `#[tokio::test]`), matching the
+    // `global_test_lock` convention used everywhere else in this crate: the
+    // guard protects process-wide DB-path state against a parallel test
+    // racing the same schema-migration setup, so it must stay held for the
+    // entire two-call sequence including both internal awaits -- `block_on`
+    // runs that async body to completion synchronously on this thread, so
+    // there is no `.await` expression in scope for clippy's
+    // `await_holding_lock` lint to flag, while the guard's actual coverage
+    // is unchanged.
+    #[test]
+    fn doctor_run_daily_requires_flag_to_migrate_stamped_older_global_db() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -344,13 +353,14 @@ mod tests {
         let project_db = dir.path().join("project.db");
         seed_and_stamp_older_schema_version(&global_db);
 
-        let deny_summary = run_daily_pipeline_remediation(
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+        let deny_summary = rt.block_on(run_daily_pipeline_remediation(
             &app_home,
             &global_db,
             Some(project_db.as_path()),
             &memcore::MigrationAuthority::Deny,
-        )
-        .await;
+        ));
         assert!(
             deny_summary.contains("refusing to migrate db schema"),
             "doctor --run-daily without --allow-schema-migration must surface the \
@@ -362,15 +372,14 @@ mod tests {
             "deny must not mutate the old schema stamp"
         );
 
-        let allow_summary = run_daily_pipeline_remediation(
+        let allow_summary = rt.block_on(run_daily_pipeline_remediation(
             &app_home,
             &global_db,
             Some(project_db.as_path()),
             &memcore::MigrationAuthority::Allow {
                 approved_by: "test:1181-doctor-run-daily".to_string(),
             },
-        )
-        .await;
+        ));
         assert!(
             !allow_summary.contains("refusing to migrate db schema"),
             "doctor --run-daily WITH --allow-schema-migration must not refuse the \
