@@ -44,6 +44,21 @@ impl MemoryServer {
         self.db.with_global_store_read(f)
     }
 
+    /// Recording twin of [`Self::with_global_store_read`]: identical
+    /// read-gate + pool-checkout semantics, additionally returning the
+    /// `ReadPoolCheckoutReceipt` so a sampled caller can carry a MEASURED
+    /// `pool_checkout_wait` instead of leaving it `LayerAvailability::Unavailable`
+    /// (kckylechen1/tachi#1125). Thin passthrough to
+    /// `DbRuntime::with_global_store_read_recording` — no new pooling/locking
+    /// behavior lives here. First consumer: tachi#1145's auto-link
+    /// pool-checkout-wait separation (`memory_search_ops/auto_link.rs`).
+    pub(crate) fn with_global_store_read_recording<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<(T, memory_server_runtime::ReadPoolCheckoutReceipt), String> {
+        self.db.with_global_store_read_recording(f)
+    }
+
     pub(crate) fn with_project_store<T>(
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,

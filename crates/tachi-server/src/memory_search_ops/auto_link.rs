@@ -2,7 +2,7 @@ use crate::memory_search_ops::confidence_reinforce::{
     apply_confidence_reinforcement, confidence_increment, vector_similarity_between,
 };
 use crate::{DbScope, MemoryServer};
-use memcore::{MemoryEntry, MemoryStore};
+use memcore::{LayerAvailability, MemoryEntry, MemoryStore};
 use serde_json::json;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -117,12 +117,42 @@ pub struct AutoLinkReceipt {
     pub skipped_no_shared_entities: usize,
     pub skipped_no_supersede_or_reinforce: usize,
     /// Wall time inside per-entity `with_*_store_read` search calls
-    /// (auto_link.rs:136/:138).
+    /// (auto_link.rs:136/:138). This is the TOTAL read-call wall time —
+    /// `pool_checkout_wait` below, when [`LayerAvailability::Measured`], is a
+    /// SUBSET of this value (the portion spent waiting for a read-pool slot,
+    /// not a separate span), so the actual search-execution time is
+    /// `read_elapsed - pool_checkout_wait`.
     pub read_elapsed: Duration,
+    /// tachi#1145: the pool-checkout-wait portion of `read_elapsed` —
+    /// kckylechen1/tachi#1125's `ReadPoolCheckoutReceipt::pool_checkout_wait`,
+    /// carried down via a recording read call, mirroring how
+    /// `memcore::SearchPhaseReceipt::pool_wait` carries it into the recall
+    /// path (`search_memory/rows.rs`). [`LayerAvailability::Measured`] only
+    /// on the `DbScope::Global` + no-named-project path (the only read call
+    /// with a recording twin today — `DbRuntime::with_global_store_read_recording`,
+    /// #1125); [`LayerAvailability::Unavailable`] on the named-project /
+    /// per-path pool, which has no recording twin yet (a future leaf's, not
+    /// invented here); [`LayerAvailability::NotSampled`] when the whole
+    /// receipt is unsampled. Never a bare `0` standing in for "not measured"
+    /// (#1097 D1) — that is exactly the honesty rule `LayerAvailability`
+    /// exists to enforce.
+    pub pool_checkout_wait: LayerAvailability,
     /// Wall time inside per-edge `with_*_store` write calls
     /// (auto_link.rs:231/:233).
     pub write_elapsed: Duration,
-    /// Wall time of the whole spawned task end-to-end.
+    /// tachi#1145: wall time between [`spawn_auto_linking`] requesting a
+    /// `tokio::spawn` and this task's body actually starting to run — the
+    /// spawn-queue delay every timer above is blind to, because they all
+    /// start only once the task is already executing. Always a real
+    /// measurement (never `Unavailable`) when the receipt exists: unlike
+    /// pool-checkout wait, capturing `Instant::now()` immediately before
+    /// `tokio::spawn` needs no layer this receipt cannot reach.
+    /// `Duration::ZERO` on the unsampled path — but the receipt itself is
+    /// `None` there, so this value is never read in that case.
+    pub spawn_queue_wait: Duration,
+    /// Wall time of the whole spawned task end-to-end (from
+    /// [`run_auto_linking`]'s own `task_start`, NOT from the pre-spawn
+    /// instant — see `spawn_queue_wait` for the piece before that).
     pub total_elapsed: Duration,
 }
 
@@ -320,6 +350,63 @@ fn auto_link_receipt_sampling_enabled_from(value: Option<String>) -> bool {
     })
 }
 
+/// Shared spawn-and-run core for `spawn_auto_linking` and its test-only
+/// correlation-token twin `spawn_auto_linking_for_test` (tachi#1145): does
+/// the dedup + sampling-gate + `tokio::spawn` + `spawn_queue_wait` timing
+/// once, and calls [`run_auto_linking`] — [`AutoLinkReceipt`]'s single
+/// source of truth — exactly once. `on_complete` is the ONLY thing that
+/// differs between the two callers (production logs; the test twin threads
+/// a correlation token through a channel), so the actual auto-link
+/// algorithm, the pooling/locking it goes through, and the
+/// spawn-queue-wait timer cannot drift between what production runs and
+/// what the test measures. Bare-name references above (not `[`...`]`
+/// links) because `spawn_auto_linking_for_test` is `#[cfg(test)]`-gated and
+/// does not exist in a non-test build, where an intra-doc link to it would
+/// be broken.
+fn spawn_and_run_auto_linking(
+    server: &MemoryServer,
+    entry: &MemoryEntry,
+    target_db: DbScope,
+    named_project: Option<String>,
+    on_complete: impl FnOnce(AutoLinkReceipt) + Send + 'static,
+) {
+    if is_training_seed(entry) {
+        return;
+    }
+
+    let auto_link_server = server.clone();
+    let auto_link_entry = entry.clone();
+    // Dedup source entities so duplicate labels cannot inflate shared_count
+    // past the #773 related_to fog floor (Gemini #905 review).
+    let auto_link_entities: HashSet<String> = entry.entities.iter().cloned().collect();
+    let auto_link_entity_list: Vec<String> = auto_link_entities.iter().cloned().collect();
+    let sample_receipt = auto_link_receipt_sampling_enabled();
+    // tachi#1145: captured BEFORE `tokio::spawn`, so the elapsed time taken
+    // inside the spawned task below is the spawn-queue delay itself — every
+    // timer inside `run_auto_linking` starts only once the task is already
+    // executing and is blind to this. `sample_receipt`-gated like every
+    // other timer in this module: no `Instant::now()` call on the unsampled
+    // path.
+    let spawn_requested_at = sample_receipt.then(Instant::now);
+
+    tokio::spawn(async move {
+        let spawn_queue_wait = spawn_requested_at.map(|started| started.elapsed());
+        let receipt = run_auto_linking(
+            &auto_link_server,
+            &auto_link_entry,
+            &auto_link_entity_list,
+            target_db,
+            named_project.as_deref(),
+            sample_receipt,
+        );
+        let Some(mut receipt) = receipt else {
+            return;
+        };
+        receipt.spawn_queue_wait = spawn_queue_wait.unwrap_or(Duration::ZERO);
+        on_complete(receipt);
+    });
+}
+
 /// Spawn the background auto-link task for a freshly-saved `entry`. The save
 /// handler returns `"auto_link": "pending"` without awaiting it
 /// (handler.rs:261-262), so nothing downstream can observe the finished
@@ -368,30 +455,7 @@ pub(crate) fn spawn_auto_linking(
     target_db: DbScope,
     named_project: Option<String>,
 ) {
-    if is_training_seed(entry) {
-        return;
-    }
-
-    let auto_link_server = server.clone();
-    let auto_link_entry = entry.clone();
-    // Dedup source entities so duplicate labels cannot inflate shared_count
-    // past the #773 related_to fog floor (Gemini #905 review).
-    let auto_link_entities: HashSet<String> = entry.entities.iter().cloned().collect();
-    let auto_link_entity_list: Vec<String> = auto_link_entities.iter().cloned().collect();
-    let sample_receipt = auto_link_receipt_sampling_enabled();
-
-    tokio::spawn(async move {
-        let receipt = run_auto_linking(
-            &auto_link_server,
-            &auto_link_entry,
-            &auto_link_entity_list,
-            target_db,
-            named_project.as_deref(),
-            sample_receipt,
-        );
-        let Some(receipt) = receipt else {
-            return;
-        };
+    spawn_and_run_auto_linking(server, entry, target_db, named_project, |receipt| {
         // Emit from inside the spawned task — the save handler returned
         // `"auto_link": "pending"` (handler.rs:261-262) long before this
         // point, so this is the only place the finished counts exist. Fields
@@ -414,10 +478,39 @@ pub(crate) fn spawn_auto_linking(
             skipped_no_shared_entities = receipt.skipped_no_shared_entities,
             skipped_no_supersede_or_reinforce = receipt.skipped_no_supersede_or_reinforce,
             read_elapsed_us = receipt.read_elapsed.as_micros() as u64,
+            pool_checkout_wait = ?receipt.pool_checkout_wait,
             write_elapsed_us = receipt.write_elapsed.as_micros() as u64,
+            spawn_queue_wait_us = receipt.spawn_queue_wait.as_micros() as u64,
             total_elapsed_us = receipt.total_elapsed.as_micros() as u64,
-            "auto_link phase receipt (tachi#1097 S1)"
+            "auto_link phase receipt (tachi#1097 S1, tachi#1145 spawn/pool visibility)"
         );
+    });
+}
+
+/// Test-only correlation-token seam (tachi#1145). `AutoLinkReceipt::entry_id`
+/// is always the fixed [`REDACTED_ENTRY_ID`] marker (#1097 r1 codex review ①)
+/// and stays that way — this seam does NOT touch that redaction, does not
+/// widen any visibility beyond `pub(crate)`, and does not exist in a
+/// production binary (`#[cfg(test)]`). Under concurrent saves, a redacted
+/// receipt alone cannot be paired back to the specific save that triggered
+/// it; this gives a test an opaque, test-minted `correlation_token` — NEVER
+/// the entry id, NEVER logged, NEVER visible to production — carried
+/// alongside the receipt through a channel once the spawned task completes.
+/// Delegates to [`spawn_and_run_auto_linking`], so it exercises the exact
+/// same dedup, sampling gate, `tokio::spawn`, `run_auto_linking` call, and
+/// `spawn_queue_wait` timer as [`spawn_auto_linking`] — the only difference
+/// is what happens to a finished receipt.
+#[cfg(test)]
+pub(crate) fn spawn_auto_linking_for_test(
+    server: &MemoryServer,
+    entry: &MemoryEntry,
+    target_db: DbScope,
+    named_project: Option<String>,
+    correlation_token: u64,
+    on_complete: std::sync::mpsc::Sender<(u64, AutoLinkReceipt)>,
+) {
+    spawn_and_run_auto_linking(server, entry, target_db, named_project, move |receipt| {
+        let _ = on_complete.send((correlation_token, receipt));
     });
 }
 
@@ -486,7 +579,9 @@ pub(crate) fn run_auto_linking(
         skipped_no_shared_entities: 0,
         skipped_no_supersede_or_reinforce: 0,
         read_elapsed: Duration::ZERO,
+        pool_checkout_wait: LayerAvailability::NotSampled,
         write_elapsed: Duration::ZERO,
+        spawn_queue_wait: Duration::ZERO,
         total_elapsed: Duration::ZERO,
     });
 
@@ -508,13 +603,50 @@ pub(crate) fn run_auto_linking(
         };
 
         let read_timer = sample.then(Instant::now);
-        let search_res = if let Some(p) = named_project {
-            server.with_named_project_store_read(p, search_action)
-        } else {
-            server.with_store_for_scope_read(target_db, search_action)
-        };
+        // tachi#1145: separate the pool-checkout-wait PORTION of this read
+        // from its total wall time (still bracketed above by `read_timer`,
+        // unchanged). Only the `DbScope::Global` + no-named-project path has
+        // a recording read call today (`with_global_store_read_recording`,
+        // #1125) — every other path keeps calling the plain read exactly as
+        // before (zero behavior/perf change there) and honestly reports
+        // `Unavailable` rather than guessing.
+        let (search_res, pool_checkout_wait) =
+            if sample && named_project.is_none() && matches!(target_db, DbScope::Global) {
+                match server.with_global_store_read_recording(search_action) {
+                    Ok((value, pool_receipt)) => (
+                        Ok(value),
+                        LayerAvailability::Measured(pool_receipt.pool_checkout_wait),
+                    ),
+                    Err(e) => (Err(e), LayerAvailability::Unavailable),
+                }
+            } else {
+                let result = if let Some(p) = named_project {
+                    server.with_named_project_store_read(p, search_action)
+                } else {
+                    server.with_store_for_scope_read(target_db, search_action)
+                };
+                let availability = if sample {
+                    LayerAvailability::Unavailable
+                } else {
+                    LayerAvailability::NotSampled
+                };
+                (result, availability)
+            };
         if let (Some(receipt), Some(read_timer)) = (receipt.as_mut(), read_timer) {
             receipt.read_elapsed += read_timer.elapsed();
+            // Accumulate across the per-entity loop exactly like
+            // `read_elapsed` does above — one entity list can drive several
+            // searches, each with its own pool checkout. The branch this
+            // block is reached from is loop-invariant (`sample`,
+            // `named_project`, `target_db` never change mid-loop), so this
+            // only ever sums two `Measured` values or repeatedly overwrites
+            // the same `Unavailable`/`NotSampled` classification.
+            receipt.pool_checkout_wait = match (receipt.pool_checkout_wait, pool_checkout_wait) {
+                (LayerAvailability::Measured(prior), LayerAvailability::Measured(this)) => {
+                    LayerAvailability::Measured(prior + this)
+                }
+                _ => pool_checkout_wait,
+            };
         }
         // #1097 r1 codex review ③-A: count ONLY searches that produced
         // a result set. A named-project resolution failure
@@ -1027,7 +1159,9 @@ mod tests {
             skipped_no_shared_entities: 0,
             skipped_no_supersede_or_reinforce: 0,
             read_elapsed: Duration::ZERO,
+            pool_checkout_wait: LayerAvailability::NotSampled,
             write_elapsed: Duration::ZERO,
+            spawn_queue_wait: Duration::ZERO,
             total_elapsed: Duration::ZERO,
         }
     }
@@ -1243,6 +1377,28 @@ mod tests {
              store, so a zero means `read_timer` never started",
             receipt.searches_executed
         );
+        // Timer 1b (tachi#1145) — `pool_checkout_wait` is the subset of
+        // `read_elapsed` spent waiting for a global read-pool slot. This
+        // call is `DbScope::Global` with no named project, the one path
+        // wired to the recording read call, so it must be `Measured`, not
+        // `Unavailable`/`NotSampled` — and it can never exceed the total
+        // read wall time it is carved out of.
+        match receipt.pool_checkout_wait {
+            LayerAvailability::Measured(pool_wait) => {
+                assert!(
+                    pool_wait <= receipt.read_elapsed,
+                    "pool_checkout_wait ({pool_wait:?}) must be <= read_elapsed \
+                     ({:?}) — it is a SUBSET of the read wall time, not a \
+                     separate span",
+                    receipt.read_elapsed
+                );
+            }
+            other => panic!(
+                "pool_checkout_wait must be Measured on the DbScope::Global + \
+                 no-named-project path (the recording read call is wired \
+                 there), got {other:?}"
+            ),
+        }
         // Timer 2 — `write_timer` (brackets the per-edge store write).
         assert!(
             receipt.write_elapsed > Duration::ZERO,
@@ -1272,5 +1428,152 @@ mod tests {
         // caller-controllable, so it is still never emitted.
         assert_eq!(receipt.entry_id, REDACTED_ENTRY_ID);
         assert_eq!(receipt.entity_count, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // tachi#1145 — `pool_checkout_wait` honestly reports `Unavailable` (never
+    // a guessed zero) on every path that is NOT the one recording read call
+    // wired today. Companion to the `Measured` assertion inside
+    // `run_auto_linking_reports_live_read_write_and_total_timers` above,
+    // which covers the `DbScope::Global` + no-named-project path.
+    // -----------------------------------------------------------------------
+
+    /// A named-project read has no recording twin yet (#1125 cold review
+    /// scoped that twin to the global read pool only), so `pool_checkout_wait`
+    /// must be `Unavailable`, not a guessed zero — regardless of whether the
+    /// named project itself resolves. The classification branch is decided
+    /// purely by `named_project.is_some()` before any store call runs, so an
+    /// intentionally-nonexistent project name is a valid, deterministic
+    /// fixture: it forces `SearchOutcome::Failed`, which this test does not
+    /// care about, while still exercising the per-entity read-timer block
+    /// (one entity, so the loop body — and therefore this classification —
+    /// actually runs).
+    #[test]
+    fn pool_checkout_wait_is_unavailable_for_named_project_reads() {
+        let server = crate::tests::make_server();
+        let entry = test_entry("named-project-probe", "probe entry");
+        let entities = vec!["probe-entity".to_string()];
+
+        let receipt = run_auto_linking(
+            &server,
+            &entry,
+            &entities,
+            DbScope::Global,
+            Some("definitely-not-a-real-project"),
+            true,
+        )
+        .expect("sampled auto-link pass must return a receipt");
+
+        assert_eq!(
+            receipt.pool_checkout_wait,
+            LayerAvailability::Unavailable,
+            "named-project reads have no recording twin yet — this must be \
+             Unavailable, never a guessed Measured(0) or NotSampled"
+        );
+    }
+
+    /// `DbScope::Project` (no named project) is likewise not wired to the
+    /// recording read call — only `DbScope::Global` is. No project DB is
+    /// attached to this test server, so the read itself errors, but (as
+    /// above) the classification is decided before that outcome is known.
+    #[test]
+    fn pool_checkout_wait_is_unavailable_for_project_scope_reads() {
+        let server = crate::tests::make_server();
+        let entry = test_entry("project-scope-probe", "probe entry");
+        let entities = vec!["probe-entity".to_string()];
+
+        let receipt = run_auto_linking(&server, &entry, &entities, DbScope::Project, None, true)
+            .expect("sampled auto-link pass must return a receipt");
+
+        assert_eq!(
+            receipt.pool_checkout_wait,
+            LayerAvailability::Unavailable,
+            "DbScope::Project reads have no recording twin yet — this must \
+             be Unavailable, never a guessed Measured(0) or NotSampled"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // tachi#1145 — `spawn_queue_wait` measures REAL tokio dispatch delay, not
+    // a placeholder. `LayerAvailability` cannot express this one: unlike
+    // pool-checkout wait, no layer boundary makes it unreachable — capturing
+    // `Instant::now()` immediately before `tokio::spawn` needs nothing this
+    // module cannot already see. So the discrimination bar here is a REAL
+    // measured delay, not an enum classification.
+    // -----------------------------------------------------------------------
+
+    /// Deterministically forces queuing delay on a single-worker-thread
+    /// runtime: a wrapper task enqueues the measured task via
+    /// [`spawn_auto_linking_for_test`] (so `spawn_requested_at` is captured),
+    /// then IMMEDIATELY monopolizes the sole worker thread with a
+    /// synchronous, `.await`-free busy-spin for `BUSY_DURATION`. A task's
+    /// `poll()` must return before the runtime can run anything else, so the
+    /// already-enqueued measured task genuinely cannot start until the
+    /// busy-spin's poll returns — no reliance on tokio's LIFO-slot/queue
+    /// ordering internals, just the basic non-preemptive-poll guarantee.
+    ///
+    /// Red on origin/main: `spawn_queue_wait` does not exist there at all
+    /// (this is a new field); red against a version of this leaf that
+    /// captures `spawn_requested_at` AFTER `tokio::spawn` instead of before
+    /// (the exact #1145 blind spot: "the auto-link receipt's total clock
+    /// starts after tokio::spawn") — that ordering would read ~0 regardless
+    /// of how long the worker was occupied before the task started.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn spawn_queue_wait_measures_dispatch_delay_under_worker_contention() {
+        const BUSY_DURATION: Duration = Duration::from_millis(60);
+        const MIN_EXPECTED_WAIT: Duration = Duration::from_millis(20);
+        const CORRELATION_TOKEN: u64 = 42;
+
+        // `spawn_auto_linking_for_test` goes through `spawn_and_run_auto_linking`,
+        // which (unlike `run_auto_linking`'s explicit `sample: bool` param)
+        // reads the sampling gate from this env var — the production entry
+        // point's real gate, unchanged for this test. No other test in this
+        // crate reads or sets `TACHI_AUTO_LINK_PHASE_RECEIPTS` (grep-verified
+        // at write time), so this is safe without `global_test_lock`'s
+        // cross-test mutual exclusion — which cannot be held across this
+        // test's `.await` points anyway (`std::sync::MutexGuard` is `!Send`,
+        // and this test's future must be `Send` for
+        // `flavor = "multi_thread"`). `EnvRestore` itself holds no lock, only
+        // plain owned data, so it is `.await`-safe.
+        let _env = crate::test_support::EnvRestore::set("TACHI_AUTO_LINK_PHASE_RECEIPTS", "1");
+
+        let server = crate::tests::make_server();
+        let inner_server: MemoryServer = server.clone();
+        let entry = test_entry("spawn-queue-wait-probe", "probe entry");
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        tokio::spawn(async move {
+            spawn_auto_linking_for_test(
+                &inner_server,
+                &entry,
+                DbScope::Global,
+                None,
+                CORRELATION_TOKEN,
+                tx,
+            );
+            let start = Instant::now();
+            while start.elapsed() < BUSY_DURATION {
+                std::hint::spin_loop();
+            }
+        });
+
+        // Give the single worker time to run the wrapper task (busy-spin)
+        // and then the measured task it enqueued.
+        tokio::time::sleep(BUSY_DURATION * 3).await;
+
+        let (token, receipt) = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("measured auto-link task must complete and report back");
+        assert_eq!(token, CORRELATION_TOKEN);
+        assert!(
+            receipt.spawn_queue_wait > MIN_EXPECTED_WAIT,
+            "spawn_queue_wait ({:?}) must reflect most of the {:?} the sole \
+             worker thread spent occupied by the busy-spin wrapper task \
+             before the measured task could even start — a value near zero \
+             means `spawn_requested_at` was captured too late (or never \
+             wired at all)",
+            receipt.spawn_queue_wait,
+            BUSY_DURATION
+        );
     }
 }
