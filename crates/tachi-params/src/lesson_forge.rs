@@ -90,13 +90,22 @@ pub struct LessonEngineReceiptV1 {
 }
 
 impl LessonEngineReceiptV1 {
-    /// A fully known, non-fallback, non-degraded identity.
+    /// A fully known, non-fallback, non-degraded identity. Requires
+    /// `effective_version` too — the frozen contract names all five fields
+    /// ("Effective provider/model/version/fallback/degraded receipt is
+    /// mandatory") as the identity a caller must attest, not just
+    /// provider+model (cross-vendor review finding 8: this used to accept a
+    /// receipt with `effective_version: None` as "known").
     pub fn has_known_identity(&self) -> bool {
         self.effective_provider
             .as_deref()
             .is_some_and(|s| !s.trim().is_empty())
             && self
                 .effective_model
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            && self
+                .effective_version
                 .as_deref()
                 .is_some_and(|s| !s.trim().is_empty())
             && self.fallback_chain.is_empty()
@@ -298,6 +307,20 @@ mod tests {
             degraded: true,
         };
         assert_eq!(lesson_identity_status(Some(&receipt)), "preview_only");
+    }
+
+    #[test]
+    fn missing_version_receipt_is_preview_only_even_with_provider_and_model() {
+        let receipt = LessonEngineReceiptV1 {
+            requested_role: "producer".to_string(),
+            effective_provider: Some("anthropic".to_string()),
+            effective_model: Some("claude".to_string()),
+            effective_version: None,
+            fallback_chain: Vec::new(),
+            degraded: false,
+        };
+        assert_eq!(lesson_identity_status(Some(&receipt)), "preview_only");
+        assert!(!receipt.has_known_identity());
     }
 
     #[test]

@@ -18,6 +18,7 @@
 use tachi_params::LessonEngineReceiptV1;
 
 use super::discrimination::{AdjudicatorReceipt, CaseOutcome};
+use super::pilot::PilotManifestV1;
 
 /// Caller-supplied summary of an old-vs-new `recall_simulate` comparison
 /// for one case. This module does not run `recall_simulate` itself (that
@@ -45,12 +46,82 @@ pub struct CaseReport {
     pub recall_simulation: Option<RecallSimulationNote>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PilotReportError {
+    WrongCaseCount {
+        expected: usize,
+        actual: usize,
+    },
+    DuplicateCaseId(String),
+    /// A case's `case_id` doesn't match any row in the frozen manifest —
+    /// evidence for a row that was never selected/spend-gated cannot count
+    /// toward this pilot's kill-gate decision.
+    CaseNotInManifest(String),
+}
+
+impl std::fmt::Display for PilotReportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WrongCaseCount { expected, actual } => write!(
+                f,
+                "pilot report must have exactly {expected} cases (one per frozen manifest row), got {actual}"
+            ),
+            Self::DuplicateCaseId(id) => write!(f, "duplicate case_id in pilot report: {id}"),
+            Self::CaseNotInManifest(id) => write!(
+                f,
+                "case_id {id} is not a row in the frozen pilot manifest — evidence for an \
+                 unselected row cannot count toward the kill-gate decision"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PilotReport {
     pub cases: Vec<CaseReport>,
 }
 
 impl PilotReport {
+    /// Build a `PilotReport` structurally bound to a frozen pilot manifest
+    /// (cross-vendor review finding 9: a plain `PilotReport { cases: ... }`
+    /// literal accepts an arbitrary `Vec<CaseReport>` with no relationship
+    /// to the actual frozen 50-row pilot — a caller could report 3 cases,
+    /// duplicate one case_id, or report cases for rows that were never
+    /// frozen, and nothing would object). Refuses unless the case count
+    /// matches the manifest's row count exactly, every `case_id` is a
+    /// distinct member of the manifest, and no case_id repeats.
+    ///
+    /// This is the constructor a real harness runner should use; the plain
+    /// struct literal remains available (its field is `pub`) for this
+    /// module's own unit tests, which exercise `PilotReport`'s aggregation
+    /// logic against hand-built fixtures rather than a full 50-row manifest.
+    pub fn from_manifest(
+        manifest: &PilotManifestV1,
+        cases: Vec<CaseReport>,
+    ) -> Result<Self, Vec<PilotReportError>> {
+        let mut errors = Vec::new();
+        if cases.len() != manifest.rows().len() {
+            errors.push(PilotReportError::WrongCaseCount {
+                expected: manifest.rows().len(),
+                actual: cases.len(),
+            });
+        }
+        let mut seen = std::collections::HashSet::new();
+        for case in &cases {
+            if !seen.insert(case.case_id.clone()) {
+                errors.push(PilotReportError::DuplicateCaseId(case.case_id.clone()));
+            }
+            if !manifest.rows().iter().any(|r| r.row_id == case.case_id) {
+                errors.push(PilotReportError::CaseNotInManifest(case.case_id.clone()));
+            }
+        }
+        if errors.is_empty() {
+            Ok(Self { cases })
+        } else {
+            Err(errors)
+        }
+    }
+
     pub fn passed_count(&self) -> usize {
         self.cases
             .iter()
@@ -149,7 +220,17 @@ impl PilotReport {
              the kill gate is a leader/owner adjudication against this evidence, not an \
              automatic verdict this report computes.\n\n",
         );
-        out.push_str("| case_id | outcome | reasons |\n|---|---|---|\n");
+        // Cross-vendor review finding 9: the table used to carry only
+        // case_id/outcome/reasons, dropping the per-case tokens/cost/
+        // latency/receipts/recall-simulation the frozen contract's
+        // "Verification" ask explicitly names ("Report pass yield, per-case
+        // outcomes, token/cost/latency, provider receipts, and old-vs-new
+        // recall simulation").
+        out.push_str(
+            "| case_id | outcome | reasons | treated_tokens | baseline_tokens | cost_usd | \
+             latency_ms | producer_identity | adjudicator | recall_sim |\n\
+             |---|---|---|---|---|---|---|---|---|---|\n",
+        );
         for case in &self.cases {
             let (outcome_label, reasons) = match &case.outcome {
                 CaseOutcome::Pass => ("PASS".to_string(), String::new()),
@@ -165,9 +246,43 @@ impl PilotReport {
                     ("INCONCLUSIVE".to_string(), (*reason).to_string())
                 }
             };
+            let producer_identity = case
+                .producer_receipt
+                .as_ref()
+                .map(LessonEngineReceiptV1::identity_status)
+                .unwrap_or("preview_only");
+            let adjudicator = match (
+                &case.adjudicator_receipt.effective_provider,
+                &case.adjudicator_receipt.effective_model,
+            ) {
+                (Some(provider), Some(model)) => format!("{provider}/{model}"),
+                _ => "unknown".to_string(),
+            };
+            let recall_sim = case
+                .recall_simulation
+                .as_ref()
+                .map(|note| format!("old={} new={}", note.old_arm_hit, note.new_arm_hit))
+                .unwrap_or_else(|| "n/a".to_string());
             out.push_str(&format!(
-                "| {} | {} | {} |\n",
-                case.case_id, outcome_label, reasons
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                case.case_id,
+                outcome_label,
+                reasons,
+                case.treated_tokens
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                case.baseline_tokens
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                case.total_cost_usd
+                    .map(|v| format!("{v:.4}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                case.latency_ms
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
+                producer_identity,
+                adjudicator,
+                recall_sim,
             ));
         }
         out
@@ -209,6 +324,106 @@ mod tests {
             adjudicator_receipt: adjudicator(),
             recall_simulation: None,
         }
+    }
+
+    /// A 50-row frozen manifest whose row ids are `row-0..row-49`, for the
+    /// `PilotReport::from_manifest` binding tests below.
+    fn fifty_row_manifest() -> PilotManifestV1 {
+        use crate::lesson_forge_ops::pilot::{freeze_pilot_manifest, PilotRowKindV1, PilotRowV1};
+        use tachi_params::LessonCandidateKindV1;
+
+        let mut rows = Vec::new();
+        for i in 0..49 {
+            rows.push(PilotRowV1 {
+                row_id: format!("row-{i}"),
+                revision: 1,
+                kind: PilotRowKindV1::Narrative,
+                selection_reason: "narrative row".to_string(),
+                reference_decision: "reference decision".to_string(),
+                target_kind: LessonCandidateKindV1::Precedent,
+            });
+        }
+        rows.push(PilotRowV1 {
+            row_id: "row-49".to_string(),
+            revision: 1,
+            kind: PilotRowKindV1::StructuredControl,
+            selection_reason: "control row".to_string(),
+            reference_decision: "reference decision".to_string(),
+            target_kind: LessonCandidateKindV1::Precedent,
+        });
+        freeze_pilot_manifest(rows).expect("test manifest must freeze")
+    }
+
+    #[test]
+    fn from_manifest_refuses_a_case_count_mismatch() {
+        let manifest = fifty_row_manifest();
+        let cases = vec![case("row-0", CaseOutcome::Pass, Some(known_receipt()))];
+        let errors = PilotReport::from_manifest(&manifest, cases)
+            .expect_err("1 case against a 50-row manifest must be refused");
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            PilotReportError::WrongCaseCount {
+                expected: 50,
+                actual: 1
+            }
+        )));
+    }
+
+    #[test]
+    fn from_manifest_refuses_a_case_id_not_in_the_manifest() {
+        let manifest = fifty_row_manifest();
+        let mut cases: Vec<CaseReport> = (0..50)
+            .map(|i| {
+                case(
+                    &format!("row-{i}"),
+                    CaseOutcome::Pass,
+                    Some(known_receipt()),
+                )
+            })
+            .collect();
+        cases[0].case_id = "not-a-real-row".to_string();
+        let errors = PilotReport::from_manifest(&manifest, cases)
+            .expect_err("a case_id outside the manifest must be refused");
+        assert!(errors.iter().any(
+            |e| matches!(e, PilotReportError::CaseNotInManifest(id) if id == "not-a-real-row")
+        ));
+    }
+
+    #[test]
+    fn from_manifest_refuses_duplicate_case_ids() {
+        let manifest = fifty_row_manifest();
+        let mut cases: Vec<CaseReport> = (0..50)
+            .map(|i| {
+                case(
+                    &format!("row-{i}"),
+                    CaseOutcome::Pass,
+                    Some(known_receipt()),
+                )
+            })
+            .collect();
+        cases[1].case_id = cases[0].case_id.clone();
+        let errors = PilotReport::from_manifest(&manifest, cases)
+            .expect_err("duplicate case_id must be refused");
+        assert!(errors
+            .iter()
+            .any(|e| matches!(e, PilotReportError::DuplicateCaseId(_))));
+    }
+
+    #[test]
+    fn from_manifest_accepts_exactly_the_manifest_rows() {
+        let manifest = fifty_row_manifest();
+        let cases: Vec<CaseReport> = (0..50)
+            .map(|i| {
+                case(
+                    &format!("row-{i}"),
+                    CaseOutcome::Pass,
+                    Some(known_receipt()),
+                )
+            })
+            .collect();
+        let report =
+            PilotReport::from_manifest(&manifest, cases).expect("exactly-matching cases must bind");
+        assert_eq!(report.total(), 50);
     }
 
     #[test]
@@ -296,7 +511,8 @@ mod tests {
             },
             candidate_cites_source_refs: false,
             candidate_claims_establishment: false,
-            dual_track_attested: true,
+            producer_receipt: Some(known_receipt()),
+            adjudicator_receipt: adjudicator(),
         };
         assert!(matches!(
             super::super::discrimination::evaluate_case(&old_summary_as_treated),
@@ -311,10 +527,80 @@ mod tests {
             baseline: old_summary_arm,
             candidate_cites_source_refs: true,
             candidate_claims_establishment: false,
-            dual_track_attested: true,
+            producer_receipt: Some(known_receipt()),
+            adjudicator_receipt: adjudicator(),
         };
         assert_eq!(
             super::super::discrimination::evaluate_case(&real_case),
+            CaseOutcome::Pass
+        );
+    }
+
+    #[test]
+    fn old_summary_fails_target_decision_discrimination_in_isolation_from_citation() {
+        // Cross-vendor review finding 10: the combined fixture above also
+        // flips `candidate_cites_source_refs` between the two cases, so a
+        // broken criterion-1 (reference-hit) check could hide behind a
+        // still-correct criterion-4 (citation) check and this test would
+        // never notice. This isolates criterion 1 ALONE: both arms cite
+        // refs identically (both `true`) and neither claims establishment,
+        // so the ONLY variable between "old summary as treated" (fails) and
+        // "candidate as treated" (passes) is the reference-hit count itself
+        // — a break in criterion-1's own logic cannot hide behind a
+        // different criterion's failure here.
+        use crate::lesson_forge_ops::discrimination::{
+            ArmRunSet, CaseInput, ColdRunScore, FailReason,
+        };
+
+        fn hit(matches: bool) -> ColdRunScore {
+            ColdRunScore {
+                matches_reference_decision: matches,
+                unsupported_claims: 0,
+            }
+        }
+
+        let old_summary_arm = ArmRunSet {
+            runs: [hit(false), hit(false), hit(false)], // 0/3 reference hits
+        };
+        let candidate_arm = ArmRunSet {
+            runs: [hit(true), hit(true), hit(false)], // 2/3 reference hits
+        };
+        let neutral_baseline = ArmRunSet {
+            runs: [hit(false), hit(false), hit(false)],
+        };
+
+        let old_summary_as_treated = CaseInput {
+            case_id: "row-1-isolated".to_string(),
+            treated: old_summary_arm,
+            baseline: neutral_baseline,
+            candidate_cites_source_refs: true,
+            candidate_claims_establishment: false,
+            producer_receipt: Some(known_receipt()),
+            adjudicator_receipt: adjudicator(),
+        };
+        let old_summary_outcome =
+            super::super::discrimination::evaluate_case(&old_summary_as_treated);
+        assert_eq!(
+            old_summary_outcome,
+            CaseOutcome::Fail(vec![FailReason::TreatedBelowThreshold {
+                hits: 0,
+                required: 2,
+            }]),
+            "old summary must fail ONLY on the reference-hit criterion, not a citation confound: \
+             {old_summary_outcome:?}"
+        );
+
+        let candidate_as_treated = CaseInput {
+            case_id: "row-1-isolated".to_string(),
+            treated: candidate_arm,
+            baseline: neutral_baseline,
+            candidate_cites_source_refs: true,
+            candidate_claims_establishment: false,
+            producer_receipt: Some(known_receipt()),
+            adjudicator_receipt: adjudicator(),
+        };
+        assert_eq!(
+            super::super::discrimination::evaluate_case(&candidate_as_treated),
             CaseOutcome::Pass
         );
     }

@@ -14,6 +14,37 @@ pub(super) fn is_eval_entry(entry: &memcore::MemoryEntry) -> bool {
     memcore::is_eval_entry(entry) || is_eval_path(&entry.path)
 }
 
+fn is_lesson_candidate_path(path: &str) -> bool {
+    path == "/lesson_candidates" || path.starts_with("/lesson_candidates/")
+}
+
+/// #1073 D2 containment: a pending, model-authored `LessonCandidateV1` row
+/// (`lesson_forge_ops::storage`) must not influence ordinary recall before
+/// establishment (#950/#1077's separate gate) — the same "generic memory
+/// search excludes drafts, eval rows, ... unless the query plan asks for
+/// them" boundary (`issue-refinery-memory-lanes.md` §6.2) already applied to
+/// eval rows and training seeds below. Checked by path prefix AND by
+/// `metadata.kind`/`domain`, matching `is_eval_entry`'s belt-and-suspenders
+/// shape (a row could in principle carry the domain without living under the
+/// canonical path, or vice versa after a manual edit).
+pub(super) fn is_lesson_candidate_entry(entry: &memcore::MemoryEntry) -> bool {
+    is_lesson_candidate_path(&entry.path)
+        || entry.domain.as_deref()
+            == Some(crate::lesson_forge_ops::storage::LESSON_CANDIDATE_DOMAIN)
+        || entry
+            .metadata
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            == Some("lesson_candidate")
+}
+
+pub(super) fn lesson_candidate_recall_opted_in(params: &SearchMemoryParams) -> bool {
+    params
+        .path_prefix
+        .as_deref()
+        .is_some_and(|prefix| is_lesson_candidate_path(prefix.trim_end_matches('/')))
+}
+
 pub(super) fn training_recall_opted_in(params: &SearchMemoryParams) -> bool {
     params.include_training
         || params

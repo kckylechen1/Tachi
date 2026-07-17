@@ -8,11 +8,24 @@
 //! no such artifact exists in this repo or in the campaign's own
 //! comments — #1059's sibling leaf uses the identical imperative pattern,
 //! "Freeze exactly 20 owner-controlled cases", instructing ITS implementer
-//! to do the freezing). [`freeze_pilot_manifest`] is that freezing act: it
-//! is the spend gate the contract requires — [`crate::lesson_forge_ops::forge::forge_lesson_candidate`]
-//! refuses to run against any row that isn't a member of an already-frozen
-//! manifest, so a caller cannot spend model budget on an unselected,
-//! unrecorded row.
+//! to do the freezing). [`freeze_pilot_manifest`] is the validation/freezing
+//! act: [`crate::lesson_forge_ops::forge::forge_lesson_candidate`] refuses
+//! to construct a `LessonCandidateV1` for any row that isn't a member of an
+//! already-frozen manifest.
+//!
+//! **Scope of this gate, precisely** (cross-vendor review finding 7): this
+//! refuses to PERSIST a candidate built from an unselected row. It does not
+//! — cannot, from inside this leaf — prevent a caller from spending an
+//! actual live-model call on an unselected row BEFORE constructing the
+//! `ForgeDraft` it hands to `forge_lesson_candidate`; controlling that
+//! requires the caller to check `PilotManifestV1::contains` before ever
+//! invoking the model, which is exactly the harness-runner seam
+//! `forge.rs`'s module doc describes (`ForgeDraft` is never constructed by
+//! this leaf). This module is also a purely in-memory validated `Vec` — it
+//! has no durable record, hash, or timestamp of its own; a harness runner
+//! that needs the freeze to survive across separate process invocations
+//! must persist it (e.g. through `lesson_forge_ops::storage`'s save path),
+//! which is a harness-runner/persistence concern this leaf doesn't invent.
 
 use tachi_params::LessonCandidateKindV1;
 

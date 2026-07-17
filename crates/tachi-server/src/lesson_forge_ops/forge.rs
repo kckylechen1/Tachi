@@ -13,10 +13,20 @@
 //! call it wired up), and [`forge_lesson_candidate`] does the part that
 //! IS this leaf's job and IS fully deterministic/testable — validate the
 //! draft against the frozen contract's own hard requirements (non-empty
-//! fields, at least one cited ref, no truncation of the source, the row is
-//! a member of an already-frozen pilot manifest so nothing gets forged
-//! outside the 50-row spend gate), assign deterministic identity, and mark
-//! the result unconditionally pending.
+//! fields, at least one cited ref, the row is a member of an already-frozen
+//! pilot manifest so nothing gets PERSISTED outside the 50-row spend gate),
+//! assign deterministic identity, and mark the result unconditionally
+//! pending.
+//!
+//! **What "no truncation" means here, precisely** (cross-vendor review
+//! finding 7): [`LessonCoverageV1::full`] reports the byte length of
+//! `SourceBundle.full_text` exactly as handed in — this module itself never
+//! slices that string before computing coverage or before the (external,
+//! out-of-scope) model call it seams to. It does NOT and cannot verify that
+//! the model actually read/used the full text when authoring `ForgeDraft` —
+//! that's the model's own behavior, attested (or not) via `engine_receipt`,
+//! not something a deterministic leaf with no model call of its own can
+//! independently observe.
 
 use tachi_params::{
     EvidenceRefV1, LessonCandidateKindV1, LessonCandidateStatusV1, LessonCandidateV1,
@@ -101,9 +111,23 @@ fn frame_field(value: &str) -> String {
     format!("{}:{}|", value.len(), value)
 }
 
-fn group_seed(project: &str, kind: LessonCandidateKindV1, draft: &ForgeDraft) -> String {
+/// Group-identity seed: project + row_id + kind + draft content, deliberately
+/// omitting ONLY `source_revision` — see `LessonCandidateV1::candidate_group_id`'s
+/// doc ("Same seed minus `source_revision` — links revisions of the same
+/// case to each other"). Cross-vendor review finding 6: this used to omit
+/// `row_id` too, so identical drafts forged from two DIFFERENT, unrelated
+/// source rows collapsed into the same group — `row_id` is included here
+/// precisely so that never happens; only genuinely different REVISIONS of
+/// the SAME row share a group.
+fn group_seed(
+    project: &str,
+    row_id: &str,
+    kind: LessonCandidateKindV1,
+    draft: &ForgeDraft,
+) -> String {
     let mut seed = String::new();
     seed.push_str(&frame_field(project));
+    seed.push_str(&frame_field(row_id));
     seed.push_str(&frame_field(kind.as_str()));
     seed.push_str(&frame_field(&draft.situation));
     seed.push_str(&frame_field(&draft.proposed_ruling));
@@ -112,8 +136,13 @@ fn group_seed(project: &str, kind: LessonCandidateKindV1, draft: &ForgeDraft) ->
     seed
 }
 
-fn candidate_group_id(project: &str, kind: LessonCandidateKindV1, draft: &ForgeDraft) -> String {
-    hash16(&group_seed(project, kind, draft))
+fn candidate_group_id(
+    project: &str,
+    row_id: &str,
+    kind: LessonCandidateKindV1,
+    draft: &ForgeDraft,
+) -> String {
+    hash16(&group_seed(project, row_id, kind, draft))
 }
 
 fn candidate_id(
@@ -122,8 +151,7 @@ fn candidate_id(
     draft: &ForgeDraft,
     bundle: &SourceBundle,
 ) -> String {
-    let mut seed = group_seed(project, kind, draft);
-    seed.push_str(&frame_field(&bundle.row_id));
+    let mut seed = group_seed(project, &bundle.row_id, kind, draft);
     seed.push_str(&frame_field(&bundle.revision.to_string()));
     hash16(&seed)
 }
@@ -160,7 +188,7 @@ pub fn forge_lesson_candidate(
         return Err(ForgeError::NoSourceRefs);
     }
 
-    let group_id = candidate_group_id(project, kind, draft);
+    let group_id = candidate_group_id(project, &bundle.row_id, kind, draft);
     let id = candidate_id(project, kind, draft, bundle);
 
     Ok(LessonCandidateV1 {
@@ -226,6 +254,35 @@ mod tests {
             reference_decision: "reference decision".to_string(),
             target_kind: LessonCandidateKindV1::Precedent,
         });
+        freeze_pilot_manifest(rows).expect("test manifest must freeze")
+    }
+
+    /// Like `manifest_with_row`, but freezes every `(row_id, revision)` pair
+    /// given, padded to 50 with filler narrative rows — used by the
+    /// candidate-grouping tests below, which need more than one real row in
+    /// the same frozen manifest.
+    fn manifest_with_rows(entries: &[(&str, i64)]) -> PilotManifestV1 {
+        let mut rows = Vec::new();
+        for i in 0..(50 - entries.len()) {
+            rows.push(PilotRowV1 {
+                row_id: format!("filler-{i}"),
+                revision: 1,
+                kind: PilotRowKindV1::Narrative,
+                selection_reason: "filler".to_string(),
+                reference_decision: "filler decision".to_string(),
+                target_kind: LessonCandidateKindV1::Precedent,
+            });
+        }
+        for (row_id, revision) in entries {
+            rows.push(PilotRowV1 {
+                row_id: row_id.to_string(),
+                revision: *revision,
+                kind: PilotRowKindV1::StructuredControl,
+                selection_reason: "control row for forge test".to_string(),
+                reference_decision: "reference decision".to_string(),
+                target_kind: LessonCandidateKindV1::Precedent,
+            });
+        }
         freeze_pilot_manifest(rows).expect("test manifest must freeze")
     }
 
@@ -398,6 +455,88 @@ mod tests {
             None,
         )
         .expect("second forge");
+        assert_ne!(a.candidate_id, b.candidate_id);
+    }
+
+    #[test]
+    fn identical_drafts_from_two_different_unrelated_rows_do_not_share_a_group() {
+        // Cross-vendor review finding 6: `candidate_group_id` used to be
+        // derived from project+kind+draft only, omitting `row_id` entirely
+        // — so two DIFFERENT rows that happen to forge the identical draft
+        // text collapsed into the same group, breaking the uniqueness a
+        // discriminating-test fixture needs. `row_id` must now separate
+        // them even though every draft field is byte-identical.
+        let manifest = manifest_with_rows(&[("row-0", 1), ("row-1", 1)]);
+        let mut bundle_a = valid_bundle();
+        bundle_a.row_id = "row-0".to_string();
+        let mut bundle_b = valid_bundle();
+        bundle_b.row_id = "row-1".to_string();
+
+        let a = forge_lesson_candidate(
+            "proj",
+            &manifest,
+            &bundle_a,
+            LessonCandidateKindV1::Precedent,
+            &valid_draft(),
+            None,
+        )
+        .expect("first forge");
+        let b = forge_lesson_candidate(
+            "proj",
+            &manifest,
+            &bundle_b,
+            LessonCandidateKindV1::Precedent,
+            &valid_draft(),
+            None,
+        )
+        .expect("second forge");
+
+        assert_ne!(
+            a.candidate_group_id, b.candidate_group_id,
+            "identical drafts from unrelated rows must not collapse into the same group"
+        );
+        assert_ne!(a.candidate_id, b.candidate_id);
+    }
+
+    #[test]
+    fn two_revisions_of_the_same_row_share_a_group_but_not_an_id() {
+        // The other half of the same guarantee: `candidate_group_id` omits
+        // ONLY `source_revision` (per `LessonCandidateV1`'s doc) — two
+        // revisions of the SAME row with the same draft SHOULD share a
+        // group (that's the whole point of "links revisions of the same
+        // case to each other"), while `candidate_id` itself still differs
+        // because revision is part of that seed.
+        let manifest = manifest_with_rows(&[("row-0", 1), ("row-0", 2)]);
+        let mut bundle_rev1 = valid_bundle();
+        bundle_rev1.row_id = "row-0".to_string();
+        bundle_rev1.revision = 1;
+        let mut bundle_rev2 = valid_bundle();
+        bundle_rev2.row_id = "row-0".to_string();
+        bundle_rev2.revision = 2;
+
+        let a = forge_lesson_candidate(
+            "proj",
+            &manifest,
+            &bundle_rev1,
+            LessonCandidateKindV1::Precedent,
+            &valid_draft(),
+            None,
+        )
+        .expect("first forge");
+        let b = forge_lesson_candidate(
+            "proj",
+            &manifest,
+            &bundle_rev2,
+            LessonCandidateKindV1::Precedent,
+            &valid_draft(),
+            None,
+        )
+        .expect("second forge");
+
+        assert_eq!(
+            a.candidate_group_id, b.candidate_group_id,
+            "two revisions of the same row with the same draft must share a group"
+        );
         assert_ne!(a.candidate_id, b.candidate_id);
     }
 

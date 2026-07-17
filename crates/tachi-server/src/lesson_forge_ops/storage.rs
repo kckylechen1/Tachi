@@ -23,6 +23,38 @@ use tachi_params::LessonCandidateV1;
 
 pub(crate) const LESSON_CANDIDATE_DOMAIN: &str = "lesson_candidate";
 
+/// Scrub every free-text prose field of a candidate for secrets, returning a
+/// scrubbed clone plus the total redaction count.
+///
+/// `save_eval_memory`'s pipeline (`handle_save_memory`) only scrubs `text`/
+/// `summary` on the way in — `metadata` is opaque to it. `build_metadata`
+/// below copies the candidate's raw `situation`/`proposed_ruling`/`why`/
+/// `how_to_apply` fields verbatim, so without this step a model-authored
+/// draft containing a leaked secret would land redacted in `text` (the
+/// pipeline's own pass) but UN-redacted in `metadata` — a secret-leak side
+/// channel the pipeline's scrub was never asked to close. Scrubbing here,
+/// before `render_body`/`summary_line`/`build_metadata` all run, guarantees
+/// all three carry identical redactions. Same discipline as
+/// `precedent_ops::scrub_ruling`, which exists for the identical reason
+/// (see that function's doc, `precedent_ops.rs:164-170`).
+fn scrub_candidate(candidate: &LessonCandidateV1) -> (LessonCandidateV1, usize) {
+    let mut scrubbed = candidate.clone();
+    let mut redactions = 0usize;
+    let (situation, c) = crate::memory_search_ops::scrub_secrets(&scrubbed.situation);
+    scrubbed.situation = situation;
+    redactions += c;
+    let (proposed_ruling, c) = crate::memory_search_ops::scrub_secrets(&scrubbed.proposed_ruling);
+    scrubbed.proposed_ruling = proposed_ruling;
+    redactions += c;
+    let (why, c) = crate::memory_search_ops::scrub_secrets(&scrubbed.why);
+    scrubbed.why = why;
+    redactions += c;
+    let (how_to_apply, c) = crate::memory_search_ops::scrub_secrets(&scrubbed.how_to_apply);
+    scrubbed.how_to_apply = how_to_apply;
+    redactions += c;
+    (scrubbed, redactions)
+}
+
 fn render_body(candidate: &LessonCandidateV1) -> String {
     let mut lines = vec![format!(
         "Lesson candidate ({}) — pending",
@@ -60,30 +92,63 @@ fn render_body(candidate: &LessonCandidateV1) -> String {
     lines.join("\n")
 }
 
-fn build_metadata(candidate: &LessonCandidateV1) -> Value {
-    json!({
-        "kind": "lesson_candidate",
-        // Unconditional — see module doc. `LessonCandidateStatusV1` has no
-        // other variant to construct, so this is never anything but
-        // "pending".
-        "candidate_status": candidate.candidate_status.as_str(),
-        "lesson_kind": candidate.kind.as_str(),
-        "situation": candidate.situation,
-        "proposed_ruling": candidate.proposed_ruling,
-        "why": candidate.why,
-        "how_to_apply": candidate.how_to_apply,
-        "refs": candidate.refs,
-        "source_row_id": candidate.source_row_id,
-        "source_revision": candidate.source_revision,
-        "coverage": {
+/// `candidate` must already be scrubbed (see `scrub_candidate`); `redactions`
+/// is surfaced so a scrubbed row is visibly marked, matching the eval-record
+/// convention (`complete_ops::eval_record`) and `precedent_ops::build_metadata`.
+fn build_metadata(candidate: &LessonCandidateV1, redactions: usize) -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert("kind".to_string(), json!("lesson_candidate"));
+    // Unconditional — see module doc. `LessonCandidateStatusV1` has no
+    // other variant to construct, so this is never anything but "pending".
+    map.insert(
+        "candidate_status".to_string(),
+        json!(candidate.candidate_status.as_str()),
+    );
+    map.insert("lesson_kind".to_string(), json!(candidate.kind.as_str()));
+    map.insert("situation".to_string(), json!(candidate.situation));
+    map.insert(
+        "proposed_ruling".to_string(),
+        json!(candidate.proposed_ruling),
+    );
+    map.insert("why".to_string(), json!(candidate.why));
+    map.insert("how_to_apply".to_string(), json!(candidate.how_to_apply));
+    map.insert("refs".to_string(), json!(candidate.refs));
+    map.insert("source_row_id".to_string(), json!(candidate.source_row_id));
+    map.insert(
+        "source_revision".to_string(),
+        json!(candidate.source_revision),
+    );
+    map.insert(
+        "coverage".to_string(),
+        json!({
             "source_bytes": candidate.coverage.source_bytes,
             "covered_bytes": candidate.coverage.covered_bytes,
-        },
-        "identity_status": candidate.identity_status(),
-        "engine_receipt": candidate.engine_receipt,
-        "candidate_group_id": candidate.candidate_group_id,
-        "established": candidate.claims_establishment(),
-    })
+        }),
+    );
+    map.insert(
+        "identity_status".to_string(),
+        json!(candidate.identity_status()),
+    );
+    map.insert(
+        "engine_receipt".to_string(),
+        json!(candidate.engine_receipt),
+    );
+    map.insert(
+        "candidate_group_id".to_string(),
+        json!(candidate.candidate_group_id),
+    );
+    map.insert(
+        "established".to_string(),
+        json!(candidate.claims_establishment()),
+    );
+    if redactions > 0 {
+        map.insert("secret_redactions".to_string(), json!(redactions));
+        map.insert(
+            "secret_redaction_warning".to_string(),
+            json!("Potential secrets were redacted from this lesson candidate before persistence."),
+        );
+    }
+    Value::Object(map)
 }
 
 fn summary_line(candidate: &LessonCandidateV1, max: usize) -> String {
@@ -163,6 +228,12 @@ pub(crate) async fn persist_pending_lesson_candidate(
     project_explicit: bool,
     candidate: &LessonCandidateV1,
 ) -> Result<String, String> {
+    // Scrub BEFORE rendering body/summary/metadata so all three carry
+    // identical redactions — see `scrub_candidate`'s doc for why the
+    // pipeline's own `text`-only scrub isn't enough.
+    let (candidate, redactions) = scrub_candidate(candidate);
+    let candidate = &candidate;
+
     let path = format!(
         "/lesson_candidates/{}/{}",
         project_path_segment(project),
@@ -170,7 +241,7 @@ pub(crate) async fn persist_pending_lesson_candidate(
     );
     let text = render_body(candidate);
     let summary = summary_line(candidate, 80);
-    let metadata = build_metadata(candidate);
+    let metadata = build_metadata(candidate, redactions);
 
     let keywords = vec![
         "lesson_candidate".to_string(),
@@ -194,7 +265,13 @@ pub(crate) async fn persist_pending_lesson_candidate(
         vector: None,
         id: None,
         force: false,
-        auto_link: true,
+        // A pending, model-authored, not-yet-established candidate must not
+        // auto-link into the graph as though it were vetted content — the
+        // same "no influence before establishment" boundary
+        // (`issue-refinery-memory-lanes.md:346-349`) that motivates
+        // excluding lesson-candidate rows from generic recall below
+        // (`filters.rs`'s `is_lesson_candidate_entry`).
+        auto_link: false,
         project: project.map(str::to_string),
         project_explicit,
         retention_policy: None,
@@ -272,9 +349,49 @@ mod tests {
 
     #[test]
     fn metadata_candidate_status_is_always_pending_and_established_is_always_false() {
-        let metadata = build_metadata(&sample_candidate());
+        let metadata = build_metadata(&sample_candidate(), 0);
         assert_eq!(metadata["candidate_status"], json!("pending"));
         assert_eq!(metadata["established"], json!(false));
+        assert!(metadata.get("secret_redactions").is_none());
+    }
+
+    #[test]
+    fn metadata_surfaces_redaction_count_and_warning_when_positive() {
+        let metadata = build_metadata(&sample_candidate(), 2);
+        assert_eq!(metadata["secret_redactions"], json!(2));
+        assert!(metadata["secret_redaction_warning"]
+            .as_str()
+            .unwrap()
+            .contains("redacted"));
+    }
+
+    #[test]
+    fn scrub_candidate_redacts_secrets_from_every_free_text_field_not_just_situation() {
+        // Regression for the cross-vendor review finding: `save_eval_memory`
+        // only scrubs `text`/`summary`, never `metadata` — and
+        // `build_metadata` copies these four fields verbatim. Every one of
+        // them must come back redacted, not just the ones that happen to
+        // feed `render_body`'s first line.
+        let mut candidate = sample_candidate();
+        let secret = "sk-abcdefghijklmnopqrstuvwxyz012345";
+        candidate.situation = format!("Leaked token {secret} in situation");
+        candidate.proposed_ruling = format!("Ruling references {secret}");
+        candidate.why = format!("Why cites {secret}");
+        candidate.how_to_apply = format!("Apply using {secret}");
+
+        let (scrubbed, redactions) = scrub_candidate(&candidate);
+        assert_eq!(redactions, 4);
+        assert!(!scrubbed.situation.contains(secret));
+        assert!(!scrubbed.proposed_ruling.contains(secret));
+        assert!(!scrubbed.why.contains(secret));
+        assert!(!scrubbed.how_to_apply.contains(secret));
+
+        let metadata = build_metadata(&scrubbed, redactions);
+        let metadata_str = metadata.to_string();
+        assert!(
+            !metadata_str.contains(secret),
+            "metadata still carries the raw secret: {metadata_str}"
+        );
     }
 
     #[test]
