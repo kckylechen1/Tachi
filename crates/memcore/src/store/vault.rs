@@ -64,25 +64,30 @@ impl MemoryStore {
     /// rotation rows. Import callers must not leave a target Vault half-initialized
     /// if a later row fails validation or persistence.
     ///
-    /// # Unvalidated primitive — caller contract
+    /// # Unchecked primitive — caller contract
     ///
-    /// This is a low-level storage primitive: it writes `config` verbatim and
-    /// does **not** validate `kdf_params`/`kdf_algorithm` for support. This
-    /// crate (memcore) is a storage leaf and intentionally has no dependency
-    /// on `vault-kit`'s KDF-parameter validation, so that check cannot live
-    /// here.
+    /// The `_unchecked` suffix is load-bearing (tachi#1110): this is a
+    /// low-level storage primitive that writes `config` verbatim and does
+    /// **not** validate `kdf_params`/`kdf_algorithm` for support. This crate
+    /// (memcore) is a storage leaf and intentionally has no dependency on
+    /// `vault-kit`'s KDF-parameter validation, so that check cannot live
+    /// here (Refs kckylechen1/tachi#1106 layering ruling — memcore treats
+    /// `kdf_params` as an opaque `String`).
     ///
-    /// **Callers must validate the incoming `VaultConfig`'s `kdf_params` via
-    /// `vault-kit`'s `KdfParams` before calling this method.** Skipping that
-    /// step can persist a Vault whose KDF is never unlockable — a day-one
-    /// brick with no recovery path.
+    /// **Callers must validate the incoming `VaultConfig`'s `kdf_params`/
+    /// `kdf_algorithm` via `vault-kit`'s `KdfParams` before calling this
+    /// method.** Skipping that step can persist a Vault whose KDF is never
+    /// unlockable — a day-one brick with no recovery path.
     ///
     /// The sole current caller, `tachi-server`'s
-    /// `bootstrap::vault_sync::import_vault_bundle`, performs this validation
-    /// before opening the vault (Refs kckylechen1/Hyperion-HyperTachi#28,
-    /// tachi#1080). Enforcing this contract at the boundary itself, rather
-    /// than relying on caller discipline, is a follow-up hardening item.
-    pub fn vault_import_bundle(
+    /// `bootstrap::vault_sync::import_validated_vault_bundle` (the
+    /// crypto-aware layer's single validating import wrapper), performs this
+    /// validation before this method is ever reached (Refs
+    /// kckylechen1/Hyperion-HyperTachi#28, tachi#1080, tachi#1110 — this
+    /// method was named `vault_import_bundle` before #1110 renamed it to put
+    /// the unvalidated nature in the name itself, rather than relying on
+    /// caller discipline alone).
+    pub fn vault_import_bundle_unchecked(
         &mut self,
         config: &VaultConfig,
         entries: &[VaultEntry],
@@ -232,6 +237,56 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    /// tachi#1110: `vault_import_bundle_unchecked` is a storage-leaf
+    /// primitive with no `vault-kit` dependency (the #1106 layering ruling),
+    /// so it has no opinion on whether `kdf_params`/`kdf_algorithm` are a
+    /// *supported* KDF profile — it persists whatever `VaultConfig` it is
+    /// given verbatim. That is the documented contract the `_unchecked`
+    /// suffix names; the validating gate lives one layer up, in
+    /// `tachi-server`'s `bootstrap::vault_sync::import_validated_vault_bundle`
+    /// (which memcore cannot see or depend on).
+    ///
+    /// Structural-discrimination note: this is a rename, not new persistence
+    /// logic — the primitive had this exact no-validation behavior under its
+    /// pre-#1110 name `vault_import_bundle` too, so there is no prior
+    /// revision of this method that behaved differently to diff against
+    /// (behavioral-red-then-green is not applicable to a pure rename). This
+    /// test instead pins the contract the new name asserts, so a future
+    /// change that quietly adds validation here (which would violate the
+    /// #1106 layering ruling by requiring a `vault-kit` dependency) goes red.
+    #[test]
+    fn vault_import_bundle_unchecked_persists_unsupported_kdf_params_raw() {
+        let mut store = MemoryStore::open_in_memory().expect("open test store");
+        let config = VaultConfig {
+            salt: "salt".to_string(),
+            verifier: "verifier".to_string(),
+            kdf_algorithm: "not-a-real-algorithm".to_string(),
+            kdf_params: r#"{"m":1,"t":1,"p":1}"#.to_string(),
+            cipher: crate::vault::VaultCipher::Aes256Gcm,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+
+        store
+            .vault_import_bundle_unchecked(&config, &[], &[])
+            .expect(
+                "unchecked primitive must persist an unsupported KDF profile without validating it",
+            );
+
+        let stored = store
+            .vault_get_config()
+            .expect("read back config")
+            .expect("config row must exist after import");
+        assert_eq!(
+            stored.kdf_algorithm, "not-a-real-algorithm",
+            "unchecked primitive must write kdf_algorithm verbatim, no validation"
+        );
+        assert_eq!(
+            stored.kdf_params, r#"{"m":1,"t":1,"p":1}"#,
+            "unchecked primitive must write kdf_params verbatim, no validation"
+        );
     }
 
     #[test]

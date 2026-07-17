@@ -194,30 +194,66 @@ pub(super) fn import_vault_bundle(
             .to_string()
     })?;
 
-    // tachi#1080 day-one brick fix: validate the imported vault_config's KDF
-    // algorithm/params BEFORE the target store is even opened. `bundle_config`
-    // is derived purely from the already-parsed/verified bundle above and has
-    // no dependency on the target store, so this gate can — and must — run
-    // before `open_cli_store` below. `MemoryStore::open` itself creates the
-    // target DB file and runs schema init/migrations on it (see
-    // `memcore::store::open::MemoryStore::open_with_label_inner`), so
-    // validating only after opening still leaves a rejected import having
-    // created (or migrated) the target DB file, even though it never got as
-    // far as writing `vault_config`. Without this gate the bootstrap path
-    // below (`local_config.is_none()`) also writes `bundle_config`
-    // unconditionally once the store is open — `store.vault_import_bundle`
-    // itself performs no KDF validation — so a bundle carrying an
-    // unsupported/corrupted KDF profile (e.g. a hand-edited
-    // `{"m":1,"t":1,"p":1}`) would import cleanly and then permanently fail
-    // every subsequent unlock: the stored-config KDF gate wired elsewhere in
-    // #1080 (`parse_stored_kdf_params`) refuses to derive against it. That is
-    // not a decryption failure, it's a vault that is initialized but can
-    // never again be opened. Checked unconditionally (not just on the
-    // bootstrap path) as defense in depth even though the existing-vault
-    // path's `ensure_same_vault` equality check makes it transitively
-    // redundant there (a local config only ever reaches the store via a path
-    // that already validated it).
-    ensure_importable_kdf(bundle_config)?;
+    let (_store, initialized_vault) = import_validated_vault_bundle(
+        global_db_path,
+        bundle_config,
+        &bundle.entries,
+        &bundle.rotations,
+    )?;
+
+    Ok(VaultSyncImportReport {
+        path: input.display().to_string(),
+        entries_imported: bundle.entries.len(),
+        rotations_imported: bundle.rotations.len(),
+        initialized_vault,
+    })
+}
+
+/// The single validating import path for persisting a `VaultConfig` +
+/// entries + rotation rows into a target store (tachi#1110). `tachi-server`
+/// is the crypto-aware layer, so this is where `kdf_algorithm`/`kdf_params`
+/// validation belongs — `memcore`'s `MemoryStore::vault_import_bundle_unchecked`
+/// is a storage-leaf primitive that intentionally has no `vault-kit`
+/// dependency (the #1106 layering ruling) and persists `config` verbatim.
+/// Every caller that wants to import a `VaultConfig` into a store MUST route
+/// through this function rather than calling the `_unchecked` primitive
+/// directly — that primitive's name exists precisely to make a future bypass
+/// visible in review, not to be convenient to call around. `pub(super)`
+/// (reachable throughout `bootstrap`, matching this module's other
+/// entry points like `import_vault_bundle`/`open_cli_store`) rather than
+/// `pub(crate)`: `bootstrap` itself is a private module, so a wider
+/// visibility modifier would not actually reach further — this stays
+/// consistent with the module's existing convention instead of overclaiming
+/// crate-wide reach it cannot deliver.
+///
+/// Returns the opened target store (so callers that already need it, like
+/// `import_vault_bundle` above, don't have to reopen it) and whether the
+/// target Vault was uninitialized before this call (bootstrap vs. merge into
+/// an existing Vault).
+///
+/// # Ordering (tachi#1080 day-one brick fix)
+///
+/// The KDF gate runs BEFORE the target store is opened. `config` here is
+/// caller-supplied and has no dependency on the target store, so this gate
+/// can — and must — run before `open_cli_store` below. `MemoryStore::open`
+/// itself creates the target DB file and runs schema init/migrations on it
+/// (see `memcore::store::open::MemoryStore::open_with_label_inner`), so
+/// validating only after opening would still leave a rejected import having
+/// created (or migrated) the target DB file, even though it never got as far
+/// as writing `vault_config`. Without this gate, persisting unconditionally
+/// once the store is open would import an unsupported/corrupted KDF profile
+/// (e.g. a hand-edited `{"m":1,"t":1,"p":1}`) cleanly and then permanently
+/// fail every subsequent unlock: the stored-config KDF gate wired elsewhere
+/// in #1080 (`parse_stored_kdf_params`) refuses to derive against it. That is
+/// not a decryption failure, it's a vault that is initialized but can never
+/// again be opened.
+pub(super) fn import_validated_vault_bundle(
+    global_db_path: &PathBuf,
+    config: &VaultConfig,
+    entries: &[VaultEntry],
+    rotations: &[VaultKeyRotation],
+) -> Result<(memcore::MemoryStore, bool), Box<dyn std::error::Error>> {
+    ensure_importable_kdf(config)?;
 
     let mut store = open_cli_store(global_db_path)?;
     let local_config = store
@@ -226,19 +262,14 @@ pub(super) fn import_vault_bundle(
 
     let initialized_vault = local_config.is_none();
     if let Some(local_config) = local_config.as_ref() {
-        ensure_same_vault(local_config, bundle_config)?;
+        ensure_same_vault(local_config, config)?;
     }
 
     store
-        .vault_import_bundle(bundle_config, &bundle.entries, &bundle.rotations)
-        .map_err(|e| format!("vault_import_bundle: {e}"))?;
+        .vault_import_bundle_unchecked(config, entries, rotations)
+        .map_err(|e| format!("vault_import_bundle_unchecked: {e}"))?;
 
-    Ok(VaultSyncImportReport {
-        path: input.display().to_string(),
-        entries_imported: bundle.entries.len(),
-        rotations_imported: bundle.rotations.len(),
-        initialized_vault,
-    })
+    Ok((store, initialized_vault))
 }
 
 pub(super) fn read_bundle_vault_config(
@@ -871,6 +902,50 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(source_db);
+        let _ = std::fs::remove_file(target_db);
+    }
+
+    /// tachi#1110: direct unit coverage of `import_validated_vault_bundle`
+    /// itself — the single validating import wrapper `import_vault_bundle`
+    /// (and any future tachi-server caller) must route through — rather than
+    /// only exercising it transitively via a signed/parsed bundle file. An
+    /// unsupported `kdf_params` profile must be rejected before the wrapper
+    /// ever calls `MemoryStore::vault_import_bundle_unchecked`, and the
+    /// target DB file must not even be created (mirrors the day-one-brick
+    /// invariant `vault_sync_import_rejects_unsupported_kdf_params_before_persisting`
+    /// already pins for the file-based entry point above).
+    ///
+    /// Structural-discrimination note: `import_validated_vault_bundle` is a
+    /// function extracted by #1110 itself (it did not exist under any name
+    /// on pre-#1110 `origin/main`), so a literal red-before/green-after run
+    /// against that exact symbol is impossible — there is nothing to invoke
+    /// pre-fix. The behavior it encapsulates (validate before persist, gate
+    /// before store-open) is not new; it is the same sequence
+    /// `import_vault_bundle` already performed inline, and remains covered
+    /// end-to-end by `vault_sync_import_rejects_unsupported_kdf_params_before_persisting`
+    /// above (unchanged, still green). This test instead pins the newly
+    /// extracted wrapper's own contract directly, so a future edit that
+    /// reorders validation after the persist call inside this specific
+    /// function goes red without needing to route through file I/O/signature
+    /// verification to detect it.
+    #[test]
+    fn import_validated_vault_bundle_rejects_unsupported_kdf_params_before_persist() {
+        let target_db = temp_db_path();
+        let config = sample_config_with_kdf_params(UNSUPPORTED_KDF_PARAMS);
+
+        let err = import_validated_vault_bundle(&target_db, &config, &[], &[])
+            .expect_err("unsupported kdf_params must be rejected before persisting");
+        assert!(
+            err.to_string().contains("unsupported KDF parameters"),
+            "{err}"
+        );
+        assert!(
+            !target_db.exists(),
+            "rejected import must not create/open the target DB file at all \
+             (would brick the vault): {}",
+            target_db.display()
+        );
+
         let _ = std::fs::remove_file(target_db);
     }
 
