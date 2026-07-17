@@ -9,7 +9,7 @@ DESTINATION="${INSTALL_DIR}/tachi"
 TARGET_DIR="${CARGO_TARGET_DIR:-${HOME}/.cache/sigil-shared-target}"
 RELEASE_BINARY="${TARGET_DIR}/release/tachi"
 SENTINELS=(
-  "tachi_memory(action='sticky_leave')"
+  "sticky_leave (leave a read-once ephemeral note"
   "tachi_memory(action='sticky_check')"
   "FROM session_claims WHERE claim_id = ?1"
   "dispatch_outcomes row "
