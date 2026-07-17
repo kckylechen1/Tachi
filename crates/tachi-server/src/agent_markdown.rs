@@ -39,14 +39,12 @@ mod tests {
         let health = serde_json::json!({"health_score": 95, "warnings": [], "wiki": {}});
         let kanban = serde_json::json!({"tasks": []});
 
-        let cross = serde_json::json!([]);
         let out = format_briefing(
             "q",
             Some("sigil"),
             &serde_json::json!([]),
             &memories,
             &wiki,
-            &cross,
             &health,
             &serde_json::json!([]),
             &kanban,
@@ -101,7 +99,6 @@ mod tests {
         let health = serde_json::json!({"health_score": 95, "warnings": [], "wiki": {}});
         let kanban = serde_json::json!({"tasks": []});
 
-        let cross = serde_json::json!([]);
         let empty_gov = serde_json::json!({"matches": []});
         let compact = format_briefing(
             "q",
@@ -109,7 +106,6 @@ mod tests {
             &serde_json::json!([]),
             &serde_json::json!(memories),
             &serde_json::json!(wiki),
-            &cross,
             &health,
             &serde_json::json!([]),
             &kanban,
@@ -126,7 +122,6 @@ mod tests {
             &serde_json::json!([]),
             &serde_json::json!(memories),
             &serde_json::json!(wiki),
-            &cross,
             &health,
             &serde_json::json!([]),
             &kanban,
@@ -211,7 +206,6 @@ mod tests {
             &empty,
             &empty,
             &empty,
-            &empty,
             &health,
             &serde_json::json!(verification),
             &kanban,
@@ -246,7 +240,6 @@ mod tests {
             &empty,
             &empty,
             &empty,
-            &empty,
             &health,
             &empty,
             &kanban,
@@ -275,7 +268,6 @@ mod tests {
         let out = format_briefing(
             "q",
             Some("sigil"),
-            &empty,
             &empty,
             &empty,
             &empty,
@@ -322,7 +314,6 @@ mod tests {
             "q",
             Some("sigil"),
             &stickies,
-            &empty,
             &empty,
             &empty,
             &health,

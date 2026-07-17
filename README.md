@@ -320,7 +320,7 @@ tachi skill-surface status --host claude,codex,gemini,cursor,antigravity
 ### 7. Agent Coordination
 - **Ghost Whispers** — persistent topic-based pub/sub between agents (`ghost_publish`, `ghost_subscribe`, `ghost_ack`, `ghost_reflect`, `ghost_promote`).
 - **Kanban** — cross-agent cards with `ack` / `progress` / `result` states (`post_card`, `check_inbox`, `update_card`).
-- **Handoff tokens** — structured context transfer between agent sessions (`handoff_leave`, `handoff_check`).
+- **Handoff issue promotion** — create/link a GitHub issue from an existing handoff memo (`tachi_handoff(action='promote_issue')`). #1099: the older `handoff_leave`/`handoff_check` memo-passing routes are retired — use `tachi_memory(action='sticky_leave'|'sticky_check')` for a short agent-to-agent note, or `tachi_orchestrator(action='handoff_write'|'handoff_read')` for a structured task baton.
 
 > Ghost and Kanban tools are native `admin`-profile surfaces (not bundled into `standard`/`coordinate`). Most agents coordinate through the `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`, and `tachi_task` facades instead.
 
@@ -376,7 +376,7 @@ Tachi exposes a filtered MCP surface based on `TACHI_PROFILE`. The full `admin` 
 | Profile | What is exposed | Best for |
 |---------|-----------------|----------|
 | `standard` | Daily facade surface: `tachi_save`, `tachi_memory`, `tachi_task`, `tachi_arena`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `vault_status`, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. | IDE agents: Claude, Cursor, Codex, Windsurf, Trae, Antigravity. |
-| `coordinate` | `remember` + `coordinate` bundles: adds `handoff_check`/`handoff_leave`, `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`, `tachi_agents`, `approve_merge`, `tachi_gh`, `tachi_shell`, `tachi_arena`, `tachi_verify`; dispatch runs through `tachi_task(action='dispatch')`. | Leader/orchestrator agents that dispatch work and coordinate across agents. |
+| `coordinate` | `remember` + `coordinate` bundles: adds `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`, `tachi_agents`, `approve_merge`, `tachi_gh`, `tachi_shell`, `tachi_arena`, `tachi_verify`; dispatch runs through `tachi_task(action='dispatch')`. | Leader/orchestrator agents that dispatch work and coordinate across agents. |
 | `operate` | `remember` + `operate` bundles: adds Foundry lifecycle, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters, OpenClaw, ops automation. |
 | `delegate` | Curated worker surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_event`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_task`, `tachi_complete`, `tachi_skill(action='discover'|'run'|'bundle')`. Standalone `run_skill` remains a legacy compatibility route outside the default delegate profile. | Worker subagents spawned by `tachi_task(action='dispatch')`. No dispatch, no handoff, no skill candidate registration. |
 | `admin` | Full catalog. | Maintenance, development, and governance. |

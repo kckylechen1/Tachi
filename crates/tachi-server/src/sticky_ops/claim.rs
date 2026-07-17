@@ -3,8 +3,8 @@
 //! Frozen semantics (#964, owner-ratified 2026-07-11): marking a sticky read
 //! must be a compare-and-set so that under N concurrent readers exactly ONE
 //! delivery happens. A naive read-then-write on the `memories` row (the same
-//! shape as `handoff_ops::pending::upsert_acknowledged_entry`, which is
-//! last-write-wins) is explicitly rejected for this reason.
+//! shape as the old, #1099-retired `handoff_ops::pending::upsert_acknowledged_entry`,
+//! which was last-write-wins) is explicitly rejected for this reason.
 //!
 //! The claim gate lives on the store's separate `hard_state` KV table
 //! (namespace `STICKY_CLAIM_NAMESPACE`, key = sticky id), using

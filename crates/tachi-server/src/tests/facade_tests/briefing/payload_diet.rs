@@ -227,7 +227,7 @@ async fn compact_briefing_uses_status_warnings_and_omits_doctrine_metadata() {
 }
 
 #[tokio::test]
-async fn compact_briefing_omits_empty_kanban_and_cross_project_sections() {
+async fn compact_briefing_omits_empty_kanban_and_never_has_cross_project_section() {
     let (server, _temp_home) = make_server_with_temp_home();
 
     let body = crate::facade_memory_ops::handle_tachi_memory(
@@ -243,9 +243,13 @@ async fn compact_briefing_omits_empty_kanban_and_cross_project_sections() {
         !object.contains_key("kanban"),
         "empty kanban must be omitted"
     );
+    // #1099: the "cross_project" (global handoffs) briefing section is
+    // retired entirely, not just conditionally omitted when empty — see
+    // handoff_ops.rs's module doc. The key must never appear now, in any
+    // briefing shape.
     assert!(
         !object.contains_key("cross_project"),
-        "empty cross-project handoff section must be omitted"
+        "cross_project section is retired (#1099) and must never appear"
     );
 }
 

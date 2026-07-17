@@ -342,38 +342,28 @@ pub struct TachiDomainAdapterParams {
 
 // ─── Facade: unified handoff ─────────────────────────────────────────────────
 
+/// Shared serde default for bool fields that default to true. Referenced
+/// cross-module as `super::default_true` by facade/dispatch.rs and
+/// facade/task.rs — do not remove while those consumers exist (#1194's
+/// inert-surface sweep missed the `super::`-qualified callers once).
 fn default_true() -> bool {
     true
 }
 
+/// #1099: `leave`/`check` were retired (see #1016 — sticky/orchestrator
+/// replace them) along with the briefing projection and GC branch that only
+/// existed to serve them. `promote_issue` is the one capability that never
+/// got a replacement, so it is the sole surviving action here — this struct
+/// only carries fields it needs. Existing callers that still pass
+/// `action='leave'|'check'` get a loud, actionable error (never a silent
+/// accept) instead of a dropped/ignored field.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiHandoffParams {
-    /// Action: "leave" to leave a handoff memo, "check" to check for pending memos, "promote_issue" to create a GitHub issue from a memo
+    /// Action: only "promote_issue" (create/link a GitHub issue from an
+    /// existing handoff memo) is supported. "leave"/"check" were retired in
+    /// #1099 — use tachi_memory(action='sticky_leave'|'sticky_check') or
+    /// tachi_orchestrator(action='handoff_write'|'handoff_read') instead.
     pub action: String,
-
-    /// Summary of what was accomplished (required when action="leave")
-    #[serde(default)]
-    pub summary: Option<String>,
-
-    /// Next steps for the receiving agent (used when action="leave")
-    #[serde(default)]
-    pub next_steps: Vec<String>,
-
-    /// Target agent ID (used when action="leave")
-    #[serde(default)]
-    pub target_agent: Option<String>,
-
-    /// Optional context (used when action="leave")
-    #[serde(default)]
-    pub context: Option<serde_json::Value>,
-
-    /// Agent ID to check for (used when action="check")
-    #[serde(default)]
-    pub agent_id: Option<String>,
-
-    /// Whether to acknowledge retrieved memos (used when action="check", default: true)
-    #[serde(default = "default_true")]
-    pub acknowledge: bool,
 
     /// Handoff memo ID to promote (required for action="promote_issue", with or without "handoff:" prefix)
     #[serde(default)]

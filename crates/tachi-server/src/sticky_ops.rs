@@ -7,8 +7,9 @@
 //!    `check`) races against concurrent callers on a `hard_state`
 //!    compare-and-set (`claim::try_claim_sticky`) — exactly one delivery
 //!    happens no matter how many concurrent readers ask. Naive
-//!    read-then-write (the shape `handoff_ops::pending::upsert_acknowledged_entry`
-//!    uses, last-write-wins) is explicitly rejected for this reason.
+//!    read-then-write (the shape the old, #1099-retired
+//!    `handoff_ops::pending::upsert_acknowledged_entry` used, last-write-wins)
+//!    is explicitly rejected for this reason.
 //! 3. Addressing: absent `to` = leader/main session ONLY. Worker seats never
 //!    consume unaddressed stickies; a named seat sees only stickies
 //!    addressed to that seat.

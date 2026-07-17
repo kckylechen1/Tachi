@@ -8,6 +8,7 @@ mod target;
 pub(crate) use capture_session::handle_capture_session;
 pub(crate) use compact::{
     handle_compact_context, handle_compact_rollup, handle_compact_session_memory,
+    COMPACT_CONTEXT_PERSIST_REFUSAL,
 };
 pub(crate) use recall_context::handle_recall_context;
 pub(crate) use section::handle_section_build;

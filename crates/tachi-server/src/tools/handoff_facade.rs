@@ -2,38 +2,16 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
-use crate::handoff_ops::{
-    handle_handoff_check, handle_handoff_leave, handle_handoff_promote_issue,
-};
+use crate::handoff_ops::handle_handoff_promote_issue;
 use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::{
-    ChainSkillsParams, DlqListParams, DlqRetryParams, HandoffCheckParams, HandoffLeaveParams,
-    HandoffPromoteIssueParams, TachiHandoffParams, TachiOrchestratorParams, TachiWorkflowParams,
+    ChainSkillsParams, DlqListParams, DlqRetryParams, HandoffPromoteIssueParams,
+    TachiHandoffParams, TachiOrchestratorParams, TachiWorkflowParams,
 };
 use crate::MemoryServer;
 
 #[tool_router(router = handoff_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
-    #[tool(
-        description = "DEPRECATED (#1016): use tachi_memory(action='sticky_leave') for a short agent-to-agent note, or tachi_orchestrator(action='handoff_write') for a structured task baton. Leave a handoff memo for the next agent session. Contains session summary, next steps, and optional context."
-    )]
-    pub(crate) async fn handoff_leave(
-        &self,
-        Parameters(params): Parameters<HandoffLeaveParams>,
-    ) -> Result<String, String> {
-        handle_handoff_leave(self, params).await
-    }
-
-    #[tool(
-        description = "DEPRECATED (#1016): use tachi_memory(action='sticky_check') or tachi_orchestrator(action='handoff_read'). Check for pending handoff memos from previous agent sessions. Call this at the start of a new session."
-    )]
-    pub(crate) async fn handoff_check(
-        &self,
-        Parameters(params): Parameters<HandoffCheckParams>,
-    ) -> Result<String, String> {
-        handle_handoff_check(self, params).await
-    }
-
     #[tool(
         description = "Execute a chain of skills in sequence (Unix pipe style). Output of each skill feeds as input to the next."
     )]
@@ -65,7 +43,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "DEPRECATED for 'leave'/'check' (#1016): prefer tachi_memory(action='sticky_leave'/'sticky_check') for a short agent-to-agent note, or tachi_orchestrator(action='handoff_write'/'handoff_read') for a structured task baton. 'promote_issue' (memo -> GitHub issue) is unaffected and has no replacement yet. Unified handoff: 'leave' a memo, 'check' pending memos, or 'promote_issue' to create/link a GitHub issue from a handoff memo."
+        description = "Create/link a GitHub issue from an existing handoff memo (action='promote_issue' only). #1099: 'leave'/'check' were retired — use tachi_memory(action='sticky_leave'/'sticky_check') for a short agent-to-agent note, or tachi_orchestrator(action='handoff_write'/'handoff_read') for a structured task baton."
     )]
     pub(crate) async fn tachi_handoff(
         &self,
@@ -73,26 +51,6 @@ impl MemoryServer {
     ) -> Result<String, String> {
         let action = params.action.to_ascii_lowercase();
         match action.as_str() {
-            "leave" => {
-                let summary = params
-                    .summary
-                    .clone()
-                    .ok_or_else(|| "summary is required when action='leave'".to_string())?;
-                let leave_params = HandoffLeaveParams {
-                    summary,
-                    next_steps: params.next_steps.clone(),
-                    target_agent: params.target_agent.clone(),
-                    context: params.context.clone(),
-                };
-                handle_handoff_leave(self, leave_params).await
-            }
-            "check" => {
-                let check_params = HandoffCheckParams {
-                    agent_id: params.agent_id.clone(),
-                    acknowledge: params.acknowledge,
-                };
-                handle_handoff_check(self, check_params).await
-            }
             "promote_issue" => {
                 let memo_id = params
                     .memo_id
@@ -112,8 +70,13 @@ impl MemoryServer {
                 };
                 handle_handoff_promote_issue(self, promote_params).await
             }
+            "leave" | "check" => Err(format!(
+                "action='{action}' was retired in #1099. Use tachi_memory(action='sticky_leave'|'sticky_check') \
+                 for a short agent-to-agent note, or tachi_orchestrator(action='handoff_write'|'handoff_read') \
+                 for a structured task baton. 'promote_issue' is the only action tachi_handoff still supports."
+            )),
             _ => Err(format!(
-                "Invalid action '{}'. Use 'leave', 'check', or 'promote_issue'.",
+                "Invalid action '{}'. tachi_handoff only supports 'promote_issue'.",
                 params.action
             )),
         }

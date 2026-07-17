@@ -1,88 +1,11 @@
-use crate::server_state::{DbScope, HandoffMemo, MemoryServer};
+use crate::server_state::HandoffMemo;
 use memcore::MemoryEntry;
 
-pub(super) fn memo_matches_agent(memo: &HandoffMemo, agent_id: Option<&str>) -> bool {
-    if memo.acknowledged {
-        return false;
-    }
-
-    match (agent_id, memo.target_agent.as_deref()) {
-        (_, None) => true,
-        (Some(my_id), Some(target)) => my_id == target,
-        (None, Some(_)) => true,
-    }
-}
-
-pub(super) fn memo_to_memory_entry(server: &MemoryServer, memo: &HandoffMemo) -> MemoryEntry {
-    let memo_id = memo.id.clone();
-    let mut metadata = crate::provenance::inject_provenance(
-        server,
-        serde_json::json!({
-            "handoff_memo_id": memo_id,
-            "handoff": memo,
-            "status": "pending",
-        }),
-        "handoff_leave",
-        "handoff_memo",
-        Some("general"),
-        DbScope::Global,
-        serde_json::json!({
-            "from_agent": memo.from_agent.clone(),
-            "target_agent": memo.target_agent.clone(),
-            "next_steps_count": memo.next_steps.len(),
-        }),
-    );
-    // Handoff lives in the global DB but uses a non-/global path prefix; opt
-    // in to cross-project routing so path-routing validation lets it through.
-    if let Some(obj) = metadata.as_object_mut() {
-        obj.insert(
-            "allow_cross_project".to_string(),
-            serde_json::Value::Bool(true),
-        );
-    }
-
-    let routed_path = memcore::path_router::standardize_handoff_path(memo.target_agent.as_deref());
-
-    MemoryEntry {
-        id: format!("handoff:{}", memo_id),
-        text: format!(
-            "[Handoff from {}] {}\n\nNext steps:\n{}",
-            memo.from_agent,
-            memo.summary,
-            memo.next_steps
-                .iter()
-                .enumerate()
-                .map(|(i, s)| format!("{}. {}", i + 1, s))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ),
-        category: "handoff".to_string(),
-        importance: 0.75,
-        summary: format!("Handoff from {}", memo.from_agent),
-        path: routed_path,
-        timestamp: memo.created_at.clone(),
-        valid_from: String::new(),
-        valid_until: None,
-        topic: "agent-handoff".to_string(),
-        keywords: vec!["handoff".to_string(), memo.from_agent.clone()],
-        persons: vec![],
-        entities: vec![memo.from_agent.clone()],
-        location: String::new(),
-        source: "extraction".to_string(),
-        scope: "general".to_string(),
-        archived: false,
-        access_count: 0,
-        last_access: None,
-        revision: 1,
-        vector: None,
-        metadata,
-        retention_policy: Some(memcore::RetentionPolicy::Pinned.as_str().to_string()),
-        domain: None,
-        recall_count: 0,
-        query_diversity: 0,
-        tier: "raw".to_string(),
-    }
-}
+// #1099: `memo_matches_agent` (used only by the retired `handoff_check`
+// action) and `memo_to_memory_entry` (used only by the retired
+// `handoff_leave` action, which was the sole writer of new `handoff:<id>`
+// entries) are gone along with those routes. `memo_from_entry` survives —
+// `promote_issue` still reads pre-existing handoff entries through it.
 
 pub(super) fn memo_from_entry(entry: &MemoryEntry) -> HandoffMemo {
     if let Some(memo) = entry
