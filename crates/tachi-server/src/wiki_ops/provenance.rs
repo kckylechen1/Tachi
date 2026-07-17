@@ -19,13 +19,23 @@ use super::*;
 /// `source_refs`, `evidence_refs_v1`, and (when present) `review_receipt`
 /// attached from the full stored entry.
 ///
-/// Rows whose `id` cannot be resolved against this function's own
-/// enrichment lookup (a defensive fallback covering wiki layouts spread
-/// across named-project stores this leaf's single-project lookup does not
-/// fully enumerate) are left unfiltered and unenriched rather than hidden —
-/// this leaf's frozen "stay behavior-frozen on existing wiki reads"
-/// constraint takes priority over enrichment completeness for a row this
-/// function cannot honestly classify.
+/// Cross-vendor review fix (#1215, BUG 4): rows whose `id` cannot be
+/// resolved against this function's own enrichment lookup — because the
+/// candidate lookup itself failed, or because the id simply isn't among the
+/// (capped) candidates returned — used to be left UNFILTERED ("serve
+/// everything" on a lookup miss/failure), which is a fail-OPEN gate on a
+/// truthful-retrieval boundary: a DB hiccup or a >5000-row wiki silently
+/// bypassed lifecycle filtering entirely. The gate now fails CLOSED: an
+/// unresolved row is excluded from both the default (active-only) scope and
+/// any explicit named-lifecycle scope (we cannot honestly confirm it
+/// matches what was asked for), and is kept ONLY for the explicit `"all"`
+/// escape hatch (`requested_lifecycle == Some("all")`) — a caller who
+/// deliberately asked for "everything, unfiltered" still gets everything,
+/// but every other caller loses nothing it could safely have gotten (an
+/// unresolved active row that legitimately matched the requested scope was
+/// never distinguishable from an unresolved draft anyway; excluding both is
+/// the safe default). The candidate lookup failure itself is now propagated
+/// as an error instead of silently degrading to an empty candidate set.
 pub(crate) fn apply_wiki_lifecycle_gate(
     server: &MemoryServer,
     project: Option<&str>,
@@ -45,7 +55,8 @@ pub(crate) fn apply_wiki_lifecycle_gate(
     let default_to_active_only = requested_lifecycle.is_none();
 
     let lookup_project = project.unwrap_or("wiki");
-    let entries = list_related_candidates(server, lookup_project, 5000).unwrap_or_default();
+    let entries = list_related_candidates(server, lookup_project, 5000)
+        .map_err(|e| format!("wiki lifecycle gate candidate lookup failed: {e}"))?;
     let by_id: HashMap<&str, &MemoryEntry> = entries
         .iter()
         .map(|entry| (entry.id.as_str(), entry))
@@ -53,11 +64,12 @@ pub(crate) fn apply_wiki_lifecycle_gate(
 
     rows.retain_mut(|row| {
         let Some(id) = row.get("id").and_then(Value::as_str).map(str::to_string) else {
-            return true;
+            return is_all_scope;
         };
         let Some(&entry) = by_id.get(id.as_str()) else {
-            // Unresolved row: see module doc — leave it alone.
-            return true;
+            // Unresolved row: fail closed (see doc comment above) — kept
+            // only under the explicit "all" opt-out.
+            return is_all_scope;
         };
         let lifecycle = derive_wiki_lifecycle(&entry.metadata, &entry.path);
         let keep = if let Some(wanted) = requested {

@@ -72,6 +72,16 @@ pub(crate) async fn handle_tachi_task_brief(
     )
     .await?;
     crate::wiki_ops::filter_user_facing_wiki_rows(&mut wiki_rows);
+    // #1072 fix-round (#1215 BUG 4): `tachi_task(action='brief')` fed raw
+    // `/wiki` rows (including unreviewed drafts) into `wiki_hits` and the
+    // debug checklist with no lifecycle filtering — another named
+    // reasoning-context bypass. Gate to the default (active-only) scope.
+    crate::wiki_ops::apply_wiki_lifecycle_gate(
+        server,
+        params.project.as_deref(),
+        &mut wiki_rows,
+        None,
+    )?;
     let memory_rows = search_memory_rows(
         server,
         SearchMemoryParams {
@@ -239,7 +249,19 @@ pub(crate) async fn handle_tachi_feature_briefing(
             !params.include_global,
         ),
     );
-    let wiki_rows = wiki_rows.unwrap_or_default();
+    let mut wiki_rows = wiki_rows.unwrap_or_default();
+    // #1072 fix-round (#1215 BUG 4): `tachi_task(action='intake'/'plan'/
+    // 'doc_index'/...)` fed raw `/wiki` rows into `wiki_hits`/`doc_index`
+    // with no lifecycle filtering — another named reasoning-context bypass.
+    // Gate to the default (active-only) scope; a lookup failure degrades to
+    // "no wiki hits" rather than failing the whole briefing.
+    // `project: None` matches the wiki search call above (unscoped, same as
+    // `apply_wiki_lifecycle_gate`'s own "wiki" default lookup project).
+    if let Err(err) = crate::wiki_ops::apply_wiki_lifecycle_gate(server, None, &mut wiki_rows, None)
+    {
+        tracing::warn!("[feature_briefing] wiki lifecycle gate failed, dropping wiki hits: {err}");
+        wiki_rows.clear();
+    }
     let memory_rows = memory_rows.unwrap_or_default();
     let eval_rows = eval_rows.unwrap_or_default();
 

@@ -144,9 +144,36 @@ pub(crate) async fn handle_recall_context(
         )
         .await
         {
-            Ok(rows) if !rows.is_empty() => {
-                let ctx = build_wiki_context(&rows);
-                (rows, ctx)
+            Ok(mut rows) if !rows.is_empty() => {
+                // #1072 fix-round (#1215 BUG 4): `recall_context` used to feed
+                // raw, ungated `/wiki` search rows straight into
+                // `<wiki-knowledge>` synthesis context and the `wiki_results`
+                // response field — the exact "unreviewed drafts served as
+                // reasoning/prompt-context truth" bypass the cross-vendor
+                // review named. `recall_context` has no explicit lifecycle
+                // scope param (and should not grow one — this is a reasoning
+                // surface, not an authoring one), so the gate always runs in
+                // its default (active-only) scope here; a lookup failure now
+                // fails this arm closed (skip wiki, keep the rest of recall)
+                // rather than silently serving unfiltered drafts.
+                match crate::wiki_ops::apply_wiki_lifecycle_gate(
+                    server,
+                    Some(params.wiki_project.as_str()),
+                    &mut rows,
+                    None,
+                ) {
+                    Ok(()) if !rows.is_empty() => {
+                        let ctx = build_wiki_context(&rows);
+                        (rows, ctx)
+                    }
+                    Ok(()) => (vec![], String::new()),
+                    Err(err) => {
+                        tracing::warn!(
+                            "[recall_context] wiki lifecycle gate failed, skipping wiki: {err}"
+                        );
+                        (vec![], String::new())
+                    }
+                }
             }
             Ok(_) => (vec![], String::new()),
             Err(err) => {

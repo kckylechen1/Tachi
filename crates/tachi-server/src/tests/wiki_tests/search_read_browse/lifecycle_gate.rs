@@ -158,3 +158,63 @@ async fn wiki_read_falls_back_to_legacy_source_refs_when_no_typed_refs_present()
         json!(["kckylechen1/tachi#1072"])
     );
 }
+
+/// Cross-vendor review (#1215 BUG 4): "The gate itself fails open: missing
+/// IDs or lookup failures convert to 'serve everything'
+/// (wiki_ops/provenance.rs:47-60, .unwrap_or_default())." Exercises
+/// `apply_wiki_lifecycle_gate` directly with a row whose `id` cannot be
+/// resolved against the store (simulating a >5000-candidate truncation miss
+/// or a stale/foreign id) — this used to be kept unfiltered ("leave it
+/// alone") under EVERY scope; it must now be excluded from the default
+/// (active-only) scope and any explicit named scope, and kept ONLY under
+/// the explicit `"all"` opt-out.
+#[tokio::test]
+async fn apply_wiki_lifecycle_gate_fails_closed_on_unresolved_row() {
+    let (server, _home) = seed_wiki_project_entries(vec![active_wiki_entry()]);
+    let unresolved_row = || {
+        json!({
+            "id": "wiki-does-not-exist-in-store",
+            "path": "/wiki/engineering/lifecycle/unresolved",
+        })
+    };
+
+    let mut default_scope_rows = vec![unresolved_row()];
+    crate::wiki_ops::apply_wiki_lifecycle_gate(
+        &server,
+        Some("wiki"),
+        &mut default_scope_rows,
+        None,
+    )
+    .expect("gate should not error");
+    assert!(
+        default_scope_rows.is_empty(),
+        "RED: an unresolved row must not be served under the default (active-only) scope: {default_scope_rows:?}"
+    );
+
+    let mut named_scope_rows = vec![unresolved_row()];
+    crate::wiki_ops::apply_wiki_lifecycle_gate(
+        &server,
+        Some("wiki"),
+        &mut named_scope_rows,
+        Some("pending_review"),
+    )
+    .expect("gate should not error");
+    assert!(
+        named_scope_rows.is_empty(),
+        "an unresolved row must not be served under an explicit named scope either: {named_scope_rows:?}"
+    );
+
+    let mut all_scope_rows = vec![unresolved_row()];
+    crate::wiki_ops::apply_wiki_lifecycle_gate(
+        &server,
+        Some("wiki"),
+        &mut all_scope_rows,
+        Some("all"),
+    )
+    .expect("gate should not error");
+    assert_eq!(
+        all_scope_rows.len(),
+        1,
+        "the explicit 'all' opt-out is the one scope that still serves an unresolved row"
+    );
+}
