@@ -594,9 +594,10 @@ fn ts_days_ago(days: i64) -> String {
 //
 // - rows: 630 / 6,300 / 63,000 (the #1142 contract's 0.63k/6.3k/63k).
 // - byte distribution: one-line (this file's existing ~80-byte shape),
-//   production quantiles (a synthetic 60/30/10 short/medium/long mix — NOT
-//   measured production telemetry, see `production_quantile_target_bytes`),
-//   KB paragraphs (~1-3KB, uniform-ish).
+//   synthetic production-like (a synthetic 60/30/10 short/medium/long mix —
+//   NOT measured production telemetry, see
+//   `synthetic_production_like_target_bytes`), KB paragraphs (~1-3KB,
+//   uniform-ish).
 // - selectivity: absent term (zero matches — the worst-case full-scan
 //   baseline), newest-dense (small tied-relevance cohort at the head of
 //   recency), oldest-target (single strongest match at the tail of
@@ -629,7 +630,7 @@ fn ts_days_ago(days: i64) -> String {
 // # Kill-test
 //
 // One extra JSONL line after the 72 per-cell records: for the
-// `production_quantiles` byte distribution (the grid's "realistic bytes"
+// `synthetic_production_like` byte distribution (the grid's "realistic bytes"
 // cross-section) and `cache_state=warmed`, the absent_term and
 // recent_hit_200 warmed p50 at each of the three row tiers. If absent_term
 // grows with rows while recent_hit_200 stays roughly flat (plateaus at
@@ -688,21 +689,21 @@ const ABSENT_TERM_QUERY: &str = "zqxabsentneverseeded9999";
 #[derive(Clone, Copy, Debug)]
 enum ByteDistribution {
     OneLine,
-    ProductionQuantiles,
+    SyntheticProductionLike,
     KbParagraphs,
 }
 
 impl ByteDistribution {
     const ALL: [ByteDistribution; 3] = [
         ByteDistribution::OneLine,
-        ByteDistribution::ProductionQuantiles,
+        ByteDistribution::SyntheticProductionLike,
         ByteDistribution::KbParagraphs,
     ];
 
     fn label(self) -> &'static str {
         match self {
             ByteDistribution::OneLine => "one_line",
-            ByteDistribution::ProductionQuantiles => "production_quantiles",
+            ByteDistribution::SyntheticProductionLike => "synthetic_production_like",
             ByteDistribution::KbParagraphs => "kb_paragraphs",
         }
     }
@@ -926,8 +927,8 @@ fn filler_text(
     let base = format!("{name} discussion of {w1} and {w2} subsystem details {raretok}");
     match dist {
         ByteDistribution::OneLine => base,
-        ByteDistribution::ProductionQuantiles => {
-            pad_to_bytes(&base, production_quantile_target_bytes(i), i)
+        ByteDistribution::SyntheticProductionLike => {
+            pad_to_bytes(&base, synthetic_production_like_target_bytes(i), i)
         }
         ByteDistribution::KbParagraphs => pad_to_bytes(&base, kb_paragraph_target_bytes(i), i),
     }
@@ -936,10 +937,10 @@ fn filler_text(
 /// Synthetic three-bucket size mix (60% short / 30% medium / 10% long).
 /// This is NOT sourced from measured production telemetry — this repo has
 /// none to cite for entry-text length — it is chosen to give the grid's
-/// "production quantiles" cell a realistic mixed-size shape instead of a
+/// "synthetic production-like" cell a realistic mixed-size shape instead of a
 /// uniform one. Flagged here so a reader does not mistake it for a measured
 /// distribution.
-fn production_quantile_target_bytes(i: usize) -> usize {
+fn synthetic_production_like_target_bytes(i: usize) -> usize {
     match bucket_pct(i) {
         0..=59 => 180,
         60..=89 => 650,
@@ -1052,7 +1053,7 @@ fn symbolic_scan_mirror_query_plan(conn: &Connection) -> Vec<String> {
 /// kill-test summary line. See the module-level doc for the full design.
 fn run_symbolic_scan_grid() {
     // Growth tracking for the kill-test cross-section: warmed p50, at
-    // byte_distribution == production_quantiles (the grid's "realistic
+    // byte_distribution == synthetic_production_like (the grid's "realistic
     // bytes" cell), across the three row-count tiers.
     let mut absent_term_growth: [Option<u64>; 3] = [None; 3];
     let mut recent_hit_growth: [Option<u64>; 3] = [None; 3];
@@ -1086,7 +1087,7 @@ fn run_symbolic_scan_grid() {
                         }
                     };
 
-                    if matches!(dist, ByteDistribution::ProductionQuantiles)
+                    if matches!(dist, ByteDistribution::SyntheticProductionLike)
                         && matches!(cache, CacheState::Warmed)
                     {
                         if let Some(p50) = p50_us {
@@ -1146,7 +1147,7 @@ fn run_symbolic_scan_grid() {
     println!(
         "{}",
         json!({
-            "kill_test": "rows_scaling_at_production_quantiles_warmed_p50",
+            "kill_test": "rows_scaling_at_synthetic_production_like_warmed_p50",
             "rows": GRID_ROW_COUNTS,
             "absent_term_p50_us": absent_term_growth,
             "recent_hit_200_p50_us": recent_hit_growth,
