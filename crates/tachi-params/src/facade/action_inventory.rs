@@ -66,6 +66,59 @@ pub const TACHI_MEMORY_ACTIONS: &[&str] = &[
     "sticky_check",
 ];
 
+/// `tachi_event` facade actions. Single source for `facade::tachi_event_action_schema`
+/// and #1098's `action_effect` completeness test — previously each kept its own
+/// inline copy of this list with no shared source to catch drift.
+pub const TACHI_EVENT_ACTIONS: &[&str] = &[
+    "emit",
+    "query",
+    "metrics",
+    "project",
+    "promote",
+    "context",
+    "a2a",
+    "label_eval",
+];
+
+/// `tachi_wiki` facade actions. Single source for `facade::tachi_wiki_action_schema`
+/// and #1098's `action_effect` completeness test.
+pub const TACHI_WIKI_ACTIONS: &[&str] = &["search", "browse", "read", "write"];
+
+/// `tachi_skill` facade actions. Single source for `facade::tachi_skill_action_schema`
+/// and #1098's `action_effect` completeness test.
+pub const TACHI_SKILL_ACTIONS: &[&str] = &["discover", "run", "bundle", "loadout", "from_pattern"];
+
+/// `tachi_shell` facade actions (workflow stages). Single source for
+/// `orchestration::tachi_shell_action_schema` and #1098's `action_effect`
+/// completeness test.
+pub const TACHI_SHELL_ACTIONS: &[&str] = &[
+    "brainstorm",
+    "plan",
+    "dispatch",
+    "kanban",
+    "status",
+    "review",
+    "ship",
+];
+
+/// `tachi_arena` facade actions. Single source for
+/// `orchestration::tachi_arena_action_schema` and #1098's `action_effect`
+/// completeness test.
+pub const TACHI_ARENA_ACTIONS: &[&str] = &[
+    "open", "spawn", "board", "collect", "abort", "reap", "close",
+];
+
+/// `tachi_orchestrator` facade actions. Single source for
+/// `orchestration::tachi_orchestrator_action_schema` and #1098's
+/// `action_effect` completeness test.
+pub const TACHI_ORCHESTRATOR_ACTIONS: &[&str] = &[
+    "todo_list",
+    "todo_update",
+    "handoff_write",
+    "handoff_read",
+    "recovery_briefing",
+];
+
 /// Soft ceilings for F0 monitoring (primary schema actions only).
 pub const TACHI_TASK_PRIMARY_ACTION_SOFT_MAX: usize = 28;
 pub const TACHI_MEMORY_ACTION_SOFT_MAX: usize = 25;

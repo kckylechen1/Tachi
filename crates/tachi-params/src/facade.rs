@@ -85,16 +85,7 @@ fn tachi_event_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
-        &[
-            "emit",
-            "query",
-            "metrics",
-            "project",
-            "promote",
-            "context",
-            "a2a",
-            "label_eval",
-        ],
+        action_inventory::TACHI_EVENT_ACTIONS,
         "Required Tachi event ledger action.",
         generator,
     )
@@ -104,7 +95,7 @@ fn tachi_wiki_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
-        &["search", "browse", "read", "write"],
+        action_inventory::TACHI_WIKI_ACTIONS,
         "Required Tachi wiki facade action.",
         generator,
     )
@@ -114,7 +105,7 @@ fn tachi_skill_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
-        &["discover", "run", "bundle", "loadout", "from_pattern"],
+        action_inventory::TACHI_SKILL_ACTIONS,
         "Required Tachi skill facade action.",
         generator,
     )
@@ -621,8 +612,10 @@ mod action_enums;
 mod action_inventory;
 pub use action_enums::{TachiTaskAction, TachiVerifyAction};
 pub use action_inventory::{
-    TACHI_GH_ACTIONS, TACHI_GH_ACTION_SOFT_MAX, TACHI_MEMORY_ACTIONS, TACHI_MEMORY_ACTION_SOFT_MAX,
-    TACHI_TASK_PRIMARY_ACTION_SOFT_MAX, TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS,
+    TACHI_ARENA_ACTIONS, TACHI_EVENT_ACTIONS, TACHI_GH_ACTIONS, TACHI_GH_ACTION_SOFT_MAX,
+    TACHI_MEMORY_ACTIONS, TACHI_MEMORY_ACTION_SOFT_MAX, TACHI_ORCHESTRATOR_ACTIONS,
+    TACHI_SHELL_ACTIONS, TACHI_SKILL_ACTIONS, TACHI_TASK_PRIMARY_ACTION_SOFT_MAX,
+    TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS, TACHI_WIKI_ACTIONS,
 };
 
 mod orchestration;

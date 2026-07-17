@@ -34,6 +34,20 @@
 //! top of the shared metadata; the two membership lists in this module are
 //! the single source both `server_state::cache` and the completeness tests
 //! below read from, not a fourth independently-authored list.
+//!
+//! PR #1213 fix round (codex cross-vendor review, 2026-07-17): closed a
+//! direct-route fail-open for `remember`/`extract_facts`/`ingest_event`
+//! (checkpoint 4, [`STANDALONE_UNSAFE_ROUTES`]'s doc comment), and replaced
+//! the tautological "does every known facade action classify" completeness
+//! test (checkpoint 3 — trivially always true by clause 2's default-deny)
+//! with a direct-tool-route completeness gate
+//! (`f1098_every_cache_invalidating_standalone_route_is_triaged_for_replay_safety`)
+//! that CAN fail: every standalone entry in `CACHE_INVALIDATING_TOOLS` must
+//! be explicitly triaged into either `STANDALONE_UNSAFE_ROUTES` or the
+//! documented `KNOWN_UNADJUDICATED_STANDALONE_REPLAY_GAPS` allowlist. The
+//! latter enumerates pre-existing (pre-#1098) standalone fail-open gaps that
+//! were not part of the owner's 2026-07-17 adjudication and are therefore
+//! flagged, not silently fixed, per the issue's behavior-freeze boundary.
 
 use serde_json::Value;
 
@@ -198,7 +212,28 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
 // ─── Standalone (non-facade) native/proxy routes ─────────────────────────────
 
 /// Standalone tool names that are never safe to auto-replay after a failure.
-/// Ported verbatim from the pre-#1098 `shared_defs::NON_IDEMPOTENT_TOOL_NAMES`.
+/// The first nine entries are ported verbatim from the pre-#1098
+/// `shared_defs::NON_IDEMPOTENT_TOOL_NAMES`.
+///
+/// `remember` / `extract_facts` / `ingest_event` are a fix-round addition
+/// (codex review, PR #1213, checkpoint 4): all three are cache-invalidating
+/// (`CACHE_INVALIDATING_TOOLS` above already treats them as state-mutating)
+/// but were absent here, so a canonicalized/proxied route whose tail
+/// resolves to one of these three names (e.g. `remote__remember`) fell
+/// through both `STANDALONE_UNSAFE_ROUTES` and every `facade_action_effect`
+/// match arm to `dlq_mutation_is_unsafe`'s `.unwrap_or(false)` — misclassified
+/// safe-to-replay, letting `retry_dispatch` auto-retry a mutation via
+/// `proxy_call_internal`. A *native* call to any of the three never reaches
+/// this table at all (`should_enqueue_dlq`'s `is_native_route` short-circuit
+/// excludes it before `dlq_mutation_is_unsafe` is even consulted; see
+/// `server_handler.rs`'s DLQ capture call site), so this fix only changes
+/// behavior for the proxied/remote path, matching the owner's 2026-07-17
+/// ruling's "native-route behavior remains unchanged" clause. This is the
+/// same class of pre-existing standalone-route gap as
+/// `KNOWN_UNADJUDICATED_STANDALONE_REPLAY_GAPS` below (neither list item was
+/// named in `NON_IDEMPOTENT_TOOL_NAMES` pre-#1098) — these three are fixed
+/// because codex's checkpoint 4 named them with a live execution trace; the
+/// rest are flagged, not fixed, pending separate adjudication.
 const STANDALONE_UNSAFE_ROUTES: &[&str] = &[
     "save_memory",
     "tachi_save",
@@ -209,6 +244,9 @@ const STANDALONE_UNSAFE_ROUTES: &[&str] = &[
     "vault_setup_rotation",
     "vault_set_api_key_pool",
     "hub_call",
+    "remember",
+    "extract_facts",
+    "ingest_event",
 ];
 
 // ─── Clause 2: gated facades, default-deny per action ───────────────────────
@@ -426,6 +464,30 @@ mod tests {
         assert!(!dlq_unsafe("remote__search_memory", None));
     }
 
+    /// codex review (PR #1213, checkpoint 4): `remote__remember` used to
+    /// canonicalize to `remember`, which was absent from
+    /// `STANDALONE_UNSAFE_ROUTES` despite being cache-invalidating
+    /// (state-mutating) — `facade_action_effect` also doesn't recognize
+    /// `remember` as a facade, so the lookup fell all the way through to
+    /// `.unwrap_or(false)` and the proxied route was misclassified safe to
+    /// auto-retry. Same defect, same fix, for `extract_facts` /
+    /// `ingest_event`. Discrimination: red before this fix-round's
+    /// `STANDALONE_UNSAFE_ROUTES` addition, green after.
+    #[test]
+    fn f1213_direct_route_fail_open_closed_for_remember_extract_facts_ingest_event() {
+        for tool in ["remember", "extract_facts", "ingest_event"] {
+            assert!(
+                dlq_unsafe(tool, None),
+                "{tool} must be unsafe to replay (cache-invalidating, no action gate)"
+            );
+            let prefixed = format!("remote__{tool}");
+            assert!(
+                dlq_unsafe(&prefixed, None),
+                "{prefixed} must canonicalize to {tool} and stay unsafe to replay"
+            );
+        }
+    }
+
     // ── Clause 2: default-deny for state-changing facade actions ───────────
 
     #[test]
@@ -530,44 +592,149 @@ mod tests {
         }
     }
 
-    /// Mirrors the private action arrays behind
+    /// codex review (PR #1213, checkpoint 3): the three inventories this test
+    /// enumerated used to be handwritten local mirrors of the private
     /// `tachi_params::facade::{tachi_event_action_schema, tachi_wiki_action_schema}`
-    /// and `orchestration::tachi_shell_action_schema` (not exported as a public
-    /// inventory const — these three lists are the completeness fixture for
-    /// this module; a genuinely new action added there without a matching
-    /// update here still gets *a* classification via the default-Mutating
-    /// branch, it just isn't exercised by this specific enumeration).
-    const TACHI_EVENT_ACTIONS: &[&str] = &[
-        "emit",
-        "query",
-        "metrics",
-        "project",
-        "promote",
-        "context",
-        "a2a",
-        "label_eval",
-    ];
-    const TACHI_WIKI_ACTIONS: &[&str] = &["search", "browse", "read", "write"];
-    const TACHI_SHELL_ACTIONS: &[&str] = &[
-        "brainstorm",
-        "plan",
-        "dispatch",
-        "kanban",
-        "status",
-        "review",
-        "ship",
-    ];
-
+    /// / `orchestration::tachi_shell_action_schema` string literals, with no
+    /// shared source to catch drift between the schema and this test. Those
+    /// three schema functions — plus `tachi_skill_action_schema`,
+    /// `tachi_arena_action_schema`, `tachi_orchestrator_action_schema` — now
+    /// read from `tachi_params::facade::action_inventory` pub consts that this
+    /// test also imports (`tachi_params::TACHI_EVENT_ACTIONS` etc.): one
+    /// source, not a fourth independently-authored list.
     #[test]
     fn f1098_every_typed_facade_action_has_effect_metadata() {
         assert_all_classified("tachi_memory", tachi_params::TACHI_MEMORY_ACTIONS);
         assert_all_classified("tachi_gh", tachi_params::TACHI_GH_ACTIONS);
         let task_actions = tachi_params::TachiTaskAction::primary_wire_strings();
         assert_all_classified("tachi_task", &task_actions);
-        assert_all_classified("tachi_event", TACHI_EVENT_ACTIONS);
-        assert_all_classified("tachi_wiki", TACHI_WIKI_ACTIONS);
-        assert_all_classified("tachi_shell", TACHI_SHELL_ACTIONS);
+        assert_all_classified("tachi_event", tachi_params::TACHI_EVENT_ACTIONS);
+        assert_all_classified("tachi_wiki", tachi_params::TACHI_WIKI_ACTIONS);
+        assert_all_classified("tachi_shell", tachi_params::TACHI_SHELL_ACTIONS);
+        // codex checkpoint 3: "Typed TachiVerifyAction::ALL exists in
+        // crates/tachi-params but is ignored." These four are in the
+        // unaudited/always-Mutating+Unsafe bucket (facade_action_effect's
+        // empty-whitelist arm), so this doesn't change their classification —
+        // it proves the enumeration walks the REAL typed action universe for
+        // them too, instead of never touching real inventories that exist.
+        assert_all_classified("tachi_skill", tachi_params::TACHI_SKILL_ACTIONS);
+        assert_all_classified("tachi_arena", tachi_params::TACHI_ARENA_ACTIONS);
+        assert_all_classified(
+            "tachi_orchestrator",
+            tachi_params::TACHI_ORCHESTRATOR_ACTIONS,
+        );
+        let verify_actions = tachi_params::TachiVerifyAction::all_wire_strings();
+        assert_all_classified("tachi_verify", &verify_actions);
     }
+
+    /// #1098 direct-route completeness (acceptance: "every ... direct tool
+    /// route ... has effect/replay metadata or fails a completeness test").
+    /// Facade actions are default-deny by construction —
+    /// `facade_action_effect`'s final arm means `is_some()` is trivially
+    /// always true for a known facade and cannot, by itself, tell a reviewed
+    /// classification from an unclassified one; that structural guarantee
+    /// (not a test) is what makes facade-action coverage total (codex review,
+    /// PR #1213, checkpoint 3).
+    ///
+    /// A *standalone* route has no such default: a canonical name that is
+    /// neither in `STANDALONE_UNSAFE_ROUTES` nor a recognized facade silently
+    /// falls through `facade_action_effect`'s `_ => None` arm to
+    /// `dlq_mutation_is_unsafe`'s `.unwrap_or(false)` — legacy "outside the
+    /// known universe" behavior
+    /// (`f1098_a_tool_outside_the_known_universe_is_unchanged`) — even when
+    /// the tool provably mutates state. That is exactly the checkpoint-4 bug
+    /// this fix round closed for `remember`/`extract_facts`/`ingest_event`.
+    ///
+    /// This test makes the rest of that class of gap structurally visible
+    /// instead of silent: every standalone (non-facade) entry in
+    /// `CACHE_INVALIDATING_TOOLS` — this module's own typed authority for
+    /// "this route mutates state" — must land in EITHER
+    /// `STANDALONE_UNSAFE_ROUTES` OR the explicit,
+    /// individually-commented `KNOWN_UNADJUDICATED_STANDALONE_REPLAY_GAPS`
+    /// allowlist below. A future tool added to `CACHE_INVALIDATING_TOOLS`
+    /// that lands in neither fails this test instead of disappearing into
+    /// the same silent fail-open path unnoticed.
+    #[test]
+    fn f1098_every_cache_invalidating_standalone_route_is_triaged_for_replay_safety() {
+        const KNOWN_FACADES: &[&str] = &[
+            "tachi_memory",
+            "tachi_event",
+            "tachi_wiki",
+            "tachi_task",
+            "tachi_gh",
+            "tachi_shell",
+            "tachi_skill",
+            "tachi_verify",
+            "tachi_domain_adapter",
+            "tachi_handoff",
+            "tachi_orchestrator",
+            "tachi_arena",
+            "tachi_sandbox",
+            "tachi_complete",
+        ];
+        for name in CACHE_INVALIDATING_TOOLS {
+            if KNOWN_FACADES.contains(name) {
+                // Facade actions are triaged by `facade_action_effect`, not
+                // by this whole-tool-name gate.
+                continue;
+            }
+            assert!(
+                STANDALONE_UNSAFE_ROUTES.contains(name)
+                    || KNOWN_UNADJUDICATED_STANDALONE_REPLAY_GAPS.contains(name),
+                "'{name}' invalidates the cache (mutates state per this module's own \
+                 typed authority) but is neither in STANDALONE_UNSAFE_ROUTES nor \
+                 documented as a pending-adjudication gap in \
+                 KNOWN_UNADJUDICATED_STANDALONE_REPLAY_GAPS — triage it into one of \
+                 the two instead of leaving it silently unclassified"
+            );
+        }
+    }
+
+    /// #1098 (PR #1213 fix round, codex checkpoint 4): standalone routes that
+    /// `CACHE_INVALIDATING_TOOLS` already marks as state-mutating but that
+    /// were ALSO already replay-classified `false` (safe) pre-#1098 — absent
+    /// from the legacy `NON_IDEMPOTENT_TOOL_NAMES` this module's
+    /// `STANDALONE_UNSAFE_ROUTES` ported verbatim. This fail-open gap
+    /// pre-dates #1098; it is not the specific bypass the owner's
+    /// 2026-07-17 adjudication comment named (that comment named
+    /// *facade-action* gaps — tachi_memory's
+    /// gc/claim/release/sticky_leave/sticky_check, tachi_event's
+    /// emit/project/promote — all closed by clause 2's default-deny).
+    /// Closing every entry here is a separate, unadjudicated behavior change
+    /// (the same category `CACHE_INVALIDATING_TOOLS`'s own doc comment
+    /// already carves out for the tachi_gh/tachi_event cache-invalidation
+    /// gap as "not part of #1098's scope") — flagged here per the issue's "a
+    /// mismatch discovered in the baseline is flagged for adjudication; do
+    /// not silently normalize" boundary, not silently fixed by this fix
+    /// round. `remember`/`extract_facts`/`ingest_event` were the three
+    /// codex's checkpoint 4 named with a live execution trace and are fixed
+    /// (removed from this list, added to `STANDALONE_UNSAFE_ROUTES`); the
+    /// rest are flagged, not fixed.
+    const KNOWN_UNADJUDICATED_STANDALONE_REPLAY_GAPS: &[&str] = &[
+        "hub_register",
+        "hub_quick_add",
+        "hub_review",
+        "hub_set_active_version",
+        "hub_export_skills",
+        "skill_evolve",
+        "capture_session",
+        "archive_memory",
+        "compact_rollup",
+        "compact_session_memory",
+        "sync_memories",
+        "vc_register",
+        "vc_bind",
+        "hub_feedback",
+        "sandbox_set_rule",
+        "sandbox_set_policy",
+        "tachi_init_project_db",
+        "post_card",
+        "update_card",
+        "distill_trajectory",
+        "tachi_unstick",
+        "wiki_lint",
+        "tachi_wiki_ingest",
+    ];
 
     /// #1098: `ActionEffect::ReadOnly` must only ever pair with
     /// `ReplaySafety::Safe` — the type only exposes one constructor for that

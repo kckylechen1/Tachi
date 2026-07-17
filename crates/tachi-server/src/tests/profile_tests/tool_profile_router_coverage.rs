@@ -441,9 +441,33 @@ fn f1098_cache_policy_entries_are_live_registered_routes() {
 /// walks the real, live router and proves the classification pass runs
 /// clean (no panic) end to end for every tool name the server actually
 /// exposes today, native or facade.
+///
+/// codex review (PR #1213, checkpoint 3): the pre-fix-round version of this
+/// test discarded the boolean result, proving only "did not panic". It now
+/// also asserts, against the LIVE router (not just the string constants a
+/// unit test in `action_effect` checks in isolation), that every currently
+/// registered cache-invalidating standalone route this fix round fixed
+/// (`remember`/`extract_facts`/`ingest_event`) really does classify unsafe
+/// end to end through `shared_defs::dlq_mutation_is_unsafe` — catching a
+/// future regression where the route stays registered but drops out of
+/// `STANDALONE_UNSAFE_ROUTES`.
 #[test]
 fn f1098_every_live_native_route_classifies_without_panicking() {
-    for name in native_route_names() {
-        let _ = crate::shared_defs::dlq_mutation_is_unsafe(&name, None);
+    let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
+    for name in &route_names {
+        let _ = crate::shared_defs::dlq_mutation_is_unsafe(name, None);
+    }
+
+    for fixed_route in ["remember", "extract_facts", "ingest_event"] {
+        assert!(
+            route_names.contains(fixed_route),
+            "'{fixed_route}' must still be a live registered route for the \
+             #1213 fail-open fix to mean anything"
+        );
+        assert!(
+            crate::shared_defs::dlq_mutation_is_unsafe(fixed_route, None),
+            "'{fixed_route}' must classify unsafe-to-replay through the live \
+             router (PR #1213 checkpoint 4 fix)"
+        );
     }
 }
