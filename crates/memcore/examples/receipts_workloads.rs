@@ -76,7 +76,7 @@ use memcore::{
     hybrid_search, hybrid_search_with_receipt, MemoryEdge, MemoryEntry, MemoryStore, SearchOptions,
     SearchPhaseReceipt,
 };
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use serde_json::json;
 use std::time::Instant;
 
@@ -965,12 +965,36 @@ const SYMBOLIC_SCAN_MIRROR_SQL: &str = r#"SELECT id FROM memories
 /// `crates/memcore/src/db/migrations.rs`'s `query_plan` test helper
 /// (`row.get::<_, String>(3)` — modern SQLite's `EXPLAIN QUERY PLAN` result
 /// columns are `id, parent, notused, detail`).
+///
+/// `SYMBOLIC_SCAN_MIRROR_SQL` declares 7 positional placeholders (`?1..?7`)
+/// mirroring `search_symbolic_candidates_with_relevance`'s real bind list
+/// (`crates/memcore/src/db/memory_crud/search.rs:259-285`); rusqlite 0.38
+/// rejects a placeholder-count mismatch, so this binds one representative,
+/// correctly-typed value per slot (matching that function's actual types:
+/// `?1`/`?2` archived/superseded flags as `i64`, `?3`/`?4` optional
+/// path/as-of filters left `NULL` to exercise the `IS NULL OR ...`
+/// short-circuit branch, `?5` a LIKE pattern, `?6` the relevance-scorer
+/// query text, `?7` the `LIMIT`). `EXPLAIN QUERY PLAN` reports the access
+/// strategy SQLite would choose for this shape; it does not execute the
+/// query body, so the bound values only need to type-check, not encode a
+/// real query.
 fn symbolic_scan_mirror_query_plan(conn: &Connection) -> Vec<String> {
     let mut stmt = conn
         .prepare(&format!("EXPLAIN QUERY PLAN {SYMBOLIC_SCAN_MIRROR_SQL}"))
         .expect("prepare mirror EXPLAIN QUERY PLAN");
     let rows = stmt
-        .query_map([], |row| row.get::<_, String>(3))
+        .query_map(
+            params![
+                0i64,
+                0i64,
+                Option::<String>::None,
+                Option::<String>::None,
+                "%x%",
+                "x",
+                1i64,
+            ],
+            |row| row.get::<_, String>(3),
+        )
         .expect("run mirror EXPLAIN QUERY PLAN");
     rows.collect::<Result<Vec<_>, _>>()
         .expect("collect mirror EXPLAIN QUERY PLAN rows")
