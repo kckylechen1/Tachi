@@ -30,6 +30,11 @@ mod types;
 pub use autofix::auto_fix_safe;
 #[cfg(test)]
 pub use classify::classify_one;
+/// Reused by `bootstrap::migrate_cli` (kckylechen1/tachi#1223) for the exact
+/// same zero-touch `PRAGMA user_version` probe `schema_skew` uses below — an
+/// immutable-URI open (not `MemoryStore::open_read_only`) is required there
+/// to guarantee a plan-only pass never writes a WAL/SHM sidecar.
+pub(crate) use classify::make_immutable_uri;
 pub use hub_lint::hub_capability_discovery_status_warnings;
 pub use render::render_report;
 pub use scan::{default_scan_roots, scan, ScanOptions};

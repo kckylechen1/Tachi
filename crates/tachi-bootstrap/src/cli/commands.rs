@@ -115,6 +115,27 @@ pub enum Commands {
         #[command(subcommand)]
         action: ManifestAction,
     },
+    /// Enumerate every known memory DB (global, manifest-addressed named
+    /// projects resolved to their real backing file, and the current
+    /// workspace's `.tachi/memory.db`) and report each one's schema-version
+    /// gap against this binary's `EXPECTED_SCHEMA_VERSION` (kckylechen1/tachi#1223).
+    ///
+    /// Plan-only (read-only, zero writes) by default. `--apply` authorizes
+    /// an in-process migration of exactly the libraries that are behind,
+    /// via a typed `MigrationAuthority::Allow` scoped to this invocation
+    /// (#1119's call-site-authority pattern — never a process env var, and
+    /// never the shared top-level `--allow-schema-migration` flag). A
+    /// library currently held by a live daemon is skipped and listed, not
+    /// aborted; the rest of the sweep continues.
+    Migrate {
+        /// Emit machine-readable JSON instead of the human summary table
+        #[arg(long)]
+        json: bool,
+        /// Actually migrate every library reported behind. Default is
+        /// plan-only: report the gap, make zero writes.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Run garbage collection
     Gc,
     /// Hub registry (list/show/bindings/stats/doctor) and capability management

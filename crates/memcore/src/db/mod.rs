@@ -111,8 +111,10 @@ pub use memory_crud::{
 pub use open::lock_retry_backoff_count;
 pub(crate) use open::{
     acquire_startup_lock, configure_connection, open_read_only, open_read_write,
-    retry_memory_locked, sqlite_error_is_locked,
+    retry_memory_locked,
 };
+/// Public: see `open::sqlite_error_is_locked`'s doc comment.
+pub use open::sqlite_error_is_locked;
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
 };
