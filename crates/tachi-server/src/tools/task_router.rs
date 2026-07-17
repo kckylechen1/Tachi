@@ -74,6 +74,7 @@ pub(super) async fn handle_tachi_task_facade(
                 auto_capability_bundle: params.auto_capability_bundle,
                 mcp_access: params.mcp_access.clone(),
                 allowed_mcp_servers: params.allowed_mcp_servers.clone(),
+                verbose: params.verbose,
             };
             crate::dispatch_ops::handle_tachi_dispatch(server, dispatch_params).await
         }
@@ -180,6 +181,7 @@ pub(super) async fn handle_tachi_task_facade(
         TachiTaskAction::Profiles | TachiTaskAction::Profile | TachiTaskAction::Card => {
             serde_json::to_string(&crate::dispatch_profile::dispatch_profiles_json_for_server(
                 server,
+                params.verbose.unwrap_or(false),
             )?)
             .map_err(|e| format!("serialize dispatch profiles: {e}"))
         }

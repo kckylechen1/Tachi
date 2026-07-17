@@ -41,6 +41,12 @@ async fn load_card_profiles(
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let mut args = serde_json::Map::new();
     args.insert("action".into(), json!("profiles"));
+    // tachi#1173 item 2 slimmed the default `tachi_task(action='profiles')`
+    // shape to name/backend/model/role; `tachi card list`/`tachi card show`
+    // are full-card consumers (compact_card_json reads mbit_card, guidance,
+    // moves, evidence_contract, authority), so this CLI facade opts back into
+    // the verbose shape explicitly.
+    args.insert("verbose".into(), json!(true));
     let body = dispatch_cli_tool(
         "tachi_task",
         args,

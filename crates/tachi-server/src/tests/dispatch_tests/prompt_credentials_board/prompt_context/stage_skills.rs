@@ -37,6 +37,7 @@ async fn dispatch_prompt_invokes_stage_and_waza_skills_for_execute_slice() {
             auto_capability_bundle: None,
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
+            verbose: None,
         },
     )
     .await;
@@ -98,6 +99,7 @@ async fn dispatch_prompt_invokes_native_subagent_factory_for_dispatch_stage() {
             auto_capability_bundle: None,
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
+            verbose: None,
         },
     )
     .await;

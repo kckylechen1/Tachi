@@ -37,6 +37,7 @@ fn test_dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams 
         auto_capability_bundle: None,
         mcp_access: None,
         allowed_mcp_servers: Vec::new(),
+        verbose: None,
     }
 }
 
@@ -880,6 +881,114 @@ async fn dispatch_receipt_carries_the_effective_authority_contract() {
         status["authority"]["enforcement"]["mode"],
         json!("advisory"),
         "the on-disk receipt must carry the enforcement mode: {status}"
+    );
+}
+
+/// tachi#1173 item 1 discriminator: on origin/main (pre-#1173) the dispatch
+/// response always embeds the full routing card (`profile` — the whole
+/// `ResolvedDispatchProfile` including its own nested `mbit_card` and
+/// `identity_receipt` — plus top-level `identity_receipt` and
+/// `dispatch_profile` duplicating the same mbit_card again), so this
+/// assertion is RED before the fix (those keys are always present) and GREEN
+/// after (they're absent by default). The default receipt must still carry
+/// the four fields the issue names: dispatch_id, state, run_dir,
+/// suggested_complete_command.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn dispatch_response_default_omits_fat_routing_card() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let tmp = tempfile::tempdir().expect("temp dispatch cwd");
+    let server = crate::tests::make_server();
+
+    let mut params = test_dispatch_params(Some("custom"), "slim receipt by default");
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+    params.cwd = Some(tmp.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
+    params.profile = Some("glm_impl".to_string());
+
+    let dispatch_response = handle_tachi_dispatch(&server, params)
+        .await
+        .expect("dispatch should start");
+    let response: Value = serde_json::from_str(&dispatch_response).expect("response JSON");
+
+    // The four fields the issue names as the default receipt shape.
+    assert!(response["dispatch_id"].is_string(), "{response}");
+    assert_eq!(response["state"], json!("TASK_STATE_WORKING"), "{response}");
+    assert!(response["run_dir"].is_string(), "{response}");
+    assert!(
+        response["suggested_complete_command"].is_object(),
+        "{response}"
+    );
+
+    // The fat fields must be entirely absent by default, not just null —
+    // `serde_json::Value::get` returning `Value::Null` for a present-but-null
+    // key would let a weakened "not truthy" check pass without actually
+    // slimming the payload.
+    assert!(
+        response.get("profile").is_none(),
+        "default dispatch response must not carry the full routing card: {response}"
+    );
+    assert!(
+        response.get("identity_receipt").is_none(),
+        "default dispatch response must not carry identity_receipt: {response}"
+    );
+    assert!(
+        response.get("dispatch_profile").is_none(),
+        "default dispatch response must not carry the mbit_card dispatch_profile: {response}"
+    );
+    assert!(
+        !dispatch_response.contains("mbit_card"),
+        "{dispatch_response}"
+    );
+    assert_eq!(response["verbose"], json!(false), "{response}");
+}
+
+/// tachi#1173 item 1 discriminator (verbose escape hatch): verbose=true must
+/// restore the exact pre-#1173 full routing card so no information is lost,
+/// only deferred behind an explicit opt-in.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn dispatch_response_verbose_true_restores_full_routing_card() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let tmp = tempfile::tempdir().expect("temp dispatch cwd");
+    let server = crate::tests::make_server();
+
+    let mut params = test_dispatch_params(Some("custom"), "verbose receipt on request");
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+    params.cwd = Some(tmp.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
+    params.profile = Some("glm_impl".to_string());
+    params.verbose = Some(true);
+
+    let dispatch_response = handle_tachi_dispatch(&server, params)
+        .await
+        .expect("dispatch should start");
+    let response: Value = serde_json::from_str(&dispatch_response).expect("response JSON");
+
+    assert_eq!(response["verbose"], json!(true), "{response}");
+    assert!(
+        response["profile"].is_object(),
+        "verbose=true must carry the full routing card: {response}"
+    );
+    assert!(
+        response["profile"]["mbit_card"].is_object(),
+        "verbose=true's `profile` is the full ResolvedDispatchProfile, which nests its own mbit_card: {response}"
+    );
+    assert!(
+        response["identity_receipt"].is_object(),
+        "verbose=true must carry identity_receipt: {response}"
+    );
+    assert!(
+        response["dispatch_profile"].is_object(),
+        "verbose=true must carry the dispatch_profile mbit_card: {response}"
     );
 }
 

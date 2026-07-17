@@ -19,15 +19,43 @@ pub(crate) use tachi_dispatch::{
     DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES, PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
 };
 
-pub(crate) fn dispatch_profiles_json_for_server(server: &MemoryServer) -> Result<Value, String> {
+/// tachi#1173 item 2: `verbose=false` (the default) returns one slim row per
+/// profile — name/backend/model/role — instead of the full mbit_card
+/// (stats/guidance/moves/personality/skill_loadout/evidence_contract) that a
+/// listing call doesn't need. `verbose=true` preserves the pre-#1173 full-card
+/// shape for callers that need it (e.g. the `tachi card` CLI).
+pub(crate) fn dispatch_profiles_json_for_server(
+    server: &MemoryServer,
+    verbose: bool,
+) -> Result<Value, String> {
+    let profiles = DISPATCH_PROFILES
+        .iter()
+        .map(|profile| profile_json_for_server(server, profile))
+        .collect::<Result<Vec<_>, _>>()?;
+    let profiles = if verbose {
+        profiles
+    } else {
+        profiles.iter().map(slim_profile_row).collect()
+    };
     Ok(json!({
-        "dispatch_profiles": DISPATCH_PROFILES
-            .iter()
-            .map(|profile| profile_json_for_server(server, profile))
-            .collect::<Result<Vec<_>, _>>()?,
+        "dispatch_profiles": profiles,
         "note": "DispatchProfile routes agents/context/evidence; ToolProfile gates visible tools.",
         "projection_namespace": PROFILE_CARD_OVERLAY_NS,
+        "verbose": verbose,
     }))
+}
+
+/// One row: name/backend/model/role. `full` is a `profile_json_for_server`
+/// output — these four fields are always top-level on that shape (see
+/// `tachi_dispatch::profiles::profile_json_with_loadout_and_evidence_contract`),
+/// so slimming is a field-drop, not a re-derivation.
+fn slim_profile_row(full: &Value) -> Value {
+    json!({
+        "name": full.get("name").cloned().unwrap_or(Value::Null),
+        "backend": full.get("backend").cloned().unwrap_or(Value::Null),
+        "model": full.get("model").cloned().unwrap_or(Value::Null),
+        "role": full.get("role").cloned().unwrap_or(Value::Null),
+    })
 }
 
 mod cards;
