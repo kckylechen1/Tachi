@@ -10,85 +10,11 @@ pub(crate) const TOOL_CACHE_TTL: Duration = Duration::from_secs(30);
 pub(crate) const TOOL_CACHE_MAX_ENTRIES: usize = 256;
 pub(super) const DEFAULT_MCP_DISCOVERY_TIMEOUT_MS: u64 = 10_000;
 
-/// Tools whose results can be cached (read-only, no side effects)
-pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
-    "section_build",
-    "recommend_capability",
-    "recommend_skill",
-    "recommend_toolchain",
-    "prepare_capability_bundle",
-    "tachi_task_brief",
-    "tachi_wiki_search",
-    "search_memory",
-    "find_similar_memory",
-    "get_memory",
-    "list_memories",
-    "memory_stats",
-    "hub_discover",
-    "hub_get",
-    "hub_stats",
-    "vc_list",
-    "vc_resolve",
-    "get_pipeline_status",
-    "wiki_search",
-    // Facade tools (read-only)
-    "tachi_search",
-    "tachi_web_search",
-    "tachi_browse",
-    "tachi_component",
-];
-
-/// Tools that invalidate the cache (write operations)
-pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
-    "save_memory",
-    "remember",
-    "extract_facts",
-    "ingest_event",
-    "hub_register",
-    "hub_quick_add",
-    "hub_review",
-    "hub_set_active_version",
-    "hub_export_skills",
-    "skill_evolve",
-    "capture_session",
-    "archive_memory",
-    "compact_rollup",
-    "compact_session_memory",
-    "sync_memories",
-    "vc_register",
-    "vc_bind",
-    "hub_feedback",
-    "sandbox_set_rule",
-    "sandbox_set_policy",
-    "tachi_init_project_db",
-    // #1099: "handoff_leave"/"handoff_check" retired — the routes no longer
-    // exist. "tachi_handoff" (below) stays, still mixed read/write via its
-    // one surviving action (promote_issue).
-    "post_card",
-    "update_card",
-    "distill_trajectory",
-    "tachi_unstick",
-    "wiki_lint",
-    "tachi_wiki_write",
-    "tachi_wiki_ingest",
-    // Facade tools (write / mixed)
-    "tachi_save",
-    "tachi_memory",
-    "tachi_domain_adapter",
-    "tachi_handoff",
-    "tachi_complete",
-    "tachi_orchestrator",
-    "tachi_task",
-    "tachi_wiki",
-    "tachi_skill",
-    "tachi_arena",
-    "tachi_verify",
-    "tachi_shell",
-    // #757 Cut3-S1: folded sandbox verb is mixed read/write (set_rule/
-    // set_policy mutate) — invalidate like the legacy sandbox_set_* aliases
-    // above, matching the whole-facade invalidation used for tachi_memory.
-    "tachi_sandbox",
-];
+/// #1098: single typed action-effect authority. `CACHEABLE_TOOLS` /
+/// `CACHE_INVALIDATING_TOOLS` used to be hand-maintained here independently
+/// of the DLQ/retry classification in `shared_defs.rs`; both now read the
+/// same source list from `crate::action_effect` (membership unchanged).
+pub(crate) use crate::action_effect::{CACHEABLE_TOOLS, CACHE_INVALIDATING_TOOLS};
 
 pub(crate) struct CachedResult {
     pub(crate) result: rmcp::model::CallToolResult,

@@ -57,59 +57,17 @@ pub(super) fn categorize_error(error: &str) -> String {
     }
 }
 
-const NON_IDEMPOTENT_TOOL_NAMES: &[&str] = &[
-    "save_memory",
-    "tachi_save",
-    "tachi_wiki_write",
-    "vault_set",
-    "vault_remove",
-    "vault_init",
-    "vault_setup_rotation",
-    "vault_set_api_key_pool",
-    // #1099: "handoff_leave" retired — the route no longer exists.
-    "hub_call",
-];
-
-const FACADE_MUTATING_ACTIONS: &[&str] = &[
-    "save",
-    "write",
-    "dispatch",
-    "complete",
-    "extract_facts",
-    "emit",
-    "delete",
-    "remove",
-    "promote_issue",
-    "merge",
-];
-
-fn tool_name_tail(tool_name: &str) -> &str {
-    tool_name.rsplit("__").next().unwrap_or(tool_name)
-}
-
 /// Returns true when replaying the tool through DLQ could duplicate writes.
+/// #1098: delegates to the single typed action-effect authority
+/// (`crate::action_effect`) instead of maintaining its own
+/// `NON_IDEMPOTENT_TOOL_NAMES` / `FACADE_MUTATING_ACTIONS` string tables —
+/// that module canonicalizes `tool_name` before classifying it, closing the
+/// remote-prefix bypass those two hand-rolled tables were prone to.
 pub(super) fn dlq_mutation_is_unsafe(
     tool_name: &str,
     arguments: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> bool {
-    if NON_IDEMPOTENT_TOOL_NAMES.contains(&tool_name)
-        || NON_IDEMPOTENT_TOOL_NAMES.contains(&tool_name_tail(tool_name))
-    {
-        return true;
-    }
-
-    if matches!(
-        tool_name,
-        "tachi_memory" | "tachi_event" | "tachi_wiki" | "tachi_task" | "tachi_gh" | "tachi_shell"
-    ) {
-        let action = arguments
-            .and_then(|args| args.get("action"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        return FACADE_MUTATING_ACTIONS.contains(&action);
-    }
-
-    false
+    crate::action_effect::dlq_mutation_is_unsafe(tool_name, arguments)
 }
 
 pub(super) fn should_enqueue_dlq(
@@ -400,5 +358,48 @@ mod dlq_tests {
         assert!(!should_enqueue_dlq("save_memory", None, true));
         assert!(!should_enqueue_dlq("hub_call", None, false));
         assert!(should_enqueue_dlq("remote__echo", None, false));
+    }
+
+    /// #1098: the owner's adjudication comment named this exact call shape —
+    /// `remote__tachi_memory(action='save')` failing through a non-native
+    /// (proxied) route used to pass the facade name match (raw name vs.
+    /// canonical) and enter the DLQ, where it could be auto-replayed and
+    /// duplicate the write. Discrimination: red before #1098's
+    /// canonicalization fix (`should_enqueue_dlq` returned `true` here),
+    /// green after.
+    #[test]
+    fn f1098_should_enqueue_dlq_closes_remote_facade_mutation_bypass() {
+        for action in [
+            "save",
+            "gc",
+            "claim",
+            "release",
+            "sticky_leave",
+            "sticky_check",
+        ] {
+            let args = serde_json::Map::from_iter([("action".to_string(), json!(action))]);
+            assert!(
+                !should_enqueue_dlq("remote__tachi_memory", Some(&args), false),
+                "remote__tachi_memory(action='{action}') must not enter the DLQ"
+            );
+        }
+        for action in ["emit", "project", "promote"] {
+            let args = serde_json::Map::from_iter([("action".to_string(), json!(action))]);
+            assert!(
+                !should_enqueue_dlq("remote__tachi_event", Some(&args), false),
+                "remote__tachi_event(action='{action}') must not enter the DLQ"
+            );
+        }
+        // A read-only failure through the same remote prefix still enters the
+        // normal (non-mutating) DLQ path — acceptance: "Read-only failures
+        // never enter a mutating DLQ path" does not mean they're excluded
+        // from the DLQ altogether, only that mutation classification never
+        // wrongly excludes them or wrongly admits an unsafe mutation.
+        let read_args = serde_json::Map::from_iter([("action".to_string(), json!("search"))]);
+        assert!(should_enqueue_dlq(
+            "remote__tachi_memory",
+            Some(&read_args),
+            false
+        ));
     }
 }

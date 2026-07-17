@@ -1,4 +1,4 @@
-use super::{string_enum_schema, DispatchMcpAccessParams};
+use super::{action_inventory, string_enum_schema, DispatchMcpAccessParams};
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
@@ -6,9 +6,7 @@ fn tachi_arena_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
-        &[
-            "open", "spawn", "board", "collect", "abort", "reap", "close",
-        ],
+        action_inventory::TACHI_ARENA_ACTIONS,
         "Required Tachi arena action.",
         generator,
     )
@@ -28,15 +26,7 @@ fn tachi_shell_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
-        &[
-            "brainstorm",
-            "plan",
-            "dispatch",
-            "kanban",
-            "status",
-            "review",
-            "ship",
-        ],
+        action_inventory::TACHI_SHELL_ACTIONS,
         "Required Tachi shell workflow stage.",
         generator,
     )
@@ -46,13 +36,7 @@ fn tachi_orchestrator_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
-        &[
-            "todo_list",
-            "todo_update",
-            "handoff_write",
-            "handoff_read",
-            "recovery_briefing",
-        ],
+        action_inventory::TACHI_ORCHESTRATOR_ACTIONS,
         "Required Tachi orchestrator action.",
         generator,
     )
