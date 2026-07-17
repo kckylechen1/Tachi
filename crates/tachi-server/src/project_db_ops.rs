@@ -79,21 +79,58 @@ impl MemoryServer {
             return Ok(project_name);
         }
 
-        let db_path = git_root.join(WORKSPACE_ROOT_DB_RELPATH);
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("create project db dir {}: {e}", parent.display()))?;
-        }
-        // Force the DB file (and its schema) into existence via the same
-        // per-path attach cache every named-project call goes through — see
-        // the doc comment above for why this, and not `activate_project_db`.
+        // Route through the same canonical containment guard
+        // `handle_tachi_init_project_db` uses below
+        // (`path_utils::alias::resolve_project_db_path`) instead of a bare
+        // `git_root.join(...)`: a repo-controlled `.tachi` symlink must not be
+        // able to redirect DB creation outside `git_root`. The guard
+        // canonicalizes the resolved parent directory and rejects anything
+        // that escapes `git_root` after symlink resolution (review finding
+        // [1], #1207).
+        let db_path = crate::path_utils::resolve_project_db_path(
+            &git_root,
+            std::path::Path::new(WORKSPACE_ROOT_DB_RELPATH),
+        )
+        .map_err(|e| {
+            format!(
+                "workspace root '{raw_root}' resolved to git root '{}' but its \
+                 {WORKSPACE_ROOT_DB_RELPATH} path is unsafe: {e}",
+                git_root.display()
+            )
+        })?;
+        // `resolve_project_db_path` already created the parent dir(s) as part
+        // of establishing containment. Force the DB file (and its schema)
+        // into existence via the same per-path attach cache every
+        // named-project call goes through — see the doc comment above for
+        // why this, and not `activate_project_db`.
         self.with_path_store(&db_path, |_store| Ok(()))
             .map_err(|e| format!("initialize project db at {}: {e}", db_path.display()))?;
 
-        // `ensure_plan_c_symlink` is a no-op `Skipped` on non-Unix hosts (see
-        // its own cfg-gated definitions in `path_utils/symlink.rs`) — safe to
-        // call unconditionally here, unlike `handle_tachi_init_project_db`
-        // below, which surfaces the platform split in its caller-facing note.
+        // Primary registration: write a manifest entry so
+        // `resolve_named_project_db_path` can find this DB by name
+        // independent of the Plan C symlink below — the manifest-recorded
+        // repo-local path is the addressing scheme's documented preferred
+        // path (`server_methods/db.rs::resolve_named_project_db_path`'s doc
+        // comment), and unlike the symlink it works on every platform (review
+        // finding [2], #1207: `ensure_plan_c_symlink` is a no-op `Skipped` on
+        // non-Unix hosts, so a project registered only via the symlink could
+        // never be reopened there).
+        if let Err(err) = register_repo_local_manifest_entry(&db_path, &project_name) {
+            tracing::warn!(
+                target: "tachi::project_db::auto_register",
+                project = %project_name,
+                error = %err,
+                "workspace-root auto-registration could not write a manifest entry; falling \
+                 back to Plan C symlink resolution only"
+            );
+        }
+
+        // Secondary/legacy addressing: the `~/.tachi/projects/<name>/`
+        // symlink alias. `ensure_plan_c_symlink` is a no-op `Skipped` on
+        // non-Unix hosts (see its own cfg-gated definitions in
+        // `path_utils/symlink.rs`) — safe to call unconditionally here,
+        // unlike `handle_tachi_init_project_db` below, which surfaces the
+        // platform split in its caller-facing note.
         match crate::path_utils::ensure_plan_c_symlink(&db_path, &git_root) {
             crate::path_utils::PlanCLinkOutcome::Failed { path, error } => {
                 tracing::warn!(
@@ -113,8 +150,30 @@ impl MemoryServer {
                     issue.warning_message()
                 );
             }
-            _ => {}
+            // Exhaustive on purpose (no `_` catch-all): a future new
+            // `PlanCLinkOutcome` variant must force a deliberate decision
+            // here about whether it needs its own warning, not silently fall
+            // into "nothing to log" the way a wildcard arm would.
+            crate::path_utils::PlanCLinkOutcome::AlreadyLinked
+            | crate::path_utils::PlanCLinkOutcome::Created(_)
+            | crate::path_utils::PlanCLinkOutcome::Skipped(_) => {}
         }
+
+        // The whole point of auto-registration is a project name the caller
+        // can immediately reopen (review finding [2], #1207: "initialization
+        // returns a project name that cannot be reopened" is a bug). Verify
+        // reachability through the exact resolver every subsequent
+        // named-project call uses, and fail loudly instead of returning a
+        // name that silently cannot be reopened (e.g. the manifest write
+        // above also failed for some reason on top of a non-Unix/no-symlink
+        // host).
+        Self::resolve_named_project_db_path(&project_name).map_err(|err| {
+            format!(
+                "project db was created at {} but is not resolvable by its derived name \
+                 '{project_name}': {err}",
+                db_path.display()
+            )
+        })?;
 
         // Loud by design (#1120): first-contact auto-registration is a
         // meaningful state change (a new DB file on disk) and must be visible
@@ -133,6 +192,59 @@ impl MemoryServer {
 
         Ok(project_name)
     }
+}
+
+/// Register a just-created repo-local `<git_root>/.tachi/memory.db` in the
+/// manifest so [`MemoryServer::resolve_named_project_db_path`] can find it by
+/// name independent of the (Unix-only, best-effort) Plan C symlink — see
+/// `server_methods/db.rs::resolve_named_project_db_path`'s doc comment: the
+/// manifest-recorded repo-local path is the addressing scheme's PRIMARY
+/// resolution path, the symlink is a legacy/secondary fallback.
+///
+/// Mirrors the single-entry registration shape
+/// `bootstrap/tidy/migration.rs::update_manifest_after_migration` writes for
+/// its own callers; unlike that helper this never removes or rewrites any
+/// entry but the one it is registering, and refuses to silently fabricate a
+/// fresh empty manifest over a manifest file that exists but fails to parse
+/// (an unreadable/corrupt manifest is an error here, not "no entries yet" —
+/// overwriting it via `load_or_empty` would silently drop every other
+/// registered project's entry).
+fn register_repo_local_manifest_entry(
+    db_path: &std::path::Path,
+    project_name: &str,
+) -> Result<(), String> {
+    let manifest_path = crate::path_utils::tachi_home().join("manifest.json");
+    let mut manifest = if manifest_path.exists() {
+        crate::manifest::Manifest::load(&manifest_path)
+            .map_err(|e| format!("load manifest {}: {e}", manifest_path.display()))?
+    } else {
+        crate::manifest::Manifest::empty()
+    };
+
+    let canonical = std::fs::canonicalize(db_path).unwrap_or_else(|_| db_path.to_path_buf());
+    let canon_str = canonical.display().to_string();
+    if manifest.dbs.iter().any(|e| e.path == canon_str) {
+        // Already registered — idempotent second contact from the same root.
+        return Ok(());
+    }
+
+    manifest.dbs.push(crate::manifest::DbEntry {
+        path: canon_str,
+        role: crate::manifest::DbRole::Project,
+        owner: "tachi".to_string(),
+        schema_kind: "tachi".to_string(),
+        vec_enabled: true,
+        allow_write: true,
+        last_doctor_at: chrono::Utc::now().to_rfc3339(),
+        last_classification: "healthy".to_string(),
+        scope_hint: format!("project:{project_name}"),
+        notes: "auto-registered via X-Tachi-Workspace-Root on first contact (#1120 PR1)"
+            .to_string(),
+    });
+    manifest.generated_at = chrono::Utc::now().to_rfc3339();
+    manifest
+        .save(&manifest_path)
+        .map_err(|e| format!("save manifest {}: {e}", manifest_path.display()))
 }
 
 pub(crate) async fn handle_tachi_init_project_db(
@@ -293,6 +405,80 @@ mod resolve_or_register_workspace_root_tests {
             assert!(
                 err.contains("not inside a git repository"),
                 "expected a not-a-git-repo error, got: {err}"
+            );
+        });
+    }
+
+    /// Review finding [1] (#1207): a repo-controlled `.tachi` symlink must
+    /// not be able to redirect DB creation outside the git root. Route
+    /// through the same canonical containment guard
+    /// (`resolve_project_db_path`) `handle_tachi_init_project_db` already
+    /// uses — it canonicalizes the resolved parent and rejects anything
+    /// that escapes the git root after symlink resolution.
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_tachi_symlink_that_escapes_the_git_root() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Symlink-Escape-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+
+            // A repo-controlled `.tachi` symlink pointing OUTSIDE the git
+            // root (e.g. committed by an attacker, or left over from a prior
+            // untrusted checkout) must not redirect DB creation there.
+            let escape_target = root.join("outside-the-repo");
+            std::fs::create_dir_all(&escape_target).expect("escape target dir");
+            std::os::unix::fs::symlink(&escape_target, repo.join(".tachi"))
+                .expect("plant escaping .tachi symlink");
+
+            let err = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect_err("a `.tachi` symlink escaping the git root must be rejected");
+            assert!(
+                err.contains("escapes") || err.contains("unsafe"),
+                "expected a containment-guard rejection, got: {err}"
+            );
+            assert!(
+                !escape_target.join("memory.db").exists(),
+                "no DB file may be created outside the git root via the symlink"
+            );
+        });
+    }
+
+    /// Review finding [2] (#1207): auto-registration must not return a
+    /// project name that later becomes unreachable once the Plan C symlink
+    /// (Unix-only, best-effort) is gone — e.g. it was never created at all on
+    /// a non-Unix host. The manifest entry `register_repo_local_manifest_entry`
+    /// writes is the primary, symlink-independent addressing path.
+    #[test]
+    fn project_remains_resolvable_after_the_plan_c_symlink_is_broken() {
+        with_test_home(|root| {
+            let server = make_server(root);
+            let repo = root.join("Symlink-Independent-Repo");
+            std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+
+            let name = server
+                .resolve_or_register_workspace_root(&repo.display().to_string())
+                .expect("auto-registration succeeds");
+
+            // Simulate a platform where the Plan C symlink either never
+            // existed (non-Unix `ensure_plan_c_symlink` is a `Skipped`
+            // no-op) or was later broken, without touching the manifest
+            // entry.
+            let alias_name =
+                crate::path_utils::plan_c_dir_name_from_root(&repo).expect("alias name");
+            let alias_db = crate::path_utils::plan_c_global_db_path(&alias_name);
+            let _ = std::fs::remove_file(&alias_db);
+            assert!(!alias_db.exists(), "test precondition: alias severed");
+
+            let resolved = MemoryServer::resolve_named_project_db_path(&name).expect(
+                "manifest-recorded repo-local path must resolve the project even with no \
+                 working Plan C symlink",
+            );
+            assert_eq!(
+                std::fs::canonicalize(&resolved).expect("canonicalize resolved"),
+                std::fs::canonicalize(repo.join(".tachi/memory.db"))
+                    .expect("canonicalize expected"),
             );
         });
     }
