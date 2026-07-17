@@ -18,8 +18,25 @@
 //! does not exist, `complete`'s pipeline never carries a
 //! `precedent_candidate_decomposition` stage, and `RulingRecordParams` has
 //! no `adjudicator` / `source_refs` / `engine_receipt` fields to even
-//! construct these params (a compile error against pre-#1076 `main` — the
-//! strongest possible RED).
+//! construct these params — a compile error against pre-#1076 `main`.
+//!
+//! **Structural justification for compile-RED (#1183 fix-round finding 13):**
+//! this is not a case of "any assertion is RED because nothing exists yet"
+//! substituting for real behavioral discrimination — every field this test
+//! module needs (`adjudicator`, `source_refs`, `engine_receipt`) is new,
+//! Rust struct literals must name every field, and the decomposition
+//! behavior under test is *defined in terms of* those new fields (an
+//! adjudicator identity, source evidence, an engine receipt). There is no
+//! pre-#1076 code path that can be driven with the new inputs to observe a
+//! wrong OLD behavior, because the old code has no slot for those inputs at
+//! all — the "call the existing entry point with the new inputs, assert on
+//! behavior" pattern is unavailable by construction. What IS avoidable, and
+//! what finding 13 correctly flagged, is conflating multiple independently-
+//! meaningful conditions inside one compile-red case so a bug in one
+//! could hide behind the others always being present too; RED case 4 is
+//! split below into three cases (missing-adjudicator-only,
+//! missing-source-refs-only, missing-both) for exactly that reason — see
+//! each case's own doc comment.
 
 use super::*;
 use crate::tool_params::{
@@ -401,8 +418,154 @@ async fn same_source_replay_idempotent_edited_comment_appends_revision() {
     );
 }
 
-/// RED case 4: missing adjudicator/outcome/source authority remains pending
-/// and cannot masquerade as established.
+/// RED case 4a (#1183 fix-round finding 13 granularity split): an
+/// adjudicator alone, with source authority present, is still NOT complete
+/// authority -- isolates the "missing adjudicator" half of case 4 so a bug
+/// that only checks `source_refs` can't hide behind both being absent at
+/// once.
+#[tokio::test]
+async fn missing_adjudicator_alone_keeps_authority_incomplete() {
+    let server = make_server();
+    let mut params = base_complete();
+    params.rulings = vec![RulingRecordParams {
+        case: "ruling with pinned source evidence but no adjudicator identity".to_string(),
+        options_considered: None,
+        ruling: "source evidence alone cannot substitute for adjudicator identity".to_string(),
+        principles_cited: vec!["constitution:precedent/authority".to_string()],
+        outcome: Some("validated".to_string()),
+        overturned_by: None,
+        adjudicator: None,
+        source_refs: vec![comment_source_ref("9", "2026-07-01T00:00:00Z", "hash-9")],
+        engine_receipt: None,
+    }];
+
+    let resp = server
+        .tachi_complete(Parameters(params))
+        .await
+        .expect("tachi_complete should succeed");
+    let bundle: Value = serde_json::from_str(&resp).expect("bundle JSON");
+    let recorded = recorded_array(&bundle);
+    assert_eq!(
+        recorded.len(),
+        1,
+        "the ruling still decomposes: {recorded:#?}"
+    );
+    assert_eq!(
+        recorded[0]["authority_complete"],
+        json!(false),
+        "a pinned source_ref with no adjudicator must not read as authority-complete: {recorded:#?}"
+    );
+}
+
+/// RED case 4b (#1183 fix-round finding 13 granularity split): an
+/// adjudicator present, with zero source refs, is still NOT complete
+/// authority -- isolates the "missing source authority" half.
+#[tokio::test]
+async fn missing_source_refs_alone_keeps_authority_incomplete() {
+    let server = make_server();
+    let mut params = base_complete();
+    params.rulings = vec![RulingRecordParams {
+        case: "ruling with an adjudicator but no source evidence at all".to_string(),
+        options_considered: None,
+        ruling: "an adjudicator's say-so alone cannot substitute for source evidence".to_string(),
+        principles_cited: vec!["constitution:precedent/authority".to_string()],
+        outcome: Some("validated".to_string()),
+        overturned_by: None,
+        adjudicator: Some("owner".to_string()),
+        source_refs: Vec::new(),
+        engine_receipt: None,
+    }];
+
+    let resp = server
+        .tachi_complete(Parameters(params))
+        .await
+        .expect("tachi_complete should succeed");
+    let bundle: Value = serde_json::from_str(&resp).expect("bundle JSON");
+    let recorded = recorded_array(&bundle);
+    assert_eq!(
+        recorded.len(),
+        1,
+        "the ruling still decomposes: {recorded:#?}"
+    );
+    assert_eq!(
+        recorded[0]["authority_complete"],
+        json!(false),
+        "an adjudicator with zero source_refs must not read as authority-complete: {recorded:#?}"
+    );
+}
+
+/// RED case 4 (#1183 fix-round finding 5/6): a source_ref supplied but
+/// REJECTED (missing the snapshot hash its `target_kind` requires to pin an
+/// immutable revision) must degrade `authority_complete` and `coverage`,
+/// never silently vanish behind an unconditional "full"/"complete" claim.
+#[tokio::test]
+async fn malformed_source_ref_degrades_coverage_and_authority() {
+    let server = make_server();
+    let mut params = base_complete();
+    params.rulings = vec![RulingRecordParams {
+        case: "ruling with one pinned ref and one unpinned (no body_hash) ref".to_string(),
+        options_considered: None,
+        ruling: "an unpinned source_ref must be dropped, not silently accepted as evidence"
+            .to_string(),
+        principles_cited: vec!["constitution:precedent/authority".to_string()],
+        outcome: Some("validated".to_string()),
+        overturned_by: None,
+        adjudicator: Some("owner".to_string()),
+        source_refs: vec![
+            comment_source_ref("10", "2026-07-01T00:00:00Z", "hash-10"),
+            RulingSourceRefParams {
+                relation: Some("supports".to_string()),
+                target_kind: "issue".to_string(),
+                target_ref: "kckylechen1/tachi#1076".to_string(),
+                comment_id: None,
+                updated_at: Some("2026-07-16T00:00:00Z".to_string()),
+                body_hash: None, // missing snapshot hash -- must be rejected
+                commit_sha: None,
+                section_or_span: None,
+            },
+        ],
+        engine_receipt: None,
+    }];
+
+    let resp = server
+        .tachi_complete(Parameters(params))
+        .await
+        .expect("tachi_complete should succeed even with a malformed source_ref");
+    let bundle: Value = serde_json::from_str(&resp).expect("bundle JSON");
+    let recorded = recorded_array(&bundle);
+    assert_eq!(
+        recorded.len(),
+        1,
+        "the ruling still decomposes: {recorded:#?}"
+    );
+    assert_eq!(
+        recorded[0]["authority_complete"],
+        json!(false),
+        "a dropped (malformed) source_ref must degrade authority_complete, not vanish: \
+         {recorded:#?}"
+    );
+
+    let id = recorded[0]["id"].as_str().unwrap();
+    let fetched = fetch_metadata(&server, id).await;
+    let meta = &fetched["metadata"];
+    assert_eq!(
+        meta["coverage"],
+        json!("partial"),
+        "a dropped source_ref must degrade coverage from \"full\" to \"partial\": {meta:#}"
+    );
+    assert_eq!(
+        meta["source_ref_count"],
+        json!(1),
+        "only the pinned ref survives into source_refs: {meta:#}"
+    );
+    let warnings = meta["source_ref_warnings"]
+        .as_array()
+        .expect("source_ref_warnings present when a ref was dropped");
+    assert_eq!(warnings.len(), 1, "exactly one ref was dropped: {meta:#}");
+}
+
+/// RED case 4 (combined): missing adjudicator/outcome/source authority
+/// remains pending and cannot masquerade as established.
 #[tokio::test]
 async fn missing_adjudicator_and_source_refs_stays_pending_and_incomplete() {
     let server = make_server();
@@ -674,5 +837,59 @@ async fn ruling_with_no_principles_cited_is_skipped_not_fabricated() {
         skipped.len(),
         1,
         "the ruling must be reported skipped: {decomposition:#}"
+    );
+}
+
+/// #1183 fix-round finding 12: `precedent_candidate_decomposition` was
+/// added to `PIPELINE_VARIANT_OBJECT_STAGES` in `evidence_format.rs`
+/// (mirroring the existing `precedent_recording` entry, see that const's
+/// doc comment), but every other test in this file passes `format="full"`,
+/// so nothing actually exercised the compact/default receipt shaper for the
+/// candidate stage. Mirrors
+/// `precedent_capture::default_format_receipt_still_surfaces_skipped_rulings`
+/// (#962 fix 3) for the sibling stage: without the
+/// `PIPELINE_VARIANT_OBJECT_STAGES` entry, `pipeline_stage_status`'s generic
+/// object handling would grab only `recorded` and silently drop `skipped`
+/// under the default (non-`full`) receipt.
+#[tokio::test]
+async fn default_format_receipt_still_surfaces_skipped_candidates() {
+    let server = make_server();
+
+    let mut params = base_complete();
+    params.format = None; // exercise the compact/default receipt shaper
+    params.rulings = vec![RulingRecordParams {
+        case: "ruling with no principles cited, captured under the default receipt".to_string(),
+        options_considered: None,
+        ruling: "nothing principle-level to decompose".to_string(),
+        principles_cited: Vec::new(),
+        outcome: Some("validated".to_string()),
+        overturned_by: None,
+        adjudicator: Some("owner".to_string()),
+        source_refs: Vec::new(),
+        engine_receipt: None,
+    }];
+
+    let resp = server
+        .tachi_complete(Parameters(params))
+        .await
+        .expect("tachi_complete should succeed");
+    let bundle: Value = serde_json::from_str(&resp).expect("bundle JSON");
+
+    let decomposition = &bundle["pipeline"]["precedent_candidate_decomposition"];
+    let skipped = decomposition["skipped"]
+        .as_array()
+        .expect("skipped array must survive the default (non-full) receipt");
+    assert_eq!(
+        skipped.len(),
+        1,
+        "a ruling with zero principles_cited must stay visible as skipped under the default \
+         receipt: {decomposition:#}"
+    );
+    assert!(
+        decomposition["recorded"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true),
+        "no candidate should be fabricated: {decomposition:#}"
     );
 }
