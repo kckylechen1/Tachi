@@ -505,7 +505,7 @@ pub struct TachiAgentEvalParams {
 /// harness-native subagent. Same `native_child_id` + same content replays
 /// idempotently; same `native_child_id` + different content is an explicit
 /// conflict (never silently overwritten).
-#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]
 pub struct MirrorEvalRegisterParams {
     /// The frozen contract (issue/PR ref) the native subagent's work is
     /// under, e.g. `"kckylechen1/tachi#1066"`. Required.
@@ -548,7 +548,7 @@ pub struct MirrorEvalRegisterParams {
 /// usefulness/failure_mode/plan_delta/evidence_usable field — those exist
 /// only on [`MirrorEvalAdjudicateParams`]. Resolve the target run by
 /// `eval_run_id` OR `native_child_id`.
-#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]
 pub struct MirrorEvalObserveParams {
     /// Resolve the target run by its `eval_run_id`.
     #[serde(default)]
@@ -594,7 +594,7 @@ pub struct MirrorEvalObserveParams {
 /// already-registered, already-observed run. Append-only — a correction is a
 /// new call with a fresh idempotency identity, never an edit of a prior
 /// judgment.
-#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]
 pub struct MirrorEvalAdjudicateParams {
     #[serde(default)]
     pub eval_run_id: Option<String>,
@@ -654,7 +654,7 @@ pub struct MirrorEvalAdjudicateParams {
 }
 
 /// #1066 `get`: resolve a run by `eval_run_id` or `native_child_id`.
-#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]
 pub struct MirrorEvalGetParams {
     #[serde(default)]
     pub eval_run_id: Option<String>,

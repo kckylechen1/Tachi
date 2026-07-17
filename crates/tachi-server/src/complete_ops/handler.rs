@@ -71,6 +71,17 @@ pub(crate) async fn handle_tachi_complete(
         }
     }
 
+    // #1066 AC-5: project ADJUDICATED, evidence-usable, non-self-eval mirror
+    // eval intake rows into the legacy subagents[]-compatible aggregation
+    // surface. Additive only — an empty/omitted eval_run_ids leaves
+    // params.subagents byte-identical to what the caller supplied, and an
+    // unresolved/ineligible id is silently skipped (never fails completion).
+    if !params.eval_run_ids.is_empty() {
+        let projected =
+            super::mirror_eval_projection::project_eval_run_ids(server, &params.eval_run_ids);
+        params.subagents.extend(projected);
+    }
+
     let CompleteEvalRecord {
         task_id,
         path,
