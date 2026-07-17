@@ -3,6 +3,25 @@
 //! harness-native subagents (register/observe/adjudicate/get), mirroring
 //! the v18 `dispatch_adjudications` migration for a DB that predates this
 //! table set.
+//!
+//! ## AC-8 / codex round-2 finding #3b: structural-justification exception
+//!
+//! AC-8 requires "pre-fix RED and post-fix GREEN evidence" per new behavior.
+//! This module's table set, and everything downstream that depends on it
+//! (`memcore::db::mirror_eval`, `complete_ops::mirror_eval_projection`, the
+//! `tests/dispatch_tests/completion_eval/mirror_eval.rs` tool-surface
+//! coverage), is net-new capability with NO pre-existing entry point on
+//! `origin/main`: there is no prior `migrate_v20_mirror_eval` (or any
+//! function it could regress) to call with new inputs and observe a
+//! behavioral failure. "RED" for this module's tests is therefore `cargo
+//! test`/`cargo check` failing to find the symbol at all on `origin/main` —
+//! compile-red, not behavioral-red — which is the explicit structural-
+//! justification alternative the #1066 fix-round's contract allows in place
+//! of pre-fix-behavioral-RED/post-fix-GREEN, precisely because no prior
+//! behavior existed to regress. The 2 tests that DO modify pre-existing
+//! behavior (the `tool_profile.rs` / `filtering.rs` profile-visibility flip)
+//! remain genuinely behavioral RED/GREEN and are not covered by this
+//! exception.
 
 use rusqlite::Connection;
 

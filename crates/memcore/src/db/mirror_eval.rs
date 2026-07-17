@@ -758,6 +758,11 @@ pub fn get_mirror_eval_run_view(
     }))
 }
 
+/// AC-8 / codex round-2 finding #3b: every test below is net-new-capability
+/// coverage with no pre-existing entry point on `origin/main` to regress —
+/// structural-justification exception (compile-red, not behavioral-red),
+/// per the canonical explanation in
+/// `memcore::db::migrations::mirror_eval`'s module doc.
 #[cfg(test)]
 mod tests {
     use super::*;

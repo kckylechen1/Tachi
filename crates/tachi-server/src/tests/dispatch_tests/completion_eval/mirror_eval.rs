@@ -7,6 +7,11 @@
 //! between params -> handler -> memcore -> JSON, and the full closed loop
 //! (register/observe/adjudicate -> complete -> aggregate_live) actually
 //! works end-to-end — a class of bug unit tests in isolation cannot catch.
+//!
+//! AC-8 / codex round-2 finding #3b: net-new-capability coverage, no
+//! pre-existing entry point on `origin/main` to regress — structural-
+//! justification exception (compile-red, not behavioral-red); canonical
+//! explanation in `memcore::db::migrations::mirror_eval`'s module doc.
 
 use super::*;
 use crate::tool_params::{
