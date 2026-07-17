@@ -86,27 +86,53 @@ fn is_entity_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_' || ch == '-'
 }
 
-fn append_references_section(body: &mut String, metadata: &serde_json::Value) {
-    let Some(refs) = metadata.get("source_refs").and_then(|v| v.as_array()) else {
-        return;
-    };
-    if refs.is_empty() {
-        return;
+fn reference_line(ref_str: &str) -> String {
+    if ref_str.starts_with("http://")
+        || ref_str.starts_with("https://")
+        || ref_str.starts_with("file://")
+    {
+        format!("- [{ref_str}]({ref_str})\n")
+    } else {
+        format!("- `{ref_str}`\n")
     }
-    body.push_str("\n\n## References\n\n");
-    for ref_val in refs {
-        let Some(ref_str) = ref_val.as_str() else {
-            continue;
-        };
-        let line = if ref_str.starts_with("http://")
-            || ref_str.starts_with("https://")
-            || ref_str.starts_with("file://")
-        {
-            format!("- [{ref_str}]({ref_str})\n")
-        } else {
-            format!("- `{ref_str}`\n")
-        };
-        body.push_str(&line);
+}
+
+/// #1072 RED case 7: Obsidian export must preserve BOTH the legacy
+/// `metadata.source_refs: string[]` (unchanged, rendered exactly as before
+/// this leaf) AND the new typed `metadata.evidence_refs_v1` refs (canon doc
+/// §7.1: "exporters render the typed `ref` field when present") during the
+/// dual-write migration window — never one in place of the other.
+fn append_references_section(body: &mut String, metadata: &serde_json::Value) {
+    if let Some(refs) = metadata.get("source_refs").and_then(|v| v.as_array()) {
+        if !refs.is_empty() {
+            body.push_str("\n\n## References\n\n");
+            for ref_val in refs {
+                let Some(ref_str) = ref_val.as_str() else {
+                    continue;
+                };
+                body.push_str(&reference_line(ref_str));
+            }
+        }
+    }
+    if let Some(typed_refs) = metadata.get("evidence_refs_v1").and_then(|v| v.as_array()) {
+        if !typed_refs.is_empty() {
+            body.push_str("\n\n## Evidence Refs (typed)\n\n");
+            for typed_ref in typed_refs {
+                let Some(ref_str) = typed_ref.get("ref").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let kind = typed_ref
+                    .get("target_kind")
+                    .and_then(|v| v.as_str())
+                    .map(|kind| format!(" ({kind})"))
+                    .unwrap_or_default();
+                let mut line = reference_line(ref_str);
+                line.truncate(line.trim_end_matches('\n').len());
+                body.push_str(&line);
+                body.push_str(&kind);
+                body.push('\n');
+            }
+        }
     }
 }
 

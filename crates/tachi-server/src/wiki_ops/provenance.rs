@@ -1,0 +1,162 @@
+use super::*;
+
+/// Applies the #1072 truthful-retrieval gate and provenance exposure to a
+/// set of already-slimmed wiki search rows.
+///
+/// Canon doc §7 required behavior, RED case 2 ("Pending `/wiki/drafts/...`
+/// currently leaks into normal search; GREEN excludes it by default"):
+/// - `requested_lifecycle == None` (the default, no explicit scope): rows
+///   are kept only when their derived lifecycle is `active`.
+/// - `requested_lifecycle == Some("all")`: no lifecycle filtering (the
+///   explicit "give me everything" scope).
+/// - `requested_lifecycle == Some(<value>)` for one of the six closed
+///   vocabulary values: rows are kept only when their derived lifecycle
+///   equals that value exactly (e.g. `"pending_review"` to browse drafts).
+///
+/// Canon doc §7 required behavior, RED case 3 ("Read/search currently hide
+/// authority/revision/source refs; GREEN exposes them"): every row that
+/// survives the gate gets `lifecycle`, `authority`, `revision`,
+/// `source_refs`, `evidence_refs_v1`, and (when present) `review_receipt`
+/// attached from the full stored entry.
+///
+/// Rows whose `id` cannot be resolved against this function's own
+/// enrichment lookup (a defensive fallback covering wiki layouts spread
+/// across named-project stores this leaf's single-project lookup does not
+/// fully enumerate) are left unfiltered and unenriched rather than hidden —
+/// this leaf's frozen "stay behavior-frozen on existing wiki reads"
+/// constraint takes priority over enrichment completeness for a row this
+/// function cannot honestly classify.
+pub(crate) fn apply_wiki_lifecycle_gate(
+    server: &MemoryServer,
+    project: Option<&str>,
+    rows: &mut Vec<Value>,
+    requested_lifecycle: Option<&str>,
+) -> Result<(), String> {
+    let is_all_scope = requested_lifecycle.is_some_and(|value| value.eq_ignore_ascii_case("all"));
+    let requested: Option<WikiLifecycleV1> = match requested_lifecycle {
+        None => None,
+        Some(_) if is_all_scope => None,
+        Some(value) => Some(
+            value
+                .parse::<WikiLifecycleV1>()
+                .map_err(|e| format!("invalid lifecycle scope '{value}': {e}"))?,
+        ),
+    };
+    let default_to_active_only = requested_lifecycle.is_none();
+
+    let lookup_project = project.unwrap_or("wiki");
+    let entries = list_related_candidates(server, lookup_project, 5000).unwrap_or_default();
+    let by_id: HashMap<&str, &MemoryEntry> = entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect();
+
+    rows.retain_mut(|row| {
+        let Some(id) = row.get("id").and_then(Value::as_str).map(str::to_string) else {
+            return true;
+        };
+        let Some(&entry) = by_id.get(id.as_str()) else {
+            // Unresolved row: see module doc — leave it alone.
+            return true;
+        };
+        let lifecycle = derive_wiki_lifecycle(&entry.metadata, &entry.path);
+        let keep = if let Some(wanted) = requested {
+            lifecycle == wanted
+        } else if default_to_active_only {
+            lifecycle.is_default_retrievable()
+        } else {
+            true
+        };
+        if keep {
+            attach_wiki_provenance(row, entry, lifecycle);
+        }
+        keep
+    });
+    Ok(())
+}
+
+/// Full-`MemoryEntry` sibling of `apply_wiki_lifecycle_gate`'s row-level
+/// scope predicate, for callers (browse) that still hold the full entry
+/// rather than an already-slimmed search row.
+pub(super) fn wiki_entry_matches_lifecycle_scope(
+    entry: &MemoryEntry,
+    requested_lifecycle: Option<&str>,
+) -> Result<bool, String> {
+    let lifecycle = derive_wiki_lifecycle(&entry.metadata, &entry.path);
+    match requested_lifecycle {
+        None => Ok(lifecycle.is_default_retrievable()),
+        Some(value) if value.eq_ignore_ascii_case("all") => Ok(true),
+        Some(value) => {
+            let wanted = value
+                .parse::<WikiLifecycleV1>()
+                .map_err(|e| format!("invalid lifecycle scope '{value}': {e}"))?;
+            Ok(lifecycle == wanted)
+        }
+    }
+}
+
+/// Canon doc §7.1: "readers prefer typed refs and fall back to strings."
+/// Returns the typed `evidence_refs_v1`'s `ref` strings when non-empty
+/// (the common case going forward), or the legacy `source_refs` strings for
+/// an entry written before this leaf's dual-write landed.
+pub(super) fn preferred_wiki_references(metadata: &Value) -> Vec<String> {
+    let typed: Vec<String> = metadata
+        .get("evidence_refs_v1")
+        .and_then(Value::as_array)
+        .map(|refs| {
+            refs.iter()
+                .filter_map(|r| r.get("ref").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !typed.is_empty() {
+        return typed;
+    }
+    metadata
+        .get("source_refs")
+        .and_then(Value::as_array)
+        .map(|refs| {
+            refs.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn attach_wiki_provenance(row: &mut Value, entry: &MemoryEntry, lifecycle: WikiLifecycleV1) {
+    let Some(obj) = row.as_object_mut() else {
+        return;
+    };
+    let authority = derive_wiki_authority(&entry.metadata);
+    obj.insert("lifecycle".to_string(), json!(lifecycle.as_str()));
+    obj.insert("authority".to_string(), json!(authority.as_str()));
+    obj.insert("revision".to_string(), json!(entry.revision));
+    obj.insert(
+        "source_refs".to_string(),
+        entry
+            .metadata
+            .get("source_refs")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    );
+    obj.insert(
+        "evidence_refs_v1".to_string(),
+        entry
+            .metadata
+            .get("evidence_refs_v1")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    );
+    obj.insert(
+        "references".to_string(),
+        json!(preferred_wiki_references(&entry.metadata)),
+    );
+    if let Some(receipt) = derive_wiki_review_receipt(&entry.metadata) {
+        obj.insert(
+            "review_receipt".to_string(),
+            serde_json::to_value(receipt).unwrap_or(Value::Null),
+        );
+    }
+}

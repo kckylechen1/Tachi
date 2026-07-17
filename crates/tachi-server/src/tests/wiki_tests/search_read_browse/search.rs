@@ -29,6 +29,7 @@ async fn wiki_search_returns_compact_hits_without_related_entries() {
             file_context: None,
             error_context: None,
             weights: None,
+            lifecycle: None,
         }))
         .await
         .expect("wiki search should succeed");

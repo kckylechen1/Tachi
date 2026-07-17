@@ -280,6 +280,8 @@ pub(crate) async fn handle_tachi_wiki_search(
 ) -> Result<String, String> {
     let path_prefix = params.path_prefix.unwrap_or_else(|| "/wiki".to_string());
     let top_k = crate::clamp_facade_top_k(params.top_k);
+    let project = params.project.clone();
+    let lifecycle_scope = params.lifecycle.clone();
     let mut rows = search_memory_rows(
         server,
         SearchMemoryParams {
@@ -314,6 +316,16 @@ pub(crate) async fn handle_tachi_wiki_search(
     )
     .await?;
     crate::wiki_ops::filter_user_facing_wiki_rows(&mut rows);
+    // #1072 RED case 2: this is a second, independent search entry point
+    // (`tachi_wiki(action='search')`'s non-JSON branch and `tachi_wiki_search`)
+    // from `wiki_ops::search::collect_wiki_search_value` — both must gate
+    // pending/candidate drafts out of the default result set.
+    crate::wiki_ops::apply_wiki_lifecycle_gate(
+        server,
+        project.as_deref(),
+        &mut rows,
+        lifecycle_scope.as_deref(),
+    )?;
 
     crate::wiki_ops::append_wiki_log(
         server,

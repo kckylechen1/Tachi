@@ -20,33 +20,64 @@ pub(in crate::copilot_ops) fn normalize_wiki_path(path: Option<String>, topic: &
     }
 }
 
+/// Builds the layer/scope/authority/lifecycle metadata stamped onto every
+/// `tachi_wiki_write` entry, plus the #1072 dual-write typed `evidence_refs_v1`
+/// (canon doc §7.1) alongside the legacy `metadata.source_refs: string[]`
+/// (set separately by the caller — this function never touches that key, so
+/// `source_refs` is never mutated in place).
+///
+/// `lifecycle` defaults to `active` for every path except `/wiki/drafts/...`
+/// — the one draft-path convention this leaf's own writer (this function) is
+/// aware of. `foundry_runtime_ops::wiki_evolver`'s weekly REM synthesis
+/// writes drafts through a *different* path (`tachi_save` directly, not this
+/// function) and stamps its own `metadata.review_status = "pending"` marker
+/// after the fact; the read-side gate (`derive_wiki_lifecycle`) honors both
+/// origins, so this function only needs to cover its own write path honestly.
 pub(in crate::copilot_ops) fn wiki_layer_metadata(
     path: &str,
     scope: &str,
     project: Option<&str>,
     references: &[String],
 ) -> Value {
-    let layer = if path == "/guide" || path.starts_with("/guide/") {
-        "guide"
-    } else {
-        "wiki"
-    };
+    let is_guide = path == "/guide" || path.starts_with("/guide/");
+    let layer = if is_guide { "guide" } else { "wiki" };
     let scope = if project.is_some() || scope.eq_ignore_ascii_case("project") {
         "project"
     } else {
         "global"
     };
-    let authority = if layer == "guide" {
-        "playbook"
+    let authority = if is_guide {
+        WikiAuthorityV1::Playbook
     } else {
-        "advisory"
+        WikiAuthorityV1::Advisory
     };
+    let is_draft_path = path == "/wiki/drafts" || path.starts_with("/wiki/drafts/");
+    let lifecycle = if is_draft_path {
+        WikiLifecycleV1::PendingReview
+    } else {
+        WikiLifecycleV1::Active
+    };
+    let artifact_kind = if is_guide {
+        WikiArtifactKindV1::Guide
+    } else if is_draft_path {
+        WikiArtifactKindV1::Draft
+    } else {
+        WikiArtifactKindV1::Wiki
+    };
+    let captured_at = Utc::now().to_rfc3339();
+    let evidence_refs_v1 = build_evidence_refs_v1(references, &captured_at);
     json!({
         "layer": layer,
         "scope": scope,
-        "authority": authority,
-        "status": "active",
+        "authority": authority.as_str(),
+        // Legacy field, kept for back-compat; nothing in this codebase reads
+        // it today (confirmed by repo-wide grep), but it must stay truthful
+        // rather than the old hardcoded "active" now that draft paths exist.
+        "status": lifecycle.as_str(),
+        "lifecycle": lifecycle.as_str(),
+        "artifact_kind": artifact_kind.as_str(),
         "source_ref": references.first().cloned(),
+        "evidence_refs_v1": evidence_refs_v1,
     })
 }
 

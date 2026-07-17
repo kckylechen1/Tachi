@@ -462,3 +462,91 @@ async fn wiki_lint_ignores_operation_log_rows() {
     assert!(orphan_ids.contains(&"wiki-real-orphan"));
     assert!(!orphan_ids.contains(&"wiki-log-noise"));
 }
+
+/// #1072 RED case 4: "Permanent stale wiki that contradicts a changed
+/// trusted source must become semantic-stale." Scoped honestly (see
+/// `wiki_ops::lint`'s inline comment and the `knowledge_artifact` module
+/// doc): this leaf's concrete trigger is the `supersedes`/`contradicts`
+/// graph-edge signal canon doc §7 lists, not full external trusted-doc
+/// blob-SHA drift detection (a separate leaf).
+#[tokio::test]
+async fn wiki_lint_stale_check_ignores_retention_policy_for_contradicted_permanent_entries() {
+    let server = make_server();
+    let old_ts = (Utc::now() - chrono::Duration::days(120)).to_rfc3339();
+    server
+        .with_global_store(|store| {
+            let mut permanent_contradicted = make_entry("wiki-semantic-stale-permanent");
+            permanent_contradicted.path = "/wiki/test/semantic-stale/permanent".to_string();
+            permanent_contradicted.text =
+                "Permanent policy note that a newer entry contradicts.".to_string();
+            permanent_contradicted.timestamp = old_ts.clone();
+            permanent_contradicted.retention_policy = Some("permanent".to_string());
+            store
+                .upsert(&permanent_contradicted)
+                .map_err(|e| e.to_string())?;
+
+            let mut newer_contradictor = make_entry("wiki-semantic-stale-newer");
+            newer_contradictor.path = "/wiki/test/semantic-stale/newer".to_string();
+            newer_contradictor.text =
+                "Newer entry that contradicts the permanent policy note.".to_string();
+            store
+                .upsert(&newer_contradictor)
+                .map_err(|e| e.to_string())?;
+
+            // RED-safety control: a permanent entry with NO contradicts/
+            // supersedes edge must stay exempt from the retention-age check
+            // (unchanged pre-#1072 behavior) — proves this fix does not
+            // simply delete the permanent/pinned exemption outright.
+            let mut permanent_untouched = make_entry("wiki-semantic-stale-untouched");
+            permanent_untouched.path = "/wiki/test/semantic-stale/untouched".to_string();
+            permanent_untouched.text = "Permanent policy note nothing contradicts.".to_string();
+            permanent_untouched.timestamp = old_ts.clone();
+            permanent_untouched.retention_policy = Some("permanent".to_string());
+            store
+                .upsert(&permanent_untouched)
+                .map_err(|e| e.to_string())?;
+
+            let edge = memcore::MemoryEdge {
+                source_id: "wiki-semantic-stale-newer".to_string(),
+                target_id: "wiki-semantic-stale-permanent".to_string(),
+                relation: "contradicts".to_string(),
+                weight: 0.9,
+                metadata: json!({"source": "test"}),
+                created_at: Utc::now().to_rfc3339(),
+                valid_from: String::new(),
+                valid_to: None,
+            };
+            store.add_edge(&edge).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed semantic staleness fixtures");
+
+    let response = server
+        .wiki_lint(Parameters(WikiLintParams {
+            path_prefix: Some("/wiki/test/semantic-stale".to_string()),
+            checks: vec!["stale".to_string()],
+            limit: 50,
+            stale_days: 90,
+            missing_edge_threshold: 0.6,
+            contradiction_threshold: 0.6,
+            include_skill_quality: false,
+        }))
+        .await
+        .expect("wiki_lint should succeed");
+    let parsed: Value = serde_json::from_str(&response).expect("wiki_lint json");
+    let stale_rows = parsed["stale_nodes"].as_array().expect("stale_nodes array");
+    let stale = stale_rows
+        .iter()
+        .find(|row| row["id"] == json!("wiki-semantic-stale-permanent"))
+        .expect("RED: contradicted permanent entry must be flagged stale despite retention_policy=permanent");
+    assert_eq!(
+        stale["reason"],
+        json!("semantic_stale_contradicted_or_superseded")
+    );
+    assert!(
+        !stale_rows
+            .iter()
+            .any(|row| row["id"] == json!("wiki-semantic-stale-untouched")),
+        "an untouched permanent entry must stay exempt from the stale check: {stale_rows:?}"
+    );
+}

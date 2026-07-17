@@ -123,6 +123,7 @@ pub(crate) async fn handle_wiki_lint(
                         "path": entry.path,
                         "timestamp": entry.timestamp,
                         "db": scope.as_str(),
+                        "reason": "retention_age",
                     }));
                 }
             }
@@ -139,6 +140,46 @@ pub(crate) async fn handle_wiki_lint(
                 "issue": "think_tag_leak",
                 "db": scope.as_str(),
             }));
+        }
+    }
+
+    // #1072 RED case 4: "permanent/pinned does not exempt [content] from
+    // semantic staleness" — canon doc §7. This pass is deliberately
+    // independent of `retention_policy` (unlike the retention-age pass
+    // above, which explicitly exempts permanent/pinned): any node targeted
+    // by a `contradicts` or `supersedes` edge from another node is flagged
+    // regardless of retention policy. `all_edges` is fully populated by now
+    // (accumulated across every node's "both"-direction query above).
+    //
+    // Scoping note (documented, not hidden — see `knowledge_artifact`
+    // module doc): this covers the "supersedes/contradicts edges" trigger
+    // from canon doc §7's required-behavior list. Full external trusted-doc
+    // blob-SHA drift detection ("source revision drift, trusted-ref
+    // changes") is a separate leaf's worth of work (needs #1002's
+    // `CanonicalDocRefV1` resolver wired into wiki writes).
+    if checks.iter().any(|check| check == "stale") {
+        let already_stale: HashSet<String> = stale_nodes
+            .iter()
+            .filter_map(|node| node.get("id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        for (entry, scope) in &nodes {
+            if already_stale.contains(entry.id.as_str()) {
+                continue;
+            }
+            let contradicted_or_superseded = all_edges.iter().any(|edge| {
+                edge.target_id == entry.id
+                    && matches!(edge.relation.as_str(), "contradicts" | "supersedes")
+            });
+            if contradicted_or_superseded {
+                stale_nodes.push(json!({
+                    "id": entry.id,
+                    "path": entry.path,
+                    "timestamp": entry.timestamp,
+                    "db": scope.as_str(),
+                    "reason": "semantic_stale_contradicted_or_superseded",
+                }));
+            }
         }
     }
 

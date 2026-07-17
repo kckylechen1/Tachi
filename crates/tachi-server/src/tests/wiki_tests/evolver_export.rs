@@ -195,3 +195,44 @@ async fn wiki_export_obsidian_writes_markdown_index_and_wikilinks() {
     assert!(index.contains("[[export-mcp]]"));
     let _ = std::fs::remove_dir_all(out_dir);
 }
+
+/// #1072 RED case 7: "Obsidian export preserves both legacy string refs and
+/// typed refs during migration."
+#[tokio::test]
+async fn wiki_export_obsidian_preserves_both_legacy_and_typed_refs() {
+    let mut entry = make_entry("wiki-export-dual-refs");
+    entry.path = "/wiki/engineering/debugging/dual-refs".to_string();
+    entry.summary = "Dual refs export lesson".to_string();
+    entry.text = "Dual refs export lesson body.".to_string();
+    entry.topic = "dual-refs".to_string();
+    entry.metadata = json!({
+        "source_refs": ["kckylechen1/tachi#1072"],
+        "evidence_refs_v1": [
+            {"ref": "kckylechen1/tachi#1072", "target_kind": "issue", "captured_at": "2026-07-17T00:00:00Z"},
+            {"ref": "docs/engineering/architecture/issue-refinery-memory-lanes.md", "target_kind": "canonical_doc", "captured_at": "2026-07-17T00:00:00Z"},
+        ],
+    });
+
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+    let out_dir =
+        std::env::temp_dir().join(format!("wiki-export-dual-refs-{}", uuid::Uuid::new_v4()));
+
+    let result = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("wiki export should succeed");
+    assert_eq!(result["count"], json!(1));
+    let md_path = out_dir.join("engineering/debugging/dual-refs/dual-refs.md");
+    let markdown = std::fs::read_to_string(&md_path).expect("read exported markdown");
+    assert!(
+        markdown.contains("## References") && markdown.contains("kckylechen1/tachi#1072"),
+        "legacy string refs must still render: {markdown}"
+    );
+    assert!(
+        markdown.contains("## Evidence Refs (typed)"),
+        "typed refs section must render alongside legacy refs: {markdown}"
+    );
+    assert!(
+        markdown.contains("docs/engineering/architecture/issue-refinery-memory-lanes.md"),
+        "typed ref target must render: {markdown}"
+    );
+    let _ = std::fs::remove_dir_all(out_dir);
+}

@@ -73,6 +73,19 @@ async fn tachi_wiki_write_stores_and_rejects_invalid_references() {
         .as_array()
         .expect("source_refs array");
     assert_eq!(refs.len(), 2);
+    // #1072: dual-write — the legacy `source_refs: string[]` is untouched
+    // (asserted above) AND the new typed `evidence_refs_v1` is populated
+    // alongside it, never replacing it.
+    let typed_refs = entry["metadata"]["evidence_refs_v1"]
+        .as_array()
+        .expect("evidence_refs_v1 array");
+    assert_eq!(typed_refs.len(), 2);
+    assert_eq!(
+        typed_refs[0]["ref"],
+        json!("https://github.com/kckylechen1/tachi/issues/149")
+    );
+    assert_eq!(typed_refs[1]["ref"], json!("kckylechen1/tachi#149"));
+    assert_eq!(typed_refs[1]["target_kind"], json!("issue"));
     assert_eq!(json["continuity_event"]["event_type"], json!("wiki.saved"));
     let events = server
         .with_global_store_read(|store| {

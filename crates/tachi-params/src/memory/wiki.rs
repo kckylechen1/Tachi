@@ -208,6 +208,15 @@ pub struct WikiSearchParams {
     /// Optional scoring weights override
     #[serde(default)]
     pub weights: Option<HybridWeightsParam>,
+
+    /// #1072 explicit lifecycle scope. Omitted (default): only `active`
+    /// wiki/guide entries are returned (the truthful-retrieval gate — a
+    /// `pending_review` draft is never silently served as reviewed). Pass
+    /// one of `candidate | pending_review | active | stale | superseded |
+    /// rejected` to browse that lifecycle explicitly, or `"all"` to disable
+    /// the gate entirely.
+    #[serde(default)]
+    pub lifecycle: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -224,6 +233,14 @@ pub struct WikiBrowseParams {
     /// Named project DB containing wiki memories (default: "wiki")
     #[serde(default = "default_wiki_project")]
     pub project: String,
+
+    /// #1072 explicit lifecycle scope. Omitted (default): only `active`
+    /// wiki/guide entries are returned (the truthful-retrieval gate). Pass
+    /// one of `candidate | pending_review | active | stale | superseded |
+    /// rejected` to browse that lifecycle explicitly, or `"all"` to disable
+    /// the gate entirely.
+    #[serde(default)]
+    pub lifecycle: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
