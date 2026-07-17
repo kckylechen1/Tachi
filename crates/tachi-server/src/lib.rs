@@ -137,6 +137,7 @@ mod orchestrator_ops;
 mod path_utils;
 mod peer_ops;
 mod pipeline_ops;
+mod precedent_candidate_ops;
 mod precedent_ops;
 mod project_db_ops;
 mod prompts;

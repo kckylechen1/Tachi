@@ -540,6 +540,19 @@ pub(crate) async fn handle_tachi_complete(
     pipeline_status["precedent_recording"] =
         crate::precedent_ops::record_complete_rulings(server, &params, project_explicit).await;
 
+    // Principle-level precedent CANDIDATE decomposition (#1076). Additive and
+    // independent of `precedent_recording` above — both read the same
+    // caller-supplied `rulings[]`, neither depends on the other's outcome.
+    // Candidates only: no pending->established promotion happens here (that
+    // is #1077's gate).
+    pipeline_status["precedent_candidate_decomposition"] =
+        crate::precedent_candidate_ops::record_complete_precedent_candidates(
+            server,
+            &params,
+            project_explicit,
+        )
+        .await;
+
     pipeline_status["post_complete_hooks"] = run_lesson_post_complete_hook(
         server,
         &params,

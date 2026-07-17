@@ -7,9 +7,12 @@
 //! rows, so a later slice can decompose, recall, and harden them. Two hard
 //! boundaries per the issue's frozen design:
 //!
-//! 1. **No decomposition here.** The verdict→principle-record decomposition is a
-//!    later backend-model lane. This module stores what the caller hands over,
-//!    faithfully, unmodified.
+//! 1. **No decomposition here.** This module stores what the caller hands
+//!    over, faithfully, unmodified — the verdict→principle-record
+//!    decomposition into `/precedent_candidates` rows is
+//!    `precedent_candidate_ops` (#1076), a sibling module that reuses this
+//!    one's validation/normalization/scrub/dedup building blocks rather than
+//!    duplicating them.
 //! 2. **Fail-safe.** A malformed ruling is skipped with a warning and never
 //!    fails the enclosing `complete` call — completion recording is the primary
 //!    contract; precedent capture is best-effort alongside it.
@@ -71,12 +74,18 @@ use crate::MemoryServer;
 /// The three recognized truth-maintenance states for a ruling. An omitted
 /// outcome defaults to `pending`; an explicit value outside this set makes the
 /// ruling malformed (skipped + warned).
-const VALID_OUTCOMES: [&str; 3] = ["validated", "overturned", "pending"];
+///
+/// `pub(crate)`: reused verbatim by `precedent_candidate_ops` (#1076) so the
+/// two capture paths can never drift on what counts as a valid outcome.
+pub(crate) const VALID_OUTCOMES: [&str; 3] = ["validated", "overturned", "pending"];
 
 /// Reject values that can't safely form a path segment. We only need the
 /// project label to be a stable, filesystem/URL-safe token; anything else is
 /// normalized to `global`.
-fn project_segment(params: &TachiCompleteParams) -> String {
+///
+/// `pub(crate)`: reused by `precedent_candidate_ops` (#1076) so both capture
+/// paths derive the identical project segment for the identical input.
+pub(crate) fn project_segment(params: &TachiCompleteParams) -> String {
     let raw = params
         .project
         .as_deref()
@@ -103,7 +112,13 @@ fn project_segment(params: &TachiCompleteParams) -> String {
 
 /// Validate + normalize one caller-supplied ruling. `Err(reason)` marks it
 /// malformed so the caller can skip + warn without aborting completion.
-fn normalize_ruling(ruling: &RulingRecordParams) -> Result<NormalizedRuling, String> {
+///
+/// `pub(crate)`: reused verbatim by `precedent_candidate_ops` (#1076) — the
+/// issue's frozen contract says "do not reimplement `rulings[]` intake", so
+/// the #1076 decomposition path validates/normalizes a ruling exactly the
+/// same way this capture path does, rather than duplicating (and risking
+/// drifting from) these rules.
+pub(crate) fn normalize_ruling(ruling: &RulingRecordParams) -> Result<NormalizedRuling, String> {
     let case = ruling.case.trim();
     if case.is_empty() {
         return Err("ruling missing required `case`".to_string());
@@ -152,13 +167,16 @@ fn normalize_ruling(ruling: &RulingRecordParams) -> Result<NormalizedRuling, Str
     })
 }
 
-struct NormalizedRuling {
-    case: String,
-    options_considered: Option<String>,
-    ruling: String,
-    principles_cited: Vec<String>,
-    outcome: String,
-    overturned_by: Option<String>,
+/// `pub(crate)` (fields included): reused by `precedent_candidate_ops`
+/// (#1076) — see [`normalize_ruling`]'s doc for why this is a shared type
+/// rather than a parallel one.
+pub(crate) struct NormalizedRuling {
+    pub(crate) case: String,
+    pub(crate) options_considered: Option<String>,
+    pub(crate) ruling: String,
+    pub(crate) principles_cited: Vec<String>,
+    pub(crate) outcome: String,
+    pub(crate) overturned_by: Option<String>,
 }
 
 /// Scrub every free-text field of a normalized ruling for secrets, in place.
@@ -168,7 +186,11 @@ struct NormalizedRuling {
 /// (rather than relying on the pipeline) guarantees the metadata copy is
 /// redacted identically to the body/summary. Returns the total redaction
 /// count across all fields.
-fn scrub_ruling(n: &mut NormalizedRuling) -> usize {
+///
+/// `pub(crate)`: reused by `precedent_candidate_ops` (#1076) so a ruling's
+/// free-text fields are scrubbed identically regardless of which capture
+/// path (raw ruling row vs. per-principle candidate rows) processes it.
+pub(crate) fn scrub_ruling(n: &mut NormalizedRuling) -> usize {
     let mut redactions = 0usize;
     let (case, c) = crate::memory_search_ops::scrub_secrets(&n.case);
     n.case = case;
@@ -195,15 +217,27 @@ fn scrub_ruling(n: &mut NormalizedRuling) -> usize {
 }
 
 /// Truncate a single line to at most `max` chars for the ≤100-char summary
-/// field, appending an ellipsis when cut.
-fn summary_line(case: &str, max: usize) -> String {
+/// field, appending an ellipsis when cut. The `summary` field is a UI teaser,
+/// not a content field — the frozen "content fields are atomic, never
+/// truncated" rule applies to `text`/`metadata`, which this never touches.
+///
+/// `pub(crate)`: `precedent_candidate_ops` (#1076) reuses this for its own
+/// candidate summaries with a `[precedent-candidate]` prefix instead — see
+/// that module's `candidate_summary_line`.
+pub(crate) fn summary_line_with_prefix(prefix: &str, case: &str, max: usize) -> String {
     let one_line = case.replace(['\n', '\r'], " ");
     if one_line.chars().count() <= max {
-        format!("[precedent] {one_line}")
+        format!("{prefix} {one_line}")
     } else {
         let head: String = one_line.chars().take(max.saturating_sub(1)).collect();
-        format!("[precedent] {head}…")
+        format!("{prefix} {head}…")
     }
+}
+
+/// Truncate a single line to at most `max` chars for the ≤100-char summary
+/// field, appending an ellipsis when cut.
+fn summary_line(case: &str, max: usize) -> String {
+    summary_line_with_prefix("[precedent]", case, max)
 }
 
 /// Build the human-readable body rendered into the memory text field.
@@ -294,7 +328,12 @@ fn build_metadata(n: &NormalizedRuling, params: &TachiCompleteParams, redactions
 /// deterministically (read ASCII digits up to `:` for the length, then
 /// consume exactly that many bytes as the field, then repeat), so two
 /// different field tuples can never collide onto the same seed bytes.
-fn frame_field(value: &str) -> String {
+///
+/// `pub(crate)`: reused by `precedent_candidate_ops` (#1076) for its own
+/// deterministic candidate-identity hash, which additionally folds in each
+/// candidate's source-evidence revision fields — see that module's
+/// `candidate_short_id` for why the same framing discipline applies there.
+pub(crate) fn frame_field(value: &str) -> String {
     format!("{}:{}", value.len(), value)
 }
 
@@ -337,7 +376,11 @@ fn precedent_short_id(project: &str, issue_ref: Option<&str>, n: &NormalizedRuli
 /// and per module docs point 3, a retried capture of the same ruling now
 /// reliably lands here (deterministic path + identical rendered body) instead
 /// of silently duplicating the row.
-fn extract_persisted_id(saved: &Value) -> Result<String, String> {
+///
+/// `pub(crate)`: reused by `precedent_candidate_ops` (#1076) — both capture
+/// paths persist through the same `save_eval_memory` pipeline and must
+/// interpret its response identically.
+pub(crate) fn extract_persisted_id(saved: &Value) -> Result<String, String> {
     match saved
         .get("id")
         .and_then(Value::as_str)
