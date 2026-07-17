@@ -427,7 +427,7 @@ mod tests {
 
     #[test]
     fn pick_shipped_evidence_requires_reachability_not_just_a_reference() {
-        let prs = vec![merged_pr(10, "Refs #1105", "sha-unreachable")];
+        let prs = [merged_pr(10, "Refs #1105", "sha-unreachable")];
         let referencing: Vec<&MergedPr> = prs.iter().collect();
         let resolver = FixtureDocResolver::new(); // nothing registered reachable
         let (evidence, any_unavailable) =
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn pick_shipped_evidence_returns_lowest_numbered_reachable_candidate() {
-        let prs = vec![
+        let prs = [
             merged_pr(20, "Refs #1105", "sha-20"),
             merged_pr(15, "Refs #1105", "sha-15"),
         ];
@@ -472,7 +472,7 @@ mod tests {
     /// negative.
     #[test]
     fn pick_shipped_evidence_reports_unavailable_reachability_separately_from_not_reachable() {
-        let prs = vec![merged_pr(10, "Refs #1105", "sha-flaky")];
+        let prs = [merged_pr(10, "Refs #1105", "sha-flaky")];
         let referencing: Vec<&MergedPr> = prs.iter().collect();
         let resolver = FixtureDocResolver::new().with_unavailable_commit(
             REPO,
