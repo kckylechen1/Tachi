@@ -58,6 +58,10 @@ export async function searchMemory(query: string, topK = 10): Promise<MemoryEntr
             query,
             top_k: topK,
             include_archived: false,
+            // tachi#1201 k3: search_memory now defaults to a markdown digest
+            // when `format` is omitted; this caller JSON.parses the raw text
+            // body below, so pin the pre-k3 contract explicitly.
+            format: 'json',
           },
         },
       }),

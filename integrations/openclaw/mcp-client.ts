@@ -635,6 +635,10 @@ export class MemoryMcpClient {
       candidates_per_channel: opts?.candidates,
       graph_expand_hops: 0,
       graph_relation_filter: null,
+      // tachi#1201 k3: search_memory now defaults to a markdown digest when
+      // `format` is omitted; this client parses the JSON row shape below, so
+      // pin the pre-k3 contract explicitly.
+      format: "json",
       ...(queryVec && queryVec.length > 0 ? { query_vec: queryVec } : {}),
       ...(opts?.weights ? { weights: opts.weights } : {}),
     });
