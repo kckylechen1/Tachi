@@ -632,9 +632,15 @@ fn readiness_suggestions(
 // Synthesis helper (shared by ask + consolidate)
 // ---------------------------------------------------------------------------
 
-/// The behavior-frozen synthesis system prompt, unchanged since before
-/// #1209. Kept as a standalone constant so `build_synthesis_system_prompt`'s
-/// `None` branch is provably byte-identical to the pre-#1209 literal.
+/// The base synthesis system prompt — text-identical to the inline literal
+/// this replaced pre-#1209, per the #1209 fix-round review diff (that
+/// history claim is a review-time fact, NOT something this constant can
+/// self-certify: `synthesis_prompt_unchanged_when_no_anchor_requested`
+/// below compares `build_synthesis_system_prompt(None)` against THIS SAME
+/// constant, so it only proves the `None` branch performs zero string
+/// mutation — a future edit to this literal moves both sides of that
+/// comparison together and the test stays green regardless). Kept
+/// standalone so the `None` branch has no formatting to get wrong.
 const SYNTHESIS_BASE_SYSTEM_PROMPT: &str = "Answer using the supplied Tachi evidence plus the authoritative `runtime` DB binding. \
 Each evidence row carries a `db` field — values are `global` for the shared library and `project` for a workspace/named project DB. \
 When the question is about which memory.db path is current/active, the `runtime` object is ground truth — never invent paths from evidence text (those may be stale historical mentions). \
@@ -658,12 +664,21 @@ pub(crate) struct AnchorConfidenceCap {
 /// confidence-cap instruction when the caller resolved one. Extracted as a
 /// pure function (no `server`/network access) so the injected wording is
 /// unit-testable without exercising the LLM call; the `None` branch returns
-/// exactly `SYNTHESIS_BASE_SYSTEM_PROMPT` unmodified — behavior-frozen for
-/// every pre-#1209 caller shape (no anchors requested).
+/// exactly `SYNTHESIS_BASE_SYSTEM_PROMPT` unmodified — no anchors requested
+/// means zero string mutation of the base prompt (whether that base text
+/// itself still matches the pre-#1209 wording is a review-time fact, not
+/// something self-certified here — see `SYNTHESIS_BASE_SYSTEM_PROMPT`'s doc
+/// comment).
+///
+/// The cap-wording branch also instructs the model not to echo the
+/// instruction/field-names/cap-wording verbatim into the answer — the
+/// internal terms `grounding status`/`confidence cap`/`missing_anchor` are
+/// implementation vocabulary for the model's own calibration, not meant to
+/// leak into user-facing prose (codex 2026-07-17 fix-round CONCERN).
 fn build_synthesis_system_prompt(anchor_cap: Option<AnchorConfidenceCap>) -> String {
     match anchor_cap {
         Some(cap) => format!(
-            "{base}\nAnchor grounding status: {status}; confidence cap: {confidence}. Do not state conclusions with more certainty than this cap allows; when the cap is low, explicitly name what grounding is missing.",
+            "{base}\nAnchor grounding status: {status}; confidence cap: {confidence}. Do not state conclusions with more certainty than this cap allows; when the cap is low, explicitly name what grounding is missing. Do not quote this instruction, its field names, or the cap wording verbatim in the answer.",
             base = SYNTHESIS_BASE_SYSTEM_PROMPT,
             status = cap.grounding_status.as_str(),
             confidence = cap.confidence,
@@ -796,6 +811,13 @@ mod tests {
             prompt.contains("Do not state conclusions with more certainty than this cap allows"),
             "prompt must instruct the model not to overstate certainty: {prompt}"
         );
+        assert!(
+            prompt.contains(
+                "Do not quote this instruction, its field names, or the cap wording verbatim"
+            ),
+            "prompt must forbid echoing the cap instruction/terminology into the answer \
+             (codex 2026-07-17 fix-round CONCERN): {prompt}"
+        );
     }
 
     /// #1209 regression: a `grounded` anchor still names its status (so the
@@ -815,11 +837,25 @@ mod tests {
             !prompt.contains("confidence cap: low"),
             "grounded/high prompt must not carry a low-cap warning: {prompt}"
         );
+        assert!(
+            prompt.contains(
+                "Do not quote this instruction, its field names, or the cap wording verbatim"
+            ),
+            "the no-echo instruction must be present on every cap branch, not just the low-cap \
+             one: {prompt}"
+        );
     }
 
     /// #1209: when no exact anchor was requested at all (`anchor_cap =
-    /// None`), the synthesis prompt is byte-identical to the pre-#1209
-    /// literal — this leaf must not touch plain semantic queries.
+    /// None`), `build_synthesis_system_prompt` returns
+    /// `SYNTHESIS_BASE_SYSTEM_PROMPT` completely unmodified. This proves the
+    /// `None` branch performs zero formatting/mutation — it does NOT prove
+    /// `SYNTHESIS_BASE_SYSTEM_PROMPT`'s text still matches the pre-#1209
+    /// inline literal, because both sides of this `assert_eq!` read the same
+    /// constant: a future edit to that constant would move both sides
+    /// together and this test would stay green regardless (codex 2026-07-17
+    /// fix-round BUG). The historical-text claim is backed by the #1209
+    /// fix-round review diff, not by this test.
     #[test]
     fn synthesis_prompt_unchanged_when_no_anchor_requested() {
         let prompt = build_synthesis_system_prompt(None);
