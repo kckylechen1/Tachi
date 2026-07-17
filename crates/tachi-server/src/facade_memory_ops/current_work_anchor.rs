@@ -38,7 +38,9 @@
 use serde_json::{json, Value};
 
 use crate::task_lifecycle::{parse_issue_ref, GithubTarget};
-use crate::tool_params::{AuthorityClassV1, GroundingStatusV1, RecallEvidenceV1, SourceKindV1};
+use crate::tool_params::{
+    AuthorityClassV1, ContradictionV1, GroundingStatusV1, RecallEvidenceV1, SourceKindV1,
+};
 use crate::MemoryServer;
 
 /// A query mentioning more exact anchors than this is still answered, but
@@ -87,7 +89,10 @@ fn missing_anchor_row(source_ref: &str, resolved_at: &str, reason: &str) -> Reca
         valid_at: resolved_at.to_string(),
         retrieval_score: 0.0,
         claim_coverage: 0.0,
-        contradictions: vec![reason.to_string()],
+        contradictions: vec![ContradictionV1 {
+            description: reason.to_string(),
+            evidence_refs: Vec::new(),
+        }],
         grounding_status: GroundingStatusV1::MissingAnchor,
     }
 }
@@ -106,14 +111,26 @@ pub(crate) fn compile_current_work_anchor(
         Err(reason) => return missing_anchor_row(&source_ref, resolved_at, reason),
     };
 
+    // #1071 fix-round checkpoint 3: a snapshot that parses as JSON but is
+    // missing the fields `read_issue_snapshot_bounded` always requests
+    // (`number,title,state,body,labels,milestone,updatedAt,comments`) is
+    // itself a malformed/truncated `gh` response — treating it as fully
+    // `Grounded`/`claim_coverage: 1.0` would fabricate completeness the
+    // response never actually proved. `body`/`milestone`/`comments` are
+    // deliberately NOT required here: they are legitimately absent/empty on
+    // a real, healthy issue (no body text, no milestone, zero comments);
+    // `title`/`state`/`labels`/`updatedAt` are not.
     let number_matches = issue.get("number").and_then(Value::as_u64) == Some(target.number);
     let state = issue.get("state").and_then(Value::as_str);
-    if !number_matches || state.is_none() {
+    let has_title = issue.get("title").and_then(Value::as_str).is_some();
+    let has_updated_at = issue.get("updatedAt").and_then(Value::as_str).is_some();
+    let has_labels = issue.get("labels").is_some();
+    if !number_matches || state.is_none() || !has_title || !has_updated_at || !has_labels {
         return missing_anchor_row(
             &source_ref,
             resolved_at,
-            "gh issue view result did not identify the requested issue by number/state \
-             (malformed or truncated gh response)",
+            "gh issue view result did not include the complete requested field set \
+             (number/state/title/updatedAt/labels) — malformed or truncated gh response",
         );
     }
     let state = state.unwrap_or("unknown").to_ascii_lowercase();
@@ -152,7 +169,7 @@ pub(crate) fn compile_current_work_anchor(
     }
 }
 
-/// Live wrapper: resolve up to [`MAX_RESOLVED_ANCHORS_PER_ASK`] exact
+/// Live wrapper: live-resolve up to [`MAX_RESOLVED_ANCHORS_PER_ASK`] exact
 /// anchors via [`crate::gh_ops::read_issue_snapshot_bounded`] (each call
 /// individually timeout-bounded and kill-on-drop — see that function's doc
 /// comment). Never panics and never propagates a network error to the
@@ -160,13 +177,35 @@ pub(crate) fn compile_current_work_anchor(
 /// `Err`, because "the requested anchor could not be confirmed live" is
 /// itself the correct, honest answer `ask` must surface — not a facade
 /// failure.
+///
+/// #1071 fix-round checkpoint 2: a query naming MORE than
+/// [`MAX_RESOLVED_ANCHORS_PER_ASK`] anchors must never silently drop the
+/// extras — every requested anchor gets a row. Anchors beyond the cap are
+/// NOT live-fetched (an unbounded `gh` fan-out is still not a reasonable
+/// per-call cost), but they ARE surfaced as `MissingAnchor` rows with an
+/// explicit "beyond cap, not resolved" reason, so `compute_anchor_gated_confidence`
+/// correctly caps confidence instead of silently evaluating a truncated
+/// anchor set as if it were complete.
 pub(crate) async fn resolve_current_work_anchors(
     server: &MemoryServer,
     targets: &[GithubTarget],
 ) -> Vec<RecallEvidenceV1> {
     let resolved_at = chrono::Utc::now().to_rfc3339();
-    let mut out = Vec::with_capacity(targets.len().min(MAX_RESOLVED_ANCHORS_PER_ASK));
-    for target in targets.iter().take(MAX_RESOLVED_ANCHORS_PER_ASK) {
+    let mut out = Vec::with_capacity(targets.len());
+    for (index, target) in targets.iter().enumerate() {
+        if index >= MAX_RESOLVED_ANCHORS_PER_ASK {
+            let source_ref = format!("{}#{}", target.repo, target.number);
+            out.push(missing_anchor_row(
+                &source_ref,
+                &resolved_at,
+                &format!(
+                    "requested anchor beyond the {MAX_RESOLVED_ANCHORS_PER_ASK}-anchor \
+                     live-resolve cap for a single ask call — not fetched, treated as \
+                     unresolved rather than silently dropped"
+                ),
+            ));
+            continue;
+        }
         let fetch =
             crate::gh_ops::read_issue_snapshot_bounded(server, &target.repo, target.number).await;
         let row = match &fetch {
@@ -185,13 +224,25 @@ pub(crate) async fn resolve_current_work_anchors(
 /// generic evidence-volume heuristic — a pile of unrelated advisory hits
 /// must never manufacture "high" confidence about a specific anchor that
 /// failed to resolve (RED corpus case 1).
+///
+/// #1071 fix-round checkpoint 3: literally checks all four factors the
+/// frozen rule names — `grounding_status` (required-anchor coverage),
+/// `claim_coverage`, `authority`, and `contradictions` — rather than only
+/// `grounding_status`. `authority` is checked because only `CurrentWork`-
+/// authority rows may grant "high" confidence here: an anchor row this
+/// leaf did not itself construct with `CurrentWork` authority has no basis
+/// for being treated as required-anchor coverage at all (RED corpus case
+/// 4, "same ids but wrong authority").
 pub(crate) fn compute_anchor_gated_confidence(
     required_anchors: &[RecallEvidenceV1],
 ) -> &'static str {
-    let any_missing = required_anchors
-        .iter()
-        .any(|anchor| anchor.grounding_status == GroundingStatusV1::MissingAnchor);
-    if any_missing {
+    let any_ungrounded = required_anchors.iter().any(|anchor| {
+        anchor.grounding_status == GroundingStatusV1::MissingAnchor
+            || anchor.authority != AuthorityClassV1::CurrentWork
+            || anchor.claim_coverage < 1.0
+            || !anchor.contradictions.is_empty()
+    });
+    if any_ungrounded {
         "low"
     } else {
         "high"
@@ -385,6 +436,30 @@ mod tests {
         assert_eq!(row.grounding_status, GroundingStatusV1::MissingAnchor);
     }
 
+    /// #1071 fix-round checkpoint 3 (exact codex repro): a `gh` response
+    /// that identifies the right issue by number/state but is missing
+    /// `title`/`labels`/`updatedAt` (a truncated/partial snapshot, e.g. a
+    /// flaky `gh` call that returns before the full JSON body streams) must
+    /// NOT be treated as `Grounded`/`claim_coverage: 1.0` — the leaf only
+    /// ever requests the complete field set, so a partial response is
+    /// itself evidence of malformation, not a smaller-but-valid claim.
+    #[test]
+    fn compile_current_work_anchor_missing_on_partial_snapshot() {
+        let gh_result = json!({ "number": 1002, "state": "OPEN" });
+        let row = compile_current_work_anchor(
+            &target("o/r", 1002),
+            Ok(&gh_result),
+            "2026-07-16T00:00:00Z",
+        );
+        assert_eq!(
+            row.grounding_status,
+            GroundingStatusV1::MissingAnchor,
+            "a partial snapshot missing title/labels/updatedAt must never be Grounded"
+        );
+        assert_eq!(row.claim_coverage, 0.0);
+        assert!(!row.contradictions.is_empty());
+    }
+
     /// RED corpus case 1: a resolved-but-missing anchor must force
     /// confidence down regardless of how much OTHER evidence exists —
     /// `compute_anchor_gated_confidence` never looks at evidence volume at
@@ -393,7 +468,9 @@ mod tests {
     fn confidence_is_low_when_any_required_anchor_is_missing() {
         let grounded = compile_current_work_anchor(
             &target("o/r", 1),
-            Ok(&json!({"number": 1, "state": "OPEN", "updatedAt": "t"})),
+            Ok(
+                &json!({"number": 1, "state": "OPEN", "title": "t", "labels": [], "updatedAt": "t"}),
+            ),
             "t0",
         );
         let missing = compile_current_work_anchor(&target("o/r", 2), Err("not found"), "t0");
@@ -404,11 +481,66 @@ mod tests {
         assert_eq!(compute_anchor_gated_confidence(&[grounded]), "high");
     }
 
+    /// #1071 fix-round checkpoint 3: `compute_anchor_gated_confidence` must
+    /// literally check `claim_coverage`, `authority`, and `contradictions`
+    /// — not only `grounding_status` — per the frozen rule's exact wording.
+    /// These rows are hand-constructed (not producible by this leaf's own
+    /// live path today) specifically to prove the FUNCTION itself enforces
+    /// each factor defensively, not just the paths that currently exist.
+    #[test]
+    fn confidence_is_low_when_claim_coverage_authority_or_contradictions_are_off() {
+        let clean = RecallEvidenceV1 {
+            kind: SourceKindV1::Issue,
+            authority: AuthorityClassV1::CurrentWork,
+            lifecycle: "open".to_string(),
+            source_ref: "o/r#1".to_string(),
+            source_revision: "abc".to_string(),
+            valid_at: "t".to_string(),
+            retrieval_score: 1.0,
+            claim_coverage: 1.0,
+            contradictions: Vec::new(),
+            grounding_status: GroundingStatusV1::Grounded,
+        };
+        assert_eq!(
+            compute_anchor_gated_confidence(std::slice::from_ref(&clean)),
+            "high"
+        );
+
+        let mut partial_claim = clean.clone();
+        partial_claim.claim_coverage = 0.5;
+        assert_eq!(
+            compute_anchor_gated_confidence(&[partial_claim]),
+            "low",
+            "claim_coverage < 1.0 must cap confidence even when grounding_status is Grounded"
+        );
+
+        let mut wrong_authority = clean.clone();
+        wrong_authority.authority = AuthorityClassV1::Advisory;
+        assert_eq!(
+            compute_anchor_gated_confidence(&[wrong_authority]),
+            "low",
+            "non-CurrentWork authority must never grant required-anchor coverage"
+        );
+
+        let mut contradicted = clean;
+        contradicted.contradictions = vec![ContradictionV1 {
+            description: "conflicts with another source".to_string(),
+            evidence_refs: Vec::new(),
+        }];
+        assert_eq!(
+            compute_anchor_gated_confidence(&[contradicted]),
+            "low",
+            "a non-empty contradictions list must cap confidence"
+        );
+    }
+
     #[test]
     fn overall_grounding_status_reflects_any_missing_anchor() {
         let grounded = compile_current_work_anchor(
             &target("o/r", 1),
-            Ok(&json!({"number": 1, "state": "OPEN", "updatedAt": "t"})),
+            Ok(
+                &json!({"number": 1, "state": "OPEN", "title": "t", "labels": [], "updatedAt": "t"}),
+            ),
             "t0",
         );
         let missing = compile_current_work_anchor(&target("o/r", 2), Err("not found"), "t0");
@@ -430,7 +562,9 @@ mod tests {
     fn anchor_row_wins_its_partition_against_crowding_evidence() {
         let grounded = compile_current_work_anchor(
             &target("o/r", 1002),
-            Ok(&json!({"number": 1002, "state": "OPEN", "updatedAt": "t"})),
+            Ok(
+                &json!({"number": 1002, "state": "OPEN", "title": "t", "labels": [], "updatedAt": "t"}),
+            ),
             "t0",
         );
         let crowding_rows: Vec<Value> = (0..20)

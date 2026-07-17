@@ -25,7 +25,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{GroundingStatusV1, SourceKindV1};
+use crate::{ContradictionV1, GroundingStatusV1, SourceKindV1};
 
 /// Canon doc §3's closed authority vocabulary. Only `CurrentWork` and
 /// `Advisory` are constructed by this leaf's live path (see module doc);
@@ -87,7 +87,12 @@ pub struct RecallEvidenceV1 {
     /// anchor resolved and its claim (the issue's own current state) is
     /// therefore fully represented, 0.0 when it did not.
     pub claim_coverage: f64,
-    pub contradictions: Vec<String>,
+    /// #1071 fix-round checkpoint 4: canon doc §6.2's literal snippet types
+    /// this `ContradictionV1[]` (the same structured type #1002's
+    /// `IssueDispositionProposalV1` already uses), not a bare string list —
+    /// publishing the wrong wire shape here would force a breaking change
+    /// once a later leaf populates real contradiction evidence refs.
+    pub contradictions: Vec<ContradictionV1>,
     pub grounding_status: GroundingStatusV1,
 }
 
@@ -122,5 +127,36 @@ mod tests {
         let wire = serde_json::to_string(&row).expect("serialize");
         let back: RecallEvidenceV1 = serde_json::from_str(&wire).expect("deserialize");
         assert_eq!(back, row);
+    }
+
+    /// #1071 fix-round checkpoint 4: `contradictions` must serialize as
+    /// structured `ContradictionV1[]` objects (`description`/`evidence_refs`
+    /// keys), not bare strings — proves the wire shape, not just that SOME
+    /// value round-trips.
+    #[test]
+    fn contradictions_serialize_as_structured_objects_not_bare_strings() {
+        let row = RecallEvidenceV1 {
+            kind: SourceKindV1::Issue,
+            authority: AuthorityClassV1::CurrentWork,
+            lifecycle: "unknown".to_string(),
+            source_ref: "owner/repo#1".to_string(),
+            source_revision: String::new(),
+            valid_at: "2026-07-16T00:00:00Z".to_string(),
+            retrieval_score: 0.0,
+            claim_coverage: 0.0,
+            contradictions: vec![ContradictionV1 {
+                description: "anchor unresolved".to_string(),
+                evidence_refs: vec![],
+            }],
+            grounding_status: GroundingStatusV1::MissingAnchor,
+        };
+        let wire: serde_json::Value = serde_json::to_value(&row).expect("serialize");
+        let first = &wire["contradictions"][0];
+        assert!(
+            first.is_object(),
+            "contradictions[0] must be a structured object, got: {first}"
+        );
+        assert_eq!(first["description"], serde_json::json!("anchor unresolved"));
+        assert!(first.get("evidence_refs").is_some());
     }
 }
