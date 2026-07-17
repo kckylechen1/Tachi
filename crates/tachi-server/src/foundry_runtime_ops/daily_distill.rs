@@ -44,6 +44,9 @@ use memcore::MemoryEntry;
 pub(crate) use parser::parse_distill_response;
 #[cfg(test)]
 use persist::persist_distill_memory;
+// #1087: unit test asserts the flag-off default is unchanged.
+#[cfg(test)]
+pub(crate) use runner::call_claude_batch;
 #[cfg(test)]
 use serde_json::json;
 #[cfg(test)]

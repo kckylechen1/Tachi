@@ -410,3 +410,234 @@ fn restore_os_env(key: &str, value: Option<std::ffi::OsString>) {
         std::env::remove_var(key);
     }
 }
+
+// ── #1087 provider-path rollout ─────────────────────────────────────────
+
+#[tokio::test]
+async fn call_via_provider_writes_same_artifact_contract_as_call() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = ClaudePool {
+        sem: Arc::new(Semaphore::new(1)),
+        runs_dir: tmp.path().to_path_buf(),
+        timeout: Duration::from_secs(5),
+        binary: Ok("/nonexistent/__tachi_test_no_such_claude_provider__".to_string()),
+    };
+
+    let outcome = pool
+        .call_via_provider("provider-test", "recorded prompt text", || async {
+            Ok::<_, String>("provider response text".to_string())
+        })
+        .await
+        .expect("provider executor should succeed without touching the CLI binary");
+    assert_eq!(outcome.text, "provider response text");
+
+    let run_dir = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .flat_map(|e| e.ok())
+        .find(|e| e.file_type().unwrap().is_dir())
+        .map(|e| e.path())
+        .expect("run dir should exist");
+
+    let prompt = std::fs::read_to_string(run_dir.join("prompt.md")).unwrap();
+    assert_eq!(prompt, "recorded prompt text");
+    let result = std::fs::read_to_string(run_dir.join("result.md")).unwrap();
+    assert_eq!(result, "provider response text");
+    let status: Value =
+        serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
+            .unwrap();
+    assert_eq!(status["status"], "success");
+    assert_eq!(status["label"], "provider-test");
+}
+
+#[tokio::test]
+async fn call_via_provider_records_failure_status_on_executor_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = ClaudePool {
+        sem: Arc::new(Semaphore::new(1)),
+        runs_dir: tmp.path().to_path_buf(),
+        timeout: Duration::from_secs(5),
+        binary: Ok("/nonexistent/__tachi_test_no_such_claude_provider_err__".to_string()),
+    };
+
+    let err = pool
+        .call_via_provider("provider-fail", "prompt", || async {
+            Err::<String, _>("provider unreachable".to_string())
+        })
+        .await
+        .expect_err("executor error should surface");
+    assert_eq!(err, "provider unreachable");
+
+    let run_dir = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .flat_map(|e| e.ok())
+        .find(|e| e.file_type().unwrap().is_dir())
+        .map(|e| e.path())
+        .expect("run dir should exist");
+    let status: Value =
+        serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
+            .unwrap();
+    assert_eq!(status["status"], "failed");
+    assert_eq!(status["error"], "provider unreachable");
+}
+
+// The four tests below all mutate the process-wide `PROVIDER_ROLLOUT_ENV`
+// var, so — matching this crate's `global_test_lock` convention (see
+// `foundry_runs_dir_honors_tachi_home` above, and 5a561225 in
+// tachi-server) — each is a plain `#[test] fn` that acquires the lock
+// SYNCHRONOUSLY (guard lives for the whole fn body, never across an
+// `.await`) and drives its async call through a local
+// `tokio::runtime::Runtime::block_on`, not `#[tokio::test]`. That keeps the
+// lock held for the entire critical section (env mutation → the call that
+// reads it) while satisfying clippy's `await_holding_lock`.
+
+#[test]
+fn pool_call_with_fallback_provider_first_skips_cli_when_provider_succeeds() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let prev = std::env::var(super::rollout::PROVIDER_ROLLOUT_ENV).ok();
+    std::env::set_var(super::rollout::PROVIDER_ROLLOUT_ENV, "true");
+
+    let tmp = tempfile::tempdir().unwrap();
+    // A CLI binary that would fail loudly if invoked — proves the CLI pool
+    // is never touched when the provider succeeds.
+    let pool = ClaudePool {
+        sem: Arc::new(Semaphore::new(1)),
+        runs_dir: tmp.path().to_path_buf(),
+        timeout: Duration::from_secs(5),
+        binary: Ok("/nonexistent/__tachi_test_provider_first_cli__".to_string()),
+    };
+
+    let (text, source) = tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(pool_call_with_fallback(
+            &pool,
+            "sys",
+            "usr",
+            "provider-first-ok",
+            || async { Ok::<_, String>("provider-first-text".to_string()) },
+        ))
+        .expect("provider path should succeed");
+
+    assert_eq!(text, "provider-first-text");
+    assert_eq!(source, PoolCallSource::ProviderTachiLlm);
+    assert_eq!(source.as_str(), "provider_tachi_llm");
+
+    match prev {
+        Some(v) => std::env::set_var(super::rollout::PROVIDER_ROLLOUT_ENV, v),
+        None => std::env::remove_var(super::rollout::PROVIDER_ROLLOUT_ENV),
+    }
+}
+
+#[test]
+fn pool_call_with_fallback_provider_first_falls_back_to_cli_on_provider_error() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let prev = std::env::var(super::rollout::PROVIDER_ROLLOUT_ENV).ok();
+    std::env::set_var(super::rollout::PROVIDER_ROLLOUT_ENV, "true");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let fake_claude = tmp.path().join("claude");
+    std::fs::write(
+        &fake_claude,
+        "#!/bin/sh\nprintf '{\"result\":\"cli-fallback-text\"}\\n'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let pool = ClaudePool {
+        sem: Arc::new(Semaphore::new(1)),
+        runs_dir: tmp.path().to_path_buf(),
+        timeout: Duration::from_secs(5),
+        binary: Ok(fake_claude.to_string_lossy().to_string()),
+    };
+
+    let (text, source) = tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(pool_call_with_fallback(
+            &pool,
+            "sys",
+            "usr",
+            "provider-first-degrade",
+            || async { Err::<String, _>("provider down".to_string()) },
+        ))
+        .expect("CLI pool fallback should succeed after provider error");
+
+    assert_eq!(text, "cli-fallback-text");
+    assert_eq!(source, PoolCallSource::ClaudeCli);
+
+    match prev {
+        Some(v) => std::env::set_var(super::rollout::PROVIDER_ROLLOUT_ENV, v),
+        None => std::env::remove_var(super::rollout::PROVIDER_ROLLOUT_ENV),
+    }
+}
+
+#[test]
+fn pool_call_with_fallback_provider_first_errors_when_both_paths_fail() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let prev = std::env::var(super::rollout::PROVIDER_ROLLOUT_ENV).ok();
+    std::env::set_var(super::rollout::PROVIDER_ROLLOUT_ENV, "true");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = ClaudePool {
+        sem: Arc::new(Semaphore::new(1)),
+        runs_dir: tmp.path().to_path_buf(),
+        timeout: Duration::from_secs(5),
+        binary: Ok("/nonexistent/__tachi_test_provider_first_both_fail__".to_string()),
+    };
+
+    let err = tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(pool_call_with_fallback(
+            &pool,
+            "sys",
+            "usr",
+            "provider-first-both-fail",
+            || async { Err::<String, _>("provider down".to_string()) },
+        ))
+        .expect_err("both paths failing should surface an error");
+    assert!(err.contains("provider down"), "unexpected error: {err}");
+    assert!(err.contains("CLI pool fallback"), "unexpected error: {err}");
+
+    match prev {
+        Some(v) => std::env::set_var(super::rollout::PROVIDER_ROLLOUT_ENV, v),
+        None => std::env::remove_var(super::rollout::PROVIDER_ROLLOUT_ENV),
+    }
+}
+
+#[test]
+fn pool_call_with_fallback_defaults_to_cli_first_when_flag_unset() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let prev = std::env::var(super::rollout::PROVIDER_ROLLOUT_ENV).ok();
+    // Explicitly unset — proves the default (flag absent) preserves
+    // pre-#1087 behavior: CLI pool first, raw-API fallback second.
+    std::env::remove_var(super::rollout::PROVIDER_ROLLOUT_ENV);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = ClaudePool {
+        sem: Arc::new(Semaphore::new(1)),
+        runs_dir: tmp.path().to_path_buf(),
+        timeout: Duration::from_secs(5),
+        binary: Ok("/nonexistent/__tachi_test_default_cli_first__".to_string()),
+    };
+
+    let (text, source) = tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(pool_call_with_fallback(
+            &pool,
+            "sys",
+            "usr",
+            "default-cli-first",
+            || async { Ok::<_, String>("raw-api-text".to_string()) },
+        ))
+        .expect("raw-api fallback should succeed since CLI binary is missing");
+
+    assert_eq!(text, "raw-api-text");
+    assert_eq!(source, PoolCallSource::RawApiFallback);
+
+    match prev {
+        Some(v) => std::env::set_var(super::rollout::PROVIDER_ROLLOUT_ENV, v),
+        None => std::env::remove_var(super::rollout::PROVIDER_ROLLOUT_ENV),
+    }
+}

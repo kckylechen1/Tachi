@@ -199,7 +199,8 @@ async fn process_claude_batch(
     report.batches_dispatched += 1;
     let label = format!("distill-{}-b{}", project_label, chunk_idx);
     let prompt = build_batch_prompt(chunk);
-    match server.claude_pool.call(&label, &prompt).await {
+    let call_result = call_claude_batch(server, &label, &prompt, chunk).await;
+    match call_result {
         Ok(outcome) => match parse_distill_response(&outcome.text) {
             Ok(per_group) => {
                 apply_parsed_groups(
@@ -376,6 +377,50 @@ async fn apply_parsed_groups(
             None => {
                 fallback_one_group(server, group, batch_run_id, report, manifest, project).await;
             }
+        }
+    }
+}
+
+/// Run the Claude-pool distill batch call, either via the CLI pool
+/// (pre-#1087 default) or — when `TACHI_CLAUDE_POOL_PROVIDER_FIRST` is set —
+/// via the cheap-tier provider executor first, with the CLI pool as a
+/// fallback for the rollout cycle. Either way the run-directory artifact
+/// contract (`prompt.md`/`result.md`/`status.json`) is preserved, since both
+/// paths go through `ClaudePool::call`/`call_via_provider`.
+pub(crate) async fn call_claude_batch(
+    server: &MemoryServer,
+    label: &str,
+    prompt: &str,
+    chunk: &[CandidateGroup],
+) -> Result<tachi_llm::claude_pool::ClaudeCallOutcome, String> {
+    if !tachi_llm::claude_pool::provider_rollout_enabled() {
+        return server.claude_pool.call(label, prompt).await;
+    }
+
+    let llm = server.llm.clone();
+    let user_payload = build_batch_user_payload(chunk);
+    let max_tokens = batch_max_tokens(chunk.len());
+    let provider_result = server
+        .claude_pool
+        .call_via_provider(label, prompt, move || async move {
+            llm.call_distill_llm(
+                DISTILL_DAILY_SYSTEM_PROMPT,
+                &user_payload,
+                None,
+                0.3,
+                max_tokens,
+            )
+            .await
+        })
+        .await;
+
+    match provider_result {
+        Ok(outcome) => Ok(outcome),
+        Err(provider_err) => {
+            tracing::warn!(
+                "[distill:{label}] provider path failed, falling back to CLI pool: {provider_err}"
+            );
+            server.claude_pool.call(label, prompt).await
         }
     }
 }

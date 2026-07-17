@@ -502,6 +502,93 @@ async fn call_reasoning_llm_with_receipt_flags_truncation_and_fallback_honestly(
     server_task.abort();
 }
 
+/// #1087: `call_reasoning_llm_provider_only` must be a pure HTTP round-trip
+/// with zero Claude-CLI involvement — contrast this with the test above
+/// (`call_reasoning_llm_with_receipt_flags_truncation_and_fallback_honestly`),
+/// which has to force the claude-cli path into its failure cooldown via
+/// `record_claude_cli_failure_at` to get a deterministic result, because
+/// `call_reasoning_llm_with_receipt` tries a real `claude` subprocess FIRST.
+/// This test needs no such ceremony: no cooldown forced, `CLAUDE_BIN`/PATH
+/// untouched, yet the mock HTTP lane deterministically serves the request —
+/// because this method never consults the CLI at all.
+#[tokio::test]
+async fn call_reasoning_llm_provider_only_is_pure_http_no_cli_ceremony_needed() {
+    use axum::{routing::post, Json, Router};
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            Json(serde_json::json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "provider-only answer"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2
+                }
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let port = listener.local_addr().expect("mock provider addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock provider");
+    });
+
+    let config = ProviderRuntimeConfig {
+        extract: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        summary: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        reasoning: ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+            model: "mock-reasoning-only-model".to_string(),
+            api_key_envs: vec!["REASONING_API_KEY"],
+        },
+        distill: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("client should initialize");
+    client.set_provider_secret_pool(
+        "REASONING_API_KEY",
+        vec![ProviderSecret {
+            key_id: "REASONING_API_KEY".to_string(),
+            value: "test-key".to_string(),
+        }],
+    );
+
+    let text = client
+        .call_reasoning_llm_provider_only("system", "user", None, 0.0, 16)
+        .await
+        .expect("provider-only call should succeed from the mock lane alone");
+
+    assert_eq!(text, "provider-only answer");
+
+    server_task.abort();
+}
+
 #[tokio::test]
 async fn chat_lane_marks_insufficient_balance_as_exhausted() {
     use axum::{http::StatusCode, response::IntoResponse, routing::post, Router};

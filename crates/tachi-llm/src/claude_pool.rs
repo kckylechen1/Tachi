@@ -21,6 +21,23 @@
 //! Callers use `pool_call_with_fallback` for a Claude CLI → raw API
 //! degradation path. Each caller is expected to handle its own LLM-fallback
 //! policy when `call()` returns Err.
+//!
+//! ## Provider-path rollout (#1087)
+//!
+//! `claude_pool` is being retired in favor of provider-based `tachi-llm`
+//! calls (no CLI subprocess, no bounded-CLI-binary dependency). The
+//! rollout is staged: [`call_via_provider`](ClaudePool::call_via_provider)
+//! preserves the exact run-directory artifact contract
+//! (`prompt.md`/`result.md`/`status.json` under
+//! `<tachi_home>/foundry-runs/<label>-<ts>/`) while swapping the executor
+//! underneath — the caller supplies a provider closure instead of spawning
+//! `claude`. [`provider_rollout_enabled`] gates whether callers route
+//! through the provider path first (CLI pool as fallback) or keep today's
+//! CLI-first behavior; it defaults to `false` so this lands inert. Once the
+//! provider path has run a full cycle in production, a follow-up change
+//! flips the default and later deletes the CLI pool + its env surface
+//! (`CLAUDE_POOL_MAX_CONCURRENT` / `CLAUDE_BIN` /
+//! `TACHI_CLAUDE_SKIP_PERMISSIONS`) — out of scope here.
 
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -41,11 +58,13 @@ mod envelope;
 mod fallback;
 mod files;
 mod lifecycle;
+mod rollout;
 
 #[cfg(test)]
 mod tests;
 
 pub use self::fallback::{pool_call_with_fallback, PoolCallSource};
+pub use self::rollout::provider_rollout_enabled;
 
 /// Default bounded concurrency for Claude CLI invocations.
 pub const DEFAULT_MAX_CONCURRENT: usize = 2;

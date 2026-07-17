@@ -361,6 +361,70 @@ fn persist_distill_memory_preserves_used_or_protected_raw_sources() {
         .expect("verify guarded sources");
 }
 
+// ── #1087 provider-path rollout ─────────────────────────────────────────
+
+/// With `TACHI_CLAUDE_POOL_PROVIDER_FIRST` unset (the shipped default),
+/// `call_claude_batch` must reduce to exactly `server.claude_pool.call(...)`
+/// — no provider attempt, no behavior change from pre-#1087. Proven by
+/// pointing `CLAUDE_BIN` at a path that fails CLAUDE_BIN validation itself
+/// (construction-time, not spawn-time) and asserting that specific error
+/// surfaces, rather than any provider-path error text.
+///
+/// `CLAUDE_BIN` is process-global and mutated by other test files too
+/// (`tests/dispatch_tests/board_first.rs`, `.../v2_smoke.rs`) — this uses
+/// the crate-wide `crate::utils::global_test_lock()`, matching their
+/// convention, not a locally-scoped mutex.
+#[test]
+fn call_claude_batch_default_flag_off_uses_cli_pool_only() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let prev_rollout = std::env::var("TACHI_CLAUDE_POOL_PROVIDER_FIRST").ok();
+    std::env::remove_var("TACHI_CLAUDE_POOL_PROVIDER_FIRST");
+    let prev_bin = std::env::var("CLAUDE_BIN").ok();
+    std::env::set_var(
+        "CLAUDE_BIN",
+        "/nonexistent/__tachi_test_distill_default__/claude",
+    );
+
+    let temp = tempfile::tempdir().expect("temp daily distill provider-flag db");
+    let server = crate::MemoryServer::new(
+        temp.path().join("global.db"),
+        Some(temp.path().join("project.db")),
+    )
+    .expect("server");
+
+    let chunk = vec![CandidateGroup {
+        group_id: "g".to_string(),
+        path_prefix: "/p".to_string(),
+        coherence_key: "k".to_string(),
+        entries: (0..1).map(candidate_entry).collect(),
+    }];
+
+    let err = tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(call_claude_batch(&server, "label", "prompt text", &chunk))
+        .expect_err("missing/invalid CLAUDE_BIN should error when the flag is off");
+    assert!(
+        err.contains("existing executable"),
+        "expected the CLI-binary-resolution error with the flag off, got: {err}"
+    );
+    assert!(
+        !err.contains("provider"),
+        "flag-off path must never mention the provider path: {err}"
+    );
+
+    match prev_rollout {
+        Some(v) => std::env::set_var("TACHI_CLAUDE_POOL_PROVIDER_FIRST", v),
+        None => std::env::remove_var("TACHI_CLAUDE_POOL_PROVIDER_FIRST"),
+    }
+    match prev_bin {
+        Some(v) => std::env::set_var("CLAUDE_BIN", v),
+        None => std::env::remove_var("CLAUDE_BIN"),
+    }
+}
+
 fn candidate_entry(idx: usize) -> MemoryEntry {
     MemoryEntry {
         id: format!("candidate-{idx}"),
