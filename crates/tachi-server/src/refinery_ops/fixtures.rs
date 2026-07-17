@@ -2,7 +2,7 @@
 //! here is synthetic/constructed test data — no live `gh`/`git` call, no
 //! network (#1002 acceptance criterion 7).
 
-use super::doc_resolver::{DocRefResolver, DocResolution};
+use super::doc_resolver::{CommitReachability, DocRefResolver, DocResolution};
 use tachi_params::{CanonicalDocRefV1, RepoRevisionV1};
 
 /// A resolver whose answers are pre-registered by the test via
@@ -20,6 +20,20 @@ pub(crate) struct FixtureDocResolver {
     /// available, same as `GitRefResolver` failing for real — it must not
     /// silently look like a resolved-but-empty axis.
     repo_revision: Result<RepoRevisionV1, String>,
+    /// #1105: pre-registered `(repo, commit_sha, trusted_ref)` triples that
+    /// `is_commit_reachable` reports `Reachable` for — exact match only, same
+    /// "unregistered == not verified" posture as `resolved` above. Empty by
+    /// default, matching `GitRefResolver`'s fail-closed behavior when a
+    /// commit genuinely isn't reachable.
+    reachable_commits: Vec<(String, String, String)>,
+    /// #1105/fix-round-2 (PR #1191 checkpoint 1): pre-registered
+    /// `(repo, commit_sha, trusted_ref)` triples that `is_commit_reachable`
+    /// reports `Unavailable` for — the fixture equivalent of a real `git`
+    /// command failure or a locally-absent commit object, distinct from
+    /// `NotReachable` (see `CommitReachability`'s own doc comment for why a
+    /// collector-level test needs to be able to exercise this case without
+    /// shelling real git).
+    unavailable_commits: Vec<(String, String, String, String)>,
 }
 
 impl Default for FixtureDocResolver {
@@ -27,6 +41,8 @@ impl Default for FixtureDocResolver {
         Self {
             resolved: Vec::new(),
             repo_revision: Err("fixture: no repo revision configured".to_string()),
+            reachable_commits: Vec::new(),
+            unavailable_commits: Vec::new(),
         }
     }
 }
@@ -73,6 +89,44 @@ impl FixtureDocResolver {
         self.repo_revision = Err(reason.to_string());
         self
     }
+
+    /// Register `commit_sha` as reachable from `trusted_ref` in `repo` —
+    /// the fixture equivalent of a real `git merge-base --is-ancestor`
+    /// success (#1105). Anything not exactly registered stays unreachable.
+    pub(crate) fn with_reachable_commit(
+        mut self,
+        repo: &str,
+        commit_sha: &str,
+        trusted_ref: &str,
+    ) -> Self {
+        self.reachable_commits.push((
+            repo.to_string(),
+            commit_sha.to_string(),
+            trusted_ref.to_string(),
+        ));
+        self
+    }
+
+    /// Register `commit_sha` as `Unavailable` (a real git failure/absent
+    /// local object, never a confirmed negative) for `(repo, trusted_ref)`
+    /// — the fixture equivalent of `GitRefResolver::is_commit_reachable`
+    /// hitting a `git` command failure (#1105/fix-round-2, PR #1191
+    /// checkpoint 1).
+    pub(crate) fn with_unavailable_commit(
+        mut self,
+        repo: &str,
+        commit_sha: &str,
+        trusted_ref: &str,
+        reason: &str,
+    ) -> Self {
+        self.unavailable_commits.push((
+            repo.to_string(),
+            commit_sha.to_string(),
+            trusted_ref.to_string(),
+            reason.to_string(),
+        ));
+        self
+    }
 }
 
 impl DocRefResolver for FixtureDocResolver {
@@ -111,6 +165,30 @@ impl DocRefResolver for FixtureDocResolver {
         _trusted_ref: &str,
     ) -> Result<RepoRevisionV1, String> {
         self.repo_revision.clone()
+    }
+
+    fn is_commit_reachable(
+        &self,
+        repo: &str,
+        commit_sha: &str,
+        trusted_ref: &str,
+    ) -> CommitReachability {
+        if let Some((.., reason)) = self
+            .unavailable_commits
+            .iter()
+            .find(|(r, c, t, _)| r == repo && c == commit_sha && t == trusted_ref)
+        {
+            return CommitReachability::Unavailable(reason.clone());
+        }
+        if self
+            .reachable_commits
+            .iter()
+            .any(|(r, c, t)| r == repo && c == commit_sha && t == trusted_ref)
+        {
+            CommitReachability::Reachable
+        } else {
+            CommitReachability::NotReachable
+        }
     }
 }
 

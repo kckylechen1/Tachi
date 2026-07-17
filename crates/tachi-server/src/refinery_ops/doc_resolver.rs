@@ -29,7 +29,39 @@ pub(crate) enum DocResolution {
     Unresolved { reason: String },
 }
 
-pub(crate) trait DocRefResolver {
+/// #1105/fix-round-2 (cross-vendor adversarial review, PR #1191, codex-b4d8f
+/// checkpoint 1): the outcome of a commit-reachability check, distinct from a
+/// plain `bool` so a caller can tell a REAL negative ("checked, confirmed not
+/// an ancestor of `trusted_ref`") from mere UNCERTAINTY (repo identity
+/// mismatch, the commit object missing from this local checkout — which for
+/// a `gh`-sourced merge-commit sha most often means a stale/unfetched
+/// checkout, not a nonexistent commit — or the `git` command itself failing
+/// to run/exiting with an unrecognized status). The original #1105 `bool`
+/// contract collapsed all three into `false`, which `pick_shipped_evidence`
+/// then silently promoted to a confirmed-negative `ShippedCheckOutcome::NotShipped`
+/// — never fail-closed for the "could not determine" case. A caller MUST
+/// treat `Unavailable` the same as "not checked", never as `NotReachable`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CommitReachability {
+    Reachable,
+    NotReachable,
+    Unavailable(String),
+}
+
+/// #1105/fix-round final-gate: `Send + Sync` supertraits are required, not
+/// cosmetic — `handle_refine_issues` (`mod.rs`) holds `Box<dyn
+/// DocRefResolver>` across `.await` points inside an async fn whose future
+/// must itself be `Send` (the MCP tool-dispatch layer drives every tool
+/// handler's future on a multi-threaded executor). Without these
+/// supertraits, `dyn DocRefResolver`/`Box<dyn DocRefResolver>` are neither
+/// `Send` nor `Sync` by default (trait objects don't inherit auto traits
+/// from their concrete implementor unless the trait itself declares them),
+/// so the crate fails to compile with a "future cannot be sent between
+/// threads safely" error. Every real implementor (`GitRefResolver`,
+/// `NullDocResolver`, `FixtureDocResolver` in `fixtures.rs`) is built from
+/// plain owned `String`/`PathBuf` fields and already satisfies both bounds
+/// — this only makes that fact visible to the trait-object boundary.
+pub(crate) trait DocRefResolver: Send + Sync {
     #[allow(clippy::too_many_arguments)]
     fn resolve(
         &self,
@@ -54,6 +86,30 @@ pub(crate) trait DocRefResolver {
         repo: &str,
         trusted_ref: &str,
     ) -> Result<RepoRevisionV1, String>;
+
+    /// #1105 (commit-reachability shipped check, canon doc §5 delivery-state
+    /// ownership table: "shipped ... requires reachability from an
+    /// owner-controlled main/release ref"): `Reachable` iff `commit_sha`
+    /// exists in `repo`'s history AND is a confirmed ancestor of
+    /// `trusted_ref`; `NotReachable` iff that was checked and confirmed
+    /// false (a real negative); `Unavailable` for everything this leaf
+    /// cannot actually determine (repo identity mismatch, commit absent
+    /// locally, `git` command failure) — see [`CommitReachability`]'s own
+    /// doc comment (fix-round-2, PR #1191 checkpoint 1) for why collapsing
+    /// `Unavailable` into `NotReachable` was the bug. Reuses the same
+    /// resolver already threaded through `build_refinery_packet` (rather
+    /// than a second I/O boundary) so live callers get real git
+    /// verification and tests stay injectable via
+    /// `FixtureDocResolver`/`NullDocResolver` with zero network/process
+    /// calls. Fail-closed: any ambiguity returns `Unavailable`, never a
+    /// false-positive `Reachable` AND never a false-confirmed
+    /// `NotReachable`.
+    fn is_commit_reachable(
+        &self,
+        repo: &str,
+        commit_sha: &str,
+        trusted_ref: &str,
+    ) -> CommitReachability;
 }
 
 pub(crate) struct GitRefResolver {
@@ -90,35 +146,10 @@ impl DocRefResolver for GitRefResolver {
             };
         }
 
-        let commit_exists = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&self.repo_root)
-            .arg("cat-file")
-            .arg("-e")
-            .arg(format!("{commit_sha}^{{commit}}"))
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !commit_exists {
-            return DocResolution::Unresolved {
-                reason: format!("commit {commit_sha} not found in local checkout"),
-            };
-        }
-
-        let reachable = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&self.repo_root)
-            .arg("merge-base")
-            .arg("--is-ancestor")
-            .arg(commit_sha)
-            .arg(trusted_ref)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !reachable {
+        if !git_commit_reachable(&self.repo_root, commit_sha, trusted_ref) {
             return DocResolution::Unresolved {
                 reason: format!(
-                    "commit {commit_sha} is not reachable from trusted ref {trusted_ref}"
+                    "commit {commit_sha} not found in local checkout, or not reachable from trusted ref {trusted_ref}"
                 ),
             };
         }
@@ -219,6 +250,119 @@ impl DocRefResolver for GitRefResolver {
             verified_at: chrono::Utc::now().to_rfc3339(),
         })
     }
+
+    fn is_commit_reachable(
+        &self,
+        repo: &str,
+        commit_sha: &str,
+        trusted_ref: &str,
+    ) -> CommitReachability {
+        if repo != self.known_repo {
+            return CommitReachability::Unavailable(format!(
+                "repo identity mismatch: requested '{repo}' but this checkout is known as '{}'",
+                self.known_repo
+            ));
+        }
+        git_commit_reachability_detailed(&self.repo_root, commit_sha, trusted_ref)
+    }
+}
+
+/// Shared by `GitRefResolver::resolve` (Spec-Ref commit verification) and
+/// `GitRefResolver::is_commit_reachable` (#1105 shipped-evidence check):
+/// true iff `commit_sha` exists in this checkout's history AND is an
+/// ancestor of `trusted_ref`. Fail-closed — any git command failure (commit
+/// absent, not a git repo, `git` not on PATH) returns `false`.
+fn git_commit_reachable(repo_root: &std::path::Path, commit_sha: &str, trusted_ref: &str) -> bool {
+    let commit_exists = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{commit_sha}^{{commit}}"))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !commit_exists {
+        return false;
+    }
+
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("merge-base")
+        .arg("--is-ancestor")
+        .arg(commit_sha)
+        .arg(trusted_ref)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// #1105/fix-round-2 (PR #1191 checkpoint 1): the tri-state counterpart of
+/// [`git_commit_reachable`] for [`GitRefResolver::is_commit_reachable`] —
+/// SAME two git calls, but distinguishes a git command/process failure or a
+/// locally-absent commit object (`Unavailable`, uncertain — never treated as
+/// a confirmed negative) from a git call that actually completed and
+/// answered "not an ancestor" (`NotReachable`, a real negative). Not shared
+/// with `git_commit_reachable` (used by `resolve()`'s Spec-Ref anchor
+/// verification): that call site's existing "any failure -> Unresolved"
+/// posture is untouched by this leaf — this finer distinction exists only
+/// where the aggregate result (`ShippedCheckOutcome`) can promote a `false`
+/// into a `ClosedUnshipped` disposition input.
+fn git_commit_reachability_detailed(
+    repo_root: &std::path::Path,
+    commit_sha: &str,
+    trusted_ref: &str,
+) -> CommitReachability {
+    let exists = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("cat-file")
+        .arg("-e")
+        .arg(format!("{commit_sha}^{{commit}}"))
+        .status();
+    match exists {
+        Ok(status) if status.success() => {}
+        Ok(_) => {
+            return CommitReachability::Unavailable(format!(
+                "commit {commit_sha} not found in local checkout — cannot confirm shipped/unshipped \
+                 (a stale or unfetched local checkout looks identical to a nonexistent commit; not \
+                 a confirmed negative)"
+            ));
+        }
+        Err(e) => {
+            return CommitReachability::Unavailable(format!(
+                "failed to run git cat-file -e {commit_sha}^{{{{commit}}}}: {e}"
+            ));
+        }
+    }
+
+    // `git merge-base --is-ancestor` exits 0 (yes) / 1 (no, a real answer) /
+    // anything else (128 etc.) on a genuine error — `.output()` (not
+    // `.status()`) so the exact exit code can be inspected instead of
+    // treating "no" and "error" the same way.
+    let ancestor_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("merge-base")
+        .arg("--is-ancestor")
+        .arg(commit_sha)
+        .arg(trusted_ref)
+        .output();
+    match ancestor_output {
+        Ok(out) => match out.status.code() {
+            Some(0) => CommitReachability::Reachable,
+            Some(1) => CommitReachability::NotReachable,
+            other => CommitReachability::Unavailable(format!(
+                "git merge-base --is-ancestor {commit_sha} {trusted_ref} exited with an \
+                 unrecognized status ({other:?}): {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )),
+        },
+        Err(e) => CommitReachability::Unavailable(format!(
+            "failed to run git merge-base --is-ancestor {commit_sha} {trusted_ref}: {e}"
+        )),
+    }
 }
 
 /// R4-3: never resolves anything and never reports a repo revision — used
@@ -250,6 +394,15 @@ impl DocRefResolver for NullDocResolver {
         _trusted_ref: &str,
     ) -> Result<RepoRevisionV1, String> {
         Err(self.reason.clone())
+    }
+
+    fn is_commit_reachable(
+        &self,
+        _repo: &str,
+        _commit_sha: &str,
+        _trusted_ref: &str,
+    ) -> CommitReachability {
+        CommitReachability::Unavailable(self.reason.clone())
     }
 }
 
@@ -326,6 +479,24 @@ Envelope text.
 
 Contract text.
 ";
+
+    /// #1105/fix-round-2: `NullDocResolver` never resolves anything AND never
+    /// confirms a commit reachable — pure, no I/O, so unlike
+    /// `GitRefResolver`'s real git shelling this is directly unit-testable
+    /// (same posture as `resolve`/`current_repo_revision`'s existing
+    /// fail-closed contract on this type). It reports `Unavailable` (never
+    /// `Reachable`, and — post fix-round-2 — never the confirmed-negative
+    /// `NotReachable` either, since it genuinely never checked).
+    #[test]
+    fn null_doc_resolver_never_reports_a_commit_reachable() {
+        let resolver = NullDocResolver {
+            reason: "no verified repo root".to_string(),
+        };
+        assert_eq!(
+            resolver.is_commit_reachable("owner/repo", "deadbeef", "origin/main"),
+            CommitReachability::Unavailable("no verified repo root".to_string())
+        );
+    }
 
     #[test]
     fn section_anchor_exists_matches_numeric_prefix() {

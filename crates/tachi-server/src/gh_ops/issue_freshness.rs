@@ -530,7 +530,14 @@ pub(crate) fn parse_issue_numbers_json(value: &Value) -> Vec<u64> {
         .unwrap_or_default()
 }
 
-fn fetch_merged_prs(
+/// #1105: also the "existing gh read surface" reused by
+/// `refinery_ops::live_signals` to find merged PRs referencing a specific
+/// (any-state, not just currently-open) issue number for its
+/// commit-reachability shipped check — the same fetch `fetch_and_scan_zombies`
+/// already uses, just exposed so a second caller can run its own
+/// `extract_referenced_issue_numbers` cross-check against a different target
+/// set than "the open-issue zombie scan".
+pub(crate) fn fetch_merged_prs(
     server: &MemoryServer,
     repo: &str,
     limit: u32,
