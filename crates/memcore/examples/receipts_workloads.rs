@@ -1275,6 +1275,14 @@ mod grid_tests {
         );
     }
 
+    /// Structural-discrimination justification (cross-vendor review
+    /// checkpoint 3): this does NOT discriminate #1154's relevance-first
+    /// ordering — an always-empty or otherwise-broken symbolic scan would
+    /// also pass. What it does discriminate: a WHERE-clause regression that
+    /// makes the LIKE match-set too broad (e.g. an accidentally-satisfied
+    /// predicate, or a term-extraction bug that treats an absent term as
+    /// present) — a real bug class shared by both #1144's cap and #1154's
+    /// relevance ordering, since both operate on this query's match-set.
     #[test]
     fn absent_term_returns_no_candidates() {
         let rows = GRID_ROW_COUNTS[0];
@@ -1300,6 +1308,22 @@ mod grid_tests {
         );
     }
 
+    /// Structural-discrimination justification (cross-vendor review
+    /// checkpoint 3): every `NEWEST_HIT_COUNT` row ties at relevance score
+    /// 1.0 for this single-token query, and this fixture's row IDs increase
+    /// monotonically with recency (`grid-{i:06}`, `days_ago` decreasing in
+    /// `i`) — so a naive "timestamp-DESC only, no relevance scoring at all"
+    /// implementation would produce the identical top result and this test
+    /// would NOT catch its absence of #1154's relevance-first ordering. What
+    /// it does discriminate: that ties are broken by `julianday(timestamp)
+    /// DESC` (parsed-instant comparison, not raw-TEXT string comparison —
+    /// tachi#718 CP2, tachi#1144) and that `symbolic_score_fields` scores
+    /// token PRESENCE, not field-count (`scorer/text.rs`) — both are real,
+    /// independently-breakable behaviors this query's match-set exercises.
+    /// `oldest_target_survives_the_relevance_first_cap` above is this file's
+    /// one test that actually discriminates #1154's relevance-first cap
+    /// itself (decoys are strictly more recent than the target, so recency
+    /// alone would evict it).
     #[test]
     fn newest_dense_ranks_first_by_recency_tiebreak() {
         let rows = GRID_ROW_COUNTS[0];
@@ -1331,6 +1355,18 @@ mod grid_tests {
         );
     }
 
+    /// Structural-discrimination justification (cross-vendor review
+    /// checkpoint 3): `DENSE_HIT_COUNT` rows all tie at relevance score 1.0
+    /// for this single-token query, so — same confound as
+    /// `newest_dense_ranks_first_by_recency_tiebreak` above — a naive
+    /// "timestamp-DESC only" implementation evicts the same oldest member
+    /// this test expects, and would NOT be caught by this assertion as
+    /// missing #1154's relevance-first ordering. What it does discriminate:
+    /// that `SYMBOLIC_LIMIT` (#1144's cap) is actually enforced
+    /// (`results.len() == SYMBOLIC_LIMIT`, not the unbounded match-set) and
+    /// that the tie-break evicts the LEAST-, not most-, recent tied member
+    /// (a reversed-comparison regression in the `julianday(timestamp) DESC`
+    /// ordering would flip which end of the tied group survives).
     #[test]
     fn recent_hit_200_evicts_the_least_recent_tied_member() {
         let rows = GRID_ROW_COUNTS[0];
@@ -1362,6 +1398,15 @@ mod grid_tests {
         );
     }
 
+    /// Scope note (cross-vendor review checkpoint 2): this only asserts the
+    /// SCAN-vs-SEARCH access strategy (`EXPLAIN QUERY PLAN`'s `detail`
+    /// column contains `"SCAN memories"`), not the full `ORDER BY` sort
+    /// order or the real statement's up-to-12-term OR-clause shape. If
+    /// `search.rs`'s WHERE/ORDER BY shape drifts in a way that changes the
+    /// sort strategy but not the SCAN-vs-SEARCH choice, this test stays
+    /// green on the stale mirror — see `SYMBOLIC_SCAN_MIRROR_SQL`'s doc for
+    /// why the two known simplifications (single-column SELECT, one
+    /// representative term) don't themselves change either.
     #[test]
     fn mirror_query_plan_shows_no_index_can_serve_this_query() {
         let mut store = MemoryStore::open_in_memory().expect("open grid test store");
