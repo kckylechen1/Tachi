@@ -52,6 +52,25 @@
 //!
 //! Prints exactly four JSONL objects to stdout (W1, W2, W3, W4). Diagnostics
 //! go to stderr so the stdout pipe stays machine-readable.
+//!
+//! # tachi#1142 (S3-A) — symbolic-scan measurement-validity grid
+//!
+//! Extends this harness (per #1142's own instruction: extend, do not
+//! duplicate) with a second, separate measurement: not the sampled/unsampled
+//! tax of W1-W4, but how the SYMBOLIC channel's own cost scales, isolated
+//! from the rest of hybrid_search. It calls `db::search_symbolic_candidates`
+//! directly — the exact function #1154 rewrote (relevance-first pre-cap
+//! eligibility) — across a rows × byte-distribution × selectivity × cache
+//! grid, printing one JSONL object per cell plus one kill-test summary line.
+//! See `run_symbolic_scan_grid` below for the full design rationale.
+//!
+//!     cargo run -p memcore --example receipts_workloads --release
+//!
+//! `--release` is mandatory for any conclusion drawn from the grid's timing
+//! fields (the S2 debug/release incident — 7x skew on Rust-heavy phases —
+//! is the cautionary tale this repeats). The grid's `#[cfg(test)]` cells are
+//! deterministic (id/rank assertions only, no timing) and do not need it:
+//! `cargo test -p memcore --example receipts_workloads`.
 
 use memcore::{
     hybrid_search, hybrid_search_with_receipt, MemoryEdge, MemoryEntry, MemoryStore, SearchOptions,
@@ -60,6 +79,11 @@ use memcore::{
 use rusqlite::Connection;
 use serde_json::json;
 use std::time::Instant;
+
+/// `search_symbolic_candidates` is not re-exported at the crate root (only
+/// its in-crate relevance-aware sibling is `pub(crate)`); this is its actual
+/// public path.
+use memcore::db::search_symbolic_candidates;
 
 /// Warmup iterations per path (unsampled and sampled each get this many).
 const WARMUP: usize = 50;
@@ -197,6 +221,12 @@ fn main() {
     // database_scope=Unknown; MemoryStore::search_with_receipt upgrades both.
     // Diagnostics to stderr so stdout stays clean JSONL.
     demonstrate_store_wrapper(conn, &store);
+
+    // tachi#1142 (S3-A) — symbolic-scan measurement-validity grid. Builds its
+    // own fresh in-memory stores per cell (the fixed 500-English/100-CJK/
+    // 30-chain corpus above can't host 0.63k-63k row tiers), independent of
+    // `conn`/`store`.
+    run_symbolic_scan_grid();
 }
 
 // ---------------------------------------------------------------------------
@@ -541,4 +571,720 @@ fn make_entry(
 fn ts_days_ago(days: i64) -> String {
     let base = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00+00:00").expect("base ts");
     (base - chrono::Duration::days(days)).to_rfc3339()
+}
+
+// =============================================================================
+// tachi#1142 (S3-A) — symbolic-scan measurement-validity grid
+// =============================================================================
+//
+// The S2 evidence table's "396μs at 630 rows -> tens of ms at 63k" claim was
+// downgraded to hypothesis: the timestamp-DESC LIMIT permits early exit on
+// dense recent matches, and the channel materializes full `MemoryEntry` rows
+// before ID-reduction, so the real cost axis may be bytes inspected, not row
+// count. This grid measures `db::search_symbolic_candidates` directly (the
+// public function #1154 rewrote for relevance-first pre-cap eligibility —
+// this grid exercises exactly that new code path, not the pre-#1154 shape)
+// across rows x byte-distribution x selectivity x cache-state, printing one
+// JSONL object per cell plus a kill-test summary line.
+//
+// # The four axes
+//
+// - rows: 630 / 6,300 / 63,000 (the #1142 contract's 0.63k/6.3k/63k).
+// - byte distribution: one-line (this file's existing ~80-byte shape),
+//   production quantiles (a synthetic 60/30/10 short/medium/long mix — NOT
+//   measured production telemetry, see `production_quantile_target_bytes`),
+//   KB paragraphs (~1-3KB, uniform-ish).
+// - selectivity: absent term (zero matches — the worst-case full-scan
+//   baseline), newest-dense (small tied-relevance cohort at the head of
+//   recency), oldest-target (single strongest match at the tail of
+//   recency, behind >SYMBOLIC_LIMIT weaker decoys — this is #1144's own
+//   kill-test re-run at grid scale), 200-recent-hit (a cohort of
+//   relevance-TIED matches larger than SYMBOLIC_LIMIT, so the cap must bind
+//   on the `julianday(timestamp) DESC` tie-break alone).
+// - cache state: fresh (the literal first call ever made for that exact
+//   query text on that connection — genuinely cannot be sampled more than
+//   once by definition) vs warmed (`GRID_WARMUP` uninstrumented calls first,
+//   matching this file's existing W1-W4 warmup convention, then
+//   `GRID_MEASURED` timed calls with p50/p95).
+//
+// # Per-cell JSONL schema
+//
+// `{"workload","rows","byte_distribution","selectivity","cache_state",
+//   "iterations","elapsed_us","p50_us","p95_us","candidate_count",
+//   "expected_id","expected_present","hit","rank","query_plan"}`.
+// `elapsed_us` is set only for `cache_state=fresh` (n=1, a percentile is
+// undefined for one sample); `p50_us`/`p95_us` are set only for `warmed`.
+// `expected_id` is the row this cell has a specific prediction about (null
+// for absent_term, whose prediction is `candidate_count == 0`).
+// `expected_present` states the prediction (true = must appear, false = must
+// be evicted, null = not applicable); `hit`/`rank` state what was actually
+// observed (`hit` = whether `expected_id` appeared, `rank` = its 0-indexed
+// position if so). A cell is correct iff `hit == expected_present` (or, for
+// absent_term, iff `candidate_count == 0`) — the grid reports every input,
+// it does not editorialize about which cells are correct.
+//
+// # Kill-test
+//
+// One extra JSONL line after the 72 per-cell records: for the
+// `production_quantiles` byte distribution (the grid's "realistic bytes"
+// cross-section) and `cache_state=warmed`, the absent_term and
+// recent_hit_200 warmed p50 at each of the three row tiers. If absent_term
+// grows with rows while recent_hit_200 stays roughly flat (plateaus at
+// `SYMBOLIC_LIMIT`-bound cost), the flat O(rows) extrapolation from the S2
+// evidence table is disproved for the dense-recent shape — read directly off
+// this line, not asserted by the harness.
+
+/// Row-count tier axis: 0.63k / 6.3k / 63k, per the #1142 contract.
+const GRID_ROW_COUNTS: [usize; 3] = [630, 6_300, 63_000];
+
+/// Warmup iterations for a `CacheState::Warmed` cell. Smaller than this
+/// file's W1-W4 `WARMUP` (50): this grid characterizes cost SHAPE across 72
+/// cells, not W1-W4's sampling-tax precision goal — at the top row-count
+/// tier, a 50-call warmup budget per cell multiplies the KB-paragraph
+/// corpus's per-call table-scan cost 72 times over for no shape-relevant
+/// benefit.
+const GRID_WARMUP: usize = 5;
+/// Measured iterations for a `CacheState::Warmed` cell.
+const GRID_MEASURED: usize = 15;
+
+/// Candidate cap passed to `search_symbolic_candidates`. Mirrors the REAL
+/// production default: `SearchOptions::default().candidates_per_channel` is
+/// 20 (`search.rs`), and `search/candidates.rs::collect_candidates` calls
+/// the symbolic channel with
+/// `n.saturating_mul(SYMBOLIC_CANDIDATE_MULTIPLIER=10).max(opts.top_k=6)` =
+/// 200. This is also where the "200-recent-hit" selectivity name in the
+/// #1142 contract comes from — it names this exact cap.
+const SYMBOLIC_LIMIT: usize = 200;
+
+/// Count of "oldest-target" decoy rows: newer than the target, sharing its
+/// raw LIKE substring but not its tokenized word (see `seed_grid_corpus`).
+/// Fixed above `SYMBOLIC_LIMIT` (200) so the pre-#1154/#1144 timestamp-first
+/// cap would have evicted the target entirely.
+const OLDTARGET_DECOY_COUNT: usize = 220;
+
+/// Count of rows sharing the "densehit" token, seeded across the MOST
+/// RECENT rows of the corpus. Exceeds `SYMBOLIC_LIMIT` so the cap must
+/// truncate a group of rows that are relevance-TIED (a single shared token
+/// scores every member 1.0 under `symbolic_score_fields`'s presence-only,
+/// not field-count-weighted, formula — `scorer/text.rs`) and can only be
+/// ordered by the `julianday(timestamp) DESC` tie-break.
+const DENSE_HIT_COUNT: usize = 250;
+
+/// Count of rows sharing the "newesthit" token — a small tied-relevance
+/// cohort at the very head of the recency ordering, never truncated by
+/// `SYMBOLIC_LIMIT`. Exists to give the grid a "recent and unambiguous"
+/// selectivity distinct from `DENSE_HIT_COUNT`'s "recent and cap-boundary"
+/// shape.
+const NEWEST_HIT_COUNT: usize = 5;
+
+/// A literal token never seeded anywhere in the grid corpus.
+const ABSENT_TERM_QUERY: &str = "zqxabsentneverseeded9999";
+
+/// Entry-byte-size axis. See the module-level doc for what each variant
+/// means and how it is generated.
+#[derive(Clone, Copy, Debug)]
+enum ByteDistribution {
+    OneLine,
+    ProductionQuantiles,
+    KbParagraphs,
+}
+
+impl ByteDistribution {
+    const ALL: [ByteDistribution; 3] = [
+        ByteDistribution::OneLine,
+        ByteDistribution::ProductionQuantiles,
+        ByteDistribution::KbParagraphs,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            ByteDistribution::OneLine => "one_line",
+            ByteDistribution::ProductionQuantiles => "production_quantiles",
+            ByteDistribution::KbParagraphs => "kb_paragraphs",
+        }
+    }
+}
+
+/// Query-selectivity axis. See the module-level doc for what each variant
+/// means and how it is seeded.
+#[derive(Clone, Copy, Debug)]
+enum Selectivity {
+    AbsentTerm,
+    NewestDense,
+    OldestTarget,
+    RecentHit200,
+}
+
+impl Selectivity {
+    const ALL: [Selectivity; 4] = [
+        Selectivity::AbsentTerm,
+        Selectivity::NewestDense,
+        Selectivity::OldestTarget,
+        Selectivity::RecentHit200,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Selectivity::AbsentTerm => "absent_term",
+            Selectivity::NewestDense => "newest_dense",
+            Selectivity::OldestTarget => "oldest_target",
+            Selectivity::RecentHit200 => "recent_hit_200",
+        }
+    }
+
+    fn query(self) -> &'static str {
+        match self {
+            Selectivity::AbsentTerm => ABSENT_TERM_QUERY,
+            Selectivity::NewestDense => "newesthit",
+            Selectivity::OldestTarget => "oldtargetterm",
+            Selectivity::RecentHit200 => "densehit",
+        }
+    }
+
+    /// The specific row this selectivity has a prediction about. `None` for
+    /// `AbsentTerm`, whose prediction (`candidate_count == 0`) is not about
+    /// any one row.
+    fn expected_id(self, markers: &GridMarkers) -> Option<String> {
+        match self {
+            Selectivity::AbsentTerm => None,
+            Selectivity::NewestDense => Some(markers.newest_dense_id.clone()),
+            Selectivity::OldestTarget => Some(markers.oldest_target_id.clone()),
+            Selectivity::RecentHit200 => Some(markers.dense_hit_oldest_id.clone()),
+        }
+    }
+
+    /// Whether `expected_id` is predicted to survive the cap. `None` for
+    /// `AbsentTerm` (not applicable — see `expected_id`).
+    fn expected_present(self) -> Option<bool> {
+        match self {
+            Selectivity::AbsentTerm => None,
+            Selectivity::NewestDense => Some(true),
+            Selectivity::OldestTarget => Some(true),
+            Selectivity::RecentHit200 => Some(false),
+        }
+    }
+}
+
+/// Cache-state axis. See the module-level doc for the exact operationalization.
+#[derive(Clone, Copy, Debug)]
+enum CacheState {
+    Fresh,
+    Warmed,
+}
+
+impl CacheState {
+    const ALL: [CacheState; 2] = [CacheState::Fresh, CacheState::Warmed];
+
+    fn label(self) -> &'static str {
+        match self {
+            CacheState::Fresh => "fresh",
+            CacheState::Warmed => "warmed",
+        }
+    }
+}
+
+/// Ids of the marker rows `seed_grid_corpus` planted, so the grid can check
+/// `expected_id`/`expected_present` against what `search_symbolic_candidates`
+/// actually returns.
+struct GridMarkers {
+    oldest_target_id: String,
+    newest_dense_id: String,
+    dense_hit_oldest_id: String,
+}
+
+/// Build one grid corpus: `rows` entries at the given `dist`, with marker
+/// rows for all four `Selectivity` variants seeded in. Filler rows reuse
+/// this file's `TOPICS` vocabulary (same intent as the W1-W4 corpus: real
+/// topical distractors, not an isolated synthetic vocabulary).
+fn seed_grid_corpus(store: &mut MemoryStore, rows: usize, dist: ByteDistribution) -> GridMarkers {
+    assert!(
+        rows > OLDTARGET_DECOY_COUNT + DENSE_HIT_COUNT,
+        "grid row-count tier must be large enough to hold non-overlapping marker zones"
+    );
+    let dense_hit_start = rows - DENSE_HIT_COUNT;
+    let newest_hit_start = rows - NEWEST_HIT_COUNT;
+
+    for i in 0..rows {
+        let (name, vocab) = TOPICS[i % TOPICS.len()];
+        let w1 = vocab[i % vocab.len()];
+        let w2 = vocab[(i / TOPICS.len()) % vocab.len()];
+        let raretok = format!("gridtok{i:06}");
+        let id = format!("grid-{i:06}");
+        let mut text = filler_text(dist, i, name, w1, w2, &raretok);
+        let mut keywords = vec![name.to_string(), w1.to_string()];
+        let entities = vec![name.to_string()];
+
+        // Ordinary filler recency: safely between the oldest-target's
+        // far-past marker and the dense/newest zones' true-recent markers.
+        // Ordering among filler rows themselves is not load-bearing for any
+        // of the four selectivity predictions below.
+        let mut days_ago: i64 = 1_000 + (i % 400) as i64;
+
+        if i == 0 {
+            // oldest-target: a unique token, far in the past. See
+            // `OLDTARGET_DECOY_COUNT`'s doc for why this must survive the cap
+            // under the current (post-#1154) relevance-first ordering.
+            text.push_str(" oldtargetterm");
+            keywords.push("oldtargetterm".to_string());
+            days_ago = 100_000;
+        } else if i <= OLDTARGET_DECOY_COUNT {
+            // Decoy: shares the raw LIKE substring but not the tokenized
+            // word — `scorer::tokenize` splits only on non-alphanumeric
+            // boundaries, so "oldtargettermish" is one token, distinct from
+            // "oldtargetterm". All strictly newer than the target.
+            text.push_str(" oldtargettermish");
+            days_ago = i as i64;
+        }
+
+        if i >= dense_hit_start {
+            text.push_str(" densehit");
+            keywords.push("densehit".to_string());
+            days_ago = (rows - i) as i64;
+        }
+
+        if i >= newest_hit_start {
+            text.push_str(" newesthit");
+            keywords.push("newesthit".to_string());
+            days_ago = (rows - i) as i64;
+        }
+
+        let entry = make_entry(
+            &id,
+            &text,
+            &keywords,
+            &entities,
+            "/grid",
+            ts_days_ago(days_ago),
+        );
+        store.upsert(&entry).expect("seed grid entry");
+    }
+
+    GridMarkers {
+        oldest_target_id: "grid-000000".to_string(),
+        newest_dense_id: format!("grid-{:06}", rows - 1),
+        dense_hit_oldest_id: format!("grid-{dense_hit_start:06}"),
+    }
+}
+
+/// Entry text for one filler row at the given byte distribution.
+fn filler_text(
+    dist: ByteDistribution,
+    i: usize,
+    name: &str,
+    w1: &str,
+    w2: &str,
+    raretok: &str,
+) -> String {
+    let base = format!("{name} discussion of {w1} and {w2} subsystem details {raretok}");
+    match dist {
+        ByteDistribution::OneLine => base,
+        ByteDistribution::ProductionQuantiles => {
+            pad_to_bytes(&base, production_quantile_target_bytes(i), i)
+        }
+        ByteDistribution::KbParagraphs => pad_to_bytes(&base, kb_paragraph_target_bytes(i), i),
+    }
+}
+
+/// Synthetic three-bucket size mix (60% short / 30% medium / 10% long).
+/// This is NOT sourced from measured production telemetry — this repo has
+/// none to cite for entry-text length — it is chosen to give the grid's
+/// "production quantiles" cell a realistic mixed-size shape instead of a
+/// uniform one. Flagged here so a reader does not mistake it for a measured
+/// distribution.
+fn production_quantile_target_bytes(i: usize) -> usize {
+    match bucket_pct(i) {
+        0..=59 => 180,
+        60..=89 => 650,
+        _ => 2_600,
+    }
+}
+
+/// ~1-3KB, spread deterministically by row index so the corpus is not one
+/// uniform byte count.
+fn kb_paragraph_target_bytes(i: usize) -> usize {
+    1_024 + (bucket_pct(i) as usize) * 20
+}
+
+/// Deterministic 0..100 spread from a row index (Knuth multiplicative hash,
+/// `2_654_435_761 = 2^32 / golden ratio`) — no RNG dependency, byte-identical
+/// run to run.
+fn bucket_pct(i: usize) -> u32 {
+    ((i as u64).wrapping_mul(2_654_435_761) >> 16) as u32 % 100
+}
+
+/// Pad `base` up to (at least) `target_bytes` by repeating an index-salted
+/// filler sentence. Byte-identical run to run; never shrinks `base`.
+fn pad_to_bytes(base: &str, target_bytes: usize, i: usize) -> String {
+    if base.len() >= target_bytes {
+        return base.to_string();
+    }
+    let filler_sentence = format!(
+        " additional context sentence {i} elaborates further on the subsystem \
+         behavior and edge cases observed during review"
+    );
+    let mut out = String::with_capacity(target_bytes + filler_sentence.len());
+    out.push_str(base);
+    while out.len() < target_bytes {
+        out.push_str(&filler_sentence);
+    }
+    out
+}
+
+/// Structural mirror of the WHERE/ORDER BY shape in
+/// `crates/memcore/src/db/memory_crud/search.rs`
+/// (`search_symbolic_candidates_with_relevance`, as of this commit — hand-
+/// check both if that function's shape moves; it is `pub(crate)` and its SQL
+/// is built inline, so an example cannot call into it directly to extract
+/// the real statement). Two deliberate simplifications from the real
+/// statement, neither of which changes SQLite's chosen access strategy (SCAN
+/// vs SEARCH; sorted vs unsorted), which is all `EXPLAIN QUERY PLAN` reports:
+///
+///   1. `SELECT id` instead of the full column list — column selection does
+///      not affect the WHERE/ORDER BY strategy on a table with no relevant
+///      secondary index over these text columns.
+///   2. One representative term OR-clause (`?5`) instead of up to 12 —
+///      SQLite's strategy for N OR'd unanchored `LIKE '%...%'` predicates
+///      across non-indexed columns is the same for any N >= 1; more terms
+///      change per-row work, not per-row access strategy.
+///
+/// `tachi_symbolic_score` must already be registered on `conn` — it is a
+/// side effect of any prior `search_symbolic_candidates` call, and every
+/// grid cell makes one before this runs.
+const SYMBOLIC_SCAN_MIRROR_SQL: &str = r#"SELECT id FROM memories
+ WHERE (?1 = 1 OR archived = 0)
+   AND (?2 = 1 OR superseded_by IS NULL)
+   AND (?3 IS NULL OR path LIKE ?3)
+   AND (?4 IS NULL OR (COALESCE(NULLIF(valid_from, ''), timestamp) <= ?4 AND (valid_until IS NULL OR valid_until > ?4)))
+   AND id NOT LIKE 'anchor:%'
+   AND (id LIKE ?5 ESCAPE '\' OR path LIKE ?5 ESCAPE '\' OR summary LIKE ?5 ESCAPE '\' OR text LIKE ?5 ESCAPE '\' OR keywords LIKE ?5 ESCAPE '\' OR entities LIKE ?5 ESCAPE '\' OR topic LIKE ?5 ESCAPE '\')
+ ORDER BY tachi_symbolic_score(?6, id, path, topic, summary, text, keywords, entities) DESC, julianday(timestamp) DESC, id ASC
+ LIMIT ?7"#;
+
+/// `EXPLAIN QUERY PLAN` rows (the `detail` column only) for
+/// `SYMBOLIC_SCAN_MIRROR_SQL`. Same extraction pattern as
+/// `crates/memcore/src/db/migrations.rs`'s `query_plan` test helper
+/// (`row.get::<_, String>(3)` — modern SQLite's `EXPLAIN QUERY PLAN` result
+/// columns are `id, parent, notused, detail`).
+fn symbolic_scan_mirror_query_plan(conn: &Connection) -> Vec<String> {
+    let mut stmt = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {SYMBOLIC_SCAN_MIRROR_SQL}"))
+        .expect("prepare mirror EXPLAIN QUERY PLAN");
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(3))
+        .expect("run mirror EXPLAIN QUERY PLAN");
+    rows.collect::<Result<Vec<_>, _>>()
+        .expect("collect mirror EXPLAIN QUERY PLAN rows")
+}
+
+/// Run the full 3x3x4x2 grid; prints 72 per-cell JSONL objects plus one
+/// kill-test summary line. See the module-level doc for the full design.
+fn run_symbolic_scan_grid() {
+    // Growth tracking for the kill-test cross-section: warmed p50, at
+    // byte_distribution == production_quantiles (the grid's "realistic
+    // bytes" cell), across the three row-count tiers.
+    let mut absent_term_growth: [Option<u64>; 3] = [None; 3];
+    let mut recent_hit_growth: [Option<u64>; 3] = [None; 3];
+
+    for (row_idx, &rows) in GRID_ROW_COUNTS.iter().enumerate() {
+        for dist in ByteDistribution::ALL {
+            eprintln!(
+                "grid: building corpus rows={rows} byte_distribution={}",
+                dist.label()
+            );
+            let mut store = MemoryStore::open_in_memory().expect("open grid store");
+            let markers = seed_grid_corpus(&mut store, rows, dist);
+            let conn: &Connection = store.connection();
+
+            let mut cells: Vec<serde_json::Value> = Vec::with_capacity(8);
+            for selectivity in Selectivity::ALL {
+                let query = selectivity.query();
+                let expected_id = selectivity.expected_id(&markers);
+                let expected_present = selectivity.expected_present();
+
+                for cache in CacheState::ALL {
+                    let (iterations, elapsed_us, p50_us, p95_us, entries) =
+                        measure_symbolic_cell(conn, query, cache);
+
+                    let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+                    let (hit, rank) = match &expected_id {
+                        None => (false, None),
+                        Some(target) => {
+                            let rank = ids.iter().position(|id| *id == target.as_str());
+                            (rank.is_some(), rank)
+                        }
+                    };
+
+                    if matches!(dist, ByteDistribution::ProductionQuantiles)
+                        && matches!(cache, CacheState::Warmed)
+                    {
+                        if let Some(p50) = p50_us {
+                            match selectivity {
+                                Selectivity::AbsentTerm => absent_term_growth[row_idx] = Some(p50),
+                                Selectivity::RecentHit200 => recent_hit_growth[row_idx] = Some(p50),
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    cells.push(json!({
+                        "workload": "S3-A-grid",
+                        "rows": rows,
+                        "byte_distribution": dist.label(),
+                        "selectivity": selectivity.label(),
+                        "cache_state": cache.label(),
+                        "iterations": iterations,
+                        "elapsed_us": elapsed_us,
+                        "p50_us": p50_us,
+                        "p95_us": p95_us,
+                        "candidate_count": ids.len(),
+                        "expected_id": expected_id,
+                        "expected_present": expected_present,
+                        "hit": hit,
+                        "rank": rank,
+                    }));
+                }
+            }
+
+            // Captured once per corpus, not once per cell: the mirror SQL is
+            // selectivity/cache-agnostic (unbound placeholders), so the plan
+            // it reports is the same for every cell in this corpus. Re-run
+            // per (rows, byte_distribution) rather than truly globally,
+            // because SQLite's row-count estimate CAN in principle steer its
+            // strategy at very different table sizes even without ANALYZE.
+            let plan = symbolic_scan_mirror_query_plan(conn);
+            for mut cell in cells {
+                cell["query_plan"] = json!(plan);
+                println!("{cell}");
+            }
+        }
+    }
+
+    println!(
+        "{}",
+        json!({
+            "kill_test": "rows_scaling_at_production_quantiles_warmed_p50",
+            "rows": GRID_ROW_COUNTS,
+            "absent_term_p50_us": absent_term_growth,
+            "recent_hit_200_p50_us": recent_hit_growth,
+        })
+    );
+}
+
+/// Run one (query, cache_state) cell. Returns
+/// `(iterations, elapsed_us, p50_us, p95_us, last_result)` — `elapsed_us` is
+/// `Some` only for `Fresh` (n=1), `p50_us`/`p95_us` only for `Warmed`.
+fn measure_symbolic_cell(
+    conn: &Connection,
+    query: &str,
+    cache: CacheState,
+) -> (
+    usize,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Vec<MemoryEntry>,
+) {
+    match cache {
+        CacheState::Fresh => {
+            let start = Instant::now();
+            let entries =
+                search_symbolic_candidates(conn, query, SYMBOLIC_LIMIT, false, false, None, None)
+                    .expect("fresh symbolic scan");
+            let elapsed_us = start.elapsed().as_micros() as u64;
+            (1, Some(elapsed_us), None, None, entries)
+        }
+        CacheState::Warmed => {
+            for _ in 0..GRID_WARMUP {
+                search_symbolic_candidates(conn, query, SYMBOLIC_LIMIT, false, false, None, None)
+                    .expect("warmup symbolic scan");
+            }
+            let mut samples: Vec<u64> = Vec::with_capacity(GRID_MEASURED);
+            let mut last_entries = Vec::new();
+            for _ in 0..GRID_MEASURED {
+                let start = Instant::now();
+                let entries = search_symbolic_candidates(
+                    conn,
+                    query,
+                    SYMBOLIC_LIMIT,
+                    false,
+                    false,
+                    None,
+                    None,
+                )
+                .expect("measured symbolic scan");
+                samples.push(start.elapsed().as_micros() as u64);
+                last_entries = entries;
+            }
+            let (p50, p95) = percentiles(&mut samples);
+            (GRID_MEASURED, None, Some(p50), Some(p95), last_entries)
+        }
+    }
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::*;
+
+    /// Discriminating check for tachi#1142's oldest-target selectivity.
+    ///
+    /// Structural-discrimination justification (this lane cannot run
+    /// `cargo` to demonstrate red-then-green against a reverted #1154/#1144;
+    /// AGENTS.md's frozen-assertion law permits a stated structural
+    /// justification in that case): pre-#1154/#1144,
+    /// `search_symbolic_candidates` capped by `ORDER BY timestamp DESC
+    /// LIMIT` BEFORE any relevance scoring. This corpus seeds the sole
+    /// "oldtargetterm" match at the single OLDEST row (`days_ago =
+    /// 100_000`) behind `OLDTARGET_DECOY_COUNT` (220, > the 200 cap)
+    /// strictly-newer decoy rows that share the LIKE substring but not the
+    /// tokenized word. Under the old timestamp-first cap, the 200 most
+    /// recent decoys would fill the entire LIMIT and the target would never
+    /// enter the result set (a false miss — exactly #1144's bug). Under the
+    /// current relevance-first cap (`search.rs`'s
+    /// `search_symbolic_candidates_with_relevance`, `ORDER BY
+    /// tachi_symbolic_score(...) DESC, julianday(timestamp) DESC, id ASC`),
+    /// the target's nonzero token-overlap score (1.0) strictly beats every
+    /// decoy's zero score (`oldtargettermish` tokenizes as one word, via
+    /// `scorer::tokenize`'s split-on-non-alphanumeric-only rule, distinct
+    /// from `oldtargetterm`), so it survives regardless of recency.
+    #[test]
+    fn oldest_target_survives_the_relevance_first_cap() {
+        let rows = GRID_ROW_COUNTS[0];
+        let mut store = MemoryStore::open_in_memory().expect("open grid test store");
+        let markers = seed_grid_corpus(&mut store, rows, ByteDistribution::OneLine);
+        let conn = store.connection();
+
+        let results = search_symbolic_candidates(
+            conn,
+            Selectivity::OldestTarget.query(),
+            SYMBOLIC_LIMIT,
+            false,
+            false,
+            None,
+            None,
+        )
+        .expect("oldest-target symbolic scan");
+
+        assert!(
+            !results.is_empty(),
+            "oldest-target query returned zero candidates; the target row was evicted"
+        );
+        assert_eq!(
+            results[0].id, markers.oldest_target_id,
+            "oldest-target's unique token match must outrank all {OLDTARGET_DECOY_COUNT} \
+             decoys (zero token overlap each) regardless of recency"
+        );
+    }
+
+    #[test]
+    fn absent_term_returns_no_candidates() {
+        let rows = GRID_ROW_COUNTS[0];
+        let mut store = MemoryStore::open_in_memory().expect("open grid test store");
+        seed_grid_corpus(&mut store, rows, ByteDistribution::OneLine);
+        let conn = store.connection();
+
+        let results = search_symbolic_candidates(
+            conn,
+            Selectivity::AbsentTerm.query(),
+            SYMBOLIC_LIMIT,
+            false,
+            false,
+            None,
+            None,
+        )
+        .expect("absent-term symbolic scan");
+
+        assert!(
+            results.is_empty(),
+            "a token seeded nowhere in the corpus must not match any row, got {} rows",
+            results.len()
+        );
+    }
+
+    #[test]
+    fn newest_dense_ranks_first_by_recency_tiebreak() {
+        let rows = GRID_ROW_COUNTS[0];
+        let mut store = MemoryStore::open_in_memory().expect("open grid test store");
+        let markers = seed_grid_corpus(&mut store, rows, ByteDistribution::OneLine);
+        let conn = store.connection();
+
+        let results = search_symbolic_candidates(
+            conn,
+            Selectivity::NewestDense.query(),
+            SYMBOLIC_LIMIT,
+            false,
+            false,
+            None,
+            None,
+        )
+        .expect("newest-dense symbolic scan");
+
+        assert!(
+            !results.is_empty(),
+            "newest-dense query returned zero candidates"
+        );
+        assert_eq!(
+            results[0].id, markers.newest_dense_id,
+            "all NEWEST_HIT_COUNT rows tie at score 1.0 for a single-token query \
+             (symbolic_score_fields counts token PRESENCE, not which/how many \
+             fields carry it — scorer/text.rs); the most recent must win the \
+             julianday(timestamp) DESC tie-break"
+        );
+    }
+
+    #[test]
+    fn recent_hit_200_evicts_the_least_recent_tied_member() {
+        let rows = GRID_ROW_COUNTS[0];
+        let mut store = MemoryStore::open_in_memory().expect("open grid test store");
+        let markers = seed_grid_corpus(&mut store, rows, ByteDistribution::OneLine);
+        let conn = store.connection();
+
+        let results = search_symbolic_candidates(
+            conn,
+            Selectivity::RecentHit200.query(),
+            SYMBOLIC_LIMIT,
+            false,
+            false,
+            None,
+            None,
+        )
+        .expect("recent-hit-200 symbolic scan");
+
+        assert_eq!(
+            results.len(),
+            SYMBOLIC_LIMIT,
+            "DENSE_HIT_COUNT ({DENSE_HIT_COUNT}) exceeds SYMBOLIC_LIMIT \
+             ({SYMBOLIC_LIMIT}); the cap must bind"
+        );
+        assert!(
+            !results.iter().any(|e| e.id == markers.dense_hit_oldest_id),
+            "the least-recent of {DENSE_HIT_COUNT} relevance-tied rows must lose the \
+             julianday(timestamp) DESC tie-break and fall outside the {SYMBOLIC_LIMIT} cap"
+        );
+    }
+
+    #[test]
+    fn mirror_query_plan_shows_no_index_can_serve_this_query() {
+        let mut store = MemoryStore::open_in_memory().expect("open grid test store");
+        seed_grid_corpus(&mut store, GRID_ROW_COUNTS[0], ByteDistribution::OneLine);
+        let conn = store.connection();
+        // Registers `tachi_symbolic_score` as a side effect (see
+        // `SYMBOLIC_SCAN_MIRROR_SQL`'s doc).
+        search_symbolic_candidates(
+            conn,
+            "oldtargetterm",
+            SYMBOLIC_LIMIT,
+            false,
+            false,
+            None,
+            None,
+        )
+        .expect("register scorer fn via a real symbolic scan");
+
+        let plan = symbolic_scan_mirror_query_plan(conn);
+        assert!(
+            plan.iter().any(|line| line.contains("SCAN memories")),
+            "expected a full table scan (unanchored LIKE across non-indexed \
+             columns cannot use an index), got: {plan:?}"
+        );
+    }
 }
