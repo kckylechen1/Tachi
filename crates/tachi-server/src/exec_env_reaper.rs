@@ -3773,13 +3773,35 @@ mod tests {
 
         assert!(report.reclaimed.is_empty(), "a bound resource must survive");
         assert!(bound.join("debug/artifact.rlib").exists(), "bytes survive");
-        let skip = report
-            .candidates
+
+        // **#1062, BUG 1: this fence moved UPSTREAM.** Before #1062 the only source
+        // that knew about a binding was `cheap_verdict`, reached after the walk had
+        // already turned this directory into a candidate — so the old shape of this
+        // assertion was "a candidate, skipped for `BoundByLease`". Now
+        // `full_protected_paths` folds every live binding into the protected set
+        // BEFORE the walk ever gets here, the same rule an env-var-declared build
+        // cache already got: it is pruned at the walk, never becomes a candidate at
+        // all, and shows up as a protected path plus a `safety-refusal` scan unit.
+        assert!(
+            report.protected.contains(&bound.display().to_string()),
+            "the bound target must be in the protected set: {:?}",
+            report.protected
+        );
+        assert!(
+            !report
+                .candidates
+                .iter()
+                .any(|c| c.path == bound.display().to_string()),
+            "a walk-level fence prunes it before candidacy; it must not also appear as a \
+             candidate: {report:?}"
+        );
+        let pruned = report
+            .unexamined
             .iter()
-            .find(|c| c.path == bound.display().to_string())
-            .expect("bound target is still a candidate");
-        assert_eq!(skip.decision, "skip");
-        assert!(skip.reason.contains("binding"), "reason: {}", skip.reason);
+            .find(|skip| skip.path == bound.display().to_string())
+            .expect("bound target is a pruned scan unit");
+        assert_eq!(pruned.class, "safety-refusal", "{pruned:?}");
+
         assert_eq!(
             memcore::get_resource(store.connection(), "res-bound")
                 .unwrap()
@@ -4056,11 +4078,21 @@ mod tests {
              {report:?}"
         );
         assert!(report.reclaimed.is_empty(), "{report:?}");
-        assert_eq!(report.candidates.len(), 1, "{report:?}");
-        assert_eq!(
-            report.candidates[0].decision, "skip",
-            "the ledger gate prunes this at the walk, before any delete is attempted: {report:?}"
+        // The ledger fence prunes this at the WALK, before it is ever a candidate at
+        // all — see `resource_with_a_live_binding_is_never_reclaimed` for the same
+        // shape, spelled out in full.
+        assert!(
+            report.protected.contains(&live.display().to_string()),
+            "the ledger-bound target must be in the protected set: {:?}",
+            report.protected
         );
+        assert!(report.candidates.is_empty(), "{report:?}");
+        let pruned = report
+            .unexamined
+            .iter()
+            .find(|skip| skip.path == live.display().to_string())
+            .expect("the ledger-bound target is a pruned scan unit");
+        assert_eq!(pruned.class, "safety-refusal", "{pruned:?}");
 
         let _ = std::fs::remove_dir_all(&root);
     }
