@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::holder::{self, HolderEvidence, HolderProbeFn};
 use crate::registry;
+use crate::scrap_ledger;
 
 #[derive(Debug, Clone, Copy)]
 pub enum OutputFormat {
@@ -22,6 +24,8 @@ struct WtRemoveReport {
     path: String,
     canonical_path: Option<String>,
     repo_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
     dry_run: bool,
     removed: bool,
     allowed: bool,
@@ -30,7 +34,7 @@ struct WtRemoveReport {
 }
 
 pub fn run_wt_remove(options: WtRemoveOptions) -> Result<(), String> {
-    let report = plan_wt_remove(&options.path, !options.force);
+    let report = plan_wt_remove(&options.path, !options.force, &holder::probe_holders);
     let report = if options.force && report.allowed {
         execute_wt_remove(report)
     } else {
@@ -45,12 +49,19 @@ pub fn run_wt_remove(options: WtRemoveOptions) -> Result<(), String> {
     }
 }
 
-fn plan_wt_remove(path: &Path, dry_run: bool) -> WtRemoveReport {
+/// Core close-predicate planning logic, parameterized over the holder
+/// probe so the fail-closed-on-inconclusive-evidence branch (tachi#1118
+/// freeze boundary 1) is unit-testable without shelling out to a real
+/// (possibly PATH-shimmed) `lsof`. Production callers always pass
+/// `&holder::probe_holders`; tests inject a fake to exercise `Held` /
+/// `Unknown` deterministically.
+fn plan_wt_remove(path: &Path, dry_run: bool, probe: &HolderProbeFn) -> WtRemoveReport {
     let mut report = WtRemoveReport {
         action: "wt-remove",
         path: path.display().to_string(),
         canonical_path: None,
         repo_root: None,
+        branch: None,
         dry_run,
         removed: false,
         allowed: false,
@@ -135,17 +146,28 @@ fn plan_wt_remove(path: &Path, dry_run: bool) -> WtRemoveReport {
         }
     }
 
-    match active_processes(&worktree_root) {
-        ActiveProcessCheck::Clear => {}
-        ActiveProcessCheck::Unavailable(reason) => {
-            report
-                .warnings
-                .push(format!("active process check unavailable: {reason}"));
-        }
-        ActiveProcessCheck::Active(lines) => {
+    // Capture the branch now, while the worktree still exists, so a
+    // successful removal can record it in the scrap ledger (tachi#1118
+    // freeze boundary 3: a scrapped tree may only reopen under a NEW
+    // branch + NEW path).
+    report.branch = current_branch(&worktree_root).ok();
+
+    // OS-view attributed process-holder evidence (tachi#1118 freeze
+    // boundary 1/2). Fail-closed: `Unknown` (probe unavailable/parse
+    // failure) refuses exactly like `Held` — an inconclusive OS-view
+    // check must never be treated as "not held". `Clear` is the only
+    // outcome that proceeds.
+    let evidence = probe(&worktree_root);
+    match &evidence {
+        HolderEvidence::Clear => {}
+        HolderEvidence::Held(_) | HolderEvidence::Unknown(_) => {
             report.errors.push(format!(
-                "refusing to remove worktree with active processes: {}",
-                lines.join(" | ")
+                "refusing to remove worktree with a live OS-view process holder ({}): {}",
+                match &evidence {
+                    HolderEvidence::Held(_) => "attributed pid family",
+                    _ => "inconclusive evidence",
+                },
+                evidence.describe_family()
             ));
             return report;
         }
@@ -153,6 +175,20 @@ fn plan_wt_remove(path: &Path, dry_run: bool) -> WtRemoveReport {
 
     report.allowed = true;
     report
+}
+
+/// Current branch of a worktree (`git rev-parse --abbrev-ref HEAD`), used
+/// only to populate the scrap-ledger record on a successful removal — a
+/// failure to resolve it never blocks the removal itself.
+fn current_branch(worktree_root: &Path) -> Result<String, String> {
+    let worktree_str = canonical_string(worktree_root);
+    git_output(&[
+        "-C",
+        worktree_str.as_str(),
+        "rev-parse",
+        "--abbrev-ref",
+        "HEAD",
+    ])
 }
 
 fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
@@ -164,6 +200,29 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
         report.errors.push("missing repo root".to_string());
         return report;
     };
+
+    // Fail-closed integrity boundary (tachi#1212 fix-round, codex checkpoint
+    // 4): record the scrap BEFORE the destructive `git worktree remove`,
+    // and abort the removal entirely if we can't. A removal that "succeeds"
+    // but leaves the re-entry gate with no memory of it is exactly the
+    // fail-open the review flagged — recording first means a write failure
+    // here has nothing to undo, because the removal has not happened yet.
+    let Some(branch) = report.branch.clone() else {
+        report.errors.push(
+            "refusing to remove: could not resolve the worktree's branch before removal, so \
+             the scrap ledger could not be written ahead of a destructive removal (tachi#1118 \
+             fail-closed integrity boundary)"
+                .to_string(),
+        );
+        return report;
+    };
+    if let Err(err) = scrap_ledger::record_scrap(Path::new(&path), &branch) {
+        report.errors.push(format!(
+            "refusing to remove: scrap ledger write failed ({err}); fail-closed rather than \
+             remove a tree the re-entry gate cannot remember (tachi#1118)"
+        ));
+        return report;
+    }
 
     match Command::new("git")
         .args(["-C", &repo_root, "worktree", "remove", "--force", &path])
@@ -187,13 +246,31 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
                     .push(format!("cleanup log write failed: {err}"));
             }
         }
-        Ok(out) => report.errors.push(format!(
-            "git worktree remove failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
-        Err(err) => report
-            .errors
-            .push(format!("failed to run git worktree remove: {err}")),
+        Ok(out) => {
+            report.errors.push(format!(
+                "git worktree remove failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+            report.warnings.push(
+                "the scrap ledger was already recorded before this failed removal; the path \
+                 and branch are now flagged as scrapped even though the tree is still present \
+                 and untouched — reopening either exact one will be (over-cautiously) refused \
+                 until a new branch/path is used"
+                    .to_string(),
+            );
+        }
+        Err(err) => {
+            report
+                .errors
+                .push(format!("failed to run git worktree remove: {err}"));
+            report.warnings.push(
+                "the scrap ledger was already recorded before this failed removal; the path \
+                 and branch are now flagged as scrapped even though the tree is still present \
+                 and untouched — reopening either exact one will be (over-cautiously) refused \
+                 until a new branch/path is used"
+                    .to_string(),
+            );
+        }
     }
     report
 }
@@ -281,36 +358,6 @@ pub(crate) fn dirty_entries_excluding_marker(worktree_root: &Path) -> Result<Vec
         .collect())
 }
 
-enum ActiveProcessCheck {
-    Clear,
-    Active(Vec<String>),
-    Unavailable(String),
-}
-
-fn active_processes(path: &Path) -> ActiveProcessCheck {
-    let output = Command::new("lsof").arg("+D").arg(path).output();
-    match output {
-        Ok(out) if out.status.success() => {
-            let lines = String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .skip(1)
-                .take(5)
-                .map(|line| line.to_string())
-                .collect::<Vec<_>>();
-            if lines.is_empty() {
-                ActiveProcessCheck::Clear
-            } else {
-                ActiveProcessCheck::Active(lines)
-            }
-        }
-        Ok(out) if out.status.code() == Some(1) => ActiveProcessCheck::Clear,
-        Ok(out) => {
-            ActiveProcessCheck::Unavailable(String::from_utf8_lossy(&out.stderr).trim().to_string())
-        }
-        Err(err) => ActiveProcessCheck::Unavailable(err.to_string()),
-    }
-}
-
 fn git_output(args: &[&str]) -> Result<String, String> {
     let out = Command::new("git")
         .args(args)
@@ -353,4 +400,175 @@ fn append_log(report: &WtRemoveReport) -> Result<(), String> {
 
 fn canonical_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::holder::HolderProcess;
+    use crate::registry::{self, RegisterOptions, RegisterOutputFormat};
+    use crate::test_support::home_env_lock as env_lock;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct HomeGuard(Option<std::ffi::OsString>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("{prefix}-{}-{}", std::process::id(), nanos));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    /// Sets up a real git repo + a real registered linked worktree so
+    /// `plan_wt_remove` can be exercised end-to-end (dirty check, registry
+    /// check) while only the holder probe is faked.
+    fn setup_registered_worktree(root: &Path) -> (HomeGuard, PathBuf) {
+        let home = root.join("home");
+        let repo = root.join("repo");
+        let worktree = root.join("wt");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.email", "tachi-test@example.com"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["config", "user.name", "tachi-test"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(repo.join("README"), "hello").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "README"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "feature/holder-test",
+                worktree.to_str().unwrap(),
+            ])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        registry::run_wt_register(RegisterOptions {
+            path: worktree.clone(),
+            repo_root: repo.clone(),
+            branch: "feature/holder-test".to_string(),
+            dispatch_id: None,
+            pr: None,
+            output: RegisterOutputFormat::Json,
+        })
+        .unwrap();
+
+        (HomeGuard(old_home), worktree)
+    }
+
+    #[test]
+    fn plan_wt_remove_refuses_a_live_holder_and_names_the_pid_family() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-live-holder");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+
+        let fake_held = |_path: &Path| {
+            HolderEvidence::Held(vec![HolderProcess {
+                pid: 987_654,
+                ppid: Some(1),
+                tty: Some("ttys009".to_string()),
+                command: "sleep 999".to_string(),
+                cwd: None,
+            }])
+        };
+
+        let report = plan_wt_remove(&worktree, false, &fake_held);
+        assert!(
+            !report.allowed,
+            "a live attributed holder must refuse the close predicate"
+        );
+        let joined = report.errors.join(" | ");
+        assert!(
+            joined.contains("987654") || joined.contains("987_654"),
+            "refusal must name the held pid: {joined}"
+        );
+        assert!(
+            joined.contains("ppid="),
+            "refusal must carry OS-view attribution (ppid), not just a raw pid: {joined}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plan_wt_remove_fails_closed_on_inconclusive_holder_evidence() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-unknown-holder");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+
+        let fake_unknown =
+            |_path: &Path| HolderEvidence::Unknown("lsof unavailable: No such file".to_string());
+
+        let report = plan_wt_remove(&worktree, false, &fake_unknown);
+        assert!(
+            !report.allowed,
+            "inconclusive holder evidence must never be treated as safe to reclaim (fail-closed, tachi#1118)"
+        );
+        assert!(
+            report.errors.join(" | ").contains("inconclusive"),
+            "refusal must explain the evidence is inconclusive, not silently pass: {:?}",
+            report.errors
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plan_wt_remove_allows_a_clean_unheld_worktree() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-clear-holder");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+
+        let report = plan_wt_remove(&worktree, false, &|_path: &Path| HolderEvidence::Clear);
+        assert!(
+            report.allowed,
+            "a clean, unheld, registered worktree must be allowed: {:?}",
+            report.errors
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
