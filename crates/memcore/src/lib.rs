@@ -99,6 +99,7 @@ pub use db::session_claims::{
     WorkClaim, WorkClaimHandoff, WorkClaimHandoffRequest, WorkClaimHeartbeat, WorkClaimMode,
 };
 pub use db::{anchor_id, anchor_path, AnchorKind};
+pub use db::{migrate_legacy_filename_if_present, LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME};
 pub use db::{CategoryPathPrefixMemoryRow, FoundryJobStatusCounts, PathPrefixMemoryRow};
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use db::{DbOpenContext, MigrationAuthority, OpenIntent};

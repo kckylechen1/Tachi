@@ -61,6 +61,11 @@ impl MemoryStore {
         path_validation: bool,
         ctx: &DbOpenContext,
     ) -> Result<Self, MemoryError> {
+        // #1132: one-time rename-on-open migration away from the legacy
+        // `memory.db` filename, before anything touches the file. Single
+        // seam — see `db::filename`'s doc comment for why it lives here and
+        // not scattered across every call site that builds a `db_path`.
+        db::migrate_legacy_filename_if_present(std::path::Path::new(db_path))?;
         // Register extensions BEFORE opening the connection.
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
