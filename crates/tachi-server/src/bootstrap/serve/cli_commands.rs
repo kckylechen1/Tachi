@@ -131,6 +131,7 @@ pub(super) async fn run_pre_serve_command(
             super::super::migrate_cli::run_migrate_command(
                 *json,
                 *apply,
+                app_home,
                 global_db_path,
                 project_db_path.map(PathBuf::as_path),
             )

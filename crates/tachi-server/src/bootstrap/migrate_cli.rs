@@ -34,10 +34,28 @@
 //! - A library another process (typically a live daemon) currently holds is
 //!   skipped and listed, never treated as fatal for the rest of the sweep —
 //!   mirrors `foundry_runtime_ops::daily_distill`'s "best-effort per target"
-//!   pattern, not `tidy --execute`'s whole-run abort (there is no reusable
-//!   single global daemon lock scoped to an arbitrary library path; busy
-//!   detection here is per-open, via
-//!   [`memcore::db::sqlite_error_is_locked`]).
+//!   pattern, not `tidy --execute`'s whole-run abort. Two layers, not one:
+//!   **(1) a liveness pre-check** — before ANY authorized write-open,
+//!   `--apply` asks [`crate::status_ops::collect_daemon_status`] (this app
+//!   home's scoped-then-legacy daemon lock, the same reusable singleton the
+//!   live `serve` daemon holds for its entire lifetime per
+//!   `bootstrap::serve::daemon::serve_http_daemon` and `tachi status`
+//!   already consult) whether a daemon is alive for this invocation's own
+//!   `global_db_path`. If one is — `Running` or `Foreign`, either way a real
+//!   process is holding that lock — every library is skipped
+//!   `SkippedLocked` WITHOUT ever attempting the open: a live daemon's
+//!   `FoundryScheduler` polls (and can write to) every manifest-listed DB, not
+//!   only its own global one, so this one liveness check gates the global,
+//!   workspace, and every named-project library alike. This closes the
+//!   exact #1119 race a per-open-only BUSY check cannot: WAL +
+//!   `busy_timeout=5000` (`memcore/src/db/schema/ddl.rs`) gives a live-but-
+//!   momentarily-idle daemon no persistent write lock, so an external
+//!   `Immediate` open between its writes would otherwise succeed.
+//!   **(2) the per-open `SQLITE_BUSY` classification** (via
+//!   [`memcore::db::sqlite_error_is_locked`]) remains as defense in depth for
+//!   contention the liveness pre-check cannot see — e.g. a second concurrent
+//!   `migrate --apply` invocation, or any other writer racing the open at the
+//!   SQLite layer.
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -252,7 +270,24 @@ fn plan_one(lib: &Library) -> MigrateFinding {
 /// site) — never reuse that literal, several tests assert on it verbatim.
 const MIGRATE_APPLY_APPROVED_BY: &str = "cli:migrate --apply";
 
-fn apply_one(lib: &Library, plan: MigrateFinding) -> MigrateFinding {
+/// True iff a live tachi daemon is holding the scoped-or-legacy singleton
+/// lock for `app_home`/`global_db_path` right now. `Running` and `Foreign`
+/// both carry a live, signalable PID (`Foreign` only differs in whether its
+/// recorded identity matches this binary/global-db exactly) — either way a
+/// real process holds the lock this app home's `serve` daemon holds for its
+/// entire lifetime, so both are treated as "do not migrate out from under
+/// it". `None`/`StalePid` mean no live process is attached to the lock.
+fn a_live_daemon_holds_this_app_home(app_home: &Path, global_db_path: &Path) -> Option<i32> {
+    match crate::status_ops::collect_daemon_status(app_home, global_db_path) {
+        crate::status_ops::DaemonStatus::Running { pid, .. }
+        | crate::status_ops::DaemonStatus::Foreign { pid, .. } => Some(pid),
+        crate::status_ops::DaemonStatus::StalePid { .. } | crate::status_ops::DaemonStatus::None => {
+            None
+        }
+    }
+}
+
+fn apply_one(lib: &Library, plan: MigrateFinding, live_daemon_pid: Option<i32>) -> MigrateFinding {
     let mut finding = plan;
 
     match finding.status {
@@ -273,6 +308,22 @@ fn apply_one(lib: &Library, plan: MigrateFinding) -> MigrateFinding {
             return finding;
         }
         GapStatus::NeedsMigration => {}
+    }
+
+    // #1119 liveness pre-check: refuse to even attempt the write-open while
+    // this app home's daemon lock is held by a live process. Per-open
+    // SQLITE_BUSY classification below is not a substitute for this — WAL +
+    // busy_timeout gives a live-but-momentarily-idle daemon no persistent
+    // write lock, so an external Immediate open between its writes would
+    // otherwise succeed and silently forward-migrate the DB out from under
+    // it (the exact #1119 incident). See module doc.
+    if let Some(pid) = live_daemon_pid {
+        finding.applied = Some(AppliedOutcome::SkippedLocked);
+        finding.note = format!(
+            "skipped: a live tachi daemon (pid {pid}) holds this app home's daemon lock; \
+             migrating now risks the #1119 race — stop it first (`tachi daemon kill`) and re-run"
+        );
+        return finding;
     }
 
     let Some(path_str) = lib.path.to_str() else {
@@ -341,17 +392,29 @@ fn render_report(report: &MigrateReport) -> String {
 pub(super) async fn run_migrate_command(
     json_output: bool,
     apply: bool,
+    app_home: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
 ) -> Result<(), Box<dyn Error>> {
     let libraries = enumerate_known_libraries(global_db_path, project_db_path);
+
+    // Computed once per invocation, not per library: this app home has at
+    // most one daemon lock scoped to `global_db_path`, and that daemon's
+    // `FoundryScheduler` polls every manifest-listed library (global,
+    // workspace, and every named project), not only its own global DB — so
+    // one liveness check correctly gates the whole sweep. See module doc.
+    let live_daemon_pid = if apply {
+        a_live_daemon_holds_this_app_home(app_home, global_db_path)
+    } else {
+        None
+    };
 
     let findings: Vec<MigrateFinding> = libraries
         .iter()
         .map(|lib| {
             let plan = plan_one(lib);
             if apply {
-                apply_one(lib, plan)
+                apply_one(lib, plan, live_daemon_pid)
             } else {
                 plan
             }
@@ -435,9 +498,15 @@ mod tests {
         global_db_path: &Path,
         project_db_path: Option<&Path>,
     ) -> Result<(), Box<dyn Error>> {
-        crate::test_support::with_tachi_home(|_home| {
+        crate::test_support::with_tachi_home(|home| {
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-            rt.block_on(run_migrate_command(json, apply, global_db_path, project_db_path))
+            rt.block_on(run_migrate_command(
+                json,
+                apply,
+                home,
+                global_db_path,
+                project_db_path,
+            ))
         })
     }
 
@@ -624,5 +693,53 @@ mod tests {
             before_version,
             "a migration that never committed (lock held throughout) must leave the stamp untouched"
         );
+    }
+
+    /// Discriminative test for the #1119 liveness pre-check (this review's
+    /// fix): a live daemon holding this app home's scoped lock must block
+    /// `--apply` BEFORE any write-open is even attempted — not merely be
+    /// caught after the fact via `SQLITE_BUSY` like the previous test.
+    /// Proven two ways: (1) `applied == SkippedLocked` and the stamp is
+    /// untouched (same outward contract as the BUSY-locked case above), AND
+    /// (2) no `-wal`/`-shm` sidecar exists afterward — `CONNECTION_PRAGMA_SQL`
+    /// sets `journal_mode = WAL` on ANY real open, authorized or not, so a
+    /// sidecar appearing here would prove a real open was attempted and only
+    /// the after-the-fact BUSY catch (not this liveness pre-check) saved the
+    /// stamp.
+    #[test]
+    fn apply_refuses_when_this_app_homes_daemon_lock_is_held_by_a_live_process() {
+        crate::test_support::with_tachi_home(|home| {
+            let dir = tempfile::tempdir().expect("tmp");
+            let db_path = make_stamped_older_fixture(dir.path(), "global.db", 2);
+            let before_version = read_user_version(&db_path);
+
+            // Simulate "a live tachi daemon is running for this app home"
+            // exactly the way `serve_http_daemon` does: hold the scoped
+            // singleton lock. `DaemonLock::acquire` stamps the CURRENT
+            // process's own pid, which `process_alive` finds alive — this
+            // test process stands in for the daemon.
+            let lock_path = crate::daemon_lock::scoped_daemon_lock_path(home, &db_path);
+            let _daemon_lock = crate::daemon_lock::DaemonLock::acquire(&lock_path)
+                .expect("acquire scoped daemon lock to simulate a live daemon");
+
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            rt.block_on(run_migrate_command(false, true, home, &db_path, None))
+                .expect("a live-daemon skip must not abort the whole sweep");
+
+            assert_eq!(
+                read_user_version(&db_path),
+                before_version,
+                "a library skipped by the liveness pre-check must be left completely untouched"
+            );
+
+            let wal = format!("{}-wal", db_path.display());
+            let shm = format!("{}-shm", db_path.display());
+            assert!(
+                !std::path::Path::new(&wal).exists() && !std::path::Path::new(&shm).exists(),
+                "the liveness pre-check must refuse BEFORE any real open — a WAL/SHM sidecar \
+                 appearing here would mean the guard was bypassed and only the after-the-fact \
+                 SQLITE_BUSY catch saved this test"
+            );
+        });
     }
 }
