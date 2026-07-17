@@ -158,6 +158,9 @@ fn standard_profile_restricts_to_allow_list() {
             "tachi_task".to_string(),
             "tachi_arena".to_string(),
             "tachi_verify".to_string(),
+            // #1066: register/observe/adjudicate/get mirror eval intake is a
+            // daily facade entrypoint now, not an admin-only tool.
+            "tachi_agent_eval".to_string(),
             "tachi_memory".to_string(),
             "tachi_briefing".to_string(),
             "tachi_save".to_string(),
