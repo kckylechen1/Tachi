@@ -431,4 +431,64 @@ mod tests {
             "rendered briefing must show the redaction marker in place of the secret:\n{out}"
         );
     }
+
+    // tachi#1201 k3 hardening (Wizard/sonnet): pin `format_status_markdown`
+    // rendering behavior for CJK, super-long, and markdown-special-symbol
+    // scalar values. Status scalars route through `compact_text_line(s,
+    // 200)` but — unlike `format_section_rows`' summary field — are NOT
+    // run through `md_escape`; these tests pin that real (asymmetric)
+    // current behavior, not an imagined one. All expected GREEN on the
+    // base SHA (regression locks, not bug fixes).
+    #[test]
+    fn format_status_markdown_truncates_long_cjk_scalar_at_char_boundary() {
+        let value = serde_json::json!({"note": "问".repeat(300)});
+        let out = format_status_markdown(&value);
+
+        let expected_note = format!("{}...", "问".repeat(197));
+        assert_eq!(out, format!("## Tachi status\n- **note**: {expected_note}"));
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn format_status_markdown_caps_long_mixed_ascii_cjk_scalar_at_200() {
+        // "超长单行(数千字符混中英)" for the status surface's 200-char cap;
+        // cutoff engineered to land inside the CJK region.
+        let value = serde_json::json!({
+            "note": format!("{}{}", "A".repeat(150), "问".repeat(100))
+        });
+        let out = format_status_markdown(&value);
+
+        let expected_note = format!("{}{}...", "A".repeat(150), "问".repeat(47));
+        assert_eq!(out, format!("## Tachi status\n- **note**: {expected_note}"));
+    }
+
+    #[test]
+    fn format_status_markdown_scalar_embedded_newline_stays_single_line() {
+        let value = serde_json::json!({"note": "first line\nsecond line"});
+        let out = format_status_markdown(&value);
+
+        assert_eq!(out, "## Tachi status\n- **note**: first line second line");
+    }
+
+    #[test]
+    fn format_status_markdown_scalar_markdown_special_symbols_pass_through_unescaped() {
+        // Status scalars skip md_escape entirely (only compact_text_line
+        // runs), so `|`, backtick, `#`, `_`, `*` all survive literally —
+        // pin the real current behavior for this surface.
+        let value = serde_json::json!({
+            "note": "a | b ` c # d _underscored_ *starred*"
+        });
+        let out = format_status_markdown(&value);
+
+        assert_eq!(
+            out,
+            "## Tachi status\n- **note**: a | b ` c # d _underscored_ *starred*"
+        );
+    }
+
+    #[test]
+    fn format_status_markdown_empty_object_falls_back_to_no_status_data() {
+        let out = format_status_markdown(&serde_json::json!({}));
+        assert_eq!(out, "## Tachi status\n_No status data._");
+    }
 }

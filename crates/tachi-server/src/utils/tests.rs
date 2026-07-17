@@ -134,6 +134,71 @@ fn compact_text_line_respects_limit_with_ellipsis() {
     );
 }
 
+// tachi#1201 k3 hardening (Wizard/sonnet): pin `compact_text_line`'s
+// char-boundary-safe truncation against CJK/multi-byte input. `chars()`
+// iteration can never split a Unicode scalar value mid-byte-sequence, so
+// these are regression locks for that guarantee, not bug hunts — this test
+// is expected GREEN on the base SHA.
+#[test]
+fn compact_text_line_truncates_repeated_cjk_char_at_exact_char_boundary() {
+    let input = "测".repeat(300);
+    let out = compact_text_line(&input, 50);
+
+    assert_eq!(out.chars().count(), 50, "output must respect the char limit");
+    assert!(out.ends_with("..."), "truncated output must end in ellipsis");
+    let body = out.strip_suffix("...").expect("ellipsis suffix");
+    assert_eq!(body, "测".repeat(47), "body must be exactly 47 whole CJK chars");
+    // Every byte in `out` decodes: a String is always valid UTF-8 by
+    // construction, but assert it explicitly to document the contract.
+    assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+}
+
+#[test]
+fn compact_text_line_truncates_mixed_ascii_cjk_without_splitting_multibyte_char() {
+    let input = format!("abc{}", "测".repeat(100));
+    let out = compact_text_line(&input, 10);
+
+    // limit=10 => keep=7: "abc" (3 ascii chars) + 4 CJK chars, then "...".
+    assert_eq!(out, "abc测测测测...");
+    assert_eq!(out.chars().count(), 10);
+    let body = out.strip_suffix("...").expect("ellipsis suffix");
+    assert_eq!(body.chars().count(), 7);
+    // The boundary between the last ascii char and the first CJK char, and
+    // the boundary right before the literal "...", must both land on whole
+    // chars — never inside a multi-byte sequence.
+    assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+}
+
+#[test]
+fn compact_text_line_crosses_ascii_to_cjk_boundary_in_long_line() {
+    // Thousands of chars, mixed ascii + CJK, cutoff engineered to land a few
+    // characters into the CJK region — the "超长单行混中英" case.
+    let input = format!("{}{}", "A".repeat(2000), "中".repeat(2000));
+    let out = compact_text_line(&input, 2008);
+
+    let expected_body = format!("{}{}", "A".repeat(2000), "中".repeat(5));
+    assert_eq!(out, format!("{expected_body}..."));
+    assert_eq!(out.chars().count(), 2008);
+    assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+}
+
+#[test]
+fn compact_text_line_collapses_newlines_and_preserves_markdown_literal_symbols() {
+    // markdown special symbols (| ` # _) and an embedded newline: pin that
+    // compact_text_line collapses the newline into a single-space token
+    // boundary (no raw '\n' survives) while leaving the literal markdown
+    // symbols untouched — this function does not escape markdown, callers
+    // (agent_markdown::md_escape) own that separately.
+    let input = "line one | col # heading\n`code span`\nline two _emphasis_";
+    let out = compact_text_line(input, 200);
+
+    assert!(!out.contains('\n'), "embedded newline must not survive");
+    assert_eq!(
+        out,
+        "line one | col # heading `code span` line two _emphasis_"
+    );
+}
+
 #[test]
 fn skill_prompt_template_renders_safe_args_only() {
     let args = serde_json::Map::from_iter([
