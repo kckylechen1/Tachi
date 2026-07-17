@@ -40,21 +40,24 @@ fn cli_tool_allows_read_fallback(tool_name: &str) -> bool {
 /// Two sources feed this, in priority order:
 /// 1. `project_db` (the CLI's separate `--project-db` PATH flag) — unchanged,
 ///    pre-existing behavior for every tool.
-/// 2. (tachi#1224) `remember`'s own `--project` NAME flag, when (1) yielded
-///    nothing. `remember --project X` with no separate `--project-db` used to
-///    put `project=X` in the body with no matching header at all — the
-///    daemon-side C1 guard then rejected the unbound write. `remember` never
+/// 2. (tachi#1224) a CLI *write* tool's own `--project` NAME flag, when (1)
+///    yielded nothing. `remember --project X` (and, identically,
+///    `wiki-write --project X`) with no separate `--project-db` used to put
+///    `project=X` in the body with no matching header at all — the
+///    daemon-side C1 guard then rejected the unbound write. Neither tool
 ///    appears in `session_identity::explicit_project_can_cross_binding`'s
-///    allowlist (it is a write, not one of the established read-only
-///    cross-project cases), so an explicit `--project` on it always requires
-///    a bound session — deriving the header from the same value already
-///    riding in the body is exactly that bind, nothing more.
+///    allowlist (both are writes, not one of the established read-only
+///    cross-project cases), so an explicit `--project` on either always
+///    requires a bound session — deriving the header from the same value
+///    already riding in the body is exactly that bind, nothing more.
+///    `cli_tool_named_project_write` (below) is the single list of which CLI
+///    tool names this fallback applies to.
 ///
-/// Scoped to `remember` only: other CLI tools that also carry a `project` arg
-/// (`search_memory`, `tachi_wiki_search`, `get_memory`, ...) keep their
-/// pre-existing header derivation (from `project_db` only) unchanged — several
-/// of them rely on `explicit_project_can_cross_binding` to allow an explicit
-/// cross-project *read* without rebinding the session, and falling back to
+/// Every other CLI tool that also carries a `project` arg (`search_memory`,
+/// `tachi_wiki_search`, `get_memory`, ...) keeps its pre-existing header
+/// derivation (from `project_db` only) unchanged — those rely on
+/// `explicit_project_can_cross_binding` to allow an explicit cross-project
+/// *read* without rebinding the session, and falling back to
 /// `args["project"]` for those too would change that behavior.
 fn daemon_forward_named_project(
     tool_name: &str,
@@ -64,7 +67,7 @@ fn daemon_forward_named_project(
     project_db
         .and_then(crate::path_utils::named_project_for_db_path)
         .or_else(|| {
-            if tool_name == "remember" {
+            if cli_tool_named_project_write(tool_name) {
                 args.get("project")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
@@ -72,6 +75,21 @@ fn daemon_forward_named_project(
                 None
             }
         })
+}
+
+/// CLI-facing tool names (as passed to `dispatch_cli_tool`, i.e. before
+/// `cli_client::tool_map::remap_daemon_tool`'s later action-verb remap) whose
+/// `--project` NAME flag must be forwarded as an `X-Tachi-Project` daemon
+/// binding header when no separate `--project-db` PATH is set. Both are
+/// mutating tools: `remember` (tachi#1224) and `tachi_wiki_write`
+/// (tachi#1224 follow-up — `Commands::WikiWrite` hit the identical unbound
+/// C1 rejection via the same `dispatch_cli_tool` path, since this fallback
+/// was originally gated on `tool_name == "remember"` only). Read tools that
+/// also carry a `project` arg (`search_memory`, `tachi_wiki_search`,
+/// `get_memory`) are deliberately excluded — see `daemon_forward_named_project`
+/// doc comment for why they must keep their unbound cross-project-read path.
+fn cli_tool_named_project_write(tool_name: &str) -> bool {
+    matches!(tool_name, "remember" | "tachi_wiki_write")
 }
 
 /// Dispatch a CLI tool invocation: try the running daemon first; on miss,
@@ -287,6 +305,65 @@ mod tests {
             "search_memory must keep deriving its header from project_db \
              only, never from args[\"project\"] — that's the pre-existing, \
              unchanged cross-project-read path"
+        );
+    }
+
+    /// tachi#1224 follow-up: `tachi wiki-write --project X` (CLI-facing tool
+    /// name `tachi_wiki_write`, per `Commands::WikiWrite`'s dispatch call)
+    /// with no separate `--project-db` hit the identical unbound C1
+    /// rejection as `remember` did before the first tachi#1224 fix — this is
+    /// the same discriminator, just for the second write-shaped CLI tool
+    /// that carries a `project` NAME arg.
+    #[test]
+    fn wiki_write_project_arg_forwards_as_named_project_header() {
+        let mut args = serde_json::Map::new();
+        args.insert("title".to_string(), serde_json::json!("T"));
+        args.insert("text".to_string(), serde_json::json!("body"));
+        args.insert("project".to_string(), serde_json::json!("X"));
+
+        assert_eq!(
+            daemon_forward_named_project("tachi_wiki_write", None, &args),
+            Some("X".to_string()),
+            "wiki-write --project X with no --project-db must still forward \
+             a named-project binding header"
+        );
+    }
+
+    /// Companion: `tachi wiki-write TITLE TEXT` with no `--project` at all
+    /// must not invent a header out of thin air.
+    #[test]
+    fn wiki_write_without_project_arg_forwards_no_named_project_header() {
+        let mut args = serde_json::Map::new();
+        args.insert("title".to_string(), serde_json::json!("T"));
+        args.insert("text".to_string(), serde_json::json!("body"));
+
+        assert_eq!(
+            daemon_forward_named_project("tachi_wiki_write", None, &args),
+            None,
+            "wiki-write with no --project must not forward any \
+             X-Tachi-Project header"
+        );
+    }
+
+    /// Scope guard: `tachi_wiki_search` (the read sibling of
+    /// `tachi_wiki_write`, both carrying a `project` arg) must NOT gain this
+    /// args-fallback — it relies on
+    /// `session_identity::explicit_project_can_cross_binding`'s
+    /// `tachi_wiki_action_allows_cross_project_read` allowance ("search" is
+    /// in that list) to allow an explicit cross-project *read* without
+    /// rebinding the session.
+    #[test]
+    fn wiki_search_with_project_arg_does_not_forward_header() {
+        let mut args = serde_json::Map::new();
+        args.insert("query".to_string(), serde_json::json!("hello"));
+        args.insert("project".to_string(), serde_json::json!("X"));
+
+        assert_eq!(
+            daemon_forward_named_project("tachi_wiki_search", None, &args),
+            None,
+            "tachi_wiki_search must keep deriving its header from \
+             project_db only, never from args[\"project\"] — that's the \
+             pre-existing, unchanged cross-project-read path"
         );
     }
 
@@ -657,6 +734,151 @@ mod tests {
         assert_eq!(
             global_count, 0,
             "remember --project X write must NOT land in the global DB"
+        );
+
+        ct.cancel();
+        rt.block_on(daemon_task).expect("daemon task");
+    }
+
+    /// tachi#1224 follow-up regression: `tachi wiki-write TITLE TEXT --project
+    /// X` with NO separate `--project-db` — the CLI shape review flagged as
+    /// still broken (`cli_tool_named_project_write` originally gated the
+    /// header-forward fallback on `tool_name == "remember"` only, so
+    /// `dispatch_cli_tool("tachi_wiki_write", ...)` derived no header and
+    /// the daemon-side C1 guard rejected the write). End-to-end mirror of
+    /// `remember_named_project_forward_binds_daemon_session_without_project_db`
+    /// above, for the second write-shaped CLI tool.
+    #[test]
+    fn wiki_write_named_project_forward_binds_daemon_session_without_project_db() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _is_daemon = EnvRestore::set("TACHI_DAEMON", "1");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        let cli_project_name = "Sigil-cli-wiki-write-1224";
+        let cli_project = tachi_home
+            .join("projects")
+            .join(cli_project_name)
+            .join("memory.db");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        std::fs::create_dir_all(cli_project.parent().expect("project parent"))
+            .expect("project parent");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+        let _disable_auto = EnvRestore::set("TACHI_DISABLE_AUTO_DAEMON", "1");
+
+        // Seed the project DB schema so the daemon can open it by name.
+        let _seed = crate::MemoryServer::new(
+            tachi_home.join(format!("seed-{}.db", uuid::Uuid::new_v4())),
+            Some(cli_project.clone()),
+        )
+        .expect("seed project db schema");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let saved_text =
+            "cli wiki-write 1224 bound write lands in named project db, not global";
+
+        let (ct, daemon_task) = rt.block_on(async {
+            // Daemon is global-only (project_db=None). The CLI request below
+            // ALSO passes project_db=None (no --project-db flag), so
+            // `daemon_matches_requested_dbs` matches and this exercises the
+            // PRIMARY (matching) forwarding branch, not the mismatch branch.
+            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+            let (daemon_info, ct, daemon_task) =
+                spawn_global_only_http_daemon(server, &global).await;
+
+            let parsed_url: serde_json::Value = serde_json::from_str(
+                &serde_json::json!({
+                    "pid": std::process::id(),
+                    "port": daemon_info
+                        .url
+                        .split(':')
+                        .nth(2)
+                        .and_then(|s| s.split('/').next())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0),
+                    "url": daemon_info.url.clone(),
+                    "global_db": global.display().to_string(),
+                    "project_db": serde_json::Value::Null,
+                    "version": env!("CARGO_PKG_VERSION"),
+                })
+                .to_string(),
+            )
+            .expect("pid json");
+            let pid_path = crate::daemon_lock::scoped_daemon_pid_path(&tachi_home, &global);
+            std::fs::create_dir_all(pid_path.parent().expect("pid parent")).expect("pid parent");
+            std::fs::write(&pid_path, parsed_url.to_string()).expect("pid file");
+
+            let mut args = serde_json::Map::new();
+            args.insert("title".to_string(), serde_json::json!("cli wiki-write 1224"));
+            args.insert("text".to_string(), serde_json::json!(saved_text));
+            args.insert("project".to_string(), serde_json::json!(cli_project_name));
+
+            let result = dispatch_cli_tool(
+                "tachi_wiki_write",
+                args,
+                &global,
+                None, // no --project-db: exactly the ticket's CLI shape
+                &tachi_home,
+                |server, args_map| async move {
+                    // In-process fallback. The daemon-forward path should
+                    // handle this before we ever get here; reaching the
+                    // fallback on the post-fix code would itself be a
+                    // failure (duplicate-write risk, and proof the header
+                    // was never sent).
+                    let params: crate::tool_params::WikiWriteParams =
+                        serde_json::from_value(serde_json::Value::Object(args_map))
+                            .map_err(|e| e.to_string())?;
+                    crate::copilot_ops::handle_tachi_wiki_write(&server, params).await
+                },
+            )
+            .await;
+
+            let body = result.expect(
+                "wiki-write --project X with no --project-db should succeed via the \
+                 daemon-forward binding (X-Tachi-Project header derived from \
+                 args[\"project\"])",
+            );
+            let parsed: serde_json::Value = serde_json::from_str(&body)
+                .unwrap_or_else(|e| panic!("wiki_write body JSON: {e}; {body}"));
+            assert!(
+                parsed.get("id").is_some(),
+                "wiki_write should report a saved id; full body: {body}"
+            );
+            (ct, daemon_task)
+        });
+
+        // The write must land in the named project DB, not the global DB.
+        let count: i64 = rusqlite::Connection::open(&cli_project)
+            .expect("open project db")
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE text = ?1",
+                [&saved_text],
+                |row| row.get(0),
+            )
+            .expect("count in project db");
+        assert_eq!(
+            count, 1,
+            "wiki-write --project X write should land in the named project DB exactly once"
+        );
+        let global_count: i64 = rusqlite::Connection::open(&global)
+            .expect("open global db")
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE text = ?1",
+                [&saved_text],
+                |row| row.get(0),
+            )
+            .expect("count in global db");
+        assert_eq!(
+            global_count, 0,
+            "wiki-write --project X write must NOT land in the global DB"
         );
 
         ct.cancel();
