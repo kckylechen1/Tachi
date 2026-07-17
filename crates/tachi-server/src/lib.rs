@@ -125,6 +125,7 @@ mod handoff_ops;
 mod host_profile;
 mod hub_ops;
 mod kanban;
+pub mod lesson_forge_ops;
 mod manifest;
 mod mcp_connection;
 mod mcp_pool;
