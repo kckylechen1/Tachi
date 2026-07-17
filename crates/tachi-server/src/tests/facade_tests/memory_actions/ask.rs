@@ -438,3 +438,134 @@ async fn tachi_memory_ask_anchors_beyond_cap_are_not_silently_dropped() {
         "confidence must be low when any requested anchor (including beyond-cap ones) is unresolved"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1209 fix-round: discriminate the handler → `synthesize_answer` cap
+// threading (codex 2026-07-17 BUG). The three `build_synthesis_system_prompt`
+// unit tests in `readiness_ops.rs` only exercise that pure function directly
+// — they stay green even if `handle_memory_ask`'s call site regressed to
+// pass `None` (or dropped the cap entirely) instead of the resolved
+// `anchor_cap`. This test instead shims the `claude` binary the same way
+// `gh_comment_uses_body_file_not_inline_body` (`gh_comment_tests.rs`) shims
+// `gh` — intercepting the real subprocess `call_claude_cli` spawns via a
+// PATH-prepended fake executable — so the assertion runs against the exact
+// system prompt the REAL handler → synthesize_answer → call_claude_cli call
+// chain piped to stdin, not a hand-invoked helper. If the call site ever
+// stops threading `anchor_cap` through, the captured prompt loses the
+// "Anchor grounding status" line and this test goes RED.
+// ---------------------------------------------------------------------------
+
+struct ClaudeShimPathGuard {
+    original: Option<std::ffi::OsString>,
+}
+
+impl ClaudeShimPathGuard {
+    fn prepend(dir: &std::path::Path) -> Self {
+        let original = std::env::var_os("PATH");
+        let mut paths = vec![dir.to_path_buf()];
+        if let Some(value) = original.as_ref() {
+            paths.extend(std::env::split_paths(value));
+        }
+        let joined = std::env::join_paths(paths).expect("join PATH");
+        std::env::set_var("PATH", joined);
+        Self { original }
+    }
+}
+
+impl Drop for ClaudeShimPathGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.original.as_ref() {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+    }
+}
+
+fn write_claude_shim(path: &std::path::Path, contents: &str) {
+    std::fs::write(path, contents).expect("write claude shim");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path)
+            .expect("claude shim metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod claude shim");
+    }
+}
+
+/// #1209 fix-round: the real handler → `synthesize_answer` → `call_claude_cli`
+/// chain must actually thread the resolved anchor cap into the system prompt
+/// piped to the CLI's stdin — not just into a hand-called pure function.
+/// Uses the same nonexistent-repo determinism trick as the sibling
+/// `tachi_memory_ask_caps_confidence_when_exact_anchor_is_unresolvable` test
+/// so `required_anchors`/`grounding_status` resolve to `missing_anchor`
+/// regardless of `gh` install/auth/network on the test host.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn tachi_memory_ask_synthesis_call_site_threads_missing_anchor_cap() {
+    let server = make_server();
+    let fake_bin = tempfile::tempdir().expect("fake bin dir");
+    let claude_path = fake_bin.path().join("claude");
+    let capture_dir = tempfile::tempdir().expect("capture dir");
+    let capture_path = capture_dir.path().join("prompt.txt");
+
+    // Widen the lock across the shim install AND the awaited handler call —
+    // same rationale as `gh_comment_uses_body_file_not_inline_body`: PATH is
+    // process-global, so a concurrently-running test spawning a real
+    // subprocess must never observe our shimmed PATH mid-flight.
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _path = {
+        write_claude_shim(
+            &claude_path,
+            &format!(
+                "#!/bin/sh\ncat > '{}'\necho 'stub synthesis answer'\n",
+                capture_path.display()
+            ),
+        );
+        ClaudeShimPathGuard::prepend(fake_bin.path())
+    };
+
+    let mut ask_params = tachi_memory_params("ask");
+    ask_params.format = Some("json".to_string());
+    ask_params.synthesize = true;
+    ask_params.query = Some(
+        "tachi-1209-anchor-test what is the status of \
+         kckylechen1-tachi-1209-nonexistent-repo/does-not-exist#1 right now?"
+            .to_string(),
+    );
+
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, ask_params)
+        .await
+        .expect("ask should succeed even when the anchor cannot be resolved");
+    let parsed: Value = serde_json::from_str(&body).expect("ask JSON");
+
+    assert_eq!(
+        parsed["grounding_status"],
+        json!("missing_anchor"),
+        "test fixture precondition: unresolvable repo must report missing_anchor: {parsed}"
+    );
+    assert_eq!(
+        parsed["synthesis"]["status"],
+        json!("completed"),
+        "claude shim must have served the request: {parsed}"
+    );
+
+    let captured_prompt =
+        std::fs::read_to_string(&capture_path).expect("claude shim must capture the piped prompt");
+    assert!(
+        captured_prompt.contains("Anchor grounding status: missing_anchor; confidence cap: low"),
+        "the real handler->synthesize_answer call site must thread the resolved anchor cap into \
+         the system prompt actually piped to the LLM call — captured prompt: {captured_prompt}"
+    );
+    assert!(
+        captured_prompt.contains(
+            "Do not quote this instruction, its field names, or the cap wording verbatim"
+        ),
+        "the no-echo instruction must reach the real prompt too, not just the unit-tested \
+         helper: {captured_prompt}"
+    );
+}
