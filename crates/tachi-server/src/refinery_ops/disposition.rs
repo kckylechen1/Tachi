@@ -49,21 +49,22 @@ pub(crate) struct RelatedSignalV1 {
 /// protection is now derived directly from `evidence` inside `classify`
 /// (see [`is_protected_router`]) so the two can never desync again.
 ///
-/// Live-path collection honesty (F7, build-seat REQUEST-CHANGES): until
-/// #1105 adds authenticated relation lookups, the live path normalizes every
-/// prose `[state]` annotation to `Unknown` before populating `related` and
-/// preserves the unverified annotation as an advisory contradiction.
-/// `stale_body_signal` is live-derived from a blob-sha-drift resolver reason
-/// (see `mod::build_refinery_packet`).
-/// `scope_collisions` and `shipped_evidence` are NOT collected by the live
-/// path at all (no scope-collision detection or shipped-evidence
-/// cross-check exists yet — both remain a follow-up slice, `Default`
-/// leaves them empty/`None`). `dispatch_packet_complete` is deliberately
-/// left `None` by the live path — there is no defined, canon-backed
-/// criterion yet for what makes a dispatch packet "complete" from a raw
-/// issue body. None of these defaults are measurements; `classify` treats
-/// an empty/`None` signal as a no-op, never as a false-positive "checked
-/// and clean".
+/// Live-path collection honesty (F7, build-seat REQUEST-CHANGES; #1105
+/// closed the gap this paragraph used to describe): the live path now
+/// populates `related`/`scope_collisions`/`shipped_evidence` from real
+/// per-relation `gh` cross-references and a commit-reachability check (see
+/// `refinery_ops::live_signals`'s module doc for the full derivation) — a
+/// target whose live lookup never ran or failed still reports `Unknown`/is
+/// simply absent from `scope_collisions`, IDENTICAL to the old
+/// `Default::default()` v1 behavior (fail-closed by construction, not a
+/// special case). `stale_body_signal` is live-derived from a blob-sha-drift
+/// resolver reason (see `mod::build_refinery_packet_with_live_signals`).
+/// `dispatch_packet_complete` is still deliberately left `None` by the live
+/// path — there is no defined, canon-backed criterion yet for what makes a
+/// dispatch packet "complete" from a raw issue body. `Default` (every field
+/// empty/`None`/`Unknown`) remains exactly v1's own conservative behavior —
+/// `classify` treats an empty/`None`/`Unknown` signal as a no-op, never as a
+/// false-positive "checked and clean".
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RefinerySignalsV1 {
     pub(crate) related: Vec<RelatedSignalV1>,

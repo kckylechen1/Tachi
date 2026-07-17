@@ -20,6 +20,12 @@ pub(crate) struct FixtureDocResolver {
     /// available, same as `GitRefResolver` failing for real — it must not
     /// silently look like a resolved-but-empty axis.
     repo_revision: Result<RepoRevisionV1, String>,
+    /// #1105: pre-registered `(repo, commit_sha, trusted_ref)` triples that
+    /// `is_commit_reachable` reports `true` for — exact match only, same
+    /// "unregistered == not verified" posture as `resolved` above. Empty by
+    /// default, matching `GitRefResolver`'s fail-closed behavior when a
+    /// commit genuinely isn't reachable.
+    reachable_commits: Vec<(String, String, String)>,
 }
 
 impl Default for FixtureDocResolver {
@@ -27,6 +33,7 @@ impl Default for FixtureDocResolver {
         Self {
             resolved: Vec::new(),
             repo_revision: Err("fixture: no repo revision configured".to_string()),
+            reachable_commits: Vec::new(),
         }
     }
 }
@@ -73,6 +80,23 @@ impl FixtureDocResolver {
         self.repo_revision = Err(reason.to_string());
         self
     }
+
+    /// Register `commit_sha` as reachable from `trusted_ref` in `repo` —
+    /// the fixture equivalent of a real `git merge-base --is-ancestor`
+    /// success (#1105). Anything not exactly registered stays unreachable.
+    pub(crate) fn with_reachable_commit(
+        mut self,
+        repo: &str,
+        commit_sha: &str,
+        trusted_ref: &str,
+    ) -> Self {
+        self.reachable_commits.push((
+            repo.to_string(),
+            commit_sha.to_string(),
+            trusted_ref.to_string(),
+        ));
+        self
+    }
 }
 
 impl DocRefResolver for FixtureDocResolver {
@@ -111,6 +135,12 @@ impl DocRefResolver for FixtureDocResolver {
         _trusted_ref: &str,
     ) -> Result<RepoRevisionV1, String> {
         self.repo_revision.clone()
+    }
+
+    fn is_commit_reachable(&self, repo: &str, commit_sha: &str, trusted_ref: &str) -> bool {
+        self.reachable_commits
+            .iter()
+            .any(|(r, c, t)| r == repo && c == commit_sha && t == trusted_ref)
     }
 }
 

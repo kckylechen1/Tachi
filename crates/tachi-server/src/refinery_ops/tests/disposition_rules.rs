@@ -299,7 +299,18 @@ fn all_ten_dispositions_are_reachable_by_at_least_one_fixture_in_this_file() {
     }
 }
 
-// ─── prose relation-state annotations are advisory until #1105 ────────────
+// ─── prose relation-state annotations are advisory, v1 no-live-signal path ──
+//
+// #1105 landed the live per-relation cross-reference (see
+// `refinery_ops::live_signals`); `build_refinery_packet` (used by every test
+// below) is now the v1 BACK-COMPAT wrapper — equivalent to calling
+// `build_refinery_packet_with_live_signals` with `LiveRelationSignals::default()`,
+// i.e. "no live lookup was ever supplied for this target_ref". These tests
+// therefore still hold exactly as written: with zero live signals, a prose
+// `[state]` annotation is still advisory-only and cannot manufacture a
+// closed/blocked/dormant disposition by itself. Live-signal-populated
+// end-to-end coverage (a `Duplicate-Of:`/`Supersedes:` target whose live
+// state genuinely resolves) lives in `tests::live_relation_signals`.
 
 /// End-to-end (through `build_refinery_packet`, the exact function the live
 /// `refine_issues` action calls — not the `propose()` bypass helpers above):

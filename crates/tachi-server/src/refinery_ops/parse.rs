@@ -21,8 +21,12 @@
 //! A relation line may carry an optional trailing `[state]` annotation
 //! applying to every target on that line — also this leaf's own convention,
 //! not canon-frozen, e.g. `Supersedes: #89 [closed_shipped]`. The parser
-//! preserves that prose annotation, but the live pipeline must treat it as
-//! advisory until #1105 supplies an authenticated cross-reference lookup.
+//! preserves that prose annotation as-is; it is NEVER authority by itself
+//! (an owner can write anything in an issue body) — #1105 added the real
+//! authenticated cross-reference lookup (`refinery_ops::live_signals`) that
+//! the live pipeline now classifies against, checking this prose annotation
+//! only for agreement/disagreement (a disagreement becomes a contradiction,
+//! never a silent override).
 
 use super::disposition::RelatedIssueStateV1;
 use tachi_params::{CommentRevisionV1, IssueRelationKindV1, IssueSnapshotV1, SourceSpanV1};
