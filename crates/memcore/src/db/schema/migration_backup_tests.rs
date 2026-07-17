@@ -71,17 +71,33 @@ fn backup_created_on_fingerprint_mismatch() {
 
 #[test]
 fn backup_skipped_when_marker_matches() {
+    // Codex review (2026-07-17, checkpoint 1): the ordinary skip path this
+    // guards is a plain same-version reopen (`stored == EXPECTED_SCHEMA_VERSION`),
+    // not an unstamped `stored == 0` DB — that shape is already covered
+    // separately by `backup_skipped_for_fresh_db`. Stamp `user_version` to
+    // EXPECTED_SCHEMA_VERSION so this test represents a real "already fully
+    // migrated, restarting at the same version" daemon restart, matching
+    // what a genuine post-migration DB looks like (see migrations.rs:
+    // successful migrations end stamped at EXPECTED_SCHEMA_VERSION).
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("matched.db");
     let conn = Connection::open(&db_path).expect("open");
     conn.execute_batch("CREATE TABLE t(x)")
         .expect("create table");
+    conn.execute_batch(&format!(
+        "PRAGMA user_version = {}",
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION
+    ))
+    .expect("stamp current schema version");
 
     let fp = migration_schema_fingerprint(&conn).expect("fingerprint");
     std::fs::write(migration_marker_path(&db_path), fp).expect("write marker");
 
     let result = maybe_backup_before_migration(&conn, &db_path).expect("backup check");
-    assert!(result.is_none(), "matching marker should skip backup");
+    assert!(
+        result.is_none(),
+        "matching marker on an ordinary same-version restart (stored == EXPECTED) should skip backup"
+    );
 }
 
 #[test]
