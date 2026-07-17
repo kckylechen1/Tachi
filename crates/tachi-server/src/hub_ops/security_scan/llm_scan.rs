@@ -159,46 +159,55 @@ async fn two_vote_provider_scan(server: &MemoryServer, payload: &str) -> (String
 /// One strong-tier vote: provider (reasoning lane, no Claude-CLI-first
 /// behavior — see `LlmClient::call_reasoning_llm_provider_only`'s doc
 /// comment) first; on Err, the Claude CLI pool as a fallback for the
-/// rollout cycle (#1087 point 4), writing the same run-directory artifact
-/// contract as every other `ClaudePool::call` site.
+/// rollout cycle (#1087 point 4). Both paths go through
+/// `ClaudePool::call`/`call_via_provider` so the run-directory artifact
+/// contract (`prompt.md`/`result.md`/`status.json`) is written on the
+/// provider-success path too, not just on CLI fallback — a successful
+/// vote is still an audit-surface event for a security scan (#1214 BUG#1).
 async fn one_vote(
     server: &MemoryServer,
     payload: &str,
     model: Option<&str>,
     label: &str,
 ) -> Result<serde_json::Value, String> {
-    match server
-        .llm
-        .call_reasoning_llm_provider_only(
-            crate::prompts::SKILL_SECURITY_SCAN_PROMPT,
-            payload,
-            model,
-            0.1,
-            800,
-        )
-        .await
-    {
-        Ok(raw) => parse_vote(&raw).ok_or_else(|| {
+    let prompt = format!(
+        "<system>\n{}\n</system>\n\n{}",
+        crate::prompts::SKILL_SECURITY_SCAN_PROMPT,
+        payload
+    );
+
+    let llm = server.llm.clone();
+    let model_owned = model.map(str::to_string);
+    let payload_owned = payload.to_string();
+    let provider_result = server
+        .claude_pool
+        .call_via_provider(label, &prompt, move || async move {
+            llm.call_reasoning_llm_provider_only(
+                crate::prompts::SKILL_SECURITY_SCAN_PROMPT,
+                &payload_owned,
+                model_owned.as_deref(),
+                0.1,
+                800,
+            )
+            .await
+        })
+        .await;
+
+    match provider_result {
+        Ok(outcome) => parse_vote(&outcome.text).ok_or_else(|| {
             format!(
                 "vote returned unparsable JSON: {}",
-                raw.chars().take(200).collect::<String>()
+                outcome.text.chars().take(200).collect::<String>()
             )
         }),
-        Err(provider_err) => {
-            let prompt = format!(
-                "<system>\n{}\n</system>\n\n{}",
-                crate::prompts::SKILL_SECURITY_SCAN_PROMPT,
-                payload
-            );
-            match server.claude_pool.call(label, &prompt).await {
-                Ok(outcome) => parse_vote(&outcome.text).ok_or_else(|| {
-                    format!("cli fallback vote unparsable (provider err was: {provider_err})")
-                }),
-                Err(cli_err) => Err(format!(
-                    "provider vote failed ({provider_err}); CLI pool fallback also failed ({cli_err})"
-                )),
-            }
-        }
+        Err(provider_err) => match server.claude_pool.call(label, &prompt).await {
+            Ok(outcome) => parse_vote(&outcome.text).ok_or_else(|| {
+                format!("cli fallback vote unparsable (provider err was: {provider_err})")
+            }),
+            Err(cli_err) => Err(format!(
+                "provider vote failed ({provider_err}); CLI pool fallback also failed ({cli_err})"
+            )),
+        },
     }
 }
 
@@ -264,12 +273,20 @@ fn fail_closed_merge(a: serde_json::Value, b: serde_json::Value) -> serde_json::
     })
 }
 
+/// Fail-closed risk ranking (#1214 BUG#2): only the exact, case-insensitive
+/// `low`/`medium`/`high` levels rank below "high". Anything else — an
+/// unrecognized word, a malformed/differently-cased value like `CRITICAL`
+/// or `HIGH` that slipped past `serde_json`'s untyped string parsing — is
+/// treated as **at least high**, never silently downgraded to `"low"`. A
+/// security surface must fail closed on malformed input, not fail open.
 fn higher_risk(a: &str, b: &str) -> &'static str {
     fn rank(risk: &str) -> u8 {
-        match risk {
-            "high" => 2,
+        match risk.trim().to_ascii_lowercase().as_str() {
+            "low" => 0,
             "medium" => 1,
-            _ => 0,
+            "high" => 2,
+            // Unknown/malformed risk value — fail closed, not open.
+            _ => 2,
         }
     }
     match rank(a).max(rank(b)) {
@@ -349,6 +366,28 @@ mod tests {
         assert_eq!(higher_risk("low", "medium"), "medium");
         assert_eq!(higher_risk("medium", "high"), "high");
         assert_eq!(higher_risk("low", "low"), "low");
-        assert_eq!(higher_risk("unknown", "low"), "low");
+    }
+
+    /// #1214 BUG#2: an unrecognized/malformed risk value must fail closed
+    /// (rank as high), never silently collapse to "low" alongside a low
+    /// vote — the pre-fix behavior that let a malformed verdict downgrade
+    /// the merged risk instead of upgrading it.
+    #[test]
+    fn higher_risk_fails_closed_on_unknown_value() {
+        assert_eq!(higher_risk("unknown", "low"), "high");
+        assert_eq!(higher_risk("low", "unknown"), "high");
+    }
+
+    /// #1214 BUG#2: case-mismatched or otherwise-malformed strings that a
+    /// real LLM could plausibly emit (`CRITICAL`, upper-cased `HIGH`) must
+    /// not be silently read as `"low"` — either they rank as their intended
+    /// level (case-insensitive `HIGH`) or, if genuinely unrecognized
+    /// (`CRITICAL`), they fail closed to `"high"` rather than bypassing
+    /// downstream blocks.
+    #[test]
+    fn higher_risk_handles_case_and_unrecognized_levels() {
+        assert_eq!(higher_risk("HIGH", "low"), "high");
+        assert_eq!(higher_risk("CRITICAL", "low"), "high");
+        assert_eq!(higher_risk("Medium", "low"), "medium");
     }
 }
