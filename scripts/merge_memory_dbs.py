@@ -29,7 +29,7 @@ DEFAULT_SOURCE_DBS = [
     "~/.gemini/antigravity/memory.db",
     "~/Desktop/Sigil/.tachi/memory.db",
 ]
-DEFAULT_TARGET_DB = "~/.tachi/projects/antigravity/memory.db"
+DEFAULT_TARGET_DB = "~/.tachi/projects/antigravity/tachi-memory.db"
 
 
 @dataclass

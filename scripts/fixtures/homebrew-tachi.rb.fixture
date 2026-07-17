@@ -46,7 +46,7 @@ class Tachi < Formula
       Optional environment variables:
         export VOYAGE_API_KEY="your_key"
         export SILICONFLOW_API_KEY="your_key"
-        export MEMORY_DB_PATH="$HOME/.Tachi/global/memory.db"
+        export MEMORY_DB_PATH="$HOME/.Tachi/global/tachi-memory.db"
 
       Quick smoke test:
         tachi --help

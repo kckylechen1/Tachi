@@ -12,7 +12,7 @@ import shutil
 
 # 用临时目录隔离测试
 tmpdir = tempfile.mkdtemp(prefix="sigil_test_")
-global_db = os.path.join(tmpdir, "global", "memory.db")
+global_db = os.path.join(tmpdir, "global", "tachi-memory.db")
 project_dir = os.path.join(tmpdir, "project")
 os.makedirs(project_dir)
 # 创建 fake git repo 让 find_git_root() 生效
