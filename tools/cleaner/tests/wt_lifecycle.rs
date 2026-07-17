@@ -238,6 +238,17 @@ fn direct_close_refuses_dirty_worktree() {
 /// assertion fails on origin/main even though origin/main also refuses
 /// the removal. GREEN post-fix: the OS-view `holder::probe_holders` +
 /// `ps`-attribution path names pid/ppid/tty/cwd explicitly.
+///
+/// Fixed (tachi#1212 fix-round, codex checkpoint 3): the original version
+/// of this test held a NEWLY WRITTEN, untracked `held.txt` open, which
+/// `git status --porcelain` reports as `?? held.txt` — the dirty-entries
+/// guard in `plan_wt_remove` runs BEFORE the holder probe and fires first
+/// on that untracked file, so the function returns the DIRTY refusal
+/// message (which never contains "ppid=") and the `err.contains("ppid=")`
+/// assertion below could never pass; the holder-attribution code path was
+/// never actually reached. Holding the already-tracked, already-committed
+/// `README` open instead keeps `git status --porcelain` clean so the
+/// holder probe is the check that actually fires.
 #[test]
 fn direct_close_refuses_a_live_holder_with_attributed_pid_family() {
     let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -268,9 +279,25 @@ fn direct_close_refuses_a_live_holder_with_attributed_pid_family() {
     assert!(open_report.opened, "setup: worktree should have opened");
     let path = PathBuf::from(&open_report.path);
 
-    let held_file = path.join("held.txt");
-    std::fs::write(&held_file, b"hold me open").unwrap();
-    let handle = std::fs::File::open(&held_file).unwrap();
+    // Hold the already-tracked, already-committed README open — NOT a
+    // newly written file — so `git status --porcelain` stays clean and the
+    // dirty-entries guard doesn't intercept before the holder probe runs.
+    let tracked_file = path.join("README");
+    assert!(
+        tracked_file.exists(),
+        "setup: README should already be tracked/committed by init_git_repo"
+    );
+    let handle = std::fs::File::open(&tracked_file).unwrap();
+    let status_before = Command::new("git")
+        .args(["-C", path.to_str().unwrap(), "status", "--porcelain"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&status_before.stdout)
+            .trim()
+            .is_empty(),
+        "test setup bug: holding a tracked file open must not itself make the worktree dirty"
+    );
 
     let result = wt_clean::run_wt_remove(WtRemoveOptions {
         path: path.clone(),
@@ -284,6 +311,10 @@ fn direct_close_refuses_a_live_holder_with_attributed_pid_family() {
     );
     let err = result.unwrap_err();
     assert!(
+        !err.to_lowercase().contains("dirty"),
+        "this must be a HOLDER refusal, not a dirty-entries refusal (test setup regression): {err}"
+    );
+    assert!(
         err.contains("ppid="),
         "refusal must carry OS-view attribution (ppid=...), not just a raw lsof line: {err}"
     );
@@ -292,7 +323,7 @@ fn direct_close_refuses_a_live_holder_with_attributed_pid_family() {
         "refusal must name this process's own pid in the held family: {err}"
     );
     assert!(
-        path.exists() && held_file.exists(),
+        path.exists() && tracked_file.exists(),
         "the held worktree must survive the refused close"
     );
 
@@ -524,6 +555,104 @@ fn reopen_refuses_an_old_branch_name_reused_at_a_new_path() {
         force: true,
         output: OutputFormat::Json,
     });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// tachi#1118 freeze boundary 3, write-lane entry gate discrimination
+/// (codex checkpoint 3: this gate — wt_open.rs, the `git status
+/// --porcelain` check immediately after `git worktree add` succeeds — had
+/// NO dedicated behavioral test before this fix-round). Simulated
+/// deterministically via a `post-checkout` git hook that writes a file
+/// into the just-created worktree: `git worktree add` genuinely invokes
+/// `post-checkout` with the new worktree as its cwd (empirically
+/// confirmed against the installed git), so this is a real end-to-end
+/// reproduction of "a surviving writer interleaved with this open" — not
+/// a test-only injection point grafted onto production code.
+#[test]
+fn open_refuses_a_worktree_left_dirty_by_a_post_checkout_hook() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let root = unique_temp("wt-lifecycle-entry-gate");
+    let home = root.join("home");
+    let cache = root.join("cache-worktrees");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+
+    let hooks_dir = repo.join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks_dir).unwrap();
+    let hook_path = hooks_dir.join("post-checkout");
+    std::fs::write(
+        &hook_path,
+        "#!/bin/sh\necho interleaved-write > ./interloper.txt\n",
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&hook_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&hook_path, perms).unwrap();
+
+    let _env = set_env(&home, &cache);
+
+    let report = wt_open::open_worktree(OpenOptions {
+        repo_root: repo.clone(),
+        path: None,
+        branch: Some("tachi/entry-gate/worker".into()),
+        base: Some("HEAD".into()),
+        task: Some("entry-gate".into()),
+        role: Some("worker".into()),
+        dispatch_id: None,
+        name: Some("entry-gate-leaf".into()),
+        cargo_target: CargoTargetPolicy::Shared,
+        dry_run: false,
+        output: OutputFormat::Json,
+    })
+    .unwrap();
+
+    assert!(
+        !report.opened,
+        "a worktree left dirty immediately after `git worktree add` must be refused, not \
+         handed off to a write lane: {:?}",
+        report.errors
+    );
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("write-lane entry gate")),
+        "expected the write-lane entry gate refusal, got: {:?}",
+        report.errors
+    );
+    let path = PathBuf::from(&report.path);
+    assert!(
+        path.exists() && path.join("interloper.txt").exists(),
+        "detection only (tachi#1062 stays sealed): the dirty tree must be LEFT IN PLACE for \
+         inspection, never auto-deleted"
+    );
+    assert!(
+        !report.registered,
+        "a refused entry-gate open must never be registered"
+    );
+    assert!(
+        !registry::registry_contains(&path),
+        "a refused entry-gate open must not appear in the worktree registry"
+    );
+
+    // Cleanup: remove the raw git worktree directly (bypassing tachi's own
+    // dirty guard, which would otherwise correctly refuse this cleanup
+    // too) so the temp root can be reclaimed.
+    let _ = Command::new("git")
+        .args([
+            "-C",
+            repo.to_str().unwrap(),
+            "worktree",
+            "remove",
+            "--force",
+            path.to_str().unwrap(),
+        ])
+        .status();
     let _ = std::fs::remove_dir_all(&root);
 }
 
