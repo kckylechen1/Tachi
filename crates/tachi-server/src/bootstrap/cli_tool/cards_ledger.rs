@@ -340,10 +340,23 @@ async fn sync_cards(
             "authority": "advisory",
             "counter_clauses_present": file.counter_clauses.is_some(),
         });
-        if let (Some(obj), Some(clauses)) =
-            (metadata.as_object_mut(), file.counter_clauses.as_ref())
-        {
-            obj.insert("counter_clauses".to_string(), json!(clauses));
+        // Always insert this key — even when there's no current clause —
+        // rather than omitting it. Updates route through
+        // `merge_patch_metadata` (entry.rs), which starts from the PRIOR
+        // metadata object and only overwrites keys present in the incoming
+        // one; omitting the key here would let a stale `counter_clauses`
+        // string from an earlier revision survive under a now-false
+        // `counter_clauses_present`. An explicit `Null` is a key that IS
+        // present, so the merge overwrites the old value instead of
+        // skipping it — the reader sees no clause text, not old text.
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "counter_clauses".to_string(),
+                match file.counter_clauses.as_ref() {
+                    Some(clauses) => json!(clauses),
+                    None => Value::Null,
+                },
+            );
         }
 
         let mut args = serde_json::Map::new();
@@ -789,6 +802,79 @@ unrelated section after
         assert!(
             rows5.iter().all(|row| row.seat != "grok-4.5"),
             "an already-archived, still-missing seat should not reappear in the report: {rows5:?}"
+        );
+    }
+
+    // Regression for tachi#1202 CONCERN: `merge_patch_metadata` (entry.rs)
+    // rebuilds an update's metadata from the PRIOR object and only
+    // overwrites keys present in the incoming one. A card that drops its
+    // counter-clause heading between syncs must not leave the OLD clause
+    // text reachable under a now-false `counter_clauses_present` — the key
+    // must be explicitly cleared (`Null`), not omitted.
+    #[tokio::test]
+    async fn sync_clears_stale_counter_clauses_on_removal() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (app_home, db_path) = app_home_and_db(temp.path());
+        let cards_dir = temp.path().join("cards");
+        std::fs::create_dir_all(&cards_dir).expect("cards dir");
+        let schema_migration = memcore::MigrationAuthority::Deny;
+
+        // 1) First sync: card has a matching counter-clause heading.
+        write_fixture(
+            &cards_dir,
+            "wizard-sonnet",
+            "## 反制条款(派单包必带)\n- always pwd-check the worktree\n",
+        );
+        let rows = sync_cards(&cards_dir, &db_path, &app_home, &schema_migration)
+            .await
+            .expect("first sync");
+        assert_eq!(find_row(&rows, "wizard-sonnet").status, "created");
+
+        let mirrors = read_existing_mirrors(&db_path, &schema_migration).expect("read mirrors");
+        let metadata = &mirrors["wizard-sonnet"].metadata;
+        assert_eq!(
+            metadata.get("counter_clauses_present").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            metadata
+                .get("counter_clauses")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .contains("pwd-check"),
+            "first sync must record the clause text: {metadata:?}"
+        );
+
+        // 2) Second sync: same card, heading removed — this is an update
+        // (is_patch=true in build_save_entry), the transition under test.
+        write_fixture(
+            &cards_dir,
+            "wizard-sonnet",
+            "## 状态\nno counter-clause heading here anymore\n",
+        );
+        let rows2 = sync_cards(&cards_dir, &db_path, &app_home, &schema_migration)
+            .await
+            .expect("removal sync");
+        assert_eq!(find_row(&rows2, "wizard-sonnet").status, "updated");
+
+        let mirrors2 = read_existing_mirrors(&db_path, &schema_migration).expect("read mirrors");
+        let metadata2 = &mirrors2["wizard-sonnet"].metadata;
+        assert_eq!(
+            metadata2.get("counter_clauses_present").and_then(Value::as_bool),
+            Some(false),
+            "presence flag must flip to false: {metadata2:?}"
+        );
+        assert!(
+            !metadata2
+                .get("counter_clauses")
+                .map(|value| value.is_string())
+                .unwrap_or(false),
+            "stale clause text must not survive as a string value: {metadata2:?}"
+        );
+        let dump = metadata2.to_string();
+        assert!(
+            !dump.contains("pwd-check"),
+            "old clause text must not be reachable anywhere in the mirrored metadata: {dump}"
         );
     }
 
