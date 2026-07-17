@@ -49,9 +49,14 @@ pub(super) fn render_task_route_overlay(route: &crate::copilot_ops::TaskBriefRou
     lines.join("\n")
 }
 
-/// Resolve the `(role_class, vendor)` lane for a dispatch, or `None` when it is
-/// not derivable or the vendor is `unknown` (which never receives projection).
-fn resolve_vaccination_lane(params: &TachiDispatchParams) -> Option<(String, String)> {
+/// Resolve the normalized vendor family (e.g. "glm", "codex") for a dispatch
+/// from `params.agent`/`params.model`, falling back to the resolved dispatch
+/// profile's `backend`/model when the caller didn't set them explicitly.
+/// `None` when no vendor is derivable or it resolves to `"unknown"` (which
+/// never receives projection). Shared by [`resolve_vaccination_lane`] (#735)
+/// and the lane-card seat-matching overlay (#1202/#993) so both projection
+/// paths agree on exactly the same vendor for the same dispatch.
+pub(super) fn resolve_dispatch_vendor(params: &TachiDispatchParams) -> Option<String> {
     let profile_def = params
         .profile
         .as_deref()
@@ -70,9 +75,18 @@ fn resolve_vaccination_lane(params: &TachiDispatchParams) -> Option<(String, Str
         .map(str::to_string)
         .or_else(|| profile_def.and_then(tachi_dispatch::profile_resolved_model));
     let vendor = tachi_dispatch::normalize_vendor(&backend, model.as_deref());
-    if vendor == "unknown" {
-        return None;
-    }
+    (vendor != "unknown").then_some(vendor)
+}
+
+/// Resolve the `(role_class, vendor)` lane for a dispatch, or `None` when it is
+/// not derivable or the vendor is `unknown` (which never receives projection).
+fn resolve_vaccination_lane(params: &TachiDispatchParams) -> Option<(String, String)> {
+    let profile_def = params
+        .profile
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(crate::dispatch_profile::resolve_dispatch_profile);
+    let vendor = resolve_dispatch_vendor(params)?;
     let role_source = profile_def.map(|p| p.role.to_string()).or_else(|| {
         params
             .stage

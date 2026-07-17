@@ -46,6 +46,7 @@ fn dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams {
         mcp_access: None,
         allowed_mcp_servers: Vec::new(),
         verbose: None,
+        inject_card: None,
     }
 }
 
@@ -124,6 +125,7 @@ fn task_params(action: &str) -> TachiTaskParams {
         mcp_access: None,
         allowed_mcp_servers: Vec::new(),
         verbose: None,
+        inject_card: None,
         state_filter: None,
         limit: None,
         proposal_id: None,

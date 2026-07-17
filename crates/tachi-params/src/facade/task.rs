@@ -47,6 +47,11 @@ pub struct TachiTaskParams {
     /// rather than just name/backend/model/role.
     #[serde(default)]
     pub verbose: Option<bool>,
+    /// [action=dispatch] tachi#1202/#993: suppress the `/cards/<seat>`
+    /// lane-card countermeasures overlay for this dispatch. Forwarded
+    /// verbatim to `TachiDispatchParams::inject_card`.
+    #[serde(default)]
+    pub inject_card: Option<bool>,
     // plan fields
     #[serde(default)]
     #[schemars(

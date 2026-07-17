@@ -104,6 +104,7 @@ pub(super) async fn handle_dispatch_action(
             mcp_access: params.mcp_access.clone(),
             allowed_mcp_servers: params.allowed_mcp_servers.clone(),
             verbose: None,
+            inject_card: None,
         };
         match crate::dispatch_ops::handle_tachi_dispatch(server, dp).await {
             Ok(s) => {

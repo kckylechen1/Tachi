@@ -257,6 +257,14 @@ pub struct TachiDispatchParams {
     /// it separately via `tachi_task(action='profile')`).
     #[serde(default)]
     pub verbose: Option<bool>,
+
+    /// tachi#1202/#993 (L2 packet projection): when the resolved profile/vendor
+    /// maps to a `/cards/<seat>` lane-card mirror row, its 反制条款
+    /// (counter-clause) section is inlined into the prompt by default. Set
+    /// `inject_card=false` to suppress this — e.g. a caller that already
+    /// hand-copies its own countermeasures and does not want them doubled.
+    #[serde(default)]
+    pub inject_card: Option<bool>,
 }
 
 // ─── Facade: worktree merge ──────────────────────────────────────────────────

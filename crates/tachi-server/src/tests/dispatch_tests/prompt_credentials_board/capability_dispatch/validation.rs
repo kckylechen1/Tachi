@@ -58,6 +58,7 @@ async fn dispatch_rejects_unknown_agent_with_fleet_hint() {
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
             verbose: None,
+            inject_card: None,
         },
     )
     .await

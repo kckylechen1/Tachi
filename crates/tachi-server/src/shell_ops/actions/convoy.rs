@@ -209,6 +209,7 @@ pub(super) async fn handle_convoy_dispatch_action(
                 mcp_access: slice_mcp_access.clone(),
                 allowed_mcp_servers: slice_allowed_mcp_servers.clone(),
                 verbose: None,
+                inject_card: None,
             };
             match crate::dispatch_ops::handle_tachi_dispatch(server, dp).await {
                 Ok(s) => {

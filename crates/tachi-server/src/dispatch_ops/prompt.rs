@@ -2,6 +2,7 @@ mod budget;
 mod completion;
 mod context;
 mod overlays;
+mod seat_card;
 mod skills;
 mod types;
 
@@ -18,6 +19,7 @@ use self::context::{compact_example_text, prompt_row_text};
 use self::overlays::{
     render_dispatch_profile_overlay, render_task_route_overlay, render_vendor_vaccination_overlay,
 };
+use self::seat_card::render_seat_countermeasures_overlay;
 use self::skills::render_skill_invocation_contract;
 
 const UNTRUSTED_OPEN: &str = "<untrusted_content>";
@@ -74,6 +76,17 @@ pub(crate) async fn assemble_prompt_with_trace(
     // not a named profile is set, so a codex-as-implementer packet carries them
     // even though only a glm implementer profile exists today (#735).
     if let Some(overlay) = render_vendor_vaccination_overlay(server, params) {
+        parts.push(overlay);
+    }
+
+    // L2 packet projection (#1202/#993): inline the seat-matched `/cards/<seat>`
+    // lane-card mirror row's 反制条款 section, when one exists. A distinct
+    // overlay from the vendor-vaccination one above: that one is keyed by the
+    // coarse (role, vendor-family) lane from append-only adjudicated evidence;
+    // this one is keyed by the specific seat (profile id or vendor, exact
+    // match preferred) from the hand-curated lane-card corpus. Both may fire
+    // on the same dispatch; neither depends on the other.
+    if let Some(overlay) = render_seat_countermeasures_overlay(server, params) {
         parts.push(overlay);
     }
 
@@ -570,6 +583,7 @@ mod tests {
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
             verbose: None,
+            inject_card: None,
         }
     }
 
@@ -673,6 +687,198 @@ mod tests {
         assert!(
             prompt.contains("truncated 1 item(s), omitted 1 body item(s)"),
             "the prompt must disclose its aggregate skill-budget decision: {prompt}"
+        );
+    }
+
+    // ─── L2 packet projection: seat-card countermeasures overlay (#1202/#993) ──
+
+    fn seat_card_dispatch_params(profile: &str, inject_card: Option<bool>) -> TachiDispatchParams {
+        TachiDispatchParams {
+            agent: Some("codex".to_string()),
+            profile: Some(profile.to_string()),
+            task: "implement the bounded slice".to_string(),
+            execution_level: None,
+            cwd: None,
+            env_id: None,
+            unmanaged_cwd: None,
+            skills: Vec::new(),
+            context_query: None,
+            model: None,
+            timeout_secs: 5,
+            permission_profile: None,
+            allowed_tools: Vec::new(),
+            completion_predicate: None,
+            max_turns: None,
+            sandbox: None,
+            inject_tachi_mcp: None,
+            inject_hub_mcps: None,
+            command: Vec::new(),
+            harness_transport: None,
+            harness_server_url: None,
+            project: None,
+            stage: None,
+            credential_profiles: Vec::new(),
+            issue_ref: None,
+            pr_ref: None,
+            flow_id: None,
+            tool_profile: None,
+            auto_capability_bundle: Some(false),
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
+            verbose: None,
+            inject_card,
+        }
+    }
+
+    /// A `/cards/<seat>` mirror row shaped the way the frozen L1/L2 contract
+    /// describes it: GLOBAL store, wiki-class, `authority: advisory` +
+    /// `source: dispatch-ledger` metadata. Tests seed this directly (L1's own
+    /// FS-sync writer is out of this leaf's scope) to exercise the L2
+    /// projection/consumption side in isolation.
+    fn seat_card_entry(seat: &str, text: &str) -> memcore::MemoryEntry {
+        memcore::MemoryEntry {
+            id: format!("seat-card-{seat}"),
+            path: format!("/cards/{seat}"),
+            summary: format!("Lane card mirror: {seat}"),
+            text: text.to_string(),
+            importance: 0.7,
+            timestamp: "2026-07-17T00:00:00Z".to_string(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "wiki".to_string(),
+            topic: "lane_card".to_string(),
+            keywords: vec!["lane_card".to_string(), seat.to_string()],
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "dispatch-ledger".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({
+                "authority": "advisory",
+                "source": "dispatch-ledger",
+                "source_file": format!("{seat}.md"),
+                "content_hash": "test-hash",
+            }),
+            vector: None,
+            retention_policy: Some("permanent".to_string()),
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    fn seed_seat_card(server: &MemoryServer, seat: &str, text: &str) {
+        let entry = seat_card_entry(seat, text);
+        server
+            .with_global_store(|store| store.upsert(&entry).map_err(|e| e.to_string()))
+            .expect("seed seat-card mirror row");
+    }
+
+    #[test]
+    fn matching_seat_card_countermeasures_are_injected_under_marked_header() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        seed_seat_card(
+            &server,
+            "glm-5.2",
+            "详见 Claude 记忆.\n\n## 反制条款(派单必带)\n- 只给窄单,架构类绝对不给。\n- 自报永不可信。\n\n## 流量定向\n- 量上去。\n",
+        );
+        let params = seat_card_dispatch_params("glm-5.2", None);
+
+        let prompt = tokio::runtime::Runtime::new()
+            .expect("tokio runtime")
+            .block_on(assemble_prompt(&server, &params));
+
+        assert!(
+            prompt.contains("## Seat countermeasures (from lane card)"),
+            "matched seat card must inject the marked header: {prompt}"
+        );
+        assert!(
+            prompt.contains("只给窄单,架构类绝对不给"),
+            "the card's counter-clause text must appear verbatim: {prompt}"
+        );
+        assert!(
+            !prompt.contains("流量定向"),
+            "only the 反制条款 section should be inlined, not sibling sections: {prompt}"
+        );
+    }
+
+    #[test]
+    fn no_matching_card_leaves_prompt_byte_identical_regardless_of_inject_card_flag() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        // No /cards/* mirror row seeded at all.
+        let params_default = seat_card_dispatch_params("glm-5.2", None);
+        let params_explicit_off = seat_card_dispatch_params("glm-5.2", Some(false));
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let prompt_default = rt.block_on(assemble_prompt(&server, &params_default));
+        let prompt_explicit_off = rt.block_on(assemble_prompt(&server, &params_explicit_off));
+
+        assert!(
+            !prompt_default.contains("## Seat countermeasures (from lane card)"),
+            "no mirror row exists; the overlay must contribute zero bytes: {prompt_default}"
+        );
+        assert_eq!(
+            prompt_default, prompt_explicit_off,
+            "inject_card=true (default) with no matching card must be byte-identical to inject_card=false"
+        );
+    }
+
+    #[test]
+    fn oversized_countermeasures_section_is_truncated_with_ellipsis_marker() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        let long_clause = "反制条款过长测试内容片段。".repeat(200); // well over 1.5KB
+        let card_text = format!("## 反制条款(压测)\n- {long_clause}\n");
+        seed_seat_card(&server, "glm-5.2", &card_text);
+        let params = seat_card_dispatch_params("glm-5.2", None);
+
+        let prompt = tokio::runtime::Runtime::new()
+            .expect("tokio runtime")
+            .block_on(assemble_prompt(&server, &params));
+
+        assert!(
+            prompt.contains("## Seat countermeasures (from lane card)"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("..."),
+            "an oversized section must be truncated with an ellipsis marker: {prompt}"
+        );
+        assert!(
+            !prompt.contains(&long_clause),
+            "the full oversized clause must NOT survive uncut into the prompt: {prompt}"
+        );
+    }
+
+    #[test]
+    fn inject_card_false_suppresses_overlay_even_when_a_seat_card_matches() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
+        seed_seat_card(
+            &server,
+            "glm-5.2",
+            "## 反制条款\n- 只给窄单。\n",
+        );
+        let params = seat_card_dispatch_params("glm-5.2", Some(false));
+
+        let prompt = tokio::runtime::Runtime::new()
+            .expect("tokio runtime")
+            .block_on(assemble_prompt(&server, &params));
+
+        assert!(
+            !prompt.contains("## Seat countermeasures (from lane card)"),
+            "inject_card=false must suppress the overlay even with a matching card: {prompt}"
+        );
+        assert!(
+            !prompt.contains("只给窄单"),
+            "inject_card=false must keep the card's clause text out of the prompt: {prompt}"
         );
     }
 }

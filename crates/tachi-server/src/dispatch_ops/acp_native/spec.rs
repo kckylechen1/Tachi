@@ -246,6 +246,7 @@ mod tests {
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
             verbose: None,
+            inject_card: None,
         }
     }
 
