@@ -1654,8 +1654,25 @@ mod tests {
     /// (the exact #1145 blind spot: "the auto-link receipt's total clock
     /// starts after tokio::spawn") — that ordering would read ~0 regardless
     /// of how long the worker was occupied before the task started.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn spawn_queue_wait_measures_dispatch_delay_under_worker_contention() {
+    // Plain `#[test]` + `Builder::new_multi_thread().worker_threads(1).block_on`
+    // (not `#[tokio::test(flavor = "multi_thread", worker_threads = 1)]`),
+    // matching the `global_test_lock` convention used everywhere else in
+    // this crate (e.g. `dispatch_ops::prompt::tests`, 5a561225): the guard
+    // protects the process-wide `TACHI_AUTO_LINK_PHASE_RECEIPTS` env var
+    // against `w5_auto_link_latency_under_saturation` racing the same key
+    // under `--include-ignored`, so it must stay held for the entire async
+    // body including its internal awaits — `block_on` runs that future to
+    // completion synchronously on this thread, so there is no `.await`
+    // expression in this function's own body for clippy's
+    // `await_holding_lock` lint to flag, while the guard's actual coverage
+    // is unchanged. The explicit `worker_threads(1)` on the `Builder`
+    // reproduces the removed `#[tokio::test]` attribute's single-worker
+    // flavor exactly — this test's determinism (the busy-spin wrapper task
+    // monopolizing the sole worker thread) depends on it; a bare
+    // `Runtime::new()` would default to a multi-worker runtime and silently
+    // break that guarantee.
+    #[test]
+    fn spawn_queue_wait_measures_dispatch_delay_under_worker_contention() {
         const BUSY_DURATION: Duration = Duration::from_millis(60);
         const MIN_EXPECTED_WAIT: Duration = Duration::from_millis(20);
         const CORRELATION_TOKEN: u64 = 42;
@@ -1684,43 +1701,50 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let _env = crate::test_support::EnvRestore::set("TACHI_AUTO_LINK_PHASE_RECEIPTS", "1");
 
-        let server = crate::tests::make_server();
-        let inner_server: MemoryServer = server.clone();
-        let entry = test_entry("spawn-queue-wait-probe", "probe entry");
-        let (tx, rx) = std::sync::mpsc::channel();
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+            .block_on(async {
+                let server = crate::tests::make_server();
+                let inner_server: MemoryServer = server.clone();
+                let entry = test_entry("spawn-queue-wait-probe", "probe entry");
+                let (tx, rx) = std::sync::mpsc::channel();
 
-        tokio::spawn(async move {
-            spawn_auto_linking_for_test(
-                &inner_server,
-                &entry,
-                DbScope::Global,
-                None,
-                CORRELATION_TOKEN,
-                tx,
-            );
-            let start = Instant::now();
-            while start.elapsed() < BUSY_DURATION {
-                std::hint::spin_loop();
-            }
-        });
+                tokio::spawn(async move {
+                    spawn_auto_linking_for_test(
+                        &inner_server,
+                        &entry,
+                        DbScope::Global,
+                        None,
+                        CORRELATION_TOKEN,
+                        tx,
+                    );
+                    let start = Instant::now();
+                    while start.elapsed() < BUSY_DURATION {
+                        std::hint::spin_loop();
+                    }
+                });
 
-        // Give the single worker time to run the wrapper task (busy-spin)
-        // and then the measured task it enqueued.
-        tokio::time::sleep(BUSY_DURATION * 3).await;
+                // Give the single worker time to run the wrapper task
+                // (busy-spin) and then the measured task it enqueued.
+                tokio::time::sleep(BUSY_DURATION * 3).await;
 
-        let (token, receipt) = rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("measured auto-link task must complete and report back");
-        assert_eq!(token, CORRELATION_TOKEN);
-        assert!(
-            receipt.spawn_queue_wait > MIN_EXPECTED_WAIT,
-            "spawn_queue_wait ({:?}) must reflect most of the {:?} the sole \
-             worker thread spent occupied by the busy-spin wrapper task \
-             before the measured task could even start — a value near zero \
-             means `spawn_requested_at` was captured too late (or never \
-             wired at all)",
-            receipt.spawn_queue_wait,
-            BUSY_DURATION
-        );
+                let (token, receipt) = rx
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .expect("measured auto-link task must complete and report back");
+                assert_eq!(token, CORRELATION_TOKEN);
+                assert!(
+                    receipt.spawn_queue_wait > MIN_EXPECTED_WAIT,
+                    "spawn_queue_wait ({:?}) must reflect most of the {:?} the sole \
+                     worker thread spent occupied by the busy-spin wrapper task \
+                     before the measured task could even start — a value near zero \
+                     means `spawn_requested_at` was captured too late (or never \
+                     wired at all)",
+                    receipt.spawn_queue_wait,
+                    BUSY_DURATION
+                );
+            });
     }
 }
