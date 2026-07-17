@@ -1,13 +1,41 @@
 //! First-class mirror eval intake for harness-native subagents (#1066).
 //!
 //! `tachi_agent_eval` extends with `register -> observe -> adjudicate -> get`,
-//! mirroring the append-only pattern the dispatch-outcome ledger uses (#773 /
-//! #1035): carrier-observed execution facts are recorded separately from
-//! leader/independent-reviewer judgment, and only a terminal judgment event
-//! makes a row adjudicated. This is a NEW ledger backing the SAME
-//! `tachi_agent_eval` facade tool the aggregate/telemetry/perf actions
-//! already use — not a second surface — for work Tachi did not dispatch
-//! (a host-native subagent Tachi only observes).
+//! reusing the append-only PATTERN the dispatch-outcome ledger established
+//! (#773 / #1035) — carrier-observed execution facts recorded separately
+//! from leader/independent-reviewer judgment, only a terminal judgment event
+//! making a row adjudicated — via the SAME `tachi_agent_eval` facade tool
+//! the aggregate/telemetry/perf actions already use, never a second surface
+//! or a duplicate `tachi_task(action="evaluate")` verb (the frozen
+//! contract's "do not create a second ledger," confirmed by the issue's own
+//! adjudication to mean exactly that surface-level prohibition).
+//!
+//! ## Companion tables, not the dispatch tables themselves
+//!
+//! These three tables are NEW storage, deliberately NOT literal rows in
+//! `dispatch_outcomes`/`dispatch_adjudications` — codex round-2 finding #2
+//! read the frozen contract's separate "internal reuse is mandatory:
+//! Phase-1 identity receipt, dispatch outcomes, and #1035 adjudications"
+//! clause as requiring literal single-table reuse, and flagged this as a
+//! contract violation. Evaluated and rejected: `dispatch_outcomes` requires
+//! `dispatch_id`/`vendor`/an enum-shaped `execution_outcome` describing work
+//! Tachi actually dispatched, and `dispatch_adjudications` has NO columns
+//! for `usefulness`/`failure_mode`/`first_review_findings`/`plan_delta`/
+//! `next_prompt_delta`/`evidence_usable`/`used_in_final_claim`/
+//! `human_override` plus a `verdict`/`not_required_reason` mutual-exclusion
+//! CHECK constraint shaped around dispatch-only semantics. Force-fitting a
+//! host-native subagent Tachi never dispatched into those tables risks
+//! silently polluting existing dispatch-specific aggregation/reporting
+//! queries that assume every row there IS a Tachi dispatch. This module
+//! satisfies "internal reuse is mandatory" via the PATTERN (mirroring
+//! `dispatch_adjudications`'s existence-check / event_key-idempotency /
+//! `insertion_seq` contract exactly — see [`append_mirror_eval_adjudication`])
+//! and via literal reuse of the Phase-1 identity primitives
+//! (`tachi_dispatch::model_lineage_id`, see `agent_eval::mirror`), not via a
+//! shared table. Whether the frozen contract's authors intended literal
+//! table-level reuse instead is a genuine open question this fix-round does
+//! NOT resolve unilaterally — flagged SCOPE-GAP on PR #1186 for an owner
+//! ruling; see that comment for the full reasoning.
 //!
 //! ## Three tables
 //!
@@ -392,9 +420,26 @@ pub fn get_observation(
     .map_err(MemoryError::from)
 }
 
+/// Codex round-2 finding #4b: malformed `artifacts` JSON must fail loudly,
+/// not silently become `[]` — an `artifacts` array feeds evidence a leader
+/// or independent reviewer may rely on for a usable-evidence verdict, so
+/// damaged storage must surface as a read error (fail-closed), never as an
+/// indistinguishable "no artifacts" row. Mirrors the `FromSqlConversionFailure`
+/// idiom already used for higher-integrity columns elsewhere in this crate
+/// (e.g. `vault_db`, `exec_env`), not the lower-stakes `unwrap_or_default`
+/// convention some purely-advisory metadata columns still use.
 fn row_to_observation(row: &rusqlite::Row<'_>) -> rusqlite::Result<MirrorEvalObservation> {
     let artifacts_raw: String = row.get(7)?;
-    let artifacts: Vec<String> = serde_json::from_str(&artifacts_raw).unwrap_or_default();
+    let artifacts: Vec<String> = serde_json::from_str(&artifacts_raw).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            7,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("corrupt mirror_eval_observations.artifacts JSON: {e}"),
+            )),
+        )
+    })?;
     Ok(MirrorEvalObservation {
         observation_id: row.get(0)?,
         eval_run_id: row.get(1)?,
@@ -621,10 +666,23 @@ fn get_adjudication_by_event_key(
     .map_err(MemoryError::from)
 }
 
+/// Codex round-2 finding #4b: same fail-closed treatment as
+/// `row_to_observation`'s `artifacts` — `first_review_findings` is
+/// judgment evidence the adjudication verdict rests on, so corrupt JSON
+/// must surface as a read error, never silently become an empty findings
+/// list indistinguishable from "no findings."
 fn row_to_adjudication(row: &rusqlite::Row<'_>) -> rusqlite::Result<MirrorEvalAdjudication> {
     let findings_raw: String = row.get(7)?;
-    let first_review_findings: Vec<String> =
-        serde_json::from_str(&findings_raw).unwrap_or_default();
+    let first_review_findings: Vec<String> = serde_json::from_str(&findings_raw).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            7,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("corrupt mirror_eval_adjudications.first_review_findings JSON: {e}"),
+            )),
+        )
+    })?;
     Ok(MirrorEvalAdjudication {
         adjudication_id: row.get(0)?,
         eval_run_id: row.get(1)?,
@@ -805,9 +863,8 @@ mod tests {
 
         let mut cross_origin = base_register("native-cross-origin");
         cross_origin.execution_origin = "some_other_origin".to_string();
-        let err = register_mirror_eval_run(&conn, &cross_origin).expect_err(
-            "same native id under a different execution_origin must be rejected",
-        );
+        let err = register_mirror_eval_run(&conn, &cross_origin)
+            .expect_err("same native id under a different execution_origin must be rejected");
         assert!(err.to_string().contains("conflict"));
 
         let count: i64 = conn

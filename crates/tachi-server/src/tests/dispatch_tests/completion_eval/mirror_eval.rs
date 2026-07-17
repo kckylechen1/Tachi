@@ -141,6 +141,74 @@ async fn register_replay_idempotent_conflict_via_tool_surface() {
     assert!(conflict.contains("conflict"), "got: {conflict}");
 }
 
+/// Codex round-2 finding #4d: register/observe/adjudicate persisted every
+/// caller-supplied string field verbatim, with zero scrubbing equivalent to
+/// `tachi_complete`'s. BEHAVIORAL RED on the pre-fix code: a secret-shaped
+/// value pasted into `plan_delta`, `evidence_ref`, or a
+/// `first_review_findings` entry would round-trip through `get` unredacted.
+#[tokio::test]
+async fn mirror_eval_scrubs_secretish_free_text_fields() {
+    let server = make_server();
+    let secret = "eval-redaction-fixture-token";
+
+    let registered = register(&server, "wire-native-secret", "anthropic/claude-sonnet").await;
+    let eval_run_id = registered["eval_run_id"].as_str().unwrap().to_string();
+
+    server
+        .tachi_agent_eval(Parameters(TachiAgentEvalParams {
+            observe: Some(MirrorEvalObserveParams {
+                eval_run_id: Some(eval_run_id.clone()),
+                native_child_id: None,
+                terminal_outcome: "success".to_string(),
+                duration_ms: Some(1_000),
+                cost_tokens: None,
+                cost_usd: None,
+                result_ref: Some(format!("see api_key={secret} in the run log")),
+                artifacts: vec![format!("token={secret}")],
+                effective_model: Some("anthropic/claude-sonnet".to_string()),
+                effective_backend: None,
+                effective_harness: None,
+            }),
+            ..agent_eval_params("observe")
+        }))
+        .await
+        .expect("observe should succeed");
+
+    server
+        .tachi_agent_eval(Parameters(TachiAgentEvalParams {
+            adjudicate: Some(MirrorEvalAdjudicateParams {
+                eval_run_id: Some(eval_run_id.clone()),
+                native_child_id: None,
+                actor: "leader".to_string(),
+                verifier_model: Some("openai/gpt-5".to_string()),
+                usefulness: "useful".to_string(),
+                failure_mode: None,
+                first_review_findings: vec![format!("secret={secret} leaked in diff")],
+                plan_delta: Some(format!("rotate password={secret}")),
+                next_prompt_delta: None,
+                evidence_usable: true,
+                used_in_final_claim: true,
+                human_override: false,
+                evidence_ref: format!("token={secret}"),
+                event_key: Some("secret-scrub-event".to_string()),
+            }),
+            ..agent_eval_params("adjudicate")
+        }))
+        .await
+        .expect("adjudicate should succeed");
+
+    let view = get(&server, &eval_run_id).await;
+    let dump = view.to_string();
+    assert!(
+        !dump.contains(secret),
+        "secret must never survive register/observe/adjudicate storage: {dump}"
+    );
+    assert!(
+        dump.contains("REDACTED"),
+        "scrubbed fields must carry the redaction marker: {dump}"
+    );
+}
+
 /// AC-3 through the tool surface: after register + observe only, the run is
 /// NOT adjudicated — observe has no path to write judgment.
 #[tokio::test]

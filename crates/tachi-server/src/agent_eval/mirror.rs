@@ -20,6 +20,33 @@ fn lineage_of(model: Option<&str>) -> String {
     tachi_dispatch::model_lineage_id(model, tachi_dispatch::UNKNOWN_IDENTITY)
 }
 
+/// Codex round-2 finding #4d: register/observe/adjudicate persisted every
+/// caller-supplied string field verbatim — "existing completion scrubs
+/// equivalent [free-text fields]... mirror path has zero scrubbing," a
+/// direct violation of the frozen contract's "raw transcripts, hidden
+/// reasoning, and secrets never enter storage." `scrub_secrets` is the SAME
+/// pure, deterministic regex scrub `complete_ops::eval_record` already
+/// applies to `tachi_complete`'s free-text fields (bearer tokens, api
+/// keys/tokens/secrets/passwords, `sk-`/`gh?_`/`AKIA`/`xox`/`voy-` literals);
+/// being pure and deterministic, scrubbing EVERY string field here —
+/// including identifier-shaped ones used for idempotency/lookup matching
+/// (`native_child_id`, `event_key`, ...) — is safe for idempotent replay: a
+/// legitimate (non-secret-shaped) value scrubs to itself every time, so
+/// replay/lookup keys stay stable: only a genuinely secret-shaped value
+/// (which was never a legitimate id/model-name/actor to begin with) is
+/// altered.
+fn scrub(text: String) -> String {
+    crate::memory_search_ops::scrub_secrets(&text).0
+}
+
+fn scrub_opt(text: Option<String>) -> Option<String> {
+    text.map(scrub)
+}
+
+fn scrub_vec(values: Vec<String>) -> Vec<String> {
+    values.into_iter().map(scrub).collect()
+}
+
 /// Producer identity for cross-model GATING (self-eval / independence,
 /// #1066 AC-7) — the carrier-OBSERVED `effective_model` ONLY, never the
 /// register-time requested/planned value. Gating must never launder a
@@ -63,14 +90,14 @@ pub(crate) fn handle_register(
     params: MirrorEvalRegisterParams,
 ) -> Result<String, String> {
     let new = memcore::NewMirrorEvalRun {
-        frozen_contract_ref: params.frozen_contract_ref,
-        execution_origin: params.execution_origin,
-        lifecycle_owner: params.lifecycle_owner,
-        harness: params.harness,
-        native_child_id: params.native_child_id,
-        requested_profile: params.requested_profile,
-        requested_model: params.requested_model,
-        requested_agent: params.requested_agent,
+        frozen_contract_ref: scrub(params.frozen_contract_ref),
+        execution_origin: scrub(params.execution_origin),
+        lifecycle_owner: scrub(params.lifecycle_owner),
+        harness: scrub_opt(params.harness),
+        native_child_id: scrub_opt(params.native_child_id),
+        requested_profile: scrub_opt(params.requested_profile),
+        requested_model: scrub_opt(params.requested_model),
+        requested_agent: scrub_opt(params.requested_agent),
     };
     let run = server.with_global_store(|store| {
         memcore::register_mirror_eval_run(store.connection(), &new).map_err(|e| e.to_string())
@@ -91,22 +118,28 @@ pub(crate) fn handle_observe(
     server: &MemoryServer,
     params: MirrorEvalObserveParams,
 ) -> Result<String, String> {
+    // Scrub `native_child_id` BEFORE the lookup, not just before storage: it
+    // is a lookup key against what `register` stored (already scrubbed
+    // there), so an unscrubbed lookup value would fail to resolve a run
+    // whose raw native id happened to be secret-shaped. `scrub` is a no-op
+    // on any legitimate (non-secret-shaped) id.
+    let native_child_id = scrub_opt(params.native_child_id);
     let eval_run_id = resolve_eval_run_id(
         server,
         params.eval_run_id.as_deref(),
-        params.native_child_id.as_deref(),
+        native_child_id.as_deref(),
     )?;
     let new = memcore::NewMirrorEvalObservation {
         eval_run_id: eval_run_id.clone(),
-        terminal_outcome: params.terminal_outcome,
+        terminal_outcome: scrub(params.terminal_outcome),
         duration_ms: params.duration_ms,
         cost_tokens: params.cost_tokens,
         cost_usd: params.cost_usd,
-        result_ref: params.result_ref,
-        artifacts: params.artifacts,
-        effective_model: params.effective_model,
-        effective_backend: params.effective_backend,
-        effective_harness: params.effective_harness,
+        result_ref: scrub_opt(params.result_ref),
+        artifacts: scrub_vec(params.artifacts),
+        effective_model: scrub_opt(params.effective_model),
+        effective_backend: scrub_opt(params.effective_backend),
+        effective_harness: scrub_opt(params.effective_harness),
     };
     let observation = server.with_global_store(|store| {
         memcore::record_mirror_eval_observation(store.connection(), &new).map_err(|e| e.to_string())
@@ -134,32 +167,41 @@ pub(crate) fn handle_adjudicate(
     server: &MemoryServer,
     params: MirrorEvalAdjudicateParams,
 ) -> Result<String, String> {
+    // Scrub BEFORE lookup/key-derivation for the same reason as
+    // `handle_observe`: `native_child_id` is a lookup key, and `actor`/
+    // `usefulness` feed the default `event_key` derivation below — scrubbing
+    // after computing the key would make a caller-omitted `event_key` derive
+    // from raw (unscrubbed) text while the persisted `actor`/`usefulness`
+    // are scrubbed, a needless inconsistency `scrub`'s determinism costs
+    // nothing to avoid.
+    let native_child_id = scrub_opt(params.native_child_id);
+    let actor = scrub(params.actor);
+    let usefulness = scrub(params.usefulness);
     let eval_run_id = resolve_eval_run_id(
         server,
         params.eval_run_id.as_deref(),
-        params.native_child_id.as_deref(),
+        native_child_id.as_deref(),
     )?;
     let event_key = params
         .event_key
+        .map(scrub)
         .filter(|k| !k.trim().is_empty())
-        .unwrap_or_else(|| {
-            default_adjudication_event_key(&eval_run_id, &params.actor, &params.usefulness)
-        });
+        .unwrap_or_else(|| default_adjudication_event_key(&eval_run_id, &actor, &usefulness));
     let new = memcore::NewMirrorEvalAdjudication {
         adjudication_id: uuid::Uuid::new_v4().to_string(),
         eval_run_id: eval_run_id.clone(),
         event_key,
-        actor: params.actor,
-        verifier_model: params.verifier_model,
-        usefulness: params.usefulness,
-        failure_mode: params.failure_mode,
-        first_review_findings: params.first_review_findings,
-        plan_delta: params.plan_delta,
-        next_prompt_delta: params.next_prompt_delta,
+        actor,
+        verifier_model: scrub_opt(params.verifier_model),
+        usefulness,
+        failure_mode: scrub_opt(params.failure_mode),
+        first_review_findings: scrub_vec(params.first_review_findings),
+        plan_delta: scrub_opt(params.plan_delta),
+        next_prompt_delta: scrub_opt(params.next_prompt_delta),
         evidence_usable: params.evidence_usable,
         used_in_final_claim: params.used_in_final_claim,
         human_override: params.human_override,
-        evidence_ref: params.evidence_ref,
+        evidence_ref: scrub(params.evidence_ref),
     };
     let adjudication = server.with_global_store(|store| {
         memcore::append_mirror_eval_adjudication(store.connection(), &new)
@@ -200,7 +242,9 @@ pub(crate) fn handle_get(
     params: MirrorEvalGetParams,
 ) -> Result<String, String> {
     let eval_run_id = params.eval_run_id.filter(|s| !s.trim().is_empty());
-    let native_child_id = params.native_child_id.filter(|s| !s.trim().is_empty());
+    // Scrub before lookup, same rationale as handle_observe/handle_adjudicate
+    // — native_child_id is a lookup key against what register stored scrubbed.
+    let native_child_id = scrub_opt(params.native_child_id).filter(|s| !s.trim().is_empty());
     if eval_run_id.is_none() && native_child_id.is_none() {
         return Err("get requires eval_run_id or native_child_id".to_string());
     }

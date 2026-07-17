@@ -76,10 +76,29 @@ pub(crate) async fn handle_tachi_complete(
     // surface. Additive only — an empty/omitted eval_run_ids leaves
     // params.subagents byte-identical to what the caller supplied, and an
     // unresolved/ineligible id is silently skipped (never fails completion).
+    // A genuine storage-read error is a DIFFERENT event from "not found"
+    // (codex round-2 finding #4a): it is `tracing::error!`-logged inside
+    // `project_eval_run_ids` AND disclosed on the completion record's notes
+    // below, instead of being indistinguishable from a benign missing
+    // reference.
     if !params.eval_run_ids.is_empty() {
-        let projected =
+        let (projected, lookup_error_ids) =
             super::mirror_eval_projection::project_eval_run_ids(server, &params.eval_run_ids);
         params.subagents.extend(projected);
+        if !lookup_error_ids.is_empty() {
+            let caveat = format!(
+                "mirror eval projection: {} eval_run_id(s) skipped due to a storage lookup \
+                 error (not simply unregistered): {}",
+                lookup_error_ids.len(),
+                lookup_error_ids.join(", ")
+            );
+            params.notes = Some(match params.notes.take() {
+                Some(existing) if !existing.trim().is_empty() => {
+                    format!("{existing}\n{caveat}")
+                }
+                _ => caveat,
+            });
+        }
     }
 
     let CompleteEvalRecord {

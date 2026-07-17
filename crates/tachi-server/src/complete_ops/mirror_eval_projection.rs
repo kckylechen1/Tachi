@@ -120,13 +120,21 @@ fn to_subagent_eval_params(view: &memcore::MirrorEvalRunView) -> Option<TachiSub
     })
 }
 
-/// Resolve each `eval_run_id` and project the eligible ones. Never fails —
-/// an unresolved or ineligible id is simply absent from the returned vec.
+/// Resolve each `eval_run_id` and project the eligible ones. Never FAILS the
+/// completion — an unresolved (never-registered), ineligible (unadjudicated
+/// / not evidence-usable / self-eval), or lookup-erroring id is simply
+/// absent from the returned vec — but a genuine storage-read error (codex
+/// round-2 finding #4a) is NOT the same event as a benign "id not found":
+/// it is distinguished with `tracing::error!` (vs `warn!` for not-found) so
+/// it is operationally alertable, and its id is returned separately so the
+/// caller can disclose it on the completion record instead of the failure
+/// being invisible outside a log line.
 pub(super) fn project_eval_run_ids(
     server: &MemoryServer,
     eval_run_ids: &[String],
-) -> Vec<TachiSubagentEvalParams> {
+) -> (Vec<TachiSubagentEvalParams>, Vec<String>) {
     let mut projected = Vec::new();
+    let mut lookup_errors = Vec::new();
     for eval_run_id in eval_run_ids {
         let eval_run_id = eval_run_id.trim();
         if eval_run_id.is_empty() {
@@ -146,7 +154,12 @@ pub(super) fn project_eval_run_ids(
                 continue;
             }
             Err(error) => {
-                tracing::warn!(eval_run_id, error = %error, "eval_run_ids: lookup failed, skipping");
+                tracing::error!(
+                    eval_run_id,
+                    error = %error,
+                    "eval_run_ids: lookup failed (storage error, not a missing reference), skipping"
+                );
+                lookup_errors.push(eval_run_id.to_string());
                 continue;
             }
         };
@@ -154,7 +167,7 @@ pub(super) fn project_eval_run_ids(
             projected.push(entry);
         }
     }
-    projected
+    (projected, lookup_errors)
 }
 
 #[cfg(test)]
@@ -182,11 +195,28 @@ mod tests {
         conn
     }
 
-    /// AC-4 / self-eval: an unadjudicated run projects to nothing.
+    /// AC-4 / self-eval: an unadjudicated run projects to nothing. Codex
+    /// round-2 finding #3c: an observation is deliberately present (unlike
+    /// the pre-fix fixture, which omitted it) so a None result here can only
+    /// be attributed to the intended discriminator — "no adjudication" — and
+    /// not to an accidental "no observation" gate that would pass this test
+    /// for the WRONG reason (a bug that gated on observation presence would
+    /// have silently passed both this test and the one below, without
+    /// exercising either's real discriminator).
     #[test]
     fn unadjudicated_run_is_not_projected() {
         let conn = open_conn();
         let run = memcore::register_mirror_eval_run(&conn, &base_run("p-1")).unwrap();
+        memcore::record_mirror_eval_observation(
+            &conn,
+            &memcore::NewMirrorEvalObservation {
+                eval_run_id: run.eval_run_id.clone(),
+                terminal_outcome: "success".to_string(),
+                effective_model: Some("anthropic/claude-sonnet".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let view = memcore::get_mirror_eval_run_view(&conn, Some(&run.eval_run_id), None)
             .unwrap()
             .unwrap();
@@ -194,10 +224,23 @@ mod tests {
     }
 
     /// AC-4: evidence_usable=false is not projected even though adjudicated.
+    /// Observation present (see `unadjudicated_run_is_not_projected`'s doc
+    /// comment for why) so this test's None is attributable ONLY to
+    /// `evidence_usable=false`, not to a coincidentally-absent observation.
     #[test]
     fn not_evidence_usable_is_not_projected() {
         let conn = open_conn();
         let run = memcore::register_mirror_eval_run(&conn, &base_run("p-2")).unwrap();
+        memcore::record_mirror_eval_observation(
+            &conn,
+            &memcore::NewMirrorEvalObservation {
+                eval_run_id: run.eval_run_id.clone(),
+                terminal_outcome: "failure".to_string(),
+                effective_model: Some("anthropic/claude-sonnet".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         memcore::append_mirror_eval_adjudication(
             &conn,
             &memcore::NewMirrorEvalAdjudication {
