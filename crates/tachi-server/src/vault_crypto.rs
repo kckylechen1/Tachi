@@ -28,6 +28,12 @@ use vault_kit::generate_nonce;
 
 const AES_GCM_TAG_LEN: usize = 16;
 
+/// The only `vault_config.kdf_algorithm` value this build's derivation
+/// function implements. Every writer in this repo always sets this literal
+/// (mirrors `bootstrap::vault_sync::ensure_importable_kdf`'s day-one-brick-fix
+/// check, tachi#1080); there is no other supported value today.
+const SUPPORTED_KDF_ALGORITHM: &str = "argon2id";
+
 /// A stored `vault_config.kdf_params` value that could not be parsed into a
 /// supported `KdfParams`. This is a **typed** error (not a bare `String`) so an
 /// outer catch-all can `downcast_ref::<KdfParamsFormatError>()` and refuse to
@@ -56,6 +62,35 @@ impl std::fmt::Display for KdfParamsFormatError {
 
 impl std::error::Error for KdfParamsFormatError {}
 
+/// A stored `vault_config.kdf_algorithm` value that is not one this build's
+/// derivation function implements (tachi#1080 attack-pass finding A1). Typed
+/// **peer** of [`KdfParamsFormatError`] for the same reason: algorithm-axis
+/// drift (e.g. a fork writes a different KDF with the same `{m,t,p}` param
+/// shape) must never be misdiagnosed as a wrong password and must never feed
+/// the unlock lockout counter. The `Display` form names both the stored value
+/// and the supported algorithm, and is deliberately NOT phrased as a password
+/// error.
+#[derive(Debug, Clone)]
+pub struct KdfAlgorithmMismatchError {
+    message: String,
+}
+
+impl KdfAlgorithmMismatchError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for KdfAlgorithmMismatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for KdfAlgorithmMismatchError {}
+
 /// Exhaustive failures from deriving and verifying a key against a stored
 /// vault configuration.
 ///
@@ -65,6 +100,7 @@ impl std::error::Error for KdfParamsFormatError {}
 #[derive(Debug)]
 pub enum StoredVaultKeyDerivationError {
     InvalidSalt(String),
+    KdfAlgorithmMismatch(KdfAlgorithmMismatchError),
     KdfParamsFormat(KdfParamsFormatError),
     Derivation(String),
     WrongPassword,
@@ -75,6 +111,7 @@ impl std::fmt::Display for StoredVaultKeyDerivationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidSalt(err) => write!(f, "Invalid vault salt: {err}"),
+            Self::KdfAlgorithmMismatch(err) => std::fmt::Display::fmt(err, f),
             Self::KdfParamsFormat(err) => std::fmt::Display::fmt(err, f),
             Self::Derivation(err) => write!(f, "Vault key derivation failed: {err}"),
             Self::WrongPassword => f.write_str("Wrong password"),
@@ -86,6 +123,7 @@ impl std::fmt::Display for StoredVaultKeyDerivationError {
 impl std::error::Error for StoredVaultKeyDerivationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::KdfAlgorithmMismatch(err) => Some(err),
             Self::KdfParamsFormat(err) => Some(err),
             _ => None,
         }
@@ -131,18 +169,52 @@ pub fn parse_stored_kdf_params(config_kdf_params: &str) -> Result<KdfParams, Kdf
 /// Derive a verified vault key from a STORED `VaultConfig` + a candidate
 /// password, using the config's own `kdf_params` (not a compile-time
 /// constant). This is the in-process seam every stored-config unlock/verify
-/// site calls (tachi#1080): it parses the stored kdf_params, derives, and
-/// verifies the password, so the three inline steps are not re-implemented at
-/// each call site.
+/// site calls (tachi#1080): it checks the stored `kdf_algorithm`, parses the
+/// stored `kdf_params`, derives, and verifies the password, so those steps
+/// are not re-implemented at each call site.
 ///
 /// The exhaustive [`StoredVaultKeyDerivationError`] is the discriminator: a
 /// caller may choose a benign outcome for [`StoredVaultKeyDerivationError::WrongPassword`]
 /// without accidentally swallowing corrupt stored configuration or a local
 /// derivation failure.
+///
+/// Checks `config.kdf_algorithm` fail-closed BEFORE deriving (tachi#1080
+/// attack-pass finding A1): this function only implements Argon2id, so a
+/// stored config naming any other algorithm — e.g. algorithm-axis drift where
+/// a fork writes a different KDF with the same `{m,t,p}` param shape —
+/// derives with Argon2id anyway and silently misdiagnoses as a wrong
+/// password if left unchecked. An empty stored value is treated as the
+/// implicit historical default (mirrors
+/// `bootstrap::vault_sync::ensure_importable_kdf`'s same day-one-brick-fix
+/// carve-out: `kdf_algorithm` is a `NOT NULL DEFAULT 'argon2id'` column with
+/// no `#[serde(default)]`, so the only reachable "no algorithm recorded"
+/// shape is an explicit empty string in an older/hand-crafted row). Any other
+/// mismatch returns [`StoredVaultKeyDerivationError::KdfAlgorithmMismatch`] —
+/// a typed peer of [`StoredVaultKeyDerivationError::KdfParamsFormat`], so it
+/// is never misread as [`StoredVaultKeyDerivationError::WrongPassword`] and
+/// so never feeds a caller's brute-force lockout counter (mirrors how
+/// `vault_ops::handlers::lifecycle::handle_vault_unlock` already keeps
+/// `KdfParamsFormat` failures out of `record_vault_unlock_failure`).
 pub fn derive_verified_key_from_stored_config(
     config: &memcore::vault::VaultConfig,
     password: &str,
 ) -> Result<DerivedVaultKey, StoredVaultKeyDerivationError> {
+    let algorithm = if config.kdf_algorithm.trim().is_empty() {
+        SUPPORTED_KDF_ALGORITHM
+    } else {
+        config.kdf_algorithm.as_str()
+    };
+    if algorithm != SUPPORTED_KDF_ALGORITHM {
+        return Err(StoredVaultKeyDerivationError::KdfAlgorithmMismatch(
+            KdfAlgorithmMismatchError::new(format!(
+                "vault_config.kdf_algorithm is not a supported KDF algorithm; refusing to \
+                 derive (this is not a password error). stored kdf_algorithm={stored:?}; \
+                 supported={supported:?}",
+                stored = config.kdf_algorithm,
+                supported = SUPPORTED_KDF_ALGORITHM,
+            )),
+        ));
+    }
     let salt = B64
         .decode(&config.salt)
         .map_err(|err| StoredVaultKeyDerivationError::InvalidSalt(err.to_string()))?;
@@ -470,6 +542,117 @@ mod tests {
         assert!(
             matches!(&err, StoredVaultKeyDerivationError::CorruptVerifier(_)),
             "corrupt stored verifier must remain a typed integrity error; got: {err}"
+        );
+    }
+
+    // --- tachi#1080 attack-pass finding A1: kdf_algorithm axis ---
+    //
+    // Pre-fix, `derive_verified_key_from_stored_config` never read
+    // `config.kdf_algorithm` at all: algorithm-axis drift (a stored config
+    // naming a KDF this build doesn't implement, but with a param shape that
+    // still parses) fell straight through to `derive_with_params`, which
+    // always derives with Argon2id regardless of the label. With the
+    // *correct* password that silently produced `Ok(key)` instead of
+    // surfacing the mismatch; with a differently-derived stored verifier
+    // (the real-world shape — the fork actually derived under its own KDF)
+    // it produces `Ok(false)` -> `WrongPassword`, feeding the brute-force
+    // lockout counter for a config problem, not a password problem.
+    //
+    // #1187 fix-round correction (codex cross-vendor review, checkpoint 3):
+    // only (e) and (f) below are genuinely RED on pre-fix `origin/main` — a
+    // stored config using the fixture's own real password always verifies
+    // successfully pre-fix (no algorithm check exists to short-circuit
+    // before parsing/deriving), so `.expect_err(...)` in (e) and the
+    // `Ok(_) => panic!(...)` arm in (f) both fail loudly. (g) is GREEN on
+    // BOTH pre-fix and post-fix code — pre-fix already ignored
+    // `kdf_algorithm` entirely, so an empty value already derived
+    // successfully; (g) is compatibility regression coverage for the
+    // legacy carve-out, not a discriminator. See also the live-handler
+    // test `vault_unlock_kdf_algorithm_mismatch_does_not_feed_lockout_counter`
+    // in `vault_ops/tests.rs`, added in the same fix-round, which is the
+    // test that actually proves the production `handle_vault_unlock`
+    // lockout counter stays untouched — (f) below only proves it against a
+    // synthetic local match, not the real dispatch.
+
+    /// (e) `kdf_algorithm` naming an unsupported KDF, with an otherwise VALID
+    /// `kdf_params` shape and the objectively CORRECT password -> a typed
+    /// `KdfAlgorithmMismatch`, never `Ok(_)` and never `WrongPassword`. Using
+    /// the correct password (rather than a wrong one) is deliberate: it
+    /// proves the algorithm check fires before any derivation is attempted at
+    /// all, exactly like the existing `kdf_params`-format tests (b)/(c) above
+    /// — a stored-config axis problem must be caught before password
+    /// verification ever runs, not conflated with its outcome.
+    #[test]
+    fn seam_rejects_algorithm_mismatch_as_typed_error_not_wrong_password() {
+        let mut config = make_stored_config_for_password("correct-pw");
+        config.kdf_algorithm = "argon2i".to_string();
+        let err = derive_verified_key_from_stored_config(&config, "correct-pw").expect_err(
+            "unsupported kdf_algorithm must fail the seam even with the correct password",
+        );
+        assert!(
+            matches!(&err, StoredVaultKeyDerivationError::KdfAlgorithmMismatch(_)),
+            "algorithm-axis drift must surface as a typed KdfAlgorithmMismatch \
+             (not a password error, not a silent Ok); got: {err}"
+        );
+        assert!(
+            !matches!(&err, StoredVaultKeyDerivationError::WrongPassword),
+            "algorithm-axis drift must never be misdiagnosed as WrongPassword; got: {err}"
+        );
+    }
+
+    /// (f) Same shape as (e), documenting the specific claim from the
+    /// attack-pass verdict: this error class must never feed a caller's
+    /// brute-force lockout counter. This exercises only the PURE seam with a
+    /// local synthetic counter/match, not the real production dispatch —
+    /// #1187 fix-round correction (codex checkpoint 3/4): despite the match
+    /// arm below being shaped like `handle_vault_unlock`'s real dispatch
+    /// (now literally the seam it calls, after the fix-round wired the
+    /// handler to this function), a synthetic local counter proves only
+    /// itself. The production-lockout-counter claim is proven by
+    /// `vault_unlock_kdf_algorithm_mismatch_does_not_feed_lockout_counter`
+    /// (`vault_ops/tests.rs`), which drives the real `handle_vault_unlock`
+    /// handler and asserts the real `failed_attempts` counter.
+    #[test]
+    fn seam_algorithm_mismatch_does_not_feed_lockout_counter() {
+        let mut config = make_stored_config_for_password("correct-pw");
+        config.kdf_algorithm = "argon2i".to_string();
+
+        let mut lockout_counter = 0u32;
+        let outcome = derive_verified_key_from_stored_config(&config, "correct-pw");
+        match outcome {
+            Ok(_) => panic!("algorithm-axis drift must not silently derive a usable key"),
+            Err(StoredVaultKeyDerivationError::WrongPassword) => {
+                // The ONLY branch production code increments the lockout
+                // counter on (mirrors `record_vault_unlock_failure`'s sole
+                // call site in `handle_vault_unlock`).
+                lockout_counter += 1;
+            }
+            Err(_) => {
+                // KdfAlgorithmMismatch (and every other typed integrity
+                // error) reaches here and must NOT touch the counter.
+            }
+        }
+        assert_eq!(
+            lockout_counter, 0,
+            "algorithm-axis drift must not increment the vault unlock lockout counter"
+        );
+    }
+
+    /// (g) An empty stored `kdf_algorithm` is the historical implicit
+    /// default, not a mismatch (mirrors
+    /// `bootstrap::vault_sync::ensure_importable_kdf`'s identical carve-out):
+    /// legacy/hand-crafted rows predating the column's introduction must keep
+    /// unlocking, so this must NOT regress into a false-positive
+    /// `KdfAlgorithmMismatch`.
+    #[test]
+    fn seam_empty_kdf_algorithm_is_treated_as_implicit_argon2id_default() {
+        let mut config = make_stored_config_for_password("correct-pw");
+        config.kdf_algorithm = String::new();
+        let key = derive_verified_key_from_stored_config(&config, "correct-pw");
+        assert!(
+            key.is_ok(),
+            "empty stored kdf_algorithm must fall back to the implicit argon2id default, not fail; got: {:?}",
+            key.err()
         );
     }
 }

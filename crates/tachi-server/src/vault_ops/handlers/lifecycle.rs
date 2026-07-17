@@ -74,9 +74,6 @@ pub(crate) async fn handle_vault_unlock(
             .map_err(|e| format!("Failed to load vault config: {e}"))?
             .ok_or_else(|| "Vault not initialized. Call vault_init first.".to_string())?;
 
-        let salt = B64
-            .decode(&config.salt)
-            .map_err(|e| format!("Invalid salt in vault config: {e}"))?;
         let fifo_path = params
             .password_fifo_path
             .as_deref()
@@ -140,18 +137,33 @@ pub(crate) async fn handle_vault_unlock(
                 &params.password
             }
         };
-        // tachi#1080: derive using the STORED `vault_config.kdf_params`, not a
-        // compile-time constant. A malformed or unsupported stored value fails
-        // loud and versioned here — before `verify_password` — so it is never
-        // misread as "wrong password" and never counts against the lockout
-        // counter (mirrors the corrupted-verifier discipline).
-        let key_result = match crypto::parse_stored_kdf_params(&config.kdf_params) {
-            Ok(params) => crypto::DerivedVaultKey::derive_with_params(password, &salt, &params)
-                .map_err(|e| e.to_string()),
-            Err(err) => Err(err.to_string()),
-        };
-        let key = match key_result {
+        // tachi#1080/#1187 fix-round (attack-pass finding A1; leader
+        // adjudication, Option B): derive+verify through the shared seam
+        // `crypto::derive_verified_key_from_stored_config`, which checks the
+        // stored `kdf_algorithm` fail-closed BEFORE parsing `kdf_params` or
+        // deriving anything — not by re-implementing parse+derive+verify
+        // inline. Pre-fix this handler never read `config.kdf_algorithm` at
+        // all, so algorithm-axis drift (a fork writing a different KDF with
+        // the same `{m,t,p}` param shape) derived with Argon2id anyway,
+        // `verify_password` returned `Ok(false)`, and this handler matched
+        // that as a plain wrong-password miss — feeding
+        // `record_vault_unlock_failure`'s brute-force lockout counter for a
+        // config-integrity problem, not a password problem. Only the seam's
+        // `WrongPassword` variant reaches the lockout counter below; every
+        // other variant (algorithm mismatch, kdf_params format, invalid
+        // salt, corrupt verifier) returns before it, exactly as the seam's
+        // own doc comment and discrimination tests require.
+        let key = match crypto::derive_verified_key_from_stored_config(&config, password) {
             Ok(key) => key,
+            Err(crypto::StoredVaultKeyDerivationError::WrongPassword) => {
+                if let Some(password) = fifo_password.as_mut() {
+                    crypto::zero_string(password);
+                }
+                if let Some(password) = keychain_password.as_mut() {
+                    crypto::zero_string(password);
+                }
+                return record_vault_unlock_failure(server);
+            }
             Err(err) => {
                 if let Some(password) = fifo_password.as_mut() {
                     crypto::zero_string(password);
@@ -159,7 +171,7 @@ pub(crate) async fn handle_vault_unlock(
                 if let Some(password) = keychain_password.as_mut() {
                     crypto::zero_string(password);
                 }
-                return Err(err);
+                return Err(err.to_string());
             }
         };
         if let Some(password) = fifo_password.as_mut() {
@@ -167,10 +179,6 @@ pub(crate) async fn handle_vault_unlock(
         }
         if let Some(password) = keychain_password.as_mut() {
             crypto::zero_string(password);
-        }
-
-        if !crypto::verify_password(key.bytes(), &config.verifier)? {
-            return record_vault_unlock_failure(server);
         }
 
         {
