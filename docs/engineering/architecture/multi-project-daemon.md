@@ -20,13 +20,13 @@ Four separate stdio fixes landed in one day (2026-07-06): idle reaper (#712), wr
 
 `Incompatible` fires when a daemon already owns the same `global.db` but its project scope doesn't match the request. It cannot reuse the daemon (wrong project scope) and cannot spawn a second one (two daemons on one `global.db` is exactly the #520 lock storm). Deadlock → fatal.
 
-**Why it's unavoidable in the current model**: a single `--project-db` binds one project. A workstation runs multiple projects (Sigil, Quant, RomanBath), each with its own `.tachi/memory.db`, all sharing one global daemon. A global-only (or single-project) daemon structurally cannot serve the project scope of a *different* project's stdio session. Every prior patch worked around this without dissolving it.
+**Why it's unavoidable in the current model**: a single `--project-db` binds one project. A workstation runs multiple projects (Sigil, Quant, RomanBath), each with its own `.tachi/tachi-memory.db`, all sharing one global daemon. A global-only (or single-project) daemon structurally cannot serve the project scope of a *different* project's stdio session. Every prior patch worked around this without dissolving it.
 
 **Compounding**: the load-bearing functions here — `compatible_daemon`, `StdioProxyServer`, `daemon_matches_requested_dbs` — have **no end-to-end test coverage** (only scope-match unit tests exist). That is why regressions slip through repeatedly.
 
 ## 2. The load-bearing insight (what #520 actually protects)
 
-#520's real target is **multi-writer lock contention on the global DB** — every session shares one `global/memory.db`; 18 concurrent direct openers produced the `SQLITE_BUSY` storm. Project DBs are per-project files; only concurrent sessions *within the same project* contend, an order of magnitude rarer.
+#520's real target is **multi-writer lock contention on the global DB** — every session shares one `global/tachi-memory.db`; 18 concurrent direct openers produced the `SQLITE_BUSY` storm. Project DBs are per-project files; only concurrent sessions *within the same project* contend, an order of magnitude rarer.
 
 So the correct terminus is not "global-only daemon + fatal on project requests," but **one daemon that owns every DB file as its single writer** — global and every project — so no other process ever opens any of them directly. That is the agent-OS shape the owner has described (one resident process managing all of the machine's memory).
 
@@ -34,10 +34,10 @@ So the correct terminus is not "global-only daemon + fatal on project requests,"
 
 ```
 single resident daemon (port 6919)
-  ├─ global/memory.db                    (always open, single writer)
-  ├─ Sigil/.tachi/memory.db              (attached on first request, cached)
-  ├─ Quant/.tachi/memory.db              (attached on demand)
-  └─ RomanBath/.tachi/memory.db          (attached on demand)
+  ├─ global/tachi-memory.db              (always open, single writer)
+  ├─ Sigil/.tachi/tachi-memory.db        (attached on first request, cached)
+  ├─ Quant/.tachi/tachi-memory.db        (attached on demand)
+  └─ RomanBath/.tachi/tachi-memory.db    (attached on demand)
 
 every stdio session  →  pure proxy  →  daemon routes each call to (global | that session's project)
 ```
@@ -66,7 +66,7 @@ The daemon already distinguishes global vs project writes internally (the `scope
 ### 4.4 Security isolation (NEW hard requirement — the daemon now opens paths on behalf of clients)
 Today a stdio session opens its own project DB under its own FS permissions. Once the **daemon** opens arbitrary project paths on behalf of a proxy, a hostile/buggy proxy could ask the daemon to open a DB outside the caller's rights (privilege confusion / path traversal). Requirements:
 - The proxy may only bind a project path that the **calling process can itself read** — the daemon verifies the requesting process's access (or the proxy passes an already-opened FD; decide in impl spec) before attaching.
-- Canonicalize + validate the project path (no symlink escape, must end in `/.tachi/memory.db` under a real project root); reject anything else.
+- Canonicalize + validate the project path (no symlink escape, must end in `/.tachi/tachi-memory.db` under a real project root); reject anything else.
 - A session bound to project P can never route to project Q's DB — binding is immutable per session.
 - This isolation MUST have a discriminating test (a session bound to Sigil attempting a Quant-scoped op is refused).
 

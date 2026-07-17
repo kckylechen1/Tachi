@@ -12,10 +12,10 @@ identical on every machine. Today all of that state is machine-local
 
 ## The one hard constraint: live SQLite never touches iCloud Drive
 
-Putting `memory.db` (WAL mode) directly under `~/Library/Mobile Documents/` is a known
+Putting `tachi-memory.db` (WAL mode) directly under `~/Library/Mobile Documents/` is a known
 corruption class, not a style preference:
 
-- iCloud syncs files independently — `memory.db` / `-wal` / `-shm` arrive on the other
+- iCloud syncs files independently — `tachi-memory.db` / `-wal` / `-shm` arrive on the other
   machine from different points in time → torn database.
 - Conflict handling produces "memory 2.db" duplicate files, silently forking state.
 - "Optimize Mac Storage" can evict the file to a stub while a daemon holds it open.
@@ -30,8 +30,8 @@ server consumes the exact same bundle format (transport-agnostic by construction
 
 | Member | Source | Notes |
 | --- | --- | --- |
-| `global/memory.db` | `VACUUM INTO` snapshot | consistent single-file copy, no wal/shm |
-| `projects/<name>/memory.db` | same | per named project |
+| `global/tachi-memory.db` | `VACUUM INTO` snapshot | consistent single-file copy, no wal/shm |
+| `projects/<name>/tachi-memory.db` | same | per named project |
 | `hub.db`, ledger, eval DBs | same | every SQLite via `VACUUM INTO`, never `cp` |
 | `vault.enc` | vault export | re-encrypted with a **sync passphrase** (argon2id), independent of the machine-local key |
 | `cards/`, `manifest.json`, hub pack registry | file copy | reviewed overlays included |

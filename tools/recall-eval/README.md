@@ -174,7 +174,7 @@ issue (#708). Nothing under `reports/` or `cases*.local.json` is committed.
 
 ## Privacy line
 
-The toolchain reads the operator's real `~/.tachi/global/memory.db`. Cases and
+The toolchain reads the operator's real `~/.tachi/global/tachi-memory.db`. Cases and
 report detail embed real query text and memory ids and are **gitignored**
 (`cases*.local.json`, `reports/*.jsonl`, `reports/*.md` — mirrors
 `tools/zvec-shadow/.gitignore`, PR #700 precedent). Only aggregate numbers —

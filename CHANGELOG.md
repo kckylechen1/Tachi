@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
 
+### Changed
+
+- **Every standalone-Tachi SQLite store file is renamed `memory.db` -> `tachi-memory.db`** (`~/.tachi/global/`, `~/.tachi/projects/<name>/`, repo-local `.tachi/`) — owner-ratified naming rule "system in the filename, scope stays in the directory" (#1132). A one-time rename-on-open migration handles existing installs transparently: the first `open()` of a directory still carrying the legacy filename renames it and leaves a `memory.db` -> `tachi-memory.db` symlink behind for one release window, so anything still hard-coded to the old name keeps working through this release. The `memory-server` `[[bin]]` PATH-compat alias (unused since the #890/#912 brand rename; never distributed) is retired in the same change.
+
 ## [1.9.0] - 2026-07-11
 
 ### Added

@@ -8,9 +8,9 @@
 
 | 来源 | 数量 | 位置 |
 |------|------|------|
-| Tachi Hub (global) — skill | 110 | `~/.tachi/global/memory.db` → `hub_capabilities` |
-| Tachi Hub (global) — MCP | 8 | `~/.tachi/global/memory.db` → `hub_capabilities` |
-| Tachi Hub (global) — Virtual | 1 | `~/.tachi/global/memory.db` → `hub_capabilities` |
+| Tachi Hub (global) — skill | 110 | `~/.tachi/global/tachi-memory.db` → `hub_capabilities` |
+| Tachi Hub (global) — MCP | 8 | `~/.tachi/global/tachi-memory.db` → `hub_capabilities` |
+| Tachi Hub (global) — Virtual | 1 | `~/.tachi/global/tachi-memory.db` → `hub_capabilities` |
 | Superpowers (Gemini backup) | 14 | `~/antigravity-gemini-reset-backup-…/superpowers/skills/` |
 | Claude Official Plugins | 26 | `~/.claude/plugins/marketplaces/claude-plugins-official/` |
 | Claude Custom Skills | 2 | `~/.claude/skills/` (gstack-index, minara) |
