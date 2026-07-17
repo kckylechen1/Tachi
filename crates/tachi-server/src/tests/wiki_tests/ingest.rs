@@ -77,7 +77,18 @@ async fn tachi_wiki_ingest_stamps_pending_review_lifecycle_not_active() {
         .get_memory(Parameters(GetMemoryParams {
             id: created_id,
             include_archived: false,
-            project: None,
+            // `tachi_wiki_ingest` always writes through
+            // `server.with_named_project_store("wiki", ...)` (see
+            // `handle_wiki_ingest`), never the workspace-default or global
+            // store, matching the sibling `with_named_project_store_read`
+            // reads elsewhere in this file. `project: None` here would fall
+            // through `handle_get_memory`'s workspace-resolution branch
+            // (which resolves to this *test process's* git-root-derived
+            // project name, not literally "wiki") straight to the global
+            // store, find nothing, and get back `{"error": "Memory not
+            // found"}` — a query-scope mismatch with where ingest writes,
+            // not a lifecycle-stamping bug.
+            project: Some("wiki".to_string()),
         }))
         .await
         .expect("get ingested memory");
