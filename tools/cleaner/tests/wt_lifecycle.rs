@@ -249,6 +249,20 @@ fn direct_close_refuses_dirty_worktree() {
 /// never actually reached. Holding the already-tracked, already-committed
 /// `README` open instead keeps `git status --porcelain` clean so the
 /// holder probe is the check that actually fires.
+///
+/// RED-MAIN fix-round follow-up: the setup's own "is it clean yet" check
+/// (`status_before` below) must apply the SAME "clean" definition
+/// `plan_wt_remove` uses, not a raw, unfiltered `git status --porcelain`.
+/// `wt_open::open_worktree` (registration enabled) unconditionally writes
+/// `.tachi-worktree.json` into every freshly opened worktree before this
+/// test ever touches `README`; that marker is untracked by design and is
+/// excluded from "dirty" by `wt_clean::dirty_entries_excluding_marker`
+/// (`pub(crate)`, unreachable from this separate-crate integration test).
+/// A raw status check here saw that marker and (falsely) called the setup
+/// dirty, tripping this assertion regardless of the holder-attribution
+/// logic under test. `porcelain_entries_excluding_marker` mirrors the
+/// production exclusion so this setup check agrees with what
+/// `plan_wt_remove` actually treats as clean.
 #[test]
 fn direct_close_refuses_a_live_holder_with_attributed_pid_family() {
     let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -288,15 +302,11 @@ fn direct_close_refuses_a_live_holder_with_attributed_pid_family() {
         "setup: README should already be tracked/committed by init_git_repo"
     );
     let handle = std::fs::File::open(&tracked_file).unwrap();
-    let status_before = Command::new("git")
-        .args(["-C", path.to_str().unwrap(), "status", "--porcelain"])
-        .output()
-        .unwrap();
+    let status_before = porcelain_entries_excluding_marker(&path);
     assert!(
-        String::from_utf8_lossy(&status_before.stdout)
-            .trim()
-            .is_empty(),
-        "test setup bug: holding a tracked file open must not itself make the worktree dirty"
+        status_before.is_empty(),
+        "test setup bug: holding a tracked file open must not itself make the worktree dirty \
+         (entries: {status_before:?})"
     );
 
     let result = wt_clean::run_wt_remove(WtRemoveOptions {
@@ -927,6 +937,35 @@ fn open_rejects_path_traversal() {
     );
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `git status --porcelain` entries for `worktree_root`, excluding the
+/// Tachi marker file (`.tachi-worktree.json`) that `wt_open::open_worktree`
+/// (via `registry::register_worktree`) unconditionally writes into a freshly
+/// opened, registered worktree — a legitimate untracked file, not evidence
+/// of dirtiness. This mirrors the production definition of "clean" used by
+/// `wt_clean::dirty_entries_excluding_marker` (which this integration test,
+/// a separate crate, cannot call directly since it is `pub(crate)`); a raw,
+/// unfiltered `git status --porcelain` here would spuriously flag every
+/// registered worktree as dirty regardless of what the test itself does.
+fn porcelain_entries_excluding_marker(worktree_root: &Path) -> Vec<String> {
+    let out = Command::new("git")
+        .args([
+            "-C",
+            worktree_root.to_str().unwrap(),
+            "status",
+            "--porcelain",
+        ])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| {
+            let path = line.get(3..).unwrap_or(line).trim();
+            path != ".tachi-worktree.json"
+        })
+        .map(|line| line.to_string())
+        .collect()
 }
 
 fn paths_match(a: &str, b: &Path) -> bool {
