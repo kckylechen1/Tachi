@@ -136,6 +136,11 @@ fn backup_still_created_when_marker_matches_but_version_migration_is_pending() {
 
 #[test]
 fn authorized_version_migration_writes_backup_trail_end_to_end() {
+    // Order-independence: the simple-tokenizer auto-extension is process-global
+    // and normally registered by whichever test opens a store first; a filtered
+    // run of only this test never triggers that, so register explicitly.
+    crate::db::enable_simple_auto_extension().unwrap();
+
     // #1180 acceptance: "live daemon-path migration writes the same trail as
     // every other authorized open." Exercises the full public entry point
     // (`init_schema_with_label_mut`, what every `MemoryStore::open*` and the

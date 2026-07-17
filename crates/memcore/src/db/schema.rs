@@ -963,7 +963,7 @@ fn maybe_backup_before_migration(
     // suppress a genuine, authorized migration's trail.
     let stored = crate::db::migrations::read_schema_version(conn)?;
     let is_version_migration =
-        stored >= 1 && stored < crate::db::migrations::EXPECTED_SCHEMA_VERSION;
+        (1..crate::db::migrations::EXPECTED_SCHEMA_VERSION).contains(&stored);
 
     if !is_version_migration {
         let marker = migration_marker_path(db_path);
