@@ -7,7 +7,7 @@ use tachi_params::PeerQueryParams;
 #[tool_router(router = peer_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
     #[tool(
-        description = "Read an advisory, structurally read-only publication from a same-host peer session (#1016 S1). Params: noun (exhaustively whitelisted — S1 supports only 'presence'; any other noun is denied), optional target_session_client to narrow presence to a single seat. Identity is self-asserted-local (same_host_loopback_v1); this never writes and never blocks. Returns a peer-publication/v1 envelope."
+        description = "Read an advisory, structurally read-only publication from a same-host peer session (#1016 observe-only v1). Params: noun (exhaustively whitelisted — 'presence' reads the claims heartbeat board, optionally narrowed by target_session_client; 'run' resolves target_session_client [required] to its active claim's dispatch_id and returns that dispatch's status.json + a recent progress.jsonl tail — any other noun is denied). Identity is self-asserted-local (same_host_loopback_v1); this never writes and never blocks a peer's turn — 'run' answers include a turn_boundary_callback pointer to tachi_memory(action='sticky_leave') for an async reply since MCP cannot interrupt a live agent. Returns a peer-publication/v1 envelope."
     )]
     pub(crate) async fn peer_query(
         &self,
