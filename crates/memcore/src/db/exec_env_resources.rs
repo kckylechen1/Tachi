@@ -515,6 +515,48 @@ pub fn list_resources(
     Ok(out)
 }
 
+/// Every resource path with at least one LIVE binding — a lease that has
+/// attached itself to that resource and never released it
+/// (`released_at IS NULL`). This is the read half of the write surface S2c
+/// shipped: `insert_resource` registers a claim, `bind_resource` is a holder
+/// DECLARING ITSELF against it, and this function is how a caller consults
+/// that declaration instead of re-deriving "is anything on this path spoken
+/// for" by guessing at the process table (#1062 BUG 1 — the orphan reaper's
+/// structural fix: a `ps` scan sees only argv and misses a build whose
+/// target dir arrived through an inherited `CARGO_TARGET_DIR` environment
+/// variable; a binding row does not depend on how the holder's command line
+/// was spelled).
+///
+/// Deliberately narrower than "every non-`reclaimed` row": an `active`
+/// resource with ZERO live bindings is not a live holder, it is a tracked
+/// physical resource nobody is currently attached to — precisely the
+/// population the reaper's OWN re-enterable-orphan path
+/// (`cheap_verdict`'s `ReclaimReason::Orphan`) exists to sweep up when it is
+/// also stale and unheld. Protecting every non-`reclaimed` row here
+/// unconditionally would silence that path entirely and defeat half of what
+/// the orphan reaper is for. A binding is the ledger's actual "someone is
+/// holding this right now" signal (the same one `active_binding_count` /
+/// `BlockedByBinding` already key off of); this reuses it rather than
+/// inventing a second one.
+///
+/// No `kind` filter: a reader protecting disk from deletion has no reason to
+/// trust only one resource kind over another, and over-protection is the
+/// safe direction here (see `exec_env_reaper::live_build_target_dirs`).
+pub fn list_bound_resource_paths(conn: &Connection) -> Result<Vec<String>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT r.path FROM exec_env_resources r \
+         JOIN exec_env_resource_bindings b ON b.resource_id = r.resource_id \
+         WHERE b.released_at IS NULL \
+         ORDER BY r.path",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 /// Record a fresh measurement. memcore does not walk the filesystem — the
 /// caller measures, this only stores the number and when it was taken.
 ///
@@ -1147,6 +1189,49 @@ mod tests {
             find_resource_by_path(&conn, "/wt/x", ResourceKind::ScratchDir)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// #1062 BUG 1's read surface: a resource with a LIVE binding is bound, one
+    /// whose binding was released is not, and an `active`-but-never-bound
+    /// resource (tracked, but nobody currently holds it) is not either —
+    /// discriminating against a naive `state != 'reclaimed'` filter, which would
+    /// also catch the never-bound row and silence the reaper's re-enterable-
+    /// orphan path for every tracked-but-abandoned resource on the books.
+    #[test]
+    fn bound_resource_paths_reflects_only_live_bindings() {
+        let mut conn = open_conn();
+        seed_env(&conn, "env-bound");
+
+        insert_resource(
+            &mut conn,
+            &new_resource("res-bound", ResourceKind::BuildTarget, "/t/bound"),
+        )
+        .unwrap();
+        bind_resource(&mut conn, "env-bound", "res-bound").unwrap();
+
+        insert_resource(
+            &mut conn,
+            &new_resource("res-released", ResourceKind::BuildTarget, "/t/released"),
+        )
+        .unwrap();
+        bind_resource(&mut conn, "env-bound", "res-released").unwrap();
+        release_binding(&mut conn, "env-bound", "res-released").unwrap();
+
+        // Tracked and `active`, but nobody ever bound it — the population
+        // `cheap_verdict`'s re-enterable `Orphan` path exists to sweep up.
+        insert_resource(
+            &mut conn,
+            &new_resource("res-untouched", ResourceKind::BuildTarget, "/t/untouched"),
+        )
+        .unwrap();
+
+        let live = list_bound_resource_paths(&conn).unwrap();
+        assert_eq!(
+            live,
+            vec!["/t/bound".to_string()],
+            "only a resource with a LIVE binding counts; a released binding and a \
+             never-bound-but-active resource must both be absent"
         );
     }
 
