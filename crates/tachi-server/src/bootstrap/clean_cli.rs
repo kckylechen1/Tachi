@@ -443,6 +443,24 @@ fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
 /// `--force` waives this no more than it waives any other fence (see
 /// `cli_force_still_refuses_a_scan_that_cannot_see_its_whole_scope` below).
 fn run_orphan_reap_cli(opts: ReapOptions, output: OutputFormat) -> Result<(), String> {
+    // The protected set's sources are read from the process environment HERE — at the
+    // edge, once — and handed to the reaper as a value. The reaper itself reads no
+    // ambient state, which is what keeps "HOME is unset" a property of one run instead of
+    // a property of the process (see `ProtectionSources`). This is the ONLY production
+    // call site of `from_process_env` in this function's call graph; everything below
+    // this line is `run_orphan_reap_cli_with_sources`, which a test may call with a
+    // different, deterministic `ProtectionSources` instead (see
+    // `cli_force_still_refuses_a_scan_that_cannot_see_its_whole_scope` and
+    // `ProtectionSources::deterministic_for_cli_test`, #1196).
+    let sources = crate::exec_env_reaper::ProtectionSources::from_process_env();
+    run_orphan_reap_cli_with_sources(opts, output, &sources)
+}
+
+fn run_orphan_reap_cli_with_sources(
+    opts: ReapOptions,
+    output: OutputFormat,
+    sources: &crate::exec_env_reaper::ProtectionSources<'_>,
+) -> Result<(), String> {
     // The first gate, above everything: no ledger, no filesystem, no process table.
     // #1062: DESTRUCTIVE_CERTIFIED is true, so this is `Ok(())` for both `force`
     // values today — it stays the first thing asked so a future REVOCATION only
@@ -464,12 +482,6 @@ fn run_orphan_reap_cli(opts: ReapOptions, output: OutputFormat) -> Result<(), St
     let mut store = memcore::MemoryStore::open_with_label(db_str, "global")
         .map_err(|err| format!("exec_env resource ledger unavailable: {err}"))?;
 
-    // The protected set's sources are read from the process environment HERE — at the
-    // edge, once — and handed to the reaper as a value. The reaper itself reads no
-    // ambient state, which is what keeps "HOME is unset" a property of one run instead of
-    // a property of the process (see `ProtectionSources`).
-    let sources = crate::exec_env_reaper::ProtectionSources::from_process_env();
-
     // #1062: `force` reaches here now (the gate above passes it). The `Err` arm is
     // still live — it is `certify_destructive`'s call inside `run_orphan_reap`
     // itself, the second of the two gates that "cannot be routed around" (see that
@@ -478,7 +490,7 @@ fn run_orphan_reap_cli(opts: ReapOptions, output: OutputFormat) -> Result<(), St
     let report = crate::exec_env_reaper::run_orphan_reap(
         store.connection_mut(),
         &opts,
-        &sources,
+        sources,
         std::time::SystemTime::now(),
         &crate::exec_env_reaper::lsof_holder_probe,
     )
@@ -539,10 +551,29 @@ mod tests {
     /// one property this test can now prove hermetically and deterministically: a
     /// certified `--force` still does not exit 0 on a scan that cannot account for
     /// its whole scope.
+    ///
+    /// It calls `run_orphan_reap_cli_with_sources` — the exact same production body
+    /// `run_orphan_reap_cli` runs — with `ProtectionSources::deterministic_for_cli_test()`
+    /// rather than going through `run_orphan_reap_cli` (which reads the REAL process
+    /// environment and shells out to the REAL `ps`). #1196: the real `ps -Awwo command=`
+    /// scan sees every process on the machine, and a live build is not the only thing
+    /// that can put the substring `CARGO_TARGET_DIR=` on a command line — a concurrent
+    /// `grep`/`cat`/agent-shell invocation mentioning it does too, and the naive
+    /// whitespace-tokenizing parser in `target_dirs_from_process_line` cannot tell them
+    /// apart. When that noise is present the CLI's OTHER fail-closed gate (protected-set
+    /// incomplete, BUG 3's sibling) fires first and starves the "scan incomplete" property
+    /// this test exists to pin — a real assertion, just not the one this test names, and
+    /// whether it happens to fire is a fact about the test MACHINE at the moment `cargo
+    /// test` runs, not about this code. Injecting a deterministic, ambient-free
+    /// `ProtectionSources` closes that gap the same way `exec_env_reaper`'s own module
+    /// tests already do (see `ProtectionSources`'s doc comment on why sources are an
+    /// explicit argument, never a read of ambient state) — this is that same seam,
+    /// extended one call further out to reach the CLI entry point.
     #[test]
     fn cli_force_still_refuses_a_scan_that_cannot_see_its_whole_scope() {
         crate::test_support::with_tachi_home(|_home| {
-            let err = run_orphan_reap_cli(
+            let sources = crate::exec_env_reaper::ProtectionSources::deterministic_for_cli_test();
+            let err = run_orphan_reap_cli_with_sources(
                 ReapOptions {
                     roots: vec![PathBuf::from(
                         "/tachi-reaper-this-root-must-never-be-scanned",
@@ -551,6 +582,7 @@ mod tests {
                     force: true,
                 },
                 OutputFormat::Text,
+                &sources,
             )
             .expect_err(
                 "a scan that cannot see its whole authorized scope must not exit 0, even \

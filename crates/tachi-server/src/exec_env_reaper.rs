@@ -654,6 +654,58 @@ impl ProtectionSources<'static> {
     }
 }
 
+/// Test-only stand-in for the process table: no build is running anywhere, on any
+/// machine, ever. Backs [`ProtectionSources::deterministic_for_cli_test`] below.
+#[cfg(test)]
+fn no_live_builds_for_cli_test() -> (Vec<PathBuf>, Vec<String>) {
+    (Vec::new(), Vec::new())
+}
+
+#[cfg(test)]
+static NO_LIVE_BUILDS_FOR_CLI_TEST: fn() -> (Vec<PathBuf>, Vec<String>) =
+    no_live_builds_for_cli_test;
+
+#[cfg(test)]
+impl ProtectionSources<'static> {
+    /// A CLI-level test's alternative to [`Self::from_process_env`] — same shape, but
+    /// every field is a fixed, ambient-free value instead of a real environment/process
+    /// read.
+    ///
+    /// [`Self::from_process_env`] shells out to the real `ps -Awwo command=` (via
+    /// [`live_build_target_dirs`]) and reads the real `CARGO_TARGET_DIR` / `HOME`. That
+    /// is correct for production, but it makes a CLI-level test of `reap_exit_status`'s
+    /// gate ORDER (protected-set-incomplete vs. scan-incomplete) hostage to whatever
+    /// else is running on the test machine at the moment `cargo test` executes it: `ps`
+    /// sees every process's full command line, and a whitespace-tokenizing scan
+    /// (`target_dirs_from_process_line`) cannot tell a live cargo build's
+    /// `CARGO_TARGET_DIR=` assignment from that literal substring appearing in some
+    /// unrelated process's argv — a `grep` for it, a shell wrapper quoting a command
+    /// that mentions it, this very repo's own `AGENTS.md` line 18 being `cat`'d or
+    /// searched by a concurrent agent session. When that happens the value captured is
+    /// the raw, unexpanded text (e.g. the literal `$HOME/.cache/sigil-shared-target`,
+    /// never resolved because nothing shell-expanded it), `protected_paths` reports it
+    /// as a relative-path warning, and `reap_exit_status` refuses on "protected set
+    /// incomplete" — a REAL fail-closed gate, just not the one under test — before the
+    /// scan ever reaches the missing root this test named (#1196).
+    ///
+    /// So this constructor reads nothing ambient at all: `home` is a fixed path (so the
+    /// protected set can still be computed — a `None` home is BUG 3's OWN gap, and
+    /// asserting the DIFFERENT "scan incomplete" gate needs that one closed), and
+    /// `live_builds` is [`NO_LIVE_BUILDS_FOR_CLI_TEST`] rather than the real process
+    /// table. This proves the CLI's actual production code path end-to-end
+    /// (`run_orphan_reap_cli_with_sources`, exercised by the real
+    /// `run_orphan_reap_cli` too) still refuses a scan that cannot see its whole scope
+    /// — deterministically, on every machine, regardless of what else is running on it.
+    pub(crate) fn deterministic_for_cli_test() -> Self {
+        Self {
+            cargo_target_dir: None,
+            shared_cargo_target_dir: None,
+            home: Some(PathBuf::from("/nonexistent-home-for-cli-test")),
+            live_builds: &NO_LIVE_BUILDS_FOR_CLI_TEST,
+        }
+    }
+}
+
 /// Everything the reaper must never touch, from every source that knows where a
 /// live build cache is:
 ///
