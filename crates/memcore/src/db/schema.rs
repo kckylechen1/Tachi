@@ -937,9 +937,39 @@ fn maybe_backup_before_migration(
         return Ok(None);
     }
 
-    let marker = migration_marker_path(db_path);
-    if std::fs::read_to_string(&marker).ok().as_deref() == Some(current_fp.as_str()) {
-        return Ok(None);
+    // #1180: the 2026-07-17 v18->v19 live deploy migrated `PRAGMA
+    // user_version` forward under an authorized `MigrationAuthority::Allow`
+    // open (the exact event the `SchemaMigrationOptInRequired` refusal
+    // promises `<db>.migration-bak.<ts>` + `<db>.migration-marker` for) but
+    // left NEITHER file. Root cause: this function's "skip if unchanged"
+    // heuristic below keys off `PRAGMA schema_version` (a SQLite-internal DDL
+    // cookie) + the binary's crate version — a proxy for "did the schema
+    // shape change since our last successful init", used to avoid redundant
+    // backups on ordinary same-version daemon restarts. `PRAGMA user_version
+    // = N` does not touch `schema_version`, so a long-lived process whose
+    // marker was last written on a PRIOR restart (no DDL has run since) can
+    // have a marker that coincidentally still matches `current_fp` at the
+    // moment a REAL `stored < EXPECTED_SCHEMA_VERSION` migration begins —
+    // silently skipping the backup this function exists to guarantee.
+    //
+    // The authoritative signal for "is this open crossing the migration
+    // threshold" is the version STAMP, not the fingerprint heuristic: this
+    // function is only ever reached after `check_db_open_context_gate` has
+    // already refused an unauthorized `1 <= stored < EXPECTED` open, so
+    // `is_version_migration` here can only be true under
+    // `MigrationAuthority::Allow`. When it is true, always back up — the
+    // fingerprint heuristic is downgraded to its original purpose (skip
+    // redundant backups on a plain same-version reopen) and must never
+    // suppress a genuine, authorized migration's trail.
+    let stored = crate::db::migrations::read_schema_version(conn)?;
+    let is_version_migration =
+        stored >= 1 && stored < crate::db::migrations::EXPECTED_SCHEMA_VERSION;
+
+    if !is_version_migration {
+        let marker = migration_marker_path(db_path);
+        if std::fs::read_to_string(&marker).ok().as_deref() == Some(current_fp.as_str()) {
+            return Ok(None);
+        }
     }
 
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S");

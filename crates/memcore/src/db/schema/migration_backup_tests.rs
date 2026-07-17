@@ -85,6 +85,115 @@ fn backup_skipped_when_marker_matches() {
 }
 
 #[test]
+fn backup_still_created_when_marker_matches_but_version_migration_is_pending() {
+    // #1180: a matching fingerprint must NOT suppress a REAL, authorized
+    // schema-version migration's backup. This reproduces the shape of the
+    // 2026-07-17 incident without any daemon/CLI distinction: `PRAGMA
+    // schema_version` is unaffected by rolling `PRAGMA user_version` back (no
+    // DDL runs), so a marker written on a PRIOR (non-migrating) init can
+    // coincidentally still match `current_fp` at the moment a version
+    // migration begins.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("pending-migration.db");
+    let conn = Connection::open(&db_path).expect("open");
+    conn.execute_batch("CREATE TABLE t(x)")
+        .expect("create table");
+
+    // Marker matches the CURRENT (pre-migration) fingerprint, exactly as it
+    // would after a long-lived process's last ordinary restart.
+    let fp = migration_schema_fingerprint(&conn).expect("fingerprint");
+    std::fs::write(migration_marker_path(&db_path), fp).expect("write marker");
+
+    // Simulate "this file is really a stamped-older DB": bump `user_version`
+    // without touching DDL — mirrors the real incident, where the
+    // migration's own DDL hasn't run yet at the point this function runs.
+    conn.execute_batch("PRAGMA user_version = 1")
+        .expect("stamp older schema version");
+
+    let result = maybe_backup_before_migration(&conn, &db_path).expect("backup check");
+    assert!(
+        result.is_some(),
+        "an in-progress version migration (1 <= stored < EXPECTED) must ALWAYS back up, \
+         even when the schema fingerprint coincidentally matches the last marker"
+    );
+}
+
+#[test]
+fn authorized_version_migration_writes_backup_trail_end_to_end() {
+    // #1180 acceptance: "live daemon-path migration writes the same trail as
+    // every other authorized open." Exercises the full public entry point
+    // (`init_schema_with_label_mut`, what every `MemoryStore::open*` and the
+    // daemon's `MemoryServer::new_with_migration_authority` funnel through),
+    // not just the private helper above, so a future refactor that
+    // reintroduces the fingerprint-skip bug at a different layer still fails
+    // this test.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("daemon-open.db");
+
+    // Seed a current-schema DB and let the ordinary open path stamp its
+    // marker — mirrors a long-lived daemon's last ordinary (non-migrating)
+    // restart.
+    {
+        let mut conn = Connection::open(&db_path).expect("open");
+        crate::db::init_schema_with_label_mut(
+            &mut conn,
+            "global",
+            &db_path,
+            &crate::db::DbOpenContext::create_fresh(),
+        )
+        .expect("seed current schema");
+    }
+    assert!(
+        migration_marker_path(&db_path).exists(),
+        "seeding must leave a marker, as a real daemon's last restart would"
+    );
+    assert_eq!(
+        count_migration_backups(tmp.path()),
+        0,
+        "seeding a fresh DB must not itself back up"
+    );
+
+    // Roll PRAGMA user_version back to simulate "this is really a
+    // stamped-older DB" without touching DDL — no schema shape changed, so
+    // the fingerprint the marker recorded is still current.
+    {
+        let conn = Connection::open(&db_path).expect("reopen to roll back stamp");
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {}",
+            crate::db::migrations::EXPECTED_SCHEMA_VERSION - 1
+        ))
+        .expect("stamp older schema version");
+    }
+
+    // The authorized open the #1119 refusal message's trail promise covers.
+    {
+        let mut conn = Connection::open(&db_path).expect("reopen for migration");
+        crate::db::init_schema_with_label_mut(
+            &mut conn,
+            "global",
+            &db_path,
+            &crate::db::DbOpenContext::open_existing_allow("test:1180-daemon-path"),
+        )
+        .expect("authorized migration must succeed");
+    }
+
+    assert_eq!(
+        count_migration_backups(tmp.path()),
+        1,
+        "an authorized version migration must write a migration-bak trail, \
+         even when the pre-migration schema fingerprint matches the last marker"
+    );
+}
+
+fn count_migration_backups(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .expect("read dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("migration-bak"))
+        .count()
+}
+
+#[test]
 fn remember_fingerprint_writes_marker() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("remember.db");
