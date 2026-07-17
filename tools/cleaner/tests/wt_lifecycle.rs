@@ -227,6 +227,196 @@ fn direct_close_refuses_dirty_worktree() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// tachi#1118 freeze boundary 1/2 discrimination: a live, OS-view
+/// attributed process holder must refuse the close predicate, and the
+/// refusal must carry structured attribution (ppid), not just a raw
+/// `lsof` line. RED on the pre-fix code for a genuinely behavioral
+/// reason: pre-fix `active_processes`'s refusal message is built only
+/// from raw `lsof +D` output rows, whose columns are
+/// `COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME` — there is no
+/// PPID column and no "ppid=" text anywhere in that message, so this
+/// assertion fails on origin/main even though origin/main also refuses
+/// the removal. GREEN post-fix: the OS-view `holder::probe_holders` +
+/// `ps`-attribution path names pid/ppid/tty/cwd explicitly.
+#[test]
+fn direct_close_refuses_a_live_holder_with_attributed_pid_family() {
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let root = unique_temp("wt-lifecycle-live-holder");
+    let home = root.join("home");
+    let cache = root.join("cache-worktrees");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let _env = set_env(&home, &cache);
+
+    let open_report = wt_open::open_worktree(OpenOptions {
+        repo_root: repo.clone(),
+        path: None,
+        branch: Some("tachi/live-holder/worker".into()),
+        base: Some("HEAD".into()),
+        task: Some("live-holder".into()),
+        role: Some("worker".into()),
+        dispatch_id: None,
+        name: Some("live-holder-leaf".into()),
+        cargo_target: CargoTargetPolicy::Shared,
+        dry_run: false,
+        output: OutputFormat::Json,
+    })
+    .unwrap();
+    assert!(open_report.opened, "setup: worktree should have opened");
+    let path = PathBuf::from(&open_report.path);
+
+    let held_file = path.join("held.txt");
+    std::fs::write(&held_file, b"hold me open").unwrap();
+    let handle = std::fs::File::open(&held_file).unwrap();
+
+    let result = wt_clean::run_wt_remove(WtRemoveOptions {
+        path: path.clone(),
+        force: true,
+        output: OutputFormat::Json,
+    });
+
+    assert!(
+        result.is_err(),
+        "a live OS-view process holder must refuse the close, even with --force"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("ppid="),
+        "refusal must carry OS-view attribution (ppid=...), not just a raw lsof line: {err}"
+    );
+    assert!(
+        err.contains(&std::process::id().to_string()),
+        "refusal must name this process's own pid in the held family: {err}"
+    );
+    assert!(
+        path.exists() && held_file.exists(),
+        "the held worktree must survive the refused close"
+    );
+
+    drop(handle);
+    let _ = wt_clean::run_wt_remove(WtRemoveOptions {
+        path: path.clone(),
+        force: true,
+        output: OutputFormat::Json,
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// tachi#1118 freeze boundary 3 discrimination: a scrapped worktree must
+/// reopen only under a NEW branch + NEW path, never the exact path a
+/// surviving writer might still hold a reference to. RED on the pre-fix
+/// code for a genuinely behavioral reason: pre-fix `open_worktree` only
+/// checks `path.exists()` (false once the path has been removed) with no
+/// memory of a prior scrap, so reopening at the identical path succeeds
+/// on origin/main. GREEN post-fix: the scrap ledger refuses it.
+#[test]
+fn reopen_refuses_the_exact_path_of_a_scrapped_worktree() {
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let root = unique_temp("wt-lifecycle-same-path-reentry");
+    let home = root.join("home");
+    let cache = root.join("cache-worktrees");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let _env = set_env(&home, &cache);
+
+    let first_open = wt_open::open_worktree(OpenOptions {
+        repo_root: repo.clone(),
+        path: None,
+        branch: Some("tachi/reentry/first".into()),
+        base: Some("HEAD".into()),
+        task: Some("reentry".into()),
+        role: Some("worker".into()),
+        dispatch_id: None,
+        name: Some("reentry-leaf".into()),
+        cargo_target: CargoTargetPolicy::Shared,
+        dry_run: false,
+        output: OutputFormat::Json,
+    })
+    .unwrap();
+    assert!(first_open.opened, "setup: first open should succeed");
+    let scrapped_path = PathBuf::from(&first_open.path);
+
+    wt_clean::run_wt_remove(WtRemoveOptions {
+        path: scrapped_path.clone(),
+        force: true,
+        output: OutputFormat::Json,
+    })
+    .expect("setup: scrapping the clean worktree should succeed");
+    assert!(
+        !scrapped_path.exists(),
+        "setup: path must be gone after scrap"
+    );
+
+    // Reopening at the EXACT same path (even with a different branch) must
+    // be refused: the same path is a re-entry route for a surviving writer.
+    let reentry = wt_open::open_worktree(OpenOptions {
+        repo_root: repo.clone(),
+        path: Some(scrapped_path.clone()),
+        branch: Some("tachi/reentry/second".into()),
+        base: Some("HEAD".into()),
+        task: Some("reentry".into()),
+        role: Some("worker".into()),
+        dispatch_id: None,
+        name: None,
+        cargo_target: CargoTargetPolicy::Shared,
+        dry_run: false,
+        output: OutputFormat::Json,
+    })
+    .unwrap();
+
+    assert!(
+        !reentry.opened,
+        "reopening at a scrapped path must be refused"
+    );
+    assert!(
+        reentry
+            .errors
+            .iter()
+            .any(|e| e.contains("scrapped") || e.contains("same path")),
+        "expected a same-path re-entry refusal, got: {:?}",
+        reentry.errors
+    );
+    assert!(
+        !scrapped_path.exists(),
+        "a refused reopen must not leave anything on disk at the scrapped path"
+    );
+
+    // A genuinely NEW path for the same repo must still succeed (the gate
+    // is path-specific, not a blanket lockout).
+    let fresh = wt_open::open_worktree(OpenOptions {
+        repo_root: repo.clone(),
+        path: None,
+        branch: Some("tachi/reentry/third".into()),
+        base: Some("HEAD".into()),
+        task: Some("reentry".into()),
+        role: Some("worker".into()),
+        dispatch_id: None,
+        name: Some("reentry-fresh-leaf".into()),
+        cargo_target: CargoTargetPolicy::Shared,
+        dry_run: false,
+        output: OutputFormat::Json,
+    })
+    .unwrap();
+    assert!(
+        fresh.opened,
+        "a brand-new path must not be blocked by an unrelated scrap record: {:?}",
+        fresh.errors
+    );
+
+    let _ = wt_clean::run_wt_remove(WtRemoveOptions {
+        path: PathBuf::from(&fresh.path),
+        force: true,
+        output: OutputFormat::Json,
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// CP1/CP2 discrimination: sweep --force must NEVER remove a worktree with
 /// uncommitted changes, even once it's old enough / marked enough to be a
 /// sweep candidate. RED on the pre-fix sweep code (which only gated on

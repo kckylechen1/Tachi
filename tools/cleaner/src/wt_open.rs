@@ -366,6 +366,42 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
         return Ok(report);
     }
 
+    // Same-path re-entry gate (tachi#1118 freeze boundary 3): a worktree
+    // that was scrapped (removed via `wt-remove`/`sweep`) must reopen only
+    // under a NEW branch + NEW path. The exact same path is a documented
+    // re-entry route for a surviving writer that still holds a reference
+    // to it (2026-07-15 incident: two lanes rebuilt at the same path after
+    // removal and interleaved writes into the new checkout). This check
+    // fires even in dry-run so a caller sees the refusal before creating
+    // anything.
+    //
+    // The scrap ledger records the FULLY canonicalized (symlink-resolved)
+    // path (`wt_clean::plan_wt_remove` canonicalizes an existing directory
+    // before recording it); `path` here does not exist yet, so it is
+    // normalized with the same ancestor-canonicalize-then-lexically-append
+    // strategy already used for the managed-root boundary check just above
+    // (`canonicalize_prefix`) rather than compared raw — otherwise a
+    // symlinked temp/cache root (e.g. macOS `/tmp` -> `/private/tmp`) would
+    // silently defeat the match.
+    let scrap_lookup_path = canonicalize_prefix(&path);
+    match crate::scrap_ledger::find_scrap_by_path(&scrap_lookup_path) {
+        Ok(Some(scrap)) => {
+            report.errors.push(format!(
+                "refusing to reopen scrapped path {} (branch '{}' scrapped at {}); a scrapped tree must reopen under a NEW branch + NEW path, never the same path a surviving writer might still hold (tachi#1118)",
+                path.display(),
+                scrap.branch,
+                scrap.scrapped_at,
+            ));
+            return Ok(report);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            report.warnings.push(format!(
+                "could not consult the scrap ledger for same-path re-entry ({err}); proceeding without that check"
+            ));
+        }
+    }
+
     if branch_exists_locally(&repo_root, &branch)? {
         // Allow reusing only if not already checked out in another worktree.
         if let Some(other) = branch_checkout_path(&repo_root, &branch)? {
@@ -441,6 +477,33 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
         ));
         return Ok(report);
     }
+
+    // Write-lane entry gate (tachi#1118 freeze boundary 3, second half):
+    // `git status --porcelain` must read empty the moment a freshly
+    // created worktree is handed to a write lane. A non-empty status here
+    // — despite `git worktree add` having just succeeded on a path that
+    // didn't exist a moment ago — is exactly the 2026-07-15 smoking-gun
+    // signature (a surviving writer from a scrapped predecessor bleeding
+    // writes into the rebuilt tree). This never auto-deletes the path
+    // (detection only, tachi#1062 stays sealed): it refuses to hand the
+    // tree off as `opened`, leaving it in place for investigation.
+    match crate::wt_clean::dirty_entries_excluding_marker(&path) {
+        Ok(entries) if entries.is_empty() => {}
+        Ok(entries) => {
+            report.errors.push(format!(
+                "write-lane entry gate refused: worktree is dirty immediately after creation ({}); a surviving writer may have interleaved with this open (tachi#1118). The path was NOT registered; inspect it before reuse.",
+                entries.join(" | ")
+            ));
+            return Ok(report);
+        }
+        Err(err) => {
+            report.errors.push(format!(
+                "write-lane entry gate refused: could not verify the freshly created worktree is clean ({err}); fail-closed rather than hand off an unverified tree (tachi#1118). The path was NOT registered; inspect it before reuse."
+            ));
+            return Ok(report);
+        }
+    }
+
     report.opened = true;
 
     // Cargo target-dir per the env class's policy (#484 slice 2, #894 S2c):

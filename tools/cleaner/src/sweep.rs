@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
+use crate::holder::{self, HolderEvidence};
+use crate::scrap_ledger;
 use crate::wt_clean::OutputFormat;
 
 pub const DEFAULT_SWEEP_MAX_AGE_DAYS: u64 = 7;
@@ -31,9 +33,18 @@ struct SweepReport {
 struct SweepCandidate {
     path: String,
     repo_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
     marker_path: String,
     age_days: u64,
+    /// True whenever the OS-view holder probe is NOT `Clear` — i.e. a live
+    /// attributed process holder OR inconclusive evidence. Fail-closed
+    /// (tachi#1118 freeze boundary 1): a probe that could not run/parse
+    /// (missing `lsof`, permission denial) must never be read as "not
+    /// active" the way the prior bare-bool check silently did.
     active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    holder_evidence: Option<String>,
     /// Fail-closed: true unless `git status --porcelain` positively proves
     /// the worktree has no outstanding changes (besides the marker file).
     /// A candidate we cannot verify as clean is treated as dirty.
@@ -153,13 +164,24 @@ fn candidate_from_marker(
         .and_then(|value| value.get("repo_root"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
+    let branch = marker
+        .as_ref()
+        .and_then(|value| value.get("branch"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+
+    let evidence = holder::probe_holders(worktree_root);
+    let active = !matches!(evidence, HolderEvidence::Clear);
+    let holder_evidence = active.then(|| evidence.describe_family());
 
     Some(SweepCandidate {
         path: worktree_root.display().to_string(),
         repo_root,
+        branch,
         marker_path: marker_path.display().to_string(),
         age_days: age.as_secs() / (24 * 60 * 60),
-        active: has_active_processes(worktree_root),
+        active,
+        holder_evidence,
         dirty: worktree_is_dirty(worktree_root),
     })
 }
@@ -179,9 +201,14 @@ fn worktree_is_dirty(path: &Path) -> bool {
 fn execute_sweep(report: &mut SweepReport) {
     for candidate in &report.candidates {
         if candidate.active {
-            report
-                .warnings
-                .push(format!("skipped active worktree {}", candidate.path));
+            report.warnings.push(format!(
+                "skipped worktree with a live/inconclusive OS-view process holder {}: {}",
+                candidate.path,
+                candidate
+                    .holder_evidence
+                    .as_deref()
+                    .unwrap_or("(no attribution captured)")
+            ));
             continue;
         }
         // Ownership to reclaim = marker AND clean AND not-active. `--force`
@@ -201,17 +228,27 @@ fn execute_sweep(report: &mut SweepReport) {
             ));
             continue;
         };
-        // CP1/CP2 defense-in-depth: re-check dirtiness immediately before
-        // removal rather than trusting only the snapshot taken during
-        // candidate collection, shrinking (not closing) the window between
-        // "we decided this is clean" and "we ran `git worktree remove`". A
-        // same-user check-then-act race in that shrunk window is accepted
-        // residual risk for this single-user local tool; full TOCTOU-safety
-        // (locking / openat) is deliberately out of scope.
+        // CP1/CP2 defense-in-depth: re-check dirtiness AND holder evidence
+        // immediately before removal rather than trusting only the
+        // snapshot taken during candidate collection, shrinking (not
+        // closing) the window between "we decided this is clean/unheld"
+        // and "we ran `git worktree remove`". A same-user check-then-act
+        // race in that shrunk window is accepted residual risk for this
+        // single-user local tool; full TOCTOU-safety (locking / openat) is
+        // deliberately out of scope.
         if worktree_is_dirty(Path::new(&candidate.path)) {
             report.warnings.push(format!(
                 "skipped dirty worktree {} (became dirty since snapshot; commit, stash, or discard before reclaim)",
                 candidate.path
+            ));
+            continue;
+        }
+        let recheck = holder::probe_holders(Path::new(&candidate.path));
+        if !matches!(recheck, HolderEvidence::Clear) {
+            report.warnings.push(format!(
+                "skipped worktree {} (a live/inconclusive OS-view process holder appeared since snapshot): {}",
+                candidate.path,
+                recheck.describe_family()
             ));
             continue;
         }
@@ -226,7 +263,23 @@ fn execute_sweep(report: &mut SweepReport) {
             ])
             .output()
         {
-            Ok(out) if out.status.success() => report.removed.push(candidate.path.clone()),
+            Ok(out) if out.status.success() => {
+                report.removed.push(candidate.path.clone());
+                if let Some(branch) = &candidate.branch {
+                    if let Err(err) = scrap_ledger::record_scrap(Path::new(&candidate.path), branch)
+                    {
+                        report.warnings.push(format!(
+                            "scrap ledger write failed for {}: {err}",
+                            candidate.path
+                        ));
+                    }
+                } else {
+                    report.warnings.push(format!(
+                        "scrap ledger not recorded for {} (marker had no branch field)",
+                        candidate.path
+                    ));
+                }
+            }
             Ok(out) => report.errors.push(format!(
                 "git worktree remove failed for {}: {}",
                 candidate.path,
@@ -268,15 +321,6 @@ fn is_skip_dir(path: &Path) -> bool {
         path.file_name().and_then(|name| name.to_str()),
         Some(".git" | "target" | "node_modules" | ".venv")
     )
-}
-
-fn has_active_processes(path: &Path) -> bool {
-    let output = Command::new("lsof").arg("+D").arg(path).output();
-    match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).lines().count() > 1,
-        Ok(out) if out.status.code() == Some(1) => false,
-        _ => false,
-    }
 }
 
 fn emit_report(report: &SweepReport, output: OutputFormat) -> Result<(), String> {
