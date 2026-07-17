@@ -250,6 +250,15 @@ pub(crate) struct LiveRelationSignals {
 /// (this leaf's commit-reachability check is local-git, single-repo; a
 /// cross-repo relation stays `Unknown` on close rather than a fabricated
 /// "checked, not shipped").
+///
+/// fix-round-2: this function already had 8 parameters before
+/// `merged_pr_scan_complete` (a 9th) was added to close checkpoint 1's
+/// fail-closed gap — `#[allow(clippy::too_many_arguments)]` here matches the
+/// same pattern `doc_resolver::resolve` already uses in this leaf, rather
+/// than leaving `cargo clippy --locked ... -D warnings` (the exact command
+/// this PR's own body asks Oz to run) newly red because of a 9th positional
+/// arg.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn derive_live_relation_signals(
     base_repo: &str,
     base_number: u64,
