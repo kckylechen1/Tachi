@@ -28,19 +28,19 @@ jobs:
             version="${GITHUB_REF_NAME#v}"
           fi
 
-          server_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/tachi-server/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
+          tachi_server_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/tachi-server/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
 
-          if [ -z "$server_version" ]; then
-            echo "Could not find memory-server version in Cargo.toml."
+          if [ -z "$tachi_server_version" ]; then
+            echo "Could not find tachi-server version in Cargo.toml."
             exit 1
           fi
 
           if [ -z "$version" ]; then
-            version="$server_version"
+            version="$tachi_server_version"
           fi
 
-          if [ "$version" != "$server_version" ]; then
-            echo "Tag/workflow version ($version) does not match crates/tachi-server/Cargo.toml ($server_version)."
+          if [ "$version" != "$tachi_server_version" ]; then
+            echo "Tag/workflow version ($version) does not match crates/tachi-server/Cargo.toml ($tachi_server_version)."
             exit 1
           fi
 

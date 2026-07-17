@@ -35,31 +35,31 @@ jobs:
             version="${GITHUB_REF_NAME#v}"
           fi
 
-          server_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/tachi-server/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
+          tachi_server_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/tachi-server/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
           node_crate_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/memory-node/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
           node_pkg_version=$(node -p "require('./crates/memory-node/package.json').version")
 
-          if [ -z "$server_version" ] || [ -z "$node_crate_version" ] || [ -z "$node_pkg_version" ]; then
+          if [ -z "$tachi_server_version" ] || [ -z "$node_crate_version" ] || [ -z "$node_pkg_version" ]; then
             echo "Failed to resolve one or more release versions."
             exit 1
           fi
 
           if [ -z "$version" ]; then
-            version="$server_version"
+            version="$tachi_server_version"
           fi
 
-          if [ "$version" != "$server_version" ]; then
-            echo "Tag/workflow version ($version) does not match crates/tachi-server/Cargo.toml ($server_version)."
+          if [ "$version" != "$tachi_server_version" ]; then
+            echo "Tag/workflow version ($version) does not match crates/tachi-server/Cargo.toml ($tachi_server_version)."
             exit 1
           fi
 
-          if [ "$server_version" != "$node_crate_version" ]; then
-            echo "memory-server version ($server_version) does not match crates/memory-node/Cargo.toml ($node_crate_version)."
+          if [ "$tachi_server_version" != "$node_crate_version" ]; then
+            echo "tachi-server version ($tachi_server_version) does not match crates/memory-node/Cargo.toml ($node_crate_version)."
             exit 1
           fi
 
-          if [ "$server_version" != "$node_pkg_version" ]; then
-            echo "memory-server version ($server_version) does not match crates/memory-node/package.json ($node_pkg_version)."
+          if [ "$tachi_server_version" != "$node_pkg_version" ]; then
+            echo "tachi-server version ($tachi_server_version) does not match crates/memory-node/package.json ($node_pkg_version)."
             exit 1
           fi
 
