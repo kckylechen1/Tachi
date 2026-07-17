@@ -63,10 +63,10 @@ pub use db::exec_env::{
 #[cfg(feature = "admin")]
 pub use db::exec_env_resources::{
     active_binding_count, bind_resource, find_resource_by_path, get_resource, insert_resource,
-    list_resources, quarantine_resource, reclaim_resource, record_resource_measurement,
-    release_binding, release_quarantine, BindOutcome, ExecEnvResource, NewExecEnvResource,
-    QuarantineOutcome, RegisterOutcome, ReleaseBindingOutcome, ReleaseQuarantineOutcome,
-    ResourceKind, ResourceReclaimOutcome, ResourceState,
+    list_bound_resource_paths, list_resources, quarantine_resource, reclaim_resource,
+    record_resource_measurement, release_binding, release_quarantine, BindOutcome, ExecEnvResource,
+    NewExecEnvResource, QuarantineOutcome, RegisterOutcome, ReleaseBindingOutcome,
+    ReleaseQuarantineOutcome, ResourceKind, ResourceReclaimOutcome, ResourceState,
 };
 #[cfg(feature = "admin")]
 pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};
