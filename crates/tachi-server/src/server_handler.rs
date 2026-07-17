@@ -236,6 +236,35 @@ struct HttpSessionIdentity {
     profile: Option<String>,
     client: Option<String>,
     project: Option<String>,
+    /// #1120 PR1: `X-Tachi-Workspace-Root` / `_meta.tachiWorkspaceRoot`. Only
+    /// consulted when `project` is absent — an explicit named-project binding
+    /// always wins, matching how a caller-supplied `project=` argument always
+    /// wins over a transport default elsewhere in this module.
+    workspace_root: Option<String>,
+}
+
+/// #1120 PR1: which session-identity field supplies the bound project, when
+/// more than one is present. An explicit `X-Tachi-Project` always wins over
+/// `X-Tachi-Workspace-Root` — the workspace-root path only fills the gap for
+/// a caller that has no already-registered project name to declare, mirroring
+/// how a caller-supplied `project=` tool argument always wins over a
+/// transport default elsewhere in this module. Pure/no I/O so the precedence
+/// itself is unit-testable without constructing a full `RequestContext`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectBindingSource<'a> {
+    Named(&'a str),
+    WorkspaceRoot(&'a str),
+    None,
+}
+
+fn project_binding_source(identity: &HttpSessionIdentity) -> ProjectBindingSource<'_> {
+    match identity.project.as_deref() {
+        Some(project) => ProjectBindingSource::Named(project),
+        None => match identity.workspace_root.as_deref() {
+            Some(root) => ProjectBindingSource::WorkspaceRoot(root),
+            None => ProjectBindingSource::None,
+        },
+    }
 }
 
 impl MemoryServer {
@@ -250,15 +279,30 @@ impl MemoryServer {
             .as_deref()
             .map(parse_http_tool_profile)
             .transpose()?;
-        if let Some(project) = identity.project.as_deref() {
-            Self::resolve_named_project_db_path(project).map_err(|err| {
-                rmcp::ErrorData::invalid_params(
-                    format!("invalid HTTP direct-connect project binding: {err}"),
-                    None,
-                )
-            })?;
-        }
-        self.set_session_identity(identity.client, identity.project, profile);
+        let project = match project_binding_source(&identity) {
+            ProjectBindingSource::Named(project) => {
+                Self::resolve_named_project_db_path(project).map_err(|err| {
+                    rmcp::ErrorData::invalid_params(
+                        format!("invalid HTTP direct-connect project binding: {err}"),
+                        None,
+                    )
+                })?;
+                Some(project.to_string())
+            }
+            ProjectBindingSource::WorkspaceRoot(root) => Some(
+                self.resolve_or_register_workspace_root(root)
+                    .map_err(|err| {
+                        rmcp::ErrorData::invalid_params(
+                            format!(
+                                "invalid HTTP direct-connect X-Tachi-Workspace-Root binding: {err}"
+                            ),
+                            None,
+                        )
+                    })?,
+            ),
+            ProjectBindingSource::None => None,
+        };
+        self.set_session_identity(identity.client, project, profile);
         Ok(())
     }
 }
@@ -275,6 +319,9 @@ fn http_session_identity(
             header_string(parts, crate::session_identity::HEADER_CLIENT).or(identity.client);
         identity.project =
             header_string(parts, crate::session_identity::HEADER_PROJECT).or(identity.project);
+        identity.workspace_root =
+            header_string(parts, crate::session_identity::HEADER_WORKSPACE_ROOT)
+                .or(identity.workspace_root);
     }
     identity
 }
@@ -292,6 +339,8 @@ fn identity_from_initialize_meta(meta: Option<&rmcp::model::Meta>) -> HttpSessio
         .or_else(|| meta_string(meta, "tachi.client"));
     identity.project = meta_string(meta, crate::session_identity::META_PROJECT)
         .or_else(|| meta_string(meta, "tachi.project"));
+    identity.workspace_root = meta_string(meta, crate::session_identity::META_WORKSPACE_ROOT)
+        .or_else(|| meta_string(meta, "tachi.workspaceRoot"));
     identity
 }
 
@@ -806,6 +855,77 @@ mod tests {
         assert!(identity.profile.is_none());
         assert!(identity.client.is_none());
         assert!(identity.project.is_none());
+    }
+
+    /// #1120 PR1: `_meta.tachiWorkspaceRoot` parses into `HttpSessionIdentity`
+    /// the same way `META_PROJECT` already does.
+    #[test]
+    fn initialize_meta_binds_workspace_root() {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            crate::session_identity::META_WORKSPACE_ROOT.to_string(),
+            json!("/home/agent/repos/sigil"),
+        );
+        let meta = rmcp::model::Meta(map);
+        let identity = identity_from_initialize_meta(Some(&meta));
+        assert_eq!(
+            identity.workspace_root.as_deref(),
+            Some("/home/agent/repos/sigil")
+        );
+        assert!(identity.project.is_none());
+    }
+
+    /// #1120 PR1: the dotted-alias fallback (`tachi.project` already has one)
+    /// also covers `tachi.workspaceRoot`.
+    #[test]
+    fn initialize_meta_accepts_dotted_workspace_root_alias() {
+        let mut map = serde_json::Map::new();
+        map.insert("tachi.workspaceRoot".to_string(), json!("/repo/root"));
+        let meta = rmcp::model::Meta(map);
+        let identity = identity_from_initialize_meta(Some(&meta));
+        assert_eq!(identity.workspace_root.as_deref(), Some("/repo/root"));
+    }
+
+    /// #1120 PR1 core regression: an explicit `X-Tachi-Project` (here, its
+    /// `_meta` twin `META_PROJECT`) must win over a simultaneously-present
+    /// `X-Tachi-Workspace-Root` — the workspace-root path only fills the gap
+    /// for a caller with no already-registered project name, never overrides
+    /// one the caller did supply.
+    #[test]
+    fn named_project_wins_over_workspace_root_when_both_present() {
+        let identity = HttpSessionIdentity {
+            profile: None,
+            client: None,
+            project: Some("sigil".to_string()),
+            workspace_root: Some("/home/agent/repos/sigil".to_string()),
+        };
+        assert_eq!(
+            project_binding_source(&identity),
+            ProjectBindingSource::Named("sigil")
+        );
+    }
+
+    #[test]
+    fn workspace_root_used_only_when_project_absent() {
+        let identity = HttpSessionIdentity {
+            profile: None,
+            client: None,
+            project: None,
+            workspace_root: Some("/home/agent/repos/sigil".to_string()),
+        };
+        assert_eq!(
+            project_binding_source(&identity),
+            ProjectBindingSource::WorkspaceRoot("/home/agent/repos/sigil")
+        );
+    }
+
+    #[test]
+    fn binding_source_is_none_when_neither_present() {
+        let identity = HttpSessionIdentity::default();
+        assert_eq!(
+            project_binding_source(&identity),
+            ProjectBindingSource::None
+        );
     }
 
     /// #757-fold fix (gpt-5.6-terra review): `delete_memory`/`memory_gc` were
