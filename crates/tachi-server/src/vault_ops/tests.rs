@@ -205,6 +205,93 @@ async fn vault_unlock_rejects_fifo_and_keychain_together() {
     );
 }
 
+// tachi#1187 fix-round (attack-pass finding A1; leader adjudication,
+// Option B): the pure-seam tests in `vault_crypto.rs`
+// (`seam_rejects_algorithm_mismatch_as_typed_error_not_wrong_password`,
+// `seam_algorithm_mismatch_does_not_feed_lockout_counter`) prove
+// `derive_verified_key_from_stored_config` itself never routes
+// algorithm-axis drift into a wrong-password outcome — but that guarantee
+// was hollow as a production safety claim, because the LIVE
+// `handle_vault_unlock` RPC handler did not call the seam at all: it
+// re-implemented parse+derive+verify inline and never read
+// `config.kdf_algorithm`. This test drives the real handler end-to-end (not
+// a synthetic match) and asserts both that the error is the typed
+// algorithm-mismatch message (never a generic wrong-password/lockout
+// message) AND that `record_vault_unlock_failure`'s counter
+// (`vault_read().failed_attempts.0`, the actual production lockout sink,
+// `session.rs:156-168`) stays at zero.
+//
+// RED before the handler was wired to the seam: `handle_vault_unlock` never
+// read `config.kdf_algorithm`, so it derived with Argon2id regardless of
+// the stored label. This fixture keeps a legitimate Argon2id verifier (the
+// real-world drift shape: a fork's `{m,t,p}` param shape matches, only the
+// label differs), so `verify_password` returned `Ok(false)`, the handler
+// matched that as a plain wrong-password miss, and `record_vault_unlock_failure`
+// incremented the counter to 1 — feeding the brute-force lockout for a
+// config-integrity problem, not a password problem.
+#[tokio::test]
+async fn vault_unlock_kdf_algorithm_mismatch_does_not_feed_lockout_counter() {
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-unlock-kdf-algorithm-mismatch-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    handle_vault_init(
+        &server,
+        VaultInitParams {
+            password: "correct-password".to_string(),
+        },
+    )
+    .await
+    .expect("vault init should succeed");
+    handle_vault_lock(&server)
+        .await
+        .expect("vault lock should succeed");
+
+    // Simulate algorithm-axis drift: rewrite the stored config's
+    // `kdf_algorithm` to a value this build does not implement, keeping
+    // salt/kdf_params/verifier exactly as `handle_vault_init` wrote them.
+    let mut config = server
+        .with_global_store(|store| store.vault_get_config().map_err(|e| e.to_string()))
+        .expect("read vault config")
+        .expect("vault config must exist after init");
+    config.kdf_algorithm = "argon2i".to_string();
+    server
+        .with_global_store(|store| store.vault_set_config(&config).map_err(|e| e.to_string()))
+        .expect("rewrite vault config with mismatched kdf_algorithm");
+
+    let err = handle_vault_unlock(
+        &server,
+        VaultUnlockParams {
+            password: "correct-password".to_string(),
+            password_fifo_path: None,
+            use_keychain: false,
+        },
+    )
+    .await
+    .expect_err(
+        "kdf_algorithm drift must fail the live unlock handler even with the correct password",
+    );
+
+    assert!(
+        err.contains("kdf_algorithm") && err.contains("not a password error"),
+        "expected the typed KdfAlgorithmMismatch message, got: {err}"
+    );
+    assert!(
+        !err.contains("Wrong password") && !err.contains("Too many failed"),
+        "algorithm-axis drift must never surface as a wrong-password/lockout message; got: {err}"
+    );
+    assert_eq!(
+        server.vault_read().failed_attempts.0,
+        0,
+        "algorithm-axis drift must not increment the live vault unlock lockout counter"
+    );
+    assert!(
+        server.vault_read().key.is_none(),
+        "vault must stay locked when the stored kdf_algorithm is unsupported"
+    );
+}
+
 // tachi#1175: `use_keychain` walks the same shared low-level primitive as
 // the CLI's `tachi vault unlock --keychain`
 // (`vault_crypto::read_password_from_macos_keychain`) so an agent never has
