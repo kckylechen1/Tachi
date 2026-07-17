@@ -90,8 +90,8 @@ impl MemoryServer {
     }
 
     /// Addressing convention for named-project recall:
-    ///   * `<repo>/.tachi/memory.db` is the per-repo source of truth (real data).
-    ///   * `~/.tachi/global/memory.db` is the machine-global store.
+    ///   * `<repo>/.tachi/tachi-memory.db` is the per-repo source of truth (real data).
+    ///   * `~/.tachi/global/tachi-memory.db` is the machine-global store.
     ///   * `~/.tachi/projects/<name>/` is an addressing alias, not a data store.
     ///
     /// Resolution prefers the manifest-recorded repo-local path for a project so
@@ -259,10 +259,11 @@ impl MemoryServer {
             .collect())
     }
 
-    /// Resolve a (sanitized) project name to a repo-local `<repo>/.tachi/memory.db`
-    /// recorded in the manifest, if any. This is the symlink-independent primary
-    /// addressing path: for each manifest entry shaped like `<repo>/.tachi/memory.db`,
-    /// we recompute the repo's alias dir name (hashed, or its legacy un-hashed
+    /// Resolve a (sanitized) project name to a repo-local `<repo>/.tachi/tachi-memory.db`
+    /// (or the pre-#1132 `.../memory.db`) recorded in the manifest, if any. This is
+    /// the symlink-independent primary addressing path: for each manifest entry shaped
+    /// like `<repo>/.tachi/<db-filename>`, we recompute the repo's alias dir name
+    /// (hashed, or its legacy un-hashed
     /// form for backward compatibility) and match it against `safe_name`.
     ///
     /// Returns the first matching repo-local path. Returns `None` when the
@@ -275,7 +276,7 @@ impl MemoryServer {
         let manifest = crate::manifest::Manifest::load(&manifest_path).ok()?;
         for entry in &manifest.dbs {
             let db_path = std::path::Path::new(&entry.path);
-            // Only consider repo-local `<repo>/.tachi/memory.db` shapes.
+            // Only consider repo-local `<repo>/.tachi/<db-filename>` shapes.
             let Some(project_root) = crate::path_utils::plan_c_project_root_from_local_db(db_path)
             else {
                 continue;

@@ -2,7 +2,7 @@ use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
 fn default_project_db_relpath() -> String {
-    ".tachi/memory.db".to_string()
+    format!(".tachi/{}", memcore::MEMORY_DB_FILENAME)
 }
 
 // ─── Project DB ─────────────────────────────────────────────────────────────

@@ -100,7 +100,9 @@ pub fn should_skip_path(p: &Path) -> Option<&'static str> {
     let under_tmp = path_lower.starts_with("/tmp/") || path_lower.starts_with("/private/tmp/");
     if under_tmp
         && (path_lower.contains("/.tachi/memory.db")
+            || path_lower.contains("/.tachi/tachi-memory.db")
             || path_lower.contains("/.tachi/project/memory.db")
+            || path_lower.contains("/.tachi/project/tachi-memory.db")
             || path_lower.contains("/tachi-recall-smoke"))
     {
         return Some("temporary tachi workspace");
