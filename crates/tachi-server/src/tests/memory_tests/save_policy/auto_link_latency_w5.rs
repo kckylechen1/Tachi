@@ -245,9 +245,25 @@ async fn run_concurrency_level(server: &MemoryServer, concurrency: usize) -> Vec
     receipts
 }
 
-#[tokio::test(flavor = "multi_thread")]
+// Plain `#[test]` + `tokio::runtime::Runtime::new().block_on` (not
+// `#[tokio::test(flavor = "multi_thread")]`), matching the
+// `global_test_lock` convention used everywhere else in this crate (e.g.
+// `dispatch_ops::prompt::tests`, 5a561225;
+// `memory_search_ops::auto_link::tests`, bfd07b86): the guard protects the
+// process-wide `TACHI_AUTO_LINK_PHASE_RECEIPTS` env var against
+// `spawn_queue_wait_measures_dispatch_delay_under_worker_contention`
+// (`memory_search_ops/auto_link.rs`) racing the same key under
+// `--include-ignored`, so it must stay held for the entire async body
+// including its internal awaits — `block_on` runs that future to
+// completion synchronously on this thread, so there is no `.await`
+// expression in this function's own body for clippy's
+// `await_holding_lock` lint to flag, while the guard's actual coverage is
+// unchanged. `Runtime::new()` defaults to the multi-worker scheduler,
+// matching the removed `#[tokio::test(flavor = "multi_thread")]`
+// attribute's flavor (no explicit worker count there either).
+#[test]
 #[ignore = "load-test harness (tachi#1145 W5) — run explicitly with --ignored"]
-async fn w5_auto_link_latency_under_saturation() {
+fn w5_auto_link_latency_under_saturation() {
     // `spawn_auto_linking_for_test` reads this env var (via
     // `spawn_and_run_auto_linking`) to decide whether to sample at all —
     // without it every receipt would be `None` and this workload would hang
@@ -268,86 +284,90 @@ async fn w5_auto_link_latency_under_saturation() {
         .unwrap_or_else(|e| e.into_inner());
     let _env = crate::test_support::EnvRestore::set("TACHI_AUTO_LINK_PHASE_RECEIPTS", "1");
 
-    let server = make_server();
-    seed_corpus(&server);
-    let pool_size = server.global_read_pool_size_for_tests();
+    tokio::runtime::Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async {
+            let server = make_server();
+            seed_corpus(&server);
+            let pool_size = server.global_read_pool_size_for_tests();
 
-    for concurrency in concurrency_levels(pool_size) {
-        let started = Instant::now();
-        let receipts = run_concurrency_level(&server, concurrency).await;
-        let wall = started.elapsed();
+            for concurrency in concurrency_levels(pool_size) {
+                let started = Instant::now();
+                let receipts = run_concurrency_level(&server, concurrency).await;
+                let wall = started.elapsed();
 
-        let mut spawn_queue_us = Vec::with_capacity(receipts.len());
-        let mut pool_wait_us = Vec::with_capacity(receipts.len());
-        let mut search_us = Vec::with_capacity(receipts.len());
-        let mut write_us = Vec::with_capacity(receipts.len());
-        let mut unmeasured_pool_wait = 0usize;
+                let mut spawn_queue_us = Vec::with_capacity(receipts.len());
+                let mut pool_wait_us = Vec::with_capacity(receipts.len());
+                let mut search_us = Vec::with_capacity(receipts.len());
+                let mut write_us = Vec::with_capacity(receipts.len());
+                let mut unmeasured_pool_wait = 0usize;
 
-        for receipt in &receipts {
-            spawn_queue_us.push(receipt.spawn_queue_wait.as_micros() as u64);
-            write_us.push(receipt.write_elapsed.as_micros() as u64);
-            match receipt.pool_checkout_wait {
-                LayerAvailability::Measured(pool_wait) => {
-                    pool_wait_us.push(pool_wait.as_micros() as u64);
-                    let search = receipt.read_elapsed.saturating_sub(pool_wait);
-                    search_us.push(search.as_micros() as u64);
+                for receipt in &receipts {
+                    spawn_queue_us.push(receipt.spawn_queue_wait.as_micros() as u64);
+                    write_us.push(receipt.write_elapsed.as_micros() as u64);
+                    match receipt.pool_checkout_wait {
+                        LayerAvailability::Measured(pool_wait) => {
+                            pool_wait_us.push(pool_wait.as_micros() as u64);
+                            let search = receipt.read_elapsed.saturating_sub(pool_wait);
+                            search_us.push(search.as_micros() as u64);
+                        }
+                        _ => unmeasured_pool_wait += 1,
+                    }
                 }
-                _ => unmeasured_pool_wait += 1,
+
+                assert_eq!(
+                    unmeasured_pool_wait,
+                    0,
+                    "every receipt in this workload uses DbScope::Global with no \
+                     named project — the one path wired to the recording read call \
+                     — so pool_checkout_wait must be Measured on all {} samples; {} \
+                     came back unmeasured, which would silently undercount the \
+                     reported pool-wait/search percentiles below",
+                    receipts.len(),
+                    unmeasured_pool_wait
+                );
+
+                // tachi#1185 fix-round (codex review checkpoint 5): the loop above
+                // only ever printed percentiles — nothing asserted that contention
+                // was actually OBSERVED during measurement, so a version of this
+                // harness with a broken/no-op foreground load would print numbers
+                // and pass regardless. This does not causally prove all `pool_size`
+                // slots were checked out simultaneously (that needs a test-only
+                // hook into `memory-server-runtime`'s pool internals, which are
+                // private to that crate today and out of this fix-round's scope —
+                // flagged as a follow-up, not silently dropped). It DOES require
+                // that at concurrency >= pool_size, WITH the same-shaped foreground
+                // load contending for the whole run, at least one sample actually
+                // waited for a slot — a genuine, falsifiable claim the harness was
+                // not making before.
+                if concurrency >= pool_size {
+                    let max_pool_wait_us = pool_wait_us.iter().copied().max().unwrap_or(0);
+                    assert!(
+                        max_pool_wait_us > 0,
+                        "at concurrency {concurrency} (>= pool_size {pool_size}), with \
+                         {concurrency} foreground W2-shaped readers contending for \
+                         the whole run, EVERY sample reported a zero pool_checkout_wait \
+                         — that means no contention was actually observed during \
+                         measurement, so this level's percentiles below would not be \
+                         evidence of anything under load"
+                    );
+                }
+
+                let (spawn_p50, spawn_p95, spawn_p99) = percentiles_us(spawn_queue_us);
+                let (pool_p50, pool_p95, pool_p99) = percentiles_us(pool_wait_us);
+                let (search_p50, search_p95, search_p99) = percentiles_us(search_us);
+                let (write_p50, write_p95, write_p99) = percentiles_us(write_us);
+
+                println!(
+                    "{{\"workload\":\"W5\",\"pool_size\":{pool_size},\"concurrency\":{concurrency},\
+                     \"samples\":{sample_count},\"wall_ms\":{wall_ms},\
+                     \"spawn_queue_wait_us\":{{\"p50\":{spawn_p50},\"p95\":{spawn_p95},\"p99\":{spawn_p99}}},\
+                     \"pool_checkout_wait_us\":{{\"p50\":{pool_p50},\"p95\":{pool_p95},\"p99\":{pool_p99}}},\
+                     \"search_us\":{{\"p50\":{search_p50},\"p95\":{search_p95},\"p99\":{search_p99}}},\
+                     \"write_us\":{{\"p50\":{write_p50},\"p95\":{write_p95},\"p99\":{write_p99}}}}}",
+                    sample_count = receipts.len(),
+                    wall_ms = wall.as_millis(),
+                );
             }
-        }
-
-        assert_eq!(
-            unmeasured_pool_wait,
-            0,
-            "every receipt in this workload uses DbScope::Global with no \
-             named project — the one path wired to the recording read call \
-             — so pool_checkout_wait must be Measured on all {} samples; {} \
-             came back unmeasured, which would silently undercount the \
-             reported pool-wait/search percentiles below",
-            receipts.len(),
-            unmeasured_pool_wait
-        );
-
-        // tachi#1185 fix-round (codex review checkpoint 5): the loop above
-        // only ever printed percentiles — nothing asserted that contention
-        // was actually OBSERVED during measurement, so a version of this
-        // harness with a broken/no-op foreground load would print numbers
-        // and pass regardless. This does not causally prove all `pool_size`
-        // slots were checked out simultaneously (that needs a test-only
-        // hook into `memory-server-runtime`'s pool internals, which are
-        // private to that crate today and out of this fix-round's scope —
-        // flagged as a follow-up, not silently dropped). It DOES require
-        // that at concurrency >= pool_size, WITH the same-shaped foreground
-        // load contending for the whole run, at least one sample actually
-        // waited for a slot — a genuine, falsifiable claim the harness was
-        // not making before.
-        if concurrency >= pool_size {
-            let max_pool_wait_us = pool_wait_us.iter().copied().max().unwrap_or(0);
-            assert!(
-                max_pool_wait_us > 0,
-                "at concurrency {concurrency} (>= pool_size {pool_size}), with \
-                 {concurrency} foreground W2-shaped readers contending for \
-                 the whole run, EVERY sample reported a zero pool_checkout_wait \
-                 — that means no contention was actually observed during \
-                 measurement, so this level's percentiles below would not be \
-                 evidence of anything under load"
-            );
-        }
-
-        let (spawn_p50, spawn_p95, spawn_p99) = percentiles_us(spawn_queue_us);
-        let (pool_p50, pool_p95, pool_p99) = percentiles_us(pool_wait_us);
-        let (search_p50, search_p95, search_p99) = percentiles_us(search_us);
-        let (write_p50, write_p95, write_p99) = percentiles_us(write_us);
-
-        println!(
-            "{{\"workload\":\"W5\",\"pool_size\":{pool_size},\"concurrency\":{concurrency},\
-             \"samples\":{sample_count},\"wall_ms\":{wall_ms},\
-             \"spawn_queue_wait_us\":{{\"p50\":{spawn_p50},\"p95\":{spawn_p95},\"p99\":{spawn_p99}}},\
-             \"pool_checkout_wait_us\":{{\"p50\":{pool_p50},\"p95\":{pool_p95},\"p99\":{pool_p99}}},\
-             \"search_us\":{{\"p50\":{search_p50},\"p95\":{search_p95},\"p99\":{search_p99}}},\
-             \"write_us\":{{\"p50\":{write_p50},\"p95\":{write_p95},\"p99\":{write_p99}}}}}",
-            sample_count = receipts.len(),
-            wall_ms = wall.as_millis(),
-        );
-    }
+        });
 }
