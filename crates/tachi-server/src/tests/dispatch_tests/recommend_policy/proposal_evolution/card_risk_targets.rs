@@ -24,6 +24,7 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
                 diff: None,
                 worktree: None,
                 subagents: Vec::new(),
+                eval_run_ids: Vec::new(),
                 feedback_rules_applied: Vec::new(),
                 dispatch_id: None,
                 flow_id: Some("flow-card-risk-evolution".to_string()),
