@@ -3,16 +3,21 @@ use std::path::{Component, Path, PathBuf};
 
 /// Project-DB addressing convention (read this before touching Plan C code):
 ///
-///   * `<repo>/.tachi/memory.db` is the **per-repo source of truth** — the real
-///     data file, addressed repo-locally (see `bootstrap/serve.rs`).
-///   * `~/.tachi/global/memory.db` is the **machine-global** store.
+///   * `<repo>/.tachi/tachi-memory.db` is the **per-repo source of truth** —
+///     the real data file, addressed repo-locally (see `bootstrap/serve.rs`).
+///   * `~/.tachi/global/tachi-memory.db` is the **machine-global** store.
 ///   * `~/.tachi/projects/<name>/` is an **addressing alias, not a data store**.
 ///     On Unix it is a symlink to the repo-local DB; named-project recall resolves
 ///     a name to a DB path and should prefer the manifest-recorded repo-local path
 ///     so resolution does not depend on the symlink existing (helps non-Unix).
 ///
+/// (Filenames renamed `memory.db` -> `tachi-memory.db` by #1132; a
+/// `memory.db` -> `tachi-memory.db` compat symlink is left behind for one
+/// release window, so some of the above may still be reachable via the old
+/// name.)
+///
 /// Sanitized directory name for the Plan C alias
-/// (`~/.tachi/projects/<name>/memory.db`).
+/// (`~/.tachi/projects/<name>/tachi-memory.db`).
 ///
 /// The name is `<sanitized-basename>-<hash8>`, where `<hash8>` is the first 8 hex
 /// of a stable hash of the canonical absolute git-root path. The hash suffix keeps
@@ -66,7 +71,7 @@ pub(crate) fn plan_c_legacy_dir_name_from_root(project_root: &Path) -> Option<St
     Some(crate::utils::sanitize_safe_path_name(raw))
 }
 
-/// Return the alias `memory.db` path that should be USED for a given repo root,
+/// Return the alias `tachi-memory.db` path that should be USED for a given repo root,
 /// preferring the hashed dir but falling back to a pre-existing legacy un-hashed
 /// dir when the hashed one does not yet exist. Used when creating/resolving the
 /// alias so repos that predate the hash suffix keep addressing their old data.
@@ -113,7 +118,29 @@ pub(crate) fn plan_c_global_db_path(project_dir_name: &str) -> PathBuf {
     tachi_home()
         .join("projects")
         .join(project_dir_name)
-        .join("memory.db")
+        .join(memcore::MEMORY_DB_FILENAME)
+}
+
+/// Like [`plan_c_global_db_path`] but for *resolving an existing* alias
+/// rather than deciding what to name a fresh one: prefers the canonical
+/// (post-#1132) filename, falling back to the pre-#1132 `memory.db` name so a
+/// Plan C alias dir that hasn't been touched by an `open()` call since the
+/// rename shipped (and so is still only the legacy-named symlink/file) keeps
+/// resolving instead of reporting "not found" against a name that was never
+/// created on disk.
+pub(crate) fn plan_c_global_db_path_existing(project_dir_name: &str) -> PathBuf {
+    let canonical = plan_c_global_db_path(project_dir_name);
+    if canonical.exists() {
+        return canonical;
+    }
+    let legacy = tachi_home()
+        .join("projects")
+        .join(project_dir_name)
+        .join(memcore::LEGACY_MEMORY_DB_FILENAME);
+    if legacy.exists() {
+        return legacy;
+    }
+    canonical
 }
 
 pub(crate) fn plan_c_project_root_from_local_db(local_db: &Path) -> Option<PathBuf> {

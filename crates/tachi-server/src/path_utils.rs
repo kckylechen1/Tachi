@@ -10,8 +10,8 @@ mod tests;
 #[cfg(test)]
 pub(crate) use alias::validate_project_db_relpath;
 pub(crate) use alias::{
-    plan_c_dir_name_from_root, plan_c_global_db_path, plan_c_legacy_dir_name_from_root,
-    plan_c_project_root_from_local_db, resolve_project_db_path,
+    plan_c_dir_name_from_root, plan_c_global_db_path, plan_c_global_db_path_existing,
+    plan_c_legacy_dir_name_from_root, plan_c_project_root_from_local_db, resolve_project_db_path,
 };
 pub(crate) use home::tachi_home;
 pub(crate) use named::{list_named_projects, named_project_for_db_path, named_project_from_path};

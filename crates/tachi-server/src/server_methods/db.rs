@@ -110,7 +110,7 @@ impl MemoryServer {
             }
         }
 
-        let db_path = crate::path_utils::plan_c_global_db_path(&safe_name);
+        let db_path = crate::path_utils::plan_c_global_db_path_existing(&safe_name);
         if !db_path.exists() {
             if db_path.is_symlink() {
                 let target_str = match std::fs::read_link(&db_path) {
@@ -169,7 +169,7 @@ impl MemoryServer {
             };
         }
 
-        let db_path = crate::path_utils::plan_c_global_db_path(&safe_name);
+        let db_path = crate::path_utils::plan_c_global_db_path_existing(&safe_name);
         if !db_path.exists() {
             if db_path.is_symlink() {
                 let target_str = match std::fs::read_link(&db_path) {
