@@ -37,6 +37,7 @@ async fn tachi_complete_failure_with_notes_saves_lesson_hook() {
             signatures: Vec::new(),
             rulings: Vec::new(),
             adjudication: None,
+            eval_run_ids: Vec::new(),
         }))
         .await
         .expect("failure complete should still record eval");
@@ -80,6 +81,7 @@ async fn tachi_complete_failure_with_notes_saves_lesson_hook() {
             signatures: Vec::new(),
             rulings: Vec::new(),
             adjudication: None,
+            eval_run_ids: Vec::new(),
         }))
         .await
         .expect("distinct short task should still record a lesson");

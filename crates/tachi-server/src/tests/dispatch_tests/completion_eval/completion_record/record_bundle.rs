@@ -61,6 +61,7 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             signatures: Vec::new(),
             rulings: Vec::new(),
             adjudication: None,
+            eval_run_ids: Vec::new(),
         }))
         .await
         .expect("tachi_complete should succeed");
@@ -378,6 +379,7 @@ async fn tachi_complete_accepts_stringified_trajectory_array() {
             signatures: Vec::new(),
             rulings: Vec::new(),
             adjudication: None,
+            eval_run_ids: Vec::new(),
         }))
         .await
         .expect("tachi_complete should accept stringified trajectory");

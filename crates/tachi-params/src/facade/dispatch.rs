@@ -503,6 +503,16 @@ pub struct TachiCompleteParams {
     #[serde(default)]
     pub subagents: Vec<TachiSubagentEvalParams>,
 
+    /// `eval_run_id`s from the #1066 `tachi_agent_eval` mirror eval intake
+    /// (register/observe/adjudicate) to project into this completion's eval
+    /// row. Only ADJUDICATED, evidence-usable, non-self-eval rows are
+    /// projected into `subagents[]`-compatible aggregation; unresolved or
+    /// ineligible ids are silently skipped and never fail the completion.
+    /// Additive/optional — an empty/omitted array leaves `subagents[]`
+    /// byte-compatible with existing callers.
+    #[serde(default)]
+    pub eval_run_ids: Vec<String>,
+
     /// Feedback/prompt-quality rule ids that were applied to this task.
     #[serde(default)]
     pub feedback_rules_applied: Vec<String>,

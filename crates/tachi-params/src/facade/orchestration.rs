@@ -465,13 +465,202 @@ pub struct TachiOrchestratorParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiAgentEvalParams {
-    /// aggregate_live | telemetry | perf. aggregate replays a local JSONL fixture only when
-    /// TACHI_AGENT_EVAL_ALLOW_FIXTURE=1 is set.
+    /// aggregate | aggregate_live | telemetry | perf | register | observe |
+    /// adjudicate | get. aggregate replays a local JSONL fixture only when
+    /// TACHI_AGENT_EVAL_ALLOW_FIXTURE=1 is set. register/observe/adjudicate/get
+    /// (#1066) are the mirror eval intake for harness-native subagents — work
+    /// Tachi did not dispatch and only observes.
     pub action: String,
     #[serde(default)]
     pub fixture_path: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+
+    /// action=register payload (#1066): records the parent contract,
+    /// execution origin, lifecycle owner, harness/native child id, and
+    /// requested identity for a harness-native subagent Tachi did not
+    /// dispatch. Returns a stable `eval_run_id`.
+    #[serde(default)]
+    pub register: Option<MirrorEvalRegisterParams>,
+
+    /// action=observe payload (#1066): carrier-observed terminal facts only —
+    /// this type carries no usefulness/failure-mode/plan-delta field, so
+    /// observe structurally cannot write judgment.
+    #[serde(default)]
+    pub observe: Option<MirrorEvalObserveParams>,
+
+    /// action=adjudicate payload (#1066): leader/independent-reviewer
+    /// judgment for an already-registered run.
+    #[serde(default)]
+    pub adjudicate: Option<MirrorEvalAdjudicateParams>,
+
+    /// action=get payload (#1066): resolve a run by `eval_run_id` or
+    /// `native_child_id`.
+    #[serde(default)]
+    pub get: Option<MirrorEvalGetParams>,
+}
+
+/// #1066 `register`: records the parent contract, execution origin,
+/// lifecycle owner, harness/native child id, and requested identity for a
+/// harness-native subagent. Same `native_child_id` + same content replays
+/// idempotently; same `native_child_id` + different content is an explicit
+/// conflict (never silently overwritten).
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct MirrorEvalRegisterParams {
+    /// The frozen contract (issue/PR ref) the native subagent's work is
+    /// under, e.g. `"kckylechen1/tachi#1066"`. Required.
+    pub frozen_contract_ref: String,
+
+    /// What kind of execution this is, e.g. `"host_native_subagent"`.
+    /// Required.
+    pub execution_origin: String,
+
+    /// Who owns starting/stopping this worker, e.g. `"host"`. Tachi never
+    /// claims it can wait, cancel, or close a host-owned worker — this field
+    /// records that ownership explicitly. Required.
+    pub lifecycle_owner: String,
+
+    /// The host harness that launched the subagent, e.g.
+    /// `"claude_code_task_tool"`.
+    #[serde(default)]
+    pub harness: Option<String>,
+
+    /// The host-native child id, when the host exposes one. Absent this,
+    /// registration can never be deduped — every call mints a fresh run.
+    #[serde(default)]
+    pub native_child_id: Option<String>,
+
+    /// Requested identity — profile at spawn time.
+    #[serde(default)]
+    pub requested_profile: Option<String>,
+
+    /// Requested identity — model at spawn time.
+    #[serde(default)]
+    pub requested_model: Option<String>,
+
+    /// Requested identity — agent/vendor label at spawn time.
+    #[serde(default)]
+    pub requested_agent: Option<String>,
+}
+
+/// #1066 `observe`: carrier-observed terminal facts, duration/cost,
+/// result/artifact references, and effective identity. Deliberately has NO
+/// usefulness/failure_mode/plan_delta/evidence_usable field — those exist
+/// only on [`MirrorEvalAdjudicateParams`]. Resolve the target run by
+/// `eval_run_id` OR `native_child_id`.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct MirrorEvalObserveParams {
+    /// Resolve the target run by its `eval_run_id`.
+    #[serde(default)]
+    pub eval_run_id: Option<String>,
+
+    /// Resolve the target run by its `native_child_id` (used when the caller
+    /// does not have the `eval_run_id` handy).
+    #[serde(default)]
+    pub native_child_id: Option<String>,
+
+    /// Carrier-observed terminal outcome, e.g. `"success"` / `"failure"` /
+    /// `"partial"` / `"aborted"` / `"unknown"`. Required.
+    pub terminal_outcome: String,
+
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+
+    #[serde(default)]
+    pub cost_tokens: Option<u64>,
+
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+
+    /// Pointer to the result (PR/diff/artifact summary).
+    #[serde(default)]
+    pub result_ref: Option<String>,
+
+    #[serde(default)]
+    pub artifacts: Vec<String>,
+
+    /// Carrier-observed (effective, not requested) model identity.
+    #[serde(default)]
+    pub effective_model: Option<String>,
+
+    #[serde(default)]
+    pub effective_backend: Option<String>,
+
+    #[serde(default)]
+    pub effective_harness: Option<String>,
+}
+
+/// #1066 `adjudicate`: leader/independent-reviewer judgment for an
+/// already-registered, already-observed run. Append-only — a correction is a
+/// new call with a fresh idempotency identity, never an edit of a prior
+/// judgment.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct MirrorEvalAdjudicateParams {
+    #[serde(default)]
+    pub eval_run_id: Option<String>,
+
+    #[serde(default)]
+    pub native_child_id: Option<String>,
+
+    /// Who adjudicated (the leader/independent-reviewer seat identity).
+    /// Required.
+    pub actor: String,
+
+    /// The reviewing engine's OWN effective model/lineage identity — the
+    /// `verifier_engine_receipt` half of cross-model independence. Omit or
+    /// leave unknown when the reviewer's own identity cannot be established;
+    /// an unknown identity can never satisfy cross-model independence.
+    #[serde(default)]
+    pub verifier_model: Option<String>,
+
+    /// Usefulness verdict, e.g. `"useful"` / `"partially_useful"` /
+    /// `"not_useful"` / `"failed"`. Required.
+    pub usefulness: String,
+
+    #[serde(default)]
+    pub failure_mode: Option<String>,
+
+    #[serde(default)]
+    pub first_review_findings: Vec<String>,
+
+    #[serde(default)]
+    pub plan_delta: Option<String>,
+
+    #[serde(default)]
+    pub next_prompt_delta: Option<String>,
+
+    /// Whether this run's evidence is usable for routing/card aggregation.
+    /// Required — no silent default: an omitted flag must not accidentally
+    /// promote a row into aggregation.
+    pub evidence_usable: bool,
+
+    #[serde(default)]
+    pub used_in_final_claim: bool,
+
+    #[serde(default)]
+    pub human_override: bool,
+
+    /// Evidence reference backing this judgment (run id, review artifact).
+    /// Required.
+    pub evidence_ref: String,
+
+    /// Idempotency identity for this specific judgment event. Replaying the
+    /// same `event_key` with the same content is a no-op; a correction uses
+    /// a NEW `event_key`. Defaults to a deterministic value derived from
+    /// `eval_run_id` + `actor` + `usefulness` when omitted (single-shot
+    /// callers do not need to invent one).
+    #[serde(default)]
+    pub event_key: Option<String>,
+}
+
+/// #1066 `get`: resolve a run by `eval_run_id` or `native_child_id`.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct MirrorEvalGetParams {
+    #[serde(default)]
+    pub eval_run_id: Option<String>,
+
+    #[serde(default)]
+    pub native_child_id: Option<String>,
 }
 
 // ─── Facade: agent registry / router ─────────────────────────────────────────
