@@ -243,13 +243,16 @@ const SECS_PER_DAY: u64 = 24 * 60 * 60;
 /// kill-test certification: it is this crate believing its own code. The bar is an
 /// EXECUTED, checked-in receipt (binary version, OS, matrix, git blob hash of the test
 /// source) — the shape `crates/tachi-dispatch/src/certification.rs` already ships for
-/// codex's sandbox. The matrix exists here, `#[ignore]`d (`kill_tests`); nobody has run
-/// it and checked in a receipt yet, so this stays `false`.
+/// codex's sandbox. The matrix exists here, `#[ignore]`d (`kill_tests`); it was EXECUTED
+/// on 2026-07-17 (Oz seat, all four scenarios pass) and the receipt is checked in at
+/// `crates/tachi-server/certifications/orphan-reaper.toml` — hence `true`. The receipt
+/// certifies exactly one (version, OS, source-blob) triple; touching the kill-test or
+/// the reap path invalidates it morally if not mechanically: re-run and re-receipt.
 ///
 /// A `const` rather than a config flag, on purpose. A flag is something an operator can
 /// flip at 2 a.m. under disk pressure; the gate between a scan of `~/.cache` and
 /// `remove_dir_all` should cost a code change, a review, and a test suite.
-pub(crate) const DESTRUCTIVE_CERTIFIED: bool = false;
+pub(crate) const DESTRUCTIVE_CERTIFIED: bool = true;
 
 /// The audit that sheathed it.
 pub(crate) const BLOCKING_AUDIT: &str = "codex-g6f99";
