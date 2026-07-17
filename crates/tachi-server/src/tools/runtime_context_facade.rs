@@ -44,7 +44,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Compact a soon-to-be-evicted session window into a ready-to-inject context block. Designed for host runtimes that know when token pressure requires compaction."
+        description = "Compact a soon-to-be-evicted session window into a ready-to-inject context block. Designed for host runtimes that know when token pressure requires compaction. Never persists (persist=true is refused, #1099) — use compact_session_memory to persist a compacted window."
     )]
     pub(crate) async fn compact_context(
         &self,
