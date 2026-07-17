@@ -58,6 +58,10 @@ pub(in crate::bootstrap::poke_cli) async fn probe_memory_basic(
             enable_rerank: false,
             as_of: None,
             include_metadata: false,
+            // tachi#1201 k3: search_memory now defaults to markdown when
+            // `format` is omitted; this probe hard-errors on JSON parse
+            // failure, so it must opt in explicitly.
+            format: Some("json".to_string()),
         },
         false,
     )

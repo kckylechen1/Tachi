@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 #[tokio::test]
 async fn tachi_status_agent_surface_is_compact() {
     let (server, _temp_home) = make_server_with_temp_home();
-    let body = crate::status_ops::handle_tachi_status_agent(&server)
+    let body = crate::status_ops::handle_tachi_status_agent(&server, Some("json"))
         .await
         .expect("agent status should serialize");
     let parsed: Value = serde_json::from_str(&body).expect("agent status JSON");
@@ -44,7 +44,7 @@ async fn tachi_status_agent_surface_is_compact() {
 #[tokio::test]
 async fn tachi_status_slims_healthy_provider_health_and_omits_empty_continuity() {
     let (server, _temp_home) = make_server_with_temp_home();
-    let body = crate::status_ops::handle_tachi_status_agent(&server)
+    let body = crate::status_ops::handle_tachi_status_agent(&server, Some("json"))
         .await
         .expect("agent status should serialize");
     let parsed: Value = serde_json::from_str(&body).expect("agent status JSON");
@@ -97,7 +97,7 @@ async fn tachi_status_surfaces_recall_eval_health_without_private_case_data() {
     )
     .expect("write recall eval status");
 
-    let body = crate::status_ops::handle_tachi_status_agent(&server)
+    let body = crate::status_ops::handle_tachi_status_agent(&server, Some("json"))
         .await
         .expect("agent status should serialize");
     let parsed: Value = serde_json::from_str(&body).expect("agent status JSON");

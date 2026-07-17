@@ -316,6 +316,7 @@ pub(crate) async fn handle_tachi_wiki_search(
             enable_rerank: false,
             as_of: None,
             include_metadata: false,
+            format: None,
         },
         false,
     )

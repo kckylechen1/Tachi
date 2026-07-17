@@ -117,6 +117,7 @@ pub(crate) async fn collect_wiki_search_value(
             enable_rerank: false,
             as_of: None,
             include_metadata: false,
+            format: None,
         },
         false,
     )

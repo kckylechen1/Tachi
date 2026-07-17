@@ -41,6 +41,13 @@ pub(super) async fn run_cli_command(
             if let Some(v) = &project {
                 args.insert("project".into(), json!(v));
             }
+            // tachi#1201 k3 flipped search_memory's *tool-default* format to
+            // markdown, but the `tachi search-memory` CLI subcommand is a
+            // separate, pre-existing external contract (scripts pipe its
+            // stdout and parse JSON) that k3 does not target — pin the
+            // explicit JSON format here so this subcommand's output stays
+            // byte-identical to its pre-k3 behavior.
+            args.insert("format".into(), json!("json"));
 
             let body = dispatch_cli_tool(
                 "search_memory",

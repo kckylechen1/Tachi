@@ -222,23 +222,42 @@ fn status_provider_health_json(server: &crate::MemoryServer) -> serde_json::Valu
     slim_provider_health_value(value)
 }
 
-/// MCP tool handler: returns a concise JSON health summary for agents.
-pub(crate) async fn handle_tachi_status_agent(
-    server: &crate::MemoryServer,
-) -> Result<String, String> {
-    handle_tachi_status_detail(server, false).await
+/// Render a status response `Value` per the raw `tachi_status` tool's
+/// `format` semantics (tachi#1201 k3): defaults to markdown, "json" opts
+/// into the full JSON payload unchanged.
+fn render_status_response(value: &serde_json::Value, format: Option<&str>) -> Result<String, String> {
+    if crate::agent_markdown::wants_explicit_json(format) {
+        serde_json::to_string(value).map_err(|e| e.to_string())
+    } else {
+        Ok(crate::agent_markdown::format_status_markdown(value))
+    }
 }
 
-/// Full diagnostic JSON for tests, doctor flows, and readiness checks.
+/// MCP tool handler: returns a concise health summary for agents.
+///
+/// `format`: omitted/anything other than "json" renders a compact markdown
+/// digest (tachi#1201 k3 default); "json" returns the full JSON payload,
+/// byte-identical to the pre-k3 unconditional shape.
+pub(crate) async fn handle_tachi_status_agent(
+    server: &crate::MemoryServer,
+    format: Option<&str>,
+) -> Result<String, String> {
+    handle_tachi_status_detail(server, false, format).await
+}
+
+/// Full diagnostic payload for tests, doctor flows, and readiness checks.
+/// Same `format` semantics as [`handle_tachi_status_agent`].
 pub(crate) async fn handle_tachi_status_full(
     server: &crate::MemoryServer,
+    format: Option<&str>,
 ) -> Result<String, String> {
-    handle_tachi_status_detail(server, true).await
+    handle_tachi_status_detail(server, true, format).await
 }
 
 async fn handle_tachi_status_detail(
     server: &crate::MemoryServer,
     full: bool,
+    format: Option<&str>,
 ) -> Result<String, String> {
     let app_home = server.tachi_home_dir();
     let global_db_path = server.global_db_path_buf();
@@ -549,7 +568,7 @@ async fn handle_tachi_status_detail(
     }
 
     if full {
-        serde_json::to_string(&json!({
+        let value = json!({
             "daemon": daemon_state,
             "daemon_inventory": snapshot.daemon_inventory,
             "runtime": runtime,
@@ -585,8 +604,8 @@ async fn handle_tachi_status_detail(
             "provider_probe_cache": snapshot.provider_probe_cache,
             "models": status_health::model_lanes_json(),
             "agent_readiness": readiness,
-        }))
-        .map_err(|e| e.to_string())
+        });
+        render_status_response(&value, format)
     } else {
         let api_key_drift = snapshot
             .api_keys
@@ -655,7 +674,7 @@ async fn handle_tachi_status_detail(
                 .expect("status response object")
                 .insert("continuity".to_string(), continuity_summary);
         }
-        serde_json::to_string(&response).map_err(|e| e.to_string())
+        render_status_response(&response, format)
     }
 }
 

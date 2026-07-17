@@ -1,10 +1,29 @@
 use super::cache::{recall_cache_key, recall_cache_read_enabled, recall_cache_ttl_secs};
 use super::rows::{query_with_context_symbols, search_memory_rows_with_access};
+use crate::agent_markdown::{format_search_memory_markdown, wants_explicit_json};
 use crate::memory_search_ops::{
     apply_search_rerank_policy, expand_search_params_for_rerank, normalize_json_relevance,
 };
 use crate::tool_params::SearchMemoryParams;
 use crate::MemoryServer;
+
+/// Render a canonical serialized-rows JSON string per `params.format`
+/// (tachi#1201 k3): defaults to markdown, "json" opts into the raw string
+/// unchanged. Used on both the cache-hit short-circuit and the fresh-compute
+/// path so caching stays keyed on the canonical JSON regardless of which
+/// format a given caller asked for.
+fn render_search_response(
+    query: &str,
+    format: Option<&str>,
+    serialized_rows: String,
+) -> Result<String, String> {
+    if wants_explicit_json(format) {
+        return Ok(serialized_rows);
+    }
+    let rows: serde_json::Value = serde_json::from_str(&serialized_rows)
+        .map_err(|e| format!("Failed to parse rows for markdown rendering: {e}"))?;
+    Ok(format_search_memory_markdown(query, &rows))
+}
 
 pub(crate) async fn handle_search_memory(
     server: &MemoryServer,
@@ -60,7 +79,7 @@ pub(crate) async fn handle_search_memory_with_access(
                             .map_err(|e| e.to_string())
                     });
                 }));
-                return Ok(hit.rows_json);
+                return render_search_response(&params.query, params.format.as_deref(), hit.rows_json);
             }
         }
     }
@@ -96,5 +115,5 @@ pub(crate) async fn handle_search_memory_with_access(
             });
         }
     }
-    Ok(serialized)
+    render_search_response(&params.query, params.format.as_deref(), serialized)
 }

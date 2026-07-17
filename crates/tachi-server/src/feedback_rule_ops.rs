@@ -143,6 +143,7 @@ async fn search_feedback_rule_rows(
             enable_rerank: false,
             as_of: None,
             include_metadata: true,
+            format: None,
         },
         false,
     )

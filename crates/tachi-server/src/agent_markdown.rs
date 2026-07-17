@@ -14,10 +14,100 @@ use shared::{format_section_rows, md_escape};
 
 pub(crate) use alerts::format_alerts;
 pub(crate) use briefing::{format_briefing, render_issue_freshness_section};
-pub(crate) use search::format_search_sections;
+pub(crate) use search::{format_search_memory_markdown, format_search_sections};
 pub(crate) use wiki::{
     format_wiki_browse_category, format_wiki_browse_stats, format_wiki_read, format_wiki_search,
 };
+
+/// Format polarity for the raw `search_memory` / `tachi_status` MCP tools
+/// (tachi#1201 k3): omitted/empty/anything-other-than-"json" means markdown;
+/// only an exact (trimmed, case-insensitive) "json" opts into the full JSON
+/// shape. This is the OPPOSITE default direction from
+/// `facade_memory_ops::evidence_format::wants_json`, which defaults an
+/// omitted facade `format` to JSON — do not swap the two helpers between
+/// surfaces, the sibling `tachi_memory`/`tachi_search` facades must keep
+/// their existing (JSON-default) polarity untouched.
+pub(crate) fn wants_explicit_json(format: Option<&str>) -> bool {
+    format
+        .map(str::trim)
+        .filter(|format| !format.is_empty())
+        .is_some_and(|format| format.eq_ignore_ascii_case("json"))
+}
+
+/// Render an arbitrary status/diagnostic JSON object as a compact markdown
+/// bullet digest (tachi#1201 k3's `tachi_status` default when `format` is
+/// omitted). No fixed schema is assumed beyond "top-level JSON object" so
+/// this stays correct as the underlying status response payload evolves.
+pub(crate) fn format_status_markdown(value: &Value) -> String {
+    let mut out = vec!["## Tachi status".to_string()];
+    match value.as_object() {
+        Some(obj) if !obj.is_empty() => {
+            for (key, v) in obj {
+                render_status_field(&mut out, key, v, 0);
+            }
+        }
+        _ => out.push("_No status data._".to_string()),
+    }
+    out.join("\n")
+}
+
+fn render_status_field(out: &mut Vec<String>, key: &str, value: &Value, depth: usize) {
+    let indent = "  ".repeat(depth);
+    match value {
+        Value::Object(map) => {
+            if map.is_empty() {
+                out.push(format!("{indent}- **{}**: {{}}", md_escape(key)));
+                return;
+            }
+            out.push(format!("{indent}- **{}**:", md_escape(key)));
+            for (k, v) in map {
+                render_status_field(out, k, v, depth + 1);
+            }
+        }
+        Value::Array(items) => {
+            if items.is_empty() {
+                out.push(format!("{indent}- **{}**: []", md_escape(key)));
+                return;
+            }
+            let noun = if items.len() == 1 { "item" } else { "items" };
+            out.push(format!(
+                "{indent}- **{}** ({} {noun}):",
+                md_escape(key),
+                items.len()
+            ));
+            const MAX_ITEMS: usize = 20;
+            for (idx, item) in items.iter().enumerate().take(MAX_ITEMS) {
+                out.push(format!(
+                    "{indent}  {}. {}",
+                    idx + 1,
+                    scalar_or_compact_line(item)
+                ));
+            }
+            if items.len() > MAX_ITEMS {
+                out.push(format!(
+                    "{indent}  … +{} more",
+                    items.len() - MAX_ITEMS
+                ));
+            }
+        }
+        _ => out.push(format!(
+            "{indent}- **{}**: {}",
+            md_escape(key),
+            scalar_or_compact_line(value)
+        )),
+    }
+}
+
+fn scalar_or_compact_line(value: &Value) -> String {
+    match value {
+        Value::String(s) => compact_text_line(s, 200),
+        Value::Null => "null".to_string(),
+        Value::Object(_) | Value::Array(_) => {
+            compact_text_line(&value.to_string(), 200)
+        }
+        other => other.to_string(),
+    }
+}
 
 #[cfg(test)]
 mod tests {

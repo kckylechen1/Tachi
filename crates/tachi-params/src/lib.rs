@@ -13,6 +13,7 @@ mod project_db;
 mod recall_evidence;
 mod refinery;
 mod sandbox;
+mod status;
 
 pub use agent::*;
 pub use dlq::*;
@@ -28,6 +29,7 @@ pub use project_db::*;
 pub use recall_evidence::*;
 pub use refinery::*;
 pub use sandbox::*;
+pub use status::*;
 
 /// Public value-level coercion helpers shared with callers outside this
 /// crate (e.g. the RPC transport layer, see #970) that need the same

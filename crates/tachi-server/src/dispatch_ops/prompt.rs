@@ -253,6 +253,7 @@ pub(crate) async fn assemble_prompt_with_trace(
                 enable_rerank: false,
                 as_of: None,
                 include_metadata: false,
+                format: None,
             },
             false,
         )
@@ -324,6 +325,7 @@ pub(crate) async fn assemble_prompt_with_trace(
                 enable_rerank: false,
                 as_of: None,
                 include_metadata: false,
+                format: None,
             },
             false,
         )
@@ -423,6 +425,7 @@ pub(crate) async fn assemble_prompt_with_trace(
             enable_rerank: false,
             as_of: None,
             include_metadata: false,
+            format: None,
         },
         false,
     )

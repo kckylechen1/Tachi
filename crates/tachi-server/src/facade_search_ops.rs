@@ -163,6 +163,11 @@ pub(crate) async fn collect_tachi_search_sections(
             enable_rerank: params.enable_rerank,
             as_of: params.as_of.clone(),
             include_metadata: false,
+            // tachi#1201 k3: search_memory now defaults to markdown when
+            // `format` is omitted; `parse_memory_rows` below parses the body
+            // as JSON (and silently degrades to empty on failure), so this
+            // must opt in explicitly.
+            format: Some("json".to_string()),
         };
         match handle_search_memory_with_access(server, mem_params, false, true).await {
             Ok(raw) => sections.push(("Memory".to_string(), parse_memory_rows(raw, top_k))),
@@ -197,6 +202,9 @@ pub(crate) async fn collect_tachi_search_sections(
             enable_rerank: params.enable_rerank,
             as_of: params.as_of.clone(),
             include_metadata: true,
+            // Goes through search_memory_rows_with_access (Vec<Value>, no
+            // string round trip) below, so format is compile-only here.
+            format: None,
         };
         match search_memory_rows_with_access(server, pattern_params, false, true).await {
             Ok(rows) => {
@@ -243,6 +251,9 @@ pub(crate) async fn collect_tachi_search_sections(
             enable_rerank: false,
             as_of: params.as_of.clone(),
             include_metadata: false,
+            // Goes through search_memory_rows_with_access (Vec<Value>, no
+            // string round trip) below, so format is compile-only here.
+            format: None,
         };
         match search_memory_rows_with_access(server, wiki_params, false, true).await {
             Ok(mut rows) => {

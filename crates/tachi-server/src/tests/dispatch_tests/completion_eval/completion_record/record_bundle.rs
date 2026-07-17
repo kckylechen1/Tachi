@@ -177,6 +177,9 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             enable_rerank: false,
             as_of: None,
             include_metadata: false,
+            // tachi#1201 k3: search_memory now defaults to markdown; this
+            // test parses the response as JSON, so opt in explicitly.
+            format: Some("json".to_string()),
         }))
         .await
         .expect("default search should succeed");
@@ -209,6 +212,9 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             enable_rerank: false,
             as_of: None,
             include_metadata: false,
+            // tachi#1201 k3: search_memory now defaults to markdown; this
+            // test parses the response as JSON, so opt in explicitly.
+            format: Some("json".to_string()),
         }))
         .await
         .expect("eval search should succeed");

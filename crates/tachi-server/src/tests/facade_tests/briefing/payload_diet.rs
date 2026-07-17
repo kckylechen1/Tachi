@@ -162,7 +162,7 @@ async fn compact_briefing_uses_status_warnings_and_omits_doctrine_metadata() {
     .expect("compact briefing should serialize");
     let briefing: Value = serde_json::from_str(&briefing_body).expect("briefing JSON");
 
-    let status_body = crate::status_ops::handle_tachi_status_agent(&server)
+    let status_body = crate::status_ops::handle_tachi_status_agent(&server, Some("json"))
         .await
         .expect("status should serialize");
     let status: Value = serde_json::from_str(&status_body).expect("status JSON");

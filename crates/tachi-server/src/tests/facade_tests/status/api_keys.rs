@@ -16,7 +16,7 @@ async fn tachi_status_marks_vault_alias_in_config_env_as_vault_config() {
     let original_voyage = std::env::var_os("VOYAGE_API_KEY");
     std::env::remove_var("VOYAGE_API_KEY");
 
-    let body = crate::status_ops::handle_tachi_status_full(&server)
+    let body = crate::status_ops::handle_tachi_status_full(&server, Some("json"))
         .await
         .expect("status should serialize");
     let parsed: Value = serde_json::from_str(&body).expect("status JSON");
@@ -51,7 +51,7 @@ async fn tachi_status_marks_config_env_only_key_as_configured() {
     let original_voyage = std::env::var_os("VOYAGE_API_KEY");
     std::env::remove_var("VOYAGE_API_KEY");
 
-    let body = crate::status_ops::handle_tachi_status_full(&server)
+    let body = crate::status_ops::handle_tachi_status_full(&server, Some("json"))
         .await
         .expect("status should serialize");
     let parsed: Value = serde_json::from_str(&body).expect("status JSON");
@@ -86,7 +86,7 @@ async fn tachi_status_marks_config_env_alias_key_as_configured() {
     std::env::remove_var("ZAI_API_KEY");
     std::env::remove_var("BIGMODEL_API_KEY");
 
-    let body = crate::status_ops::handle_tachi_status_full(&server)
+    let body = crate::status_ops::handle_tachi_status_full(&server, Some("json"))
         .await
         .expect("status should serialize");
     let parsed: Value = serde_json::from_str(&body).expect("status JSON");

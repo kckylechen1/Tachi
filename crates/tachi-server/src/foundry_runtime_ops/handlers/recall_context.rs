@@ -55,6 +55,7 @@ pub(crate) async fn handle_recall_context(
                 enable_rerank: false,
                 as_of: None,
                 include_metadata: false,
+                format: None,
             },
             false,
         )
@@ -139,6 +140,7 @@ pub(crate) async fn handle_recall_context(
                 enable_rerank: false,
                 as_of: None,
                 include_metadata: false,
+                format: None,
             },
             false,
         )

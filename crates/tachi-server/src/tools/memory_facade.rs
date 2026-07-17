@@ -10,7 +10,7 @@ use crate::memory_search_ops::{handle_find_similar_memory, handle_remember, hand
 use crate::project_db_ops::handle_tachi_init_project_db;
 use crate::tool_params::{
     ArchiveMemoryParams, FindSimilarMemoryParams, GetMemoryParams, InitProjectDbParams,
-    ListMemoriesParams, RememberParams, SaveMemoryParams, SearchMemoryParams,
+    ListMemoriesParams, RememberParams, SaveMemoryParams, SearchMemoryParams, TachiStatusParams,
 };
 use crate::MemoryServer;
 
@@ -47,7 +47,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Search memory entries using hybrid search (vector + FTS + symbolic). Returns ranked results with scores."
+        description = "Search memory entries using hybrid search (vector + FTS + symbolic). Returns ranked results with scores. `format` defaults to a compact markdown digest; pass format=\"json\" for the full JSON row array."
     )]
     pub(crate) async fn search_memory(
         &self,
@@ -122,10 +122,13 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Cheap health check: daemon status, vector coverage, foundry queue depth, provider key drift/auth-failure inference, model lane config, and agent readiness warnings. Call at session start; use `tachi status --probe-keys` or `tachi doctor --probe-keys` for live provider calls."
+        description = "Cheap health check: daemon status, vector coverage, foundry queue depth, provider key drift/auth-failure inference, model lane config, and agent readiness warnings. Call at session start; use `tachi status --probe-keys` or `tachi doctor --probe-keys` for live provider calls. `format` defaults to a compact markdown digest; pass format=\"json\" for the full JSON payload."
     )]
-    pub(crate) async fn tachi_status(&self) -> Result<String, String> {
-        crate::status_ops::handle_tachi_status_agent(self).await
+    pub(crate) async fn tachi_status(
+        &self,
+        Parameters(params): Parameters<TachiStatusParams>,
+    ) -> Result<String, String> {
+        crate::status_ops::handle_tachi_status_agent(self, params.format.as_deref()).await
     }
 
     #[tool(

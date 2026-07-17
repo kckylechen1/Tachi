@@ -68,6 +68,10 @@ async fn tachi_search_excludes_recall_cache_rows_by_default() {
             enable_rerank: false,
             as_of: None,
             include_metadata: false,
+            // Assertion below is a substring `.contains()` check on the
+            // response, unaffected by the search_memory markdown/JSON
+            // default (tachi#1201 k3); left unset intentionally.
+            format: None,
         }))
         .await
         .expect("recall-cache scoped search");

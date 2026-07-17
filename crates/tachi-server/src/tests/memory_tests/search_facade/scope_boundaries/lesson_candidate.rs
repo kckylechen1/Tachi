@@ -98,6 +98,10 @@ async fn tachi_search_path_prefix_opts_into_lesson_candidate_rows() {
             enable_rerank: false,
             as_of: None,
             include_metadata: false,
+            // Assertion below is a substring `.contains()` check on the
+            // response, unaffected by the search_memory markdown/JSON
+            // default (tachi#1201 k3); left unset intentionally.
+            format: None,
         }))
         .await
         .expect("lesson-candidate scoped search");

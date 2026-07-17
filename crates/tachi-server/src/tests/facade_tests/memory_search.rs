@@ -69,6 +69,11 @@ fn search_params(query: &str, project: Option<&str>) -> crate::tool_params::Sear
         enable_rerank: false,
         as_of: None,
         include_metadata: false,
+        // tachi#1201 k3: search_memory now defaults to markdown; every
+        // caller of this helper parses the response as JSON, so opt in
+        // explicitly (this is the "existing JSON assertion migrated to
+        // explicit format=json" sweep the ticket asks for).
+        format: Some("json".to_string()),
     }
 }
 
@@ -533,4 +538,168 @@ async fn direct_tachi_search_caps_large_top_k() {
         .expect("memory rows");
 
     assert_eq!(memory_rows.len(), crate::MAX_FACADE_TOP_K);
+}
+
+// tachi#1201 k3: the raw `search_memory` MCP tool defaults `format` to
+// markdown when omitted; explicit format="json" must stay byte-for-byte the
+// same JSON row-array shape this tool always returned before k3.
+
+#[tokio::test]
+async fn search_memory_defaults_to_markdown_when_format_omitted() {
+    let server = make_server();
+    let entry_id = format!("search-default-format-{}", uuid::Uuid::new_v4());
+    let mut entry = make_entry(&entry_id);
+    entry.summary = "search default format sentinel".to_string();
+    entry.text = "SearchDefaultFormatNeedle should show up in the markdown digest.".to_string();
+    entry.keywords = vec!["SearchDefaultFormatNeedle".to_string()];
+    server
+        .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("seed: {e}")))
+        .expect("seed default-format entry");
+
+    let response = server
+        .search_memory(Parameters(SearchMemoryParams {
+            query: "SearchDefaultFormatNeedle".to_string(),
+            query_vec: None,
+            top_k: 5,
+            path_prefix: None,
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: Some(0.85),
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            context_symbols: Vec::new(),
+            agent_role: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+            format: None,
+        }))
+        .await
+        .expect("default-format search should succeed");
+
+    assert!(
+        response.starts_with("## Tachi memory search:"),
+        "omitted format should render markdown, got: {response}"
+    );
+    assert!(
+        serde_json::from_str::<Vec<Value>>(&response).is_err(),
+        "markdown digest must not happen to parse as the JSON row array: {response}"
+    );
+    assert!(response.contains(&entry_id), "{response}");
+}
+
+#[tokio::test]
+async fn search_memory_explicit_json_keeps_pre_k3_row_array_shape() {
+    let server = make_server();
+    let entry_id = format!("search-explicit-json-{}", uuid::Uuid::new_v4());
+    let mut entry = make_entry(&entry_id);
+    entry.summary = "search explicit json sentinel".to_string();
+    entry.text = "SearchExplicitJsonNeedle should show up in the JSON row array.".to_string();
+    entry.keywords = vec!["SearchExplicitJsonNeedle".to_string()];
+    server
+        .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("seed: {e}")))
+        .expect("seed explicit-json entry");
+
+    let response = server
+        .search_memory(Parameters(SearchMemoryParams {
+            query: "SearchExplicitJsonNeedle".to_string(),
+            query_vec: None,
+            top_k: 5,
+            path_prefix: None,
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: Some(0.85),
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            context_symbols: Vec::new(),
+            agent_role: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+            format: Some("json".to_string()),
+        }))
+        .await
+        .expect("explicit json search should succeed");
+
+    let rows: Vec<Value> = serde_json::from_str(&response)
+        .expect("explicit format=\"json\" must parse as the row array, byte-identical shape");
+    assert!(
+        rows.iter().any(|row| row["id"] == json!(entry_id)),
+        "seeded row should be present: {rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn search_memory_format_is_case_insensitive_and_trims_whitespace() {
+    let server = make_server();
+    for candidate in ["JSON", " json ", "Json"] {
+        let response = server
+            .search_memory(Parameters(SearchMemoryParams {
+                query: "format polarity probe".to_string(),
+                query_vec: None,
+                top_k: 3,
+                path_prefix: None,
+                include_training: false,
+                include_archived: false,
+                candidates_per_channel: 20,
+                mmr_threshold: Some(0.85),
+                graph_expand_hops: 0,
+                graph_relation_filter: None,
+                weights: None,
+                context_symbols: Vec::new(),
+                agent_role: None,
+                project: None,
+                domain: None,
+                file_context: None,
+                error_context: None,
+                enable_rerank: false,
+                as_of: None,
+                include_metadata: false,
+                format: Some(candidate.to_string()),
+            }))
+            .await
+            .unwrap_or_else(|e| panic!("format={candidate:?} should succeed: {e}"));
+        serde_json::from_str::<Vec<Value>>(&response)
+            .unwrap_or_else(|e| panic!("format={candidate:?} should parse as JSON: {e}"));
+    }
+
+    let markdown = server
+        .search_memory(Parameters(SearchMemoryParams {
+            query: "format polarity probe".to_string(),
+            query_vec: None,
+            top_k: 3,
+            path_prefix: None,
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: Some(0.85),
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            context_symbols: Vec::new(),
+            agent_role: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+            format: Some("yaml".to_string()),
+        }))
+        .await
+        .expect("unrecognized format should still succeed");
+    assert!(markdown.starts_with("## Tachi memory search:"));
 }
