@@ -23,8 +23,15 @@ pub(crate) fn format_wiki_search(query: &str, count: usize, results: &Value) -> 
                 .get("relevance")
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "?".to_string());
+            // #1072: an explicit non-active lifecycle scope (see
+            // `WikiSearchParams::lifecycle`) can still surface a draft row —
+            // label it so it never reads as reviewed wiki truth.
+            let lifecycle_badge = match row.get("lifecycle").and_then(Value::as_str) {
+                Some(lifecycle) if lifecycle != "active" => format!(" [{lifecycle}]"),
+                _ => String::new(),
+            };
             out.push(format!(
-                "{}. {relevance} `{path}` - {}",
+                "{}. {relevance} `{path}`{lifecycle_badge} - {}",
                 idx + 1,
                 md_escape(&compact_text_line(summary, 120)),
             ));
@@ -66,8 +73,17 @@ pub(crate) fn format_wiki_browse_category(path: &str, entries: &[Value]) -> Stri
             .get("importance")
             .map(|v| v.to_string())
             .unwrap_or_else(|| "?".to_string());
+        // #1072 fix-round (#1215 BUG 6): Markdown provenance loss — browse
+        // JSON carries `lifecycle`/`authority` but the rendered markdown
+        // silently dropped them, so a non-active entry (reachable via an
+        // explicit `lifecycle` scope) could read as plain reviewed content.
+        // Mirror `format_wiki_search`'s badge convention.
+        let lifecycle_badge = match entry.get("lifecycle").and_then(Value::as_str) {
+            Some(lifecycle) if lifecycle != "active" => format!(" [{lifecycle}]"),
+            _ => String::new(),
+        };
         out.push(format!(
-            "{}. **`{entry_path}`** (importance {importance})\n   {}",
+            "{}. **`{entry_path}`**{lifecycle_badge} (importance {importance})\n   {}",
             idx + 1,
             md_escape(summary),
         ));
@@ -110,7 +126,20 @@ pub(crate) fn format_wiki_read(entry: &Value) -> String {
         })
         .unwrap_or_default();
 
+    let lifecycle = entry
+        .get("lifecycle")
+        .and_then(Value::as_str)
+        .unwrap_or("active");
+
     let mut out = vec![format!("## Wiki: `{path}`")];
+    // #1072 RED case 2/3: a non-`active` entry (e.g. a `pending_review`
+    // draft reached by its exact path) must never render as plain reviewed
+    // wiki content — the caller sees this before the body.
+    if lifecycle != "active" {
+        out.push(format!(
+            "\n> ⚠️ lifecycle: **{lifecycle}** — not reviewed/active wiki truth."
+        ));
+    }
     if !summary.is_empty() {
         out.push(format!("\n> {summary}"));
     }

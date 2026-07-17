@@ -334,6 +334,7 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
             missing_edge_threshold: 0.6,
             contradiction_threshold: 0.6,
             include_skill_quality: true,
+            persist_stale: false,
         }))
         .await
         .expect("wiki_lint should succeed");
@@ -449,6 +450,7 @@ async fn wiki_lint_ignores_operation_log_rows() {
             missing_edge_threshold: 0.6,
             contradiction_threshold: 0.6,
             include_skill_quality: false,
+            persist_stale: false,
         }))
         .await
         .expect("wiki_lint should succeed");
@@ -461,4 +463,227 @@ async fn wiki_lint_ignores_operation_log_rows() {
         .collect::<Vec<_>>();
     assert!(orphan_ids.contains(&"wiki-real-orphan"));
     assert!(!orphan_ids.contains(&"wiki-log-noise"));
+}
+
+/// #1072 RED case 4: "Permanent stale wiki that contradicts a changed
+/// trusted source must become semantic-stale." Scoped honestly (see
+/// `wiki_ops::lint`'s inline comment and the `knowledge_artifact` module
+/// doc): this leaf's concrete trigger is the `supersedes`/`contradicts`
+/// graph-edge signal canon doc §7 lists, not full external trusted-doc
+/// blob-SHA drift detection (a separate leaf).
+#[tokio::test]
+async fn wiki_lint_stale_check_ignores_retention_policy_for_contradicted_permanent_entries() {
+    let server = make_server();
+    let old_ts = (Utc::now() - chrono::Duration::days(120)).to_rfc3339();
+    server
+        .with_global_store(|store| {
+            let mut permanent_contradicted = make_entry("wiki-semantic-stale-permanent");
+            permanent_contradicted.path = "/wiki/test/semantic-stale/permanent".to_string();
+            permanent_contradicted.text =
+                "Permanent policy note that a newer entry contradicts.".to_string();
+            permanent_contradicted.timestamp = old_ts.clone();
+            permanent_contradicted.retention_policy = Some("permanent".to_string());
+            store
+                .upsert(&permanent_contradicted)
+                .map_err(|e| e.to_string())?;
+
+            let mut newer_contradictor = make_entry("wiki-semantic-stale-newer");
+            newer_contradictor.path = "/wiki/test/semantic-stale/newer".to_string();
+            newer_contradictor.text =
+                "Newer entry that contradicts the permanent policy note.".to_string();
+            store
+                .upsert(&newer_contradictor)
+                .map_err(|e| e.to_string())?;
+
+            // RED-safety control: a permanent entry with NO contradicts/
+            // supersedes edge must stay exempt from the retention-age check
+            // (unchanged pre-#1072 behavior) — proves this fix does not
+            // simply delete the permanent/pinned exemption outright.
+            let mut permanent_untouched = make_entry("wiki-semantic-stale-untouched");
+            permanent_untouched.path = "/wiki/test/semantic-stale/untouched".to_string();
+            permanent_untouched.text = "Permanent policy note nothing contradicts.".to_string();
+            permanent_untouched.timestamp = old_ts.clone();
+            permanent_untouched.retention_policy = Some("permanent".to_string());
+            store
+                .upsert(&permanent_untouched)
+                .map_err(|e| e.to_string())?;
+
+            let edge = memcore::MemoryEdge {
+                source_id: "wiki-semantic-stale-newer".to_string(),
+                target_id: "wiki-semantic-stale-permanent".to_string(),
+                relation: "contradicts".to_string(),
+                weight: 0.9,
+                metadata: json!({"source": "test"}),
+                created_at: Utc::now().to_rfc3339(),
+                valid_from: String::new(),
+                valid_to: None,
+            };
+            store.add_edge(&edge).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed semantic staleness fixtures");
+
+    let response = server
+        .wiki_lint(Parameters(WikiLintParams {
+            path_prefix: Some("/wiki/test/semantic-stale".to_string()),
+            checks: vec!["stale".to_string()],
+            limit: 50,
+            stale_days: 90,
+            missing_edge_threshold: 0.6,
+            contradiction_threshold: 0.6,
+            include_skill_quality: false,
+            persist_stale: false,
+        }))
+        .await
+        .expect("wiki_lint should succeed");
+    let parsed: Value = serde_json::from_str(&response).expect("wiki_lint json");
+    let stale_rows = parsed["stale_nodes"].as_array().expect("stale_nodes array");
+    let stale = stale_rows
+        .iter()
+        .find(|row| row["id"] == json!("wiki-semantic-stale-permanent"))
+        .expect("RED: contradicted permanent entry must be flagged stale despite retention_policy=permanent");
+    assert_eq!(
+        stale["reason"],
+        json!("semantic_stale_contradicted_or_superseded")
+    );
+    assert!(
+        !stale_rows
+            .iter()
+            .any(|row| row["id"] == json!("wiki-semantic-stale-untouched")),
+        "an untouched permanent entry must stay exempt from the stale check: {stale_rows:?}"
+    );
+}
+
+/// #1072 fix-round (cross-vendor review, #1215): "Discrimination: provide
+/// unchanged-behavior RED-on-main proof for the retrieval-exclusion
+/// property (a stale/unreviewed entry is excluded from truthful retrieval)
+/// — not just 'lint output exists'." The pre-fix `wiki_lint` "stale" check
+/// only ever appended a diagnostic row (`stale_nodes`); the entry's
+/// persisted `metadata.lifecycle` never changed, so it stayed `active` and
+/// fully retrievable through the exact same gate (`derive_wiki_lifecycle` /
+/// `apply_wiki_lifecycle_gate`) this leaf's own truthful-retrieval fix
+/// relies on. This test proves the causal chain end to end: RED (before
+/// `persist_stale`) the contradicted entry is still default-retrievable;
+/// GREEN (after `persist_stale=true`) it is not — using the exact predicate
+/// (`derive_wiki_lifecycle(..).is_default_retrievable()`) and the exact
+/// search entry point (`tachi_wiki_search`) truthful retrieval depends on,
+/// not a bespoke assertion.
+#[tokio::test]
+async fn wiki_lint_persist_stale_makes_contradicted_entry_retrieval_excluded() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut contradicted = make_entry("wiki-persist-stale-target");
+            contradicted.path = "/wiki/test/persist-stale/target".to_string();
+            contradicted.summary = "SemanticStalePersistNeedle target entry".to_string();
+            contradicted.text =
+                "SemanticStalePersistNeedle documents policy a newer entry contradicts."
+                    .to_string();
+            store.upsert(&contradicted).map_err(|e| e.to_string())?;
+
+            let mut newer = make_entry("wiki-persist-stale-newer");
+            newer.path = "/wiki/test/persist-stale/newer".to_string();
+            newer.text = "Newer entry that contradicts the persist-stale target.".to_string();
+            store.upsert(&newer).map_err(|e| e.to_string())?;
+
+            let edge = memcore::MemoryEdge {
+                source_id: "wiki-persist-stale-newer".to_string(),
+                target_id: "wiki-persist-stale-target".to_string(),
+                relation: "contradicts".to_string(),
+                weight: 0.9,
+                metadata: json!({"source": "test"}),
+                created_at: Utc::now().to_rfc3339(),
+                valid_from: String::new(),
+                valid_to: None,
+            };
+            store.add_edge(&edge).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed persist-stale fixtures");
+
+    async fn target_lifecycle_retrievable(server: &MemoryServer) -> bool {
+        let fetched = server
+            .get_memory(Parameters(GetMemoryParams {
+                id: "wiki-persist-stale-target".to_string(),
+                include_archived: false,
+                project: None,
+            }))
+            .await
+            .expect("get_memory should succeed");
+        let entry: Value = serde_json::from_str(&fetched).expect("entry json");
+        let metadata = entry.get("metadata").cloned().unwrap_or_else(|| json!({}));
+        let path = entry
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        crate::tool_params::derive_wiki_lifecycle(&metadata, &path).is_default_retrievable()
+    }
+
+    // RED: before any persist_stale lint run, the contradicted entry is
+    // still `active` (unchanged pre-#1072-fix-round behavior) and therefore
+    // default-retrievable — this is the exact bug the review flagged.
+    assert!(
+        target_lifecycle_retrievable(&server).await,
+        "RED baseline: contradicted entry must start default-retrievable (unchanged behavior)"
+    );
+
+    let lint_response = server
+        .wiki_lint(Parameters(WikiLintParams {
+            path_prefix: Some("/wiki/test/persist-stale".to_string()),
+            checks: vec!["stale".to_string()],
+            limit: 50,
+            stale_days: 90,
+            missing_edge_threshold: 0.6,
+            contradiction_threshold: 0.6,
+            include_skill_quality: false,
+            persist_stale: true,
+        }))
+        .await
+        .expect("wiki_lint with persist_stale should succeed");
+    let lint_parsed: Value = serde_json::from_str(&lint_response).expect("wiki_lint json");
+    assert_eq!(lint_parsed["stale_persisted"], json!(true));
+    assert_eq!(
+        lint_parsed["stale_persist_errors"].as_array().map(Vec::len),
+        Some(0)
+    );
+    let stale_rows = lint_parsed["stale_nodes"]
+        .as_array()
+        .expect("stale_nodes array");
+    assert!(stale_rows
+        .iter()
+        .any(|row| row["id"] == json!("wiki-persist-stale-target")));
+
+    // GREEN: after the persist_stale write-back, the SAME predicate the
+    // retrieval gate calls now excludes the entry.
+    assert!(
+        !target_lifecycle_retrievable(&server).await,
+        "GREEN: persisted semantic-stale entry must no longer be default-retrievable"
+    );
+
+    // End-to-end proof through the real MCP search entry point: the entry
+    // must have been default-retrievable by exact-needle search before the
+    // lint run and excluded after it.
+    let search_params = WikiSearchParams {
+        query: "SemanticStalePersistNeedle".to_string(),
+        path_prefix: Some("/wiki/test/persist-stale".to_string()),
+        category: None,
+        top_k: 10,
+        include_archived: false,
+        agent_role: None,
+        project: None,
+        domain: None,
+        file_context: None,
+        error_context: None,
+        weights: None,
+        lifecycle: None,
+    };
+    let search_markdown = server
+        .tachi_wiki_search(Parameters(search_params))
+        .await
+        .expect("post-persist search should succeed");
+    assert!(
+        !search_markdown.contains("/wiki/test/persist-stale/target"),
+        "GREEN: default-scope search must exclude the now-stale entry: {search_markdown}"
+    );
 }

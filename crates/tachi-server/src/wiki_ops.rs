@@ -2,8 +2,9 @@ use crate::memory_search_ops::search_memory_rows;
 use crate::network_safety::is_private_or_local_ip;
 use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::{
-    HybridWeightsParam, SearchMemoryParams, TachiWikiIngestParams, WikiBrowseParams,
-    WikiLintParams, WikiSearchParams,
+    derive_wiki_authority, derive_wiki_lifecycle, derive_wiki_review_receipt, HybridWeightsParam,
+    SearchMemoryParams, TachiWikiIngestParams, WikiArtifactKindV1, WikiAuthorityV1,
+    WikiBrowseParams, WikiLifecycleV1, WikiLintParams, WikiSearchParams,
 };
 use crate::utils::sanitize_safe_path_name;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -27,6 +28,7 @@ mod export;
 mod ingest;
 mod lint;
 mod log;
+mod provenance;
 mod references;
 mod search;
 mod similarity;
@@ -36,6 +38,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 
+use self::provenance::{preferred_wiki_references, wiki_entry_matches_lifecycle_scope};
 use self::similarity::{
     contradiction_score, parse_rfc3339_utc, relation_exists, token_cosine_similarity,
 };
@@ -47,6 +50,7 @@ pub(crate) use self::export::export_wiki_obsidian;
 pub(crate) use self::ingest::handle_wiki_ingest;
 pub(crate) use self::lint::{handle_wiki_lint, wiki_hygiene_counts};
 pub(crate) use self::log::append_wiki_log;
+pub(crate) use self::provenance::apply_wiki_lifecycle_gate;
 pub(crate) use self::references::validate_references;
 pub(crate) use self::search::{
     collect_wiki_browse_value, collect_wiki_read_value, collect_wiki_search_value,

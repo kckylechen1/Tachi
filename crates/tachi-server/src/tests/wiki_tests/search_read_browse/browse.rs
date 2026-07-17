@@ -23,6 +23,7 @@ async fn wiki_browse_includes_related_entries_and_logs_operation() {
             category: Some("engineering/debugging".to_string()),
             limit: 10,
             project: "wiki".to_string(),
+            lifecycle: None,
         }))
         .await
         .expect("wiki browse should succeed");
@@ -64,6 +65,7 @@ async fn wiki_browse_hides_recall_cache_entries() {
             category: Some("engineering/debugging".to_string()),
             limit: 10,
             project: "wiki".to_string(),
+            lifecycle: None,
         }))
         .await
         .expect("wiki browse should succeed");
@@ -94,6 +96,7 @@ async fn wiki_browse_large_limit_keeps_related_entries_empty() {
             category: Some("engineering/scale".to_string()),
             limit: 21,
             project: "wiki".to_string(),
+            lifecycle: None,
         }))
         .await
         .expect("wiki browse should succeed");
@@ -104,5 +107,49 @@ async fn wiki_browse_large_limit_keeps_related_entries_empty() {
     assert!(
         response.contains("/wiki/engineering/scale/beta"),
         "browse markdown should contain beta path"
+    );
+}
+
+/// #1072 RED case 1: "Live browse currently reports a partial hard-coded
+/// count while the real DB contains more path families; fixture with an
+/// unlisted prefix must appear in facets/counts."
+#[tokio::test]
+async fn wiki_browse_stats_derive_facets_from_real_paths_including_unlisted_prefix() {
+    let mut known = make_entry("wiki-facet-known");
+    known.path = "/wiki/engineering/architecture/known-entry".to_string();
+    known.summary = "Known category entry".to_string();
+    known.text = "Known category entry body.".to_string();
+
+    let mut unlisted = make_entry("wiki-facet-unlisted");
+    unlisted.path = "/wiki/newteam-prefix/unlisted-entry".to_string();
+    unlisted.summary = "Unlisted-prefix category entry".to_string();
+    unlisted.text = "Unlisted-prefix category entry body.".to_string();
+
+    let (server, _home) = seed_wiki_project_entries(vec![known, unlisted]);
+
+    let stats = crate::wiki_ops::collect_wiki_browse_value(
+        &server,
+        WikiBrowseParams {
+            category: None,
+            limit: 50,
+            project: "wiki".to_string(),
+            lifecycle: None,
+        },
+    )
+    .expect("browse stats should succeed");
+    assert_eq!(stats["kind"], json!("stats"));
+    let categories = stats["categories"]
+        .as_array()
+        .expect("categories array")
+        .iter()
+        .map(|row| row["path"].as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        categories.contains(&"/wiki/engineering/architecture".to_string()),
+        "RED-safety: known category must still be derived: {categories:?}"
+    );
+    assert!(
+        categories.contains(&"/wiki/newteam-prefix".to_string()),
+        "RED: unlisted prefix must appear in derived facets/counts: {categories:?}"
     );
 }

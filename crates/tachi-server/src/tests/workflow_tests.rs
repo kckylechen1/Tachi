@@ -80,7 +80,16 @@ async fn workflow_close_loop_writes_wiki_with_references() {
     assert_eq!(entry["metadata"]["layer"], json!("wiki"));
     assert_eq!(entry["metadata"]["scope"], json!("global"));
     assert_eq!(entry["metadata"]["authority"], json!("advisory"));
-    assert_eq!(entry["metadata"]["status"], json!("active"));
+    // #1072 fix-round (#1215 BUG 1): this used to assert "active" — but
+    // close_loop's wiki write is agent/workflow-authored output with no
+    // review_receipt, exactly the case the cross-vendor review flagged
+    // ("Active ⇒ validated sources + approval" must hold; a non-draft path
+    // must not earn active merely for being outside /wiki/drafts/). It now
+    // correctly lands pending_review like every other unreviewed write —
+    // this was one of the frozen assertions the review named as encoding
+    // the unsafe state.
+    assert_eq!(entry["metadata"]["status"], json!("pending_review"));
+    assert_eq!(entry["metadata"]["lifecycle"], json!("pending_review"));
     assert_eq!(
         entry["metadata"]["source_ref"],
         json!("kckylechen1/tachi#150")

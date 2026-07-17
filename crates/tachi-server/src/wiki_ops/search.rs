@@ -47,26 +47,6 @@ fn resolve_wiki_category(category: &str) -> String {
     }
 }
 
-/// All known wiki top-level categories for browse stats.
-const WIKI_CATEGORIES: &[&str] = &[
-    "/wiki/quant/strategy",
-    "/wiki/quant/stock-analysis",
-    "/wiki/quant/portfolio",
-    "/wiki/quant/market-analysis",
-    "/wiki/quant/data-pipeline",
-    "/wiki/quant/autoresearch",
-    "/wiki/engineering/architecture",
-    "/wiki/engineering/devops",
-    "/wiki/engineering/debugging",
-    "/wiki/engineering/code-review",
-    "/wiki/agent/tachi",
-    "/wiki/agent/openclaw",
-    "/wiki/agent/evolution",
-    "/wiki/product/hyperion",
-    "/wiki/product/crimson-alphard",
-    "/wiki/misc",
-];
-
 pub(crate) async fn handle_wiki_search(
     server: &MemoryServer,
     params: WikiSearchParams,
@@ -144,6 +124,12 @@ pub(crate) async fn collect_wiki_search_value(
     filter_user_facing_wiki_rows(&mut rows);
     let unfiltered_count = rows.len();
     rows.retain(wiki_row_has_direct_match_signal);
+    apply_wiki_lifecycle_gate(
+        server,
+        params.project.as_deref(),
+        &mut rows,
+        params.lifecycle.as_deref(),
+    )?;
 
     append_wiki_log(
         server,
@@ -218,33 +204,45 @@ pub(crate) fn handle_wiki_browse(
     ))
 }
 
+/// #1072 RED case 1 fix: derives a wiki entry's browse-facet "category" from
+/// its actual stored path (the parent directory) instead of matching it
+/// against a hard-coded category list. A fixture under an unlisted prefix
+/// (e.g. `/wiki/newteam/entry`) now produces its own `/wiki/newteam` facet
+/// instead of being silently dropped from `browse` stats.
+fn wiki_entry_category_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rsplit_once('/') {
+        Some((parent, _leaf)) if !parent.is_empty() => parent.to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
 pub(crate) fn collect_wiki_browse_value(
     server: &MemoryServer,
     params: WikiBrowseParams,
 ) -> Result<Value, String> {
     let project_name = params.project;
+    let requested_lifecycle = params.lifecycle.as_deref();
 
     match params.category.as_deref() {
         None | Some("") => {
-            let mut categories = Vec::new();
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
             let mut total = 0usize;
             let all_entries =
                 list_related_candidates(server, &project_name, 5000).unwrap_or_default();
 
-            for &cat_path in WIKI_CATEGORIES {
-                let cat_prefix = format!("{cat_path}/");
-                let count = all_entries
-                    .iter()
-                    .filter(|entry| entry.path == cat_path || entry.path.starts_with(&cat_prefix))
-                    .count();
-                if count > 0 {
-                    categories.push(json!({
-                        "path": cat_path,
-                        "count": count,
-                    }));
-                    total += count;
+            for entry in &all_entries {
+                if !wiki_entry_matches_lifecycle_scope(entry, requested_lifecycle)? {
+                    continue;
                 }
+                let category = wiki_entry_category_path(&entry.path);
+                *counts.entry(category).or_insert(0) += 1;
+                total += 1;
             }
+            let categories: Vec<Value> = counts
+                .into_iter()
+                .map(|(path, count)| json!({ "path": path, "count": count }))
+                .collect();
 
             append_wiki_log(
                 server,
@@ -266,20 +264,40 @@ pub(crate) fn collect_wiki_browse_value(
 
             let (entries, _) = list_wiki_entries(server, &project_name, 5000)?;
             let resolved_prefix = format!("{resolved_path}/");
-            let slim_entries: Vec<Value> = entries
-                .into_iter()
-                .filter(|entry| {
-                    entry.path == resolved_path || entry.path.starts_with(&resolved_prefix)
-                })
-                .take(limit)
-                .map(|entry| {
-                    json!({
-                        "path": entry.path,
-                        "summary": entry.summary,
-                        "importance": entry.importance,
-                    })
-                })
-                .collect();
+            let mut slim_entries: Vec<Value> = Vec::new();
+            for entry in entries {
+                if !(entry.path == resolved_path || entry.path.starts_with(&resolved_prefix)) {
+                    continue;
+                }
+                if !wiki_entry_matches_lifecycle_scope(&entry, requested_lifecycle)? {
+                    continue;
+                }
+                if slim_entries.len() >= limit {
+                    break;
+                }
+                let lifecycle = derive_wiki_lifecycle(&entry.metadata, &entry.path);
+                let authority = derive_wiki_authority(&entry.metadata);
+                // #1072 fix-round (#1215 BUG 6): browse-category provenance
+                // was overclaimed — the PR description said read/search
+                // "expose ... revision, source refs, ... review receipt" but
+                // this branch (unlike `collect_wiki_search_value`'s
+                // `attach_wiki_provenance`) dropped id/revision/references/
+                // review_receipt entirely. Bring it to parity.
+                let review_receipt = derive_wiki_review_receipt(&entry.metadata)
+                    .and_then(|receipt| serde_json::to_value(receipt).ok())
+                    .unwrap_or(Value::Null);
+                slim_entries.push(json!({
+                    "id": entry.id,
+                    "path": entry.path,
+                    "summary": entry.summary,
+                    "importance": entry.importance,
+                    "revision": entry.revision,
+                    "lifecycle": lifecycle.as_str(),
+                    "authority": authority.as_str(),
+                    "references": preferred_wiki_references(&entry.metadata),
+                    "review_receipt": review_receipt,
+                }));
+            }
 
             append_wiki_log(
                 server,
@@ -385,11 +403,23 @@ pub(crate) fn collect_wiki_read_value(
     match entry {
         Some(entry) => {
             append_wiki_log(server, "read", &resolved);
+            // #1072 RED case 3: expose id/revision/authority/lifecycle/
+            // source refs/typed evidence refs/review receipt on read, not
+            // just search — a direct read of a `pending_review` path must
+            // still show the caller it is not reviewed truth, even though
+            // reading by an exact known path (unlike default search) is not
+            // itself gated.
+            let lifecycle = derive_wiki_lifecycle(&entry.metadata, &entry.path);
+            let authority = derive_wiki_authority(&entry.metadata);
+            let review_receipt = derive_wiki_review_receipt(&entry.metadata)
+                .and_then(|receipt| serde_json::to_value(receipt).ok())
+                .unwrap_or(Value::Null);
             Ok(json!({
                 "status": "found",
                 "project": project,
                 "path": resolved,
                 "entry": {
+                    "id": entry.id,
                     "path": entry.path,
                     "text": entry.text,
                     "summary": entry.summary,
@@ -398,6 +428,13 @@ pub(crate) fn collect_wiki_read_value(
                     "entities": entry.entities,
                     "topic": entry.topic,
                     "timestamp": entry.timestamp,
+                    "revision": entry.revision,
+                    "authority": authority.as_str(),
+                    "lifecycle": lifecycle.as_str(),
+                    "source_refs": entry.metadata.get("source_refs").cloned().unwrap_or_else(|| json!([])),
+                    "evidence_refs_v1": entry.metadata.get("evidence_refs_v1").cloned().unwrap_or_else(|| json!([])),
+                    "references": preferred_wiki_references(&entry.metadata),
+                    "review_receipt": review_receipt,
                 }
             }))
         }

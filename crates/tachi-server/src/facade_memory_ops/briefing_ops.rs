@@ -231,6 +231,20 @@ pub(crate) async fn handle_memory_briefing(
     let wiki = if include_wiki {
         let mut rows = wiki_result?;
         crate::wiki_ops::filter_user_facing_wiki_rows(&mut rows);
+        // #1072 fix-round (#1215 BUG 4): `tachi_memory(briefing)` used to
+        // serve raw `/wiki` search rows — including unreviewed
+        // `pending_review` drafts — straight into the briefing response with
+        // no lifecycle filtering, another reasoning-context bypass the
+        // cross-vendor review named explicitly. Briefing has no explicit
+        // lifecycle-scope param and should not grow one (it is a read
+        // surface, not an authoring one) — always gate to the default
+        // (active-only) scope.
+        crate::wiki_ops::apply_wiki_lifecycle_gate(
+            server,
+            params.project.as_deref(),
+            &mut rows,
+            None,
+        )?;
         let wiki_rows = Value::Array(rows);
         slim_memory_rows(if compact {
             apply_compact_relevance_floor(wiki_rows)

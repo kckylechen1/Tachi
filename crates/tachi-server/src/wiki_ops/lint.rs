@@ -31,6 +31,9 @@ pub(crate) async fn wiki_hygiene_counts(
             missing_edge_threshold: 0.72,
             contradiction_threshold: 0.75,
             include_skill_quality: false,
+            // Hot path (every briefing/alerts call) — never a surprise
+            // writer. See `WikiLintParams::persist_stale` doc.
+            persist_stale: false,
         },
     )
     .await?;
@@ -123,6 +126,7 @@ pub(crate) async fn handle_wiki_lint(
                         "path": entry.path,
                         "timestamp": entry.timestamp,
                         "db": scope.as_str(),
+                        "reason": "retention_age",
                     }));
                 }
             }
@@ -139,6 +143,96 @@ pub(crate) async fn handle_wiki_lint(
                 "issue": "think_tag_leak",
                 "db": scope.as_str(),
             }));
+        }
+    }
+
+    // #1072 RED case 4: "permanent/pinned does not exempt [content] from
+    // semantic staleness" — canon doc §7. This pass is deliberately
+    // independent of `retention_policy` (unlike the retention-age pass
+    // above, which explicitly exempts permanent/pinned): any node targeted
+    // by a `contradicts` or `supersedes` edge from another node is flagged
+    // regardless of retention policy. `all_edges` is fully populated by now
+    // (accumulated across every node's "both"-direction query above).
+    //
+    // Scoping note (documented, not hidden — see `knowledge_artifact`
+    // module doc): this covers the "supersedes/contradicts edges" trigger
+    // from canon doc §7's required-behavior list. Full external trusted-doc
+    // blob-SHA drift detection ("source revision drift, trusted-ref
+    // changes") is a separate leaf's worth of work (needs #1002's
+    // `CanonicalDocRefV1` resolver wired into wiki writes).
+    let mut semantic_stale_to_persist: Vec<(MemoryEntry, DbScope)> = Vec::new();
+    if checks.iter().any(|check| check == "stale") {
+        let already_stale: HashSet<String> = stale_nodes
+            .iter()
+            .filter_map(|node| node.get("id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        for (entry, scope) in &nodes {
+            if already_stale.contains(entry.id.as_str()) {
+                continue;
+            }
+            let contradicted_or_superseded = all_edges.iter().any(|edge| {
+                edge.target_id == entry.id
+                    && matches!(edge.relation.as_str(), "contradicts" | "supersedes")
+            });
+            if contradicted_or_superseded {
+                stale_nodes.push(json!({
+                    "id": entry.id,
+                    "path": entry.path,
+                    "timestamp": entry.timestamp,
+                    "db": scope.as_str(),
+                    "reason": "semantic_stale_contradicted_or_superseded",
+                }));
+                // #1072 fix-round (#1215 BUG 6): "lint appends a diagnostic
+                // row only; persisted lifecycle stays active and
+                // retrievable." Canon doc §7's required behavior is
+                // retrieval EXCLUSION, not just a report. Queue this node
+                // for a real `metadata.lifecycle = "stale"` write-back — see
+                // `WikiLintParams::persist_stale` doc for why this is
+                // opt-in, and only when the entry isn't already gated
+                // (`pending_review`/etc — downgrading FROM active TO stale
+                // is this pass's job; it must not clobber a stronger
+                // existing gate like `rejected`).
+                if params.persist_stale
+                    && derive_wiki_lifecycle(&entry.metadata, &entry.path)
+                        == WikiLifecycleV1::Active
+                {
+                    semantic_stale_to_persist.push((entry.clone(), *scope));
+                }
+            }
+        }
+    }
+    let mut stale_persist_errors: Vec<String> = Vec::new();
+    for (mut entry, scope) in semantic_stale_to_persist {
+        let Some(obj) = entry.metadata.as_object_mut() else {
+            continue;
+        };
+        obj.insert(
+            "lifecycle".to_string(),
+            json!(WikiLifecycleV1::Stale.as_str()),
+        );
+        obj.insert(
+            "stale_reason".to_string(),
+            json!("semantic_stale_contradicted_or_superseded"),
+        );
+        let write_result = match scope {
+            DbScope::Global => server.with_global_store(|store| {
+                store
+                    .upsert(&entry)
+                    .map_err(|e| format!("wiki_lint stale persist (global): {e}"))
+            }),
+            DbScope::Project => server.with_project_store(|store| {
+                store
+                    .upsert(&entry)
+                    .map_err(|e| format!("wiki_lint stale persist (project): {e}"))
+            }),
+        };
+        if let Err(err) = write_result {
+            tracing::warn!(
+                "wiki_lint persist_stale write failed for {}: {err}",
+                entry.id
+            );
+            stale_persist_errors.push(err);
         }
     }
 
@@ -220,6 +314,8 @@ pub(crate) async fn handle_wiki_lint(
         "dirty_data": dirty_data,
         "duplicates": duplicates,
         "skill_quality": skill_quality,
+        "stale_persisted": params.persist_stale,
+        "stale_persist_errors": stale_persist_errors,
     }))
     .map_err(|e| format!("serialize wiki_lint: {e}"))
 }

@@ -245,7 +245,29 @@ pub(crate) async fn collect_tachi_search_sections(
             include_metadata: false,
         };
         match search_memory_rows_with_access(server, wiki_params, false, true).await {
-            Ok(rows) => sections.push(("Wiki".to_string(), Value::Array(rows))),
+            Ok(mut rows) => {
+                // #1072 fix-round (#1215 BUG 4): this "Wiki" section feeds
+                // BOTH `tachi_search` and `tachi_memory(action='ask')`'s LLM
+                // synthesis (`handle_memory_ask` -> `collect_tachi_search_sections`)
+                // — the generic-search bypass the cross-vendor review named
+                // explicitly ("generic search... bypass the new gate").
+                // Serving an unreviewed draft here means `ask` can answer a
+                // question by citing unreviewed model output as truth. Gate
+                // to the default (active-only) scope; a lookup failure drops
+                // the wiki section rather than serving it unfiltered.
+                match crate::wiki_ops::apply_wiki_lifecycle_gate(
+                    server,
+                    params.project.as_deref(),
+                    &mut rows,
+                    None,
+                ) {
+                    Ok(()) => sections.push(("Wiki".to_string(), Value::Array(rows))),
+                    Err(e) => sections.push((
+                        "Wiki".to_string(),
+                        Value::String(format!("Error: wiki lifecycle gate failed: {e}")),
+                    )),
+                }
+            }
             Err(e) => sections.push(("Wiki".to_string(), Value::String(format!("Error: {e}")))),
         }
     }
