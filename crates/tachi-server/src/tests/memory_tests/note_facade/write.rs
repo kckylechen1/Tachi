@@ -105,8 +105,7 @@ async fn tachi_save_note_leading_slash_normalizes_to_same_path_as_relative() {
         }))
         .await
         .expect("leading-slash note path should be accepted");
-    let with_slash_json: serde_json::Value =
-        serde_json::from_str(&with_slash).expect("save JSON");
+    let with_slash_json: serde_json::Value = serde_json::from_str(&with_slash).expect("save JSON");
     let with_slash_path = with_slash_json["note_path"]
         .as_str()
         .expect("note_path")
