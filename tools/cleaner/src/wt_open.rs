@@ -396,9 +396,41 @@ pub fn open_worktree(options: OpenOptions) -> Result<OpenReport, String> {
         }
         Ok(None) => {}
         Err(err) => {
-            report.warnings.push(format!(
-                "could not consult the scrap ledger for same-path re-entry ({err}); proceeding without that check"
+            // Fail-closed (tachi#1212 fix-round, codex checkpoint 4): a
+            // ledger we cannot consult is inconclusive, not evidence of "no
+            // scrap on record" — proceeding here is exactly the fail-open
+            // the cross-vendor review flagged on this safety boundary.
+            report.errors.push(format!(
+                "refusing to open: could not consult the scrap ledger for same-path re-entry ({err}); fail-closed rather than open on inconclusive evidence (tachi#1118)"
             ));
+            return Ok(report);
+        }
+    }
+
+    // Same-BRANCH re-entry gate, the other half of "NEW branch + NEW path"
+    // (tachi#1212 fix-round, codex checkpoint 1): the path-only check above
+    // stops the same path from reopening under a different branch, but on
+    // its own it still let an OLD branch name reopen at a brand-new path
+    // (scrap branch_A@/path1, then open branch_A@/path2 sailed through).
+    // Either half reused alone is a re-entry route for a surviving writer
+    // that cached a reference by path OR by branch name, so both must be
+    // new.
+    match crate::scrap_ledger::find_scrap_by_branch(&branch) {
+        Ok(Some(scrap)) => {
+            report.errors.push(format!(
+                "refusing to reopen scrapped branch '{}' (previously scrapped at path {} on {}); a scrapped tree must reopen under a NEW branch + NEW path, never a branch name a surviving writer might still reference (tachi#1118)",
+                branch,
+                scrap.path,
+                scrap.scrapped_at,
+            ));
+            return Ok(report);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            report.errors.push(format!(
+                "refusing to open: could not consult the scrap ledger for same-branch re-entry ({err}); fail-closed rather than open on inconclusive evidence (tachi#1118)"
+            ));
+            return Ok(report);
         }
     }
 

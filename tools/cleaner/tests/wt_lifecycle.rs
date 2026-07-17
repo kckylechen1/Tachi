@@ -417,6 +417,116 @@ fn reopen_refuses_the_exact_path_of_a_scrapped_worktree() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// tachi#1118 freeze boundary 3 discrimination, second half (tachi#1212
+/// fix-round, codex checkpoint 1): a scrapped BRANCH reused at a brand-new
+/// path must also be refused, not just the same path reused under a new
+/// branch. RED on the pre-fix code: `open_worktree` only consulted the
+/// scrap ledger by path, so `open_worktree(scrapped_branch, new_path)`
+/// sailed through. GREEN post-fix: the branch-keyed ledger lookup refuses
+/// it.
+#[test]
+fn reopen_refuses_an_old_branch_name_reused_at_a_new_path() {
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let root = unique_temp("wt-lifecycle-branch-reentry");
+    let home = root.join("home");
+    let cache = root.join("cache-worktrees");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let _env = set_env(&home, &cache);
+
+    let scrapped_branch = "tachi/branch-reentry/scrapped";
+
+    let first_open = wt_open::open_worktree(OpenOptions {
+        repo_root: repo.clone(),
+        path: None,
+        branch: Some(scrapped_branch.into()),
+        base: Some("HEAD".into()),
+        task: Some("branch-reentry".into()),
+        role: Some("worker".into()),
+        dispatch_id: None,
+        name: Some("branch-reentry-first-leaf".into()),
+        cargo_target: CargoTargetPolicy::Shared,
+        dry_run: false,
+        output: OutputFormat::Json,
+    })
+    .unwrap();
+    assert!(first_open.opened, "setup: first open should succeed");
+    let first_path = PathBuf::from(&first_open.path);
+
+    wt_clean::run_wt_remove(WtRemoveOptions {
+        path: first_path.clone(),
+        force: true,
+        output: OutputFormat::Json,
+    })
+    .expect("setup: scrapping the clean worktree should succeed");
+
+    // Reopening the SAME branch at a DIFFERENT (brand-new) path must be
+    // refused: the freeze contract requires NEW branch AND NEW path, not
+    // either alone.
+    let reentry = wt_open::open_worktree(OpenOptions {
+        repo_root: repo.clone(),
+        path: None,
+        branch: Some(scrapped_branch.into()),
+        base: Some("HEAD".into()),
+        task: Some("branch-reentry".into()),
+        role: Some("worker".into()),
+        dispatch_id: None,
+        name: Some("branch-reentry-second-leaf".into()),
+        cargo_target: CargoTargetPolicy::Shared,
+        dry_run: false,
+        output: OutputFormat::Json,
+    })
+    .unwrap();
+
+    assert!(
+        !reentry.opened,
+        "reopening a scrapped branch at a new path must still be refused"
+    );
+    assert!(
+        reentry.errors.iter().any(|e| e.contains("scrapped branch")),
+        "expected a same-branch re-entry refusal, got: {:?}",
+        reentry.errors
+    );
+    let reentry_path = PathBuf::from(&reentry.path);
+    assert!(
+        !reentry_path.exists(),
+        "a refused branch re-entry must not leave anything on disk"
+    );
+
+    // A genuinely NEW branch name at a genuinely new path must still
+    // succeed (the gate is branch-specific, not a blanket lockout on the
+    // repo).
+    let fresh = wt_open::open_worktree(OpenOptions {
+        repo_root: repo.clone(),
+        path: None,
+        branch: Some("tachi/branch-reentry/fresh".into()),
+        base: Some("HEAD".into()),
+        task: Some("branch-reentry".into()),
+        role: Some("worker".into()),
+        dispatch_id: None,
+        name: Some("branch-reentry-fresh-leaf".into()),
+        cargo_target: CargoTargetPolicy::Shared,
+        dry_run: false,
+        output: OutputFormat::Json,
+    })
+    .unwrap();
+    assert!(
+        fresh.opened,
+        "a brand-new branch name must not be blocked by an unrelated scrap record: {:?}",
+        fresh.errors
+    );
+
+    let _ = wt_clean::run_wt_remove(WtRemoveOptions {
+        path: PathBuf::from(&fresh.path),
+        force: true,
+        output: OutputFormat::Json,
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// CP1/CP2 discrimination: sweep --force must NEVER remove a worktree with
 /// uncommitted changes, even once it's old enough / marked enough to be a
 /// sweep candidate. RED on the pre-fix sweep code (which only gated on
