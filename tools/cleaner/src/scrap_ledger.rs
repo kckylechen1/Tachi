@@ -257,7 +257,6 @@ mod tests {
         .unwrap();
 
         let ledger = root.join(".tachi").join("worktrees_scrapped.jsonl");
-        use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(&ledger)
