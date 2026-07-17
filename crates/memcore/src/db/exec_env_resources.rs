@@ -1216,7 +1216,7 @@ mod tests {
         )
         .unwrap();
         bind_resource(&mut conn, "env-bound", "res-released").unwrap();
-        release_binding(&mut conn, "env-bound", "res-released").unwrap();
+        release_binding(&conn, "env-bound", "res-released").unwrap();
 
         // Tracked and `active`, but nobody ever bound it — the population
         // `cheap_verdict`'s re-enterable `Orphan` path exists to sweep up.
