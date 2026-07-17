@@ -192,10 +192,10 @@ mod tests {
     }
 
     fn open_conn() -> rusqlite::Connection {
-        memcore::enable_simple_auto_extension().unwrap();
-        memcore::register_sqlite_vec();
+        memcore::db::enable_simple_auto_extension().unwrap();
+        memcore::db::register_sqlite_vec();
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        memcore::init_schema(&conn).unwrap();
+        memcore::db::init_schema(&conn).unwrap();
         conn
     }
 
