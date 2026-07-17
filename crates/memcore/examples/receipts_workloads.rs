@@ -52,8 +52,8 @@
 //!
 //! `main` runs W1-W4 (4 JSONL objects) AND, unconditionally after them, the
 //! #1142 symbolic-scan grid below (72 per-cell JSONL objects + 1 kill-test
-//! summary line = 73 more) — **73 records total**, not four; there is no
-//! separate invocation or flag that runs W1-W4 alone. `--release` is
+//! summary line = 73 more) — **77 JSONL records total**, not four; there is
+//! no separate invocation or flag that runs W1-W4 alone. `--release` is
 //! mandatory for both: the grid's own corpora reach 63k rows and W1-W4's own
 //! module doc already names the S2 debug/release incident (7x skew on
 //! Rust-heavy phases) as the reason no timing conclusion from this binary is
