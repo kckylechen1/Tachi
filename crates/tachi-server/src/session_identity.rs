@@ -16,10 +16,25 @@ use rmcp::model::JsonObject;
 pub(crate) const HEADER_PROFILE: &str = "x-tachi-profile";
 pub(crate) const HEADER_CLIENT: &str = "x-tachi-client";
 pub(crate) const HEADER_PROJECT: &str = "x-tachi-project";
+/// #1120 PR1: same shape as `HEADER_PROJECT`, but carries a filesystem path
+/// (a git repo root, or any path beneath one) instead of an already-registered
+/// project name. Lets a raw HTTP direct-connect client that only knows its own
+/// cwd — not a pre-registered Tachi project name — declare it at session init;
+/// the daemon derives the git root + project identity and auto-registers the
+/// project DB on first contact instead of requiring a prior explicit
+/// `tachi_init_project_db` call. See
+/// `MemoryServer::resolve_or_register_workspace_root` for the resolution law
+/// (evaluated against the DAEMON's own filesystem — only meaningful when
+/// client and daemon share one, e.g. today's stdio-proxy -> localhost-daemon
+/// topology).
+pub(crate) const HEADER_WORKSPACE_ROOT: &str = "x-tachi-workspace-root";
 
 pub(crate) const META_PROFILE: &str = "tachiProfile";
 pub(crate) const META_CLIENT: &str = "tachiClient";
 pub(crate) const META_PROJECT: &str = "tachiProject";
+/// `_meta` twin of [`HEADER_WORKSPACE_ROOT`] for transports that carry MCP
+/// `initialize._meta` instead of (or in addition to) HTTP headers.
+pub(crate) const META_WORKSPACE_ROOT: &str = "tachiWorkspaceRoot";
 
 /// #1041 F2: wire key stamped onto the raw tool-call arguments (never a
 /// caller-facing schema field — hidden via `#[schemars(skip)]` on every

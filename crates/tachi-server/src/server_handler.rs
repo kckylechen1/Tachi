@@ -236,6 +236,48 @@ struct HttpSessionIdentity {
     profile: Option<String>,
     client: Option<String>,
     project: Option<String>,
+    /// #1120 PR1: `X-Tachi-Workspace-Root` / `_meta.tachiWorkspaceRoot`. Only
+    /// consulted when `project` is absent — an explicit named-project binding
+    /// always wins, matching how a caller-supplied `project=` argument always
+    /// wins over a transport default elsewhere in this module.
+    workspace_root: Option<String>,
+    /// Review finding [3] (#1207): set when `X-Tachi-Workspace-Root` /
+    /// `_meta.tachiWorkspaceRoot` was PRESENT but unusable — blank/whitespace,
+    /// or (header only) not valid UTF-8 text — as opposed to simply absent.
+    /// `workspace_root` collapses "absent" and "malformed" to the same `None`
+    /// (matching the pre-existing `X-Tachi-Project`/profile/client parsing
+    /// this PR's header reuses the shape of); that is fine for a caller that
+    /// never declared a root, but a caller that DID send one and got it
+    /// silently ignored must not fall through to an unbound session — this
+    /// carries the reason so `apply_http_session_identity` can fail closed
+    /// instead. Scoped to `workspace_root` only (this PR's new surface); the
+    /// analogous gap on `X-Tachi-Project`/profile/client is pre-existing
+    /// behavior out of this PR's blast radius.
+    workspace_root_error: Option<String>,
+}
+
+/// #1120 PR1: which session-identity field supplies the bound project, when
+/// more than one is present. An explicit `X-Tachi-Project` always wins over
+/// `X-Tachi-Workspace-Root` — the workspace-root path only fills the gap for
+/// a caller that has no already-registered project name to declare, mirroring
+/// how a caller-supplied `project=` tool argument always wins over a
+/// transport default elsewhere in this module. Pure/no I/O so the precedence
+/// itself is unit-testable without constructing a full `RequestContext`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectBindingSource<'a> {
+    Named(&'a str),
+    WorkspaceRoot(&'a str),
+    None,
+}
+
+fn project_binding_source(identity: &HttpSessionIdentity) -> ProjectBindingSource<'_> {
+    match identity.project.as_deref() {
+        Some(project) => ProjectBindingSource::Named(project),
+        None => match identity.workspace_root.as_deref() {
+            Some(root) => ProjectBindingSource::WorkspaceRoot(root),
+            None => ProjectBindingSource::None,
+        },
+    }
 }
 
 impl MemoryServer {
@@ -245,20 +287,47 @@ impl MemoryServer {
         context: &RequestContext<RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
         let identity = http_session_identity(request, context);
+        // Review finding [3] (#1207): a caller-supplied but malformed/blank
+        // `X-Tachi-Workspace-Root` (or its `_meta` twin) must fail the whole
+        // `initialize` call, not silently disappear into an unbound session
+        // — an unbound session skips the git-root/tenant checks below
+        // entirely, so a garbled identity header must never be treated the
+        // same as "no header sent".
+        if let Some(err) = identity.workspace_root_error.as_deref() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("malformed X-Tachi-Workspace-Root identity: {err}"),
+                None,
+            ));
+        }
         let profile = identity
             .profile
             .as_deref()
             .map(parse_http_tool_profile)
             .transpose()?;
-        if let Some(project) = identity.project.as_deref() {
-            Self::resolve_named_project_db_path(project).map_err(|err| {
-                rmcp::ErrorData::invalid_params(
-                    format!("invalid HTTP direct-connect project binding: {err}"),
-                    None,
-                )
-            })?;
-        }
-        self.set_session_identity(identity.client, identity.project, profile);
+        let project = match project_binding_source(&identity) {
+            ProjectBindingSource::Named(project) => {
+                Self::resolve_named_project_db_path(project).map_err(|err| {
+                    rmcp::ErrorData::invalid_params(
+                        format!("invalid HTTP direct-connect project binding: {err}"),
+                        None,
+                    )
+                })?;
+                Some(project.to_string())
+            }
+            ProjectBindingSource::WorkspaceRoot(root) => Some(
+                self.resolve_or_register_workspace_root(root)
+                    .map_err(|err| {
+                        rmcp::ErrorData::invalid_params(
+                            format!(
+                                "invalid HTTP direct-connect X-Tachi-Workspace-Root binding: {err}"
+                            ),
+                            None,
+                        )
+                    })?,
+            ),
+            ProjectBindingSource::None => None,
+        };
+        self.set_session_identity(identity.client, project, profile);
         Ok(())
     }
 }
@@ -275,6 +344,19 @@ fn http_session_identity(
             header_string(parts, crate::session_identity::HEADER_CLIENT).or(identity.client);
         identity.project =
             header_string(parts, crate::session_identity::HEADER_PROJECT).or(identity.project);
+        // Review finding [3] (#1207): a header wins over `_meta` per this
+        // function's usual precedence, but ONLY when it is actually present
+        // and well-formed. A PRESENT-but-malformed header must win the error
+        // too (surfacing the header's own problem, not silently keeping a
+        // `_meta`-derived value/error) rather than being treated as absent.
+        match header_string_result(parts, crate::session_identity::HEADER_WORKSPACE_ROOT) {
+            Ok(Some(value)) => {
+                identity.workspace_root = Some(value);
+                identity.workspace_root_error = None;
+            }
+            Ok(None) => {}
+            Err(err) => identity.workspace_root_error = Some(err),
+        }
     }
     identity
 }
@@ -292,6 +374,22 @@ fn identity_from_initialize_meta(meta: Option<&rmcp::model::Meta>) -> HttpSessio
         .or_else(|| meta_string(meta, "tachi.client"));
     identity.project = meta_string(meta, crate::session_identity::META_PROJECT)
         .or_else(|| meta_string(meta, "tachi.project"));
+    // Review finding [3] (#1207): unlike the fields above, a PRESENT-but-
+    // malformed `_meta.tachiWorkspaceRoot` (non-string type, or blank) must
+    // be recorded as an error, not silently treated the same as "the caller
+    // never declared a workspace root". Try the canonical key first; only
+    // fall through to the dotted alias when the canonical key is genuinely
+    // ABSENT (a malformed canonical key is itself the caller's answer and
+    // must not be masked by trying the alias next).
+    match meta_string_result(meta, crate::session_identity::META_WORKSPACE_ROOT) {
+        Ok(Some(value)) => identity.workspace_root = Some(value),
+        Ok(None) => match meta_string_result(meta, "tachi.workspaceRoot") {
+            Ok(Some(value)) => identity.workspace_root = Some(value),
+            Ok(None) => {}
+            Err(err) => identity.workspace_root_error = Some(err),
+        },
+        Err(err) => identity.workspace_root_error = Some(err),
+    }
     identity
 }
 
@@ -302,12 +400,54 @@ fn meta_string(meta: &rmcp::model::Meta, key: &str) -> Option<String> {
         .and_then(crate::session_identity::normalize_identity_value)
 }
 
+/// Presence-distinguishing twin of [`meta_string`] for `workspace_root`
+/// (review finding [3], #1207): `Ok(None)` means the key is genuinely
+/// absent; `Err` means it was present but unusable (wrong JSON type, or
+/// blank after trimming) — the caller must not collapse that into `Ok(None)`
+/// the way an absent key would be.
+fn meta_string_result(meta: &rmcp::model::Meta, key: &str) -> Result<Option<String>, String> {
+    match meta.0.get(key) {
+        None => Ok(None),
+        Some(value) => {
+            let raw = value
+                .as_str()
+                .ok_or_else(|| format!("_meta.{key} must be a string"))?;
+            match crate::session_identity::normalize_identity_value(raw) {
+                Some(v) => Ok(Some(v)),
+                None => Err(format!("_meta.{key} is blank")),
+            }
+        }
+    }
+}
+
 fn header_string(parts: &axum::http::request::Parts, name: &str) -> Option<String> {
     parts
         .headers
         .get(name)
         .and_then(|value| value.to_str().ok())
         .and_then(crate::session_identity::normalize_identity_value)
+}
+
+/// Presence-distinguishing twin of [`header_string`] for `workspace_root`
+/// (review finding [3], #1207): `Ok(None)` means the header is genuinely
+/// absent; `Err` means it was present but unusable (not valid UTF-8 text, or
+/// blank after trimming).
+fn header_string_result(
+    parts: &axum::http::request::Parts,
+    name: &str,
+) -> Result<Option<String>, String> {
+    match parts.headers.get(name) {
+        None => Ok(None),
+        Some(value) => {
+            let raw = value
+                .to_str()
+                .map_err(|_| format!("{name} header is not valid UTF-8 text"))?;
+            match crate::session_identity::normalize_identity_value(raw) {
+                Some(v) => Ok(Some(v)),
+                None => Err(format!("{name} header is blank")),
+            }
+        }
+    }
 }
 
 fn parse_http_tool_profile(raw: &str) -> Result<tachi_hub::ToolProfile, rmcp::ErrorData> {
@@ -806,6 +946,191 @@ mod tests {
         assert!(identity.profile.is_none());
         assert!(identity.client.is_none());
         assert!(identity.project.is_none());
+    }
+
+    /// #1120 PR1: `_meta.tachiWorkspaceRoot` parses into `HttpSessionIdentity`
+    /// the same way `META_PROJECT` already does.
+    #[test]
+    fn initialize_meta_binds_workspace_root() {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            crate::session_identity::META_WORKSPACE_ROOT.to_string(),
+            json!("/home/agent/repos/sigil"),
+        );
+        let meta = rmcp::model::Meta(map);
+        let identity = identity_from_initialize_meta(Some(&meta));
+        assert_eq!(
+            identity.workspace_root.as_deref(),
+            Some("/home/agent/repos/sigil")
+        );
+        assert!(identity.project.is_none());
+    }
+
+    /// #1120 PR1: the dotted-alias fallback (`tachi.project` already has one)
+    /// also covers `tachi.workspaceRoot`.
+    #[test]
+    fn initialize_meta_accepts_dotted_workspace_root_alias() {
+        let mut map = serde_json::Map::new();
+        map.insert("tachi.workspaceRoot".to_string(), json!("/repo/root"));
+        let meta = rmcp::model::Meta(map);
+        let identity = identity_from_initialize_meta(Some(&meta));
+        assert_eq!(identity.workspace_root.as_deref(), Some("/repo/root"));
+    }
+
+    /// Review finding [3] (#1207): a blank `_meta.tachiWorkspaceRoot` was
+    /// PRESENT but unusable — it must not be treated the same as the caller
+    /// never having declared a root at all.
+    #[test]
+    fn initialize_meta_blank_workspace_root_is_recorded_as_an_error_not_absence() {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            crate::session_identity::META_WORKSPACE_ROOT.to_string(),
+            json!("   "),
+        );
+        let meta = rmcp::model::Meta(map);
+        let identity = identity_from_initialize_meta(Some(&meta));
+        assert!(
+            identity.workspace_root.is_none(),
+            "a blank value must not bind a usable workspace root"
+        );
+        assert!(
+            identity.workspace_root_error.is_some(),
+            "a blank-but-present value must be recorded as an error, not silent absence"
+        );
+    }
+
+    /// Review finding [3] (#1207) twin: a non-string `_meta.tachiWorkspaceRoot`
+    /// (wrong JSON type) is malformed, not absent.
+    #[test]
+    fn initialize_meta_non_string_workspace_root_is_recorded_as_an_error() {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            crate::session_identity::META_WORKSPACE_ROOT.to_string(),
+            json!(12345),
+        );
+        let meta = rmcp::model::Meta(map);
+        let identity = identity_from_initialize_meta(Some(&meta));
+        assert!(identity.workspace_root.is_none());
+        assert!(
+            identity.workspace_root_error.is_some(),
+            "a non-string value must be recorded as an error, not silent absence"
+        );
+    }
+
+    /// Review finding [3] (#1207): a malformed value under the canonical key
+    /// must not be masked by falling through to try the dotted alias next —
+    /// the caller's actual (bad) answer under the primary key is the signal,
+    /// not "maybe they meant the alias".
+    #[test]
+    fn initialize_meta_malformed_canonical_key_is_not_masked_by_the_alias() {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            crate::session_identity::META_WORKSPACE_ROOT.to_string(),
+            json!(""),
+        );
+        map.insert("tachi.workspaceRoot".to_string(), json!("/repo/root"));
+        let meta = rmcp::model::Meta(map);
+        let identity = identity_from_initialize_meta(Some(&meta));
+        assert!(
+            identity.workspace_root.is_none(),
+            "the malformed canonical key must win over a well-formed alias"
+        );
+        assert!(identity.workspace_root_error.is_some());
+    }
+
+    /// Review finding [3] (#1207): a header that is present but not valid
+    /// UTF-8 text is malformed, not absent — `header_string_result` must
+    /// surface it as `Err`, distinct from a genuinely missing header.
+    #[test]
+    fn header_string_result_rejects_non_utf8_header_value() {
+        let parts = axum::http::Request::builder()
+            .header(
+                crate::session_identity::HEADER_WORKSPACE_ROOT,
+                axum::http::HeaderValue::from_bytes(&[0xff, 0xfe]).expect("opaque header bytes"),
+            )
+            .body(())
+            .expect("build request")
+            .into_parts()
+            .0;
+        let err = header_string_result(&parts, crate::session_identity::HEADER_WORKSPACE_ROOT)
+            .expect_err("non-UTF-8 header bytes must be rejected, not treated as absent");
+        assert!(err.contains("UTF-8"), "unexpected error message: {err}");
+    }
+
+    /// Review finding [3] (#1207) twin: a present-but-blank header value is
+    /// malformed, not absent.
+    #[test]
+    fn header_string_result_rejects_a_blank_header_value() {
+        let parts = axum::http::Request::builder()
+            .header(crate::session_identity::HEADER_WORKSPACE_ROOT, "   ")
+            .body(())
+            .expect("build request")
+            .into_parts()
+            .0;
+        let err = header_string_result(&parts, crate::session_identity::HEADER_WORKSPACE_ROOT)
+            .expect_err("a blank header value must be rejected, not treated as absent");
+        assert!(err.contains("blank"), "unexpected error message: {err}");
+    }
+
+    /// Review finding [3] (#1207) control case: a header that was never sent
+    /// at all is genuinely absent — this must stay `Ok(None)`, not an error,
+    /// or every session without the (optional) header would fail `initialize`.
+    #[test]
+    fn header_string_result_missing_header_is_ok_none() {
+        let parts = axum::http::Request::builder()
+            .body(())
+            .expect("build request")
+            .into_parts()
+            .0;
+        assert_eq!(
+            header_string_result(&parts, crate::session_identity::HEADER_WORKSPACE_ROOT)
+                .expect("a missing header is not an error"),
+            None
+        );
+    }
+
+    /// #1120 PR1 core regression: an explicit `X-Tachi-Project` (here, its
+    /// `_meta` twin `META_PROJECT`) must win over a simultaneously-present
+    /// `X-Tachi-Workspace-Root` — the workspace-root path only fills the gap
+    /// for a caller with no already-registered project name, never overrides
+    /// one the caller did supply.
+    #[test]
+    fn named_project_wins_over_workspace_root_when_both_present() {
+        let identity = HttpSessionIdentity {
+            profile: None,
+            client: None,
+            project: Some("sigil".to_string()),
+            workspace_root: Some("/home/agent/repos/sigil".to_string()),
+            workspace_root_error: None,
+        };
+        assert_eq!(
+            project_binding_source(&identity),
+            ProjectBindingSource::Named("sigil")
+        );
+    }
+
+    #[test]
+    fn workspace_root_used_only_when_project_absent() {
+        let identity = HttpSessionIdentity {
+            profile: None,
+            client: None,
+            project: None,
+            workspace_root: Some("/home/agent/repos/sigil".to_string()),
+            workspace_root_error: None,
+        };
+        assert_eq!(
+            project_binding_source(&identity),
+            ProjectBindingSource::WorkspaceRoot("/home/agent/repos/sigil")
+        );
+    }
+
+    #[test]
+    fn binding_source_is_none_when_neither_present() {
+        let identity = HttpSessionIdentity::default();
+        assert_eq!(
+            project_binding_source(&identity),
+            ProjectBindingSource::None
+        );
     }
 
     /// #757-fold fix (gpt-5.6-terra review): `delete_memory`/`memory_gc` were
