@@ -414,19 +414,23 @@ fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
 
 /// CLI wrapper for the orphan build-artifact reaper (#894 S2b).
 ///
-/// # `--force` is REFUSED. This command reports; it does not delete.
+/// # `--force` is CERTIFIED (#1062). This command can now delete.
 ///
-/// Unlike the rest of the `clean` family, `--force` here does not mean "now do it": an
-/// adversarial audit (`codex-g6f99`) found the delete path unsafe, so
-/// [`crate::exec_env_reaper::certify_destructive`] rejects the request — **before this
-/// function opens the ledger, stats a directory, or reads the process table** — and the
-/// CLI prints the reason and exits non-zero. A destructive request that quietly
-/// degraded into a dry run would be worse than either: the operator would read
-/// "reclaimed 0 bytes" as "there was nothing to reclaim".
+/// Was `--force` is REFUSED, unconditionally, before this function opened the ledger,
+/// stats'd a directory, or read the process table: an adversarial audit (`codex-g6f99`)
+/// found the delete path unsafe, so [`crate::exec_env_reaper::certify_destructive`]
+/// rejected every `--force` request at the gate and the CLI printed the reason and
+/// exited non-zero. #1062 (owner-ratified 1A, 2026-07-17: the kill-test matrix was
+/// executed and its receipt checked in) flipped `DESTRUCTIVE_CERTIFIED` to `true`, and
+/// [`crate::exec_env_reaper::certify_destructive`] now returns `Ok(())` for `--force`
+/// too — this function proceeds past the gate below, opens the real ledger, and (on a
+/// healthy scan) genuinely reclaims. The gate call stays: the day certification is
+/// REVOKED, this is the one place that starts refusing `force` again, and every caller
+/// already asks it instead of reading the constant directly.
 ///
-/// Without `--force` it does what it has always done, and that is now the whole product:
-/// a full accounting of the dead build artifacts on this machine — where they are, how
-/// big, how old, who (if anyone) holds them, and everything the scan could not see.
+/// Without `--force` it does what it has always done: a full accounting of the dead
+/// build artifacts on this machine — where they are, how big, how old, who (if anyone)
+/// holds them, and everything the scan could not see.
 ///
 /// An unopenable ledger is a hard error rather than a warning, because the byte report
 /// is grouped out of that ledger and a report that silently loses half its history is
@@ -435,9 +439,32 @@ fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
 /// Exit status comes from [`crate::exec_env_reaper::reap_exit_status`]: a run whose scan
 /// left `incomplete-or-error` units (a named root that is not there, a subtree `read_dir`
 /// could not open) or whose protected set could not be fully resolved (`ps` unavailable,
-/// `HOME` unset) exits non-zero, because it cannot honestly say it saw its whole scope.
+/// `HOME` unset) exits non-zero, because it cannot honestly say it saw its whole scope —
+/// `--force` waives this no more than it waives any other fence (see
+/// `cli_force_still_refuses_a_scan_that_cannot_see_its_whole_scope` below).
 fn run_orphan_reap_cli(opts: ReapOptions, output: OutputFormat) -> Result<(), String> {
+    // The protected set's sources are read from the process environment HERE — at the
+    // edge, once — and handed to the reaper as a value. The reaper itself reads no
+    // ambient state, which is what keeps "HOME is unset" a property of one run instead of
+    // a property of the process (see `ProtectionSources`). This is the ONLY production
+    // call site of `from_process_env` in this function's call graph; everything below
+    // this line is `run_orphan_reap_cli_with_sources`, which a test may call with a
+    // different, deterministic `ProtectionSources` instead (see
+    // `cli_force_still_refuses_a_scan_that_cannot_see_its_whole_scope` and
+    // `ProtectionSources::deterministic_for_cli_test`, #1196).
+    let sources = crate::exec_env_reaper::ProtectionSources::from_process_env();
+    run_orphan_reap_cli_with_sources(opts, output, &sources)
+}
+
+fn run_orphan_reap_cli_with_sources(
+    opts: ReapOptions,
+    output: OutputFormat,
+    sources: &crate::exec_env_reaper::ProtectionSources<'_>,
+) -> Result<(), String> {
     // The first gate, above everything: no ledger, no filesystem, no process table.
+    // #1062: DESTRUCTIVE_CERTIFIED is true, so this is `Ok(())` for both `force`
+    // values today — it stays the first thing asked so a future REVOCATION only
+    // has to flip the constant, not re-wire every caller.
     if let Err(refusal) = crate::exec_env_reaper::certify_destructive(opts.force) {
         crate::exec_env_reaper::emit_destructive_refusal(&refusal, output)?;
         return Err(refusal.to_string());
@@ -455,18 +482,15 @@ fn run_orphan_reap_cli(opts: ReapOptions, output: OutputFormat) -> Result<(), St
     let mut store = memcore::MemoryStore::open_with_label(db_str, "global")
         .map_err(|err| format!("exec_env resource ledger unavailable: {err}"))?;
 
-    // The protected set's sources are read from the process environment HERE — at the
-    // edge, once — and handed to the reaper as a value. The reaper itself reads no
-    // ambient state, which is what keeps "HOME is unset" a property of one run instead of
-    // a property of the process (see `ProtectionSources`).
-    let sources = crate::exec_env_reaper::ProtectionSources::from_process_env();
-
-    // `force` is already impossible here (refused above), so this is always the
-    // report-only path; the `Err` arm is the second fence, not a live branch.
+    // #1062: `force` reaches here now (the gate above passes it). The `Err` arm is
+    // still live — it is `certify_destructive`'s call inside `run_orphan_reap`
+    // itself, the second of the two gates that "cannot be routed around" (see that
+    // function's doc comment) — but on THIS build it never fires, for the same
+    // reason the gate above didn't.
     let report = crate::exec_env_reaper::run_orphan_reap(
         store.connection_mut(),
         &opts,
-        &sources,
+        sources,
         std::time::SystemTime::now(),
         &crate::exec_env_reaper::lsof_holder_probe,
     )
@@ -484,43 +508,110 @@ fn run_orphan_reap_cli(opts: ReapOptions, output: OutputFormat) -> Result<(), St
 mod tests {
     use super::*;
 
-    /// `tachi clean orphans --force` must exit NON-ZERO with the refusal, and must not
-    /// reach the ledger or the filesystem on its way out (#894 S2b; audit `codex-g6f99`).
+    /// `tachi clean orphans --force` still must not exit 0 on a scan that cannot see
+    /// its whole authorized scope — `--force` waives that no more than it waives any
+    /// other fence (#894 S2b's BUG 3 accounting invariant, `reap_exit_status`).
     ///
-    /// The assertion is on *which* error comes back, and that is deliberate: this run
-    /// names a root that does not exist, so a reaper whose gate failed to fire would ALSO
-    /// return an `Err` — "scan incomplete". A test that only asserted `is_err()` would
-    /// pass with the seal removed. Only the refusal's own words prove the gate fired.
+    /// Renamed from `orphan_reap_cli_refuses_force_with_a_nonzero_exit`, which pinned
+    /// a DIFFERENT property: that `certify_destructive` refused every `--force`
+    /// request outright, before this function ever opened the ledger, stat'd a
+    /// directory, or read the process table (audit `codex-g6f99`) — a property that
+    /// no longer holds. #1062 (owner-ratified 1A) flipped `DESTRUCTIVE_CERTIFIED` to
+    /// `true`, so `certify_destructive(true)` now returns `Ok(())` and this function
+    /// falls through the gate into the real ledger open and scan. See git blame /
+    /// #1062 for the old reading.
+    ///
+    /// ## Why this could not be reconciled in place, and what changed instead
+    ///
+    /// Once `--force` falls through the gate, `run_orphan_reap_cli` opens
+    /// `tachi_home()/global/memory.db` — the OPERATOR'S REAL global ledger — via
+    /// `MemoryStore::open_with_label`'s fail-closed default (#1119:
+    /// `OpenExisting` + `Deny`). On the machine this reconciliation was done on,
+    /// that real DB is stamped at an OLDER schema than this binary's
+    /// `EXPECTED_SCHEMA_VERSION` (v20, #1066/#1186 — landed on `main`, not
+    /// something this branch introduced; confirmed no diff in
+    /// `crates/memcore/src/db/migrations.rs` against `origin/main`), so the old
+    /// fixture's `.expect_err(...)` still happened to hold — but the error was
+    /// `SchemaMigrationOptInRequired`, not the certification refusal, and the old
+    /// assertions on `"report-only"` / `"not certified"` / `"codex-g6f99"` would
+    /// have failed. That outcome is a coincidence of THIS machine's ambient
+    /// `~/.tachi` state, not a property of the code: a machine with no `~/.tachi`
+    /// yet builds fresh at v20 and proceeds past the ledger open entirely; a
+    /// machine already migrated to v20 does too. A test whose pass/fail depends on
+    /// an operator's unrelated local DB state — while genuinely touching that real
+    /// DB from a `cargo test` run — is exactly the hazard the NOTE below already
+    /// called out for the report path, now true of the force path too.
+    ///
+    /// So this version isolates `TACHI_HOME` via [`crate::test_support::with_tachi_home`]
+    /// (panic-safe, lock-guarded, the same helper three other call sites in this
+    /// crate already share) before calling in: `tachi clean orphans --force` against
+    /// a temp home has no ledger yet, opens fresh at the current schema with no
+    /// migration decision to make, and reaches the scan — which is handed a root
+    /// that does not exist, so `reap_exit_status` refuses on "scan incomplete", the
+    /// one property this test can now prove hermetically and deterministically: a
+    /// certified `--force` still does not exit 0 on a scan that cannot account for
+    /// its whole scope.
+    ///
+    /// It calls `run_orphan_reap_cli_with_sources` — the exact same production body
+    /// `run_orphan_reap_cli` runs — with `ProtectionSources::deterministic_for_cli_test()`
+    /// rather than going through `run_orphan_reap_cli` (which reads the REAL process
+    /// environment and shells out to the REAL `ps`). #1196: the real `ps -Awwo command=`
+    /// scan sees every process on the machine, and a live build is not the only thing
+    /// that can put the substring `CARGO_TARGET_DIR=` on a command line — a concurrent
+    /// `grep`/`cat`/agent-shell invocation mentioning it does too, and the naive
+    /// whitespace-tokenizing parser in `target_dirs_from_process_line` cannot tell them
+    /// apart. When that noise is present the CLI's OTHER fail-closed gate (protected-set
+    /// incomplete, BUG 3's sibling) fires first and starves the "scan incomplete" property
+    /// this test exists to pin — a real assertion, just not the one this test names, and
+    /// whether it happens to fire is a fact about the test MACHINE at the moment `cargo
+    /// test` runs, not about this code. Injecting a deterministic, ambient-free
+    /// `ProtectionSources` closes that gap the same way `exec_env_reaper`'s own module
+    /// tests already do (see `ProtectionSources`'s doc comment on why sources are an
+    /// explicit argument, never a read of ambient state) — this is that same seam,
+    /// extended one call further out to reach the CLI entry point.
     #[test]
-    fn orphan_reap_cli_refuses_force_with_a_nonzero_exit() {
-        let err = run_orphan_reap_cli(
-            ReapOptions {
-                roots: vec![PathBuf::from(
-                    "/tachi-reaper-this-root-must-never-be-scanned",
-                )],
-                max_age_days: 7,
-                force: true,
-            },
-            OutputFormat::Text,
-        )
-        .expect_err("--force must be refused, not merely downgraded to a dry run");
+    fn cli_force_still_refuses_a_scan_that_cannot_see_its_whole_scope() {
+        crate::test_support::with_tachi_home(|_home| {
+            let sources = crate::exec_env_reaper::ProtectionSources::deterministic_for_cli_test();
+            let err = run_orphan_reap_cli_with_sources(
+                ReapOptions {
+                    roots: vec![PathBuf::from(
+                        "/tachi-reaper-this-root-must-never-be-scanned",
+                    )],
+                    max_age_days: 7,
+                    force: true,
+                },
+                OutputFormat::Text,
+                &sources,
+            )
+            .expect_err(
+                "a scan that cannot see its whole authorized scope must not exit 0, even \
+                 under --force, once certified",
+            );
 
-        assert!(
-            err.contains("report-only") && err.contains("not certified"),
-            "the non-zero exit must carry the refusal, not some incidental error: {err}"
-        );
-        assert!(
-            err.contains("codex-g6f99"),
-            "and it must name the audit that sheathed it: {err}"
-        );
+            assert!(
+                err.contains("scan incomplete"),
+                "the non-zero exit must carry the BUG 3 accounting refusal, not some \
+                 incidental error: {err}"
+            );
+            assert!(
+                err.contains("missing root"),
+                "and it must name why the scan could not see its whole scope: {err}"
+            );
+        });
     }
 
-    // NOTE: there is deliberately no CLI-level test of the *report* path here. It would
-    // open the real global ledger under `tachi_home()`, and a unit test has no business
-    // writing to the operator's `~/.tachi`. The report path is covered where it can be
-    // driven against a temp store: `exec_env_reaper`'s own tests, through the same sealed
-    // entry point this CLI calls. The refusal above needs no such fixture — it returns
-    // before the ledger is opened, which is itself part of the contract.
+    // NOTE: there is deliberately no CLI-level test of a *healthy* --force run (one
+    // that reaches the delete path) here. It would need a real target dir under a
+    // real scan root, and while `with_tachi_home` above isolates the LEDGER, it does
+    // not sandbox the FILESYSTEM the CLI would then walk and delete from — a unit
+    // test still has no business creating and deleting real directories through this
+    // entry point when `exec_env_reaper`'s own tests can drive the identical
+    // certified entry point (`run_orphan_reap`, via `reap_sealed`) against a fully
+    // temp-dir'd store AND a temp-dir'd scan root. See
+    // `force_reclaims_at_the_entry_point_and_a_broken_fence_still_refuses_it` in
+    // that module for the genuinely-deletes proof, and its second half for the proof
+    // that certification did not remove the other fences.
 
     #[test]
     fn clean_target_defaults_to_dry_run_and_json_output() {

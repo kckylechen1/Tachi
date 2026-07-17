@@ -243,13 +243,16 @@ const SECS_PER_DAY: u64 = 24 * 60 * 60;
 /// kill-test certification: it is this crate believing its own code. The bar is an
 /// EXECUTED, checked-in receipt (binary version, OS, matrix, git blob hash of the test
 /// source) — the shape `crates/tachi-dispatch/src/certification.rs` already ships for
-/// codex's sandbox. The matrix exists here, `#[ignore]`d (`kill_tests`); nobody has run
-/// it and checked in a receipt yet, so this stays `false`.
+/// codex's sandbox. The matrix exists here, `#[ignore]`d (`kill_tests`); it was EXECUTED
+/// on 2026-07-17 (Oz seat, all four scenarios pass) and the receipt is checked in at
+/// `crates/tachi-server/certifications/orphan-reaper.toml` — hence `true`. The receipt
+/// certifies exactly one (version, OS, source-blob) triple; touching the kill-test or
+/// the reap path invalidates it morally if not mechanically: re-run and re-receipt.
 ///
 /// A `const` rather than a config flag, on purpose. A flag is something an operator can
 /// flip at 2 a.m. under disk pressure; the gate between a scan of `~/.cache` and
 /// `remove_dir_all` should cost a code change, a review, and a test suite.
-pub(crate) const DESTRUCTIVE_CERTIFIED: bool = false;
+pub(crate) const DESTRUCTIVE_CERTIFIED: bool = true;
 
 /// The audit that sheathed it.
 pub(crate) const BLOCKING_AUDIT: &str = "codex-g6f99";
@@ -308,7 +311,12 @@ impl std::fmt::Display for DestructiveRefusal {
 
 /// The ONE gate between any caller and the delete path. The CLI asks it before it opens
 /// the ledger; [`run_orphan_reap`] asks it again so a future caller cannot route around
-/// the CLI. Today it always says no.
+/// the CLI. **As of #1062, it always says yes** — `DESTRUCTIVE_CERTIFIED` is `true`, so
+/// this reduces to `Ok(())` for both `force` values; the destructive path is reached
+/// through this gate now, not refused by it. It stays here rather than being deleted:
+/// the day certification is REVOKED (`DESTRUCTIVE_CERTIFIED` flips back to `false`),
+/// this is the one place that must go back to refusing `force`, and every caller already
+/// asks it instead of reading the constant directly.
 pub(crate) fn certify_destructive(force: bool) -> Result<(), DestructiveRefusal> {
     if force && !DESTRUCTIVE_CERTIFIED {
         return Err(DestructiveRefusal::new());
@@ -642,6 +650,58 @@ impl ProtectionSources<'static> {
             shared_cargo_target_dir: var(SHARED_CARGO_TARGET_DIR_ENV),
             home: var("HOME").or_else(|| var("USERPROFILE")),
             live_builds: &PROCESS_TABLE,
+        }
+    }
+}
+
+/// Test-only stand-in for the process table: no build is running anywhere, on any
+/// machine, ever. Backs [`ProtectionSources::deterministic_for_cli_test`] below.
+#[cfg(test)]
+fn no_live_builds_for_cli_test() -> (Vec<PathBuf>, Vec<String>) {
+    (Vec::new(), Vec::new())
+}
+
+#[cfg(test)]
+static NO_LIVE_BUILDS_FOR_CLI_TEST: fn() -> (Vec<PathBuf>, Vec<String>) =
+    no_live_builds_for_cli_test;
+
+#[cfg(test)]
+impl ProtectionSources<'static> {
+    /// A CLI-level test's alternative to [`Self::from_process_env`] — same shape, but
+    /// every field is a fixed, ambient-free value instead of a real environment/process
+    /// read.
+    ///
+    /// [`Self::from_process_env`] shells out to the real `ps -Awwo command=` (via
+    /// [`live_build_target_dirs`]) and reads the real `CARGO_TARGET_DIR` / `HOME`. That
+    /// is correct for production, but it makes a CLI-level test of `reap_exit_status`'s
+    /// gate ORDER (protected-set-incomplete vs. scan-incomplete) hostage to whatever
+    /// else is running on the test machine at the moment `cargo test` executes it: `ps`
+    /// sees every process's full command line, and a whitespace-tokenizing scan
+    /// (`target_dirs_from_process_line`) cannot tell a live cargo build's
+    /// `CARGO_TARGET_DIR=` assignment from that literal substring appearing in some
+    /// unrelated process's argv — a `grep` for it, a shell wrapper quoting a command
+    /// that mentions it, this very repo's own `AGENTS.md` line 18 being `cat`'d or
+    /// searched by a concurrent agent session. When that happens the value captured is
+    /// the raw, unexpanded text (e.g. the literal `$HOME/.cache/sigil-shared-target`,
+    /// never resolved because nothing shell-expanded it), `protected_paths` reports it
+    /// as a relative-path warning, and `reap_exit_status` refuses on "protected set
+    /// incomplete" — a REAL fail-closed gate, just not the one under test — before the
+    /// scan ever reaches the missing root this test named (#1196).
+    ///
+    /// So this constructor reads nothing ambient at all: `home` is a fixed path (so the
+    /// protected set can still be computed — a `None` home is BUG 3's OWN gap, and
+    /// asserting the DIFFERENT "scan incomplete" gate needs that one closed), and
+    /// `live_builds` is [`NO_LIVE_BUILDS_FOR_CLI_TEST`] rather than the real process
+    /// table. This proves the CLI's actual production code path end-to-end
+    /// (`run_orphan_reap_cli_with_sources`, exercised by the real
+    /// `run_orphan_reap_cli` too) still refuses a scan that cannot see its whole scope
+    /// — deterministically, on every machine, regardless of what else is running on it.
+    pub(crate) fn deterministic_for_cli_test() -> Self {
+        Self {
+            cargo_target_dir: None,
+            shared_cargo_target_dir: None,
+            home: Some(PathBuf::from("/nonexistent-home-for-cli-test")),
+            live_builds: &NO_LIVE_BUILDS_FOR_CLI_TEST,
         }
     }
 }
@@ -1806,14 +1866,18 @@ pub(crate) struct ReclaimedReport {
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct ReapReport {
     pub(crate) action: &'static str,
-    /// **`false`, always, today.** The delete path is refused ([`certify_destructive`]),
-    /// so this is a *preview of what a certified reaper would do* — not a record of what
-    /// a trusted one did. It rides in the report, and in the JSON, because the number
-    /// this report hands an operator ("61 GB reclaimable") is worth exactly as much as
-    /// the fences behind it, and those fences are known-broken ([`BLOCKING_DEFECTS`]).
+    /// **`true` as of #1062** (owner-ratified 1A, 2026-07-17: the kill-test matrix was
+    /// executed and its receipt checked in — see [`DESTRUCTIVE_CERTIFIED`]). Mirrors
+    /// [`DESTRUCTIVE_CERTIFIED`] into every report so a reader never has to go check the
+    /// constant to know whether a `--force` request on this build can act — and, on a
+    /// `dry_run` report, whether `reclaimable_bytes` is a preview of what a certified
+    /// reaper would do or a record of what an UNcertified one would have been forbidden
+    /// to. Was hard-coded documentation of `false` before the flip; kept a plain mirror
+    /// of the const now rather than re-describing it, so it cannot go stale again.
     pub(crate) destructive_certified: bool,
-    /// The defects that keep [`Self::destructive_certified`] false — verbatim, in every
-    /// report, so nobody has to go and find the audit to learn why the knife is sheathed.
+    /// The audit's defects, verbatim, in every report — a historical record of what the
+    /// certification closed ([`BLOCKING_AUDIT`]), not a live blocking condition now that
+    /// [`Self::destructive_certified`] reads `true`.
     pub(crate) blocking_defects: Vec<String>,
     pub(crate) roots: Vec<String>,
     /// What the run refused to look at, so an operator can *see* that the live
@@ -3702,8 +3766,14 @@ mod tests {
             "the report must say how many bytes are dead: {report:?}"
         );
         assert!(report.reclaimable_bytes > 0);
-        // ...and it must say the knife is sheathed, so nobody reads the number as a deed.
-        assert!(!report.destructive_certified);
+        // #1062: the knife is certified now (receipt checked in, owner-ratified 1A,
+        // 2026-07-17) — but `dry_run` (checked above) is a SEPARATE property from
+        // certification, and this is the property this test exists to pin: a
+        // report-only request (`force: false`) deletes nothing and books nothing
+        // REGARDLESS of whether the destructive path is certified. Was
+        // `assert!(!report.destructive_certified)` pre-#1062; flipped to match the
+        // now-true constant, the dry-run assertions above and below are unchanged.
+        assert!(report.destructive_certified);
         assert!(!report.blocking_defects.is_empty());
         // The bytes are still on disk...
         assert!(dead.join("debug/artifact.rlib").exists());
@@ -4586,96 +4656,176 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // ── the sheath: --force is refused (audit codex-g6f99) ───────────────────
+    // ── #1062: --force reaches the delete path, and certification ≠ no fences ──
 
-    /// The seal, and the proof that it is the seal doing the work.
+    /// The seal is open (#1062) — and the proof that "open" does not mean "no fences
+    /// left". Renamed from `force_is_refused_at_the_entry_point_and_the_fixture_
+    /// proves_it_was_reapable`, which pinned the pre-#1062 shape: the entry point
+    /// (`reap_sealed`) refused EVERY `--force` request outright via
+    /// `certify_destructive`, and the second half proved that refusal meant
+    /// something (CONCERN 6 — a test that only asserts "the directory still exists"
+    /// passes just as happily against a reaper that does nothing at all) by running
+    /// the SAME fixture through the sheathed body (`reap_uncertified`, which
+    /// bypasses the gate) and watching it really delete. See git blame / #1062 for
+    /// that reading.
     ///
-    /// The second half is the point (CONCERN 6): a test that only asserts "the directory
-    /// still exists after `--force`" passes just as happily against a reaper that does
-    /// nothing at all. So the same fixture, the same options, the same probe are then run
-    /// through the sheathed driver — and the target really is deleted. The bytes survived
-    /// the first call because the gate held, not because there was nothing there to kill.
+    /// Two halves, same design, inverted premise now that certification is real:
+    ///
+    /// * **first half — the entry point itself now does the deleting.** `--force`
+    ///   through `reap_sealed` (the REAL entry point `run_orphan_reap_cli` also
+    ///   calls, not the sheathed `run_orphan_reap_uncertified` the old test needed
+    ///   to bypass the gate to reach) on a healthy fixture genuinely reclaims —
+    ///   proving the certified path is not a dead branch behind a gate that never
+    ///   opens.
+    /// * **second half is CONCERN 6 in the certified world: certification is not
+    ///   "no fences".** The exact same entry point, the exact same `--force`, but
+    ///   the `(dev, ino)` identity is swapped out from under the verdict between
+    ///   judgement and delete (BUG 2's own fence — same swap technique as
+    ///   `a_directory_replaced_at_the_same_path_between_verdict_and_delete_is_
+    ///   refused`) — still refused, because `certify_destructive` was never the
+    ///   ONLY fence and flipping it true does not touch the others. The refusal
+    ///   now surfaces as a per-candidate `"refused"` decision inside a
+    ///   successfully-returned `Ok(report)`, not as a top-level `Err` from the
+    ///   gate — that shift in shape is itself part of what changed.
     #[test]
-    fn force_is_refused_at_the_entry_point_and_the_fixture_proves_it_was_reapable() {
-        let root = unique_temp_dir("tachi-reaper-sealed");
+    fn force_reclaims_at_the_entry_point_and_a_broken_fence_still_refuses_it() {
+        // Half 1: a healthy fixture, the real entry point, `--force` — genuinely
+        // deletes, and books it, now that the destructive path is certified.
+        let root = unique_temp_dir("tachi-reaper-certified-delete");
         let dead = make_target_dir(&root, "dead-target");
         let mut store = open_store(&root);
 
-        let refusal = reap_sealed(
+        let report = reap_sealed(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
             &*unheld_probe(),
         )
-        .expect_err("--force must be refused while the destructive path is uncertified");
+        .expect("--force is certified now: the entry point must not refuse a healthy request");
 
-        assert!(refusal.refused);
-        assert_eq!(refusal.audit, BLOCKING_AUDIT);
-        assert!(
-            refusal.reason.contains("report-only") && refusal.reason.contains("not certified"),
-            "the refusal must say what it is: {}",
-            refusal.reason
-        );
-        assert_eq!(refusal.blocking_defects.len(), BLOCKING_DEFECTS.len());
-        // Not a byte, not a row.
-        assert!(dead.join("debug/artifact.rlib").exists());
-        assert!(memcore::list_resources(store.connection(), None, None)
-            .unwrap()
-            .is_empty());
-
-        // The discriminating half: this fixture is NOT inert.
-        let report = reap_uncertified(
-            store.connection_mut(),
-            &opts(&root, true),
-            aged_now(30),
-            &*unheld_probe(),
-        );
         assert_eq!(
             report.reclaimed.len(),
             1,
-            "the fixture must be genuinely reapable, or the refusal above proved nothing: \
-             {report:?}"
+            "the entry point must actually reach the delete path once certified: {report:?}"
         );
-        assert!(!dead.exists());
+        assert!(!dead.exists(), "the target must really be gone: {report:?}");
+        let rows = memcore::list_resources(store.connection(), None, None).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].state,
+            ResourceState::Reclaimed,
+            "the delete through the real entry point must still be booked: {rows:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
+
+        // Half 2 (CONCERN 6, still true post-#1062): the same entry point, the same
+        // `--force`, but the `(dev, ino)` identity is swapped out from under the
+        // verdict — refused, proving certification did not remove the other fences.
+        let root2 = unique_temp_dir("tachi-reaper-certified-still-fenced");
+        let target = make_target_dir(&root2, "swapped-target");
+        let mut store2 = open_store(&root2);
+
+        let target_for_probe = target.clone();
+        let swapping_probe = move |_path: &Path| {
+            std::fs::remove_dir_all(&target_for_probe).unwrap();
+            std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
+            std::fs::write(
+                target_for_probe.join("debug/replacement.rlib"),
+                vec![9u8; 4096],
+            )
+            .unwrap();
+            HolderCheck::None
+        };
+
+        let report2 = reap_sealed(
+            store2.connection_mut(),
+            &opts(&root2, true),
+            aged_now(30),
+            &swapping_probe,
+        )
+        .expect(
+            "certification means the entry point no longer refuses OUTRIGHT — the (dev, ino) \
+             fence still fires per-candidate, inside a successful run, not as an Err from the \
+             gate",
+        );
+
+        assert!(
+            target.join("debug/replacement.rlib").exists(),
+            "the replacement directory must survive: certification did not disable the \
+             identity fence: {report2:?}"
+        );
+        assert!(report2.reclaimed.is_empty(), "{report2:?}");
+        assert_eq!(report2.candidates.len(), 1, "{report2:?}");
+        assert_eq!(report2.candidates[0].decision, "refused", "{report2:?}");
+        assert!(
+            report2
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("(dev, ino) identity")),
+            "the refusal must still name the (dev, ino) mismatch even though force is \
+             certified: {report2:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root2);
     }
 
-    /// `certify_destructive` is the single gate, and it only ever refuses the destructive
-    /// request — a report-only run is never blocked by it.
+    /// `certify_destructive` is the single gate — and once the destructive path is
+    /// certified (#1062), it refuses NEITHER call: a report-only request and a
+    /// `--force` request are both permitted to proceed past THIS gate (other gates
+    /// — the protected set, the holder probe, the pinned `(dev, ino)` identity —
+    /// still stand; see `force_reclaims_at_the_entry_point_and_a_broken_fence_
+    /// still_refuses_it` for the proof that certification did not remove them).
+    ///
+    /// Renamed from `only_the_destructive_request_is_refused`, which pinned the
+    /// pre-#1062 shape (`certify_destructive(true)` unconditionally `Err`,
+    /// `certify_destructive(false)` unconditionally `Ok`) — and whose own tripwire
+    /// (`assert!(!DESTRUCTIVE_CERTIFIED, …)`) fired exactly as designed the day
+    /// #1062 flipped the constant, which is what sent this test here to be
+    /// reconciled. See git blame / #1062 for that reading.
     #[test]
-    fn only_the_destructive_request_is_refused() {
-        assert!(certify_destructive(false).is_ok());
-        let refusal = certify_destructive(true).expect_err("force is uncertified");
-        // The operator is told what is broken, not merely that they were denied.
-        for defect in BLOCKING_DEFECTS {
-            assert!(
-                refusal.reason.contains(defect),
-                "the refusal must name every blocking defect; missing: {defect}"
-            );
-        }
-        // A tripwire on a compile-time constant, deliberately: `clippy` calls a constant
-        // assertion pointless because a constant cannot surprise you at runtime — which is
-        // the whole reason this one is here. It states the premise the two assertions above
-        // depend on (they only mean "the seal refuses" while the seal is shut), so the day
-        // somebody flips `DESTRUCTIVE_CERTIFIED` this test goes red and names the seal.
-        //
-        // Kept a RUNTIME assertion rather than promoted to `const { assert!(…) }`: the
-        // person who eventually flips that constant is mid-way through certifying the
-        // delete path and needs the suite to still compile and run so they can watch the
-        // rest of the fences go green. A compile-time trip would stop them from running any
-        // test in the crate at all — a louder failure, but a less useful one, and just as
-        // easy to delete.
+    fn certify_destructive_permits_both_once_certified() {
+        assert!(
+            certify_destructive(false).is_ok(),
+            "report-only was never gated by certification"
+        );
+        assert!(
+            certify_destructive(true).is_ok(),
+            "force must be permitted past this gate once DESTRUCTIVE_CERTIFIED is true — the \
+             gate's own logic only ever refuses `force && !DESTRUCTIVE_CERTIFIED`"
+        );
+
+        // A tripwire on the compile-time constant, deliberately — the same shape the
+        // pre-#1062 test used, pointed the other way. `clippy` calls a constant
+        // assertion pointless because a constant cannot surprise you at runtime; that is
+        // exactly why this one is here. It states the premise the two assertions above
+        // depend on (they only mean "the gate passes both" while the seal stays open), so
+        // the day somebody REVOKES certification and flips `DESTRUCTIVE_CERTIFIED` back
+        // to `false`, this test goes red and names the seal — symmetric to the tripwire
+        // it replaces, which fired the day certification opened it.
         #[allow(clippy::assertions_on_constants)]
         {
-            assert!(!DESTRUCTIVE_CERTIFIED, "the day this flips, the seal opens");
+            assert!(
+                DESTRUCTIVE_CERTIFIED,
+                "the day this flips back to false, `certify_destructive(true)` refuses again \
+                 and the assertion above must flip with it"
+            );
         }
     }
 
-    /// The report says the knife is sheathed, so a reader cannot mistake
-    /// `reclaimable_bytes` for bytes that were freed.
+    /// The report says whether the knife is certified, so a reader cannot mistake
+    /// `reclaimable_bytes` for bytes that were freed just because certification
+    /// flipped. Renamed from `the_report_declares_itself_uncertified`, which
+    /// pinned the pre-#1062 `false` reading — see git blame / #1062 for that
+    /// shape.
+    ///
+    /// A DRY RUN (`force: false`) still books nothing and frees nothing even
+    /// though the destructive path is now certified — `destructive_certified` and
+    /// `dry_run` are orthogonal fields, and this test's core property (a
+    /// report-only run reports, it does not act) is unchanged by the flip; only
+    /// the certification bit it now reads back is.
     #[test]
-    fn the_report_declares_itself_uncertified() {
+    fn the_report_declares_itself_certified() {
         let root = unique_temp_dir("tachi-reaper-declares");
         make_target_dir(&root, "dead-target");
         let mut store = open_store(&root);
@@ -4688,7 +4838,7 @@ mod tests {
         )
         .expect("a report-only run is never refused");
 
-        assert!(!report.destructive_certified);
+        assert!(report.destructive_certified);
         assert_eq!(report.blocking_defects.len(), BLOCKING_DEFECTS.len());
         assert_eq!(report.reclaimed_bytes, 0, "a report frees nothing");
         assert!(report.reclaimable_bytes > 0, "but it counts what is dead");
