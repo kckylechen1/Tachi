@@ -30,10 +30,14 @@ fn ensure_notes_dirs(root: &Path) -> Result<(), String> {
 ///
 /// Rules:
 /// - `None` or empty path → `inbox/<timestamp>-<slug>.md`
-/// - Relative path ending in `.md` → `notes/<path>`
-/// - Relative path not ending in `.md` → `notes/<path>/<timestamp>-<slug>.md`
-/// - Absolute paths are rejected (security: no escape from notes root)
-/// - `..` traversal is rejected
+/// - A leading `/` is accepted and stripped, not rejected: note paths mirror the
+///   same hierarchical `/scratch/...`-style convention documented for memory/wiki
+///   saves (tachi#1199), they just resolve relative to the notes root rather than
+///   escaping it. `/scratch/a/b` and `scratch/a/b` therefore land at the same file.
+/// - Relative path (post-normalization) ending in `.md` → `notes/<path>`
+/// - Relative path (post-normalization) not ending in `.md` → `notes/<path>/<timestamp>-<slug>.md`
+/// - A path that normalizes to nothing (e.g. `/`, `//`, `.`) is rejected
+/// - `..` traversal and (on Windows) drive-prefixed paths are rejected
 fn resolve_note_path(
     root: &Path,
     user_path: Option<&str>,
@@ -50,13 +54,22 @@ fn resolve_note_path(
                 match component {
                     Component::Normal(part) => clean.push(part),
                     Component::CurDir => {}
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    Component::RootDir => {
+                        // Leading `/` normalizes to notes-root-relative; not an escape.
+                    }
+                    Component::ParentDir | Component::Prefix(_) => {
                         return Err(format!(
-                            "Note paths must be relative and stay under notes root (got '{}').",
+                            "Note path escapes the notes root directory (got '{}').",
                             p
                         ));
                     }
                 }
+            }
+            if clean.as_os_str().is_empty() {
+                return Err(format!(
+                    "Note path must resolve to a location under the notes root (got '{}').",
+                    p
+                ));
             }
             if p.ends_with(".md") {
                 clean
