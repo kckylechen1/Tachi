@@ -48,10 +48,17 @@
 //!
 //! # How to run (build seat)
 //!
-//!     cargo run -p memcore --example receipts_workloads
+//!     cargo run -p memcore --example receipts_workloads --release
 //!
-//! Prints exactly four JSONL objects to stdout (W1, W2, W3, W4). Diagnostics
-//! go to stderr so the stdout pipe stays machine-readable.
+//! `main` runs W1-W4 (4 JSONL objects) AND, unconditionally after them, the
+//! #1142 symbolic-scan grid below (72 per-cell JSONL objects + 1 kill-test
+//! summary line = 73 more) — **73 records total**, not four; there is no
+//! separate invocation or flag that runs W1-W4 alone. `--release` is
+//! mandatory for both: the grid's own corpora reach 63k rows and W1-W4's own
+//! module doc already names the S2 debug/release incident (7x skew on
+//! Rust-heavy phases) as the reason no timing conclusion from this binary is
+//! valid without it. Diagnostics go to stderr so the stdout pipe stays
+//! machine-readable JSONL.
 //!
 //! # tachi#1142 (S3-A) — symbolic-scan measurement-validity grid
 //!
@@ -64,12 +71,8 @@
 //! grid, printing one JSONL object per cell plus one kill-test summary line.
 //! See `run_symbolic_scan_grid` below for the full design rationale.
 //!
-//!     cargo run -p memcore --example receipts_workloads --release
-//!
-//! `--release` is mandatory for any conclusion drawn from the grid's timing
-//! fields (the S2 debug/release incident — 7x skew on Rust-heavy phases —
-//! is the cautionary tale this repeats). The grid's `#[cfg(test)]` cells are
-//! deterministic (id/rank assertions only, no timing) and do not need it:
+//! The grid's `#[cfg(test)]` cells are deterministic (id/rank assertions
+//! only, no timing) and do not need `--release`:
 //! `cargo test -p memcore --example receipts_workloads`.
 
 use memcore::{
@@ -790,6 +793,25 @@ struct GridMarkers {
     oldest_target_id: String,
     newest_dense_id: String,
     dense_hit_oldest_id: String,
+    /// Observed distribution of the `text` column's byte length across the
+    /// corpus just seeded — #1142's invariant requires searchable bytes to
+    /// be stated, not just the `byte_distribution` label bucket name
+    /// (`text` dominates the LIKE-scanned column set: `summary` is a
+    /// 40-char truncation of it, `keywords`/`entities`/`path`/`topic` are
+    /// short and near-constant per row — see `make_entry`).
+    searchable_bytes: SearchableByteStats,
+}
+
+/// `count`/`min`/`max`/`p50`/`p95` of per-row `text`-column byte length for
+/// one seeded corpus. `p50`/`p95` reuse the same nearest-rank method as the
+/// timing `percentiles` helper (sorted index `len/2` / `len*95/100`) — same
+/// shape, different unit (bytes, not microseconds).
+struct SearchableByteStats {
+    count: usize,
+    min_bytes: u64,
+    max_bytes: u64,
+    p50_bytes: u64,
+    p95_bytes: u64,
 }
 
 /// Build one grid corpus: `rows` entries at the given `dist`, with marker
@@ -803,6 +825,7 @@ fn seed_grid_corpus(store: &mut MemoryStore, rows: usize, dist: ByteDistribution
     );
     let dense_hit_start = rows - DENSE_HIT_COUNT;
     let newest_hit_start = rows - NEWEST_HIT_COUNT;
+    let mut text_bytes: Vec<u64> = Vec::with_capacity(rows);
 
     for i in 0..rows {
         let (name, vocab) = TOPICS[i % TOPICS.len()];
@@ -848,6 +871,8 @@ fn seed_grid_corpus(store: &mut MemoryStore, rows: usize, dist: ByteDistribution
             days_ago = (rows - i) as i64;
         }
 
+        text_bytes.push(text.len() as u64);
+
         let entry = make_entry(
             &id,
             &text,
@@ -859,10 +884,33 @@ fn seed_grid_corpus(store: &mut MemoryStore, rows: usize, dist: ByteDistribution
         store.upsert(&entry).expect("seed grid entry");
     }
 
+    let searchable_bytes = summarize_byte_lengths(&mut text_bytes);
+
     GridMarkers {
         oldest_target_id: "grid-000000".to_string(),
         newest_dense_id: format!("grid-{:06}", rows - 1),
         dense_hit_oldest_id: format!("grid-{dense_hit_start:06}"),
+        searchable_bytes,
+    }
+}
+
+/// `min`/`max`/`p50`/`p95` of `values` (per-row `text` byte lengths). Reuses
+/// `percentiles`'s nearest-rank method so the byte-length percentiles are
+/// computed identically to the timing ones. `values` is non-empty here: the
+/// same `assert!` above (`rows > OLDTARGET_DECOY_COUNT + DENSE_HIT_COUNT`)
+/// guarantees at least one row was seeded.
+fn summarize_byte_lengths(values: &mut [u64]) -> SearchableByteStats {
+    let count = values.len();
+    let (p50_bytes, p95_bytes) = percentiles(values);
+    // `percentiles` already sorted `values` in place.
+    let min_bytes = *values.first().unwrap_or(&0);
+    let max_bytes = *values.last().unwrap_or(&0);
+    SearchableByteStats {
+        count,
+        min_bytes,
+        max_bytes,
+        p50_bytes,
+        p95_bytes,
     }
 }
 
@@ -1054,6 +1102,18 @@ fn run_symbolic_scan_grid() {
                         "workload": "S3-A-grid",
                         "rows": rows,
                         "byte_distribution": dist.label(),
+                        // #1142's invariant: "searchable bytes" must be
+                        // observable per conclusion, not just the
+                        // distribution-bucket label above — the actual
+                        // per-row `text` byte-length distribution this
+                        // corpus was seeded with.
+                        "searchable_bytes": {
+                            "count": markers.searchable_bytes.count,
+                            "min": markers.searchable_bytes.min_bytes,
+                            "max": markers.searchable_bytes.max_bytes,
+                            "p50": markers.searchable_bytes.p50_bytes,
+                            "p95": markers.searchable_bytes.p95_bytes,
+                        },
                         "selectivity": selectivity.label(),
                         "cache_state": cache.label(),
                         "iterations": iterations,
@@ -1110,6 +1170,22 @@ fn measure_symbolic_cell(
 ) {
     match cache {
         CacheState::Fresh => {
+            // `conn` is reused across all 4 selectivities x 2 cache states
+            // for this (rows, byte_distribution) corpus (opening a fresh
+            // in-memory `MemoryStore` per selectivity would multiply corpus
+            // -seeding cost 4x, including at the 63k-row tier). Without this,
+            // only the very first selectivity's Fresh cell in a corpus is
+            // genuinely fresh: every later "fresh" call inherits SQLite's
+            // page cache warmed by the prior selectivity's own Warmed loop
+            // (both scan the same `memories` table). `PRAGMA shrink_memory`
+            // releases the connection's cached pages
+            // (`sqlite3_db_release_memory`) with no live cursor held open at
+            // this point (the previous cell's `query_map` fully drained and
+            // returned owned `MemoryEntry` rows), giving each Fresh cell an
+            // empty page cache regardless of what ran before it on this
+            // connection.
+            conn.execute_batch("PRAGMA shrink_memory;")
+                .expect("shrink_memory before fresh symbolic scan");
             let start = Instant::now();
             let entries =
                 search_symbolic_candidates(conn, query, SYMBOLIC_LIMIT, false, false, None, None)
