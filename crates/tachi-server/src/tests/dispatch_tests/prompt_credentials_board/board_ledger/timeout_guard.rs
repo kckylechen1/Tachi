@@ -34,6 +34,7 @@ async fn board_caps_corrupt_huge_timeout_before_duration_math() {
             limit: Some(20),
             project: None,
             flow_id: None,
+            verbose: None,
         },
     )
     .await

@@ -281,6 +281,7 @@ pub(crate) async fn handle_memory_briefing(
                 limit: Some(top_k.min(kanban_cap)),
                 project: named_project.clone(),
                 flow_id: None,
+                verbose: None,
             },
         ),
         async {

@@ -96,6 +96,14 @@ pub(super) async fn feature_board_raw(
             limit: Some(top_k.max(10)),
             project: params.project.clone(),
             flow_id,
+            // tachi#1173 item 3: the default board view now folds terminal
+            // rows into count rows on an unfiltered ("all") query. This
+            // consumer needle-scans historical (including completed) rows
+            // for flow_id/issue_ref/pr_ref matches (see `feature_needles` /
+            // `value_contains_any` below) — folding those away would silently
+            // drop matches, so this internal caller opts back into the full,
+            // unfolded row set rather than the new agent-facing default.
+            verbose: Some(true),
         },
     )
     .await

@@ -45,6 +45,11 @@ async fn board_surfaces_dispatch_run_ledger() {
             limit: Some(20),
             project: None,
             flow_id: None,
+            // tachi#1173 item 3: this test asserts the full acpx/acpx_events
+            // payload is present on the row -- the new agent-facing default
+            // (verbose omitted) strips those fields, so request the full
+            // shape explicitly rather than weaken the assertion.
+            verbose: Some(true),
         },
     )
     .await

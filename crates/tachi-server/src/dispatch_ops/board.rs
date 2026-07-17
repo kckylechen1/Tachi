@@ -1,3 +1,4 @@
+mod failure_tail;
 mod flow;
 mod handler;
 mod paths;
@@ -7,6 +8,7 @@ mod status;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use failure_tail::read_failure_tail;
 pub(crate) use handler::handle_tachi_board;
 pub(crate) use runs::collect_run_task_for_server;
 

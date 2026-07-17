@@ -1,11 +1,13 @@
 use super::flow::{flow_dispatch_ids, merge_run_task};
 use super::paths::runs_dir_for_server;
 use super::runs::{collect_run_task_by_id, collect_run_tasks_from_dir};
-use super::status::{mark_abandoned_kanban_task, state_matches_filter};
+use super::status::{is_terminal_state, mark_abandoned_kanban_task, state_matches_filter};
 use crate::tool_params::{SearchMemoryParams, TachiBoardParams};
 use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::json;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 pub(crate) async fn handle_tachi_board(
     server: &MemoryServer,
@@ -157,12 +159,95 @@ pub(crate) async fn handle_tachi_board(
                 .is_some_and(|state| state_matches_filter(state_filter_name, state))
         });
     }
+
+    // tachi#1173 item 3: default board rows omit the heavy per-row session
+    // payload (identity_receipt/acpx/acpx_events) unless the caller asks for
+    // the full shape via verbose=true. Kanban-only rows never carried these
+    // fields; run-ledger rows do (see `runs::collect_run_tasks_from_dir` /
+    // `collect_run_task_from_dir`) -- stripped here rather than at the
+    // shared collectors, which `wait`/`status` still call for full fidelity.
+    let verbose = params.verbose.unwrap_or(false);
+    if !verbose {
+        for task in &mut tasks {
+            if let Some(obj) = task.as_object_mut() {
+                obj.remove("identity_receipt");
+                obj.remove("acpx");
+                obj.remove("acpx_events");
+            }
+        }
+    }
+
+    // tachi#1173 item 3: fold terminal (completed/failed/canceled) rows into
+    // a per-state count row on the default (unfiltered, non-verbose) view so
+    // a long-lived board doesn't drown active work under historical noise.
+    // An explicit non-"all" state_filter is itself an ask to see that state
+    // expanded, so folding never applies there regardless of `verbose`. A
+    // flow_id filter is the same kind of explicit, scoped ask -- a flow
+    // board is expected to show every dispatch it recorded (including
+    // completed ones), so folding is skipped there too (see
+    // `tachi_task_board_filters_to_flow_dispatch_ids`, which asserts a
+    // completed flow dispatch is still an individual row).
+    let fold_terminal = !verbose && state_filter_name == "all" && flow_filter.is_none();
+    let mut folded_counts: BTreeMap<String, usize> = BTreeMap::new();
+    if fold_terminal {
+        let mut kept = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            let state = task
+                .get("state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            if is_terminal_state(&state) {
+                *folded_counts.entry(state).or_insert(0) += 1;
+            } else {
+                kept.push(task);
+            }
+        }
+        tasks = kept;
+    }
+
+    // tachi#1173 item 7: attach a bounded, ANSI-free failure_tail to any
+    // visible individual row for a terminal-failed dispatch, so a caller can
+    // autopsy the failure without a separate file read. This only reaches
+    // failed rows that survived the fold step above (i.e. an explicit
+    // state_filter or verbose=true asked to see them expanded) -- a folded
+    // count row has no single run to read a tail from.
+    for task in &mut tasks {
+        if task.get("state").and_then(|v| v.as_str()) != Some("TASK_STATE_FAILED") {
+            continue;
+        }
+        let Some(run_dir) = task
+            .get("run_dir")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+        else {
+            continue;
+        };
+        if let Some(tail) = super::read_failure_tail(&run_dir) {
+            if let Some(obj) = task.as_object_mut() {
+                obj.insert("failure_tail".to_string(), json!(tail));
+            }
+        }
+    }
+
     tasks.sort_by(|a, b| {
         b.get("updated_at")
             .and_then(|v| v.as_str())
             .cmp(&a.get("updated_at").and_then(|v| v.as_str()))
     });
     tasks.truncate(limit);
+
+    let folded_total: usize = folded_counts.values().sum();
+    if folded_total > 0 {
+        for (state, count) in &folded_counts {
+            tasks.push(json!({
+                "source": "folded",
+                "folded": true,
+                "state": state,
+                "count": count,
+            }));
+        }
+    }
 
     serde_json::to_string(&json!({
         "board": "kanban",
@@ -171,6 +256,7 @@ pub(crate) async fn handle_tachi_board(
         "count": tasks.len(),
         "kanban_count": kanban_count,
         "run_count": run_count,
+        "folded_total": folded_total,
         "tasks": tasks,
     }))
     .map_err(|e| format!("serialize board: {e}"))

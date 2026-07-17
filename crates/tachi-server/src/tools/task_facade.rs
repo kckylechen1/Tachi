@@ -30,12 +30,23 @@ pub(super) async fn handle_tachi_task_wait(
                 .unwrap_or("unknown");
             let terminal = is_terminal_task_state(state);
             if terminal {
+                // tachi#1173 item 7: on a terminal *failed* dispatch, attach
+                // a bounded, ANSI-free failure_tail so the caller can
+                // autopsy the failure from this response alone, without a
+                // separate file read under ~/.tachi.
+                let failure_tail = (state == "TASK_STATE_FAILED")
+                    .then(|| task.get("run_dir").and_then(Value::as_str))
+                    .flatten()
+                    .and_then(|run_dir| {
+                        crate::dispatch_ops::read_failure_tail(std::path::Path::new(run_dir))
+                    });
                 return serde_json::to_string(&json!({
                     "status": "completed",
                     "dispatch_id": dispatch_id,
                     "terminal": true,
                     "state": state,
                     "task": task,
+                    "failure_tail": failure_tail,
                 }))
                 .map_err(|e| format!("serialize wait response: {e}"));
             }
@@ -289,6 +300,36 @@ mod tests {
         serde_json::from_str(&json_str).expect("deserialize status params")
     }
 
+    fn wait_params(dispatch_id: &str) -> TachiTaskParams {
+        let json_str = format!(
+            r#"{{"action":"wait","dispatch_id":"{}","timeout_secs":1}}"#,
+            dispatch_id
+        );
+        serde_json::from_str(&json_str).expect("deserialize wait params")
+    }
+
+    /// tachi#1173 item 7: a terminal-FAILED run whose `progress.jsonl` carries
+    /// a `subprocess_finished` event with an ANSI-colored `output_tail`.
+    fn write_fake_failed_run(runs_dir: &std::path::Path, dispatch_id: &str, output_tail: &str) {
+        let run_dir = runs_dir.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+        let status = json!({
+            "dispatch_id": dispatch_id,
+            "agent": "claude",
+            "state": "TASK_STATE_FAILED",
+            "exit_code": 1,
+            "updated_at": Utc::now().to_rfc3339(),
+        });
+        std::fs::write(run_dir.join("status.json"), status.to_string()).expect("write status.json");
+        let progress_line = json!({
+            "event": "subprocess_finished",
+            "dispatch_id": dispatch_id,
+            "output_tail": output_tail,
+        });
+        std::fs::write(run_dir.join("progress.jsonl"), format!("{progress_line}\n"))
+            .expect("write progress.jsonl");
+    }
+
     #[tokio::test]
     async fn status_include_result_returns_result_md_content() {
         let (tmp, server) = make_server_with_runs_dir();
@@ -392,6 +433,66 @@ mod tests {
         assert_eq!(
             response["result"]["full_size_chars"], 500,
             "char count should be 500, got: {response}"
+        );
+    }
+
+    /// tachi#1173 item 7 discriminator: a terminal-FAILED dispatch's `wait`
+    /// response must carry `failure_tail` sourced from the run's
+    /// `progress.jsonl` output_tail, with ANSI escapes stripped.
+    #[tokio::test]
+    async fn wait_terminal_failure_includes_ansi_free_failure_tail() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-dispatch-failed-tail";
+        write_fake_failed_run(
+            &runs_dir,
+            dispatch_id,
+            "\u{1b}[31merror: build failed\u{1b}[0m",
+        );
+
+        let params = wait_params(dispatch_id);
+        let response_str = handle_tachi_task_wait(&server, &params)
+            .await
+            .expect("wait call");
+        let response: serde_json::Value =
+            serde_json::from_str(&response_str).expect("parse response");
+
+        assert_eq!(response["status"], "completed");
+        assert_eq!(response["terminal"], true);
+        assert_eq!(response["state"], "TASK_STATE_FAILED");
+        let tail = response["failure_tail"].as_str().unwrap_or_else(|| {
+            panic!("failure_tail should be present as a string, got: {response}")
+        });
+        assert!(
+            tail.contains("error: build failed"),
+            "failure_tail should carry the underlying message, got: {tail:?}"
+        );
+        assert!(
+            !tail.contains('\u{1b}'),
+            "failure_tail must not contain raw ANSI escape bytes: {tail:?}"
+        );
+    }
+
+    /// A non-failed terminal state (completed) must not synthesize a
+    /// failure_tail -- the field is present (stable response shape) but null.
+    #[tokio::test]
+    async fn wait_terminal_completion_has_null_failure_tail() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-dispatch-completed-no-tail";
+        write_fake_run(&runs_dir, dispatch_id, None);
+
+        let params = wait_params(dispatch_id);
+        let response_str = handle_tachi_task_wait(&server, &params)
+            .await
+            .expect("wait call");
+        let response: serde_json::Value =
+            serde_json::from_str(&response_str).expect("parse response");
+
+        assert_eq!(response["state"], "TASK_STATE_COMPLETED");
+        assert!(
+            response["failure_tail"].is_null(),
+            "completed dispatch should not carry a failure_tail, got: {response}"
         );
     }
 }
