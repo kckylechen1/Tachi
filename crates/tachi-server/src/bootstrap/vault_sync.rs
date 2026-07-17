@@ -366,10 +366,14 @@ fn ensure_importable_kdf(config: &VaultConfig) -> Result<(), Box<dyn std::error:
     // entirely already fails to deserialize as `VaultSyncBundle` earlier in
     // `import_vault_bundle`, before this function ever runs — so the only
     // reachable "no algorithm recorded" shape is an explicit empty string in
-    // an older/hand-crafted bundle. Treat that as the implicit historical
-    // default rather than rejecting it outright; reject anything else that
-    // isn't "argon2id".
-    let algorithm = if config.kdf_algorithm.trim().is_empty() {
+    // an older/hand-crafted bundle. This is an exact-empty check, not a
+    // trimmed one (tachi#1210): a whitespace-only value is not a reachable
+    // "no algorithm recorded" shape from the schema default, so it falls
+    // through to the unrecognized-algorithm rejection below rather than
+    // silently widening the default carve-out. Treat the exact-empty shape
+    // as the implicit historical default rather than rejecting it outright;
+    // reject anything else that isn't "argon2id".
+    let algorithm = if config.kdf_algorithm.is_empty() {
         "argon2id"
     } else {
         config.kdf_algorithm.as_str()
@@ -507,6 +511,42 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }
+    }
+
+    /// tachi#1210: a WHITESPACE-ONLY stored `kdf_algorithm` is not the
+    /// schema's "no algorithm recorded" shape (the column is `NOT NULL
+    /// DEFAULT 'argon2id'` with no serde default, so the only reachable
+    /// empty-shape row is an exact empty string) and must NOT silently widen
+    /// the exact-empty default carve-out. It must be refused as an
+    /// unrecognized KDF algorithm, the same fail-closed rejection as any
+    /// other unsupported label — mirrors `vault_crypto`'s
+    /// `seam_whitespace_only_kdf_algorithm_is_refused_not_defaulted` (fixed
+    /// by a7449319).
+    #[test]
+    fn ensure_importable_kdf_rejects_whitespace_only_algorithm() {
+        let mut config = sample_config();
+        config.kdf_algorithm = " ".to_string();
+
+        let err = ensure_importable_kdf(&config)
+            .expect_err("whitespace-only kdf_algorithm must not silently default to argon2id");
+        assert!(
+            err.to_string().contains("unrecognized KDF"),
+            "whitespace-only kdf_algorithm must be rejected as unrecognized, not defaulted: {err}"
+        );
+    }
+
+    /// tachi#1080/#1210: an exact-empty stored `kdf_algorithm` IS the
+    /// schema's reachable "no algorithm recorded" shape (an
+    /// older/hand-crafted bundle) and must still fall back to the implicit
+    /// `argon2id` default — this is the one carve-out `ensure_importable_kdf`
+    /// intentionally keeps.
+    #[test]
+    fn ensure_importable_kdf_defaults_exact_empty_algorithm_to_argon2id() {
+        let mut config = sample_config();
+        config.kdf_algorithm = String::new();
+
+        ensure_importable_kdf(&config)
+            .expect("exact-empty kdf_algorithm must still default to argon2id");
     }
 
     #[test]
