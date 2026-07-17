@@ -16,22 +16,29 @@ use crate::tool_params::{
     MirrorEvalRegisterParams,
 };
 
-/// The producer's effective model identity: prefer the carrier-observed
-/// value from `observe` (ground truth of what actually ran) over the
-/// `register`-time requested value (planned intent) — same planned-vs-
-/// observed preference the #1065 identity receipt already establishes.
-fn producer_model(
-    run: &memcore::MirrorEvalRun,
-    observation: Option<&memcore::MirrorEvalObservation>,
-) -> Option<String> {
-    observation
-        .and_then(|o| o.effective_model.clone())
-        .filter(|m| !m.trim().is_empty())
-        .or_else(|| run.requested_model.clone())
-}
-
 fn lineage_of(model: Option<&str>) -> String {
     tachi_dispatch::model_lineage_id(model, tachi_dispatch::UNKNOWN_IDENTITY)
+}
+
+/// Producer identity for cross-model GATING (self-eval / independence,
+/// #1066 AC-7) — the carrier-OBSERVED `effective_model` ONLY, never the
+/// register-time requested/planned value. Gating must never launder a
+/// `register`-only run's *requested* identity into something strong enough
+/// to pass cross-model independence or dodge a same-engine self-eval: AC-7
+/// is explicit that "unknown native model identity ... cannot satisfy
+/// cross-model independence," and a run with no `observe` call yet (or an
+/// `observe` that omitted `effective_model`) has zero carrier confirmation
+/// of what actually ran. Codex round-2 finding #4: the pre-fix code
+/// (`producer_model` in `mirror_eval_projection.rs`, formerly duplicated
+/// here too) fell back to the requested value for gating, so a known
+/// `requested_model` alone could satisfy independence (or evade self-eval)
+/// without any observation ever having occurred.
+fn producer_lineage_for_gating(observation: Option<&memcore::MirrorEvalObservation>) -> String {
+    lineage_of(
+        observation
+            .and_then(|o| o.effective_model.as_deref())
+            .filter(|m| !m.trim().is_empty()),
+    )
 }
 
 /// Cross-model independence requires BOTH sides to carry an identifiable
@@ -159,7 +166,10 @@ pub(crate) fn handle_adjudicate(
             .map_err(|e| e.to_string())
     })?;
 
-    let (run, observation) = server.with_global_store_read(|store| {
+    // `_run` is fetched only as an existence check (the "vanished after
+    // adjudication" error below) — gating below uses ONLY the observation,
+    // never the run's requested identity (see `producer_lineage_for_gating`).
+    let (_run, observation) = server.with_global_store_read(|store| {
         let conn = store.connection();
         let run = memcore::get_run_by_id(conn, &eval_run_id)
             .map_err(|e| e.to_string())?
@@ -168,7 +178,7 @@ pub(crate) fn handle_adjudicate(
             memcore::get_observation(conn, &eval_run_id).map_err(|e| e.to_string())?;
         Ok((run, observation))
     })?;
-    let producer_lineage = lineage_of(producer_model(&run, observation.as_ref()).as_deref());
+    let producer_lineage = producer_lineage_for_gating(observation.as_ref());
     let verifier_lineage = lineage_of(adjudication.verifier_model.as_deref());
 
     serde_json::to_string(&json!({
@@ -209,8 +219,7 @@ pub(crate) fn handle_get(
         ));
     };
 
-    let producer_lineage =
-        lineage_of(producer_model(&view.run, view.observation.as_ref()).as_deref());
+    let producer_lineage = producer_lineage_for_gating(view.observation.as_ref());
     let (independent, self_eval, verifier_model) = match view.current_adjudication() {
         Some(adj) => {
             let verifier_lineage = lineage_of(adj.verifier_model.as_deref());

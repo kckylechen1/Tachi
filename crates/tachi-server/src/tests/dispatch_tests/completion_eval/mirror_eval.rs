@@ -231,6 +231,52 @@ async fn cross_model_independence_requires_two_known_differing_engines() {
     );
 }
 
+/// AC-7 / codex round-2 finding #4: the DANGEROUS case the pre-existing
+/// unknown-identity test above does not cover — a `register` with a KNOWN
+/// `requested_model` but NO carrier `observe` confirming what actually ran
+/// (never even calls `observe`, so `effective_model` is entirely absent, not
+/// merely empty-string). BEHAVIORAL RED on the pre-fix code: it fell back to
+/// the requested value for gating, so a known requested model differing
+/// from the verifier's model would WRONGLY report `cross_model_independent:
+/// true` despite zero carrier confirmation the requested model is what
+/// actually ran — exactly the self-eval-gate bypass AC-7 forbids ("unknown
+/// native model identity ... cannot satisfy cross-model independence").
+/// Post-fix, an unobserved producer must resolve to unknown for gating
+/// regardless of how confident the requested value looks.
+#[tokio::test]
+async fn requested_known_but_unobserved_producer_never_satisfies_independence() {
+    let server = make_server();
+
+    let run = register(&server, "wire-native-unobserved", "anthropic/claude-sonnet").await;
+    let run_id = run["eval_run_id"].as_str().unwrap();
+    // Deliberately no `observe` call — the run has ONLY a requested identity,
+    // never a carrier-confirmed one.
+    let adjudication = adjudicate(
+        &server,
+        run_id,
+        "leader",
+        Some("openai/gpt-5"),
+        "useful",
+        true,
+        "unobserved-event",
+    )
+    .await;
+    assert_eq!(
+        adjudication["cross_model_independent"],
+        serde_json::json!(false),
+        "an unobserved producer must never satisfy cross-model independence just because its \
+         requested_model happens to differ from the verifier's: {adjudication:#}"
+    );
+    assert_eq!(adjudication["self_eval"], serde_json::json!(false));
+
+    let view = get(&server, run_id).await;
+    assert_eq!(
+        view["cross_model_independent"],
+        serde_json::json!(false),
+        "get must agree with adjudicate: {view:#}"
+    );
+}
+
 /// AC-4 / AC-5 end-to-end: `tachi_complete(eval_run_ids=[...])` projects only
 /// the adjudicated + evidence-usable + non-self-eval run into aggregation;
 /// an evidence_usable=false run, an unadjudicated run, and a wholly unknown

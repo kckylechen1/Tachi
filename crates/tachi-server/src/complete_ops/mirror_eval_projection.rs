@@ -33,6 +33,24 @@ fn lineage_of(model: Option<&str>) -> String {
     tachi_dispatch::model_lineage_id(model, tachi_dispatch::UNKNOWN_IDENTITY)
 }
 
+/// Producer identity for cross-model GATING (self-eval, AC-7) — the
+/// carrier-OBSERVED `effective_model` ONLY, never the register-time
+/// requested/planned value. Symmetric with
+/// `crate::agent_eval::mirror::producer_lineage_for_gating` (see that
+/// function's doc for why a fallback to `requested_model` here would let a
+/// `register`-only row (no `observe` yet) launder planned intent into an
+/// attribution strong enough to dodge the self-eval gate — codex round-2
+/// finding #4). `producer_model` above still prefers observed-over-requested
+/// for the *display* `model:` field projected below; this function is
+/// gating-only.
+fn producer_lineage_for_gating(observation: Option<&memcore::MirrorEvalObservation>) -> String {
+    lineage_of(
+        observation
+            .and_then(|o| o.effective_model.as_deref())
+            .filter(|m| !m.trim().is_empty()),
+    )
+}
+
 /// Self-eval: producer and verifier are identifiably the SAME known engine.
 /// An unknown identity on either side is unattributable, never proof of
 /// self-eval — it also never satisfies cross-model independence (AC-7), so
@@ -49,8 +67,7 @@ fn to_subagent_eval_params(view: &memcore::MirrorEvalRunView) -> Option<TachiSub
     if !adjudication.evidence_usable {
         return None;
     }
-    let producer_lineage =
-        lineage_of(producer_model(&view.run, view.observation.as_ref()).as_deref());
+    let producer_lineage = producer_lineage_for_gating(view.observation.as_ref());
     let verifier_lineage = lineage_of(adjudication.verifier_model.as_deref());
     if is_self_eval(&producer_lineage, &verifier_lineage) {
         return None;

@@ -12,12 +12,17 @@
 //! ## Three tables
 //!
 //! - `mirror_eval_runs` (`register`): one row per registered execution. A
-//!   `native_child_id` (when the host exposes one) plus its parent contract
-//!   and execution origin form the idempotency anchor: replaying the same
-//!   native id with the same content returns the original row; replaying it
-//!   with different content is an explicit conflict (never silently
-//!   overwritten — see [`register_mirror_eval_run`]). Absent a native id,
-//!   registration cannot be deduped and always mints a fresh row.
+//!   `native_child_id` (when the host exposes one) IS the idempotency
+//!   anchor, per the frozen contract's "same native id + same payload is
+//!   idempotent, same native id + differing payload is an explicit
+//!   conflict": replaying the same native id with the same content (which
+//!   includes `frozen_contract_ref`/`execution_origin` as ordinary compared
+//!   fields) returns the original row; replaying it with ANY differing
+//!   content — including a different parent contract or execution origin —
+//!   is an explicit conflict (never silently overwritten, and never
+//!   silently minted as a second row under the same native id — see
+//!   [`register_mirror_eval_run`]). Absent a native id, registration cannot
+//!   be deduped and always mints a fresh row.
 //! - `mirror_eval_observations` (`observe`): at most ONE row per
 //!   `eval_run_id` — the carrier-observed terminal facts (duration/cost,
 //!   result/artifact refs, effective identity). The type has no judgment
@@ -77,10 +82,20 @@ pub struct MirrorEvalRun {
     pub created_at: String,
 }
 
-/// Deterministic natural key: `(frozen_contract_ref, execution_origin,
-/// native_child_id)` when a native id is present, else always-fresh (no
-/// identity anchor to dedupe against). Non-native registrations therefore can
-/// never collide with each other or with a native-anchored registration.
+/// Deterministic natural key: the bare `native_child_id` when one is
+/// present, else always-fresh (no identity anchor to dedupe against).
+///
+/// The frozen contract (#1066) is explicit: "Same native id + same payload
+/// is idempotent; same native id + differing payload is an explicit
+/// conflict" — the anchor is the native id ALONE, not a compound of
+/// `(frozen_contract_ref, execution_origin, native_child_id)`. A compound
+/// key would let the SAME native id silently mint a SECOND row whenever the
+/// contract_ref or execution_origin differs, instead of surfacing the
+/// conflict `register` is supposed to reject — exactly the case
+/// `registration_content_matches` below already exists to catch (it compares
+/// `frozen_contract_ref`/`execution_origin` as ordinary content fields, so a
+/// mismatch on either one correctly fails the match and raises a conflict
+/// once the key itself no longer launders them into different rows).
 fn register_key(new: &NewMirrorEvalRun) -> String {
     match new
         .native_child_id
@@ -88,12 +103,7 @@ fn register_key(new: &NewMirrorEvalRun) -> String {
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        Some(native_id) => format!(
-            "{}{KEY_SEP}{}{KEY_SEP}{}",
-            new.frozen_contract_ref.trim(),
-            new.execution_origin.trim(),
-            native_id
-        ),
+        Some(native_id) => native_id.to_string(),
         None => format!("no-native-id{KEY_SEP}{}", uuid::Uuid::new_v4()),
     }
 }
@@ -204,8 +214,13 @@ pub fn get_run_by_native_child_id(
     conn: &Connection,
     native_child_id: &str,
 ) -> Result<Option<MirrorEvalRun>, MemoryError> {
-    // Most-recent-first: a host may reuse a native id across unrelated
-    // parents over time; the newest registration is the live one.
+    // Most-recent-first defensively: `register_key` now anchors solely on
+    // `native_child_id`, so a live registration for a given native id is
+    // unique by construction (a same-id/differing-content re-register is
+    // rejected as a conflict, never silently minted as a second row). The
+    // ORDER BY/LIMIT 1 exists only to stay correct against any pre-fix rows
+    // written under the old compound key, where more than one row COULD
+    // share a native_child_id — never against new writes.
     conn.query_row(
         "SELECT eval_run_id, register_key, frozen_contract_ref, execution_origin, lifecycle_owner,
                 harness, native_child_id, requested_profile, requested_model, requested_agent, created_at
@@ -745,6 +760,60 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM mirror_eval_runs", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1, "the rejected conflict must not land a second row");
+    }
+
+    /// AC-2 / codex round-2 finding #2: reusing the SAME native id under a
+    /// DIFFERENT `frozen_contract_ref` (or `execution_origin`) must be an
+    /// explicit conflict too — the frozen contract anchors idempotency on
+    /// the native id ALONE, not a `(contract_ref, execution_origin,
+    /// native_id)` compound. BEHAVIORAL RED on the pre-fix compound-key
+    /// `register_key`: that implementation minted a SILENT SECOND ROW here
+    /// instead of rejecting the conflict, because the compound key differed
+    /// even though the native id was identical.
+    #[test]
+    fn register_same_native_id_different_contract_ref_is_explicit_conflict() {
+        let conn = open_conn();
+        register_mirror_eval_run(&conn, &base_register("native-cross-contract")).unwrap();
+
+        let mut cross_contract = base_register("native-cross-contract");
+        cross_contract.frozen_contract_ref = "kckylechen1/tachi#9999".to_string();
+        let err = register_mirror_eval_run(&conn, &cross_contract).expect_err(
+            "same native id under a different frozen_contract_ref must be rejected, not \
+             silently registered as a second row",
+        );
+        assert!(
+            err.to_string().contains("conflict"),
+            "error must name the conflict: {err}"
+        );
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM mirror_eval_runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "the same native id must never anchor two rows under different contracts"
+        );
+    }
+
+    /// Same native id, different `execution_origin`: same conflict rule as
+    /// the contract_ref case above, exercised on the other compound-key
+    /// field the pre-fix implementation also let through.
+    #[test]
+    fn register_same_native_id_different_execution_origin_is_explicit_conflict() {
+        let conn = open_conn();
+        register_mirror_eval_run(&conn, &base_register("native-cross-origin")).unwrap();
+
+        let mut cross_origin = base_register("native-cross-origin");
+        cross_origin.execution_origin = "some_other_origin".to_string();
+        let err = register_mirror_eval_run(&conn, &cross_origin).expect_err(
+            "same native id under a different execution_origin must be rejected",
+        );
+        assert!(err.to_string().contains("conflict"));
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM mirror_eval_runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     /// Registrations with no native id can never be deduped against each
