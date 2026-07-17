@@ -116,7 +116,7 @@ fn provision_managed_env_cli(
 ) -> Result<(), String> {
     let global_db = crate::path_utils::tachi_home()
         .join("global")
-        .join("memory.db");
+        .join(memcore::MEMORY_DB_FILENAME);
     if let Some(parent) = global_db.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -211,7 +211,7 @@ fn provision_managed_env_cli(
 fn sweep_stale_exec_env_leases_cli(force: bool) {
     let global_db = crate::path_utils::tachi_home()
         .join("global")
-        .join("memory.db");
+        .join(memcore::MEMORY_DB_FILENAME);
     let db_str = match global_db.to_str() {
         Some(s) => s,
         None => {
@@ -472,7 +472,7 @@ fn run_orphan_reap_cli_with_sources(
 
     let global_db = crate::path_utils::tachi_home()
         .join("global")
-        .join("memory.db");
+        .join(memcore::MEMORY_DB_FILENAME);
     if let Some(parent) = global_db.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -524,7 +524,7 @@ mod tests {
     /// ## Why this could not be reconciled in place, and what changed instead
     ///
     /// Once `--force` falls through the gate, `run_orphan_reap_cli` opens
-    /// `tachi_home()/global/memory.db` — the OPERATOR'S REAL global ledger — via
+    /// `tachi_home()/global/tachi-memory.db` — the OPERATOR'S REAL global ledger — via
     /// `MemoryStore::open_with_label`'s fail-closed default (#1119:
     /// `OpenExisting` + `Deny`). On the machine this reconciliation was done on,
     /// that real DB is stamped at an OLDER schema than this binary's

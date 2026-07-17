@@ -43,8 +43,8 @@ pub(in crate::bootstrap) async fn run_tidy_command(
             Ok(lock) => lock,
         };
 
-        let target_db =
-            target_db_override.unwrap_or_else(|| app_home.join("global").join("memory.db"));
+        let target_db = target_db_override
+            .unwrap_or_else(|| app_home.join("global").join(memcore::MEMORY_DB_FILENAME));
         let archive_root = app_home
             .join("archive")
             .join(chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string());
@@ -81,8 +81,8 @@ pub(in crate::bootstrap) async fn run_tidy_command(
 
     // --dry-run (or default): also include the migration plan preview when
     // there are any migration candidates, but make no writes.
-    let target_db_preview =
-        target_db_override.unwrap_or_else(|| app_home.join("global").join("memory.db"));
+    let target_db_preview = target_db_override
+        .unwrap_or_else(|| app_home.join("global").join(memcore::MEMORY_DB_FILENAME));
     let archive_preview = app_home.join("archive").join("<timestamp>");
     let plan_preview = build_migration_plan(&report, &target_db_preview, &archive_preview, home);
 

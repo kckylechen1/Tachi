@@ -78,7 +78,10 @@ pub(super) fn run_intake_action(
 // `discover_report` / CLI entrypoints directly.
 #[cfg(test)]
 pub(crate) fn discover_candidates(env_home: &Path, cwd: &Path) -> Vec<Candidate> {
-    let global_db_path = env_home.join(".tachi").join("global").join("memory.db");
+    let global_db_path = env_home
+        .join(".tachi")
+        .join("global")
+        .join(memcore::MEMORY_DB_FILENAME);
     discover_report(env_home, cwd, &global_db_path, None).candidates
 }
 

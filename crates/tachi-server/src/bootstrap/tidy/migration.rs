@@ -82,7 +82,7 @@ fn archive_relative_path(source: &std::path::Path, home: &std::path::Path) -> Pa
         source
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "memory.db".to_string()),
+            .unwrap_or_else(|| memcore::MEMORY_DB_FILENAME.to_string()),
     )
 }
 
