@@ -77,7 +77,43 @@ fn facade_response_renders_recommend_and_profiles_as_markdown_tables() {
     assert_eq!(recommend_value["status"], "completed");
     assert_eq!(recommend_value["recommended_profile"], "codex_55_review");
 
-    let profiles_raw = r#"{
+    // #1182 checkpoint 4 (codex review round 2): tachi#1173 item 2's default
+    // `dispatch_profiles_json_for_server` shape is the slim row
+    // (name/backend/model/role, `verbose: false` echoed, no `mbit_card`) —
+    // exercise that real default shape here instead of only a hand-built
+    // full-card fixture, so this test would actually catch a markdown
+    // renderer that still assumes the pre-#1173 always-full-card shape.
+    let profiles_slim_raw = r#"{
+        "verbose": false,
+        "dispatch_profiles": [
+            {"name": "codex_55_review", "backend": "codex", "model": "gpt-5.5", "role": "reviewer"}
+        ]
+    }"#;
+    let profiles_slim = format_facade_response(
+        "Tachi task profiles",
+        "profiles",
+        profiles_slim_raw,
+        Some("markdown"),
+    )
+    .unwrap();
+    assert!(
+        profiles_slim.starts_with("## Tachi task profiles"),
+        "{profiles_slim}"
+    );
+    assert!(
+        profiles_slim.contains("| name | backend | model | role |"),
+        "{profiles_slim}"
+    );
+    assert!(profiles_slim.contains("codex_55_review"), "{profiles_slim}");
+    assert!(profiles_slim.contains("gpt-5.5"), "{profiles_slim}");
+    assert!(!profiles_slim.contains("```json"), "{profiles_slim}");
+    // The slim default must not silently fall back to the full-card column
+    // set (which would render every stats column as "-").
+    assert!(!profiles_slim.contains("precision"), "{profiles_slim}");
+
+    // verbose=true preserves the pre-#1173 full-card table shape.
+    let profiles_verbose_raw = r#"{
+        "verbose": true,
         "dispatch_profiles": [
             {"name": "codex_55_review", "role": "reviewer", "stage": "review",
              "backend": "codex",
@@ -85,23 +121,32 @@ fn facade_response_renders_recommend_and_profiles_as_markdown_tables() {
                            "strong_against": ["regressions", "security"]}}
         ]
     }"#;
-    let profiles = format_facade_response(
+    let profiles_verbose = format_facade_response(
         "Tachi task profiles",
         "profiles",
-        profiles_raw,
+        profiles_verbose_raw,
         Some("markdown"),
     )
     .unwrap();
-    assert!(profiles.starts_with("## Tachi task profiles"), "{profiles}");
     assert!(
-        profiles.contains(
+        profiles_verbose.starts_with("## Tachi task profiles"),
+        "{profiles_verbose}"
+    );
+    assert!(
+        profiles_verbose.contains(
             "| name | role | stage | backend | cost | precision | speed | strong_against |"
         ),
-        "{profiles}"
+        "{profiles_verbose}"
     );
-    assert!(profiles.contains("codex_55_review"), "{profiles}");
-    assert!(profiles.contains("regressions, security"), "{profiles}");
-    assert!(!profiles.contains("```json"), "{profiles}");
+    assert!(
+        profiles_verbose.contains("codex_55_review"),
+        "{profiles_verbose}"
+    );
+    assert!(
+        profiles_verbose.contains("regressions, security"),
+        "{profiles_verbose}"
+    );
+    assert!(!profiles_verbose.contains("```json"), "{profiles_verbose}");
 }
 
 #[test]

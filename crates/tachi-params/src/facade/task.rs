@@ -38,6 +38,15 @@ pub struct TachiTaskParams {
     /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
     #[serde(default)]
     pub format: Option<String>,
+    /// tachi#1173 items 1+2: request the full payload instead of the default
+    /// slim shape. [action=dispatch]: the dispatch response includes the full
+    /// routing card (`profile`, `identity_receipt`, `dispatch_profile`) rather
+    /// than just dispatch_id/state/run_dir/suggested_complete_command.
+    /// [action=profiles|profile|card]: each row includes the full mbit_card
+    /// (stats/guidance/moves/personality/skill_loadout/evidence_contract)
+    /// rather than just name/backend/model/role.
+    #[serde(default)]
+    pub verbose: Option<bool>,
     // plan fields
     #[serde(default)]
     #[schemars(

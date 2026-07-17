@@ -317,8 +317,13 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
             .contains(&json!("acceptance_criteria"))
     );
 
+    // tachi#1173 item 2 slimmed action='profiles' rows to name/backend/model/role
+    // by default; this assertion needs the full mbit_card/skill_loadout, so
+    // request the verbose escape hatch explicitly (#1182 consumer sweep).
+    let mut profiles_params = task_params("profiles");
+    profiles_params.verbose = Some(true);
     let profiles_raw = server
-        .tachi_task(Parameters(task_params("profiles")))
+        .tachi_task(Parameters(profiles_params))
         .await
         .expect("profiles should include projected loadout");
     let profiles: serde_json::Value = serde_json::from_str(&profiles_raw).expect("profiles JSON");

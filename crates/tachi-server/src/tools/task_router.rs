@@ -74,6 +74,7 @@ pub(super) async fn handle_tachi_task_facade(
                 auto_capability_bundle: params.auto_capability_bundle,
                 mcp_access: params.mcp_access.clone(),
                 allowed_mcp_servers: params.allowed_mcp_servers.clone(),
+                verbose: params.verbose,
             };
             crate::dispatch_ops::handle_tachi_dispatch(server, dispatch_params).await
         }
@@ -177,9 +178,25 @@ pub(super) async fn handle_tachi_task_facade(
         TachiTaskAction::Status => handle_tachi_task_status(server, &params).await,
         TachiTaskAction::Cancel => handle_tachi_task_cancel(server, &params).await,
         TachiTaskAction::Wait => handle_tachi_task_wait(server, &params).await,
-        TachiTaskAction::Profiles | TachiTaskAction::Profile | TachiTaskAction::Card => {
+        // codex review round 2 (#1182 checkpoint 2): the issue #1173 escape
+        // hatch is "verbose=true OR action='profile'" — two independent ways
+        // to get the full card. `profiles` (the listing) is the one item 2
+        // names as needing to slim; `profile`/`card` (singular-sounding
+        // aliases of the same underlying listing call, pre-existing before
+        // #1173) are the promised on-demand full-card fetch and must default
+        // to full unless the caller explicitly asks for the slim shape via
+        // verbose=false.
+        TachiTaskAction::Profiles => {
             serde_json::to_string(&crate::dispatch_profile::dispatch_profiles_json_for_server(
                 server,
+                params.verbose.unwrap_or(false),
+            )?)
+            .map_err(|e| format!("serialize dispatch profiles: {e}"))
+        }
+        TachiTaskAction::Profile | TachiTaskAction::Card => {
+            serde_json::to_string(&crate::dispatch_profile::dispatch_profiles_json_for_server(
+                server,
+                params.verbose.unwrap_or(true),
             )?)
             .map_err(|e| format!("serialize dispatch profiles: {e}"))
         }

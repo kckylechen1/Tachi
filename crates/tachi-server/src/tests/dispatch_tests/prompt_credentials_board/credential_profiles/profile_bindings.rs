@@ -69,6 +69,13 @@ async fn dispatch_profile_declared_credentials_materialize_without_explicit_para
     params.profile = Some("opencode_builder".to_string());
     params.cwd = Some(nested.to_string_lossy().to_string());
     params.unmanaged_cwd = Some(true);
+    // #1182 checkpoint 3 (MERGE BLOCKER, codex review round 2): this test's
+    // own assertions below read `response["profile"]...` to verify
+    // credential threading into the resolved routing card — unrelated to
+    // #1173 item 1's receipt-slimming default. #1173 slims `profile` out of
+    // the default response, so this pre-existing test would fail at runtime
+    // without an explicit opt-in; request the full card it actually needs.
+    params.verbose = Some(true);
     params.command = vec![
         "python3".to_string(),
         "-c".to_string(),
