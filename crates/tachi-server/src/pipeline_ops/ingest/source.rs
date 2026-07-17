@@ -108,6 +108,29 @@ pub(crate) async fn handle_ingest_source(
                 if chunk_path.starts_with("/wiki/") {
                     if let Some(obj) = metadata.as_object_mut() {
                         obj.insert("allow_cross_project".to_string(), json!(true));
+                        // #1072 fix-round (#1215 BUG 6): `ingest_source` is a
+                        // generic write path that can target ANY
+                        // `path_prefix`, including `/wiki/...`, entirely
+                        // outside `wiki_layer_metadata`'s lifecycle stamping
+                        // — a second, independent bypass alongside
+                        // `wiki_ops::ingest` the cross-vendor review named
+                        // ("generic source ingest can bypass dual-write for
+                        // /wiki prefix"). Without an explicit marker,
+                        // `derive_wiki_lifecycle`'s no-marker-present default
+                        // (`Active`, kept for pre-#1072 back-compat) would
+                        // silently promote arbitrary ingested content to
+                        // reviewed truth. Stamp it honestly: ingested content
+                        // has no review/approval step here.
+                        if !obj.contains_key("lifecycle") {
+                            obj.insert(
+                                "lifecycle".to_string(),
+                                json!(WikiLifecycleV1::PendingReview.as_str()),
+                            );
+                        }
+                        obj.entry("authority")
+                            .or_insert_with(|| json!(WikiAuthorityV1::Advisory.as_str()));
+                        obj.entry("artifact_kind")
+                            .or_insert_with(|| json!(WikiArtifactKindV1::Wiki.as_str()));
                     }
                 }
                 let entry = build_ingest_entry(

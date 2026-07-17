@@ -277,12 +277,25 @@ pub(crate) fn collect_wiki_browse_value(
                 }
                 let lifecycle = derive_wiki_lifecycle(&entry.metadata, &entry.path);
                 let authority = derive_wiki_authority(&entry.metadata);
+                // #1072 fix-round (#1215 BUG 6): browse-category provenance
+                // was overclaimed — the PR description said read/search
+                // "expose ... revision, source refs, ... review receipt" but
+                // this branch (unlike `collect_wiki_search_value`'s
+                // `attach_wiki_provenance`) dropped id/revision/references/
+                // review_receipt entirely. Bring it to parity.
+                let review_receipt = derive_wiki_review_receipt(&entry.metadata)
+                    .and_then(|receipt| serde_json::to_value(receipt).ok())
+                    .unwrap_or(Value::Null);
                 slim_entries.push(json!({
+                    "id": entry.id,
                     "path": entry.path,
                     "summary": entry.summary,
                     "importance": entry.importance,
+                    "revision": entry.revision,
                     "lifecycle": lifecycle.as_str(),
                     "authority": authority.as_str(),
+                    "references": preferred_wiki_references(&entry.metadata),
+                    "review_receipt": review_receipt,
                 }));
             }
 

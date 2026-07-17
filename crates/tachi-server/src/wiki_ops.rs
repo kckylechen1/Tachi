@@ -3,8 +3,8 @@ use crate::network_safety::is_private_or_local_ip;
 use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::{
     derive_wiki_authority, derive_wiki_lifecycle, derive_wiki_review_receipt, HybridWeightsParam,
-    SearchMemoryParams, TachiWikiIngestParams, WikiBrowseParams, WikiLifecycleV1, WikiLintParams,
-    WikiSearchParams,
+    SearchMemoryParams, TachiWikiIngestParams, WikiArtifactKindV1, WikiAuthorityV1,
+    WikiBrowseParams, WikiLifecycleV1, WikiLintParams, WikiSearchParams,
 };
 use crate::utils::sanitize_safe_path_name;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};

@@ -73,8 +73,17 @@ pub(crate) fn format_wiki_browse_category(path: &str, entries: &[Value]) -> Stri
             .get("importance")
             .map(|v| v.to_string())
             .unwrap_or_else(|| "?".to_string());
+        // #1072 fix-round (#1215 BUG 6): Markdown provenance loss — browse
+        // JSON carries `lifecycle`/`authority` but the rendered markdown
+        // silently dropped them, so a non-active entry (reachable via an
+        // explicit `lifecycle` scope) could read as plain reviewed content.
+        // Mirror `format_wiki_search`'s badge convention.
+        let lifecycle_badge = match entry.get("lifecycle").and_then(Value::as_str) {
+            Some(lifecycle) if lifecycle != "active" => format!(" [{lifecycle}]"),
+            _ => String::new(),
+        };
         out.push(format!(
-            "{}. **`{entry_path}`** (importance {importance})\n   {}",
+            "{}. **`{entry_path}`**{lifecycle_badge} (importance {importance})\n   {}",
             idx + 1,
             md_escape(summary),
         ));

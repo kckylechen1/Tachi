@@ -45,6 +45,54 @@ async fn tachi_wiki_ingest_creates_entry_and_related_edge() {
         .any(|edge| edge.target_id == "wiki-ingest-existing"));
 }
 
+/// Cross-vendor review (#1215 BUG 6): `wiki_ingest` used to upsert straight
+/// into `/wiki/general/...` with NO lifecycle/authority marker at all, so
+/// the no-marker-present read-side default (`Active`, kept for pre-#1072
+/// back-compat) silently promoted arbitrary fetched URL/file content to
+/// reviewed truth — an "ingest writers" bypass named explicitly in the
+/// review. Ingested content is unreviewed by construction; it must land
+/// `pending_review`, not `active`.
+#[tokio::test]
+async fn tachi_wiki_ingest_stamps_pending_review_lifecycle_not_active() {
+    let (server, home) = seed_wiki_project_entries(vec![]);
+    let source_path = home.temp_home.join(".tachi/ingest-lifecycle-source.md");
+    std::fs::write(
+        &source_path,
+        "# Ingest lifecycle source\nUnreviewed fetched content.",
+    )
+    .expect("write ingest source");
+
+    let response = server
+        .tachi_wiki_ingest(Parameters(TachiWikiIngestParams {
+            source: source_path.to_string_lossy().to_string(),
+            topic: Some("IngestLifecycleTopic".to_string()),
+            update_related: false,
+        }))
+        .await
+        .expect("wiki ingest should succeed");
+    let json: Value = serde_json::from_str(&response).expect("wiki ingest json");
+    let created_id = json["id"].as_str().expect("created id").to_string();
+
+    let fetched = server
+        .get_memory(Parameters(GetMemoryParams {
+            id: created_id,
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("get ingested memory");
+    let entry: Value = serde_json::from_str(&fetched).expect("entry json");
+    assert_eq!(
+        entry["metadata"]["lifecycle"],
+        json!("pending_review"),
+        "ingested content must never be default-retrievable as reviewed truth: {entry:?}"
+    );
+    assert_eq!(
+        entry["metadata"]["source_refs"],
+        json!([source_path.to_string_lossy().to_string()])
+    );
+}
+
 #[tokio::test]
 async fn tachi_wiki_ingest_propagates_edge_write_errors() {
     let mut existing = make_entry("wiki-ingest-edge-error-existing");

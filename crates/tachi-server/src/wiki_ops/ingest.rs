@@ -413,6 +413,21 @@ pub(crate) async fn handle_wiki_ingest(
             "wiki_title": title,
             "ingest_source": params.source.clone(),
             "allow_cross_project": true,
+            // #1072 fix-round (#1215 BUG 6): `wiki_ingest` used to upsert
+            // straight into `/wiki/general/...` with no lifecycle/authority
+            // marker at all, so `derive_wiki_lifecycle`'s no-marker default
+            // (`Active`, kept for pre-#1072 back-compat on entries that
+            // predate the lifecycle vocabulary) silently promoted arbitrary
+            // fetched URL/file content to reviewed truth — a bypass named
+            // explicitly in the cross-vendor review ("ingest writers").
+            // Ingested content is unreviewed by construction (no approval
+            // step exists here); stamp it `pending_review` honestly, same
+            // vocabulary `wiki_layer_metadata` stamps for the MCP write
+            // path, with the ingest source recorded as its source ref.
+            "lifecycle": WikiLifecycleV1::PendingReview.as_str(),
+            "authority": WikiAuthorityV1::Advisory.as_str(),
+            "artifact_kind": WikiArtifactKindV1::Wiki.as_str(),
+            "source_refs": [params.source.clone()],
         }),
         vector: None,
         retention_policy: Some("permanent".to_string()),
