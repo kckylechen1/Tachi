@@ -173,7 +173,7 @@ pub(crate) async fn handle_ingest_source(
 
     for entry in &saved_entries {
         if should_enqueue_enrichment(entry) {
-            let _ = server.enrichment_lock().enrich_tx.try_send(
+            if let Err(error) = server.enrichment_lock().enrich_tx.try_send(
                 crate::enrichment::build_enrichment_item(
                     entry,
                     true,
@@ -185,7 +185,13 @@ pub(crate) async fn handle_ingest_source(
                     None,
                     1,
                 ),
-            );
+            ) {
+                tracing::warn!(
+                    entry_id = %entry.id,
+                    error = %error,
+                    "failed to enqueue enrichment for saved ingest entry"
+                );
+            }
         }
     }
 

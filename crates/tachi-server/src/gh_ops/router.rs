@@ -181,7 +181,15 @@ pub(crate) async fn handle_tachi_gh(
             // a second owner). Never fails the already-successful merge.
             if let Some(worktree) = worktree_for_lease.as_deref() {
                 if safe_merge_reclaimed_worktree(&out) {
-                    let _ = server.reclaim_exec_env_for_worktree(worktree, Some("safe_merge"));
+                    if let Err(error) =
+                        server.reclaim_exec_env_for_worktree(worktree, Some("safe_merge"))
+                    {
+                        tracing::warn!(
+                            worktree,
+                            error = %error,
+                            "failed to reclaim exec env lease after safe_merge"
+                        );
+                    }
                 }
             }
             Ok(out)

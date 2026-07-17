@@ -201,7 +201,12 @@ pub(crate) async fn handle_hub_register(
                 }
             }
         } else {
-            let _ = server.unregister_skill_tool(&cap.id);
+            if let Err(e) = server.unregister_skill_tool(&cap.id) {
+                append_warning(
+                    &mut resp,
+                    format!("Failed to clear non-listed skill tool {}: {e}", cap.id),
+                );
+            }
             append_warning(
                 &mut resp,
                 "Skill registered but not listed in tools (policy.visibility != 'listed'). Use run_skill or change policy.visibility.",

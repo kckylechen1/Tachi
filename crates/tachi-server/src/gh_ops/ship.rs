@@ -388,7 +388,9 @@ fn verify_cached_set(repo: &Path, files: &[String]) -> Result<(), String> {
         OsString::from("--"),
     ];
     args.extend(files.iter().map(|file| OsString::from(file.as_str())));
-    let _ = run_git_os(repo, args);
+    if let Err(error) = run_git_os(repo, args) {
+        tracing::warn!(error = %error, "failed to clear stale staged files during ship cache verify");
+    }
     Err(format!(
         "staged_mismatch: expected exactly {:?}, got {:?}",
         expected, staged
@@ -400,7 +402,13 @@ fn git_commit_verbatim(repo: &Path, message: &str) -> Result<String, String> {
 
     impl Drop for TempFileGuard {
         fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
+            if let Err(error) = fs::remove_file(&self.0) {
+                tracing::warn!(
+                    path = %self.0.display(),
+                    error = %error,
+                    "failed to remove temporary commit message file"
+                );
+            }
         }
     }
 

@@ -253,7 +253,9 @@ fn run_version_probe(program: &std::path::Path) -> Option<String> {
         let output = std::process::Command::new(&program)
             .arg("--version")
             .output();
-        let _ = tx.send(output);
+        if let Err(error) = tx.send(output) {
+            eprintln!("failed to send binary version output to dispatcher: {error}");
+        }
     });
 
     let output = rx.recv_timeout(PROBE_TIMEOUT).ok()?.ok()?;

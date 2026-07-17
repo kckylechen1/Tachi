@@ -10,6 +10,15 @@ use tachi_hub::{
     review_status_allows_call, should_expose_skill_tool,
 };
 
+fn log_skill_tool_sync_error(capability_id: &str, action: &str, error: &str) {
+    tracing::warn!(
+        capability_id = %capability_id,
+        action,
+        error = %error,
+        "failed to sync skill tool exposure"
+    );
+}
+
 /// Whether an MCP capability is eligible to attempt (re)discovery.
 ///
 /// This is deliberately **narrower** than [`capability_callable`]: it checks
@@ -155,9 +164,13 @@ pub(crate) async fn handle_hub_review(
 
         if current_cap.id.starts_with("skill:") {
             if capability_callable(&current_cap) && should_expose_skill_tool(&current_cap) {
-                let _ = server.register_skill_tool(&current_cap);
+                if let Err(error) = server.register_skill_tool(&current_cap) {
+                    log_skill_tool_sync_error(&current_cap.id, "register", &error);
+                }
             } else {
-                let _ = server.unregister_skill_tool(&current_cap.id);
+                if let Err(error) = server.unregister_skill_tool(&current_cap.id) {
+                    log_skill_tool_sync_error(&current_cap.id, "unregister", &error);
+                }
             }
         }
 
@@ -276,13 +289,19 @@ pub(crate) async fn handle_hub_set_enabled(
             if params.enabled {
                 if let Ok(cap) = server.get_capability(&params.id) {
                     if should_expose_skill_tool(&cap) {
-                        let _ = server.register_skill_tool(&cap);
+                        if let Err(error) = server.register_skill_tool(&cap) {
+                            log_skill_tool_sync_error(&params.id, "register", &error);
+                        }
                     } else {
-                        let _ = server.unregister_skill_tool(&cap.id);
+                        if let Err(error) = server.unregister_skill_tool(&cap.id) {
+                            log_skill_tool_sync_error(&params.id, "unregister", &error);
+                        }
                     }
                 }
             } else {
-                let _ = server.unregister_skill_tool(&params.id);
+                if let Err(error) = server.unregister_skill_tool(&params.id) {
+                    log_skill_tool_sync_error(&params.id, "unregister", &error);
+                }
             }
         }
     }

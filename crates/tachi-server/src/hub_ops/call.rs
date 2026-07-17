@@ -80,7 +80,16 @@ pub(crate) async fn execute_loaded_skill_prompt(
 
     let success = result.is_ok();
     let error_msg = result.as_ref().err().map(|e| e.to_string());
-    let _ = server.record_capability_call_outcome(&cap.id, success, error_msg.as_deref());
+    if let Err(error) =
+        server.record_capability_call_outcome(&cap.id, success, error_msg.as_deref())
+    {
+        tracing::warn!(
+            cap_id = %cap.id,
+            success,
+            error = %error,
+            "failed to persist capability call outcome"
+        );
+    }
 
     result.map_err(|e| format!("skill execution failed: {e}"))
 }

@@ -66,11 +66,22 @@ pub(crate) async fn build_similarity_edges(
             };
             let save_edge =
                 |store: &mut MemoryStore| store.add_edge(&edge).map_err(|e| format!("{e}"));
-            let _ = if let Some(project_name) = project {
+            if let Some(project_name) = project {
                 server.with_named_project_store(project_name, save_edge)
             } else {
                 server.with_store_for_scope(target_db, save_edge)
-            };
+            }
+            .map_err(|error| {
+                tracing::warn!(
+                    target_db = ?target_db,
+                    project = ?project,
+                    capability_id = %entry.id,
+                    error = %error,
+                    "failed to persist auto-ingest similarity edge"
+                );
+                error
+            })
+            .ok();
         }
     }
 }

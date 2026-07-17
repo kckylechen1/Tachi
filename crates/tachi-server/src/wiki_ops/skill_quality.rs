@@ -149,14 +149,20 @@ fn run_skill_quality_guards_for_scope(
 
     if !graph_edges.is_empty() {
         let edges = graph_edges.clone();
-        let _ = server.with_store_for_scope(scope, |store| {
+        if let Err(error) = server.with_store_for_scope(scope, |store| {
             for edge in &edges {
                 store
                     .add_edge(edge)
                     .map_err(|e| format!("skill graph edge: {e}"))?;
             }
             Ok(())
-        });
+        }) {
+            tracing::warn!(
+                scope = ?scope,
+                error = %error,
+                "failed to persist skill-quality graph edges"
+            );
+        }
     }
 
     let pagerank = local_pagerank(&graph_edges, 0.85);
@@ -235,9 +241,21 @@ fn run_skill_quality_guards_for_scope(
 
         for cap in &changed_caps {
             if capability_callable(cap) && should_expose_skill_tool(cap) {
-                let _ = server.register_skill_tool(cap);
+                if let Err(error) = server.register_skill_tool(cap) {
+                    tracing::warn!(
+                        capability_id = %cap.id,
+                        error = %error,
+                        "failed to expose skill tool during skill quality refresh"
+                    );
+                }
             } else {
-                let _ = server.unregister_skill_tool(&cap.id);
+                if let Err(error) = server.unregister_skill_tool(&cap.id) {
+                    tracing::warn!(
+                        capability_id = %cap.id,
+                        error = %error,
+                        "failed to unexpose skill tool during skill quality refresh"
+                    );
+                }
             }
         }
     }

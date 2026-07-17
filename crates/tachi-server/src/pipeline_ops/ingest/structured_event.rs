@@ -141,7 +141,7 @@ pub(super) async fn ingest_structured_event(
     }
 
     if should_enqueue_enrichment(&entry) {
-        let _ =
+        if let Err(error) =
             server
                 .enrichment_lock()
                 .enrich_tx
@@ -155,7 +155,14 @@ pub(super) async fn ingest_structured_event(
                     None,
                     None,
                     1,
-                ));
+                ))
+        {
+            tracing::warn!(
+                entry_id = %entry.id,
+                error = %error,
+                "failed to enqueue enrichment for structured event"
+            );
+        }
     }
 
     insert_ingest_audit(server, "ingest_event", &event_hash);

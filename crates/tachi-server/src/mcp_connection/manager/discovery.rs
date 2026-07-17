@@ -22,14 +22,38 @@ impl MemoryServer {
 
         match list_result {
             Ok(Ok(tools)) => {
-                let _ = cancel_result;
+                if let Err(error) = cancel_result {
+                    tracing::warn!(
+                        capability_id = %capability_id,
+                        error = %error,
+                        "failed to cancel MCP discovery client after successful tool list"
+                    );
+                }
                 Ok(tools)
             }
-            Ok(Err(e)) => Err(format!("list_tools failed: {e}")),
-            Err(_) => Err(format!(
-                "list_tools timed out after {}ms",
-                discovery_timeout.as_millis()
-            )),
+            Ok(Err(e)) => {
+                if let Err(error) = cancel_result {
+                    tracing::warn!(
+                        capability_id = %capability_id,
+                        error = %error,
+                        "failed to cancel MCP discovery client after list_tools error"
+                    );
+                }
+                Err(format!("list_tools failed: {e}"))
+            }
+            Err(_) => {
+                if let Err(error) = cancel_result {
+                    tracing::warn!(
+                        capability_id = %capability_id,
+                        error = %error,
+                        "failed to cancel MCP discovery client after timeout"
+                    );
+                }
+                Err(format!(
+                    "list_tools timed out after {}ms",
+                    discovery_timeout.as_millis()
+                ))
+            }
         }
     }
 }

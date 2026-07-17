@@ -113,9 +113,20 @@ pub(crate) fn release_ingest_claim(
             .map_err(|e| format!("{e}"))
     };
 
-    let _ = if let Some(project_name) = project {
+    let release_result = if let Some(project_name) = project {
         server.with_named_project_store(project_name, action)
     } else {
         server.with_store_for_scope(target_db, action)
     };
+
+    if let Err(error) = release_result {
+        tracing::warn!(
+            worker,
+            event_hash,
+            db = ?target_db,
+            project,
+            error = %error,
+            "failed to release ingest claim"
+        );
+    }
 }

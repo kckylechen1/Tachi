@@ -146,9 +146,20 @@ pub(crate) async fn handle_distill_trajectory(
         };
         let save_edge = |store: &mut MemoryStore| store.add_edge(&edge).map_err(|e| format!("{e}"));
         if let Some(project_name) = named_project.as_deref() {
-            let _ = server.with_named_project_store(project_name, save_edge);
+            if let Err(error) = server.with_named_project_store(project_name, save_edge) {
+                tracing::warn!(
+                    error = %error,
+                    "failed to persist distilled skill graph edge to named project"
+                );
+            }
         } else {
-            let _ = server.with_store_for_scope(target_db, save_edge);
+            if let Err(error) = server.with_store_for_scope(target_db, save_edge) {
+                tracing::warn!(
+                    error = %error,
+                    db = ?target_db,
+                    "failed to persist distilled skill graph edge"
+                );
+            }
         }
     }
 
@@ -249,7 +260,13 @@ pub(crate) async fn handle_distill_trajectory(
         })?;
     }
     if should_expose_skill_tool(&capability) {
-        let _ = server.register_skill_tool(&capability);
+        if let Err(error) = server.register_skill_tool(&capability) {
+            tracing::warn!(
+                capability_id = %capability.id,
+                error = %error,
+                "failed to expose distilled skill tool"
+            );
+        }
     }
     let skill_quality = crate::wiki_ops::refresh_skill_quality_guards(server)?;
 

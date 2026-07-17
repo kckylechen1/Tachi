@@ -155,7 +155,13 @@ pub(crate) async fn handle_hub_feedback(
                     .map_err(|e| format!("feedback: {e}"))
             })?;
             if recorded {
-                let _ = crate::wiki_ops::refresh_skill_quality_guards(server);
+                if let Err(error) = crate::wiki_ops::refresh_skill_quality_guards(server) {
+                    tracing::warn!(
+                        capability_id = %params.id,
+                        error = %error,
+                        "failed to refresh skill quality guards after recorded feedback"
+                    );
+                }
             }
             return serde_json::to_string(
                 &json!({"id": params.id, "recorded": recorded, "db": "project"}),
@@ -169,7 +175,13 @@ pub(crate) async fn handle_hub_feedback(
             .map_err(|e| format!("feedback: {e}"))
     })?;
     if recorded {
-        let _ = crate::wiki_ops::refresh_skill_quality_guards(server);
+        if let Err(error) = crate::wiki_ops::refresh_skill_quality_guards(server) {
+            tracing::warn!(
+                capability_id = %params.id,
+                error = %error,
+                "failed to refresh skill quality guards after recorded feedback"
+            );
+        }
     }
     serde_json::to_string(&json!({"id": params.id, "recorded": recorded, "db": "global"}))
         .map_err(|e| format!("serialize: {e}"))

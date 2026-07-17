@@ -73,7 +73,9 @@ impl ContinuityProjectionScheduler {
 
 impl Drop for ContinuityProjectionScheduler {
     fn drop(&mut self) {
-        let _ = self.cancel_tx.send(());
+        if let Err(error) = self.cancel_tx.send(()) {
+            tracing::warn!(error = %error, "failed to send continuity projection cancel signal");
+        }
         self.join.abort();
     }
 }
