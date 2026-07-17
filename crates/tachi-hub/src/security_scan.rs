@@ -348,11 +348,23 @@ pub fn normalize_review_status(status: &str) -> Option<&'static str> {
     }
 }
 
+/// Fail-closed risk ranking (#1214 BUG#2, downstream instance): only the
+/// exact, case-insensitive `low`/`medium`/`high` levels rank below `high`.
+/// This is the merge point `scan_skill_definition_with_llm`'s legacy
+/// CLI/raw_api single-shot backends feed straight through (they parse the
+/// raw LLM JSON verbatim, unlike the strong-tier two-vote path's
+/// `fail_closed_merge`/`higher_risk` in `tachi-server`'s `llm_scan.rs`,
+/// which already normalizes to a known value before it gets here) — an
+/// unrecognized or malformed risk string here must rank as **at least
+/// high**, never silently as low, or a malformed LLM verdict bypasses the
+/// `blocked` gate below instead of tripping it.
 fn risk_rank(risk: &str) -> u8 {
     match risk.trim().to_ascii_lowercase().as_str() {
-        "high" => 3,
+        "low" => 1,
         "medium" => 2,
-        _ => 1,
+        "high" => 3,
+        // Unknown/malformed risk value — fail closed, not open.
+        _ => 3,
     }
 }
 
@@ -554,5 +566,37 @@ mod scan_tests {
     fn review_status_normalization_rejects_unknown_values() {
         assert_eq!(normalize_review_status("APPROVED"), Some("approved"));
         assert_eq!(normalize_review_status("needs-review"), None);
+    }
+
+    /// #1214 BUG#2 (downstream instance): a malformed/unrecognized LLM risk
+    /// string — as the legacy CLI/raw_api single-shot security-scan
+    /// backends would pass through verbatim from raw LLM JSON, unlike the
+    /// strong-tier two-vote path which normalizes first — must not
+    /// silently rank alongside "low" and get outvoted by a lower static
+    /// risk. It must fail closed to "high" and set `blocked: true`.
+    #[test]
+    fn merge_skill_scans_fails_closed_on_malformed_llm_risk() {
+        let static_scan = json!({
+            "risk": "low",
+            "blocked": false,
+            "signals": [],
+            "findings": []
+        });
+        let llm_scan = json!({
+            "status": "ok",
+            "result": {
+                "risk": "CRITICAL",
+                "blocked": false,
+                "signals": [],
+                "findings": []
+            }
+        });
+
+        let merged = merge_skill_scans(&static_scan, Some(&llm_scan));
+        assert_eq!(
+            merged["risk"], "high",
+            "malformed LLM risk value must fail closed to high, not silently rank as low"
+        );
+        assert_eq!(merged["blocked"], true);
     }
 }
