@@ -162,7 +162,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Initialize a project-scoped Tachi memory DB under the current or target git repository."
+        description = "Initialize a project-scoped Tachi memory DB under an explicit target git repository (project_root is required — #1120 PR2: this no longer defaults to the server's own cwd)."
     )]
     pub(crate) async fn tachi_init_project_db(
         &self,
