@@ -894,7 +894,7 @@ pub fn run_wt_open_with_emit(options: OpenOptions) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+    use crate::test_support::home_env_lock as env_lock;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -910,11 +910,6 @@ mod tests {
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         assert_ne!(a, b, "consecutive short_ids must not collide");
-    }
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn unique_temp(prefix: &str) -> PathBuf {

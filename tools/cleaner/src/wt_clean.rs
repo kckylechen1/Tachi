@@ -407,13 +407,8 @@ mod tests {
     use super::*;
     use crate::holder::HolderProcess;
     use crate::registry::{self, RegisterOptions, RegisterOutputFormat};
-    use std::sync::{Mutex, OnceLock};
+    use crate::test_support::home_env_lock as env_lock;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     struct HomeGuard(Option<std::ffi::OsString>);
     impl Drop for HomeGuard {

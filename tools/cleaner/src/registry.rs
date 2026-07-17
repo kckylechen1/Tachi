@@ -309,12 +309,7 @@ fn canonical_string(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::test_support::home_env_lock as env_lock;
 
     #[test]
     fn nested_registry_path_is_detected() {

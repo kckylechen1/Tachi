@@ -4,6 +4,8 @@ mod scrap_ledger;
 mod sweep;
 mod tachi_clean;
 mod target_clean;
+#[cfg(test)]
+mod test_support;
 mod wt_clean;
 mod wt_open;
 
