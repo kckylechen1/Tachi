@@ -286,6 +286,42 @@ fn json_array_strings(value: Option<&Value>) -> String {
 mod tests {
     use super::*;
 
+    /// tachi#1173 item 2 regression guard: `dispatch_profiles_json_for_server`
+    /// slimmed its default (`verbose=false`) shape to name/backend/model/role,
+    /// so `load_card_profiles` — a genuine full-card consumer
+    /// (`compact_card_json` below reads `mbit_card`/`skill_loadout`/
+    /// `evidence_contract`/`authority`) — must keep requesting the pre-#1173
+    /// verbose shape explicitly. This is RED if that `verbose: true` arg is
+    /// ever dropped (rows would come back slim and `card list`/`card show`
+    /// would silently render "-" for every card field), GREEN as shipped.
+    #[tokio::test]
+    async fn load_card_profiles_still_returns_full_mbit_cards() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_home = temp.path().join("home");
+        std::fs::create_dir_all(&app_home).expect("app_home dir");
+        let db_path = temp.path().join("global.db");
+
+        let profiles = load_card_profiles(&db_path, None, &app_home)
+            .await
+            .expect("load card profiles");
+
+        let rows = profiles
+            .get("dispatch_profiles")
+            .and_then(Value::as_array)
+            .expect("dispatch_profiles array");
+        assert!(!rows.is_empty(), "{profiles}");
+        for row in rows {
+            assert!(
+                row.get("mbit_card").is_some_and(Value::is_object),
+                "tachi card CLI needs the full mbit_card, got: {row}"
+            );
+            assert!(
+                row.get("skill_loadout").is_some(),
+                "tachi card CLI needs skill_loadout, got: {row}"
+            );
+        }
+    }
+
     fn sample_profile() -> Value {
         json!({
             "name": "codex_55_review",
