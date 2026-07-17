@@ -1,6 +1,6 @@
 use crate::server_state::MemoryServer;
 use crate::tool_params::InitProjectDbParams;
-use crate::utils::{find_git_root, find_git_root_from};
+use crate::utils::find_git_root_from;
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -251,12 +251,30 @@ pub(crate) async fn handle_tachi_init_project_db(
     server: &MemoryServer,
     params: InitProjectDbParams,
 ) -> Result<String, String> {
-    let project_root = match params.project_root.as_deref() {
-        Some(raw) => PathBuf::from(raw),
-        None => find_git_root().ok_or_else(|| {
-            "No git repository detected. Provide project_root explicitly.".to_string()
-        })?,
+    // #1120 PR2: an omitted `project_root` used to fall back to
+    // `find_git_root()` — the SERVER process's own cwd. For a shared daemon
+    // (any HTTP direct-connect or auto-spawned stdio-proxy daemon) that cwd is
+    // unrelated to the calling session's actual workspace (for `--daemon`
+    // mode specifically it is the detached `${app_home}/runtime`, which is
+    // never a git repo at all) — silently resolving "the wrong repo's
+    // project DB, or none" from it was exactly the caller-cwd-blindness
+    // #1120 exists to close (kckylechen1/tachi#1120 gap #1). `project_root`
+    // is now always required; the actionable alternative for a bound
+    // HTTP/stdio session is to skip this tool entirely and let
+    // `X-Tachi-Workspace-Root` auto-register the project DB at session init
+    // instead (#1120 PR1, `MemoryServer::resolve_or_register_workspace_root`).
+    let Some(raw_project_root) = params.project_root.as_deref() else {
+        return Err(
+            "project_root is required — tachi_init_project_db no longer falls back to the \
+             server process's own cwd (that cwd belongs to the DAEMON, not the calling session, \
+             and silently resolving the wrong repo's project DB from it was the exact routing \
+             bug #1120 exists to close). Pass project_root explicitly, or for a bound HTTP/stdio \
+             session skip this tool entirely: declaring X-Tachi-Workspace-Root at session init \
+             now auto-registers the project DB for you."
+                .to_string(),
+        );
     };
+    let project_root = PathBuf::from(raw_project_root);
 
     if !project_root.join(".git").exists() {
         return Err(format!(

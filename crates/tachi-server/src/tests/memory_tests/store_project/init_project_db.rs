@@ -123,6 +123,36 @@ async fn tachi_init_project_db_reports_plan_c_split_brain() {
     );
 }
 
+/// #1120 PR2 core regression: an omitted `project_root` must be a loud,
+/// actionable error, never a silent fallback to the SERVER process's own
+/// cwd (`find_git_root()`). This is genuinely behavioral-red on pre-fix
+/// code, not just compile-red: `cargo test` runs with the Tachi source
+/// checkout itself as cwd (a real git repo), so pre-fix this call would
+/// silently succeed by resolving `project_root` to the CALLER's unrelated
+/// test-process cwd — the exact caller-cwd-blindness bug #1120 exists to
+/// close, reproduced live by omitting the field in this very test binary.
+#[tokio::test]
+async fn tachi_init_project_db_requires_project_root_explicitly() {
+    let server = make_server();
+
+    let err = server
+        .tachi_init_project_db(Parameters(InitProjectDbParams {
+            project_root: None,
+            db_relpath: ".tachi/memory.db".to_string(),
+        }))
+        .await
+        .expect_err("omitted project_root must be rejected, not silently resolved from cwd");
+
+    assert!(
+        err.contains("project_root is required"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        err.contains("X-Tachi-Workspace-Root"),
+        "error should point at the #1120 PR1 auto-register alternative: {err}"
+    );
+}
+
 #[tokio::test]
 async fn tachi_init_project_db_rejects_path_traversal() {
     let server = make_server();
