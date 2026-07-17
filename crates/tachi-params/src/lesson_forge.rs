@@ -53,9 +53,10 @@ impl LessonCandidateKindV1 {
 /// Single-inhabitant status enum — see module doc boundary 1. Every
 /// `LessonCandidateV1` this leaf constructs carries `Pending`
 /// unconditionally; there is no other value to assign.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LessonCandidateStatusV1 {
+    #[default]
     Pending,
 }
 
@@ -64,12 +65,6 @@ impl LessonCandidateStatusV1 {
         match self {
             Self::Pending => "pending",
         }
-    }
-}
-
-impl Default for LessonCandidateStatusV1 {
-    fn default() -> Self {
-        Self::Pending
     }
 }
 
