@@ -118,7 +118,9 @@ fn provision_managed_env_cli(
         .join("global")
         .join("memory.db");
     if let Some(parent) = global_db.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            tracing::warn!(error = %error, path = %parent.display(), "failed to create global db parent directory");
+        }
     }
     let db_str = global_db
         .to_str()
@@ -474,7 +476,9 @@ fn run_orphan_reap_cli_with_sources(
         .join("global")
         .join("memory.db");
     if let Some(parent) = global_db.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            tracing::warn!(error = %error, path = %parent.display(), "failed to create global db parent directory");
+        }
     }
     let db_str = global_db
         .to_str()

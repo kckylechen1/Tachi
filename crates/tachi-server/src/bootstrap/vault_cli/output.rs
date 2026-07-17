@@ -138,7 +138,13 @@ pub(in crate::bootstrap) fn lease_api_key_from_store(
                 }
             }
         }
-        let _ = store.vault_touch_entry(&entry.name);
+        if let Err(error) = store.vault_touch_entry(&entry.name) {
+            tracing::warn!(
+                error = %error,
+                entry = %entry.name,
+                "failed to touch vault entry during output resolution"
+            );
+        }
         return Ok((entry.name.clone(), value));
     }
 

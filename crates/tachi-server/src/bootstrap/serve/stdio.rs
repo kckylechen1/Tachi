@@ -282,7 +282,7 @@ async fn spawn_stdio_daemon(
         Ok(exe) => {
             let port_str = "0".to_string();
             let daemon_args = auto_daemon_command_args(global_db_path, project_db_path, &port_str);
-            match std::process::Command::new(&exe)
+            match tokio::process::Command::new(&exe)
                 .args(daemon_args)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -290,9 +290,15 @@ async fn spawn_stdio_daemon(
                 .spawn()
             {
                 Ok(mut child) => {
-                    eprintln!("[auto-daemon] spawned tachi daemon (pid={})", child.id());
+                    let pid = child
+                        .id()
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    eprintln!("[auto-daemon] spawned tachi daemon (pid={})", pid);
                     tokio::spawn(async move {
-                        let _ = child.wait();
+                        if let Err(error) = child.wait().await {
+                            tracing::warn!(error = %error, "auto-daemon process wait failed");
+                        }
                     });
                     wait_for_daemon_ready(
                         app_home,

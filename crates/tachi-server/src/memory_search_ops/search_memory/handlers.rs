@@ -54,11 +54,13 @@ pub(crate) async fn handle_search_memory_with_access(
                 let server_clone = (*server).clone();
                 let key_clone = key.clone();
                 std::mem::drop(tokio::task::spawn_blocking(move || {
-                    let _ = server_clone.with_global_store(|store| {
+                    if let Err(error) = server_clone.with_global_store(|store| {
                         store
                             .recall_cache_record_hit(&key_clone)
                             .map_err(|e| e.to_string())
-                    });
+                    }) {
+                        tracing::warn!(error = %error, "failed to record recall-cache hit");
+                    }
                 }));
                 return Ok(hit.rows_json);
             }
@@ -83,7 +85,7 @@ pub(crate) async fn handle_search_memory_with_access(
     // this run actually reranked, so the read side can honor rerank intent.
     if let Some(key) = cache_key {
         if !rows.is_empty() {
-            let _ = server.with_global_store(|store| {
+            if let Err(error) = server.with_global_store(|store| {
                 store
                     .recall_cache_store(
                         &key,
@@ -93,7 +95,9 @@ pub(crate) async fn handle_search_memory_with_access(
                         params.enable_rerank,
                     )
                     .map_err(|e| e.to_string())
-            });
+            }) {
+                tracing::warn!(error = %error, "failed to persist recall cache entry");
+            }
         }
     }
     Ok(serialized)

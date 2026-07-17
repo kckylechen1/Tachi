@@ -51,9 +51,13 @@ pub(super) fn write_file_atomic(
         }
     };
     let cleanup_temp_and_backup = |temp: &Path, backup: Option<&Path>| {
-        let _ = cleanup_file(temp, "temp credential file");
+        if let Err(error) = cleanup_file(temp, "temp credential file") {
+            tracing::warn!(error = %error, path = %temp.display(), "cleanup temp credential file failed");
+        }
         if let Some(backup) = backup {
-            let _ = cleanup_file(backup, "temporary credential backup");
+            if let Err(error) = cleanup_file(backup, "temporary credential backup") {
+                tracing::warn!(error = %error, path = %backup.display(), "cleanup credential backup failed");
+            }
         }
     };
 
@@ -76,7 +80,13 @@ pub(super) fn write_file_atomic(
         })?;
         #[cfg(unix)]
         fs::set_permissions(&backup, fs::Permissions::from_mode(0o600)).map_err(|e| {
-            let _ = cleanup_file(&backup, "temporary credential backup");
+            if let Err(cleanup_error) = cleanup_file(&backup, "temporary credential backup") {
+                tracing::warn!(
+                    error = %cleanup_error,
+                    path = %backup.display(),
+                    "cleanup temporary credential backup after chmod failure failed"
+                );
+            }
             format!(
                 "chmod temporary credential backup '{}': {e}",
                 backup.display()

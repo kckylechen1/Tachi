@@ -321,7 +321,9 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
         // Pre-flight write check: create and delete a temp file to verify permissions
         let probe = parent.join(".tachi_write_probe");
         std::fs::write(&probe, b"")?;
-        let _ = std::fs::remove_file(&probe);
+        if let Err(error) = std::fs::remove_file(&probe) {
+            tracing::warn!(error = %error, path = %probe.display(), "failed to remove setup wizard write probe file");
+        }
     }
     let existing = std::fs::read_to_string(config_env_path).unwrap_or_default();
     let merged = merge_config_env(&existing, &new_entries);

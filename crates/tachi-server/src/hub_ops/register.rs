@@ -288,7 +288,8 @@ pub(crate) async fn handle_hub_register(
                                 updated_cap.description = summary.to_string();
                                 let db_str = db_path.to_string_lossy().to_string();
                                 let cap_id_inner = cap_id.clone();
-                                let _ = tokio::task::spawn_blocking(move || {
+                                let cap_id_for_log = cap_id_inner.clone();
+                                if let Err(error) = tokio::task::spawn_blocking(move || {
                                     match MemoryStore::open(&db_str) {
                                         Ok(store) => {
                                             if let Err(e) = store.hub_register(&updated_cap) {
@@ -305,7 +306,15 @@ pub(crate) async fn handle_hub_register(
                                             );
                                         }
                                     }
-                                }).await;
+                                })
+                                .await
+                                {
+                                    tracing::warn!(
+                                        error = %error,
+                                        cap_id = %cap_id_for_log,
+                                        "failed to persist auto-analysis description in background task"
+                                    );
+                                }
                             }
                         }
                         eprintln!(

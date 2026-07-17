@@ -371,15 +371,19 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     .append(true)
                     .open(&traj_path_for_spawn)
                 {
-                    let _ = writeln!(f, "{}", line);
+                    if let Err(error) = writeln!(f, "{}", line) {
+                        tracing::warn!(error = %error, path = %traj_path_for_spawn.display(), "failed to write trajectory event");
+                    }
                 }
                 let progress_path = workspace_dir_for_spawn.join("progress.jsonl");
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .append(true)
                     .create(true)
-                    .open(progress_path)
+                    .open(&progress_path)
                 {
-                    let _ = writeln!(f, "{}", line);
+                    if let Err(error) = writeln!(f, "{}", line) {
+                        tracing::warn!(error = %error, path = %progress_path.display(), "failed to write progress event");
+                    }
                 }
             }
         }

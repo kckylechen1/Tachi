@@ -226,16 +226,20 @@ pub(super) fn append_trajectory_event(trajectory_path: &std::path::Path, event: 
         .create(true)
         .open(trajectory_path)
     {
-        let _ = writeln!(f, "{}", line);
+        if let Err(error) = writeln!(f, "{}", line) {
+            tracing::warn!(error = %error, path = %trajectory_path.display(), "failed to write dispatch v2 trajectory event");
+        }
     }
     if let Some(run_dir) = trajectory_path.parent() {
         let progress_path = run_dir.join("progress.jsonl");
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .append(true)
             .create(true)
-            .open(progress_path)
+            .open(&progress_path)
         {
-            let _ = writeln!(f, "{}", line);
+            if let Err(error) = writeln!(f, "{}", line) {
+                tracing::warn!(error = %error, path = %progress_path.display(), "failed to write dispatch v2 progress event");
+            }
         }
     }
 }

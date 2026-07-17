@@ -475,7 +475,9 @@ async fn run_daily_pipeline_remediation(
                         Ok(report) => {
                             // Write success marker (same shape as the scheduler).
                             if let Some(parent) = marker_path.parent() {
-                                let _ = std::fs::create_dir_all(parent);
+                                if let Err(error) = std::fs::create_dir_all(parent) {
+                                    tracing::warn!(error = %error, path = %parent.display(), "failed to create marker directory");
+                                }
                             }
                             let marker_body = serde_json::json!({
                                 "ts": chrono::Utc::now().to_rfc3339(),
@@ -485,7 +487,13 @@ async fn run_daily_pipeline_remediation(
                                 "errors": report.errors.len(),
                             })
                             .to_string();
-                            let _ = std::fs::write(&marker_path, marker_body);
+                            if let Err(error) = std::fs::write(&marker_path, marker_body) {
+                                tracing::warn!(
+                                    error = %error,
+                                    marker_path = %marker_path.display(),
+                                    "failed to write manifest distill success marker"
+                                );
+                            }
                             format!(
                                 "distill: dispatched={} distilled={} skipped={} fallback={} errors={}",
                                 report.batches_dispatched,
@@ -498,7 +506,9 @@ async fn run_daily_pipeline_remediation(
                         Err(e) => {
                             // Write failure marker so status surfaces the reason.
                             if let Some(parent) = marker_path.parent() {
-                                let _ = std::fs::create_dir_all(parent);
+                                if let Err(error) = std::fs::create_dir_all(parent) {
+                                    tracing::warn!(error = %error, path = %parent.display(), "failed to create marker directory");
+                                }
                             }
                             let marker_body = serde_json::json!({
                                 "ts": chrono::Utc::now().to_rfc3339(),
@@ -509,7 +519,13 @@ async fn run_daily_pipeline_remediation(
                                 "errors": 0,
                             })
                             .to_string();
-                            let _ = std::fs::write(&marker_path, marker_body);
+                            if let Err(error) = std::fs::write(&marker_path, marker_body) {
+                                tracing::warn!(
+                                    error = %error,
+                                    marker_path = %marker_path.display(),
+                                    "failed to write manifest distill failure marker"
+                                );
+                            }
                             format!("distill batch failed: {e}")
                         }
                     }

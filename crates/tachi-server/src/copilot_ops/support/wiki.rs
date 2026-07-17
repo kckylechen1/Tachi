@@ -247,7 +247,14 @@ pub(in crate::copilot_ops) fn supersede_wiki_duplicates(
                 valid_from: String::new(),
                 valid_to: None,
             };
-            let _ = store.add_edge(&edge);
+            if let Err(error) = store.add_edge(&edge) {
+                tracing::warn!(
+                    error = %error,
+                    canonical_id = %canonical_id,
+                    candidate_id = %candidate.id,
+                    "wiki dedupe edge write failed"
+                );
+            }
             changed += 1;
         }
     }

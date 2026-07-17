@@ -125,7 +125,9 @@ async fn distill_one_project(
         .join("distill")
         .join(&project_label)
         .join(&batch_run_id);
-    let _ = std::fs::create_dir_all(&runs_root);
+    if let Err(error) = std::fs::create_dir_all(&runs_root) {
+        tracing::warn!(error = %error, path = %runs_root.display(), "failed to create daily distill runs root");
+    }
 
     let mut manifest: Vec<SourceManifestEntry> = Vec::new();
     let backend = resolve_distill_backend();

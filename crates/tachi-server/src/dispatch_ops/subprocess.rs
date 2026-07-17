@@ -99,7 +99,9 @@ async fn read_pipe(pipe: Option<impl tokio::io::AsyncRead + Unpin>) -> Vec<u8> {
         return Vec::new();
     };
     let mut bytes = Vec::new();
-    let _ = pipe.read_to_end(&mut bytes).await;
+    if let Err(error) = pipe.read_to_end(&mut bytes).await {
+        tracing::warn!(error = %error, "failed to read subprocess pipe");
+    }
     bytes
 }
 
@@ -125,7 +127,9 @@ async fn reap_timed_out_child(child: &mut tokio::process::Child, child_pid: Opti
         if let Err(err) = child.kill().await {
             tracing::warn!(error = %err, "failed to kill timed-out subprocess");
         }
-        let _ = child.wait().await;
+        if let Err(error) = child.wait().await {
+            tracing::warn!(error = %error, "failed to wait timed-out subprocess after kill");
+        }
     }
 }
 

@@ -539,7 +539,9 @@ pub(crate) fn spawn_auto_linking_for_test(
     on_complete: std::sync::mpsc::Sender<(u64, AutoLinkReceipt)>,
 ) {
     spawn_and_run_auto_linking(server, entry, target_db, named_project, move |receipt| {
-        let _ = on_complete.send((correlation_token, receipt));
+        if let Err(error) = on_complete.send((correlation_token, receipt)) {
+            tracing::warn!(error = %error, "failed to send auto-link test receipt");
+        }
     });
 }
 
@@ -794,11 +796,19 @@ pub(crate) fn run_auto_linking(
                     Ok(())
                 };
                 let write_timer = sample.then(Instant::now);
-                let _ = if let Some(p) = named_project {
+                let save_result = if let Some(p) = named_project {
                     server.with_named_project_store(p, save_edge_action)
                 } else {
                     server.with_store_for_scope(target_db, save_edge_action)
                 };
+                if let Err(error) = save_result {
+                    tracing::warn!(
+                        error = %error,
+                        entry_id = %result.entry.id,
+                        db_scope = ?target_db,
+                        "failed to persist auto-link edges"
+                    );
+                }
                 if let (Some(receipt), Some(write_timer)) = (receipt.as_mut(), write_timer) {
                     receipt.write_elapsed += write_timer.elapsed();
                 }

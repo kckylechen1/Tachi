@@ -33,7 +33,9 @@ pub(crate) fn ensure_plan_c_symlink(local_db: &Path, project_root: &Path) -> Pla
         return PlanCLinkOutcome::AlreadyLinked;
     }
     if global_link.is_symlink() {
-        let _ = std::fs::remove_file(&global_link);
+        if let Err(error) = std::fs::remove_file(&global_link) {
+            tracing::warn!(error = %error, path = %global_link.display(), "failed to remove stale Plan C symlink");
+        }
     } else if global_link.exists() {
         if let Some(split_brain) = plan_c_split_brain(local_db, project_root) {
             tracing::warn!(

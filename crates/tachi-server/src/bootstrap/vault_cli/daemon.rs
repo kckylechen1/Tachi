@@ -91,7 +91,13 @@ pub(super) async fn call_daemon_vault_unlock(
                 .map_err(|e| e.to_string())
         }
     );
-    let _ = std::fs::remove_file(&fifo_path);
+    if let Err(error) = std::fs::remove_file(&fifo_path) {
+        tracing::warn!(
+            error = %error,
+            path = %fifo_path.display(),
+            "failed to remove unlock FIFO after daemon call"
+        );
+    }
     // Check the daemon call's own error first: if the daemon rejected the
     // tool call (e.g. "tool not found"), no reader ever opens the FIFO and
     // the writer times out with ENXIO. That ENXIO is expected collateral,

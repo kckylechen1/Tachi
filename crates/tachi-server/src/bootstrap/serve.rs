@@ -60,21 +60,39 @@ fn load_env_files(
     load_project_local_env: bool,
     git_root: Option<&Path>,
 ) {
-    let _ = dotenvy::from_path(home.join(".secrets/master.env"));
+    if let Err(error) = dotenvy::from_path(home.join(".secrets/master.env")) {
+        tracing::debug!(error = %error, path = %home.join(".secrets/master.env").display(), "no master env file loaded");
+    }
     std::env::remove_var(crate::host_profile::HOST_PROFILE_ENV);
-    let _ = dotenvy::from_path_override(app_home.join("config.env"));
+    if let Err(error) = dotenvy::from_path_override(app_home.join("config.env")) {
+        tracing::debug!(error = %error, path = %app_home.join("config.env").display(), "no app env override loaded");
+    }
     let canonical_host_profile = std::env::var(crate::host_profile::HOST_PROFILE_ENV).ok();
-    let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
+    if let Err(error) = dotenvy::from_path_override(home.join(".sigil/config.env")) {
+        tracing::debug!(error = %error, path = %home.join(".sigil/config.env").display(), "no sigil config override loaded");
+    }
 
     if load_project_local_env {
-        let _ = dotenvy::from_path_override(PathBuf::from(".tachi/config.env"));
-        let _ = dotenvy::from_path_override(PathBuf::from(".sigil/config.env"));
+        let tachi_project_env = PathBuf::from(".tachi/config.env");
+        if let Err(error) = dotenvy::from_path_override(&tachi_project_env) {
+            tracing::debug!(error = %error, path = %tachi_project_env.display(), "no project local env loaded");
+        }
+        let sigil_project_env = PathBuf::from(".sigil/config.env");
+        if let Err(error) = dotenvy::from_path_override(&sigil_project_env) {
+            tracing::debug!(error = %error, path = %sigil_project_env.display(), "no project local sigil env loaded");
+        }
 
         if let Ok(cwd) = std::env::current_dir() {
-            let _ = dotenvy::from_path(cwd.join(".env"));
+            let cwd_env = cwd.join(".env");
+            if let Err(error) = dotenvy::from_path(&cwd_env) {
+                tracing::debug!(error = %error, path = %cwd_env.display(), "no cwd env loaded");
+            }
             if let Some(root) = git_root {
                 if root != cwd.as_path() {
-                    let _ = dotenvy::from_path(root.join(".env"));
+                    let root_env = root.join(".env");
+                    if let Err(error) = dotenvy::from_path(&root_env) {
+                        tracing::debug!(error = %error, path = %root_env.display(), "no git root env loaded");
+                    }
                 }
             }
         }
@@ -798,7 +816,9 @@ async fn start_server_transport(
         );
         for handle in bg_handles {
             // Deliberately swallows task-panic JoinError so a panicking bg task doesn't take down the daemon.
-            let _ = handle.await;
+            if let Err(error) = handle.await {
+                tracing::warn!(error = %error, "background task join failed during shutdown");
+            }
         }
     }
 

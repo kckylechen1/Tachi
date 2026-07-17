@@ -172,8 +172,20 @@ fn export_for_claude(
         // Create/update symlink in ~/.claude/skills/
         let link_target = claude_skills_dir.join(&name);
         // Remove stale symlink or directory if it exists
-        let _ = std::fs::remove_file(&link_target);
-        let _ = std::fs::remove_dir(&link_target);
+        if let Err(error) = std::fs::remove_file(&link_target) {
+            tracing::warn!(
+                error = %error,
+                path = %link_target.display(),
+                "failed to remove stale claude skill link target file"
+            );
+        }
+        if let Err(error) = std::fs::remove_dir(&link_target) {
+            tracing::warn!(
+                error = %error,
+                path = %link_target.display(),
+                "failed to remove stale claude skill link target directory"
+            );
+        }
         #[cfg(unix)]
         {
             if let Err(e) = std::os::unix::fs::symlink(&skill_dir, &link_target) {
@@ -202,8 +214,13 @@ fn export_for_claude(
                 let fname = entry.file_name();
                 let name = fname.to_string_lossy();
                 if !exported_names.contains(name.as_ref()) {
-                    let _ = std::fs::remove_file(entry.path());
-                    let _ = std::fs::remove_dir_all(entry.path());
+                    let path = entry.path();
+                    if let Err(error) = std::fs::remove_file(&path) {
+                        tracing::warn!(error = %error, path = %path.display(), "failed to remove stale claude skill export file");
+                    }
+                    if let Err(error) = std::fs::remove_dir_all(&path) {
+                        tracing::warn!(error = %error, path = %path.display(), "failed to remove stale claude skill export directory");
+                    }
                 }
             }
         }
@@ -360,7 +377,10 @@ fn export_for_cursor(
                         .and_then(|s| s.strip_suffix(".mdc"))
                         .unwrap_or("");
                     if !exported_names.contains(skill_name) {
-                        let _ = std::fs::remove_file(entry.path());
+                        let path = entry.path();
+                        if let Err(error) = std::fs::remove_file(&path) {
+                            tracing::warn!(error = %error, path = %path.display(), "failed to remove stale cursor rule");
+                        }
                     }
                 }
             }

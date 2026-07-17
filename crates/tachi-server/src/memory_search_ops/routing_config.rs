@@ -125,7 +125,13 @@ fn cached_or_reload_with(
     // Another thread may have raced us and already set it — that's a
     // harmless double-read of the identical file, not a correctness issue.
     // Either way, use whatever actually landed in the cache.
-    let _ = cache.set(cfg.clone());
+    if let Err(error) = cache.set(cfg.clone()) {
+        tracing::warn!(
+            error = ?error,
+            config = ?*cfg,
+            "failed to cache routing config; retrying callers may reload"
+        );
+    }
     Ok(cache.get().cloned().unwrap_or(cfg))
 }
 
@@ -255,7 +261,11 @@ mod tests {
                     .expect_err("unreadable file must be Err, not defaults");
                 assert!(matches!(err, RoutingConfigError::Unreadable { .. }));
             }
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+            if let Err(error) =
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            {
+                tracing::warn!(error = %error, path = %path.display(), "failed to reset routing file permissions in test");
+            }
         });
     }
 

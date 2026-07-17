@@ -131,7 +131,9 @@ impl DbContext {
         let conn = Connection::open(&path)?;
         // Match the rest of the codebase: prefer WAL & shorter busy timeout
         // for repair sessions running alongside a possibly-live daemon.
-        let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
+        if let Err(error) = conn.busy_timeout(std::time::Duration::from_secs(5)) {
+            tracing::warn!(error = %error, path = %path.display(), "failed to set sqlite busy timeout");
+        }
         Ok(DbContext {
             label: inventory::label_for(entry),
             path,
@@ -352,7 +354,9 @@ fn resolve_rules(rule_filter: &[String]) -> Vec<String> {
 pub fn backup_db(path: &Path) -> std::io::Result<PathBuf> {
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let backup = sibling_with_suffix(path, &format!("bak.{ts}"));
-    let _ = memcore::db::enable_simple_auto_extension();
+    if let Err(error) = memcore::db::enable_simple_auto_extension() {
+        tracing::warn!(error = %error, path = %path.display(), "failed to enable simple auto extension");
+    }
     memcore::db::register_sqlite_vec();
     let src = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(sqlite_io_error)?;

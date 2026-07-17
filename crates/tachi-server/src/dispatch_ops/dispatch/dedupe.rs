@@ -147,7 +147,9 @@ pub(super) fn reserve_dispatch_dedupe_lock(
                 crate::utils::sync_parent_dir(&lock_path)
             })();
             if let Err(err) = write_result {
-                let _ = std::fs::remove_file(&lock_path);
+                if let Err(error) = std::fs::remove_file(&lock_path) {
+                    tracing::warn!(error = %error, path = %lock_path.display(), "failed to remove dispatch dedupe lock after write failure");
+                }
                 return Err(err);
             }
             Ok(lock_path)
@@ -157,7 +159,9 @@ pub(super) fn reserve_dispatch_dedupe_lock(
                 Ok(Some(existing)) => existing,
                 Ok(None) => json!({}),
                 Err(_) if dispatch_dedupe_lock_file_is_stale(&lock_path) => {
-                    let _ = std::fs::remove_file(&lock_path);
+                    if let Err(error) = std::fs::remove_file(&lock_path) {
+                        tracing::warn!(error = %error, path = %lock_path.display(), "failed to remove stale dispatch dedupe lock");
+                    }
                     return reserve_dispatch_dedupe_lock(
                         lock_dir,
                         scope,
@@ -173,11 +177,15 @@ pub(super) fn reserve_dispatch_dedupe_lock(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("<unknown>");
             if dispatch_status_is_terminal(existing_dispatch_id) {
-                let _ = std::fs::remove_file(&lock_path);
+                if let Err(error) = std::fs::remove_file(&lock_path) {
+                    tracing::warn!(error = %error, dispatch_id = existing_dispatch_id, path = %lock_path.display(), "failed to remove completed dispatch dedupe lock");
+                }
                 return reserve_dispatch_dedupe_lock(lock_dir, scope, task, dispatch_id, flow_id);
             }
             if dispatch_dedupe_lock_is_stale(&existing, existing_dispatch_id) {
-                let _ = std::fs::remove_file(&lock_path);
+                if let Err(error) = std::fs::remove_file(&lock_path) {
+                    tracing::warn!(error = %error, dispatch_id = existing_dispatch_id, path = %lock_path.display(), "failed to remove stale dispatch dedupe lock");
+                }
                 return reserve_dispatch_dedupe_lock(lock_dir, scope, task, dispatch_id, flow_id);
             }
             let scope_label = flow_id.unwrap_or("global");
@@ -225,6 +233,8 @@ pub(super) fn reserve_dispatch_slot(
 
 pub(super) fn release_flow_dispatch_slot(lock_path: Option<PathBuf>) {
     if let Some(path) = lock_path {
-        let _ = std::fs::remove_file(path);
+        if let Err(error) = std::fs::remove_file(&path) {
+            tracing::warn!(error = %error, path = %path.display(), "failed to remove flow dispatch slot lock");
+        }
     }
 }

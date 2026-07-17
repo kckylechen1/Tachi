@@ -466,12 +466,19 @@ fn clear_target_for_reuse(
     } else {
         let freed = runner.clear_target(&path)?;
         if freed > 0 {
-            let _ = memcore::record_resource_measurement(
+            if let Err(error) = memcore::record_resource_measurement(
                 store.connection_mut(),
                 target_resource_id,
                 0,
                 "",
-            );
+            ) {
+                tracing::warn!(
+                    error = %error,
+                    resource_id = %target_resource_id,
+                    freed,
+                    "failed to record build target reuse measurement"
+                );
+            }
         }
     }
     // The dir is empty: it is virgin again, and must not keep claiming the

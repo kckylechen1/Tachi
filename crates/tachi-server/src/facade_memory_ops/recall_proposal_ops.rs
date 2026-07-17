@@ -429,7 +429,9 @@ fn upsert_recall_config_env(path: &Path, values: &BTreeMap<String, String>) -> R
     let tmp = tmp_path_for(path);
     std::fs::write(&tmp, body).map_err(|e| format!("write temp config.env: {e}"))?;
     std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
+        if let Err(error) = std::fs::remove_file(&tmp) {
+            tracing::warn!(error = %error, path = %tmp.display(), "failed to remove temp config env file after rename failure");
+        }
         format!("replace config.env {}: {e}", path.display())
     })
 }

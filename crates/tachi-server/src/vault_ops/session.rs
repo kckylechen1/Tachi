@@ -286,7 +286,13 @@ pub(super) fn read_unlock_password_fifo(home: &Path, path: &str) -> Result<Strin
         String::from_utf8(bytes).map_err(|e| format!("unlock FIFO password is not UTF-8: {e}"))
     })();
     if should_remove_fifo {
-        let _ = std::fs::remove_file(&path);
+        if let Err(error) = std::fs::remove_file(&path) {
+            tracing::warn!(
+                error = %error,
+                path = %path.display(),
+                "failed to remove vault unlock fifo"
+            );
+        }
     }
     let password = result?;
     if password.is_empty() {

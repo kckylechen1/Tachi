@@ -85,7 +85,9 @@ pub(crate) fn write_owner_only_file_atomic(
     })();
 
     if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
+        if let Err(error) = std::fs::remove_file(&tmp_path) {
+            tracing::warn!(error = %error, path = %tmp_path.display(), "failed to remove temporary output file");
+        }
     }
     result
 }
@@ -190,7 +192,9 @@ pub(crate) fn append_owner_only_jsonl_line(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!(error = %error, path = %path.display(), "failed to restrict file permissions");
+        }
     }
     Ok(())
 }

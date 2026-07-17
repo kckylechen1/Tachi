@@ -139,7 +139,13 @@ pub(in crate::gh_ops) struct GhBodyFileGuard(pub(in crate::gh_ops) PathBuf);
 
 impl Drop for GhBodyFileGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        if let Err(error) = fs::remove_file(&self.0) {
+            tracing::warn!(
+                error = %error,
+                path = %self.0.display(),
+                "failed to cleanup gh body temp file"
+            );
+        }
     }
 }
 

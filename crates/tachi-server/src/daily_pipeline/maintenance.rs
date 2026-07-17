@@ -260,7 +260,7 @@ async fn run_truth_maintenance_for_target(
         .entries_missing_vectors(50)
         .map_err(|e| format!("scan embedding candidates {}: {e}", target.label))?;
     for entry in &needs_embed {
-        let _ =
+        if let Err(error) =
             server
                 .enrichment_lock()
                 .enrich_tx
@@ -274,7 +274,15 @@ async fn run_truth_maintenance_for_target(
                     None,
                     None,
                     entry.revision,
-                ));
+                ))
+        {
+            tracing::warn!(
+                error = %error,
+                entry_id = %entry.id,
+                target = ?route.target_db,
+                "failed to enqueue embedding job during maintenance"
+            );
+        }
     }
 
     let promotion_candidates = store
@@ -290,7 +298,7 @@ async fn run_truth_maintenance_for_target(
         store
             .promote_memory_to_durable(&entry.id)
             .map_err(|e| format!("promote memory {}: {e}", entry.id))?;
-        let _ =
+        if let Err(error) =
             server
                 .enrichment_lock()
                 .enrich_tx
@@ -304,7 +312,15 @@ async fn run_truth_maintenance_for_target(
                     None,
                     None,
                     entry.revision,
-                ));
+                ))
+        {
+            tracing::warn!(
+                error = %error,
+                entry_id = %entry.id,
+                target = ?route.target_db,
+                "failed to enqueue promotion enrichment job"
+            );
+        }
     }
 
     Ok(())

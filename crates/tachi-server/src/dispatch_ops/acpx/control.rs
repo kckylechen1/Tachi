@@ -107,7 +107,9 @@ pub(crate) async fn run_acpx_control_from_status(
     });
     let artifact_path = run_dir.join(format!("acpx_{control}.json"));
     if let Ok(body) = serde_json::to_vec_pretty(&result) {
-        let _ = crate::utils::write_owner_only_file_atomic(&artifact_path, &body);
+        if let Err(error) = crate::utils::write_owner_only_file_atomic(&artifact_path, &body) {
+            tracing::warn!(error = %error, path = %artifact_path.display(), "failed to write acpx control artifact");
+        }
     }
     append_trajectory_event(
         &run_dir.join("trajectory.jsonl"),

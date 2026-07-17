@@ -15,7 +15,9 @@ pub(super) fn init_tracing(app_home: &std::path::Path) {
 
     let opener = |path: &std::path::Path| -> Option<std::fs::File> {
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                tracing::warn!(error = %error, path = %parent.display(), "failed to create log parent directory");
+            }
         }
         #[cfg(unix)]
         {
@@ -79,13 +81,18 @@ pub(super) fn init_tracing(app_home: &std::path::Path) {
 
     // Best-effort registration. A second call (e.g. from a test) becomes a
     // no-op because `set_global_default` was already set.
-    let _ = tracing_subscriber::registry()
+    if let Err(error) = tracing_subscriber::registry()
         .with(env_filter)
         .with(file_layer)
-        .try_init();
+        .try_init()
+    {
+        tracing::warn!(error = %error, "failed to initialize tracing subscriber");
+    }
 
     // Mirror the sink choice to stderr so operators can find their logs.
-    let _ = writeln!(std::io::stderr(), "tachi: logging to {sink_label}");
+    if let Err(error) = writeln!(std::io::stderr(), "tachi: logging to {sink_label}") {
+        tracing::warn!(error = %error, "failed to emit logging sink notice to stderr");
+    }
 }
 
 /// Best-effort restrict a file to owner-read/write (0o600) on Unix.

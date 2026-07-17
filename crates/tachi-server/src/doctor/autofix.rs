@@ -152,7 +152,9 @@ fn retire_old_hash_alias(
     match fs::remove_file(candidate) {
         Ok(()) => {
             if let Some(parent) = candidate.parent() {
-                let _ = fs::remove_dir(parent);
+                if let Err(error) = fs::remove_dir(parent) {
+                    tracing::warn!(error = %error, path = %parent.display(), "failed to remove old alias parent directory");
+                }
             }
             AutoFixAction {
                 path: candidate.display().to_string(),
@@ -471,12 +473,16 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
     if wal.exists() {
         let mut wal_dest = dest.as_os_str().to_owned();
         wal_dest.push("-wal");
-        let _ = fs::copy(&wal, PathBuf::from(wal_dest));
+        if let Err(error) = fs::copy(&wal, PathBuf::from(wal_dest)) {
+            tracing::warn!(error = %error, db = %wal.display(), "failed to copy wal sidecar");
+        }
     }
     if shm.exists() {
         let mut shm_dest = dest.as_os_str().to_owned();
         shm_dest.push("-shm");
-        let _ = fs::copy(&shm, PathBuf::from(shm_dest));
+        if let Err(error) = fs::copy(&shm, PathBuf::from(shm_dest)) {
+            tracing::warn!(error = %error, db = %shm.display(), "failed to copy shm sidecar");
+        }
     }
 
     // Open the COPY read-write and force a TRUNCATE checkpoint.
@@ -591,8 +597,14 @@ fn gc_old_checkpoint_copies(src_path: &Path, keep: usize) -> Option<String> {
             errs.push(format!("rm {}: {e}", path.display()));
         }
         // Sidecars (best-effort). Reuse the existing `sidecar` helper.
-        let _ = fs::remove_file(sidecar(path, "-wal"));
-        let _ = fs::remove_file(sidecar(path, "-shm"));
+        let wal_sidecar = sidecar(path, "-wal");
+        if let Err(error) = fs::remove_file(&wal_sidecar) {
+            errs.push(format!("rm {}: {error}", wal_sidecar.display()));
+        }
+        let shm_sidecar = sidecar(path, "-shm");
+        if let Err(error) = fs::remove_file(&shm_sidecar) {
+            errs.push(format!("rm {}: {error}", shm_sidecar.display()));
+        }
     }
     if errs.is_empty() {
         None

@@ -68,7 +68,9 @@ async fn run_native_acp_dispatch_inner(
         .ok_or_else(|| "Native ACP adapter stderr was not piped".to_string())?;
     let stderr_task = tokio::spawn(async move {
         let mut captured = String::new();
-        let _ = stderr.read_to_string(&mut captured).await;
+        if let Err(error) = stderr.read_to_string(&mut captured).await {
+            tracing::warn!(error = %error, "failed to collect ACP native stderr");
+        }
         captured
     });
 
@@ -102,8 +104,12 @@ async fn run_native_acp_dispatch_inner(
             None
         }
         Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            if let Err(error) = child.kill().await {
+                tracing::warn!(error = %error, dispatch_id = dispatch_id, "failed to kill ACP native process after timeout");
+            }
+            if let Err(error) = child.wait().await {
+                tracing::warn!(error = %error, dispatch_id = dispatch_id, "failed to wait ACP native process after timeout");
+            }
             append_trajectory_event(
                 trajectory_path,
                 json!({

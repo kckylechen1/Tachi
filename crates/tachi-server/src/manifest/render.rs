@@ -3,15 +3,17 @@ use super::{DbRole, Manifest};
 pub fn render_manifest(m: &Manifest) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
-    let _ = writeln!(
+    if let Err(error) = writeln!(
         out,
         "tachi manifest v{}  generated_at={}  dbs={}",
         m.schema_version,
         m.generated_at,
         m.dbs.len()
-    );
+    ) {
+        tracing::warn!(error = %error, "failed to render manifest header");
+    }
     for e in &m.dbs {
-        let _ = writeln!(
+        if let Err(error) = writeln!(
             out,
             "  [{}] {}  owner={}  schema={}  vec={}  write={}  last={}  scope={}",
             role_str(&e.role),
@@ -22,7 +24,9 @@ pub fn render_manifest(m: &Manifest) -> String {
             e.allow_write,
             e.last_classification,
             e.scope_hint,
-        );
+        ) {
+            tracing::warn!(error = %error, db_path = %e.path, "failed to render manifest entry");
+        }
     }
     out
 }

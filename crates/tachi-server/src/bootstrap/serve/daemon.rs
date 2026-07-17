@@ -328,7 +328,13 @@ pub(super) async fn serve_http_daemon(
                         // Drop the discovery pid file before exiting, same as the
                         // fail-loud serve path, so a respawning daemon or CLI
                         // client never forwards a write to this dead pid.
-                        let _ = tokio::fs::remove_file(&pid_path_watchdog).await;
+                        if let Err(error) = tokio::fs::remove_file(&pid_path_watchdog).await {
+                            tracing::warn!(
+                                error = %error,
+                                path = %pid_path_watchdog.display(),
+                                "failed to remove watchdog pid file during forced exit"
+                            );
+                        }
                         std::process::exit(code);
                     }
                 }
@@ -406,7 +412,9 @@ pub(super) async fn serve_http_daemon(
         "git_sha": crate::build_info::GIT_SHA,
     });
     if let Some(parent) = pid_path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
+        if let Err(error) = tokio::fs::create_dir_all(parent).await {
+            tracing::warn!(error = %error, path = %parent.display(), "failed to create pid discovery directory");
+        }
     }
     let pid_body = serde_json::to_string_pretty(&pid_payload).unwrap_or_default();
     match tokio::task::spawn_blocking({
@@ -449,7 +457,13 @@ pub(super) async fn serve_http_daemon(
                 }
                 ExitDecision::Fatal { code, reason } => {
                     eprintln!("[fatal] {reason}; exiting {code} so launchd (KeepAlive) respawns a serving daemon");
-                    let _ = tokio::fs::remove_file(&pid_path_cleanup).await;
+                    if let Err(error) = tokio::fs::remove_file(&pid_path_cleanup).await {
+                        tracing::warn!(
+                            error = %error,
+                            path = %pid_path_cleanup.display(),
+                            "failed to remove pid discovery file on fatal exit"
+                        );
+                    }
                     std::process::exit(code);
                 }
             }
@@ -465,7 +479,13 @@ pub(super) async fn serve_http_daemon(
     }
 
     // Best-effort cleanup of daemon discovery file
-    let _ = tokio::fs::remove_file(&pid_path_cleanup).await;
+    if let Err(error) = tokio::fs::remove_file(&pid_path_cleanup).await {
+        tracing::warn!(
+            error = %error,
+            path = %pid_path_cleanup.display(),
+            "failed to remove pid discovery file during shutdown"
+        );
+    }
     // This call site already did its own (async, logged-on-failure) removal
     // above, so disarm the guard rather than let its synchronous Drop attempt
     // a redundant no-op removal.
@@ -684,7 +704,9 @@ impl Drop for DiscoveryPidGuard {
         // synchronous fs op here (the same tradeoff `DaemonLock::drop`
         // makes). Best-effort: a bind failure with no prior discovery file
         // (e.g. the very first run) is a harmless no-op.
-        let _ = std::fs::remove_file(&self.path);
+        if let Err(error) = std::fs::remove_file(&self.path) {
+            tracing::warn!(error = %error, path = %self.path.display(), "failed to remove discovery pid file in drop");
+        }
     }
 }
 

@@ -77,7 +77,13 @@ pub(crate) async fn run_daemon(
                 }
                 crate::status_ops::DaemonStatus::StalePid { pid, lock_path } => {
                     if force {
-                        let _ = std::fs::remove_file(&lock_path);
+                        if let Err(error) = std::fs::remove_file(&lock_path) {
+                            tracing::warn!(
+                                error = %error,
+                                path = %lock_path.display(),
+                                "failed to remove stale daemon lock file"
+                            );
+                        }
                         println!(
                             "[OK] removed stale lock {} (pid {pid} was not alive)",
                             lock_path.display()
@@ -287,8 +293,21 @@ fn reap_stale_processes(
             if !alive {
                 stale_files.push(name);
                 if apply {
-                    let _ = std::fs::remove_file(&path);
-                    let _ = std::fs::remove_file(path.with_extension("lock"));
+                    if let Err(error) = std::fs::remove_file(&path) {
+                        tracing::warn!(
+                            error = %error,
+                            path = %path.display(),
+                            "failed to remove stale daemon pid file"
+                        );
+                    }
+                    let lock_path = path.with_extension("lock");
+                    if let Err(error) = std::fs::remove_file(&lock_path) {
+                        tracing::warn!(
+                            error = %error,
+                            path = %lock_path.display(),
+                            "failed to remove stale daemon pid lock file"
+                        );
+                    }
                 }
             }
         }

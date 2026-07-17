@@ -92,7 +92,9 @@ pub(super) fn git_changed_files_and_patches(
             patches,
         })
     })();
-    let _ = fs::remove_dir_all(&root);
+    if let Err(error) = fs::remove_dir_all(&root) {
+        tracing::warn!(error = %error, path = %root.display(), "failed to cleanup temp sync-plan git root");
+    }
     result
 }
 

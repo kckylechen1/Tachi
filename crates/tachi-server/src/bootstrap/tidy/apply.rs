@@ -55,7 +55,9 @@ pub(crate) fn execute_tidy_apply(
                                 Ok(()) => {
                                     removed += 1;
                                     if let Some(parent) = path.parent() {
-                                        let _ = std::fs::remove_dir(parent);
+                                        if let Err(error) = std::fs::remove_dir(parent) {
+                                            tracing::warn!(error = %error, path = %parent.display(), "failed to remove parent directory during tidy apply");
+                                        }
                                     }
                                 }
                                 Err(err) => failures.push(format!("{source}: {err}")),

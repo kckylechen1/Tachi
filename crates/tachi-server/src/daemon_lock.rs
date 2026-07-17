@@ -148,7 +148,9 @@ impl Drop for DaemonLock {
         unsafe {
             libc::flock(fd, libc::LOCK_UN);
         }
-        let _ = std::fs::remove_file(&self.path);
+        if let Err(error) = std::fs::remove_file(&self.path) {
+            tracing::warn!(error = %error, path = %self.path.display(), "failed to remove daemon lock file");
+        }
     }
 }
 

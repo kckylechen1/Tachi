@@ -263,7 +263,9 @@ fn migrate_single_db(
     if let Some(err) = copy_err {
         // Best-effort rollback: delete rows we newly inserted in this run.
         for id in &newly_inserted_ids {
-            let _ = target_store.delete(id);
+            if let Err(error) = target_store.delete(id) {
+                tracing::warn!(error = %error, target_store = %migration.target_path, "failed to rollback migration row");
+            }
         }
         return Ok(TidyMigrationOutcome {
             source_path: migration.source_path.clone(),
