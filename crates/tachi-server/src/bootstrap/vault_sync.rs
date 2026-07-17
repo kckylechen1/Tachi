@@ -194,7 +194,7 @@ pub(super) fn import_vault_bundle(
             .to_string()
     })?;
 
-    let (_store, initialized_vault) = import_validated_vault_bundle(
+    let initialized_vault = import_validated_vault_bundle(
         global_db_path,
         bundle_config,
         &bundle.entries,
@@ -221,15 +221,17 @@ pub(super) fn import_vault_bundle(
 /// visible in review, not to be convenient to call around. `pub(super)`
 /// (reachable throughout `bootstrap`, matching this module's other
 /// entry points like `import_vault_bundle`/`open_cli_store`) rather than
-/// `pub(crate)`: `bootstrap` itself is a private module, so a wider
+/// `pub(crate)`: both `mod bootstrap` (in `lib.rs`) and `mod vault_sync`
+/// (in `bootstrap/mod.rs`, private child module) are private, so a wider
 /// visibility modifier would not actually reach further — this stays
 /// consistent with the module's existing convention instead of overclaiming
 /// crate-wide reach it cannot deliver.
 ///
-/// Returns the opened target store (so callers that already need it, like
-/// `import_vault_bundle` above, don't have to reopen it) and whether the
-/// target Vault was uninitialized before this call (bootstrap vs. merge into
-/// an existing Vault).
+/// Returns whether the target Vault was uninitialized before this call
+/// (bootstrap vs. merge into an existing Vault). Does not return the opened
+/// store: the sole current caller (`import_vault_bundle` above) has no use
+/// for it once import completes, and returning an unused connection just to
+/// have it would widen this function's surface for no reason.
 ///
 /// # Ordering (tachi#1080 day-one brick fix)
 ///
@@ -252,7 +254,7 @@ pub(super) fn import_validated_vault_bundle(
     config: &VaultConfig,
     entries: &[VaultEntry],
     rotations: &[VaultKeyRotation],
-) -> Result<(memcore::MemoryStore, bool), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     ensure_importable_kdf(config)?;
 
     let mut store = open_cli_store(global_db_path)?;
@@ -269,7 +271,7 @@ pub(super) fn import_validated_vault_bundle(
         .vault_import_bundle_unchecked(config, entries, rotations)
         .map_err(|e| format!("vault_import_bundle_unchecked: {e}"))?;
 
-    Ok((store, initialized_vault))
+    Ok(initialized_vault)
 }
 
 pub(super) fn read_bundle_vault_config(
