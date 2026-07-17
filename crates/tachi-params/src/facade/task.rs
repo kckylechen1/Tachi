@@ -38,6 +38,15 @@ pub struct TachiTaskParams {
     /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
     #[serde(default)]
     pub format: Option<String>,
+    /// tachi#1173 items 1+2: request the full payload instead of the default
+    /// slim shape. [action=dispatch]: the dispatch response includes the full
+    /// routing card (`profile`, `identity_receipt`, `dispatch_profile`) rather
+    /// than just dispatch_id/state/run_dir/suggested_complete_command.
+    /// [action=profiles|profile|card]: each row includes the full mbit_card
+    /// (stats/guidance/moves/personality/skill_loadout/evidence_contract)
+    /// rather than just name/backend/model/role.
+    #[serde(default)]
+    pub verbose: Option<bool>,
     // plan fields
     #[serde(default)]
     #[schemars(
@@ -159,6 +168,16 @@ pub struct TachiTaskParams {
     /// [action=complete] Structured subagent eval records.
     #[serde(default)]
     pub subagents: Vec<TachiSubagentEvalParams>,
+    /// [action=complete] `eval_run_id`s from the #1066 mirror eval intake
+    /// (`tachi_agent_eval` register/observe/adjudicate) to project into this
+    /// completion's eval row. Only rows that are ADJUDICATED and
+    /// evidence-usable (and not a self-eval) are projected; unresolved or
+    /// ineligible ids are silently skipped — this never fails the
+    /// completion. Additive/optional — an empty/omitted array is
+    /// byte-compatible with existing callers and leaves `subagents[]`
+    /// untouched.
+    #[serde(default)]
+    pub eval_run_ids: Vec<String>,
     /// [action=complete] Feedback/prompt-quality rule ids that were applied to this task.
     #[serde(default)]
     pub feedback_rules_applied: Vec<String>,

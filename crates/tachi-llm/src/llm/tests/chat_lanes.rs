@@ -400,6 +400,108 @@ async fn chat_lane_records_success_usage_to_vault_db() {
     server_task.abort();
 }
 
+/// #1071 fix-round checkpoints 5/6: a lane response whose `finish_reason`
+/// is `"length"` (provider cut it off) must be surfaced as `truncated`, and
+/// a request that used the lane (not the claude-cli path) must honestly
+/// report `used_fallback: true` — the exact two signals the codex
+/// 2026-07-17 review found `call_reasoning_llm`'s old `Ok(answer) =>
+/// engine_receipt { fallback: false }` path could never produce. The
+/// claude-cli path is forced into its failure-cooldown state first so this
+/// test is deterministic regardless of whether a `claude` binary happens to
+/// be on the test host's `PATH`.
+#[tokio::test]
+async fn call_reasoning_llm_with_receipt_flags_truncation_and_fallback_honestly() {
+    use axum::{routing::post, Json, Router};
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            Json(serde_json::json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "cut off mid-thou"
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 5,
+                    "total_tokens": 10
+                }
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let port = listener.local_addr().expect("mock provider addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock provider");
+    });
+
+    let config = ProviderRuntimeConfig {
+        extract: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        summary: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        reasoning: ChatLaneConfig {
+            base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+            model: "mock-reasoning-model".to_string(),
+            api_key_envs: vec!["REASONING_API_KEY"],
+        },
+        distill: ChatLaneConfig {
+            base_url: "https://unused.test/v1/chat/completions".to_string(),
+            model: "unused".to_string(),
+            api_key_envs: vec!["UNUSED_API_KEY"],
+        },
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    };
+    let client = LlmClient::new_with_config(config, None).expect("client should initialize");
+    client.set_provider_secret_pool(
+        "REASONING_API_KEY",
+        vec![ProviderSecret {
+            key_id: "REASONING_API_KEY".to_string(),
+            value: "test-key".to_string(),
+        }],
+    );
+    // Force the claude-cli path into its failure cooldown so the mock lane
+    // above deterministically serves the request (see `ClaudeCliFailureKind
+    // ::from_error`'s recognized-prefix match for why this exact prefix).
+    client.record_claude_cli_failure_at(
+        "claude cli spawn failed: forced for deterministic test",
+        std::time::Instant::now(),
+    );
+
+    let outcome = client
+        .call_reasoning_llm_with_receipt("system", "user", None, 0.0, 16)
+        .await
+        .expect("mock provider should succeed");
+
+    assert_eq!(outcome.text, "cut off mid-thou");
+    assert!(
+        outcome.truncated,
+        "finish_reason=length must be surfaced as truncated, not silently absorbed"
+    );
+    assert!(
+        outcome.used_fallback,
+        "the lane path (not claude-cli) served this request — must report fallback: true"
+    );
+
+    server_task.abort();
+}
+
 #[tokio::test]
 async fn chat_lane_marks_insufficient_balance_as_exhausted() {
     use axum::{http::StatusCode, response::IntoResponse, routing::post, Router};

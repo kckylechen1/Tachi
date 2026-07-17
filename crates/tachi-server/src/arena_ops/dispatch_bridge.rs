@@ -91,6 +91,7 @@ pub(super) fn dispatch_params_for_mission(
         auto_capability_bundle: params.auto_capability_bundle,
         mcp_access: None,
         allowed_mcp_servers: Vec::new(),
+        verbose: None,
     })
 }
 

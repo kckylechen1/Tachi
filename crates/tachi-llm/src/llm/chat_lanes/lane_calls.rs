@@ -62,6 +62,7 @@ impl super::super::LlmClient {
             max_tokens,
         )
         .await
+        .map(|(text, _truncated)| text)
     }
 
     /// Foundry batch distill and single-group fallback when
@@ -83,6 +84,7 @@ impl super::super::LlmClient {
             max_tokens,
         )
         .await
+        .map(|(text, _truncated)| text)
     }
 
     pub async fn call_summary_llm(
@@ -102,8 +104,13 @@ impl super::super::LlmClient {
             max_tokens,
         )
         .await
+        .map(|(text, _truncated)| text)
     }
 
+    /// Returns `(text, truncated)` — `truncated` is `true` when the
+    /// provider's `finish_reason` is `"length"` on an otherwise-successful,
+    /// non-empty response (#1071 fix-round checkpoint 6: truncated synthesis
+    /// must never be silently reported as a clean `completed` answer).
     pub(in crate::llm::chat_lanes) async fn call_lane_llm(
         &self,
         lane: ChatLane,
@@ -112,7 +119,7 @@ impl super::super::LlmClient {
         model_override: Option<&str>,
         temperature: f32,
         max_tokens: u32,
-    ) -> Result<String, String> {
+    ) -> Result<(String, bool), String> {
         let breaker_key = format!("chat:{}", lane.as_str());
         if !self.circuit_breakers.allow(&breaker_key) {
             return Err(format!(
@@ -259,6 +266,15 @@ impl super::super::LlmClient {
                 format!("Failed to parse chat response JSON: {e} — raw: {resp_text}")
             })?;
 
+            // #1071 fix-round checkpoint 6: read `finish_reason` regardless
+            // of whether content came back, so a non-empty-but-cut-off
+            // response (`finish_reason == "length"`) is distinguishable from
+            // a clean stop, not just used as empty-content diagnostics.
+            let finish_reason = json["choices"][0]["finish_reason"]
+                .as_str()
+                .unwrap_or("null")
+                .to_string();
+
             // Extract content from first choice
             let content = json["choices"].as_array().and_then(|choices| {
                 choices.iter().find_map(|choice| {
@@ -284,13 +300,10 @@ impl super::super::LlmClient {
                     text.chars().count(),
                     attempt_started.elapsed(),
                 );
-                return Ok(text);
+                return Ok((text, finish_reason == "length"));
             }
 
             // Content was empty — build diagnostic info
-            let finish_reason = json["choices"][0]["finish_reason"]
-                .as_str()
-                .unwrap_or("null");
             let usage = json
                 .get("usage")
                 .map(|u| u.to_string())

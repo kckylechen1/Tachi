@@ -65,7 +65,12 @@ async fn standard_profile_exposes_arena_but_hides_heavy_coordination_facades() {
     assert!(tools.contains("`tachi_verify`"));
     assert!(tools.contains("`tachi_gh`"));
     assert!(!tools.contains("`tachi_event`"));
-    assert!(!tools.contains("`tachi_agent_eval`"));
+    // #1066: tachi_agent_eval's register/observe/adjudicate/get mirror eval
+    // intake is a daily facade entrypoint for any host-native session (AC-1
+    // "standard profile exposes this tool") — flipped from hidden now that
+    // the facade carries more than the admin-only aggregate/telemetry/perf
+    // read actions it had when this assertion was written.
+    assert!(tools.contains("`tachi_agent_eval`"));
     assert!(!tools.contains("`tachi_shell`"));
     assert!(!tools.contains("`tachi_orchestrator`"));
 }

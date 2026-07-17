@@ -24,6 +24,7 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
                 diff: None,
                 worktree: None,
                 subagents: Vec::new(),
+                eval_run_ids: Vec::new(),
                 feedback_rules_applied: Vec::new(),
                 dispatch_id: None,
                 flow_id: Some("flow-card-risk-evolution".to_string()),
@@ -100,8 +101,13 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
             .expect("card risk projection should apply");
     }
 
+    // tachi#1173 item 2 slimmed action='profiles' rows to name/backend/model/role
+    // by default; this assertion needs the full mbit_card/weak_against, so
+    // request the verbose escape hatch explicitly (#1182 consumer sweep).
+    let mut profiles_params = task_params("profiles");
+    profiles_params.verbose = Some(true);
     let profiles_raw = server
-        .tachi_task(Parameters(task_params("profiles")))
+        .tachi_task(Parameters(profiles_params))
         .await
         .expect("profiles should include card risk projections");
     let profiles: serde_json::Value = serde_json::from_str(&profiles_raw).expect("profiles JSON");

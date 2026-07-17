@@ -117,22 +117,37 @@ pub(super) struct DispatchResponseInputs<'a> {
     pub(super) workspace_dir: &'a Path,
 }
 
+/// tachi#1173 item 1: the dispatch state seeded by `build_dispatch_response`.
+/// Every dispatch that reaches this point already returned (background work
+/// runs after this response is built), so the state is always the initial
+/// "accepted, working in background" value — matches the same literal used
+/// by the receipt-first `write_status_json` seed in `dispatch.rs`.
+const DISPATCH_RESPONSE_INITIAL_STATE: &str = "TASK_STATE_WORKING";
+
 pub(super) fn build_dispatch_response(
     inputs: DispatchResponseInputs<'_>,
 ) -> Result<String, String> {
-    let response = json!({
+    // tachi#1173 item 1: dispatch receipt slimming. The default response is a
+    // slim receipt (dispatch_id/state/run_dir/suggested_complete_command plus
+    // other small metadata already useful post-dispatch); the fat routing
+    // card (mbit_card x3 via `profile`/`dispatch_profile`, identity_receipt
+    // x2, personality dump) is selection-time information an agent needs
+    // when CHOOSING a profile, not receipt information it needs after
+    // dispatch already committed to one — so it moves behind verbose=true (or
+    // a separate `tachi_task(action='profile')` call).
+    let verbose = inputs.params.verbose.unwrap_or(false);
+
+    let mut response = json!({
         "dispatch_id": inputs.dispatch_id,
+        "state": DISPATCH_RESPONSE_INITIAL_STATE,
         "task": {
             "id": inputs.dispatch_id,
-            "status": { "state": "TASK_STATE_WORKING" },
+            "status": { "state": DISPATCH_RESPONSE_INITIAL_STATE },
         },
         "agent": inputs.agent_norm,
-        "profile": inputs.profile_payload,
-        "identity_receipt": inputs.resolved_profile.identity_receipt,
         "selected_profile": inputs.resolved_profile.selected_profile,
         "authority": inputs.authority,
         "tool_access": inputs.resolved_profile.mcp_access,
-        "dispatch_profile": inputs.resolved_profile.mbit_card,
         "credentials": inputs.credential_reports_json,
         "route_explanation": inputs.resolved_profile.route_explanation,
         "fallback_chain": inputs.resolved_profile.fallback_chain,
@@ -159,7 +174,27 @@ pub(super) fn build_dispatch_response(
         "context_file": inputs.context_md_path.to_string_lossy(),
         "trajectory_file": inputs.trajectory_path.to_string_lossy(),
         "run_dir": inputs.workspace_dir.to_string_lossy(),
+        "verbose": verbose,
     });
+
+    if verbose {
+        let object = response
+            .as_object_mut()
+            .expect("build_dispatch_response always constructs a JSON object");
+        object.insert("profile".to_string(), inputs.profile_payload.clone());
+        object.insert(
+            "identity_receipt".to_string(),
+            serde_json::to_value(&inputs.resolved_profile.identity_receipt).unwrap_or(Value::Null),
+        );
+        object.insert(
+            "dispatch_profile".to_string(),
+            inputs
+                .resolved_profile
+                .mbit_card
+                .clone()
+                .unwrap_or(Value::Null),
+        );
+    }
 
     serde_json::to_string(&response).map_err(|e| format!("serialize: {e}"))
 }

@@ -55,5 +55,6 @@ pub(crate) use self::issue_freshness::{
     fetch_and_scan_zombies, reap_stale_kind_rows, save_freshness_row, FreshnessRow,
     KIND_CHURN_CANDIDATE, KIND_STALE_CANDIDATE, KIND_ZOMBIE, STALE_CANDIDATE_NS, ZOMBIE_NS,
 };
+pub(crate) use self::issues::read_issue_snapshot_bounded;
 pub(crate) use self::router::handle_tachi_gh;
 pub(crate) use self::safe_merge::{gh_client_for_server, handle_github_safe_merge};

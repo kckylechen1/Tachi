@@ -247,6 +247,16 @@ pub struct TachiDispatchParams {
     /// Hub MCP server ids allowed when inject_hub_mcps=true. Empty preserves current all-enabled behavior.
     #[serde(default)]
     pub allowed_mcp_servers: Vec<String>,
+
+    /// tachi#1173 item 1: the default dispatch response is a slim receipt
+    /// (dispatch_id, state, run_dir, suggested_complete_command, plus other
+    /// small metadata) — the full routing card (`profile`, `identity_receipt`,
+    /// `dispatch_profile`/mbit_card) is selection-time information, not
+    /// receipt information, and is omitted by default. Set verbose=true to
+    /// get the full payload back on the dispatch response itself (or fetch
+    /// it separately via `tachi_task(action='profile')`).
+    #[serde(default)]
+    pub verbose: Option<bool>,
 }
 
 // ─── Facade: worktree merge ──────────────────────────────────────────────────
@@ -502,6 +512,16 @@ pub struct TachiCompleteParams {
     /// Store concise summaries only; raw child transcripts should stay out of memory.
     #[serde(default)]
     pub subagents: Vec<TachiSubagentEvalParams>,
+
+    /// `eval_run_id`s from the #1066 `tachi_agent_eval` mirror eval intake
+    /// (register/observe/adjudicate) to project into this completion's eval
+    /// row. Only ADJUDICATED, evidence-usable, non-self-eval rows are
+    /// projected into `subagents[]`-compatible aggregation; unresolved or
+    /// ineligible ids are silently skipped and never fail the completion.
+    /// Additive/optional — an empty/omitted array leaves `subagents[]`
+    /// byte-compatible with existing callers.
+    #[serde(default)]
+    pub eval_run_ids: Vec<String>,
 
     /// Feedback/prompt-quality rule ids that were applied to this task.
     #[serde(default)]

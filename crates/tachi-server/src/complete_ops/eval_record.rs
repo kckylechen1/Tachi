@@ -388,6 +388,7 @@ mod tests {
             signatures: Vec::new(),
             rulings: Vec::new(),
             adjudication: None,
+            eval_run_ids: Vec::new(),
         }
     }
 

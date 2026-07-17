@@ -291,9 +291,39 @@ pub(super) fn render_recommend_markdown(title: &str, action: &str, value: &Value
 }
 
 /// Render the `profiles` action as a table of configured dispatch profiles.
+///
+/// #1182 checkpoint 4 (codex review round 2): tachi#1173 item 2 slimmed the
+/// JSON default to `name`/`backend`/`model`/`role` rows with no `mbit_card`,
+/// but this renderer used to unconditionally read `stage`/`mbit_card.stats`/
+/// `strong_against` — on the new slim default those columns silently
+/// rendered `-` for every row and dropped `model` from view entirely, a
+/// human-facing UX regression no test exercised end-to-end. Mirror the same
+/// verbose/slim split the JSON response uses: `value["verbose"]` (echoed by
+/// `dispatch_profiles_json_for_server`) selects which table shape to render.
 pub(super) fn render_profiles_markdown(title: &str, action: &str, value: &Value) -> String {
     let mut lines = vec![format!("## {title}"), format!("action: `{action}`")];
     lines.push(String::new());
+
+    let verbose = value
+        .get("verbose")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if !verbose {
+        lines.push("| name | backend | model | role |".to_string());
+        lines.push("| --- | --- | --- | --- |".to_string());
+        if let Some(profiles) = value.get("dispatch_profiles").and_then(Value::as_array) {
+            for profile in profiles {
+                let name = md_opt_str(profile, "name");
+                let backend = md_opt_str(profile, "backend");
+                let model = md_opt_str(profile, "model");
+                let role = md_opt_str(profile, "role");
+                lines.push(format!("| {name} | {backend} | {model} | {role} |"));
+            }
+        }
+        return lines.join("\n");
+    }
+
     lines.push(
         "| name | role | stage | backend | cost | precision | speed | strong_against |".to_string(),
     );

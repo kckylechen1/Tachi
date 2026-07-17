@@ -37,6 +37,7 @@ async fn tachi_task_recommend_uses_live_eval_and_dispatch_profiles() {
             signatures: Vec::new(),
             rulings: Vec::new(),
             adjudication: None,
+            eval_run_ids: Vec::new(),
         }))
         .await
         .expect("seed eval row");
@@ -160,6 +161,7 @@ async fn tachi_task_recommend_surfaces_human_override_and_retry_penalties() {
             signatures: Vec::new(),
             rulings: Vec::new(),
             adjudication: None,
+            eval_run_ids: Vec::new(),
         }))
         .await
         .expect("seed eval row");

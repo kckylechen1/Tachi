@@ -8,6 +8,7 @@ mod hub;
 mod memory;
 mod peer;
 mod project_db;
+mod recall_evidence;
 mod refinery;
 mod sandbox;
 
@@ -20,6 +21,7 @@ pub use hub::*;
 pub use memory::*;
 pub use peer::*;
 pub use project_db::*;
+pub use recall_evidence::*;
 pub use refinery::*;
 pub use sandbox::*;
 

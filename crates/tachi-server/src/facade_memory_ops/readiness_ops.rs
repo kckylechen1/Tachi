@@ -1,6 +1,10 @@
 //! Alert, ask, and readiness handlers for `tachi_memory`.
 //! Consolidate lifecycle lives in `consolidate_ops` (#775).
 
+use super::current_work_anchor::{
+    compute_anchor_gated_confidence, extract_exact_issue_anchors, overall_grounding_status,
+    prepend_anchor_evidence_rows, resolve_current_work_anchors,
+};
 use super::evidence_format::{
     build_thinking_scaffold, evidence_rows, format_agent_status, json_string, parse_json_or_empty,
     sections_to_evidence, synthesis_markdown_text, wants_json,
@@ -10,6 +14,10 @@ use crate::facade_search_ops::collect_tachi_search_sections;
 use crate::tool_params::*;
 use crate::MemoryServer;
 use serde_json::{json, Value};
+
+/// #1071: synthesis is called with a bounded timeout so a stalled provider
+/// degrades the response to `partial`, never hangs `ask`.
+const ASK_SYNTHESIS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Alerts
@@ -48,8 +56,31 @@ pub(crate) async fn handle_memory_ask(
     // Desktop/Sigil paths from old memories; never let synthesis invent them.
     let runtime_binding = runtime_db_binding(server);
 
+    // #1071 fix-round checkpoint 1: exact-anchor extraction/resolution must
+    // happen before EVERY confidence-return path, including the runtime-DB
+    // fast path below — a query can simultaneously name an exact anchor
+    // ("what is the current db path for owner/repo#1234?") and ask about
+    // the runtime binding; the anchor-gating rule still applies to that
+    // query's confidence even though the runtime-path answer itself is
+    // authoritative and unaffected. See `current_work_anchor` module doc
+    // for the frozen-contract basis and documented scope gaps (issue
+    // anchors only, no bare `#N`).
+    let exact_anchor_targets = extract_exact_issue_anchors(&query);
+    let required_anchors = if exact_anchor_targets.is_empty() {
+        Vec::new()
+    } else {
+        resolve_current_work_anchors(server, &exact_anchor_targets).await
+    };
+    let grounding_status = overall_grounding_status(&required_anchors);
+
     if is_runtime_db_path_query(&query) {
-        return answer_runtime_db_path_query(&query, &runtime_binding, params.format.as_deref());
+        return answer_runtime_db_path_query(
+            &query,
+            &runtime_binding,
+            params.format.as_deref(),
+            &required_anchors,
+            grounding_status,
+        );
     }
 
     let search_params = TachiSearchParams {
@@ -83,7 +114,36 @@ pub(crate) async fn handle_memory_ask(
         .any(|row| row.get("db").and_then(Value::as_str) == Some("global"));
     let cross_store = params.project.is_none() && has_project_db && uses_global;
     let evidence = inject_project_tags(evidence);
-    let thinking = build_thinking_scaffold("ask", &query, &evidence);
+
+    // #1071: `required_anchors`/`grounding_status` were already resolved
+    // above (before the runtime-DB fast path) — see checkpoint 1's fix
+    // comment there. Reused here, not re-extracted, so a live-resolved (or
+    // live-failed) anchor overrides the generic evidence-volume confidence
+    // heuristic — never the reverse.
+    let evidence = prepend_anchor_evidence_rows(evidence, &required_anchors);
+
+    let mut thinking = build_thinking_scaffold("ask", &query, &evidence);
+    if !required_anchors.is_empty() {
+        let confidence = compute_anchor_gated_confidence(&required_anchors);
+        if let Some(obj) = thinking.as_object_mut() {
+            obj.insert("confidence".to_string(), json!(confidence));
+            if confidence == "low" {
+                if let Some(gaps) = obj.get_mut("gaps").and_then(Value::as_array_mut) {
+                    for anchor in required_anchors.iter().filter(|anchor| {
+                        anchor.grounding_status == GroundingStatusV1::MissingAnchor
+                    }) {
+                        for reason in &anchor.contradictions {
+                            gaps.push(json!(format!(
+                                "current-work anchor {} unresolved: {}",
+                                anchor.source_ref, reason.description
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let synthesis = if params.synthesize {
         Some(
             synthesize_answer(
@@ -98,9 +158,25 @@ pub(crate) async fn handle_memory_ask(
     } else {
         None
     };
+    // #1071: "Provider timeout/fallback preserves evidence but returns
+    // overall partial/preview-only." Evidence confidence (`thinking`) is
+    // computed above, before synthesis runs, and is never touched here —
+    // only the top-level response status reflects a degraded synthesis.
+    // #1071 fix-round checkpoint 6: `synthesize_answer` now reports its own
+    // `status: "partial"` when the provider truncated its response
+    // (`finish_reason == "length"`), so that case folds into this same
+    // "partial" rule rather than remaining `completed/high/gaps=[]`.
+    let overall_status = match synthesis
+        .as_ref()
+        .and_then(|s| s.get("status"))
+        .and_then(Value::as_str)
+    {
+        Some("timeout") | Some("failed") | Some("partial") => "partial",
+        _ => "completed",
+    };
     if wants_json(params.format.as_deref()) {
         return json_string(&json!({
-            "status": "completed",
+            "status": overall_status,
             "query": query,
             "evidence": evidence,
             "thinking": thinking,
@@ -112,11 +188,13 @@ pub(crate) async fn handle_memory_ask(
             } else {
                 None
             },
+            "grounding_status": grounding_status.as_str(),
+            "required_anchors": required_anchors,
         }));
     }
     let synthesis_text = synthesis.as_ref().and_then(synthesis_markdown_text);
     let mut fields: Vec<(&str, String)> = vec![
-        ("status", "completed".to_string()),
+        ("status", overall_status.to_string()),
         ("query", query),
         (
             "evidence",
@@ -147,6 +225,9 @@ pub(crate) async fn handle_memory_ask(
                 .to_string(),
         ),
     ];
+    if !required_anchors.is_empty() {
+        fields.push(("grounding_status", grounding_status.as_str().to_string()));
+    }
     if cross_store {
         fields.push((
             "cross_store",
@@ -196,10 +277,19 @@ fn is_runtime_db_path_query(query: &str) -> bool {
         || q.contains("using")
 }
 
+/// #1071 fix-round checkpoint 1: `required_anchors`/`grounding_status` are
+/// resolved by the caller BEFORE it decides to route into this fast path
+/// (see `handle_memory_ask`), so a query that both asks about the runtime
+/// DB path AND names an exact anchor still gets its confidence gated on
+/// that anchor's resolution — the runtime-binding answer text itself is
+/// unaffected (it's a different, always-authoritative claim), only
+/// `confidence`/`grounding_status` reflect the anchor outcome.
 fn answer_runtime_db_path_query(
     query: &str,
     runtime_binding: &Value,
     format: Option<&str>,
+    required_anchors: &[RecallEvidenceV1],
+    grounding_status: GroundingStatusV1,
 ) -> Result<String, String> {
     let global = runtime_binding
         .get("global_db")
@@ -215,14 +305,35 @@ fn answer_runtime_db_path_query(
          - project_db: {project}\n\
          Use runtime_info for the full routing snapshot. Memory hits mentioning other paths are historical and may be stale."
     );
+    let confidence = if required_anchors.is_empty() {
+        "high"
+    } else {
+        compute_anchor_gated_confidence(required_anchors)
+    };
+    let gaps: Vec<Value> = if confidence == "low" {
+        required_anchors
+            .iter()
+            .filter(|anchor| anchor.grounding_status == GroundingStatusV1::MissingAnchor)
+            .flat_map(|anchor| {
+                anchor.contradictions.iter().map(move |reason| {
+                    json!(format!(
+                        "current-work anchor {} unresolved: {}",
+                        anchor.source_ref, reason.description
+                    ))
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     if wants_json(format) {
         return json_string(&json!({
             "status": "completed",
             "query": query,
             "evidence": [],
             "thinking": {
-                "confidence": "high",
-                "gaps": [],
+                "confidence": confidence,
+                "gaps": gaps,
                 "basis": "runtime_binding",
             },
             "synthesis": {
@@ -231,18 +342,24 @@ fn answer_runtime_db_path_query(
                 "source": "runtime_binding",
             },
             "runtime": runtime_binding,
+            "grounding_status": grounding_status.as_str(),
+            "required_anchors": required_anchors,
         }));
+    }
+    let mut fields = vec![
+        ("status", "completed".to_string()),
+        ("query", query.to_string()),
+        ("confidence", confidence.to_string()),
+        ("basis", "runtime_binding".to_string()),
+        ("project_db", project.to_string()),
+        ("global_db", global.to_string()),
+    ];
+    if !required_anchors.is_empty() {
+        fields.push(("grounding_status", grounding_status.as_str().to_string()));
     }
     Ok(format_agent_status(
         "Tachi ask",
-        &[
-            ("status", "completed".to_string()),
-            ("query", query.to_string()),
-            ("confidence", "high".to_string()),
-            ("basis", "runtime_binding".to_string()),
-            ("project_db", project.to_string()),
-            ("global_db", global.to_string()),
-        ],
+        &fields,
         None,
         Some(&answer),
     ))
@@ -512,23 +629,88 @@ If evidence is insufficient, say what is missing. Keep the answer concise and ci
     let user = format!(
         "Question:\n{query}\n\nAuthoritative runtime binding JSON:\n{runtime_text}\n\nEvidence JSON:\n{evidence_text}"
     );
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        server.llm.call_extract_llm(system, &user, model, 0.2, 700),
+    let started_at = std::time::Instant::now();
+    // #1071: "Synthesis uses an answer/reasoning capability, not Extract."
+    // `call_reasoning_llm_with_receipt` is the Reasoning chat lane (falls
+    // back to a higher-quality CLI path first, see `chat_lanes::claude_cli`),
+    // never the Extract lane `ask` used to share with fact-atomization
+    // callers. #1071 fix-round checkpoints 5/6: unlike the old
+    // `call_reasoning_llm`, this returns whether the answer used the
+    // fallback lane and whether the provider truncated it, so the receipt
+    // below can be honest instead of hardcoding `fallback: false`.
+    let outcome = tokio::time::timeout(
+        ASK_SYNTHESIS_TIMEOUT,
+        server
+            .llm
+            .call_reasoning_llm_with_receipt(system, &user, model, 0.2, 700),
     )
-    .await
-    {
-        Ok(Ok(answer)) => json!({
-            "status": "completed",
-            "answer": answer,
-        }),
+    .await;
+    let latency_ms = started_at.elapsed().as_millis();
+    // #1071 fix-round checkpoint 5: `effective_provider` stays `None`
+    // (neither the claude-cli path nor the lane call exposes which backend
+    // actually served the request), matching #1002's precedent that
+    // unknown identity is declared, never guessed. `effective_model` is
+    // ONLY populated when the lane path served the request (`used_fallback`)
+    // — that's the one case where `model` was actually threaded into the
+    // API call body; the claude-cli path never receives `model` at all, so
+    // echoing the caller's requested override there would misrepresent it
+    // as the proven serving engine (the exact codex finding: "<requested_
+    // override, not proven_engine>"). `EngineReceiptV1` has no `latency_ms`
+    // field in its #1002-frozen shape, so latency is carried as a sibling
+    // field instead of widening that type without adjudication.
+    let receipt = |used_fallback: bool, degraded: bool| {
+        json!(EngineReceiptV1 {
+            requested_role: "reasoning".to_string(),
+            effective_provider: None,
+            effective_model: if used_fallback {
+                model.map(str::to_string)
+            } else {
+                None
+            },
+            fallback: used_fallback,
+            degraded,
+        })
+    };
+    match outcome {
+        Ok(Ok(outcome)) => {
+            // #1071 fix-round checkpoint 6: a truncated (finish_reason ==
+            // "length") lane response is never a clean `completed` answer —
+            // it reports `partial` plus an explicit truncation gap, per
+            // frozen RED corpus case 6.
+            if outcome.truncated {
+                json!({
+                    "status": "partial",
+                    "answer": outcome.text,
+                    "engine_receipt": receipt(outcome.used_fallback, true),
+                    "latency_ms": latency_ms,
+                    "truncated": true,
+                    "gaps": ["synthesis truncated by provider (finish_reason=length); answer may be incomplete"],
+                })
+            } else {
+                json!({
+                    "status": "completed",
+                    "answer": outcome.text,
+                    "engine_receipt": receipt(outcome.used_fallback, false),
+                    "latency_ms": latency_ms,
+                })
+            }
+        }
         Ok(Err(err)) => json!({
             "status": "failed",
             "error": err,
+            // `fallback: false` here is a documented "unproven, not
+            // asserted" default, not a claim of fact — codex's checkpoint 5
+            // review confirmed this path (unlike the success path) was
+            // already honest: an error surfaces via `degraded: true` +
+            // `status: "failed"` regardless of which lane produced it.
+            "engine_receipt": receipt(false, true),
+            "latency_ms": latency_ms,
         }),
         Err(_) => json!({
             "status": "timeout",
-            "error": "LLM synthesis timed out after 30s",
+            "error": format!("LLM synthesis timed out after {}s", ASK_SYNTHESIS_TIMEOUT.as_secs()),
+            "engine_receipt": receipt(false, true),
+            "latency_ms": latency_ms,
         }),
     }
 }
