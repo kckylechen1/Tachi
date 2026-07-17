@@ -64,6 +64,11 @@ outside the plan. When done, call tachi_task(action="complete") with the dispatc
 /// budget.
 pub(super) const DEFAULT_PLAN_TIMEOUT_SECS: u64 = 180;
 
+/// Generous ceiling for the Stage-1 plan-stage provider call (#1214 BUG#3) —
+/// a markdown plan (Goal/Steps/Files/Validation) can run longer than the
+/// terse JSON verdicts the other provider-rollout consumers produce.
+const PLAN_PROVIDER_MAX_TOKENS: u32 = 2000;
+
 /// Result of evaluating whether V2 should kick in for a given dispatch call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum V2Decision {
@@ -149,9 +154,7 @@ pub(super) async fn run_plan_stage(
     let composed = format!("{}\n\n# Task\n{}", PLAN_SYSTEM_PROMPT, task.trim());
 
     let started = Instant::now();
-    let outcome = server
-        .claude_pool
-        .call(label, &composed)
+    let outcome = call_plan_llm(server, label, &composed, task.trim())
         .await
         .map_err(|e| format!("dispatch v2 stage1 (plan) failed: {e}"))?;
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -165,6 +168,51 @@ pub(super) async fn run_plan_stage(
         plan_md,
         duration_ms,
     })
+}
+
+/// Run the Stage-1 plan-stage LLM call, either via the CLI pool (pre-#1087
+/// default) or — when `TACHI_CLAUDE_POOL_PROVIDER_FIRST` is set — via the
+/// provider executor first, with the CLI pool as a fallback for the rollout
+/// cycle. Either way the run-directory artifact contract
+/// (`prompt.md`/`result.md`/`status.json`) is preserved, since both paths go
+/// through `ClaudePool::call`/`call_via_provider` (#1214 BUG#3: this call
+/// site previously had no flag gate at all — the fifth live pool consumer
+/// the flag-coverage audit missed).
+async fn call_plan_llm(
+    server: &crate::MemoryServer,
+    label: &str,
+    composed_prompt: &str,
+    task: &str,
+) -> Result<tachi_llm::claude_pool::ClaudeCallOutcome, String> {
+    if !tachi_llm::claude_pool::provider_rollout_enabled() {
+        return server.claude_pool.call(label, composed_prompt).await;
+    }
+
+    let llm = server.llm.clone();
+    let task_owned = task.to_string();
+    let provider_result = server
+        .claude_pool
+        .call_via_provider(label, composed_prompt, move || async move {
+            llm.call_reasoning_llm_provider_only(
+                PLAN_SYSTEM_PROMPT,
+                &task_owned,
+                None,
+                0.2,
+                PLAN_PROVIDER_MAX_TOKENS,
+            )
+            .await
+        })
+        .await;
+
+    match provider_result {
+        Ok(outcome) => Ok(outcome),
+        Err(provider_err) => {
+            tracing::warn!(
+                "[dispatch_v2:{label}] provider path failed, falling back to CLI pool: {provider_err}"
+            );
+            server.claude_pool.call(label, composed_prompt).await
+        }
+    }
 }
 
 /// Append a single JSON event line to `<run_dir>/trajectory.jsonl`. Best-effort.
@@ -368,6 +416,58 @@ impl PlanSections {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #1214 BUG#3: plan-stage flag gate ───────────────────────────────
+    //
+    // Mirrors `daily_distill::tests::call_claude_batch_default_flag_off_uses_cli_pool_only`
+    // exactly: before this fix, `run_plan_stage` called `server.claude_pool.call`
+    // directly with no `TACHI_CLAUDE_POOL_PROVIDER_FIRST` check at all — the
+    // fifth live pool consumer the flag-coverage audit missed. This proves the
+    // flag-off (shipped default) behavior is unchanged: exactly the CLI pool,
+    // no provider mention anywhere in the resulting error.
+    #[test]
+    fn call_plan_llm_default_flag_off_uses_cli_pool_only() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let prev_rollout = std::env::var("TACHI_CLAUDE_POOL_PROVIDER_FIRST").ok();
+        std::env::remove_var("TACHI_CLAUDE_POOL_PROVIDER_FIRST");
+        let prev_bin = std::env::var("CLAUDE_BIN").ok();
+        std::env::set_var(
+            "CLAUDE_BIN",
+            "/nonexistent/__tachi_test_planstage_default__/claude",
+        );
+
+        let temp = tempfile::tempdir().expect("temp dispatch v2 plan-flag db");
+        let server = crate::MemoryServer::new(
+            temp.path().join("global.db"),
+            Some(temp.path().join("project.db")),
+        )
+        .expect("server");
+
+        let err = tokio::runtime::Runtime::new()
+            .expect("tokio runtime")
+            .block_on(call_plan_llm(&server, "plan", "composed prompt", "task"))
+            .expect_err("missing/invalid CLAUDE_BIN should error when the flag is off");
+        assert!(
+            err.contains("existing executable"),
+            "expected the CLI-binary-resolution error with the flag off, got: {err}"
+        );
+        assert!(
+            !err.contains("provider"),
+            "flag-off path must never mention the provider path: {err}"
+        );
+
+        match prev_rollout {
+            Some(v) => std::env::set_var("TACHI_CLAUDE_POOL_PROVIDER_FIRST", v),
+            None => std::env::remove_var("TACHI_CLAUDE_POOL_PROVIDER_FIRST"),
+        }
+        match prev_bin {
+            Some(v) => std::env::set_var("CLAUDE_BIN", v),
+            None => std::env::remove_var("CLAUDE_BIN"),
+        }
+    }
 
     #[test]
     fn v2_enabled_default_off() {

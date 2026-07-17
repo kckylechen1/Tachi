@@ -67,6 +67,53 @@ impl super::ClaudePool {
     /// preamble). `label` is a short ASCII slug used in the per-call dir
     /// name; non-ASCII / unsafe chars are replaced with `_`.
     pub async fn call(&self, label: &str, prompt: &str) -> Result<ClaudeCallOutcome, String> {
+        self.run_and_record(
+            label,
+            prompt,
+            |p| async move { self.run_claude_cli(&p).await },
+        )
+        .await
+    }
+
+    /// Same run-directory artifact contract as [`Self::call`]
+    /// (`prompt.md`/`result.md`/`status.json` under
+    /// `<tachi_home>/foundry-runs/<label>-<ts>/`, same bounded-concurrency
+    /// semaphore) but with the Claude CLI subprocess swapped out for a
+    /// caller-supplied provider executor (#1087 rollout). `prompt` is
+    /// recorded verbatim to `prompt.md` exactly as `call()` does — callers
+    /// pass the same combined system+user text they would have sent the CLI
+    /// so the artifact is comparable across the two executors; `executor` is
+    /// what actually produces the completion (a `tachi-llm` chat-lane call).
+    pub async fn call_via_provider<F, Fut>(
+        &self,
+        label: &str,
+        prompt: &str,
+        executor: F,
+    ) -> Result<ClaudeCallOutcome, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<String, String>>,
+    {
+        self.run_and_record(label, prompt, move |_prompt| executor())
+            .await
+    }
+
+    /// Shared run-directory bookkeeping for [`Self::call`] and
+    /// [`Self::call_via_provider`]: acquire a bounded-concurrency permit,
+    /// create `<runs_dir>/<label>-<ts>/`, write `prompt.md`, run `executor`,
+    /// then write `result.md` + `status.json` regardless of outcome. The
+    /// only difference between the two public entry points is what
+    /// `executor` does to turn `prompt` into text.
+    async fn run_and_record<F, Fut>(
+        &self,
+        label: &str,
+        prompt: &str,
+        executor: F,
+    ) -> Result<ClaudeCallOutcome, String>
+    where
+        F: FnOnce(String) -> Fut,
+        Fut: std::future::Future<Output = Result<String, String>>,
+    {
         let permit = self
             .sem
             .clone()
@@ -93,11 +140,11 @@ impl super::ClaudePool {
 
         let started_at = Utc::now().to_rfc3339();
         let started = Instant::now();
-        let result = self.run_claude_cli(prompt).await;
+        let result = executor(prompt.to_string()).await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let finished_at = Utc::now().to_rfc3339();
 
-        // Drop permit before fs writes — file I/O shouldn't hold a CLI slot.
+        // Drop permit before fs writes — file I/O shouldn't hold a call slot.
         drop(permit);
 
         match result {

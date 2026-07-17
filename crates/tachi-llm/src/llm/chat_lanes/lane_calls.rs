@@ -87,6 +87,35 @@ impl super::super::LlmClient {
         .map(|(text, _truncated)| text)
     }
 
+    /// Reasoning-lane HTTP call with **no** Claude-CLI-first behavior — a
+    /// pure provider round-trip. `call_reasoning_llm`/
+    /// `call_reasoning_llm_with_receipt` try a raw `claude` CLI subprocess
+    /// before falling back to this same lane (see `chat_lanes/claude_cli.rs`);
+    /// that is exactly the implicit Claude-CLI dependency #1087 retires, so
+    /// a provider-rollout call site (e.g. the hub security scan's strong-tier
+    /// two-vote check) must go through this method instead of
+    /// `call_reasoning_llm`, or it would silently reintroduce a CLI
+    /// subprocess dependency into a path meant to be CLI-free.
+    pub async fn call_reasoning_llm_provider_only(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<String, String> {
+        self.call_lane_llm(
+            ChatLane::Reasoning,
+            system,
+            user,
+            model,
+            temperature,
+            max_tokens,
+        )
+        .await
+        .map(|(text, _truncated)| text)
+    }
+
     pub async fn call_summary_llm(
         &self,
         system: &str,
