@@ -4199,8 +4199,10 @@ mod tests {
         std::os::unix::fs::symlink(&judged_root, &link).unwrap();
         let mut store = open_store(&base);
 
-        // The retarget lands exactly in the window: the holder probe is the last
-        // thing the run does before it decides to delete.
+        // `probe` is invoked twice per candidate (once to decide eligibility,
+        // once again inside the deleter); this closure retargets on its FIRST
+        // call, which happens during the eligibility check — see the assertions
+        // below for exactly which fence that lands the refusal on.
         let link_for_probe = link.clone();
         let decoy_for_probe = decoy_root.clone();
         let retargeting_probe = move |_path: &Path| {
@@ -4227,24 +4229,35 @@ mod tests {
         assert!(report.reclaimed.is_empty(), "{report:?}");
         assert_eq!(report.candidates.len(), 1, "{report:?}");
         assert_eq!(report.candidates[0].decision, "refused", "{report:?}");
-        // **checkpoint 2 fix (codex-9178d).** The retarget happens INSIDE the
-        // holder probe, i.e. after the canonicalize/dev-ino checks that run
-        // BEFORE the probe already passed against the still-correctly-targeted
-        // link — only the SECOND dev/ino recheck (right before `remove_dir_all`)
-        // catches this. Pre-fix, nothing re-verified identity after the probe, so
-        // `remove_dir_all` would have followed the retargeted link straight into
-        // the decoy.
+        // **Correction (fix-round, 2026-07-17): checkpoint 2's own claim about
+        // this test was wrong.** `probe` is not called once, at the last possible
+        // moment before `remove_dir_all` — it is called TWICE: once as one of
+        // `run_orphan_reap_uncertified`'s "expensive checks" that decide whether a
+        // candidate is even eligible (`candidate.holders = Some(probe(...))`,
+        // BEFORE the `--force` branch is entered at all), and again inside
+        // `delete_resource_bytes` itself. This closure's retarget is unconditional
+        // on invocation, so it fires on the FIRST call — during that eligibility
+        // check, well before `delete_resource_bytes` runs a single fence. By the
+        // time the deleter's own `std::fs::canonicalize` re-resolves the pinned
+        // root, the link is ALREADY retargeted, so it is THAT check — "it now
+        // resolves to X but the verdict was rendered against Y" — that refuses the
+        // delete here, not the `(dev, ino)` recheck checkpoint 2 added (which
+        // exists for the different case where the canonical *spelling* survives
+        // unchanged — see `a_directory_replaced_at_the_same_path_between_verdict_
+        // and_delete_is_refused` for that one). The safety property this test
+        // exists to prove (the decoy survives, nothing is deleted) still holds —
+        // it was the inline claim about *which* fence catches it that was wrong.
         assert!(
             report
                 .warnings
                 .iter()
-                .any(|warning| warning.contains("(dev, ino) identity")),
-            "the refusal names the identity mismatch: {report:?}"
+                .any(|warning| warning.contains("verdict was rendered against")),
+            "the refusal names the retargeted root: {report:?}"
         );
         assert!(
             !report.errors.is_empty(),
-            "an identity that changed a second time (mid-probe) must land in errors, not just a \
-             warning: {report:?}"
+            "an identity that no longer resolves to the judged object must land in errors, not \
+             just a warning: {report:?}"
         );
         assert!(report.incomplete, "{report:?}");
 
@@ -4271,8 +4284,10 @@ mod tests {
         let target = make_target_dir(&root, "swapped-target");
         let mut store = open_store(&root);
 
-        // The swap lands exactly in the window: the holder probe is the last thing
-        // the run does before it decides to delete.
+        // `probe` is invoked twice per candidate (once to decide eligibility,
+        // once again inside the deleter); this closure swaps on its FIRST call,
+        // during the eligibility check — either invocation's identity recheck
+        // would catch it (see the assertion below).
         let target_for_probe = target.clone();
         let swapping_probe = move |_path: &Path| {
             std::fs::remove_dir_all(&target_for_probe).unwrap();
@@ -4307,13 +4322,21 @@ mod tests {
                 .any(|warning| warning.contains("(dev, ino) identity")),
             "the refusal names the (dev, ino) mismatch, not just the pathname: {report:?}"
         );
-        // **checkpoint 2 fix (codex-9178d).** The swap happens INSIDE the holder
-        // probe, i.e. after the first dev/ino check already passed — only the
-        // second recheck (right before `remove_dir_all`) can catch it, so this
-        // refusal must cost the run its clean exit exactly like any other
-        // identity-unresolved unit (checkpoint 3): a fence that fires here means
-        // the run does not know what is at this path anymore, not that a designed
-        // fence worked cleanly.
+        // **checkpoint 2 fix (codex-9178d) — correction, 2026-07-17: this
+        // scenario is actually caught by the FIRST `(dev, ino)` check
+        // (`delete_resource_bytes`'s pre-probe recheck), not the second one added
+        // for checkpoint 2.** `probe` runs twice per candidate — once as one of
+        // `run_orphan_reap_uncertified`'s own eligibility checks, before the
+        // `--force` branch is even entered, and again inside
+        // `delete_resource_bytes`. This closure's swap is unconditional on
+        // invocation, so it fires on that FIRST call, well before the deleter's
+        // own probe or its second recheck ever run. Either check would have
+        // caught it (that is what checkpoint 2 hardened for the case where BOTH
+        // pre-existing checks run before the swap); what matters for #1062 is
+        // that this refusal must cost the run its clean exit exactly like any
+        // other identity-unresolved unit (checkpoint 3): a fence that fires here
+        // means the run does not know what is at this path anymore, not that a
+        // designed fence worked cleanly.
         assert!(
             !report.errors.is_empty(),
             "an identity that changed a second time (mid-probe) must land in errors, not just a \
