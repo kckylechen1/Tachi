@@ -311,14 +311,43 @@ fn all_ten_dispositions_are_reachable_by_at_least_one_fixture_in_this_file() {
 // closed/blocked/dormant disposition by itself. Live-signal-populated
 // end-to-end coverage (a `Duplicate-Of:`/`Supersedes:` target whose live
 // state genuinely resolves) lives in `tests::live_relation_signals`.
+//
+// PR #1191 final-gate note (fix-round, sonnet): the two tests immediately
+// below were originally named
+// `relation_line_state_annotation_cannot_close_superseded_before_1105` and
+// `relation_line_state_annotation_cannot_drive_dormant_before_1105`, and
+// asserted the literal contradiction strings a pre-#1105 STOPGAP emitted
+// ("unverified related issue state annotation" / "advisory only until
+// #1105"). #1105 (this PR) is the real verification mechanism the stopgap
+// was always meant to be replaced by, so those exact strings are gone by
+// design — `build_refinery_packet_with_live_signals` (`mod.rs`) now folds
+// every relation's prose `[state]` against `live_signals.related_states`
+// and feeds `classify()` (`disposition.rs`) the LIVE state only, never the
+// prose one; a target_ref with no live signal (this back-compat wrapper's
+// case) falls back to `Unknown`, and `classify()` is a no-op for `Unknown`.
+// Disagreement between prose and live state is still surfaced, just under
+// new wording: `"prose [state] annotation for {target} ({prose:?}) disagrees
+// with the live-verified state ({live:?})"`. Leader ruling (2026-07-17,
+// PR #1191 final gate): this is a legitimate replacement of the stopgap by
+// the real mechanism it stood in for, not a frozen-assertion weakening —
+// the safety PROPERTY under test (an unverified/prose-only relation-state
+// annotation must never by itself close-superseded or drive dormant) is
+// re-asserted below against the new mechanism, same fixtures, renamed off
+// `_before_1105` to describe what they now check.
 
 /// End-to-end (through `build_refinery_packet`, the exact function the live
 /// `refine_issues` action calls — not the `propose()` bypass helpers above):
-/// a `Supersedes:` relation line's own `[closed_shipped]` annotation is
-/// preserved as evidence but cannot manufacture CLOSE_SUPERSEDED before the
-/// authenticated relation lookup in #1105 exists.
+/// a `Supersedes:` relation line's own `[closed_shipped]` prose annotation,
+/// with no live-verified state behind it (v1 back-compat path — see module
+/// note above), is degraded to `Unknown` before it ever reaches `classify()`
+/// and therefore cannot manufacture CLOSE_SUPERSEDED; the disagreement
+/// between the prose annotation and the (unavailable) live state is still
+/// surfaced as an advisory contradiction referencing the target.
+/// Formerly `relation_line_state_annotation_cannot_close_superseded_before_1105`
+/// (renamed — see module note above for why the old assertion string no
+/// longer exists and what replaced it).
 #[test]
-fn relation_line_state_annotation_cannot_close_superseded_before_1105() {
+fn relation_line_state_annotation_without_live_verification_cannot_close_superseded() {
     let body = "This work is superseded by the landed replacement.\n\n\
                 Supersedes: owner/repo#7001 [closed_shipped]\n"
         .to_string();
@@ -340,15 +369,20 @@ fn relation_line_state_annotation_cannot_close_superseded_before_1105() {
     assert_eq!(proposal.disposition, DispositionV1::Keep);
     assert!(proposal.contradictions.iter().any(|c| {
         c.description
-            .contains("unverified related issue state annotation")
+            .contains("disagrees with the live-verified state")
             && c.description.contains("owner/repo#7001")
     }));
 }
 
-/// The same fail-safe applies to `[closed_unshipped]`: retain the advisory
-/// contradiction, but do not manufacture DORMANT.
+/// The same fail-safe applies to `[closed_unshipped]`: with no live state
+/// behind the prose annotation, the target degrades to `Unknown` and cannot
+/// manufacture DORMANT — only a genuinely live-verified `ClosedUnshipped`
+/// (see `tests::live_relation_signals`) may do that.
+/// Formerly `relation_line_state_annotation_cannot_drive_dormant_before_1105`
+/// (renamed — see module note above for why the old assertion string no
+/// longer exists and what replaced it).
 #[test]
-fn relation_line_state_annotation_cannot_drive_dormant_before_1105() {
+fn relation_line_state_annotation_without_live_verification_cannot_drive_dormant() {
     let body = "This work is superseded but the replacement did not land.\n\n\
                 Supersedes: owner/repo#7002 [closed_unshipped]\n"
         .to_string();
@@ -368,10 +402,11 @@ fn relation_line_state_annotation_cannot_drive_dormant_before_1105() {
             .expect("build_refinery_packet");
     assert_eq!(evidence.relations.len(), 1);
     assert_eq!(proposal.disposition, DispositionV1::Keep);
-    assert!(proposal
-        .contradictions
-        .iter()
-        .any(|c| c.description.contains("advisory only until #1105")));
+    assert!(proposal.contradictions.iter().any(|c| {
+        c.description
+            .contains("disagrees with the live-verified state")
+            && c.description.contains("owner/repo#7002")
+    }));
 }
 
 #[test]
