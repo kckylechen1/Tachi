@@ -725,7 +725,6 @@ export class MemoryMcpClient {
     status: string;
     compacted_text: string;
     estimated_tokens: number;
-    queued_job_ids?: string[];
   }> {
     if (!this.availableTools.has("compact_context")) {
       throw new Error("compact_context tool is unavailable");

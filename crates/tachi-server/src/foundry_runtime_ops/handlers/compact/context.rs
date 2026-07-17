@@ -12,7 +12,10 @@ use serde_json::{json, Value};
 /// nothing was ever written — the forbidden "nominal success with no
 /// persistence" contract. Refuse loudly instead, before any compaction work
 /// runs, and point at the real persistence path.
-const PERSIST_REFUSAL: &str = "compact_context does not persist memories and never has \
+/// Public so the MCP facade (`tools/runtime_context_facade.rs`) can enforce
+/// this refusal before any daemon forwarding is attempted — persist=true must
+/// never reach a possibly-stale daemon, not just the in-process handler below.
+pub(crate) const PERSIST_REFUSAL: &str = "compact_context does not persist memories and never has \
     (the response fields describing capture/queue ids were always empty placeholders). \
     persist=true is refused. Call compact_session_memory to actually persist a compacted \
     window, or omit persist / pass persist=false for a stateless compaction preview.";
