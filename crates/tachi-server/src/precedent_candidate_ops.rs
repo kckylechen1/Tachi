@@ -22,9 +22,19 @@
 //!    `options_considered`, `ruling`, `outcome`, and `overturned_by` are
 //!    copied *verbatim* onto every principle-candidate it produces — a
 //!    losing alternative or an owner self-overturn can never be silently
-//!    dropped or summarized away by the fan-out. Every candidate also
-//!    carries the ruling's *complete* set of source refs (no partitioning,
-//!    no drop-tail), plus an explicit `metadata.coverage = "full"` marker.
+//!    dropped or summarized away by the fan-out. Content fields are never
+//!    truncated. Every candidate carries every source ref that survived
+//!    per-kind immutable-revision validation (`normalize_source_ref`) — a
+//!    ref that FAILED validation (missing the snapshot hash its
+//!    `target_kind` requires) is dropped from `source_refs` but never
+//!    silently: it is recorded in `metadata.source_ref_warnings`, and
+//!    `metadata.coverage` degrades from `"full"` to `"partial"` to reflect
+//!    it (#1183 fix-round finding 6 — an unconditional `"full"` marker
+//!    would have hidden dropped evidence behind a claim of completeness).
+//!    `metadata.authority_complete` degrades the same way: it requires an
+//!    adjudicator, at least one immutably-pinned source ref, AND zero
+//!    dropped refs (finding 5) — a flag #1077's establishment gate must be
+//!    able to trust is *earned*, not defaulted true.
 //! 3. **Fail-safe.** A malformed ruling, a ruling with no `principles_cited`
 //!    (nothing principle-level to emit), or a malformed individual
 //!    `source_ref` is skipped/warned and never fails the enclosing
@@ -39,16 +49,20 @@
 //! - `candidate_group_id` hashes project + `issue_ref` + case + options +
 //!   ruling + *this one* principle + outcome + `overturned_by` — the
 //!   candidate's case/principle identity, independent of *which* evidence
-//!   backs it.
+//!   or *which* engine identity backs it.
 //! - `candidate_short_id` (the row's path segment) additionally folds in the
-//!   adjudicator and every normalized source ref's full identity tuple
-//!   (relation/kind/ref/comment_id/updated_at/body_hash/commit_sha/span).
+//!   adjudicator, every normalized source ref's full identity tuple
+//!   (relation/kind/ref/comment_id/updated_at/body_hash/commit_sha/span),
+//!   and the engine receipt's identity fields (provider/model/version/
+//!   fallback_chain/degraded) — see that function's doc for why the receipt
+//!   is folded in too (#1183 fix-round finding 10).
 //!
-//! An exact replay (byte-identical ruling, same source refs) re-derives the
-//! same `candidate_short_id` and the same rendered `text`, so
-//! `save_memory`'s exact-path+exact-text dedup gate collapses it onto the
-//! existing row — idempotent, per #1076 RED case 3. An edited owner comment
-//! (same `comment_id`, different `updated_at`/`body_hash`) changes the
+//! An exact replay (byte-identical ruling, same source refs, same engine
+//! receipt) re-derives the same `candidate_short_id` and the same rendered
+//! `text`, so `save_memory`'s exact-path+exact-text dedup gate collapses it
+//! onto the existing row — idempotent, per #1076 RED case 3. An edited owner
+//! comment (same `comment_id`, different `updated_at`/`body_hash`) or an
+//! improved engine receipt (e.g. `preview_only` -> `known`) changes the
 //! `candidate_short_id` seed, so it is NOT treated as the same replay: a new
 //! row is appended at a new path, sharing the old row's `candidate_group_id`
 //! (so a later reader can tell the two rows are revisions of the same
@@ -140,14 +154,43 @@ fn normalize_source_ref(raw: &RulingSourceRefParams) -> Result<NormalizedSourceR
                 .to_string(),
         );
     }
+    let body_hash = trimmed_opt(&raw.body_hash);
+    let commit_sha = trimmed_opt(&raw.commit_sha);
+    // #1183 fix-round finding 5: the frozen contract requires resolving
+    // "immutable issue/comment/PR/doc/verification refs, and source
+    // snapshot hashes" *before* decomposition — a source_ref that names a
+    // target but carries no snapshot hash for that kind isn't actually
+    // pinned to an immutable revision, it's a bare pointer that can drift
+    // out from under the ruling. Per `RulingSourceRefParams::body_hash`'s
+    // own doc ("comment body hash, issue body hash, PR snapshot hash, blob
+    // SHA, ... depending on target_kind"), every kind needs a snapshot hash;
+    // `commit` uses `commit_sha` instead of `body_hash` for that hash.
+    // Rejecting here (not just degrading a flag) means only refs that are
+    // ACTUALLY immutably pinned ever reach `authority_complete`'s
+    // `!source_refs.is_empty()` check — see `record_complete_precedent_candidates`.
+    match target_kind.as_str() {
+        "commit" if commit_sha.is_none() => {
+            return Err(
+                "source_ref with target_kind \"commit\" requires `commit_sha` to pin an immutable revision"
+                    .to_string(),
+            );
+        }
+        "comment" | "issue" | "pr" | "canonical_doc" | "verification" if body_hash.is_none() => {
+            return Err(format!(
+                "source_ref with target_kind {target_kind:?} requires `body_hash` (a source snapshot hash) \
+                 to pin an immutable revision"
+            ));
+        }
+        _ => {}
+    }
     Ok(NormalizedSourceRef {
         relation,
         target_kind,
         target_ref,
         comment_id,
         updated_at: trimmed_opt(&raw.updated_at),
-        body_hash: trimmed_opt(&raw.body_hash),
-        commit_sha: trimmed_opt(&raw.commit_sha),
+        body_hash,
+        commit_sha,
         section_or_span: trimmed_opt(&raw.section_or_span),
     })
 }
@@ -188,8 +231,12 @@ fn dedup_principles(principles: &[String]) -> Vec<String> {
 /// fallback/degraded receipt. Unknown/fallback identity is preview-only."
 /// Collapsed to the two states the sentence actually distinguishes: a fully
 /// known, non-fallback, non-degraded identity is `"known"`; everything else
-/// (absent receipt, missing provider/model, a non-empty fallback chain, or
-/// an explicitly degraded run) is `"preview_only"`.
+/// (absent receipt, missing provider/model/**version**, a non-empty fallback
+/// chain, or an explicitly degraded run) is `"preview_only"`. `version` is
+/// one of the three fields the frozen contract names ("provider/model/
+/// version") — #1183 fix-round finding 7: this previously ignored a `None`
+/// `effective_version` and still returned `"known"` whenever provider+model
+/// were present, mislabeling an incomplete engine identity as fully known.
 fn identity_status(receipt: Option<&RulingEngineReceiptParams>) -> &'static str {
     let Some(receipt) = receipt else {
         return "preview_only";
@@ -202,7 +249,16 @@ fn identity_status(receipt: Option<&RulingEngineReceiptParams>) -> &'static str 
         .effective_model
         .as_deref()
         .is_some_and(|s| !s.trim().is_empty());
-    if !has_provider || !has_model || !receipt.fallback_chain.is_empty() || receipt.degraded {
+    let has_version = receipt
+        .effective_version
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty());
+    if !has_provider
+        || !has_model
+        || !has_version
+        || !receipt.fallback_chain.is_empty()
+        || receipt.degraded
+    {
         "preview_only"
     } else {
         "known"
@@ -245,6 +301,18 @@ fn candidate_group_id(
     hash16(&group_seed(project, issue_ref, principle, n))
 }
 
+/// #1183 fix-round finding 10: `candidate_short_id` originally excluded
+/// `engine_receipt` entirely, so a replay with the SAME ruling/source_refs
+/// but an IMPROVED engine receipt (e.g. `preview_only` -> `known`, once the
+/// effective provider/model/version become resolvable) deduped onto the
+/// stale row and the better receipt was silently discarded — a later reader
+/// would see `identity_status="preview_only"` forever even though a fuller
+/// identity had since been captured. Folding the receipt's fields into the
+/// identity seed means an engine-identity change (like a source-ref
+/// revision change) appends a new candidate revision instead of vanishing
+/// into the dedup gate, consistent with this module's "never silently drop"
+/// boundary (module doc boundary 2) — `candidate_group_id` still excludes it
+/// so revisions of the same case/principle/receipt-state remain linkable.
 fn candidate_short_id(
     project: &str,
     issue_ref: Option<&str>,
@@ -252,6 +320,7 @@ fn candidate_short_id(
     n: &NormalizedRuling,
     adjudicator: Option<&str>,
     source_refs: &[NormalizedSourceRef],
+    engine_receipt: Option<&RulingEngineReceiptParams>,
 ) -> String {
     let mut seed = group_seed(project, issue_ref, principle, n);
     seed.push_str(&frame_field(adjudicator.unwrap_or("")));
@@ -265,6 +334,30 @@ fn candidate_short_id(
         seed.push_str(&frame_field(r.body_hash.as_deref().unwrap_or("")));
         seed.push_str(&frame_field(r.commit_sha.as_deref().unwrap_or("")));
         seed.push_str(&frame_field(r.section_or_span.as_deref().unwrap_or("")));
+    }
+    if let Some(receipt) = engine_receipt {
+        seed.push_str(&frame_field(
+            receipt.requested_role.as_deref().unwrap_or(""),
+        ));
+        seed.push_str(&frame_field(
+            receipt.effective_provider.as_deref().unwrap_or(""),
+        ));
+        seed.push_str(&frame_field(
+            receipt.effective_model.as_deref().unwrap_or(""),
+        ));
+        seed.push_str(&frame_field(
+            receipt.effective_version.as_deref().unwrap_or(""),
+        ));
+        // Each fallback entry individually framed (not comma-joined) so two
+        // different chains can never collide onto the same seed bytes —
+        // same discipline as `frame_field`'s own doc comment.
+        seed.push_str(&frame_field(&receipt.fallback_chain.len().to_string()));
+        for f in &receipt.fallback_chain {
+            seed.push_str(&frame_field(f));
+        }
+        seed.push_str(&frame_field(&receipt.degraded.to_string()));
+    } else {
+        seed.push_str(&frame_field(""));
     }
     hash16(&seed)
 }
@@ -281,6 +374,7 @@ fn render_candidate_body(
     principle_count: usize,
     source_refs: &[NormalizedSourceRef],
     adjudicator: Option<&str>,
+    coverage: &str,
 ) -> String {
     let mut lines = vec![format!(
         "Precedent candidate ({principle_index}/{principle_count}) — Principle: {principle}"
@@ -308,7 +402,15 @@ fn render_candidate_body(
             ));
         }
     }
-    lines.push("Coverage: full (no truncation, no dropped source refs)".to_string());
+    if coverage == "full" {
+        lines.push("Coverage: full (no truncation, no dropped source refs)".to_string());
+    } else {
+        lines.push(
+            "Coverage: partial (no truncation, but one or more supplied source refs were \
+             dropped as malformed -- see metadata.source_ref_warnings)"
+                .to_string(),
+        );
+    }
     lines.push("Candidate status: pending".to_string());
     lines.join("\n")
 }
@@ -325,6 +427,7 @@ fn build_candidate_metadata(
     adjudicator: Option<&str>,
     authority_complete: bool,
     id_status: &str,
+    coverage: &str,
     engine_receipt: Option<&RulingEngineReceiptParams>,
     group_id: &str,
     params: &TachiCompleteParams,
@@ -385,10 +488,16 @@ fn build_candidate_metadata(
     if !source_ref_warnings.is_empty() {
         map.insert("source_ref_warnings".into(), json!(source_ref_warnings));
     }
-    // No truncation/drop-tail path: every candidate carries the ruling's
-    // full case/options/ruling text and its complete source_refs set (see
-    // module doc boundary 2), so this is always "full" — never partial.
-    map.insert("coverage".into(), json!("full"));
+    // No truncation, ever: every candidate carries the ruling's full
+    // case/options/ruling text verbatim (see module doc boundary 2). But
+    // "full" vs "partial" coverage is earned, not assumed — #1183 fix-round
+    // finding 6: a supplied source_ref that failed per-kind immutable-
+    // revision validation is evidence that was silently discarded from
+    // `source_refs` before it ever reached this metadata; the caller
+    // resolves that (via `source_ref_warnings.is_empty()`) into `coverage`
+    // before calling in, so this always mirrors reality instead of a
+    // hardcoded claim.
+    map.insert("coverage".into(), json!(coverage));
     map.insert("candidate_group_id".into(), json!(group_id));
     if let Some(did) = params.dispatch_id.as_deref().filter(|s| !s.is_empty()) {
         map.insert("dispatch_id".into(), json!(did));
@@ -499,7 +608,29 @@ pub(crate) async fn record_complete_precedent_candidates(
         // module), but `authority_complete=false` follows them everywhere,
         // and `candidate_status` never becomes anything but "pending"
         // regardless (see module doc boundary 1).
-        let authority_complete = adjudicator.is_some() && !source_refs.is_empty();
+        //
+        // #1183 fix-round finding 5/6: `authority_complete` must also be
+        // earned, not defaulted true, when evidence was DROPPED as
+        // malformed (`source_ref_warnings` non-empty) — a bare issue_ref +
+        // adjudicator with the ref's own snapshot hash missing must not
+        // read as authority-complete just because SOME source_ref survived
+        // validation. Every ref that reaches `source_refs` is now already
+        // per-kind immutably pinned (`normalize_source_ref`), so the
+        // remaining gap this closes is "evidence was supplied but rejected"
+        // — that must degrade the flag, never silently vanish.
+        let authority_complete =
+            adjudicator.is_some() && !source_refs.is_empty() && source_ref_warnings.is_empty();
+        // #1183 fix-round finding 6: "full" coverage is only true when
+        // every supplied source_ref survived validation — a malformed ref
+        // that got dropped is evidence that was silently discarded from the
+        // candidate's authority, and the frozen "no drop-tail" contract
+        // means that droppage must be reflected, not hidden behind an
+        // unconditional "full" marker.
+        let coverage = if source_ref_warnings.is_empty() {
+            "full"
+        } else {
+            "partial"
+        };
         let id_status = identity_status(ruling.engine_receipt.as_ref());
         let principle_count = principles.len();
 
@@ -513,6 +644,7 @@ pub(crate) async fn record_complete_precedent_candidates(
                 &normalized,
                 adjudicator.as_deref(),
                 &source_refs,
+                ruling.engine_receipt.as_ref(),
             );
             let path = format!("/precedent_candidates/{project}/{short_id}");
 
@@ -523,6 +655,7 @@ pub(crate) async fn record_complete_precedent_candidates(
                 principle_count,
                 &source_refs,
                 adjudicator.as_deref(),
+                coverage,
             );
             let summary = summary_line_with_prefix("[precedent-candidate]", &normalized.case, 80);
 
@@ -555,6 +688,7 @@ pub(crate) async fn record_complete_precedent_candidates(
                 adjudicator.as_deref(),
                 authority_complete,
                 id_status,
+                coverage,
                 ruling.engine_receipt.as_ref(),
                 &group_id,
                 params,
@@ -705,9 +839,62 @@ mod unit_tests {
         fallback.fallback_chain = vec!["gpt-fallback".to_string()];
         assert_eq!(identity_status(Some(&fallback)), "preview_only");
 
-        let mut unknown_model = receipt;
+        let mut unknown_model = receipt.clone();
         unknown_model.effective_model = None;
         assert_eq!(identity_status(Some(&unknown_model)), "preview_only");
+
+        // #1183 fix-round finding 7: a receipt with provider+model present
+        // but `effective_version=None` must NOT read as "known" -- the
+        // frozen contract names "provider/model/version" together.
+        let mut unknown_version = receipt;
+        unknown_version.effective_version = None;
+        assert_eq!(
+            identity_status(Some(&unknown_version)),
+            "preview_only",
+            "missing effective_version must not be mislabeled as a known identity"
+        );
+    }
+
+    #[test]
+    fn candidate_short_id_changes_when_engine_receipt_changes() {
+        // #1183 fix-round finding 10: an identical ruling/source_refs replay
+        // with an IMPROVED engine receipt (preview_only -> known) must not
+        // dedupe onto the stale row -- the better receipt would otherwise be
+        // silently discarded.
+        let n = normalize_ruling(&base_ruling()).expect("valid ruling normalizes");
+        let receipt_known = RulingEngineReceiptParams {
+            requested_role: Some("leader".to_string()),
+            effective_provider: Some("anthropic".to_string()),
+            effective_model: Some("claude-sonnet-5".to_string()),
+            effective_version: Some("2026-07".to_string()),
+            fallback_chain: Vec::new(),
+            degraded: false,
+        };
+
+        let id_no_receipt = candidate_short_id("global", None, "a", &n, None, &[], None);
+        let id_with_receipt =
+            candidate_short_id("global", None, "a", &n, None, &[], Some(&receipt_known));
+        assert_ne!(
+            id_no_receipt, id_with_receipt,
+            "a later capture of the same ruling with a newly-resolved engine receipt must not \
+             collapse onto the receipt-less row"
+        );
+
+        let mut receipt_fallback = receipt_known.clone();
+        receipt_fallback.fallback_chain = vec!["gpt-fallback".to_string()];
+        let id_fallback =
+            candidate_short_id("global", None, "a", &n, None, &[], Some(&receipt_fallback));
+        assert_ne!(
+            id_with_receipt, id_fallback,
+            "a changed fallback_chain must derive a different candidate id"
+        );
+
+        let group_a = candidate_group_id("global", None, "a", &n);
+        let group_b = candidate_group_id("global", None, "a", &n);
+        assert_eq!(
+            group_a, group_b,
+            "candidate_group_id is independent of the engine receipt"
+        );
     }
 
     #[test]
@@ -737,8 +924,8 @@ mod unit_tests {
             });
         }
 
-        let id_v1 = candidate_short_id("global", None, "a", &n, None, &refs_v1);
-        let id_v2 = candidate_short_id("global", None, "a", &n, None, &refs_v2);
+        let id_v1 = candidate_short_id("global", None, "a", &n, None, &refs_v1, None);
+        let id_v2 = candidate_short_id("global", None, "a", &n, None, &refs_v2, None);
         assert_ne!(
             id_v1, id_v2,
             "an edited comment revision must not derive the same candidate id"
