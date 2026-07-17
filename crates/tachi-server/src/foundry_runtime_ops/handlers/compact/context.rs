@@ -28,14 +28,18 @@ pub(crate) async fn handle_compact_context(
         return Err(PERSIST_REFUSAL.to_string());
     }
 
-    let combined_text = params
+    // Only message *content* determines "is there anything to compact" —
+    // the formatted `"role: content"` label always contributes non-whitespace
+    // text (e.g. "user:"), so checking a role-prefixed combined string here
+    // was never actually empty for a non-empty `messages` list, no matter
+    // how blank the content was. That let whitespace-only messages fall
+    // through to a real model call instead of the intended short-circuit.
+    let has_content = params
         .messages
         .iter()
-        .map(|message| format!("{}: {}", message.role.trim(), message.content.trim()))
-        .collect::<Vec<_>>()
-        .join("\n");
+        .any(|message| !message.content.trim().is_empty());
 
-    if combined_text.trim().is_empty() {
+    if !has_content {
         return serde_json::to_string(&json!({
             "status": "skipped",
             "reason": "empty_messages",
