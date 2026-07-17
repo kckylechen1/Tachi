@@ -63,6 +63,14 @@ async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
 /// path convention for every `tachi_save` kind (memory/wiki/note alike). The note
 /// writer used to be the one holdout that rejected a leading `/`; it must now accept
 /// it and normalize to the same location a caller would get by dropping the slash.
+///
+/// This asserts literal path identity, not merely "same parent directory": both
+/// calls target the *same* logical note (`scratch/tachi-1199/probe-note.md`), one
+/// spelled with a leading slash and one without. `resolve_note_path` performs no
+/// existence/dedup check before writing (it's a plain `create_dir_all` + `fs::write`),
+/// so a second write to an already-written path is a harmless overwrite here, not a
+/// distinct code path — the test is free to reuse the exact path without exercising
+/// any dedup/versioning semantics.
 #[tokio::test]
 async fn tachi_save_note_leading_slash_normalizes_to_same_path_as_relative() {
     let (server, _temp_home) = make_server_with_temp_home();
@@ -99,9 +107,16 @@ async fn tachi_save_note_leading_slash_normalizes_to_same_path_as_relative() {
         .expect("leading-slash note path should be accepted");
     let with_slash_json: serde_json::Value =
         serde_json::from_str(&with_slash).expect("save JSON");
+    let with_slash_path = with_slash_json["note_path"]
+        .as_str()
+        .expect("note_path")
+        .to_string();
+    let with_slash_file = with_slash_json["note_file"]
+        .as_str()
+        .expect("note_file")
+        .to_string();
     assert_eq!(
-        with_slash_json["note_path"].as_str().expect("note_path"),
-        "scratch/tachi-1199/probe-note.md",
+        with_slash_path, "scratch/tachi-1199/probe-note.md",
         "leading slash should be stripped, not preserved, in the stored note path"
     );
 
@@ -112,7 +127,7 @@ async fn tachi_save_note_leading_slash_normalizes_to_same_path_as_relative() {
             kind: Some("note".to_string()),
             title: None,
             summary: None,
-            path: Some("scratch/tachi-1199/probe-note2.md".to_string()),
+            path: Some("scratch/tachi-1199/probe-note.md".to_string()),
             importance: None,
             category: None,
             keywords: Vec::new(),
@@ -137,20 +152,25 @@ async fn tachi_save_note_leading_slash_normalizes_to_same_path_as_relative() {
         .expect("relative note path should be accepted");
     let without_slash_json: serde_json::Value =
         serde_json::from_str(&without_slash).expect("save JSON");
-    assert_eq!(
-        without_slash_json["note_path"]
-            .as_str()
-            .expect("note_path"),
-        "scratch/tachi-1199/probe-note2.md"
-    );
+    let without_slash_path = without_slash_json["note_path"]
+        .as_str()
+        .expect("note_path")
+        .to_string();
+    let without_slash_file = without_slash_json["note_file"]
+        .as_str()
+        .expect("note_file")
+        .to_string();
 
-    // Both land under the same notes-root-relative directory tree.
-    let with_slash_file = with_slash_json["note_file"].as_str().expect("note_file");
-    assert!(
-        std::path::Path::new(with_slash_file)
-            .parent()
-            .expect("parent dir")
-            .ends_with("scratch/tachi-1199"),
-        "leading-slash note should resolve under notes_root/scratch/tachi-1199, got {with_slash_file}"
+    // The literal proof this test's name promises: leading-slash and relative
+    // spellings of the same logical path resolve to the exact same stored path
+    // and the exact same file on disk — not merely paths that share a parent dir.
+    assert_eq!(
+        with_slash_path, without_slash_path,
+        "leading-slash and relative spellings of the same note path must resolve identically"
     );
+    assert_eq!(
+        with_slash_file, without_slash_file,
+        "leading-slash and relative spellings of the same note path must resolve to the same file on disk"
+    );
+    assert_eq!(without_slash_path, "scratch/tachi-1199/probe-note.md");
 }
