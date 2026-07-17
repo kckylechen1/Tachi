@@ -2080,7 +2080,23 @@ fn run_orphan_reap_uncertified(
                     report.warnings.push(gap.clone());
                 }
             }
-            let refusal = if fresh.covers(&candidate.path) || fresh.covers(&candidate.identity) {
+            // **checkpoint 1 fix (codex-9178d).** An incomplete protected set is not
+            // merely a report-level footnote — it means THIS delete cannot know
+            // whether `candidate.path` is actually clear. #1062 is explicit: "an
+            // unresolved protection source ... refuses to delete anything." Before
+            // this fix, an incomplete `fresh` set still fell through to the
+            // `covers()` check below, and an unprotected-looking candidate would be
+            // reclaimed anyway on the strength of a protected set this run just
+            // admitted it could not fully build.
+            let refusal = if !fresh.is_complete() {
+                Some(format!(
+                    "refused {path}: the protected set could not be fully resolved at delete \
+                     time ({}) — an unresolved protection source means this run does not know \
+                     what it must not touch, so nothing may be deleted while any source stays \
+                     unresolved",
+                    fresh.gaps().join("; ")
+                ))
+            } else if fresh.covers(&candidate.path) || fresh.covers(&candidate.identity) {
                 Some(format!(
                     "refused {path}: it is protected as of the delete (a live build claimed it \
                      after the scan); the run's opening protected set did not cover it"
@@ -2209,15 +2225,23 @@ pub(crate) fn reap_exit_status(report: &ReapReport) -> Result<(), String> {
 #[derive(Debug, Clone)]
 enum ReclaimFailure {
     /// A typed safety refusal: the destructive path correctly declined (blocked by
-    /// a binding, quarantined, protected at delete time, an identity mismatch, a
-    /// holder appeared, lost a reclaim race). Worth a warning line; does not cost
-    /// the run its clean exit — a fence that fired is not an error.
+    /// a binding, quarantined, or protected at delete time). Worth a warning line;
+    /// does not cost the run its clean exit — a fence that fired is not an error.
+    ///
+    /// **NOT this bucket (checkpoint 3/4, codex-9178d):** an identity mismatch
+    /// (`IDENTITY_UNRESOLVED_PREFIX`) or a lost reclaim race discovered AFTER the
+    /// deleter already ran. Neither is a fence firing cleanly — the first means the
+    /// run no longer knows what is at the path it judged, the second means real
+    /// bytes were deleted with no ledger row to show for it. Both are
+    /// [`Self::DeleteFailed`].
     Refused(String),
     /// The delete path was ATTEMPTED and did not cleanly finish — an I/O failure
-    /// out of `remove_dir_all`, a ledger write that could not be made, or ledger
-    /// state so far from what this call just did that it cannot be trusted. This is
-    /// the class BUG 4 exists for: it must cost the run its clean exit every time,
-    /// with no exceptions carved out for `--force`.
+    /// out of `remove_dir_all`, a ledger write that could not be made, ledger state
+    /// so far from what this call just did that it cannot be trusted, an identity
+    /// the deleter could no longer confirm, or a reclaim whose bytes hit disk but
+    /// never made it into the ledger. This is the class BUG 4 exists for: it must
+    /// cost the run its clean exit every time, with no exceptions carved out for
+    /// `--force`.
     DeleteFailed(String),
 }
 
@@ -2228,6 +2252,15 @@ impl ReclaimFailure {
         }
     }
 }
+
+/// Sentinel prefix `delete_resource_bytes` puts on messages meaning "the object's
+/// identity could not be reconfirmed" — as opposed to a designed fence (protected
+/// path, symlink, non-directory, holder appeared) declining on purpose. Matched by
+/// `reclaim_candidate` to route identity-unresolved refusals to
+/// [`ReclaimFailure::DeleteFailed`] instead of [`ReclaimFailure::Refused`]
+/// (checkpoint 3, codex-9178d — #1062: "if the identity moved, the unit is
+/// incomplete, not progressed").
+const IDENTITY_UNRESOLVED_PREFIX: &str = "identity unresolved: ";
 
 /// Book (or revive) the resource and reclaim it through S2a's single reclaim
 /// path. An `Err` is worth a human's eye and always lands as a warning line;
@@ -2318,7 +2351,21 @@ fn reclaim_candidate(
             // that is not `InvalidArg`). Only the former is a refusal that worked as
             // designed; the rest are the delete path failing to finish what it
             // started, and must not be waved through as a mere warning.
+            //
+            // **checkpoint 3 fix (codex-9178d).** Not every `InvalidArg` out of
+            // `delete_resource_bytes` is the same kind of event. #1062's text: "if
+            // the identity moved, the unit is incomplete, not progressed." A
+            // protected path, a symlink, a non-directory, or a holder that appeared
+            // are the destructive path's fences WORKING — a designed refusal. An
+            // identity the deleter can no longer confirm (`IDENTITY_UNRESOLVED_PREFIX`
+            // — a retargeted symlink, a path that stopped resolving, a `(dev, ino)`
+            // that changed) is different: the run does not know what is at this path
+            // anymore, and that is exactly the class BUG 4 exists for, not a clean
+            // refusal.
             match &err {
+                MemoryError::InvalidArg(msg) if msg.starts_with(IDENTITY_UNRESOLVED_PREFIX) => {
+                    ReclaimFailure::DeleteFailed(format!("reclaim of {path} failed: {msg}"))
+                }
                 MemoryError::InvalidArg(msg) => {
                     ReclaimFailure::Refused(format!("reclaim of {path} failed: {msg}"))
                 }
@@ -2362,15 +2409,24 @@ fn reclaim_candidate(
         // under it — a concurrent reclaim, a quarantine, or a re-registration
         // won the race. `freed_bytes` is deliberately NOT folded into this run's
         // `reclaimed_bytes`: memcore did not write it, so counting it here would
-        // claim bytes no ledger row backs (#1029's whole point). It is only a
-        // warning line, same as every other refusal.
+        // claim bytes no ledger row backs (#1029's whole point).
+        //
+        // **checkpoint 4 fix (codex-9178d).** This is NOT a fence that fired —
+        // `remove_dir_all` already ran and real bytes are already gone; the ledger
+        // simply failed to record it. #1062's conservation invariant and #1029's
+        // whole point are that destructive work with an accounting failure must not
+        // read as a clean, working refusal (a warning-only "skipped"). It must cost
+        // the run its clean exit exactly like any other attempted delete that did
+        // not finish cleanly (BUG 4).
         ResourceReclaimOutcome::LostRace {
             observed_state,
             freed_bytes,
             ..
-        } => Err(ReclaimFailure::Refused(format!(
-            "skipped {path}: lost the reclaim race (now observed as {:?}); this run's deleter \
-             freed {freed_bytes} bytes not recorded in the ledger",
+        } => Err(ReclaimFailure::DeleteFailed(format!(
+            "reclaim of {path} failed: lost the reclaim race AFTER the deleter already ran (now \
+             observed as {:?}) — this run's deleter freed {freed_bytes} bytes not recorded in \
+             the ledger (#1029: an off-ledger delete is destructive work with an accounting \
+             failure, not a clean refusal)",
             observed_state
         ))),
         // Not a designed outcome of any reclaim this module drives — the row we
@@ -2445,8 +2501,9 @@ fn delete_resource_bytes(
         Ok(actual) if actual == pinned => {}
         Ok(actual) => {
             return Err(MemoryError::InvalidArg(format!(
-                "refusing to reclaim {}: it now resolves to {} but the verdict was rendered \
-                 against {} — a symlink or mount was retargeted between the two",
+                "identity unresolved: refusing to reclaim {}: it now resolves to {} but the \
+                 verdict was rendered against {} — a symlink or mount was retargeted between the \
+                 two",
                 resource.path,
                 actual.display(),
                 pinned.display()
@@ -2454,8 +2511,8 @@ fn delete_resource_bytes(
         }
         Err(err) => {
             return Err(MemoryError::InvalidArg(format!(
-                "refusing to reclaim {}: its path no longer resolves ({err}), so the identity the \
-                 verdict was rendered against cannot be confirmed",
+                "identity unresolved: refusing to reclaim {}: its path no longer resolves \
+                 ({err}), so the identity the verdict was rendered against cannot be confirmed",
                 resource.path
             )))
         }
@@ -2465,8 +2522,10 @@ fn delete_resource_bytes(
     // rename-and-replace at the same path (`rm -rf` + `mkdir`, or a rename swap)
     // leaves the canonical spelling identical while the directory underneath it is a
     // different one entirely; the check above cannot see that. `(dev, ino)`, captured
-    // at judgement and re-`stat`ed on this line, can: this is the actual `remove_dir_all`
-    // target's identity, checked immediately before the call that deletes it.
+    // at judgement and re-`stat`ed on this line, can. This is the FIRST of two
+    // identity checks — the second, right before `remove_dir_all` itself, is what
+    // closes the window the holder probe and the byte walk still open below
+    // (checkpoint 2, codex-9178d).
     //
     // `pinned_identity` being `None` is also a refusal — `decide_reap` never reaches a
     // `Reclaim` decision without one (BUG 2's fail-closed half), so `None` here means
@@ -2475,9 +2534,10 @@ fn delete_resource_bytes(
     let current_identity = FileIdentity::of(path);
     if pinned_identity.is_none() || current_identity != pinned_identity {
         return Err(MemoryError::InvalidArg(format!(
-            "refusing to reclaim {}: its (dev, ino) identity does not match the one the verdict \
-             was rendered against (captured {pinned_identity:?}, now {current_identity:?}) — the \
-             object at this path was replaced between judgement and delete",
+            "identity unresolved: refusing to reclaim {}: its (dev, ino) identity does not match \
+             the one the verdict was rendered against (captured {pinned_identity:?}, now \
+             {current_identity:?}) — the object at this path was replaced between judgement and \
+             delete",
             resource.path
         )));
     }
@@ -2496,6 +2556,23 @@ fn delete_resource_bytes(
         }
     }
     let bytes = dir_size(path);
+    // **checkpoint 2 fix (codex-9178d): re-checked IMMEDIATELY before unlink, not just
+    // before the probe.** The dev/ino check above proves the object was still the
+    // pinned one before the holder probe ran — it says nothing about what is at `path`
+    // after that probe (a real recursive `lsof +D`) and the recursive `dir_size` walk
+    // just above, both of which take real wall-clock time and are exactly the window a
+    // rename-swap needs. #1062's own text is "re-checked immediately before unlink";
+    // one check before two more filesystem round-trips does not satisfy that. Re-stat
+    // one more time, on the last line before the call that actually deletes.
+    let identity_at_unlink = FileIdentity::of(path);
+    if identity_at_unlink != pinned_identity {
+        return Err(MemoryError::InvalidArg(format!(
+            "identity unresolved: refusing to reclaim {}: its (dev, ino) identity changed again \
+             between the holder probe and the delete (captured {pinned_identity:?}, now \
+             {identity_at_unlink:?}) — the object at this path was replaced a second time",
+            resource.path
+        )));
+    }
     std::fs::remove_dir_all(path).map_err(MemoryError::Io)?;
     Ok(clamp_bytes(bytes))
 }
@@ -4150,13 +4227,26 @@ mod tests {
         assert!(report.reclaimed.is_empty(), "{report:?}");
         assert_eq!(report.candidates.len(), 1, "{report:?}");
         assert_eq!(report.candidates[0].decision, "refused", "{report:?}");
+        // **checkpoint 2 fix (codex-9178d).** The retarget happens INSIDE the
+        // holder probe, i.e. after the canonicalize/dev-ino checks that run
+        // BEFORE the probe already passed against the still-correctly-targeted
+        // link — only the SECOND dev/ino recheck (right before `remove_dir_all`)
+        // catches this. Pre-fix, nothing re-verified identity after the probe, so
+        // `remove_dir_all` would have followed the retargeted link straight into
+        // the decoy.
         assert!(
             report
                 .warnings
                 .iter()
-                .any(|warning| warning.contains("verdict was rendered against")),
+                .any(|warning| warning.contains("(dev, ino) identity")),
             "the refusal names the identity mismatch: {report:?}"
         );
+        assert!(
+            !report.errors.is_empty(),
+            "an identity that changed a second time (mid-probe) must land in errors, not just a \
+             warning: {report:?}"
+        );
+        assert!(report.incomplete, "{report:?}");
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -4214,9 +4304,22 @@ mod tests {
             report
                 .warnings
                 .iter()
-                .any(|warning| warning.contains("(dev, ino) identity does not match")),
+                .any(|warning| warning.contains("(dev, ino) identity")),
             "the refusal names the (dev, ino) mismatch, not just the pathname: {report:?}"
         );
+        // **checkpoint 2 fix (codex-9178d).** The swap happens INSIDE the holder
+        // probe, i.e. after the first dev/ino check already passed — only the
+        // second recheck (right before `remove_dir_all`) can catch it, so this
+        // refusal must cost the run its clean exit exactly like any other
+        // identity-unresolved unit (checkpoint 3): a fence that fires here means
+        // the run does not know what is at this path anymore, not that a designed
+        // fence worked cleanly.
+        assert!(
+            !report.errors.is_empty(),
+            "an identity that changed a second time (mid-probe) must land in errors, not just a \
+             warning: {report:?}"
+        );
+        assert!(report.incomplete, "{report:?}");
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4748,6 +4851,42 @@ mod tests {
         assert_eq!(gapped.scan.roots_missing, 0, "{:?}", gapped.scan);
         assert_eq!(gapped.scan.unreadable, 0, "{:?}", gapped.scan);
         assert!(gapped.scan.balances(), "{:?}", gapped.scan);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **checkpoint 1 fix, standing coverage (codex-9178d).** The test above
+    /// (`an_incomplete_protection_set_never_exits_clean`) runs `force: false` and
+    /// only proves the report-level flags — it never reaches the delete path at
+    /// all, so it cannot discriminate this bug. #1062's own text: an unresolved
+    /// protection source "refuses to delete anything," not merely a non-zero exit
+    /// after the fact. Discriminating: before the fix, `fresh.is_complete()` being
+    /// false at delete time still fell through to the `covers()` check, and a
+    /// candidate that the (incomplete) set did not happen to name as covered was
+    /// reclaimed anyway.
+    #[test]
+    fn an_incomplete_protection_set_at_delete_time_deletes_nothing() {
+        let root = unique_temp_dir("tachi-reaper-protection-gap-delete");
+        let dead = make_target_dir(&root, "dead-target");
+        let mut store = open_store(&root);
+
+        let report = run_orphan_reap_uncertified(
+            store.connection_mut(),
+            &opts(&root, true),
+            &resolved_sources().without_home(),
+            aged_now(30),
+            &*unheld_probe(),
+        );
+
+        assert!(
+            dead.join("debug/artifact.rlib").exists(),
+            "an unresolved protection source at delete time must refuse to delete, not just \
+             warn about it afterward: {report:?}"
+        );
+        assert!(report.reclaimed.is_empty(), "{report:?}");
+        assert!(!report.protection_complete, "{report:?}");
+        let status = reap_exit_status(&report);
+        assert!(status.is_err(), "must not exit clean: {status:?}");
 
         let _ = std::fs::remove_dir_all(&root);
     }
