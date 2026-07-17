@@ -105,38 +105,68 @@ pub fn probe_holders(path: &Path) -> HolderEvidence {
         Ok(out) => out,
         Err(err) => return HolderEvidence::Unknown(format!("lsof unavailable: {err}")),
     };
+    interpret_lsof_output(
+        out.status.code(),
+        &String::from_utf8_lossy(&out.stdout),
+        &String::from_utf8_lossy(&out.stderr),
+    )
+}
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-
-    // lsof's documented idiom: exit code 1 with no data rows means "no
-    // open files found" (clear). Any other non-zero exit is inconclusive,
-    // never clear — fail closed on holder evidence.
-    if !out.status.success() {
-        if out.status.code() == Some(1) && stdout.trim().is_empty() {
-            return HolderEvidence::Clear;
-        }
-        return HolderEvidence::Unknown(if stderr.trim().is_empty() {
-            format!("lsof exited with {}", out.status)
-        } else {
-            stderr.trim().to_string()
-        });
-    }
-
-    let mut pids: Vec<i32> = stdout
+/// Pure interpreter for an `lsof +D` run — the part worth testing in
+/// isolation, without shelling out. Deliberately mirrors
+/// `exec_env_reaper::interpret_lsof`'s fail-closed idiom exactly (tachi#1212
+/// fix-round, codex checkpoint 4/5): that function is the sealed, already
+/// reviewed precedent for the SAME kind of evidence (an `lsof +D` walk) on
+/// the destructive (#1062) side; this module borrows its interpretation,
+/// never its destructive consequence — this module only ever detects.
+///
+/// * any data row on stdout that yields a parseable pid ⇒ [`HolderEvidence::Held`]
+/// * data rows present but NONE yield a parseable pid ⇒ [`HolderEvidence::Unknown`]:
+///   the walk produced output we could not attribute, which is not proof of
+///   absence (earned-not-defaulted: `Clear` must never be the fallback for
+///   evidence we failed to parse).
+/// * no data rows, but anything on stderr ⇒ [`HolderEvidence::Unknown`]: lsof
+///   warns (e.g. "can't stat()", "Permission denied") when it could not
+///   descend part of the tree, and a partial walk that "found nothing" is
+///   not proof of nothing.
+/// * no data rows, no stderr noise, exit 0/1 ⇒ [`HolderEvidence::Clear`] (1 is
+///   lsof's documented "no matching files" status)
+/// * any other exit / signal ⇒ [`HolderEvidence::Unknown`]
+fn interpret_lsof_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HolderEvidence {
+    let data_lines: Vec<&str> = stdout
         .lines()
         .skip(1) // header row: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
-        .filter_map(|line| line.split_whitespace().nth(1))
-        .filter_map(|pid_str| pid_str.parse::<i32>().ok())
+        .filter(|line| !line.trim().is_empty())
         .collect();
-    pids.sort_unstable();
-    pids.dedup();
 
-    if pids.is_empty() {
-        return HolderEvidence::Clear;
+    if !data_lines.is_empty() {
+        let mut pids: Vec<i32> = data_lines
+            .iter()
+            .filter_map(|line| line.split_whitespace().nth(1))
+            .filter_map(|pid_str| pid_str.parse::<i32>().ok())
+            .collect();
+        pids.sort_unstable();
+        pids.dedup();
+        if pids.is_empty() {
+            return HolderEvidence::Unknown(format!(
+                "lsof produced {} data row(s) but none yielded a parseable pid",
+                data_lines.len()
+            ));
+        }
+        return HolderEvidence::Held(pids.into_iter().map(attribute_pid).collect());
     }
 
-    HolderEvidence::Held(pids.into_iter().map(attribute_pid).collect())
+    let noise = stderr.trim();
+    if !noise.is_empty() {
+        let first = noise.lines().next().unwrap_or(noise);
+        return HolderEvidence::Unknown(format!("lsof walk incomplete: {first}"));
+    }
+
+    match exit_code {
+        Some(0) | Some(1) => HolderEvidence::Clear,
+        Some(code) => HolderEvidence::Unknown(format!("lsof exited with status {code}")),
+        None => HolderEvidence::Unknown("lsof terminated by a signal".to_string()),
+    }
 }
 
 fn attribute_pid(pid: i32) -> HolderProcess {
@@ -255,5 +285,100 @@ mod tests {
             HolderEvidence::Unknown("boom".to_string()),
             HolderEvidence::Clear
         );
+    }
+
+    // --- interpret_lsof_output: tachi#1212 fix-round, codex checkpoint 4/5 ---
+    // RED on the pre-fix code, which special-cased only
+    // `exit_code == Some(1) && stdout.is_empty()` as Clear and never looked
+    // at stderr at all on the success path.
+
+    #[test]
+    fn stderr_noise_with_no_data_rows_is_unknown_not_clear() {
+        // Exit code 1 (lsof's own "nothing found" convention) with a
+        // permission-denied warning on stderr must NOT collapse to Clear —
+        // a partial walk that "found nothing" proves nothing.
+        let evidence = interpret_lsof_output(
+            Some(1),
+            "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n",
+            "lsof: WARNING: can't stat() /some/mount\n      Output information may be incomplete.\n",
+        );
+        assert!(
+            matches!(evidence, HolderEvidence::Unknown(_)),
+            "partial/diagnostic lsof output must be Unknown, got {evidence:?}"
+        );
+    }
+
+    #[test]
+    fn stderr_noise_on_a_success_exit_is_also_unknown() {
+        // Same bug, other exit code: the pre-fix code never inspected
+        // stderr at all when `out.status.success()` was true.
+        let evidence = interpret_lsof_output(
+            Some(0),
+            "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n",
+            "lsof: WARNING: can't stat() /some/mount\n",
+        );
+        assert!(
+            matches!(evidence, HolderEvidence::Unknown(_)),
+            "stderr noise on a success exit must still be Unknown, got {evidence:?}"
+        );
+    }
+
+    #[test]
+    fn unparsable_data_rows_are_unknown_not_clear() {
+        // Data rows are present (the walk found something), but the pid
+        // column doesn't parse for any of them — this must never be
+        // silently treated as "no holders" (earned-not-defaulted).
+        let evidence = interpret_lsof_output(
+            Some(0),
+            "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\nweird ??? garbled row here\n",
+            "",
+        );
+        assert!(
+            matches!(evidence, HolderEvidence::Unknown(_)),
+            "data rows with no parseable pid must be Unknown, not Clear: {evidence:?}"
+        );
+    }
+
+    #[test]
+    fn clean_empty_run_is_clear() {
+        let evidence = interpret_lsof_output(
+            Some(1),
+            "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n",
+            "",
+        );
+        assert_eq!(evidence, HolderEvidence::Clear);
+    }
+
+    #[test]
+    fn odd_exit_or_signal_is_unknown() {
+        assert!(matches!(
+            interpret_lsof_output(
+                Some(2),
+                "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n",
+                ""
+            ),
+            HolderEvidence::Unknown(_)
+        ));
+        assert!(matches!(
+            interpret_lsof_output(
+                None,
+                "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n",
+                ""
+            ),
+            HolderEvidence::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn data_rows_with_a_valid_pid_are_held_even_with_some_unparsable_siblings() {
+        let evidence = interpret_lsof_output(
+            Some(0),
+            "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\ncargo 4242 kc cwd DIR 1,4 320 12345 /tmp/x\ngarbled ??? row\n",
+            "",
+        );
+        let HolderEvidence::Held(procs) = evidence else {
+            panic!("a data row with a valid pid must be Held even alongside a garbled sibling row");
+        };
+        assert!(procs.iter().any(|p| p.pid == 4242));
     }
 }
