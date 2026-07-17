@@ -625,6 +625,35 @@ pub enum CardAction {
     },
 }
 
+/// `tachi cards` (plural) — dispatch-ledger LANE card ingest (tachi#1202
+/// Phase-1 / tachi#992). Deliberately a separate enum from `CardAction`
+/// above: that one projects Tachikoma dispatch-profile cards, this one
+/// mirrors `~/.agents/dispatch-ledger/cards/*.md` (leader-authored
+/// model/vendor playbooks) into GLOBAL-db `/cards/<seat>` rows.
+#[derive(Subcommand, Debug, Clone)]
+pub enum CardsAction {
+    /// Read every `*.md` lane card under `--dir` (default:
+    /// `~/.agents/dispatch-ledger/cards`) and create/update/no-op/archive its
+    /// `/cards/<seat>` mirror row accordingly. Writes go through the same
+    /// daemon-forward-else-in-process channel as `tachi remember`. Never
+    /// deletes: a mirror row whose source file disappeared is archived, not
+    /// removed.
+    Sync {
+        /// Override the source directory of `*.md` lane cards.
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
+        /// Emit machine-readable JSON instead of the human summary table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List current `/cards/<seat>` mirror rows (read-only; no filesystem access).
+    List {
+        /// Emit machine-readable JSON instead of the human table.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum PokeAction {
     /// Run a local Poke probe suite.

@@ -1,4 +1,5 @@
 mod cards;
+mod cards_ledger;
 mod hub;
 mod tool_dispatch;
 
@@ -147,6 +148,9 @@ pub(super) async fn run_cli_command(
         }
         Commands::Card { action } => {
             cards::run_card_command(action, db_path, project_db_path, app_home).await
+        }
+        Commands::Cards { action } => {
+            cards_ledger::run_cards_command(action, db_path, app_home, schema_migration).await
         }
         Commands::Hub { action } => hub::run_hub_command(action, app_home).await,
         Commands::Mcp { action } => hub::run_mcp_command(action, app_home).await,
