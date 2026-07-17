@@ -912,6 +912,85 @@ mod tests {
         );
     }
 
+    fn backfill_fts_cli(global_db: std::path::PathBuf, allow_schema_migration: bool) -> Cli {
+        Cli {
+            daemon: false,
+            port: 6919,
+            global_db: Some(global_db),
+            project_db: None,
+            no_project_db: true,
+            allow_schema_migration,
+            profile: None,
+            gc_enabled: None,
+            gc_initial_delay_secs: None,
+            gc_interval_secs: None,
+            command: Some(Commands::BackfillFts {
+                db: None,
+                full: false,
+                dry_run: false,
+            }),
+        }
+    }
+
+    /// Codex review (2026-07-17, checkpoint 3): the discrimination tests in
+    /// `bootstrap::backfill::tests` call the private `run_backfill_*`
+    /// functions directly with a hand-constructed `MigrationAuthority`,
+    /// bypassing the actual CLI flag resolution (`initialize_startup_context`)
+    /// and dispatch (`run_if_backfill_command`) #1181's contract is about.
+    /// This test closes that gap for `backfill-fts` by going through the
+    /// full `tokio_main` entry point, mirroring
+    /// `remember_cli_requires_flag_to_migrate_stamped_older_db_in_process`
+    /// immediately above.
+    #[test]
+    fn backfill_fts_cli_requires_flag_to_migrate_stamped_older_db_in_process() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("cli-backfill-fts-schema-");
+        let app_home = fixture.path().join("home");
+        let global_db = app_home.join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global DB parent"))
+            .expect("create global DB parent");
+        let _tachi_home = crate::test_support::EnvRestore::set_path("TACHI_HOME", &app_home);
+        let _sigil_home = crate::test_support::EnvRestore::remove("SIGIL_HOME");
+        let _app_home = crate::test_support::EnvRestore::remove("TACHI_APP_HOME");
+
+        let server = MemoryServer::new(global_db.clone(), None).expect("seed current DB");
+        drop(server);
+        let conn = memcore::db::open_raw(&global_db).expect("open seeded DB");
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {}",
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1
+        ))
+        .expect("stamp older schema version");
+        drop(conn);
+
+        let err = tokio_main(backfill_fts_cli(global_db.clone(), false))
+            .expect_err("backfill-fts without the flag must preserve OpenExisting + Deny");
+        assert!(
+            err.to_string().contains("refusing to migrate db schema"),
+            "unexpected deny error: {err}"
+        );
+
+        let conn = memcore::db::open_raw(&global_db).expect("reopen denied DB");
+        assert_eq!(
+            memcore::db::migrations::read_schema_version(&conn).expect("read denied version"),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
+            "deny must not mutate the old schema stamp"
+        );
+        drop(conn);
+
+        tokio_main(backfill_fts_cli(global_db.clone(), true))
+            .expect("backfill-fts with the flag must migrate the isolated DB, resolved through the real CLI flag path");
+
+        let conn = memcore::db::open_raw(&global_db).expect("reopen migrated DB");
+        assert_eq!(
+            memcore::db::migrations::read_schema_version(&conn).expect("read migrated version"),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION,
+            "allow must re-stamp the DB at the current schema version"
+        );
+    }
+
     #[test]
     fn primary_log_path_lives_under_app_home() {
         let app_home = std::path::Path::new("/tmp/tachi-app-home");
