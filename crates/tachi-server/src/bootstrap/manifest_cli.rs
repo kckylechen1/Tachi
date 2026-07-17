@@ -63,6 +63,7 @@ pub(super) async fn run_doctor_command(
     global_db_path: &Path,
     project_db_path: Option<&Path>,
     git_root: Option<&PathBuf>,
+    schema_migration: &memcore::MigrationAuthority,
 ) -> Result<(), Box<dyn Error>> {
     let roots: Vec<PathBuf> = if !roots_override.is_empty() {
         roots_override
@@ -106,7 +107,15 @@ pub(super) async fn run_doctor_command(
     // marker so the next `tachi status` sees a fresh (or failure-detailed) marker
     // instead of a bare stale warning.
     let daily_remediation = if run_daily {
-        Some(run_daily_pipeline_remediation(app_home, global_db_path, project_db_path).await)
+        Some(
+            run_daily_pipeline_remediation(
+                app_home,
+                global_db_path,
+                project_db_path,
+                schema_migration,
+            )
+            .await,
+        )
     } else {
         None
     };
@@ -296,6 +305,92 @@ mod tests {
             "app home should not be duplicated: {roots:?}"
         );
     }
+
+    // --- #1181 checkpoint 7 (codex review, 2026-07-17, MERGE-BLOCKING) +
+    // leader adjudication "THREAD IT": `doctor --run-daily`'s distill step
+    // opened its DBs via the fail-closed `MemoryServer::new` regardless of
+    // the CLI's resolved `--allow-schema-migration` authority, silently
+    // refusing to migrate a stamped-older DB even when the operator
+    // explicitly authorized it. This mirrors the
+    // `backfill_*_requires_flag_to_migrate_stamped_older_db_in_process`
+    // pattern (backfill.rs) at the `run_daily_pipeline_remediation` entry
+    // point that `run_doctor_command` calls under `--run-daily`.
+
+    fn seed_and_stamp_older_schema_version(db_path: &std::path::Path) {
+        memcore::MemoryStore::open(db_path.to_str().expect("utf8 db path"))
+            .expect("seed current-schema db");
+        let conn = rusqlite::Connection::open(db_path).expect("reopen to roll back stamp");
+        conn.execute_batch(&format!(
+            "PRAGMA user_version = {}",
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1
+        ))
+        .expect("stamp older schema version");
+    }
+
+    fn read_user_version(db_path: &std::path::Path) -> u32 {
+        let conn = rusqlite::Connection::open(db_path).expect("open for version read");
+        memcore::db::migrations::read_schema_version(&conn).expect("read schema version")
+    }
+
+    // Plain `#[test]` + `block_on` (not `#[tokio::test]`), matching the
+    // `global_test_lock` convention used everywhere else in this crate: the
+    // guard protects process-wide DB-path state against a parallel test
+    // racing the same schema-migration setup, so it must stay held for the
+    // entire two-call sequence including both internal awaits -- `block_on`
+    // runs that async body to completion synchronously on this thread, so
+    // there is no `.await` expression in scope for clippy's
+    // `await_holding_lock` lint to flag, while the guard's actual coverage
+    // is unchanged.
+    #[test]
+    fn doctor_run_daily_requires_flag_to_migrate_stamped_older_global_db() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let dir = tempfile::tempdir().expect("tmp");
+        let app_home = dir.path().join("app-home");
+        std::fs::create_dir_all(&app_home).expect("create app home");
+        let global_db = dir.path().join("global.db");
+        let project_db = dir.path().join("project.db");
+        seed_and_stamp_older_schema_version(&global_db);
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+        let deny_summary = rt.block_on(run_daily_pipeline_remediation(
+            &app_home,
+            &global_db,
+            Some(project_db.as_path()),
+            &memcore::MigrationAuthority::Deny,
+        ));
+        assert!(
+            deny_summary.contains("refusing to migrate db schema"),
+            "doctor --run-daily without --allow-schema-migration must surface the \
+             typed refusal, not silently skip the distill step: {deny_summary}"
+        );
+        assert_eq!(
+            read_user_version(&global_db),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION - 1,
+            "deny must not mutate the old schema stamp"
+        );
+
+        let allow_summary = rt.block_on(run_daily_pipeline_remediation(
+            &app_home,
+            &global_db,
+            Some(project_db.as_path()),
+            &memcore::MigrationAuthority::Allow {
+                approved_by: "test:1181-doctor-run-daily".to_string(),
+            },
+        ));
+        assert!(
+            !allow_summary.contains("refusing to migrate db schema"),
+            "doctor --run-daily WITH --allow-schema-migration must not refuse the \
+             authorized migration: {allow_summary}"
+        );
+        assert_eq!(
+            read_user_version(&global_db),
+            memcore::db::migrations::EXPECTED_SCHEMA_VERSION,
+            "allow must re-stamp the global DB at the current schema version"
+        );
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -342,6 +437,7 @@ async fn run_daily_pipeline_remediation(
     app_home: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
+    schema_migration: &memcore::MigrationAuthority,
 ) -> String {
     // Step 1: refresh provider probe cache.
     let probe_result =
@@ -362,9 +458,17 @@ async fn run_daily_pipeline_remediation(
     let distill_summary = match project_db_path {
         Some(_) => {
             let marker_path = app_home.join("foundry-runs").join(".last_distill_run");
-            match crate::MemoryServer::new(
+            // Codex review (2026-07-17, checkpoint 7, MERGE-BLOCKING) + leader
+            // adjudication: `doctor --allow-schema-migration --fix --run-daily`
+            // must thread the resolved authority into this in-process open,
+            // same as every other CLI in-process DB open (#1181's frozen
+            // contract) — `MemoryServer::new` hardcodes Deny and would
+            // silently refuse the distill step on a stamped-older DB even
+            // when the operator explicitly authorized migration.
+            match crate::MemoryServer::new_with_migration_authority(
                 global_db_path.to_path_buf(),
                 project_db_path.map(|p| p.to_path_buf()),
+                schema_migration.clone(),
             ) {
                 Ok(server) => {
                     match crate::foundry_runtime_ops::run_daily_batch_distill(&server).await {

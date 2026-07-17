@@ -107,6 +107,7 @@ pub(super) async fn run_pre_serve_command(
                 global_db_path,
                 project_db_path.map(PathBuf::as_path),
                 git_root,
+                schema_migration,
             )
             .await?;
             Ok(true)
