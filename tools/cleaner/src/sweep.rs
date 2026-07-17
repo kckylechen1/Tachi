@@ -252,6 +252,47 @@ fn execute_sweep(report: &mut SweepReport) {
             ));
             continue;
         }
+
+        // Fail-closed integrity boundary (tachi#1212 fix-round, codex
+        // checkpoint 4/5), same discipline as the direct wt-remove path:
+        // record the scrap BEFORE the destructive removal and abort this
+        // candidate (never remove) if we can't. Also canonicalize the path
+        // before recording it — sweep's candidate.path is the raw spelling
+        // collected while walking the scan roots (e.g. `/tmp/tachi-123`),
+        // while wt-open's re-entry lookup canonicalizes before consulting
+        // the ledger (`wt_open::canonicalize_prefix`; on macOS `/tmp` ->
+        // `/private/tmp`). Recording the raw spelling here would silently
+        // defeat the re-entry gate for anything reached through a
+        // symlinked root.
+        let Some(branch) = &candidate.branch else {
+            report.warnings.push(format!(
+                "skipped {} (marker had no branch field; the scrap ledger could not be written \
+                 ahead of a destructive removal, tachi#1118 fail-closed integrity boundary)",
+                candidate.path
+            ));
+            continue;
+        };
+        let canonical_path = match std::fs::canonicalize(&candidate.path) {
+            Ok(p) => p,
+            Err(err) => {
+                report.warnings.push(format!(
+                    "skipped {} (could not canonicalize path before scrap-ledger recording: \
+                     {err}; fail-closed rather than remove a tree the re-entry gate cannot \
+                     remember, tachi#1118)",
+                    candidate.path
+                ));
+                continue;
+            }
+        };
+        if let Err(err) = scrap_ledger::record_scrap(&canonical_path, branch) {
+            report.warnings.push(format!(
+                "skipped {} (scrap ledger write failed: {err}; fail-closed rather than remove a \
+                 tree the re-entry gate cannot remember, tachi#1118)",
+                candidate.path
+            ));
+            continue;
+        }
+
         match Command::new("git")
             .args([
                 "-C",
@@ -265,30 +306,32 @@ fn execute_sweep(report: &mut SweepReport) {
         {
             Ok(out) if out.status.success() => {
                 report.removed.push(candidate.path.clone());
-                if let Some(branch) = &candidate.branch {
-                    if let Err(err) = scrap_ledger::record_scrap(Path::new(&candidate.path), branch)
-                    {
-                        report.warnings.push(format!(
-                            "scrap ledger write failed for {}: {err}",
-                            candidate.path
-                        ));
-                    }
-                } else {
-                    report.warnings.push(format!(
-                        "scrap ledger not recorded for {} (marker had no branch field)",
-                        candidate.path
-                    ));
-                }
             }
-            Ok(out) => report.errors.push(format!(
-                "git worktree remove failed for {}: {}",
-                candidate.path,
-                String::from_utf8_lossy(&out.stderr).trim()
-            )),
-            Err(err) => report.errors.push(format!(
-                "failed to run git worktree remove for {}: {err}",
-                candidate.path
-            )),
+            Ok(out) => {
+                report.errors.push(format!(
+                    "git worktree remove failed for {}: {}",
+                    candidate.path,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ));
+                report.warnings.push(format!(
+                    "the scrap ledger was already recorded for {} before this failed removal; \
+                     it is now flagged as scrapped even though the tree is still present and \
+                     untouched",
+                    candidate.path
+                ));
+            }
+            Err(err) => {
+                report.errors.push(format!(
+                    "failed to run git worktree remove for {}: {err}",
+                    candidate.path
+                ));
+                report.warnings.push(format!(
+                    "the scrap ledger was already recorded for {} before this failed removal; \
+                     it is now flagged as scrapped even though the tree is still present and \
+                     untouched",
+                    candidate.path
+                ));
+            }
         }
     }
     if report.errors.is_empty() {

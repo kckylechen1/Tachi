@@ -201,6 +201,29 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
         return report;
     };
 
+    // Fail-closed integrity boundary (tachi#1212 fix-round, codex checkpoint
+    // 4): record the scrap BEFORE the destructive `git worktree remove`,
+    // and abort the removal entirely if we can't. A removal that "succeeds"
+    // but leaves the re-entry gate with no memory of it is exactly the
+    // fail-open the review flagged — recording first means a write failure
+    // here has nothing to undo, because the removal has not happened yet.
+    let Some(branch) = report.branch.clone() else {
+        report.errors.push(
+            "refusing to remove: could not resolve the worktree's branch before removal, so \
+             the scrap ledger could not be written ahead of a destructive removal (tachi#1118 \
+             fail-closed integrity boundary)"
+                .to_string(),
+        );
+        return report;
+    };
+    if let Err(err) = scrap_ledger::record_scrap(Path::new(&path), &branch) {
+        report.errors.push(format!(
+            "refusing to remove: scrap ledger write failed ({err}); fail-closed rather than \
+             remove a tree the re-entry gate cannot remember (tachi#1118)"
+        ));
+        return report;
+    }
+
     match Command::new("git")
         .args(["-C", &repo_root, "worktree", "remove", "--force", &path])
         .output()
@@ -217,35 +240,37 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
                     .warnings
                     .push(format!("registry cleanup failed: {err}")),
             }
-            // Scrap ledger (tachi#1118 freeze boundary 3): record path+branch
-            // so `wt-open` can refuse a future same-path re-entry. Best-effort
-            // — a ledger write failure never undoes a removal that already
-            // happened, it only weakens the re-entry gate's memory.
-            if let Some(branch) = report.branch.clone() {
-                if let Err(err) = scrap_ledger::record_scrap(Path::new(&path), &branch) {
-                    report
-                        .warnings
-                        .push(format!("scrap ledger write failed: {err}"));
-                }
-            } else {
-                report.warnings.push(
-                    "scrap ledger not recorded: could not resolve the worktree's branch before removal"
-                        .to_string(),
-                );
-            }
             if let Err(err) = append_log(&report) {
                 report
                     .warnings
                     .push(format!("cleanup log write failed: {err}"));
             }
         }
-        Ok(out) => report.errors.push(format!(
-            "git worktree remove failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
-        Err(err) => report
-            .errors
-            .push(format!("failed to run git worktree remove: {err}")),
+        Ok(out) => {
+            report.errors.push(format!(
+                "git worktree remove failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+            report.warnings.push(
+                "the scrap ledger was already recorded before this failed removal; the path \
+                 and branch are now flagged as scrapped even though the tree is still present \
+                 and untouched — reopening either exact one will be (over-cautiously) refused \
+                 until a new branch/path is used"
+                    .to_string(),
+            );
+        }
+        Err(err) => {
+            report
+                .errors
+                .push(format!("failed to run git worktree remove: {err}"));
+            report.warnings.push(
+                "the scrap ledger was already recorded before this failed removal; the path \
+                 and branch are now flagged as scrapped even though the tree is still present \
+                 and untouched — reopening either exact one will be (over-cautiously) refused \
+                 until a new branch/path is used"
+                    .to_string(),
+            );
+        }
     }
     report
 }

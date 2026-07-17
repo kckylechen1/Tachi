@@ -603,6 +603,114 @@ fn sweep_never_removes_dirty_worktree() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// tachi#1212 fix-round, codex checkpoint 5 discrimination: sweep's
+/// scrap-ledger recording and wt-open's re-entry lookup must agree on the
+/// canonical form of a path, or a symlinked root (macOS `/tmp` ->
+/// `/private/tmp`) silently defeats the re-entry gate for anything reclaimed
+/// via `sweep` instead of a direct `wt-remove`. Deliberately anchors the
+/// managed root under a LITERAL `/tmp/...` path (not `std::env::temp_dir()`,
+/// which on macOS is usually already a resolved `TMPDIR` outside `/tmp`) so
+/// this test actually exercises the divergence the review named. RED on the
+/// pre-fix sweep code (recorded `candidate.path` raw, e.g. `/tmp/...`, while
+/// `wt_open`'s lookup canonicalizes the query to `/private/tmp/...`): the
+/// reopen below would have SUCCEEDED. GREEN post-fix: sweep canonicalizes
+/// before recording, so the lookup matches and the reopen is refused.
+#[test]
+fn sweep_records_a_canonical_path_matching_wt_open_reentry_lookup() {
+    let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let root = PathBuf::from(format!(
+        "/tmp/wt-lifecycle-sweep-canon-{}-{}",
+        std::process::id(),
+        nanos
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let home = root.join("home");
+    let cache = root.join("cache-worktrees");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::create_dir_all(&repo).unwrap();
+    init_git_repo(&repo);
+    let _env = set_env(&home, &cache);
+
+    let open_report = wt_open::open_worktree(OpenOptions {
+        repo_root: repo.clone(),
+        path: None,
+        branch: Some("tachi/sweep-canon/worker".into()),
+        base: Some("HEAD".into()),
+        task: Some("sweep-canon".into()),
+        role: Some("worker".into()),
+        dispatch_id: None,
+        name: Some("sweep-canon-leaf".into()),
+        cargo_target: CargoTargetPolicy::Shared,
+        dry_run: false,
+        output: OutputFormat::Json,
+    })
+    .unwrap();
+    assert!(
+        open_report.opened,
+        "setup: worktree should have opened: {:?}",
+        open_report.errors
+    );
+    let path = PathBuf::from(&open_report.path);
+    assert!(
+        path.starts_with("/tmp"),
+        "test setup must place the worktree under a literal /tmp path to exercise the macOS \
+         symlink divergence, got {}",
+        path.display()
+    );
+
+    // max_age_days = 0 makes every marked worktree an immediate sweep
+    // candidate regardless of real elapsed time.
+    sweep::run_sweep(SweepOptions {
+        roots: vec![cache.clone()],
+        max_age_days: 0,
+        force: true,
+        output: OutputFormat::Text,
+    })
+    .expect("sweep should reclaim a clean, unheld, aged-out worktree");
+    assert!(
+        !path.exists(),
+        "setup: sweep should have reclaimed the worktree"
+    );
+
+    // Reopening at the exact same path must be refused. This only proves
+    // the fix if sweep recorded the CANONICAL form of the path — the same
+    // form wt_open's lookup canonicalizes the query to.
+    let reentry = wt_open::open_worktree(OpenOptions {
+        repo_root: repo.clone(),
+        path: Some(path.clone()),
+        branch: Some("tachi/sweep-canon/second".into()),
+        base: Some("HEAD".into()),
+        task: Some("sweep-canon".into()),
+        role: Some("worker".into()),
+        dispatch_id: None,
+        name: None,
+        cargo_target: CargoTargetPolicy::Shared,
+        dry_run: false,
+        output: OutputFormat::Json,
+    })
+    .unwrap();
+
+    assert!(
+        !reentry.opened,
+        "reopening the exact path sweep just scrapped must be refused, even though sweep (not \
+         wt-remove) reclaimed it: {:?}",
+        reentry.errors
+    );
+    assert!(
+        reentry.errors.iter().any(|e| e.contains("scrapped")),
+        "expected a same-path re-entry refusal, got: {:?}",
+        reentry.errors
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn open_rejects_path_outside_managed_root() {
     let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
