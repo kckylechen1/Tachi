@@ -311,7 +311,12 @@ impl std::fmt::Display for DestructiveRefusal {
 
 /// The ONE gate between any caller and the delete path. The CLI asks it before it opens
 /// the ledger; [`run_orphan_reap`] asks it again so a future caller cannot route around
-/// the CLI. Today it always says no.
+/// the CLI. **As of #1062, it always says yes** — `DESTRUCTIVE_CERTIFIED` is `true`, so
+/// this reduces to `Ok(())` for both `force` values; the destructive path is reached
+/// through this gate now, not refused by it. It stays here rather than being deleted:
+/// the day certification is REVOKED (`DESTRUCTIVE_CERTIFIED` flips back to `false`),
+/// this is the one place that must go back to refusing `force`, and every caller already
+/// asks it instead of reading the constant directly.
 pub(crate) fn certify_destructive(force: bool) -> Result<(), DestructiveRefusal> {
     if force && !DESTRUCTIVE_CERTIFIED {
         return Err(DestructiveRefusal::new());
@@ -4599,89 +4604,160 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // ── the sheath: --force is refused (audit codex-g6f99) ───────────────────
+    // ── #1062: --force reaches the delete path, and certification ≠ no fences ──
 
-    /// The seal, and the proof that it is the seal doing the work.
+    /// The seal is open (#1062) — and the proof that "open" does not mean "no fences
+    /// left". Renamed from `force_is_refused_at_the_entry_point_and_the_fixture_
+    /// proves_it_was_reapable`, which pinned the pre-#1062 shape: the entry point
+    /// (`reap_sealed`) refused EVERY `--force` request outright via
+    /// `certify_destructive`, and the second half proved that refusal meant
+    /// something (CONCERN 6 — a test that only asserts "the directory still exists"
+    /// passes just as happily against a reaper that does nothing at all) by running
+    /// the SAME fixture through the sheathed body (`reap_uncertified`, which
+    /// bypasses the gate) and watching it really delete. See git blame / #1062 for
+    /// that reading.
     ///
-    /// The second half is the point (CONCERN 6): a test that only asserts "the directory
-    /// still exists after `--force`" passes just as happily against a reaper that does
-    /// nothing at all. So the same fixture, the same options, the same probe are then run
-    /// through the sheathed driver — and the target really is deleted. The bytes survived
-    /// the first call because the gate held, not because there was nothing there to kill.
+    /// Two halves, same design, inverted premise now that certification is real:
+    ///
+    /// * **first half — the entry point itself now does the deleting.** `--force`
+    ///   through `reap_sealed` (the REAL entry point `run_orphan_reap_cli` also
+    ///   calls, not the sheathed `run_orphan_reap_uncertified` the old test needed
+    ///   to bypass the gate to reach) on a healthy fixture genuinely reclaims —
+    ///   proving the certified path is not a dead branch behind a gate that never
+    ///   opens.
+    /// * **second half is CONCERN 6 in the certified world: certification is not
+    ///   "no fences".** The exact same entry point, the exact same `--force`, but
+    ///   the `(dev, ino)` identity is swapped out from under the verdict between
+    ///   judgement and delete (BUG 2's own fence — same swap technique as
+    ///   `a_directory_replaced_at_the_same_path_between_verdict_and_delete_is_
+    ///   refused`) — still refused, because `certify_destructive` was never the
+    ///   ONLY fence and flipping it true does not touch the others. The refusal
+    ///   now surfaces as a per-candidate `"refused"` decision inside a
+    ///   successfully-returned `Ok(report)`, not as a top-level `Err` from the
+    ///   gate — that shift in shape is itself part of what changed.
     #[test]
-    fn force_is_refused_at_the_entry_point_and_the_fixture_proves_it_was_reapable() {
-        let root = unique_temp_dir("tachi-reaper-sealed");
+    fn force_reclaims_at_the_entry_point_and_a_broken_fence_still_refuses_it() {
+        // Half 1: a healthy fixture, the real entry point, `--force` — genuinely
+        // deletes, and books it, now that the destructive path is certified.
+        let root = unique_temp_dir("tachi-reaper-certified-delete");
         let dead = make_target_dir(&root, "dead-target");
         let mut store = open_store(&root);
 
-        let refusal = reap_sealed(
+        let report = reap_sealed(
             store.connection_mut(),
             &opts(&root, true),
             aged_now(30),
             &*unheld_probe(),
         )
-        .expect_err("--force must be refused while the destructive path is uncertified");
+        .expect("--force is certified now: the entry point must not refuse a healthy request");
 
-        assert!(refusal.refused);
-        assert_eq!(refusal.audit, BLOCKING_AUDIT);
-        assert!(
-            refusal.reason.contains("report-only") && refusal.reason.contains("not certified"),
-            "the refusal must say what it is: {}",
-            refusal.reason
-        );
-        assert_eq!(refusal.blocking_defects.len(), BLOCKING_DEFECTS.len());
-        // Not a byte, not a row.
-        assert!(dead.join("debug/artifact.rlib").exists());
-        assert!(memcore::list_resources(store.connection(), None, None)
-            .unwrap()
-            .is_empty());
-
-        // The discriminating half: this fixture is NOT inert.
-        let report = reap_uncertified(
-            store.connection_mut(),
-            &opts(&root, true),
-            aged_now(30),
-            &*unheld_probe(),
-        );
         assert_eq!(
             report.reclaimed.len(),
             1,
-            "the fixture must be genuinely reapable, or the refusal above proved nothing: \
-             {report:?}"
+            "the entry point must actually reach the delete path once certified: {report:?}"
         );
-        assert!(!dead.exists());
+        assert!(!dead.exists(), "the target must really be gone: {report:?}");
+        let rows = memcore::list_resources(store.connection(), None, None).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].state,
+            ResourceState::Reclaimed,
+            "the delete through the real entry point must still be booked: {rows:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
+
+        // Half 2 (CONCERN 6, still true post-#1062): the same entry point, the same
+        // `--force`, but the `(dev, ino)` identity is swapped out from under the
+        // verdict — refused, proving certification did not remove the other fences.
+        let root2 = unique_temp_dir("tachi-reaper-certified-still-fenced");
+        let target = make_target_dir(&root2, "swapped-target");
+        let mut store2 = open_store(&root2);
+
+        let target_for_probe = target.clone();
+        let swapping_probe = move |_path: &Path| {
+            std::fs::remove_dir_all(&target_for_probe).unwrap();
+            std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
+            std::fs::write(
+                target_for_probe.join("debug/replacement.rlib"),
+                vec![9u8; 4096],
+            )
+            .unwrap();
+            HolderCheck::None
+        };
+
+        let report2 = reap_sealed(
+            store2.connection_mut(),
+            &opts(&root2, true),
+            aged_now(30),
+            &swapping_probe,
+        )
+        .expect(
+            "certification means the entry point no longer refuses OUTRIGHT — the (dev, ino) \
+             fence still fires per-candidate, inside a successful run, not as an Err from the \
+             gate",
+        );
+
+        assert!(
+            target.join("debug/replacement.rlib").exists(),
+            "the replacement directory must survive: certification did not disable the \
+             identity fence: {report2:?}"
+        );
+        assert!(report2.reclaimed.is_empty(), "{report2:?}");
+        assert_eq!(report2.candidates.len(), 1, "{report2:?}");
+        assert_eq!(report2.candidates[0].decision, "refused", "{report2:?}");
+        assert!(
+            report2
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("(dev, ino) identity")),
+            "the refusal must still name the (dev, ino) mismatch even though force is \
+             certified: {report2:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root2);
     }
 
-    /// `certify_destructive` is the single gate, and it only ever refuses the destructive
-    /// request — a report-only run is never blocked by it.
+    /// `certify_destructive` is the single gate — and once the destructive path is
+    /// certified (#1062), it refuses NEITHER call: a report-only request and a
+    /// `--force` request are both permitted to proceed past THIS gate (other gates
+    /// — the protected set, the holder probe, the pinned `(dev, ino)` identity —
+    /// still stand; see `force_reclaims_at_the_entry_point_and_a_broken_fence_
+    /// still_refuses_it` for the proof that certification did not remove them).
+    ///
+    /// Renamed from `only_the_destructive_request_is_refused`, which pinned the
+    /// pre-#1062 shape (`certify_destructive(true)` unconditionally `Err`,
+    /// `certify_destructive(false)` unconditionally `Ok`) — and whose own tripwire
+    /// (`assert!(!DESTRUCTIVE_CERTIFIED, …)`) fired exactly as designed the day
+    /// #1062 flipped the constant, which is what sent this test here to be
+    /// reconciled. See git blame / #1062 for that reading.
     #[test]
-    fn only_the_destructive_request_is_refused() {
-        assert!(certify_destructive(false).is_ok());
-        let refusal = certify_destructive(true).expect_err("force is uncertified");
-        // The operator is told what is broken, not merely that they were denied.
-        for defect in BLOCKING_DEFECTS {
-            assert!(
-                refusal.reason.contains(defect),
-                "the refusal must name every blocking defect; missing: {defect}"
-            );
-        }
-        // A tripwire on a compile-time constant, deliberately: `clippy` calls a constant
-        // assertion pointless because a constant cannot surprise you at runtime — which is
-        // the whole reason this one is here. It states the premise the two assertions above
-        // depend on (they only mean "the seal refuses" while the seal is shut), so the day
-        // somebody flips `DESTRUCTIVE_CERTIFIED` this test goes red and names the seal.
-        //
-        // Kept a RUNTIME assertion rather than promoted to `const { assert!(…) }`: the
-        // person who eventually flips that constant is mid-way through certifying the
-        // delete path and needs the suite to still compile and run so they can watch the
-        // rest of the fences go green. A compile-time trip would stop them from running any
-        // test in the crate at all — a louder failure, but a less useful one, and just as
-        // easy to delete.
+    fn certify_destructive_permits_both_once_certified() {
+        assert!(
+            certify_destructive(false).is_ok(),
+            "report-only was never gated by certification"
+        );
+        assert!(
+            certify_destructive(true).is_ok(),
+            "force must be permitted past this gate once DESTRUCTIVE_CERTIFIED is true — the \
+             gate's own logic only ever refuses `force && !DESTRUCTIVE_CERTIFIED`"
+        );
+
+        // A tripwire on the compile-time constant, deliberately — the same shape the
+        // pre-#1062 test used, pointed the other way. `clippy` calls a constant
+        // assertion pointless because a constant cannot surprise you at runtime; that is
+        // exactly why this one is here. It states the premise the two assertions above
+        // depend on (they only mean "the gate passes both" while the seal stays open), so
+        // the day somebody REVOKES certification and flips `DESTRUCTIVE_CERTIFIED` back
+        // to `false`, this test goes red and names the seal — symmetric to the tripwire
+        // it replaces, which fired the day certification opened it.
         #[allow(clippy::assertions_on_constants)]
         {
-            assert!(!DESTRUCTIVE_CERTIFIED, "the day this flips, the seal opens");
+            assert!(
+                DESTRUCTIVE_CERTIFIED,
+                "the day this flips back to false, `certify_destructive(true)` refuses again \
+                 and the assertion above must flip with it"
+            );
         }
     }
 
