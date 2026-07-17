@@ -221,9 +221,9 @@ pub(crate) fn scrub_ruling(n: &mut NormalizedRuling) -> usize {
 /// not a content field — the frozen "content fields are atomic, never
 /// truncated" rule applies to `text`/`metadata`, which this never touches.
 ///
-/// `pub(crate)`: `precedent_candidate_ops` (#1076) reuses this for its own
-/// candidate summaries with a `[precedent-candidate]` prefix instead — see
-/// that module's `candidate_summary_line`.
+/// `pub(crate)`: `precedent_candidate_ops` (#1076) calls this directly with
+/// a `"[precedent-candidate]"` prefix instead of duplicating the truncation
+/// logic for its own candidate summaries.
 pub(crate) fn summary_line_with_prefix(prefix: &str, case: &str, max: usize) -> String {
     let one_line = case.replace(['\n', '\r'], " ");
     if one_line.chars().count() <= max {
