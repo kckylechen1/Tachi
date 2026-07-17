@@ -22,6 +22,13 @@
 
 The canon doc's `Execution:` lane marker uses the vendor-neutral label `solo-frozen` (behavior-frozen refactor/split, machine-checkable goldens, runs unattended). Today that work is by default routed through codex; that routing, not the label, is the part that may change without touching `AGENTS.md` or the canon doc.
 
+## Dispatch process (owner-ratified 2026-07-17; supersedes the in-session review loop above where they conflict)
+
+- **PR-first**: an implementation lane's FIRST act is branch + initial commit + **draft PR**; all increments push to the PR branch continuously. The worktree is a pure cache — a dead lane loses nothing. Finishing = flipping the draft to ready.
+- **No in-session cross-review, no in-session merge**: lanes open PRs and STOP; the leader flips ready and does NOT merge. Review and merging belong to the owner's designated human reviewer.
+- **Oz still runs, non-blocking**: after each PR opens, the Oz seat runs compile + targeted tests asynchronously and posts the verbatim results as a PR comment for the reviewer. It gates nothing and merges nothing.
+- **Dead-lane finalizer**: on any lane-death notification, the leader pushes stranded work to a `salvage/<lane>` branch, then removes the worktree. Structural home for auto-salvage: #1184 (reaper-integrated).
+
 ## Build/worktree specifics
 
 - `CARGO_TARGET_DIR=$HOME/.cache/sigil-shared-target` is stated in `AGENTS.md` itself as a repo fact (it applies to every carrier building this repo, not just Claude).
