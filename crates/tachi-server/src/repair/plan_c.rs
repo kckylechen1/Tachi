@@ -1,8 +1,9 @@
 //! R11 — Plan C split-brain repair.
 //!
-//! Plan C makes `<repo>/.tachi/memory.db` canonical and keeps
-//! `<tachi_home>/projects/<repo>/memory.db` as a symlink alias. Historical
-//! setups may have a regular SQLite file at the alias path; this rule merges
+//! Plan C makes `<repo>/.tachi/tachi-memory.db` canonical and keeps
+//! `<tachi_home>/projects/<repo>/tachi-memory.db` as a symlink alias.
+//! Historical setups may have a regular SQLite file at the alias path (or
+//! still carry the pre-#1132 `memory.db` filename); this rule merges
 //! alias-only rows into the canonical DB and restores the symlink.
 
 use std::collections::HashSet;

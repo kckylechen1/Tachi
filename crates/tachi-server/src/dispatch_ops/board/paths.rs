@@ -3,7 +3,12 @@ use std::path::PathBuf;
 
 pub(super) fn runs_dir_for_server(server: &MemoryServer) -> PathBuf {
     let global_db = server.global_db_path_buf();
-    if global_db.file_name().and_then(|name| name.to_str()) == Some("memory.db") {
+    if global_db
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(memcore::is_memory_db_filename)
+        .unwrap_or(false)
+    {
         if let Some(global_dir) = global_db.parent() {
             if global_dir.file_name().and_then(|name| name.to_str()) == Some("global") {
                 if let Some(app_home) = global_dir.parent() {
