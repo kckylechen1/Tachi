@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_support::EnvRestore;
+use crate::test_support::{CwdRestore, EnvRestore};
 use std::path::{Path, PathBuf};
 
 fn with_env_lock<F: FnOnce()>(f: F) {
@@ -55,7 +55,6 @@ fn tachi_home_falls_back_to_tachi_app_home() {
 fn tachi_home_detects_workspace_data_tachi_layout() {
     with_env_lock(|| {
         let tmp = tempfile::tempdir().expect("tmp");
-        let saved_cwd = std::env::current_dir().expect("cwd");
 
         let _tachi_home = EnvRestore::remove("TACHI_HOME");
         let _sigil_home = EnvRestore::remove("SIGIL_HOME");
@@ -68,16 +67,20 @@ fn tachi_home_detects_workspace_data_tachi_layout() {
         std::fs::create_dir_all(local_home.join("global")).expect("global parent");
         std::fs::write(local_home.join("global/memory.db"), b"").expect("global db");
 
-        std::env::set_current_dir(&nested).expect("set cwd");
+        // Guard the cwd switch via RAII (not a bare set-then-restore pair):
+        // if an assertion below panics, a bare restore statement is never
+        // reached and the changed cwd leaks into every test that runs after
+        // this one in the same process (same class of bug `with_tachi_home`
+        // was hardened against for env vars in #1096 leaf-2a).
+        let _cwd = CwdRestore::set(&nested);
         let local_home = std::fs::canonicalize(local_home).expect("canonical local home");
         let repo = std::fs::canonicalize(repo).expect("canonical repo");
         assert_eq!(tachi_home(), local_home);
         assert_eq!(
             plan_c_global_db_path("hyperion"),
-            repo.join("data/tachi/projects/hyperion/memory.db")
+            repo.join("data/tachi/projects/hyperion")
+                .join(memcore::MEMORY_DB_FILENAME)
         );
-
-        std::env::set_current_dir(saved_cwd).expect("restore cwd");
     });
 }
 

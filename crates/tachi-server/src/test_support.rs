@@ -106,6 +106,42 @@ impl Drop for EnvRestore {
     }
 }
 
+/// RAII guard that restores the process current directory to its prior
+/// value on drop.
+///
+/// Same class of bug as [`EnvRestore`]/`with_tachi_home`'s panic-safety fix
+/// (#1096 leaf-2a), but for `std::env::current_dir` instead of an env var:
+/// a test that does a bare `set_current_dir(new)` ... `set_current_dir(old)`
+/// leaks the changed cwd into every test that runs afterward in the same
+/// process if an assertion between the two calls panics — the restore
+/// statement is simply never reached. Process cwd is global mutable state
+/// shared by the whole test binary, so that leak doesn't just corrupt the
+/// panicking test's own next run; it can make an unrelated, otherwise-correct
+/// test fail later in the same `cargo test` invocation (e.g. a cwd-walking
+/// git-root resolver, or `std::env::current_dir()` itself erroring because
+/// the leaked directory was a tempdir that has since been deleted). Restoring
+/// via `Drop` survives unwinding, so the original cwd comes back regardless
+/// of how the guarded section exits.
+pub(crate) struct CwdRestore {
+    original: PathBuf,
+}
+
+impl CwdRestore {
+    /// Switch to `path`, returning a guard that restores the original cwd
+    /// (captured at construction, before the switch) when dropped.
+    pub(crate) fn set(path: &Path) -> Self {
+        let original = std::env::current_dir().expect("capture current dir");
+        std::env::set_current_dir(path).expect("set current dir");
+        Self { original }
+    }
+}
+
+impl Drop for CwdRestore {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original);
+    }
+}
+
 /// Bind a fresh, isolated Tachi home directory for the duration of `f`.
 ///
 /// #1096 leaf-2a: this crate had THREE independent local copies of this

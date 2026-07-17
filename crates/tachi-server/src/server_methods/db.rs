@@ -334,7 +334,7 @@ impl MemoryServer {
 #[cfg(test)]
 mod resolve_named_project_tests {
     use super::*;
-    use crate::test_support::EnvRestore;
+    use crate::test_support::{CwdRestore, EnvRestore};
 
     fn with_env_lock<F: FnOnce()>(f: F) {
         let _guard = crate::utils::global_test_lock()
@@ -347,7 +347,6 @@ mod resolve_named_project_tests {
     fn resolve_named_project_uses_workspace_data_tachi_home() {
         with_env_lock(|| {
             let tmp = tempfile::tempdir().expect("tmp");
-            let saved_cwd = std::env::current_dir().expect("cwd");
             let _tachi_home = EnvRestore::remove("TACHI_HOME");
             let _sigil_home = EnvRestore::remove("SIGIL_HOME");
             let _app_home = EnvRestore::remove("TACHI_APP_HOME");
@@ -359,13 +358,16 @@ mod resolve_named_project_tests {
             std::fs::create_dir_all(named_db.parent().unwrap()).expect("named parent");
             std::fs::write(&named_db, b"").expect("named db placeholder");
 
-            std::env::set_current_dir(&nested).expect("set cwd");
+            // RAII cwd guard, not a bare set-then-restore pair — a panicking
+            // assertion below must not skip the restore and leak the changed
+            // cwd into later tests in this process (same class of bug
+            // `with_tachi_home` was hardened against for env vars, #1096
+            // leaf-2a).
+            let _cwd = CwdRestore::set(&nested);
             let named_db = std::fs::canonicalize(named_db).expect("canonical named db");
             let resolved =
                 MemoryServer::resolve_named_project_db_path("hyperion").expect("resolve");
             assert_eq!(resolved, named_db);
-
-            std::env::set_current_dir(saved_cwd).expect("restore cwd");
         });
     }
 
