@@ -33,6 +33,19 @@
 //! never fabricates a signal from absent data; a target_ref with no entry
 //! in `related_live_states` stays `Unknown`, exactly like v1.
 //!
+//! fix-round-2 (cross-vendor adversarial review, PR #1191, codex-b4d8f
+//! checkpoint 1, BLOCKING): "degrades back to the v1-conservative value" is
+//! now load-bearing for the CLOSED+shipped-check case too, not just a
+//! missing `related_live_states` entry — see [`ShippedCheckOutcome`] and
+//! [`derive_live_relation_signals`]'s `merged_pr_scan_complete` parameter
+//! for exactly which conditions may produce the confirmed-negative
+//! `ClosedUnshipped` versus degrade to `Unknown`. A collection/reachability
+//! outcome this file cannot actually confirm — a merged-PR fetch failure, a
+//! bounded/truncated scan (the merged-PR pool is capped, canon doc §4.3
+//! manual/on-demand posture, not an unbounded scan), or a `git`-level
+//! `Unavailable` reachability check — is Unknown, never a manufactured
+//! negative.
+//!
 //! `scope_collision` derivation (this leaf's own convention, not
 //! canon-frozen — same posture as `parse.rs`'s `[state]` annotation syntax):
 //! a `Duplicate-Of:` relation whose live-verified target state is `Open`
@@ -44,7 +57,7 @@
 //! real live cross-reference lookup.
 
 use super::disposition::RelatedIssueStateV1;
-use super::doc_resolver::DocRefResolver;
+use super::doc_resolver::{CommitReachability, DocRefResolver};
 use tachi_params::RepoRevisionV1;
 
 /// Whether a commit-reachability shipped check was performed for a CLOSED
@@ -55,10 +68,27 @@ use tachi_params::RepoRevisionV1;
 /// to same-repo relations, see `derive_live_relation_signals`) — conflating
 /// the two would let an honestly-unchecked relation manufacture a false
 /// `ClosedUnshipped` (itself a real disposition input, e.g. DORMANT).
+///
+/// fix-round-2 (cross-vendor adversarial review, PR #1191, codex-b4d8f
+/// checkpoint 1, BLOCKING): the original two-outcome-plus-`NotChecked` shape
+/// let `NotShipped` mean BOTH "the merged-PR search actually completed and
+/// genuinely found nothing" (a real negative) AND "the search was
+/// incomplete/failed/uncertain" (the merged-PR fetch itself errored, the
+/// scan was bounded and might be missing an older shipping PR, or a
+/// candidate's own commit-reachability check was `Unavailable` rather than a
+/// confirmed `NotReachable`) — every one of those uncertain cases was
+/// silently promoted to the SAME confirmed-negative `ClosedUnshipped` a real
+/// check would produce, which is not fail-closed. `Incomplete` is the new
+/// bucket for all of those: it maps to `Unknown` (v1's own default),
+/// EXACTLY like `NotChecked` — see `classify_related_state`. `NotShipped`
+/// now only fires when [`derive_live_relation_signals`] can show the
+/// merged-PR search was actually exhaustive (see `merged_pr_scan_complete`)
+/// AND no candidate's reachability check came back `Unavailable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShippedCheckOutcome {
     Shipped,
     NotShipped,
+    Incomplete,
     NotChecked,
 }
 
@@ -66,7 +96,10 @@ pub(crate) enum ShippedCheckOutcome {
 /// ("OPEN"/"CLOSED", case-insensitive — `None` when the lookup was never
 /// attempted or failed) plus the shipped-check outcome for CLOSED issues.
 /// Any other/missing live state degrades to `Unknown` (fail-closed, v1's
-/// own default).
+/// own default). `Incomplete` (fix-round-2: uncertain collection/
+/// reachability) degrades to `Unknown` exactly like `NotChecked` — only a
+/// genuinely confirmed `Shipped`/`NotShipped` outcome may produce
+/// `ClosedShipped`/`ClosedUnshipped`.
 pub(crate) fn classify_related_state(
     live_issue_state: Option<&str>,
     shipped: ShippedCheckOutcome,
@@ -76,7 +109,9 @@ pub(crate) fn classify_related_state(
         Some(s) if s.eq_ignore_ascii_case("CLOSED") => match shipped {
             ShippedCheckOutcome::Shipped => RelatedIssueStateV1::ClosedShipped,
             ShippedCheckOutcome::NotShipped => RelatedIssueStateV1::ClosedUnshipped,
-            ShippedCheckOutcome::NotChecked => RelatedIssueStateV1::Unknown,
+            ShippedCheckOutcome::Incomplete | ShippedCheckOutcome::NotChecked => {
+                RelatedIssueStateV1::Unknown
+            }
         },
         _ => RelatedIssueStateV1::Unknown,
     }
@@ -110,25 +145,35 @@ pub(crate) fn merged_prs_referencing(
 /// Pick the shipped evidence among `referencing_prs`: the lowest PR-numbered
 /// candidate (deterministic tie-break) whose merge commit is confirmed
 /// reachable from `trusted_ref` via `resolver.is_commit_reachable` (#1105
-/// item 2, canon doc §5). `None` when no candidate has BOTH a merge commit
-/// and a confirmed-reachable one — "referenced by a merged PR" alone is not
+/// item 2, canon doc §5). Returns `(evidence, any_unavailable)`: `evidence`
+/// is `None` when no candidate has BOTH a merge commit and a
+/// confirmed-reachable one — "referenced by a merged PR" alone is not
 /// "shipped" (canon doc §5: `shipped` requires the reachability check, not
-/// merely `merged` delivery state).
+/// merely `merged` delivery state). `any_unavailable` (fix-round-2, PR #1191
+/// checkpoint 1) is `true` iff at least one candidate's reachability check
+/// came back `CommitReachability::Unavailable` rather than a confirmed
+/// `Reachable`/`NotReachable` — a caller MUST treat `(None, true)` as
+/// "could not determine", never as a confirmed negative (see
+/// `derive_live_relation_signals`'s `ShippedCheckOutcome::Incomplete`).
 pub(crate) fn pick_shipped_evidence(
     repo: &str,
     trusted_ref: &str,
     referencing_prs: &[&crate::gh_ops::MergedPr],
     resolver: &dyn DocRefResolver,
     verified_at: &str,
-) -> Option<RepoRevisionV1> {
-    referencing_prs
+) -> (Option<RepoRevisionV1>, bool) {
+    let mut any_unavailable = false;
+    let evidence = referencing_prs
         .iter()
         .filter_map(|pr| {
             let sha = pr.merge_commit_sha.as_deref()?;
-            if resolver.is_commit_reachable(repo, sha, trusted_ref) {
-                Some((pr.number, sha.to_string()))
-            } else {
-                None
+            match resolver.is_commit_reachable(repo, sha, trusted_ref) {
+                CommitReachability::Reachable => Some((pr.number, sha.to_string())),
+                CommitReachability::NotReachable => None,
+                CommitReachability::Unavailable(_) => {
+                    any_unavailable = true;
+                    None
+                }
             }
         })
         .min_by_key(|(pr_number, _)| *pr_number)
@@ -137,7 +182,8 @@ pub(crate) fn pick_shipped_evidence(
             git_ref: trusted_ref.to_string(),
             commit_sha,
             verified_at: verified_at.to_string(),
-        })
+        });
+    (evidence, any_unavailable)
 }
 
 /// One relation target this issue's body/comments declared, resolved to a
@@ -184,6 +230,19 @@ pub(crate) struct LiveRelationSignals {
 /// those out before calling this).
 /// `merged_prs`: recently-merged PRs for `base_repo` (already fetched via
 /// `gh_ops::fetch_merged_prs`) — the shipped-evidence candidate pool.
+/// `merged_pr_scan_complete` (fix-round-2, PR #1191 checkpoint 1): `true`
+/// iff `merged_prs` is KNOWN to be the repo's ENTIRE merged-PR history (the
+/// caller's `gh pr list --limit N` returned strictly fewer than `N` results,
+/// meaning nothing was cut off by the bound) AND the fetch itself did not
+/// error. The merged-PR scan this leaf runs is bounded (`mod.rs`'s
+/// `LIVE_SIGNAL_MERGED_PR_SCAN_LIMIT`) precisely because it is manual/
+/// on-demand, never resident (canon doc §4.3) — "not found in the most
+/// recent N merged PRs" can NEVER be promoted to a confirmed negative unless
+/// the caller can show there was no Nth-PR cutoff at all. When `false` (scan
+/// was truncated, or the fetch failed and the caller passed an empty/partial
+/// `merged_prs`), a same-repo CLOSED target with no reachable evidence
+/// degrades to `ShippedCheckOutcome::Incomplete` (-> `Unknown`), never
+/// `NotShipped` (-> `ClosedUnshipped`).
 ///
 /// Shipped-ness (commit-reachability) is only ever evaluated for targets in
 /// `base_repo` — a cross-repo relation can still be reported Open/Closed
@@ -198,6 +257,7 @@ pub(crate) fn derive_live_relation_signals(
     targets: &[RelationLookupTarget],
     related_live_states: &std::collections::HashMap<String, String>,
     merged_prs: &[crate::gh_ops::MergedPr],
+    merged_pr_scan_complete: bool,
     resolver: &dyn DocRefResolver,
     captured_at: &str,
 ) -> LiveRelationSignals {
@@ -208,10 +268,14 @@ pub(crate) fn derive_live_relation_signals(
             .map(String::as_str);
         let shipped = if target.repo == base_repo {
             let referencing = merged_prs_referencing(merged_prs, target.number);
-            match pick_shipped_evidence(base_repo, trusted_ref, &referencing, resolver, captured_at)
-            {
+            let (evidence, any_unavailable) =
+                pick_shipped_evidence(base_repo, trusted_ref, &referencing, resolver, captured_at);
+            match evidence {
                 Some(_) => ShippedCheckOutcome::Shipped,
-                None => ShippedCheckOutcome::NotShipped,
+                None if merged_pr_scan_complete && !any_unavailable => {
+                    ShippedCheckOutcome::NotShipped
+                }
+                None => ShippedCheckOutcome::Incomplete,
             }
         } else {
             ShippedCheckOutcome::NotChecked
@@ -222,8 +286,13 @@ pub(crate) fn derive_live_relation_signals(
         );
     }
 
+    // `own_shipped_evidence` "not found" already IS v1's own default
+    // (`None`) regardless of scan completeness — unlike `related_states`
+    // there is no stronger "confirmed unshipped" claim to guard here, so the
+    // `any_unavailable` half of `pick_shipped_evidence`'s return is not
+    // needed for this half of the derivation.
     let own_referencing = merged_prs_referencing(merged_prs, base_number);
-    let own_shipped_evidence = pick_shipped_evidence(
+    let (own_shipped_evidence, _) = pick_shipped_evidence(
         base_repo,
         trusted_ref,
         &own_referencing,
@@ -299,6 +368,20 @@ mod tests {
         );
     }
 
+    /// fix-round-2 (PR #1191 checkpoint 1, required item 1): `Incomplete`
+    /// (uncertain collection/reachability — a bounded/partial merged-PR
+    /// scan, a merged-PR fetch failure, or an `Unavailable` reachability
+    /// check) must degrade to `Unknown` exactly like `NotChecked`, NEVER to
+    /// the confirmed-negative `ClosedUnshipped`.
+    #[test]
+    fn classify_related_state_closed_but_incomplete_stays_unknown() {
+        assert_eq!(
+            classify_related_state(Some("CLOSED"), ShippedCheckOutcome::Incomplete),
+            RelatedIssueStateV1::Unknown,
+            "an incomplete/uncertain shipped-check must not manufacture a confirmed negative"
+        );
+    }
+
     #[test]
     fn classify_related_state_missing_or_unrecognized_state_is_unknown() {
         assert_eq!(
@@ -338,11 +421,15 @@ mod tests {
         let prs = vec![merged_pr(10, "Refs #1105", "sha-unreachable")];
         let referencing: Vec<&MergedPr> = prs.iter().collect();
         let resolver = FixtureDocResolver::new(); // nothing registered reachable
-        let evidence =
+        let (evidence, any_unavailable) =
             pick_shipped_evidence(REPO, TRUSTED_REF, &referencing, &resolver, CAPTURED_AT);
         assert!(
             evidence.is_none(),
             "a referencing PR whose merge commit was never confirmed reachable must not count as shipped"
+        );
+        assert!(
+            !any_unavailable,
+            "an unregistered fixture commit is a confirmed NotReachable, not Unavailable"
         );
     }
 
@@ -356,15 +443,41 @@ mod tests {
         let resolver = FixtureDocResolver::new()
             .with_reachable_commit(REPO, "sha-20", TRUSTED_REF)
             .with_reachable_commit(REPO, "sha-15", TRUSTED_REF);
-        let evidence =
-            pick_shipped_evidence(REPO, TRUSTED_REF, &referencing, &resolver, CAPTURED_AT)
-                .expect("both reachable, must pick one");
+        let (evidence, any_unavailable) =
+            pick_shipped_evidence(REPO, TRUSTED_REF, &referencing, &resolver, CAPTURED_AT);
+        let evidence = evidence.expect("both reachable, must pick one");
         assert_eq!(
             evidence.commit_sha, "sha-15",
             "lowest PR number wins the tie-break"
         );
         assert_eq!(evidence.repo, REPO);
         assert_eq!(evidence.git_ref, TRUSTED_REF);
+        assert!(!any_unavailable);
+    }
+
+    /// fix-round-2 (PR #1191 checkpoint 1): a candidate whose reachability
+    /// check is `Unavailable` (a real git failure/absent-locally commit, the
+    /// fixture equivalent of `GitRefResolver` hitting a `git` error) must
+    /// set `any_unavailable`, even though the same call also has no positive
+    /// evidence — the caller must NOT read `(None, true)` as a confirmed
+    /// negative.
+    #[test]
+    fn pick_shipped_evidence_reports_unavailable_reachability_separately_from_not_reachable() {
+        let prs = vec![merged_pr(10, "Refs #1105", "sha-flaky")];
+        let referencing: Vec<&MergedPr> = prs.iter().collect();
+        let resolver = FixtureDocResolver::new().with_unavailable_commit(
+            REPO,
+            "sha-flaky",
+            TRUSTED_REF,
+            "git cat-file -e failed: no such file or directory",
+        );
+        let (evidence, any_unavailable) =
+            pick_shipped_evidence(REPO, TRUSTED_REF, &referencing, &resolver, CAPTURED_AT);
+        assert!(evidence.is_none());
+        assert!(
+            any_unavailable,
+            "an Unavailable reachability check must be surfaced, not silently dropped"
+        );
     }
 
     #[test]
@@ -378,6 +491,7 @@ mod tests {
             &[],
             &std::collections::HashMap::new(),
             &merged_prs,
+            true,
             &resolver,
             CAPTURED_AT,
         );
@@ -401,6 +515,7 @@ mod tests {
             &[],
             &std::collections::HashMap::new(),
             &[],
+            true,
             &resolver,
             CAPTURED_AT,
         );
@@ -425,6 +540,7 @@ mod tests {
             &targets,
             &live_states,
             &[],
+            true,
             &resolver,
             CAPTURED_AT,
         );
@@ -435,8 +551,14 @@ mod tests {
         );
     }
 
+    /// The genuinely-confirmable case: the merged-PR scan is KNOWN complete
+    /// (`merged_pr_scan_complete = true`, the fixture equivalent of `gh pr
+    /// list --limit N` returning strictly fewer than `N` results — nothing
+    /// was cut off by the bound) and every candidate's reachability check
+    /// resolved (no `Unavailable`) — a same-repo CLOSED target with no
+    /// referencing merged PR is a REAL checked negative.
     #[test]
-    fn derive_live_relation_signals_same_repo_closed_target_resolves_shipped_or_unshipped() {
+    fn derive_live_relation_signals_complete_scan_no_evidence_confirms_unshipped() {
         let targets = vec![
             RelationLookupTarget {
                 target_ref: "#10".to_string(),
@@ -461,6 +583,7 @@ mod tests {
             &targets,
             &live_states,
             &merged_prs,
+            true, // scan complete: gh returned every merged PR, none cut off
             &resolver,
             CAPTURED_AT,
         );
@@ -471,7 +594,102 @@ mod tests {
         assert_eq!(
             signals.related_states.get("#11").copied(),
             Some(RelatedIssueStateV1::ClosedUnshipped),
-            "#11 was closed but no merged PR referenced it — a real, checked negative"
+            "#11 was closed, the merged-PR scan was exhaustive, and no PR referenced it — a real, checked negative"
+        );
+    }
+
+    /// fix-round-2 (cross-vendor adversarial review, PR #1191, codex-b4d8f
+    /// checkpoint 1, "Bounded 100-PR window: 'not found in partial scan'
+    /// treated as confirmed negative. Not fail-closed."): the SAME inputs as
+    /// the complete-scan test above, except `merged_pr_scan_complete =
+    /// false` (the realistic case: `gh pr list --limit 100` returned exactly
+    /// 100, or the merged-PR fetch itself failed and the caller degraded to
+    /// an empty list) — #11 must stay `Unknown`, NOT `ClosedUnshipped`. This
+    /// is the collector-level failure-discrimination test #1191 required:
+    /// an incomplete/failed collection degrades that ONE signal back to v1's
+    /// conservative default, exactly like a `gh`/`git` call that errored
+    /// outright.
+    #[test]
+    fn derive_live_relation_signals_incomplete_scan_stays_unknown_not_unshipped() {
+        let targets = vec![
+            RelationLookupTarget {
+                target_ref: "#10".to_string(),
+                repo: REPO.to_string(),
+                number: 10,
+            },
+            RelationLookupTarget {
+                target_ref: "#11".to_string(),
+                repo: REPO.to_string(),
+                number: 11,
+            },
+        ];
+        let mut live_states = std::collections::HashMap::new();
+        live_states.insert("#10".to_string(), "CLOSED".to_string());
+        live_states.insert("#11".to_string(), "CLOSED".to_string());
+        let merged_prs = vec![merged_pr(99, "Refs #10", "sha-99")];
+        let resolver = FixtureDocResolver::new().with_reachable_commit(REPO, "sha-99", TRUSTED_REF);
+        let signals = derive_live_relation_signals(
+            REPO,
+            1105,
+            TRUSTED_REF,
+            &targets,
+            &live_states,
+            &merged_prs,
+            false, // scan bounded/incomplete (or the fetch itself failed)
+            &resolver,
+            CAPTURED_AT,
+        );
+        assert_eq!(
+            signals.related_states.get("#10").copied(),
+            Some(RelatedIssueStateV1::ClosedShipped),
+            "positive evidence found within the scan is still trustworthy regardless of completeness"
+        );
+        assert_eq!(
+            signals.related_states.get("#11").copied(),
+            Some(RelatedIssueStateV1::Unknown),
+            "#11 was closed but the merged-PR scan was incomplete — 'not found in a partial scan' \
+             must never be promoted to a confirmed negative (v1 degradation)"
+        );
+    }
+
+    /// The same v1-degradation guarantee, this time driven by an
+    /// `Unavailable` reachability check (a real git failure) rather than an
+    /// incomplete scan — even with `merged_pr_scan_complete = true`, a
+    /// candidate whose reachability could not be determined must not let
+    /// "no confirmed-reachable candidate" collapse into a confirmed
+    /// negative.
+    #[test]
+    fn derive_live_relation_signals_unavailable_reachability_stays_unknown_not_unshipped() {
+        let targets = vec![RelationLookupTarget {
+            target_ref: "#12".to_string(),
+            repo: REPO.to_string(),
+            number: 12,
+        }];
+        let mut live_states = std::collections::HashMap::new();
+        live_states.insert("#12".to_string(), "CLOSED".to_string());
+        let merged_prs = vec![merged_pr(100, "Refs #12", "sha-flaky")];
+        let resolver = FixtureDocResolver::new().with_unavailable_commit(
+            REPO,
+            "sha-flaky",
+            TRUSTED_REF,
+            "git merge-base --is-ancestor failed",
+        );
+        let signals = derive_live_relation_signals(
+            REPO,
+            1105,
+            TRUSTED_REF,
+            &targets,
+            &live_states,
+            &merged_prs,
+            true, // scan complete, but the one candidate's reachability was Unavailable
+            &resolver,
+            CAPTURED_AT,
+        );
+        assert_eq!(
+            signals.related_states.get("#12").copied(),
+            Some(RelatedIssueStateV1::Unknown),
+            "an Unavailable reachability check must not be promoted to a confirmed negative even \
+             when the merged-PR scan itself was exhaustive"
         );
     }
 }

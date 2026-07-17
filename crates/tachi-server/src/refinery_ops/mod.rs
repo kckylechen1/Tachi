@@ -85,14 +85,36 @@
 //! `DocRefResolver::is_commit_reachable`, canon doc §5's delivery-state
 //! ownership table). `collect_live_relation_signals` (in this module) is the
 //! async orchestrator; [`build_refinery_packet_with_live_signals`] stays a
-//! PURE consumer of its output, so a `gh`/`git` failure anywhere in
-//! collection degrades that one signal back to v1's conservative default
-//! (`Unknown` state / empty `scope_collisions` / `None` shipped evidence) —
-//! it never blocks or corrupts the proposal-only disposition, and never
-//! propagates as an `Err` out of the pure pipeline itself. An owner-authored
-//! prose `[state]` annotation is STILL never authority — it is now checked
-//! against the live-verified state (a disagreement is a contradiction; an
-//! unverifiable target stays advisory) instead of being unconditionally
+//! PURE consumer of its output, and it never propagates as an `Err` out of
+//! the pure pipeline itself, so it never blocks or corrupts the
+//! proposal-only disposition.
+//!
+//! Fail-closed correction (fix-round-2, cross-vendor adversarial review, PR
+//! #1191, codex-b4d8f checkpoint 1, BLOCKING): an EARLIER version of this
+//! paragraph claimed "every `gh`/`git` failure degrades that one signal back
+//! to v1's conservative default" and "an issue whose shipping PR is older
+//! than [the 100-PR] window degrades to 'no evidence found', same as v1" —
+//! both were FALSE as originally implemented. A `fetch_merged_prs` failure,
+//! a bounded/truncated merged-PR scan, AND an `Unavailable` commit-
+//! reachability check (`git` command failure, commit object absent locally)
+//! were all silently promoted to the SAME confirmed-negative
+//! `ClosedUnshipped` a genuinely checked negative would produce — not
+//! fail-closed. The corrected contract (see
+//! `live_signals::derive_live_relation_signals`'s `merged_pr_scan_complete`
+//! parameter and `ShippedCheckOutcome::Incomplete`): a same-repo CLOSED
+//! relation's shipped-check ONLY resolves to the confirmed-negative
+//! `ClosedUnshipped` when the merged-PR fetch succeeded, returned
+//! DEMONSTRABLY the repo's entire merged-PR history (strictly fewer results
+//! than the bound — nothing was truncated), AND no candidate's
+//! reachability check came back `Unavailable`; every other case (fetch
+//! error, truncated/bounded scan, `Unavailable` reachability) degrades to
+//! `Unknown`, identical to v1's own always-`Unknown` default. `scope_collisions`
+//! / `own_shipped_evidence` were already correctly `None`/empty on any
+//! failure (no fix needed there — see `live_signals`'s own module doc). An
+//! owner-authored prose `[state]` annotation is STILL never authority — it
+//! is now checked against the live-verified state (a disagreement is a
+//! contradiction; an unverifiable target stays advisory) instead of being
+//! unconditionally
 //! discarded.
 
 mod compiler;
@@ -271,19 +293,31 @@ async fn collect_live_relation_signals(
     // One merged-PR fetch for `repo` — the shared shipped-evidence candidate
     // pool for both this issue's OWN shipped_evidence and every same-repo
     // CLOSED relation's shipped-ness. Bounded to the most-recently-merged
-    // PRs (canon doc §4.3 posture: manual/on-demand, not an unbounded scan);
-    // an issue whose shipping PR is older than this window degrades to "no
-    // evidence found" — identical to v1, never a false claim.
-    let merged_prs = match crate::gh_ops::fetch_merged_prs(
+    // PRs (canon doc §4.3 posture: manual/on-demand, not an unbounded scan).
+    // fix-round-2 (PR #1191 checkpoint 1): `merged_pr_scan_complete` is
+    // `true` ONLY when the fetch succeeded AND returned strictly fewer PRs
+    // than the bound — i.e. `gh` handed back the repo's ENTIRE merged-PR
+    // history, nothing was cut off. That is the ONLY condition under which
+    // "no referencing PR found" may become a confirmed
+    // `ShippedCheckOutcome::NotShipped` (-> `ClosedUnshipped`); a fetch
+    // failure OR a scan that hit the bound both leave
+    // `merged_pr_scan_complete = false`, degrading every same-repo CLOSED
+    // target's shipped-check to `ShippedCheckOutcome::Incomplete` (->
+    // `Unknown`, v1's own default) — see `live_signals::derive_live_relation_signals`'s
+    // own doc comment.
+    let (merged_prs, merged_pr_scan_complete) = match crate::gh_ops::fetch_merged_prs(
         server,
         repo,
         LIVE_SIGNAL_MERGED_PR_SCAN_LIMIT,
         repo_root,
     ) {
-        Ok(prs) => prs,
+        Ok(prs) => {
+            let complete = prs.len() < LIVE_SIGNAL_MERGED_PR_SCAN_LIMIT as usize;
+            (prs, complete)
+        }
         Err(reason) => {
             errors.push(format!("fetch_merged_prs({repo}): {reason}"));
-            Vec::new()
+            (Vec::new(), false)
         }
     };
 
@@ -294,6 +328,7 @@ async fn collect_live_relation_signals(
         &targets,
         &related_live_states,
         &merged_prs,
+        merged_pr_scan_complete,
         reachability_resolver,
         captured_at,
     );
