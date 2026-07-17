@@ -6,10 +6,41 @@
 //! `peer_query` answers a small, exhaustively-whitelisted set of *nouns* about
 //! a peer session on the SAME host, over a self-asserted-local trust boundary
 //! (`same_host_loopback_v1`): identity is taken on the caller's word, and the
-//! surface is strictly advisory/read-only. S1 whitelists exactly ONE noun —
-//! `presence` — read from this daemon's own `session_claims` rows. Every other
-//! noun (including the future `outcomes`/`sticky`/`handoff`) is DENIED, never
-//! silently routed (sol invariant 2).
+//! surface is strictly advisory/read-only. Every noun not on the whitelist
+//! below is DENIED, never silently routed (sol invariant 2).
+//!
+//! ## v1 whitelist (owner ruling 2026-07-17, "observe-only v1 of the
+//! `tachi_peer` facade")
+//!
+//! - `presence` (S1, #1049) — claims-table heartbeat board.
+//! - `run` (this leaf) — resolves `target_session_client` to its active
+//!   claim's `dispatch_id`, then reads that dispatch's run-dir
+//!   `status.json` (the same safe projection `board`/`task_facade` already
+//!   expose for a known dispatch_id — this noun only adds the
+//!   session_client → dispatch_id resolution step) and tails its
+//!   `progress.jsonl` as the "recent event ledger" the ruling asks for.
+//!   Requires `target_session_client` — this noun addresses one specific
+//!   peer, it is not a board scan. **`progress.jsonl` is NOT safe-by-source**
+//!   (some writers append raw ACP message/thinking text or subprocess
+//!   output-tails to it, see [`project_progress_event`]) — the tail is only
+//!   safe because it is run through a strict allowlist projection before it
+//!   ever leaves this process, not because of anything about the file itself.
+//!
+//! ## Deliberately NOT implemented in this leaf (flagged, not guessed)
+//!
+//! The ruling also names `checkpoint` and a generic "event ledger" reader.
+//! Both hit the same structural gap on inspection: `session_claims` carries
+//! no `project` field, checkpoint memory rows (`tachi_memory(action=
+//! 'checkpoint')`) and `tachi_events` rows are BOTH project-routed (may live
+//! in a per-project DB this daemon's `PeerPublicationRead::open_global`
+//! cannot see — `event_ops::emit_event`'s `server.event_db_route(project)`),
+//! and neither carries a `session_client`/`dispatch_id` correlator to resolve
+//! "which project/rows belong to this peer" from a `target_session_client`
+//! alone. Guessing "the caller's own current project" would risk leaking a
+//! different project's checkpoints/events across the peer boundary — the
+//! opposite of fail-closed. Landing this without a real correlator is out of
+//! scope for this leaf; the `PeerNoun` whitelist below denies both nouns
+//! rather than routing them through an unsafe guess.
 //!
 //! ## The read is structurally read-only, not read-only by convention
 //!
@@ -42,21 +73,29 @@ use tachi_params::PeerQueryParams;
 /// The peer-publication response contract this module emits.
 const PEER_PUBLICATION_CONTRACT: &str = "peer-publication/v1";
 
-/// The exhaustive S1 noun whitelist (sol invariant 2). Adding a variant here
+/// Cap on how many trailing `progress.jsonl` lines a `run` read surfaces as
+/// "recent events" — mirrors [`claims_ops`]'s `PRESENCE_BOARD_DISPLAY_CAP`
+/// idiom (bounded advisory tail, not an unbounded dump).
+const RECENT_EVENTS_DISPLAY_CAP: usize = 20;
+
+/// The exhaustive noun whitelist (sol invariant 2). Adding a variant here
 /// is the ONLY way to make a new noun routable — an unlisted noun can never be
 /// answered, only `denied`.
 enum PeerNoun {
     Presence,
+    Run,
 }
 
 impl PeerNoun {
     /// Parse a caller-supplied noun against the exhaustive whitelist. Returns
     /// `None` for ANY value outside the whitelist (`outcomes`, `sticky`,
-    /// `handoff`, `memories`, …) — the caller turns `None` into a `denied`
-    /// response.
+    /// `handoff`, `checkpoint`, `events`, `memories`, …) — the caller turns
+    /// `None` into a `denied` response. `checkpoint`/`events` are deliberately
+    /// absent — see the module doc's "Deliberately NOT implemented" section.
     fn parse(raw: &str) -> Option<Self> {
         match raw {
             "presence" => Some(PeerNoun::Presence),
+            "run" => Some(PeerNoun::Run),
             _ => None,
         }
     }
@@ -122,6 +161,40 @@ impl PeerPublicationRead {
         Ok(project_peer_presence(&candidates, now_render, ttl_seconds))
     }
 
+    /// Resolve `target`'s (session_client) most-recently-heartbeated ACTIVE
+    /// claim to its `dispatch_id`, through the same single read-only
+    /// transaction / snapshot-clock discipline as [`Self::read_presence`].
+    ///
+    /// Returns `Ok(None)` — never a fabricated id — when `target` has no live
+    /// claim, or its live claim(s) carry no `dispatch_id` (a claim made
+    /// through the manual `claim`/`release` facade actions, never through
+    /// `tachi_dispatch`, legitimately has none). The caller must present this
+    /// as `empty`, not `unavailable` (sol invariant 3: the source WAS read
+    /// successfully, there is just nothing to report).
+    fn resolve_active_dispatch_id(
+        &self,
+        target: &str,
+        now_query: DateTime<Utc>,
+        ttl_seconds: i64,
+    ) -> Result<Option<String>, String> {
+        let conn = self.store.connection();
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let now_iso = now_query.to_rfc3339();
+        let candidates =
+            memcore::list_active_claims(&tx, &now_iso, ttl_seconds).map_err(|e| e.to_string())?;
+        drop(tx);
+
+        // `list_active_claims` orders newest-heartbeat-first (see
+        // `project_peer_presence`'s doc comment), so the first match carrying
+        // a dispatch_id is the freshest.
+        Ok(candidates
+            .into_iter()
+            .find(|claim| {
+                claim.session_client.as_deref() == Some(target) && claim.dispatch_id.is_some()
+            })
+            .and_then(|claim| claim.dispatch_id))
+    }
+
     /// Test-only: attempt a raw write through the held connection to PROVE it is
     /// structurally read-only (the write must fail at the SQLite layer, and an
     /// independent read-write connection must observe the table unchanged).
@@ -139,6 +212,185 @@ enum PresenceOutcome {
     Unavailable(String),
 }
 
+/// One of `run`'s two run-dir sub-sources (`status.json`, `progress.jsonl`
+/// tail), read independently — one can succeed while the other is
+/// unavailable, and that must stay visible rather than collapsing to a single
+/// pass/fail bit (sol invariant 3, applied per-source).
+enum RunSourceOutcome {
+    Ok(serde_json::Value),
+    Unavailable(String),
+}
+
+/// Outcome of a `noun=run` read for one `target`.
+enum RunOutcome {
+    /// The claims source itself (the addressing step) could not be read.
+    ClaimsUnavailable(String),
+    /// The claims source WAS read; `target` simply has no active claim
+    /// carrying a `dispatch_id` right now. Never fabricated — `empty`, not
+    /// `unavailable` (sol invariant 3).
+    NoActiveDispatch,
+    /// A `dispatch_id` was resolved; its run-dir sources were (independently)
+    /// attempted.
+    Found {
+        dispatch_id: String,
+        status: RunSourceOutcome,
+        recent_events: RunSourceOutcome,
+    },
+}
+
+/// The ONLY keys a `run` noun's progress tail may ever surface (fix-round,
+/// codex `codex-e0a3c` finding D). The module doc's original claim —
+/// `progress.jsonl` carries "never raw prompt/transcript content" — does not
+/// hold structurally: `acp_native/connection.rs`'s `acp_native_message`
+/// events, `acpx/events.rs`'s `acpx_message` events, and
+/// `dispatch/execution.rs`'s `subprocess_finished.output_tail` all append
+/// raw ACP message/thinking text or subprocess stdout to this SAME file.
+/// This projection is a strict ALLOWLIST, not a denylist of known-bad keys —
+/// any key not in this list (`text`, `acp_event`, `acpx_event`, `agent`,
+/// `output_tail`, `tachi_target`, …), from any current or future writer, is
+/// dropped before the line ever leaves this process. This is the identical
+/// trust posture the module doc already claims for `status.json`'s own
+/// fields (advisory projection, never a transcript).
+const PROGRESS_EVENT_PROJECTION_KEYS: &[&str] = &["event", "timestamp", "status", "dispatch_id"];
+
+/// Project one already-parsed progress-line JSON object down to
+/// [`PROGRESS_EVENT_PROJECTION_KEYS`]. Returns `None` for a line that did not
+/// parse to a JSON object at all (the fallback `raw_text` shape some writers
+/// emit on unparseable subprocess output) — treated as malformed by the
+/// caller, never smuggled through as an opaque non-object array element.
+fn project_progress_event(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let obj = value.as_object()?;
+    let mut projected = serde_json::Map::new();
+    for key in PROGRESS_EVENT_PROJECTION_KEYS {
+        if let Some(v) = obj.get(*key) {
+            projected.insert((*key).to_string(), v.clone());
+        }
+    }
+    Some(serde_json::Value::Object(projected))
+}
+
+/// Read `run_dir/progress.jsonl`'s trailing [`RECENT_EVENTS_DISPLAY_CAP`]
+/// lines as the "recent event ledger" the #1016 v1 ruling asks for, projected
+/// through [`project_progress_event`] so only the safe advisory subset ever
+/// crosses the peer boundary. A line that fails to parse as JSON, or parses
+/// but isn't a JSON object, is skipped from the tail AND logged via
+/// `tracing::warn!` — visible in daemon logs rather than silently vanishing,
+/// even though the best-effort tail itself stays lenient (one corrupt line
+/// must not sink the whole read).
+fn read_recent_progress_events(status: &serde_json::Value) -> RunSourceOutcome {
+    let Some(run_dir) = status.get("run_dir").and_then(serde_json::Value::as_str) else {
+        return RunSourceOutcome::Unavailable(
+            "run status projection carried no run_dir".to_string(),
+        );
+    };
+    let progress_path = std::path::Path::new(run_dir).join("progress.jsonl");
+    let raw = match std::fs::read_to_string(&progress_path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            return RunSourceOutcome::Unavailable(format!(
+                "read {}: {err}",
+                progress_path.display()
+            ))
+        }
+    };
+    // Newest-first while capping, then restore chronological (oldest-first)
+    // order — the same shape a caller reading the raw file top-to-bottom
+    // would see for its trailing window.
+    let mut tail: Vec<serde_json::Value> = raw
+        .lines()
+        .rev()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let parsed = match serde_json::from_str::<serde_json::Value>(trimmed) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %progress_path.display(),
+                        error = %err,
+                        "peer_query noun=run: skipping malformed progress.jsonl line"
+                    );
+                    return None;
+                }
+            };
+            let Some(projected) = project_progress_event(&parsed) else {
+                tracing::warn!(
+                    path = %progress_path.display(),
+                    "peer_query noun=run: skipping non-object progress.jsonl line"
+                );
+                return None;
+            };
+            Some(projected)
+        })
+        .take(RECENT_EVENTS_DISPLAY_CAP)
+        .collect();
+    tail.reverse();
+    RunSourceOutcome::Ok(serde_json::Value::Array(tail))
+}
+
+/// `noun=run` entry point: resolve `target` to a `dispatch_id` through the
+/// claims source, then independently read that dispatch's `status.json` (via
+/// the SAME safe projection `board`/`task_facade` already expose for a known
+/// dispatch_id — this only adds the session_client resolution step) and
+/// `progress.jsonl` tail.
+fn read_run(
+    server: &MemoryServer,
+    target: &str,
+    now_query: DateTime<Utc>,
+    ttl_seconds: i64,
+) -> RunOutcome {
+    let read = match PeerPublicationRead::open_global(server) {
+        Ok(read) => read,
+        Err(err) => return RunOutcome::ClaimsUnavailable(err),
+    };
+    let dispatch_id = match read.resolve_active_dispatch_id(target, now_query, ttl_seconds) {
+        Ok(Some(id)) => id,
+        Ok(None) => return RunOutcome::NoActiveDispatch,
+        Err(err) => return RunOutcome::ClaimsUnavailable(err),
+    };
+    let status = match crate::dispatch_ops::collect_run_task_for_server(server, &dispatch_id) {
+        Some(value) => RunSourceOutcome::Ok(value),
+        None => RunSourceOutcome::Unavailable(format!(
+            "run_dir/status.json not found for dispatch_id {dispatch_id}"
+        )),
+    };
+    let recent_events = match &status {
+        RunSourceOutcome::Ok(value) => read_recent_progress_events(value),
+        RunSourceOutcome::Unavailable(_) => {
+            RunSourceOutcome::Unavailable("run status unreadable; progress not attempted".into())
+        }
+    };
+    RunOutcome::Found {
+        dispatch_id,
+        status,
+        recent_events,
+    }
+}
+
+/// Advisory "how to actually get a reply" pointer, attached to every `run`
+/// answer that has a `target`. MCP is client→server — nothing here can
+/// interrupt a live peer turn, so the only honest answer mechanism is the
+/// EXISTING sticky facade (#964), used as-is (this noun does not own sticky
+/// CAS or reimplement it). Deliberately hedged: the peer-addressing spine
+/// (`session_client`) and sticky's own `to`/seat identity chain
+/// (`sticky_ops::identity::resolve_caller_agent_id`) are NOT yet unified —
+/// asserting `to=<session_client>` always resolves the same seat would be
+/// overclaiming a linkage that doesn't exist yet.
+fn turn_boundary_callback(target: &str) -> serde_json::Value {
+    serde_json::json!({
+        "mechanism": "tachi_memory(action='sticky_leave', to=<peer's agent seat>)",
+        "note": format!(
+            "peers only answer at their own turn boundary (MCP is client->server, \
+             never interrupt-capable); leave a sticky note for an async reply. \
+             session_client ('{target}') and sticky's seat identity are separate \
+             addressing spaces today — resolve the peer's seat name if you don't \
+             already know it (#1016 follow-up unifies them)."
+        ),
+    })
+}
+
 /// `peer_query` entry point. Never fails the tool call: every failure mode
 /// (denied noun, unreadable source) is a structured envelope, not an `Err`.
 pub(crate) fn handle_peer_query(
@@ -154,8 +406,8 @@ pub(crate) fn handle_peer_query(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    // sol invariant 2: exhaustive noun whitelist — anything but `presence` is
-    // denied before any source is touched.
+    // sol invariant 2: exhaustive noun whitelist — anything not on the
+    // whitelist is denied before any source is touched.
     let noun = params.noun.trim().to_ascii_lowercase();
     let envelope = match PeerNoun::parse(&noun) {
         None => {
@@ -179,6 +431,16 @@ pub(crate) fn handle_peer_query(
                 Err(err) => PresenceOutcome::Unavailable(err),
             };
             presence_envelope(target.as_deref(), &snapshot_at, &answered_at, outcome)
+        }
+        Some(PeerNoun::Run) => {
+            let answered_at = Utc::now().to_rfc3339();
+            match target.as_deref() {
+                None => target_required_envelope(&noun, &snapshot_at, &answered_at),
+                Some(t) => {
+                    let outcome = read_run(server, t, now_query, CLAIM_TTL_SECONDS);
+                    run_envelope(t, &snapshot_at, &answered_at, outcome)
+                }
+            }
         }
     };
 
@@ -218,10 +480,143 @@ fn denied_envelope(
             "noun": noun,
             "code": "noun_not_whitelisted",
             "message": format!(
-                "peer_query noun '{noun}' is not routable in S1; the exhaustive whitelist is: presence"
+                "peer_query noun '{noun}' is not routable; the exhaustive whitelist is: presence, run"
             ),
         } ],
     })
+}
+
+/// A `denied` envelope specific to a noun that requires `target_session_client`
+/// (it addresses one specific peer, not a board scan) when the caller omitted
+/// it. Distinct error code from `noun_not_whitelisted` — the noun IS routable,
+/// the call is just missing the addressing field it needs.
+fn target_required_envelope(noun: &str, snapshot_at: &str, answered_at: &str) -> serde_json::Value {
+    serde_json::json!({
+        "contract": PEER_PUBLICATION_CONTRACT,
+        "status": "denied",
+        "target": target_block(None),
+        "snapshot": {
+            "snapshot_at": snapshot_at,
+            "answered_at": answered_at,
+            "sources": [],
+        },
+        "result": {},
+        "errors": [ {
+            "noun": noun,
+            "code": "target_required",
+            "message": format!(
+                "peer_query noun '{noun}' requires target_session_client — it addresses one specific peer, not a board scan"
+            ),
+        } ],
+    })
+}
+
+/// A `run` envelope: resolves `target` to a `dispatch_id` via the claims
+/// source, then reads that dispatch's `status.json`/`progress.jsonl`
+/// independently. Overall `status` mirrors the `run_status` source
+/// specifically (an unreadable `progress` tail alone does not flip the whole
+/// answer to `unreachable` — it is a secondary, independently-reported
+/// source, same idiom as presence's `expired_during_render` staying visible
+/// rather than collapsing the whole board).
+fn run_envelope(
+    target: &str,
+    snapshot_at: &str,
+    answered_at: &str,
+    outcome: RunOutcome,
+) -> serde_json::Value {
+    match outcome {
+        RunOutcome::ClaimsUnavailable(err) => serde_json::json!({
+            "contract": PEER_PUBLICATION_CONTRACT,
+            "status": "unreachable",
+            "target": target_block(Some(target)),
+            "snapshot": {
+                "snapshot_at": snapshot_at,
+                "answered_at": answered_at,
+                "sources": [ { "name": "claims", "state": "unavailable", "as_of": serde_json::Value::Null } ],
+            },
+            "result": {},
+            "errors": [ {
+                "name": "claims",
+                "code": "source_unavailable",
+                "message": err,
+            } ],
+        }),
+        RunOutcome::NoActiveDispatch => serde_json::json!({
+            "contract": PEER_PUBLICATION_CONTRACT,
+            "status": "ok",
+            "target": target_block(Some(target)),
+            "snapshot": {
+                "snapshot_at": snapshot_at,
+                "answered_at": answered_at,
+                "sources": [ { "name": "claims", "state": "empty", "as_of": serde_json::Value::Null } ],
+            },
+            "result": {
+                "dispatch_id": serde_json::Value::Null,
+                "status": serde_json::Value::Null,
+                "recent_events": serde_json::Value::Null,
+            },
+            "errors": [],
+            "turn_boundary_callback": turn_boundary_callback(target),
+        }),
+        RunOutcome::Found {
+            dispatch_id,
+            status,
+            recent_events,
+        } => {
+            let (status_state, status_value, status_err) = match status {
+                RunSourceOutcome::Ok(value) => ("ok", Some(value), None),
+                RunSourceOutcome::Unavailable(err) => ("unavailable", None, Some(err)),
+            };
+            let (events_state, events_value, events_err) = match recent_events {
+                RunSourceOutcome::Ok(value) => {
+                    let is_empty = value.as_array().map(Vec::is_empty).unwrap_or(true);
+                    (if is_empty { "empty" } else { "ok" }, Some(value), None)
+                }
+                RunSourceOutcome::Unavailable(err) => ("unavailable", None, Some(err)),
+            };
+            let overall_status = if status_state == "unavailable" {
+                "unreachable"
+            } else {
+                "ok"
+            };
+            let mut errors = Vec::new();
+            if let Some(err) = status_err {
+                errors.push(serde_json::json!({
+                    "name": "run_status",
+                    "code": "source_unavailable",
+                    "message": err,
+                }));
+            }
+            if let Some(err) = events_err {
+                errors.push(serde_json::json!({
+                    "name": "progress",
+                    "code": "source_unavailable",
+                    "message": err,
+                }));
+            }
+            serde_json::json!({
+                "contract": PEER_PUBLICATION_CONTRACT,
+                "status": overall_status,
+                "target": target_block(Some(target)),
+                "snapshot": {
+                    "snapshot_at": snapshot_at,
+                    "answered_at": answered_at,
+                    "sources": [
+                        { "name": "claims", "state": "ok", "as_of": serde_json::Value::Null },
+                        { "name": "run_status", "state": status_state, "as_of": serde_json::Value::Null },
+                        { "name": "progress", "state": events_state, "as_of": serde_json::Value::Null },
+                    ],
+                },
+                "result": {
+                    "dispatch_id": dispatch_id,
+                    "status": status_value,
+                    "recent_events": events_value,
+                },
+                "errors": errors,
+                "turn_boundary_callback": turn_boundary_callback(target),
+            })
+        }
+    }
 }
 
 /// A presence envelope. `ok`/`empty` only when the source was actually read;
@@ -348,6 +743,7 @@ mod tests {
         "outcomes",
         "sticky",
         "handoff",
+        "checkpoint",
     ];
 
     fn assert_no_forbidden_keys(envelope: &serde_json::Value) {
@@ -650,5 +1046,367 @@ mod tests {
             one.board["items"][0]["session_client"], "codex",
             "the narrowed row is the requested seat"
         );
+    }
+
+    // ── noun=run: target-required, empty vs unavailable, real read ───────────
+
+    /// Build a `MemoryServer` whose global DB lives at
+    /// `<tmp>/global/memory.db` — the exact shape `runs_dir_for_server`
+    /// special-cases to resolve `<tmp>/runs` as the dispatch run-dir root
+    /// (`dispatch_ops::board::paths::runs_dir_for_server`), so a dispatch_id
+    /// resolved through this server's claims table can be paired with a real
+    /// `runs/<dispatch_id>/status.json` on disk.
+    fn run_test_server(tmp: &std::path::Path) -> crate::MemoryServer {
+        let global_db = tmp.join("global").join("memory.db");
+        crate::MemoryServer::new(global_db, None).expect("test memory server")
+    }
+
+    #[test]
+    fn run_noun_without_target_is_target_required_not_noun_not_whitelisted() {
+        // On origin/main (no `run` variant) this same call returns `denied` /
+        // `noun_not_whitelisted` (the noun itself isn't parsed). Post-fix it
+        // parses fine and is denied for a DIFFERENT, more specific reason —
+        // a real behavioral flip through the actual `handle_peer_query` entry
+        // point, not a compile-time difference.
+        let dir = tempfile::tempdir().unwrap();
+        let server = run_test_server(dir.path());
+        let body = handle_peer_query(
+            &server,
+            PeerQueryParams {
+                target_session_client: None,
+                noun: "run".to_string(),
+            },
+        )
+        .unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(envelope["status"], "denied");
+        assert_eq!(envelope["errors"][0]["code"], "target_required");
+        assert_no_forbidden_keys(&envelope);
+    }
+
+    #[test]
+    fn run_noun_with_no_active_claim_is_empty_not_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = run_test_server(dir.path());
+        // No claim seeded at all for "codex".
+        let body = handle_peer_query(
+            &server,
+            PeerQueryParams {
+                target_session_client: Some("codex".to_string()),
+                noun: "run".to_string(),
+            },
+        )
+        .unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(envelope["status"], "ok");
+        assert_eq!(envelope["snapshot"]["sources"][0]["name"], "claims");
+        assert_eq!(envelope["snapshot"]["sources"][0]["state"], "empty");
+        assert_eq!(envelope["result"]["dispatch_id"], serde_json::Value::Null);
+        assert!(
+            envelope["turn_boundary_callback"]["mechanism"]
+                .as_str()
+                .unwrap()
+                .contains("sticky_leave"),
+            "no-active-dispatch answer must still point at the sticky callback: {envelope}"
+        );
+        assert_no_forbidden_keys(&envelope);
+    }
+
+    #[test]
+    fn run_noun_resolves_dispatch_id_and_reads_status_and_progress_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_db = dir.path().join("global").join("memory.db");
+        let server = crate::MemoryServer::new(global_db.clone(), None).expect("server");
+
+        // Seed an active claim carrying a dispatch_id for "codex".
+        {
+            let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).unwrap();
+            memcore::insert_claim(
+                store.connection(),
+                &memcore::NewSessionClaim {
+                    claim_id: "claim-run-1".to_string(),
+                    session_client: Some("codex".to_string()),
+                    issue_ref: Some("org/repo#1".to_string()),
+                    flow_id: None,
+                    dispatch_id: Some("d-run-123".to_string()),
+                    branch: "feat/x".to_string(),
+                    declared_file_scope: None,
+                    created_at: Utc::now().to_rfc3339(),
+                },
+            )
+            .unwrap();
+        }
+
+        // Write a real run-dir: <tmp>/runs/d-run-123/{status.json,progress.jsonl}
+        let run_dir = dir.path().join("runs").join("d-run-123");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::json!({
+                "dispatch_id": "d-run-123",
+                "task": "fix the thing",
+                "agent": "codex",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            run_dir.join("progress.jsonl"),
+            "{\"event\":\"a\",\"timestamp\":\"t1\"}\n\
+             {\"event\":\"b\",\"timestamp\":\"t2\"}\n\
+             {\"event\":\"c\",\"timestamp\":\"t3\"}\n",
+        )
+        .unwrap();
+
+        let body = handle_peer_query(
+            &server,
+            PeerQueryParams {
+                target_session_client: Some("codex".to_string()),
+                noun: "run".to_string(),
+            },
+        )
+        .unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(envelope["status"], "ok", "envelope: {envelope}");
+        assert_eq!(envelope["result"]["dispatch_id"], "d-run-123");
+        assert_eq!(
+            envelope["result"]["status"]["dispatch_id"], "d-run-123",
+            "run_status projection must carry through: {envelope}"
+        );
+        let events = envelope["result"]["recent_events"].as_array().unwrap();
+        assert_eq!(
+            events.len(),
+            3,
+            "all three progress lines fit under the cap"
+        );
+        assert_eq!(events[0]["event"], "a");
+        assert_eq!(events[2]["event"], "c");
+        assert_no_forbidden_keys(&envelope);
+    }
+
+    #[test]
+    fn run_noun_missing_run_dir_is_unreachable_for_run_status_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_db = dir.path().join("global").join("memory.db");
+        let server = crate::MemoryServer::new(global_db.clone(), None).expect("server");
+        {
+            let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).unwrap();
+            memcore::insert_claim(
+                store.connection(),
+                &memcore::NewSessionClaim {
+                    claim_id: "claim-run-2".to_string(),
+                    session_client: Some("codex".to_string()),
+                    issue_ref: Some("org/repo#2".to_string()),
+                    flow_id: None,
+                    dispatch_id: Some("d-missing-456".to_string()),
+                    branch: "feat/y".to_string(),
+                    declared_file_scope: None,
+                    created_at: Utc::now().to_rfc3339(),
+                },
+            )
+            .unwrap();
+        }
+        // No run_dir written on disk for d-missing-456.
+
+        let body = handle_peer_query(
+            &server,
+            PeerQueryParams {
+                target_session_client: Some("codex".to_string()),
+                noun: "run".to_string(),
+            },
+        )
+        .unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(envelope["status"], "unreachable", "envelope: {envelope}");
+        let sources = envelope["snapshot"]["sources"].as_array().unwrap();
+        let run_status_source = sources
+            .iter()
+            .find(|s| s["name"] == "run_status")
+            .expect("run_status source listed");
+        assert_eq!(run_status_source["state"], "unavailable");
+        assert!(
+            !envelope["errors"].as_array().unwrap().is_empty(),
+            "an unreadable run_status source must carry an explaining error: {envelope}"
+        );
+        assert_no_forbidden_keys(&envelope);
+    }
+
+    // ── fix-round (codex `codex-e0a3c` finding D): the tail must never leak
+    // raw ACP message/thinking text or subprocess output through as a
+    // "recent event" ──────────────────────────────────────────────────────
+
+    #[test]
+    fn run_noun_progress_tail_strips_raw_text_and_backend_metadata() {
+        // RED before this fix-round's `project_progress_event` allowlist:
+        // `read_recent_progress_events` used to pass every parsed JSON
+        // object through verbatim, so a line shaped like a real
+        // `acp_native_message`/`acpx_message`/`subprocess_finished` write
+        // (raw agent text under `text`/`output_tail`, plus vendor metadata
+        // like `acp_event`/`agent`/`tachi_target`) would have reached the
+        // peer-publication envelope unfiltered. GREEN after: only
+        // `event`/`timestamp`/`status`/`dispatch_id` survive the tail.
+        const SECRET_TEXT: &str = "reasoning-about-the-vault-passphrase-do-not-leak-this";
+
+        let dir = tempfile::tempdir().unwrap();
+        let global_db = dir.path().join("global").join("memory.db");
+        let server = crate::MemoryServer::new(global_db.clone(), None).expect("server");
+        {
+            let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).unwrap();
+            memcore::insert_claim(
+                store.connection(),
+                &memcore::NewSessionClaim {
+                    claim_id: "claim-run-3".to_string(),
+                    session_client: Some("codex".to_string()),
+                    issue_ref: Some("org/repo#3".to_string()),
+                    flow_id: None,
+                    dispatch_id: Some("d-run-789".to_string()),
+                    branch: "feat/z".to_string(),
+                    declared_file_scope: None,
+                    created_at: Utc::now().to_rfc3339(),
+                },
+            )
+            .unwrap();
+        }
+
+        let run_dir = dir.path().join("runs").join("d-run-789");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::json!({ "dispatch_id": "d-run-789", "agent": "codex" }).to_string(),
+        )
+        .unwrap();
+        // A real `acp_native_message`-shaped line (see `connection.rs`'s
+        // `append_mapped_event`) plus a `subprocess_finished`-shaped line
+        // (see `execution.rs`) — both real writers that append raw content
+        // to THIS file, not a synthetic worst case.
+        let acp_message_line = serde_json::json!({
+            "event": "acp_native_message",
+            "dispatch_id": "d-run-789",
+            "agent": "codex",
+            "acp_event": "session/update",
+            "text": SECRET_TEXT,
+            "status": "ok",
+            "timestamp": "t1",
+        });
+        let subprocess_line = serde_json::json!({
+            "event": "subprocess_finished",
+            "dispatch_id": "d-run-789",
+            "agent": "codex",
+            "exit_code": 0,
+            "output_tail": SECRET_TEXT,
+            "timestamp": "t2",
+        });
+        std::fs::write(
+            run_dir.join("progress.jsonl"),
+            format!("{}\n{}\n", acp_message_line, subprocess_line),
+        )
+        .unwrap();
+
+        let body = handle_peer_query(
+            &server,
+            PeerQueryParams {
+                target_session_client: Some("codex".to_string()),
+                noun: "run".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            !body.contains(SECRET_TEXT),
+            "peer_query run tail leaked raw progress content into the envelope: {body}"
+        );
+
+        let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(envelope["status"], "ok", "envelope: {envelope}");
+        let events = envelope["result"]["recent_events"].as_array().unwrap();
+        assert_eq!(events.len(), 2, "both lines survive the tail: {envelope}");
+        for event in events {
+            let obj = event.as_object().expect("projected event is an object");
+            for key in obj.keys() {
+                assert!(
+                    PROGRESS_EVENT_PROJECTION_KEYS.contains(&key.as_str()),
+                    "progress tail leaked a non-allowlisted key '{key}': {envelope}"
+                );
+            }
+        }
+        assert_eq!(events[0]["event"], "acp_native_message");
+        assert_eq!(events[0]["dispatch_id"], "d-run-789");
+        assert_eq!(events[1]["event"], "subprocess_finished");
+        assert_no_forbidden_keys(&envelope);
+    }
+
+    #[test]
+    fn run_noun_progress_tail_logs_and_skips_malformed_line_without_faking_empty() {
+        // A single malformed line surrounded by valid ones must be dropped
+        // from the tail (never surfaced as a fabricated event) while the
+        // valid neighbors still come through — malformed-but-not-alone must
+        // not collapse the whole tail to `empty`.
+        let dir = tempfile::tempdir().unwrap();
+        let global_db = dir.path().join("global").join("memory.db");
+        let server = crate::MemoryServer::new(global_db.clone(), None).expect("server");
+        {
+            let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).unwrap();
+            memcore::insert_claim(
+                store.connection(),
+                &memcore::NewSessionClaim {
+                    claim_id: "claim-run-4".to_string(),
+                    session_client: Some("codex".to_string()),
+                    issue_ref: Some("org/repo#4".to_string()),
+                    flow_id: None,
+                    dispatch_id: Some("d-run-999".to_string()),
+                    branch: "feat/w".to_string(),
+                    declared_file_scope: None,
+                    created_at: Utc::now().to_rfc3339(),
+                },
+            )
+            .unwrap();
+        }
+        let run_dir = dir.path().join("runs").join("d-run-999");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::json!({ "dispatch_id": "d-run-999" }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            run_dir.join("progress.jsonl"),
+            "{\"event\":\"a\",\"timestamp\":\"t1\"}\n\
+             not-json-at-all\n\
+             {\"event\":\"b\",\"timestamp\":\"t2\"}\n",
+        )
+        .unwrap();
+
+        let body = handle_peer_query(
+            &server,
+            PeerQueryParams {
+                target_session_client: Some("codex".to_string()),
+                noun: "run".to_string(),
+            },
+        )
+        .unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let events = envelope["result"]["recent_events"].as_array().unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "the malformed line is skipped, not fabricated into the tail: {envelope}"
+        );
+        assert_eq!(events[0]["event"], "a");
+        assert_eq!(events[1]["event"], "b");
+    }
+
+    #[test]
+    fn checkpoint_and_events_nouns_remain_denied() {
+        // NOTE: this is a regression guard for the deliberate #1016 leaf gap
+        // (module doc), not a discriminating test for THIS PR — `checkpoint`
+        // and `events` were never routable on origin/main either (S1's
+        // whitelist was `presence`-only), so this assertion is baseline-green
+        // before and after this leaf. It stays because it pins the intended
+        // invariant (both hit a project-routing / missing-correlator wall on
+        // inspection and are NOT routed rather than guessed), not because it
+        // proves anything new landed here.
+        assert!(PeerNoun::parse("checkpoint").is_none());
+        assert!(PeerNoun::parse("events").is_none());
+        assert!(PeerNoun::parse("event_ledger").is_none());
     }
 }
