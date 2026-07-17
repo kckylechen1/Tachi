@@ -1809,14 +1809,18 @@ pub(crate) struct ReclaimedReport {
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct ReapReport {
     pub(crate) action: &'static str,
-    /// **`false`, always, today.** The delete path is refused ([`certify_destructive`]),
-    /// so this is a *preview of what a certified reaper would do* — not a record of what
-    /// a trusted one did. It rides in the report, and in the JSON, because the number
-    /// this report hands an operator ("61 GB reclaimable") is worth exactly as much as
-    /// the fences behind it, and those fences are known-broken ([`BLOCKING_DEFECTS`]).
+    /// **`true` as of #1062** (owner-ratified 1A, 2026-07-17: the kill-test matrix was
+    /// executed and its receipt checked in — see [`DESTRUCTIVE_CERTIFIED`]). Mirrors
+    /// [`DESTRUCTIVE_CERTIFIED`] into every report so a reader never has to go check the
+    /// constant to know whether a `--force` request on this build can act — and, on a
+    /// `dry_run` report, whether `reclaimable_bytes` is a preview of what a certified
+    /// reaper would do or a record of what an UNcertified one would have been forbidden
+    /// to. Was hard-coded documentation of `false` before the flip; kept a plain mirror
+    /// of the const now rather than re-describing it, so it cannot go stale again.
     pub(crate) destructive_certified: bool,
-    /// The defects that keep [`Self::destructive_certified`] false — verbatim, in every
-    /// report, so nobody has to go and find the audit to learn why the knife is sheathed.
+    /// The audit's defects, verbatim, in every report — a historical record of what the
+    /// certification closed ([`BLOCKING_AUDIT`]), not a live blocking condition now that
+    /// [`Self::destructive_certified`] reads `true`.
     pub(crate) blocking_defects: Vec<String>,
     pub(crate) roots: Vec<String>,
     /// What the run refused to look at, so an operator can *see* that the live
@@ -3705,8 +3709,14 @@ mod tests {
             "the report must say how many bytes are dead: {report:?}"
         );
         assert!(report.reclaimable_bytes > 0);
-        // ...and it must say the knife is sheathed, so nobody reads the number as a deed.
-        assert!(!report.destructive_certified);
+        // #1062: the knife is certified now (receipt checked in, owner-ratified 1A,
+        // 2026-07-17) — but `dry_run` (checked above) is a SEPARATE property from
+        // certification, and this is the property this test exists to pin: a
+        // report-only request (`force: false`) deletes nothing and books nothing
+        // REGARDLESS of whether the destructive path is certified. Was
+        // `assert!(!report.destructive_certified)` pre-#1062; flipped to match the
+        // now-true constant, the dry-run assertions above and below are unchanged.
+        assert!(report.destructive_certified);
         assert!(!report.blocking_defects.is_empty());
         // The bytes are still on disk...
         assert!(dead.join("debug/artifact.rlib").exists());
@@ -4675,10 +4685,19 @@ mod tests {
         }
     }
 
-    /// The report says the knife is sheathed, so a reader cannot mistake
-    /// `reclaimable_bytes` for bytes that were freed.
+    /// The report says whether the knife is certified, so a reader cannot mistake
+    /// `reclaimable_bytes` for bytes that were freed just because certification
+    /// flipped. Renamed from `the_report_declares_itself_uncertified`, which
+    /// pinned the pre-#1062 `false` reading — see git blame / #1062 for that
+    /// shape.
+    ///
+    /// A DRY RUN (`force: false`) still books nothing and frees nothing even
+    /// though the destructive path is now certified — `destructive_certified` and
+    /// `dry_run` are orthogonal fields, and this test's core property (a
+    /// report-only run reports, it does not act) is unchanged by the flip; only
+    /// the certification bit it now reads back is.
     #[test]
-    fn the_report_declares_itself_uncertified() {
+    fn the_report_declares_itself_certified() {
         let root = unique_temp_dir("tachi-reaper-declares");
         make_target_dir(&root, "dead-target");
         let mut store = open_store(&root);
@@ -4691,7 +4710,7 @@ mod tests {
         )
         .expect("a report-only run is never refused");
 
-        assert!(!report.destructive_certified);
+        assert!(report.destructive_certified);
         assert_eq!(report.blocking_defects.len(), BLOCKING_DEFECTS.len());
         assert_eq!(report.reclaimed_bytes, 0, "a report frees nothing");
         assert!(report.reclaimable_bytes > 0, "but it counts what is dead");
