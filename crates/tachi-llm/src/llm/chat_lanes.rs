@@ -3,3 +3,5 @@
 mod claude_cli;
 mod generators;
 mod lane_calls;
+
+pub use claude_cli::ReasoningOutcome;

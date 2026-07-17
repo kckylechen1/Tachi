@@ -14,6 +14,7 @@ mod helpers;
 mod provider_health;
 mod rerank;
 
+pub use chat_lanes::ReasoningOutcome;
 pub(crate) use circuit_breaker::CircuitBreakerRegistry;
 pub use provider_health::ProviderSecret;
 pub use provider_health::{ChatLaneConfig, ProviderRuntimeConfig};
