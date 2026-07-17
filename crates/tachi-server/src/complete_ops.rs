@@ -11,6 +11,7 @@ mod flow_link;
 mod handler;
 mod kanban;
 mod lessons;
+mod mirror_eval_projection;
 mod scrub;
 
 pub(crate) use handler::handle_tachi_complete;

@@ -169,14 +169,12 @@ pub(crate) fn validate_path_for_db(
     Ok(())
 }
 
-/// Build the canonical handoff path for an agent, defaulting to `/handoff/unknown`.
-pub fn standardize_handoff_path(agent_id: Option<&str>) -> String {
-    let id = agent_id
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("unknown");
-    format!("/handoff/{id}")
-}
+// #1099: `standardize_handoff_path` (the `/handoff/<agent_id>` path builder)
+// is retired — its only caller was `handoff_ops::memo::memo_to_memory_entry`
+// (the `handoff_leave` writer), which is gone. `/handoff` path
+// classification/validation below (`classify_path`, `validate_path_for_db`)
+// stays: legacy `/handoff/*` rows are retained read-only and must still
+// route/validate correctly.
 
 /// Build the canonical sticky path bucket for a `to` addressee, defaulting to
 /// `/sticky/broadcast` when `to` is absent (frozen semantics: absent `to`
@@ -303,16 +301,5 @@ mod tests {
     fn validate_allow_cross_project_bypass() {
         assert!(validate_path_for_db("/wiki/foo", "hapi", true).is_ok());
         assert!(validate_path_for_db("/foo/bar", "global", true).is_ok());
-    }
-
-    #[test]
-    fn standardize_handoff_path_defaults_unknown() {
-        assert_eq!(standardize_handoff_path(None), "/handoff/unknown");
-        assert_eq!(standardize_handoff_path(Some("")), "/handoff/unknown");
-        assert_eq!(standardize_handoff_path(Some("   ")), "/handoff/unknown");
-        assert_eq!(
-            standardize_handoff_path(Some("agent-x")),
-            "/handoff/agent-x"
-        );
     }
 }

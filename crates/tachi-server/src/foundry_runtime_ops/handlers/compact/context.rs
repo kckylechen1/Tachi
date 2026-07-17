@@ -4,25 +4,47 @@ use crate::server_state::MemoryServer;
 use crate::tool_params::CompactContextParams;
 use serde_json::{json, Value};
 
+/// #1099: `compact_context` never persists anything — it only drafts a
+/// compacted text block. `persist=true` used to return a nominal-success
+/// response (with two always-empty `captured_memory_ids`/`queued_job_ids`
+/// fields) plus a `persist_requested_but_deferred` warning that most callers
+/// never inspect. That shape lets a caller believe persistence happened when
+/// nothing was ever written — the forbidden "nominal success with no
+/// persistence" contract. Refuse loudly instead, before any compaction work
+/// runs, and point at the real persistence path.
+/// Public so the MCP facade (`tools/runtime_context_facade.rs`) can enforce
+/// this refusal before any daemon forwarding is attempted — persist=true must
+/// never reach a possibly-stale daemon, not just the in-process handler below.
+pub(crate) const PERSIST_REFUSAL: &str = "compact_context does not persist memories and never has \
+    (the response fields describing capture/queue ids were always empty placeholders). \
+    persist=true is refused. Call compact_session_memory to actually persist a compacted \
+    window, or omit persist / pass persist=false for a stateless compaction preview.";
+
 pub(crate) async fn handle_compact_context(
     server: &MemoryServer,
     params: CompactContextParams,
 ) -> Result<String, String> {
-    let combined_text = params
+    if params.persist {
+        return Err(PERSIST_REFUSAL.to_string());
+    }
+
+    // Only message *content* determines "is there anything to compact" —
+    // the formatted `"role: content"` label always contributes non-whitespace
+    // text (e.g. "user:"), so checking a role-prefixed combined string here
+    // was never actually empty for a non-empty `messages` list, no matter
+    // how blank the content was. That let whitespace-only messages fall
+    // through to a real model call instead of the intended short-circuit.
+    let has_content = params
         .messages
         .iter()
-        .map(|message| format!("{}: {}", message.role.trim(), message.content.trim()))
-        .collect::<Vec<_>>()
-        .join("\n");
+        .any(|message| !message.content.trim().is_empty());
 
-    if combined_text.trim().is_empty() {
+    if !has_content {
         return serde_json::to_string(&json!({
             "status": "skipped",
             "reason": "empty_messages",
             "compacted_text": "",
             "estimated_tokens": 0,
-            "captured_memory_ids": [],
-            "queued_job_ids": [],
         }))
         .map_err(|e| format!("Failed to serialize compact_context response: {e}"));
     }
@@ -60,8 +82,6 @@ pub(crate) async fn handle_compact_context(
                 "target_tokens": params.target_tokens.max(32),
                 "salient_topics": [],
                 "durable_signals": [],
-                "captured_memory_ids": [],
-                "queued_job_ids": [],
             }))
             .map_err(|e| format!("Failed to serialize compact_context response: {e}"));
         }
@@ -91,11 +111,6 @@ pub(crate) async fn handle_compact_context(
         "durable_signals".into(),
         json!(dedup_strings(draft.durable_signals)),
     );
-    response.insert("captured_memory_ids".into(), json!(Vec::<String>::new()));
-    response.insert("queued_job_ids".into(), json!(Vec::<String>::new()));
-    if params.persist {
-        response.insert("warning".into(), json!("persist_requested_but_deferred"));
-    }
 
     serde_json::to_string(&Value::Object(response))
         .map_err(|e| format!("Failed to serialize compact_context response: {e}"))

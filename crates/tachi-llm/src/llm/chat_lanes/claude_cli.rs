@@ -4,6 +4,23 @@ use super::super::provider_health::{
     ChatLane, ClaudeCliFailure, ClaudeCliFailureKind, ClaudeCliSkip, CLAUDE_CLI_FAILURE_COOLDOWN,
 };
 
+/// #1071 fix-round (checkpoints 5/6): honest engine-receipt signal for
+/// `ask`'s reasoning-lane synthesis. `used_fallback` is `true` whenever the
+/// answer did NOT come from the higher-quality Claude CLI path (either the
+/// CLI was skipped due to a recent-failure cooldown, or it failed and the
+/// HTTP reasoning lane served the request instead) — the prior
+/// `call_reasoning_llm` unconditionally reported `fallback: false` on any
+/// `Ok(_)`, which was true for the CLI path but dishonest for a lane
+/// fallback. `truncated` is `true` when the lane response's
+/// `finish_reason == "length"` (the Claude CLI path has no equivalent
+/// finish-reason signal to check, so `truncated` is always `false` there —
+/// a documented scope gap, not a fabricated guarantee).
+pub struct ReasoningOutcome {
+    pub text: String,
+    pub used_fallback: bool,
+    pub truncated: bool,
+}
+
 impl super::super::LlmClient {
     pub(in crate::llm) fn claude_cli_skip_at(&self, now: Instant) -> Option<ClaudeCliSkip> {
         let failure = self
@@ -56,6 +73,27 @@ impl super::super::LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
+        self.call_reasoning_llm_with_receipt(system, user, model, temperature, max_tokens)
+            .await
+            .map(|outcome| outcome.text)
+    }
+
+    /// Same reasoning-capability call as [`Self::call_reasoning_llm`], but
+    /// exposes whether the answer came from a fallback path and whether the
+    /// provider truncated its response — see [`ReasoningOutcome`]'s doc
+    /// comment for why (#1071 fix-round checkpoints 5/6). Added as a sibling
+    /// rather than widening `call_reasoning_llm`'s existing
+    /// `Result<String, String>` signature, which 3 other callers
+    /// (`daily_pipeline::routing`/`health`, `continuity_ops::pipeline`) use
+    /// and none of them need this receipt.
+    pub async fn call_reasoning_llm_with_receipt(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<ReasoningOutcome, String> {
         if let Some(skip) = self.claude_cli_skip() {
             tracing::debug!(
                 "skipping claude-cli reasoning after recent {} failure; retry in {}s",
@@ -71,7 +109,11 @@ impl super::super::LlmClient {
                         "reasoning via claude-cli succeeded ({} chars)",
                         response.len()
                     );
-                    return Ok(response);
+                    return Ok(ReasoningOutcome {
+                        text: response,
+                        used_fallback: false,
+                        truncated: false,
+                    });
                 }
                 Err(e) => {
                     self.record_claude_cli_failure(&e);
@@ -79,15 +121,21 @@ impl super::super::LlmClient {
                 }
             }
         }
-        self.call_lane_llm(
-            ChatLane::Reasoning,
-            system,
-            user,
-            model,
-            temperature,
-            max_tokens,
-        )
-        .await
+        let (text, truncated) = self
+            .call_lane_llm(
+                ChatLane::Reasoning,
+                system,
+                user,
+                model,
+                temperature,
+                max_tokens,
+            )
+            .await?;
+        Ok(ReasoningOutcome {
+            text,
+            used_fallback: true,
+            truncated,
+        })
     }
 
     async fn call_claude_cli(system: &str, user: &str) -> Result<String, String> {

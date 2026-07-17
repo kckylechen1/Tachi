@@ -3,6 +3,7 @@ use super::*;
 mod dual_truth_outcome;
 mod feedback_rules;
 mod lesson_hooks;
+mod precedent_candidate_capture;
 mod precedent_capture;
 mod presence_claim_release;
 mod receipt_golden;

@@ -12,33 +12,41 @@
 //! fail-closed until a kill-test certifies it* — and it binds us too, most of all when
 //! the capability deletes 61 GB and the reviewer says it is wrong.
 //!
-//! ## The blocking defects (why the knife stays sheathed) — [`BLOCKING_DEFECTS`]
+//! ## The blocking defect (why the knife stays sheathed) — [`BLOCKING_DEFECTS`]
 //!
-//! * **BUG 1 — a live build cache is invisible to the holder probe.**
-//!   [`live_build_target_dirs`] reads `ps -Awwo command=`, which prints **argv and only
-//!   argv**. Every build seat in this repo does `export CARGO_TARGET_DIR=…` — an
-//!   *environment* variable, on nobody's command line — so a running build's target dir
-//!   never appears in the process table this module reads. `lsof` does not cover for it
-//!   either: `cargo` between two compile units holds no file descriptor under the
-//!   target. A live cache can therefore be unprotected, unheld, and (a week into a long
-//!   lane) stale, all at once. **That is a delete of a live build cache** — the exact
-//!   accident the protected set exists to prevent.
-//! * **BUG 2 — the pinned identity is a pathname, not a file identity.**
-//!   [`OrphanCandidate::identity`] is a `PathBuf`: a *spelling*. Rename the judged
-//!   directory away, drop a live one at the same path, and the deleter's re-resolution
-//!   yields the same string, the staleness and holder verdicts are never recomputed, and
-//!   the replacement is deleted. A real identity is `(dev, ino)` captured at judgement
-//!   and re-`stat`ed at the delete — better, an fd held across the decision.
-//! * **BUG 4 — a partial delete still exits 0.** A `remove_dir_all` that fails halfway
-//!   leaves the resource half-deleted, and the run's exit status does not say so.
-//! * **CONCERN 6 — most of the safety tests do not discriminate.** A large share of them
-//!   pass against a reaper that does nothing at all: they assert "the directory still
-//!   exists" without ever proving the run *would* have deleted a comparable directory
-//!   that was genuinely dead. A safety suite a no-op passes certifies nothing.
+//! * **The kill-test matrix has not been EXECUTED and receipted (#1062).** BUGs 1, 2 and
+//!   4 below are closed in source and pinned by this module's own standing test suite —
+//!   but S2d's own doctrine (*a capability is fail-closed until a kill-test certifies
+//!   it*) does not accept "the unit tests pass" as that certification. An executed
+//!   kill-test matrix, checked in as a receipt naming the binary version, the OS, the
+//!   matrix, and the git blob hash of the test source that ran — the same shape
+//!   `tachi-dispatch`'s codex sandbox certification (`crates/tachi-dispatch/src/
+//!   certification.rs`, #894 S2d) uses — is what flips [`DESTRUCTIVE_CERTIFIED`]. The
+//!   matrix is written and `#[ignore]`d (`kill_tests` below); nobody has run it yet.
 //!
-//! ## Closed in this cut
+//! ## Closed in this cut (#1062 — sol audit `codex-g6f99` / linear KYL-877)
 //!
-//! They were cheap, and an uncertified reaper must at least not *lie*:
+//! * **BUG 1 — a live build cache is invisible to the holder probe.** [`live_build_target_dirs`]
+//!   reads `ps -Awwo command=`, which prints **argv and only argv**, so a build that took its
+//!   target dir from `CARGO_TARGET_DIR` — every build seat in this repo — never appeared on any
+//!   command line. The structural fix is not chasing `ps` further; it is
+//!   [`ledger_protected_paths`]: a holder now DECLARES itself by binding a resource on the S2a/
+//!   S2c ledger surface, and this module reads that declaration back. `ps` argv scanning
+//!   survives as the fallback for a holder that never went through the ledger at all.
+//! * **BUG 2 — the pinned identity was a pathname, not a file identity.** [`OrphanCandidate::identity`]
+//!   is a `PathBuf` — a spelling — and re-resolving a spelling only proves the NAME still resolves,
+//!   not that it resolves to the same OBJECT. [`OrphanCandidate::file_identity`] pins a real
+//!   `(dev, ino)` ([`FileIdentity`]) at judgement, and [`delete_resource_bytes`] re-`stat`s it
+//!   immediately before `remove_dir_all`, refusing on any mismatch — including "could not be
+//!   re-stat'd at all".
+//! * **BUG 4 — a partial delete used to still exit 0.** A `remove_dir_all` that failed halfway
+//!   left the resource half-deleted with no trace in the exit status: [`reclaim_candidate`]'s
+//!   `Err` conflated a designed safety refusal (a fence firing) with a delete that was ATTEMPTED
+//!   and did not finish. [`ReclaimFailure`] now types the two apart; only
+//!   [`ReclaimFailure::DeleteFailed`] lands in `errors`, and any non-empty `errors` costs the
+//!   run its clean exit ([`reap_exit_status`]) regardless of `--force`.
+//!
+//! Also closed earlier, and still true:
 //!
 //! * **BUG 3 — an incomplete protection set no longer permits anything.** `ps` failing,
 //!   `HOME` unset, a relative `CARGO_TARGET_DIR`: each was a `warning` that did not stop
@@ -54,9 +62,10 @@
 //!   it. Duplicate `--root`s are deduplicated too, so one subtree is no longer walked,
 //!   counted, and reported twice.
 //!
-//! Re-enabling the destructive path means closing BUGs 1, 2 and 4 and *certifying* them
-//! with a kill-test suite — a mutation that would delete a live cache must turn a test
-//! red. That is a separate knife. Until it lands, everything below is a **report**.
+//! Re-enabling the destructive path now means exactly one thing: running the kill-test
+//! matrix for real and checking in the receipt. Until that lands, everything below is
+//! still a **report** — [`DESTRUCTIVE_CERTIFIED`] does not flip on a green `cargo test`
+//! alone, on purpose (see the const's own doc).
 //!
 //! ## What it is still for
 //!
@@ -226,9 +235,16 @@ const SECS_PER_DAY: u64 = 24 * 60 * 60;
 
 // ── Certification (the sheath) ──────────────────────────────────────────────
 
-/// Has the destructive path been certified safe to run? **No.** See the module docs:
-/// the adversarial review (`codex-g6f99`) returned NOT-SAFE, the defects reproduce, and
-/// until they are closed *and kill-tested* this reaper reports and nothing more.
+/// Has the destructive path been certified safe to run? **No.** #1062 closed BUGs 1, 2
+/// and 4 (the module docs, and [`BLOCKING_DEFECTS`], have the detail) and pinned each
+/// with a discriminating test in this module's own standing suite — but that is
+/// deliberately NOT what flips this constant. S2d's own doctrine is *a capability is
+/// fail-closed until a kill-test certifies it*, and "the unit tests pass" is not a
+/// kill-test certification: it is this crate believing its own code. The bar is an
+/// EXECUTED, checked-in receipt (binary version, OS, matrix, git blob hash of the test
+/// source) — the shape `crates/tachi-dispatch/src/certification.rs` already ships for
+/// codex's sandbox. The matrix exists here, `#[ignore]`d (`kill_tests`); nobody has run
+/// it and checked in a receipt yet, so this stays `false`.
 ///
 /// A `const` rather than a config flag, on purpose. A flag is something an operator can
 /// flip at 2 a.m. under disk pressure; the gate between a scan of `~/.cache` and
@@ -241,15 +257,16 @@ pub(crate) const BLOCKING_AUDIT: &str = "codex-g6f99";
 /// Why the delete path may not run — verbatim in the refusal, in the report, and on the
 /// CLI's stderr. An operator who types `--force` is told exactly what is broken, not
 /// merely that they were denied.
+///
+/// #1062 closed BUGs 1, 2 and 4 (each pinned by a discriminating test — see the module
+/// docs for the detail on each) — the one line left is the reason
+/// [`DESTRUCTIVE_CERTIFIED`] still reads `false`.
 pub(crate) const BLOCKING_DEFECTS: &[&str] = &[
-    "the holder probe cannot see a live cache whose CARGO_TARGET_DIR is inherited from the \
-     environment rather than passed on argv (`ps` prints argv only, and `cargo` between compile \
-     units holds no fd for `lsof` to find), so a live build cache can be unprotected, unheld and \
-     stale all at once",
-    "the pinned identity is a pathname, not a file identity (dev+inode): a rename-and-replace at \
-     the same path, between the verdict and the delete, defeats it",
-    "a partial `remove_dir_all` failure still exits 0",
-    "most of the safety tests do not discriminate: a reaper that does nothing at all passes them",
+    "no EXECUTED kill-test receipt exists yet for this destructive path (#1062): a matrix \
+     covering an env-var-only live build, a target swapped for a symlink, an uncanonicalizable \
+     protected path, and a ps that cannot spawn is written and #[ignore]d, but S2d's own \
+     doctrine does not accept a green `cargo test` as the certification a checked-in receipt \
+     is — see `crates/tachi-dispatch/src/certification.rs` for the shape this one must match",
 ];
 
 /// The typed refusal a destructive request gets. Not a silent skip, and not an empty
@@ -688,6 +705,80 @@ pub(crate) fn protected_paths(sources: &ProtectionSources<'_>) -> Protection {
     Protection::new(paths, warnings)
 }
 
+// ── Ledger-based holder discovery (sol audit, BUG 1 — closed) ──────────────
+
+/// Every path the resource ledger considers BOUND — a live holder, structurally —
+/// the fix to BUG 1.
+///
+/// The old sole source, `ps` argv scanning ([`live_build_target_dirs`]), cannot see a
+/// holder that never put its target dir on a command line — which is every build seat
+/// in this repo, all of which take `CARGO_TARGET_DIR` from the *environment*. The
+/// structural fix is not teaching this module to read `/proc/<pid>/environ`; it is
+/// that **a holder declares itself on an observable surface**, and this reaper
+/// consults that declaration. #894 S2a shipped the surface (`exec_env_resources` +
+/// `exec_env_resource_bindings`) and S2c's `BuildPrivate` lease already WRITES an
+/// approved, sized, attributed claim there on provision, binding it to the lease.
+/// Nothing read it back until now.
+///
+/// `memcore::list_bound_resource_paths` is the read, and it is deliberately narrower
+/// than "every non-`reclaimed` row": only a resource with a LIVE binding
+/// (`released_at IS NULL`) is a holder declaring itself RIGHT NOW. A merely `active`
+/// resource nobody has bound is a tracked-but-abandoned physical resource — exactly
+/// the population [`cheap_verdict`]'s re-enterable `ReclaimReason::Orphan` path
+/// exists to sweep up when it is also stale and unheld. Protecting every non-
+/// `reclaimed` row unconditionally at THIS layer would silence that path for good and
+/// defeat half of what the orphan reaper is for.
+///
+/// A ledger that cannot be read is a GAP, never a silent "nothing declared" — the
+/// same discipline BUG 3 already applies to `ps` and `HOME`.
+fn ledger_protected_paths(conn: &rusqlite::Connection) -> (Vec<PathBuf>, Vec<String>) {
+    match memcore::list_bound_resource_paths(conn) {
+        Ok(paths) => (paths.into_iter().map(PathBuf::from).collect(), Vec::new()),
+        Err(err) => (
+            Vec::new(),
+            vec![format!(
+                "exec_env_resources ledger unavailable ({err}): every path a lease has bound \
+                 live is NOT in the protected set for this run. A GAP, not a note: the run is \
+                 incomplete and cannot exit clean, and process-table probing (the fallback this \
+                 source exists to cover for) does not make up for it either"
+            )],
+        ),
+    }
+}
+
+/// Everything the reaper must never touch, from every source available: env vars +
+/// the live process table ([`protected_paths`]) UNIONED with every path the ledger
+/// says is live ([`ledger_protected_paths`]).
+///
+/// The two sources are not redundant, and neither replaces the other. The ledger is
+/// now the AUTHORITATIVE source for anything that declared itself through S1/S2a/S2c
+/// (a `BuildPrivate` lease's target dir, a bound worktree, a scratch dir) — a real
+/// binding on a real row, not a guess from a command line. `ps` argv scanning
+/// SURVIVES as the fallback for a process that never declared itself on that
+/// surface at all: codex's own self-build, or any future un-managed process. Over-
+/// protection being the safe direction, the two sets are simply unioned rather than
+/// one gating the other.
+fn full_protected_paths(
+    conn: &rusqlite::Connection,
+    sources: &ProtectionSources<'_>,
+) -> Protection {
+    let from_env_and_process = protected_paths(sources);
+    let (ledger_paths, ledger_gaps) = ledger_protected_paths(conn);
+    Protection::new(
+        from_env_and_process
+            .paths()
+            .iter()
+            .cloned()
+            .chain(ledger_paths),
+        from_env_and_process
+            .gaps()
+            .iter()
+            .cloned()
+            .chain(ledger_gaps)
+            .collect(),
+    )
+}
+
 /// Target dirs that a *running* build owns.
 ///
 /// The `lsof` gate is the fail-closed fence, but it only sees open file
@@ -700,20 +791,24 @@ pub(crate) fn protected_paths(sources: &ProtectionSources<'_>) -> Protection {
 /// is the safe direction here. The cost of protecting one directory too many is
 /// that it survives; the cost of missing one is a deleted build cache.
 ///
-/// # This source is BLINDER THAN IT LOOKS (audit `codex-g6f99`, BUG 1 — OPEN)
+/// # This source is BLINDER THAN IT LOOKS (audit `codex-g6f99`, BUG 1 — closed elsewhere)
 ///
 /// `ps -Awwo command=` prints **argv, and nothing but argv**. A build that took its
 /// target dir from the *environment* — `export CARGO_TARGET_DIR=…`, which is how every
 /// build seat in this repo runs — names it on no command line, and this function cannot
 /// see it. The `lsof` gate does not cover the hole: `cargo` between two compile units
-/// holds no fd under the target. So a **live** build cache can be absent from the
-/// protected set, probe as `HolderCheck::None`, and pass the staleness gate.
+/// holds no fd under the target. So a **live** build cache can be absent from THIS
+/// source, probe as `HolderCheck::None`, and pass the staleness gate.
 ///
-/// This is the first reason the destructive path is refused ([`certify_destructive`]).
-/// Closing it means reading each process's *environment* (`/proc/<pid>/environ`, `ps -E`,
-/// or the platform equivalent) — not merely tolerating a `ps` that fails.
+/// This function is no longer the fence's sole load-bearing source: [`full_protected_paths`]
+/// unions its answer with [`ledger_protected_paths`], and the ledger is the structural fix
+/// — a `BuildPrivate` lease declares its target dir on provision, and that declaration
+/// does not depend on how (or whether) the build's command line spells it. This source
+/// SURVIVES as the fallback for a holder that never went through the ledger at all — an
+/// un-managed process, codex's own self-build — which is exactly the population `ps` can
+/// still see.
 ///
-/// A `ps` that will not run is now a **gap**, not a passing warning: it makes the
+/// A `ps` that will not run is a **gap**, not a passing warning: it makes the
 /// protected set incomplete, and that costs the run its clean exit
 /// ([`Protection::is_complete`], BUG 3 — closed).
 fn live_build_target_dirs() -> (Vec<PathBuf>, Vec<String>) {
@@ -777,6 +872,58 @@ fn target_dirs_from_process_line(line: &str) -> Vec<PathBuf> {
     dirs
 }
 
+// ── File identity (sol audit, BUG 2 — closed) ──────────────────────────────
+
+/// A real file identity — `(dev, ino)` — as opposed to a spelling.
+///
+/// A `PathBuf` proves a name still *resolves*; it does not prove the name
+/// resolves to the **same object** it resolved to earlier. Move the judged
+/// directory aside and drop a fresh one at the same path (a `rm -rf` +
+/// `mkdir`, or a rename swap) and a pathname re-resolution matches — same
+/// string — while the thing underneath it has changed completely. `(dev,
+/// ino)`, captured at judgement ([`OrphanCandidate::file_identity`]) and
+/// re-`stat`ed immediately before the delete ([`delete_resource_bytes`]), is
+/// the fence a pathname alone cannot be.
+///
+/// Deliberately NOT `Eq` in the "unknown means unknown" sense: two
+/// `FileIdentity` values are equal only when both dev and ino agree, and
+/// [`FileIdentity::of`] returning `None` (the stat failed, or this platform
+/// has no notion of an inode) is never treated as "matches nothing in
+/// particular" — every call site that consults it fails closed on `None`,
+/// the same discipline as [`HolderCheck::Unknown`] and
+/// [`Staleness::Unprovable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+impl FileIdentity {
+    /// `symlink_metadata`, not `metadata`: the identity is of the entry AT this
+    /// path, not of whatever a symlink there might point through. A candidate is
+    /// only ever a directory (the scan uses `symlink_metadata` to enqueue it and
+    /// never follows a symlink into a subtree), so an identity captured over a
+    /// symlink here would already be a lie about what was judged.
+    #[cfg(unix)]
+    fn of(path: &Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        Some(Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        })
+    }
+
+    /// No portable `(dev, ino)` off Unix, and this module's holder probes (`ps`,
+    /// `lsof`) are Unix-only commands anyway — the destructive path has never run
+    /// anywhere else. An identity this platform cannot compute is an identity the
+    /// deleter may not act on: fail closed, exactly like [`HolderCheck::Unknown`].
+    #[cfg(not(unix))]
+    fn of(_path: &Path) -> Option<Self> {
+        None
+    }
+}
+
 // ── Candidates ──────────────────────────────────────────────────────────────
 
 /// How old the *newest* byte anywhere under a candidate is, resolved against the
@@ -812,30 +959,37 @@ pub(crate) struct OrphanCandidate {
     /// The path as the scan walked it — the caller's spelling, symlinked scan
     /// root and all.
     pub(crate) path: PathBuf,
-    /// **The identity the verdict is rendered against (sol audit, BUG 2).**
+    /// **The resolved SPELLING the verdict is rendered against.**
     ///
-    /// `path` is a *name*, and a name is not an object: `--root` is caller-supplied
-    /// and may be (or contain) a symlink, and the protection verdict and the
-    /// `remove_dir_all` that follows it each resolve that name independently. Retarget
-    /// the link in between and the run decides about one directory and deletes another.
+    /// `path` is the caller's spelling — `--root` is caller-supplied and may be
+    /// (or contain) a symlink — and the protection verdict and the
+    /// `remove_dir_all` that follows it each resolve that name independently.
+    /// Retarget the link in between and a re-resolution by NAME ALONE would
+    /// decide about one directory and delete another.
     ///
-    /// So the scan resolves the name **once**, here, and the deleter re-resolves it and
-    /// refuses unless it still lands on the same object ([`delete_resource_bytes`]).
+    /// So the scan resolves the name **once**, here, and the deleter re-resolves
+    /// it and refuses unless it still lands on the same canonical spelling
+    /// ([`delete_resource_bytes`]).
     ///
-    /// # This is NOT a file identity (audit `codex-g6f99`, BUG 2 — OPEN)
+    /// # This is a spelling, not a file identity — see [`Self::file_identity`]
     ///
-    /// A `PathBuf` is a *spelling*, and re-resolving a spelling proves only that the
-    /// spelling still resolves — not that it resolves to **the same object**. Move the
-    /// judged directory aside, drop a live one in its place, and the re-resolution
-    /// matches (same string), the staleness and holder verdicts are never recomputed
-    /// against the new inode, and the replacement is deleted. Retargeting a *symlink* is
-    /// fenced; a rename-and-replace at the same path is not.
-    ///
-    /// A real identity is `(dev, ino)` captured at judgement and re-`stat`ed at the
-    /// delete — better still, an fd held across the decision so the object cannot be
-    /// swapped at all. This module stays on paths, which is one of the reasons its
-    /// destructive path is refused ([`certify_destructive`]).
+    /// A `PathBuf` proves only that a name still resolves, never that it
+    /// resolves to the same OBJECT. Move the judged directory aside, drop a
+    /// fresh one at the same path (`rm -rf` + `mkdir`, or a rename swap), and
+    /// the canonical spelling matches — same string — while the inode
+    /// underneath has changed completely. This field alone caught only the
+    /// *symlink*-retarget half of that; [`Self::file_identity`] (sol audit, BUG
+    /// 2 — closed) is what catches the rest.
     pub(crate) identity: PathBuf,
+    /// **The real identity the verdict is rendered against (sol audit, BUG 2 —
+    /// closed).** `(dev, ino)`, captured here at judgement and re-`stat`ed
+    /// immediately before the delete ([`delete_resource_bytes`]); a mismatch —
+    /// including "could not be re-stat'd at all" — refuses the delete. `None`
+    /// means the identity could not be captured at scan time (an unreadable
+    /// entry, or a non-Unix host — see [`FileIdentity::of`]), and
+    /// [`decide_reap`] treats that exactly like an unprobed holder check:
+    /// unprovable ⇒ never reclaimed.
+    pub(crate) file_identity: Option<FileIdentity>,
     pub(crate) kind: ResourceKind,
     pub(crate) staleness: Staleness,
     /// Measured *only* for candidates that survived every cheap gate — a
@@ -1321,10 +1475,13 @@ pub(crate) fn scan_orphan_candidates(
                     out.record(&dir, UnitOutcome::Candidate, String::new());
                     out.candidates.push(OrphanCandidate {
                         staleness: staleness(&dir, now, cutoff),
-                        // Pin the identity the verdict is about to be rendered against —
-                        // a pathname, and NOT a file identity: see
-                        // `OrphanCandidate::identity` (BUG 2, still open).
+                        // Pin the spelling the verdict is about to be rendered against —
+                        // see `OrphanCandidate::identity`.
                         identity: canonicalize_expected(&dir).unwrap_or_else(|| dir.clone()),
+                        // …and the REAL identity beside it (BUG 2, closed): captured
+                        // now, at judgement, and re-checked immediately before the
+                        // delete (`delete_resource_bytes`).
+                        file_identity: FileIdentity::of(&dir),
                         path: dir,
                         kind,
                         bytes: None,
@@ -1450,11 +1607,22 @@ impl ReclaimReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SkipReason {
-    TooYoung { age_days: u64, max_age_days: u64 },
+    TooYoung {
+        age_days: u64,
+        max_age_days: u64,
+    },
     StalenessUnprovable(String),
     Held(String),
     HolderCheckInconclusive(String),
-    BoundByLease { active_bindings: i64 },
+    /// The scan could not capture a `(dev, ino)` identity to render the verdict
+    /// against (sol audit, BUG 2). Fail-closed by the same type-level discipline
+    /// as [`Self::HolderCheckInconclusive`]: an identity we never captured is an
+    /// identity we cannot re-check before the delete, so nothing is reclaimed on
+    /// the strength of a name alone.
+    IdentityUnprovable,
+    BoundByLease {
+        active_bindings: i64,
+    },
     Quarantined,
 }
 
@@ -1473,6 +1641,10 @@ impl SkipReason {
             SkipReason::HolderCheckInconclusive(reason) => format!(
                 "holder check inconclusive ({reason}); refusing to reclaim what we cannot prove is free"
             ),
+            SkipReason::IdentityUnprovable => "file identity (dev, ino) could not be captured at \
+                 judgement; refusing to reclaim an object we could not re-identify before the \
+                 delete"
+                .to_string(),
             SkipReason::BoundByLease { active_bindings } => {
                 format!("{active_bindings} live lease binding(s)")
             }
@@ -1551,6 +1723,14 @@ pub(crate) fn decide_reap(
         Ok(reason) => reason,
         Err(skip) => return ReapDecision::Skip(skip),
     };
+    // Fail-closed by type, same shape as the holder check below: no identity was
+    // captured at judgement, so there is nothing to re-check before the delete
+    // (BUG 2). Checked before the holder probe because it is cheaper (a field
+    // read, not a subprocess) and because an unidentifiable candidate is exactly
+    // as undeletable no matter what the holder probe says.
+    if candidate.file_identity.is_none() {
+        return ReapDecision::Skip(SkipReason::IdentityUnprovable);
+    }
     match &candidate.holders {
         // Fail-closed by type: no probe ran, so nothing was proved. A caller that
         // forgets to probe gets a skip, not a delete.
@@ -1748,7 +1928,10 @@ fn run_orphan_reap_uncertified(
     now: SystemTime,
     probe: &HolderProbe,
 ) -> ReapReport {
-    let protection = protected_paths(sources);
+    // BUG 1, closed: env vars + the live process table, UNIONED with everything the
+    // resource ledger says is live (`ledger_protected_paths`) — the structural fix, not
+    // a patch to the `ps` scan.
+    let protection = full_protected_paths(&*conn, sources);
     let scan = scan_orphan_candidates(&opts.roots, &protection, now, opts.max_age_days);
 
     // BUG 3, fail-closed: a protected set that could not be fully built does not merely
@@ -1883,10 +2066,11 @@ fn run_orphan_reap_uncertified(
             // late claim actually arrives through. The environment half of `sources` is a
             // per-run snapshot on purpose: another process cannot reach into *our*
             // `CARGO_TARGET_DIR`, so re-reading it would re-read the same bytes and prove
-            // nothing.
-            let fresh = protected_paths(sources);
-            // A gap that appears only at delete time (a `ps` that has started failing)
-            // still costs the run its clean exit.
+            // nothing. The ledger half (BUG 1) is re-read for the same reason a late claim
+            // through a `BuildPrivate` lease binding must be caught too.
+            let fresh = full_protected_paths(&*conn, sources);
+            // A gap that appears only at delete time (a `ps` that has started failing, a
+            // ledger that has gone unreachable) still costs the run its clean exit.
             if !fresh.is_complete() {
                 report.protection_complete = false;
                 report.incomplete = true;
@@ -1896,7 +2080,23 @@ fn run_orphan_reap_uncertified(
                     report.warnings.push(gap.clone());
                 }
             }
-            let refusal = if fresh.covers(&candidate.path) || fresh.covers(&candidate.identity) {
+            // **checkpoint 1 fix (codex-9178d).** An incomplete protected set is not
+            // merely a report-level footnote — it means THIS delete cannot know
+            // whether `candidate.path` is actually clear. #1062 is explicit: "an
+            // unresolved protection source ... refuses to delete anything." Before
+            // this fix, an incomplete `fresh` set still fell through to the
+            // `covers()` check below, and an unprotected-looking candidate would be
+            // reclaimed anyway on the strength of a protected set this run just
+            // admitted it could not fully build.
+            let refusal = if !fresh.is_complete() {
+                Some(format!(
+                    "refused {path}: the protected set could not be fully resolved at delete \
+                     time ({}) — an unresolved protection source means this run does not know \
+                     what it must not touch, so nothing may be deleted while any source stays \
+                     unresolved",
+                    fresh.gaps().join("; ")
+                ))
+            } else if fresh.covers(&candidate.path) || fresh.covers(&candidate.identity) {
                 Some(format!(
                     "refused {path}: it is protected as of the delete (a live build claimed it \
                      after the scan); the run's opening protected set did not cover it"
@@ -1913,7 +2113,19 @@ fn run_orphan_reap_uncertified(
                     // Every refusal is a warning line with its reason — a reclaim that
                     // did not happen is never a silent skip, and never keeps the
                     // `reclaim` label either.
-                    Err(err) => Some(err),
+                    //
+                    // **BUG 4, closed.** A `DeleteFailed` is not a fence that fired — the
+                    // delete path was ATTEMPTED and did not cleanly finish, and that must
+                    // cost the run its clean exit exactly like any other
+                    // `incomplete-or-error` unit (see `ReclaimFailure`). A `Refused` is
+                    // the destructive path working as designed and stays a warning only.
+                    Err(failure @ ReclaimFailure::Refused(_)) => {
+                        Some(failure.message().to_string())
+                    }
+                    Err(failure @ ReclaimFailure::DeleteFailed(_)) => {
+                        report.errors.push(failure.message().to_string());
+                        Some(failure.message().to_string())
+                    }
                 }
             };
             if let Some(err) = refusal {
@@ -1995,9 +2207,65 @@ pub(crate) fn reap_exit_status(report: &ReapReport) -> Result<(), String> {
     Ok(())
 }
 
+/// Why [`reclaim_candidate`] did not return a [`ReclaimedReport`] — and, critically,
+/// whether that is a WORKING FENCE or a BROKEN RUN (sol audit, BUG 4).
+///
+/// The first cut answered every non-`Ok` outcome the same way: a warning line, and
+/// the run still exited 0. That conflated two entirely different events. A resource
+/// found to be bound, quarantined, or already claimed by a concurrent reclaim is the
+/// destructive path **working as designed** — the whole point of re-checking at
+/// delete time is to catch exactly that, and a run that caught it has nothing to
+/// apologize for. A `remove_dir_all` that fails PARTWAY — a permission error three
+/// levels down, a device that goes away mid-delete — is the opposite: an operator
+/// who asked to free disk got a half-deleted directory and a process that told them
+/// it succeeded. That is not a refusal; the delete was ATTEMPTED and it did not
+/// finish, and hiding that inside the same warning bucket as "was quarantined" is
+/// the exact "reaper always reports success" failure mode #894 S2b was built to
+/// stop hiding.
+#[derive(Debug, Clone)]
+enum ReclaimFailure {
+    /// A typed safety refusal: the destructive path correctly declined (blocked by
+    /// a binding, quarantined, or protected at delete time). Worth a warning line;
+    /// does not cost the run its clean exit — a fence that fired is not an error.
+    ///
+    /// **NOT this bucket (checkpoint 3/4, codex-9178d):** an identity mismatch
+    /// (`IDENTITY_UNRESOLVED_PREFIX`) or a lost reclaim race discovered AFTER the
+    /// deleter already ran. Neither is a fence firing cleanly — the first means the
+    /// run no longer knows what is at the path it judged, the second means real
+    /// bytes were deleted with no ledger row to show for it. Both are
+    /// [`Self::DeleteFailed`].
+    Refused(String),
+    /// The delete path was ATTEMPTED and did not cleanly finish — an I/O failure
+    /// out of `remove_dir_all`, a ledger write that could not be made, ledger state
+    /// so far from what this call just did that it cannot be trusted, an identity
+    /// the deleter could no longer confirm, or a reclaim whose bytes hit disk but
+    /// never made it into the ledger. This is the class BUG 4 exists for: it must
+    /// cost the run its clean exit every time, with no exceptions carved out for
+    /// `--force`.
+    DeleteFailed(String),
+}
+
+impl ReclaimFailure {
+    fn message(&self) -> &str {
+        match self {
+            ReclaimFailure::Refused(msg) | ReclaimFailure::DeleteFailed(msg) => msg,
+        }
+    }
+}
+
+/// Sentinel prefix `delete_resource_bytes` puts on messages meaning "the object's
+/// identity could not be reconfirmed" — as opposed to a designed fence (protected
+/// path, symlink, non-directory, holder appeared) declining on purpose. Matched by
+/// `reclaim_candidate` to route identity-unresolved refusals to
+/// [`ReclaimFailure::DeleteFailed`] instead of [`ReclaimFailure::Refused`]
+/// (checkpoint 3, codex-9178d — #1062: "if the identity moved, the unit is
+/// incomplete, not progressed").
+const IDENTITY_UNRESOLVED_PREFIX: &str = "identity unresolved: ";
+
 /// Book (or revive) the resource and reclaim it through S2a's single reclaim
-/// path. An `Err` is a refusal worth a human's eye and lands as a warning line;
-/// it is never a silent skip.
+/// path. An `Err` is worth a human's eye and always lands as a warning line;
+/// [`ReclaimFailure::DeleteFailed`] additionally costs the run its clean exit
+/// (BUG 4) — see [`ReclaimFailure`] for why the two are not the same event.
 fn reclaim_candidate(
     conn: &mut rusqlite::Connection,
     candidate: &OrphanCandidate,
@@ -2005,7 +2273,7 @@ fn reclaim_candidate(
     existing: Option<&ExecEnvResource>,
     probe: &HolderProbe,
     protection: &Protection,
-) -> Result<ReclaimedReport, String> {
+) -> Result<ReclaimedReport, ReclaimFailure> {
     let path = candidate.path.display().to_string();
 
     // `insert_resource` only ever accepts an absent row or a `reclaimed`
@@ -2015,11 +2283,18 @@ fn reclaim_candidate(
     // `Orphan` ⇒ the row is already on the books in a re-enterable state
     // (active/reclaiming/reclaim_failed) — reuse its id directly, an
     // `insert_resource` call here would only bounce off `Duplicate`.
+    //
+    // Both failure modes here are `DeleteFailed`, not `Refused`: neither is a
+    // designed fence firing — an internal invariant broke (the `Orphan` branch)
+    // or the ledger write itself failed (the `Unmanaged` branch), and either
+    // means this run does not know what state the candidate is actually in.
     let (resource_id, revived_previous_bytes) = match reason {
         ReclaimReason::Orphan => {
             let resource_id = existing
                 .ok_or_else(|| {
-                    format!("internal: {path} decided Orphan but the ledger lookup found no row")
+                    ReclaimFailure::DeleteFailed(format!(
+                        "internal: {path} decided Orphan but the ledger lookup found no row"
+                    ))
                 })?
                 .resource_id
                 .clone();
@@ -2036,7 +2311,9 @@ fn reclaim_candidate(
                     created_at: String::new(),
                 },
             )
-            .map_err(|err| format!("cannot book orphan {path}: {err}"))?;
+            .map_err(|err| {
+                ReclaimFailure::DeleteFailed(format!("cannot book orphan {path}: {err}"))
+            })?;
             match outcome {
                 // The id we proposed is only used when the row is new; on a
                 // revive the ledger's own (retired) id comes back instead.
@@ -2053,11 +2330,48 @@ fn reclaim_candidate(
     let outcome =
         memcore::reclaim_resource(conn, &resource_id, Some(reason.as_str()), |resource| {
             // `protection` here is the set recomputed at delete time by the caller,
-            // and `identity` is the object the verdict was rendered against — the
-            // deleter re-resolves the name and refuses anything else (BUG 1 / BUG 2).
-            delete_resource_bytes(resource, probe, protection, &candidate.identity)
+            // and `identity` / `file_identity` are the object the verdict was
+            // rendered against — the deleter re-resolves both and refuses anything
+            // else (BUG 1 / BUG 2).
+            delete_resource_bytes(
+                resource,
+                probe,
+                protection,
+                &candidate.identity,
+                candidate.file_identity,
+            )
         })
-        .map_err(|err| format!("reclaim of {path} failed: {err}"))?;
+        .map_err(|err| {
+            // **BUG 4.** `memcore::reclaim_resource` returns `Err` in exactly two
+            // shapes: the deleter's own error (everything `delete_resource_bytes`
+            // returns is a designed, typed `MemoryError::InvalidArg` refusal — a
+            // protected path, a retargeted identity, a holder that appeared — EXCEPT
+            // `MemoryError::Io`, which is `remove_dir_all` itself failing), or a
+            // ledger-side failure reading/writing the `reclaiming` state (anything
+            // that is not `InvalidArg`). Only the former is a refusal that worked as
+            // designed; the rest are the delete path failing to finish what it
+            // started, and must not be waved through as a mere warning.
+            //
+            // **checkpoint 3 fix (codex-9178d).** Not every `InvalidArg` out of
+            // `delete_resource_bytes` is the same kind of event. #1062's text: "if
+            // the identity moved, the unit is incomplete, not progressed." A
+            // protected path, a symlink, a non-directory, or a holder that appeared
+            // are the destructive path's fences WORKING — a designed refusal. An
+            // identity the deleter can no longer confirm (`IDENTITY_UNRESOLVED_PREFIX`
+            // — a retargeted symlink, a path that stopped resolving, a `(dev, ino)`
+            // that changed) is different: the run does not know what is at this path
+            // anymore, and that is exactly the class BUG 4 exists for, not a clean
+            // refusal.
+            match &err {
+                MemoryError::InvalidArg(msg) if msg.starts_with(IDENTITY_UNRESOLVED_PREFIX) => {
+                    ReclaimFailure::DeleteFailed(format!("reclaim of {path} failed: {msg}"))
+                }
+                MemoryError::InvalidArg(msg) => {
+                    ReclaimFailure::Refused(format!("reclaim of {path} failed: {msg}"))
+                }
+                other => ReclaimFailure::DeleteFailed(format!("reclaim of {path} failed: {other}")),
+            }
+        })?;
 
     match outcome {
         ResourceReclaimOutcome::Reclaimed {
@@ -2072,41 +2386,56 @@ fn reclaim_candidate(
             revived_previous_bytes,
         }),
         // The ledger re-checks the binding refcount inside its own transaction;
-        // a binding taken between our decision and the reclaim lands here.
+        // a binding taken between our decision and the reclaim lands here. A
+        // fence that fired, not a failure.
         ResourceReclaimOutcome::BlockedByBinding {
             active_bindings, ..
-        } => Err(format!(
+        } => Err(ReclaimFailure::Refused(format!(
             "skipped {path}: {active_bindings} live lease binding(s) appeared since the scan"
-        )),
-        ResourceReclaimOutcome::Quarantined { .. } => {
-            Err(format!("skipped {path}: resource is quarantined"))
-        }
+        ))),
+        ResourceReclaimOutcome::Quarantined { .. } => Err(ReclaimFailure::Refused(format!(
+            "skipped {path}: resource is quarantined"
+        ))),
         // For `Unmanaged` we just booked/revived this row moments ago, so this
         // can only be a concurrent reclaim of the same resource winning the
         // race. For `Orphan` the row was already on the books before this call
-        // — same story, a concurrent reclaimer got there first.
-        ResourceReclaimOutcome::AlreadyReclaimed { .. } => Err(format!(
+        // — same story, a concurrent reclaimer got there first. Nothing this
+        // run attempted failed; another one finished first.
+        ResourceReclaimOutcome::AlreadyReclaimed { .. } => Err(ReclaimFailure::Refused(format!(
             "skipped {path}: another reclaim of this resource finished first"
-        )),
+        ))),
         // The deleter ran (our bytes really are gone), but by the time the
         // ledger went to stamp `reclaimed` the row had already moved out from
         // under it — a concurrent reclaim, a quarantine, or a re-registration
         // won the race. `freed_bytes` is deliberately NOT folded into this run's
         // `reclaimed_bytes`: memcore did not write it, so counting it here would
-        // claim bytes no ledger row backs (#1029's whole point). It is only a
-        // warning line, same as every other refusal.
+        // claim bytes no ledger row backs (#1029's whole point).
+        //
+        // **checkpoint 4 fix (codex-9178d).** This is NOT a fence that fired —
+        // `remove_dir_all` already ran and real bytes are already gone; the ledger
+        // simply failed to record it. #1062's conservation invariant and #1029's
+        // whole point are that destructive work with an accounting failure must not
+        // read as a clean, working refusal (a warning-only "skipped"). It must cost
+        // the run its clean exit exactly like any other attempted delete that did
+        // not finish cleanly (BUG 4).
         ResourceReclaimOutcome::LostRace {
             observed_state,
             freed_bytes,
             ..
-        } => Err(format!(
-            "skipped {path}: lost the reclaim race (now observed as {:?}); this run's deleter \
-             freed {freed_bytes} bytes not recorded in the ledger",
+        } => Err(ReclaimFailure::DeleteFailed(format!(
+            "reclaim of {path} failed: lost the reclaim race AFTER the deleter already ran (now \
+             observed as {:?}) — this run's deleter freed {freed_bytes} bytes not recorded in \
+             the ledger (#1029: an off-ledger delete is destructive work with an accounting \
+             failure, not a clean refusal)",
             observed_state
-        )),
-        ResourceReclaimOutcome::NotFound => {
-            Err(format!("skipped {path}: resource row vanished mid-reclaim"))
-        }
+        ))),
+        // Not a designed outcome of any reclaim this module drives — the row we
+        // just resolved (or booked moments ago) is gone entirely. Anomalous
+        // enough that treating it as a working fence would be a guess; treat it
+        // as the run not knowing what happened instead.
+        ResourceReclaimOutcome::NotFound => Err(ReclaimFailure::DeleteFailed(format!(
+            "skipped {path}: resource row vanished mid-reclaim"
+        ))),
     }
 }
 
@@ -2115,14 +2444,16 @@ fn reclaim_candidate(
 /// reclaim of an already-deleted path frees 0 bytes, and S2a assigns rather
 /// than accumulates, so 0 cannot corrupt a prior count).
 ///
-/// `protection` must be the set computed **at delete time** (BUG 1) and `pinned` the
-/// identity the verdict was rendered against (BUG 2). Both are re-asserted here, on
-/// the last lines before `remove_dir_all`.
+/// `protection` must be the set computed **at delete time** (BUG 1), `pinned` the
+/// spelling the verdict was rendered against, and `pinned_identity` the `(dev, ino)`
+/// captured at the same moment (BUG 2). All three are re-asserted here, on the last
+/// lines before `remove_dir_all`.
 fn delete_resource_bytes(
     resource: &ExecEnvResource,
     probe: &HolderProbe,
     protection: &Protection,
     pinned: &Path,
+    pinned_identity: Option<FileIdentity>,
 ) -> Result<i64, MemoryError> {
     let path = Path::new(&resource.path);
 
@@ -2170,8 +2501,9 @@ fn delete_resource_bytes(
         Ok(actual) if actual == pinned => {}
         Ok(actual) => {
             return Err(MemoryError::InvalidArg(format!(
-                "refusing to reclaim {}: it now resolves to {} but the verdict was rendered \
-                 against {} — a symlink or mount was retargeted between the two",
+                "identity unresolved: refusing to reclaim {}: it now resolves to {} but the \
+                 verdict was rendered against {} — a symlink or mount was retargeted between the \
+                 two",
                 resource.path,
                 actual.display(),
                 pinned.display()
@@ -2179,11 +2511,35 @@ fn delete_resource_bytes(
         }
         Err(err) => {
             return Err(MemoryError::InvalidArg(format!(
-                "refusing to reclaim {}: its path no longer resolves ({err}), so the identity the \
-                 verdict was rendered against cannot be confirmed",
+                "identity unresolved: refusing to reclaim {}: its path no longer resolves \
+                 ({err}), so the identity the verdict was rendered against cannot be confirmed",
                 resource.path
             )))
         }
+    }
+    // **sol audit fix (BUG 2, the rest of it): the pathname check above proves the
+    // NAME still resolves to the same spelling — not that it is the same OBJECT.** A
+    // rename-and-replace at the same path (`rm -rf` + `mkdir`, or a rename swap)
+    // leaves the canonical spelling identical while the directory underneath it is a
+    // different one entirely; the check above cannot see that. `(dev, ino)`, captured
+    // at judgement and re-`stat`ed on this line, can. This is the FIRST of two
+    // identity checks — the second, right before `remove_dir_all` itself, is what
+    // closes the window the holder probe and the byte walk still open below
+    // (checkpoint 2, codex-9178d).
+    //
+    // `pinned_identity` being `None` is also a refusal — `decide_reap` never reaches a
+    // `Reclaim` decision without one (BUG 2's fail-closed half), so `None` here means
+    // this deleter was invoked outside that gate, and an identity we were never given
+    // is not one we may act on.
+    let current_identity = FileIdentity::of(path);
+    if pinned_identity.is_none() || current_identity != pinned_identity {
+        return Err(MemoryError::InvalidArg(format!(
+            "identity unresolved: refusing to reclaim {}: its (dev, ino) identity does not match \
+             the one the verdict was rendered against (captured {pinned_identity:?}, now \
+             {current_identity:?}) — the object at this path was replaced between judgement and \
+             delete",
+            resource.path
+        )));
     }
     // Defense in depth against the scan→delete window: the row is already
     // `reclaiming`, but the bytes are still there. A process that grabbed the
@@ -2200,6 +2556,23 @@ fn delete_resource_bytes(
         }
     }
     let bytes = dir_size(path);
+    // **checkpoint 2 fix (codex-9178d): re-checked IMMEDIATELY before unlink, not just
+    // before the probe.** The dev/ino check above proves the object was still the
+    // pinned one before the holder probe ran — it says nothing about what is at `path`
+    // after that probe (a real recursive `lsof +D`) and the recursive `dir_size` walk
+    // just above, both of which take real wall-clock time and are exactly the window a
+    // rename-swap needs. #1062's own text is "re-checked immediately before unlink";
+    // one check before two more filesystem round-trips does not satisfy that. Re-stat
+    // one more time, on the last line before the call that actually deletes.
+    let identity_at_unlink = FileIdentity::of(path);
+    if identity_at_unlink != pinned_identity {
+        return Err(MemoryError::InvalidArg(format!(
+            "identity unresolved: refusing to reclaim {}: its (dev, ino) identity changed again \
+             between the holder probe and the delete (captured {pinned_identity:?}, now \
+             {identity_at_unlink:?}) — the object at this path was replaced a second time",
+            resource.path
+        )));
+    }
     std::fs::remove_dir_all(path).map_err(MemoryError::Io)?;
     Ok(clamp_bytes(bytes))
 }
@@ -2541,12 +2914,21 @@ mod tests {
         }
     }
 
+    /// A stable stand-in `(dev, ino)` for fixtures that never touch the real
+    /// filesystem — the identity gate only cares whether one was captured, not
+    /// what it is; the real re-stat happens in `delete_resource_bytes`, on a
+    /// fixture that made a real directory.
+    fn fixture_identity() -> FileIdentity {
+        FileIdentity { dev: 1, ino: 1 }
+    }
+
     /// A stale, unbound, unregistered candidate — everything a reclaim needs
     /// except the holder verdict, which is what the caller is testing.
     fn stale_candidate(holders: Option<HolderCheck>) -> OrphanCandidate {
         OrphanCandidate {
             path: PathBuf::from("/tmp/x-target"),
             identity: PathBuf::from("/private/tmp/x-target"),
+            file_identity: Some(fixture_identity()),
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Stale { age_days: 30 },
             bytes: Some(2048),
@@ -3004,6 +3386,7 @@ mod tests {
         );
         let candidate = OrphanCandidate {
             identity: std::fs::canonicalize(&target).unwrap(),
+            file_identity: FileIdentity::of(&target),
             path: target.clone(),
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Stale { age_days: 30 },
@@ -3198,6 +3581,7 @@ mod tests {
         let candidate = OrphanCandidate {
             path: PathBuf::from("/tmp/x-target"),
             identity: PathBuf::from("/private/tmp/x-target"),
+            file_identity: Some(fixture_identity()),
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Fresh { age_days: 2 },
             bytes: None,
@@ -3217,6 +3601,7 @@ mod tests {
         let candidate = OrphanCandidate {
             path: PathBuf::from("/tmp/x-target"),
             identity: PathBuf::from("/private/tmp/x-target"),
+            file_identity: Some(fixture_identity()),
             kind: ResourceKind::BuildTarget,
             staleness: Staleness::Unprovable("cannot read /tmp/x-target/deps".to_string()),
             bytes: None,
@@ -3226,6 +3611,23 @@ mod tests {
             decide_reap(&candidate, 7, None, 0),
             ReapDecision::Skip(SkipReason::StalenessUnprovable(_))
         ));
+    }
+
+    /// Fail-closed by *type*, mirroring `an_unprobed_candidate_never_reclaims`
+    /// exactly: a candidate whose scan never captured a `(dev, ino)` identity is
+    /// skipped for it, no matter how eligible everything else about it looks —
+    /// stale, unheld, unbound. Nothing is deleted against an object the run
+    /// cannot re-identify at the delete (BUG 2).
+    #[test]
+    fn a_candidate_with_no_captured_identity_never_reclaims() {
+        let mut candidate = stale_candidate(Some(HolderCheck::None));
+        candidate.file_identity = None;
+        assert_eq!(
+            decide_reap(&candidate, 7, None, 0),
+            ReapDecision::Skip(SkipReason::IdentityUnprovable),
+            "no captured identity must skip, never reclaim, even though holders/staleness/ledger \
+             all say yes"
+        );
     }
 
     #[test]
@@ -3448,13 +3850,35 @@ mod tests {
 
         assert!(report.reclaimed.is_empty(), "a bound resource must survive");
         assert!(bound.join("debug/artifact.rlib").exists(), "bytes survive");
-        let skip = report
-            .candidates
+
+        // **#1062, BUG 1: this fence moved UPSTREAM.** Before #1062 the only source
+        // that knew about a binding was `cheap_verdict`, reached after the walk had
+        // already turned this directory into a candidate — so the old shape of this
+        // assertion was "a candidate, skipped for `BoundByLease`". Now
+        // `full_protected_paths` folds every live binding into the protected set
+        // BEFORE the walk ever gets here, the same rule an env-var-declared build
+        // cache already got: it is pruned at the walk, never becomes a candidate at
+        // all, and shows up as a protected path plus a `safety-refusal` scan unit.
+        assert!(
+            report.protected.contains(&bound.display().to_string()),
+            "the bound target must be in the protected set: {:?}",
+            report.protected
+        );
+        assert!(
+            !report
+                .candidates
+                .iter()
+                .any(|c| c.path == bound.display().to_string()),
+            "a walk-level fence prunes it before candidacy; it must not also appear as a \
+             candidate: {report:?}"
+        );
+        let pruned = report
+            .unexamined
             .iter()
-            .find(|c| c.path == bound.display().to_string())
-            .expect("bound target is still a candidate");
-        assert_eq!(skip.decision, "skip");
-        assert!(skip.reason.contains("binding"), "reason: {}", skip.reason);
+            .find(|skip| skip.path == bound.display().to_string())
+            .expect("bound target is a pruned scan unit");
+        assert_eq!(pruned.class, "safety-refusal", "{pruned:?}");
+
         assert_eq!(
             memcore::get_resource(store.connection(), "res-bound")
                 .unwrap()
@@ -3556,9 +3980,10 @@ mod tests {
             &resource,
             &*unheld_probe(),
             &Protection::new([shared.clone()], Vec::new()),
-            // The identity check would pass — the fence under test is the protected
+            // Both identity checks would pass — the fence under test is the protected
             // set, re-asserted at the line that deletes.
             &std::fs::canonicalize(&shared).unwrap(),
+            FileIdentity::of(&shared),
         )
         .expect_err("a protected path must never be deleted");
         assert!(
@@ -3665,6 +4090,90 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **BUG 1, closed: the ledger is now an authoritative holder-discovery
+    /// source, not merely `ps` argv.** A `BuildPrivate` lease's target dir taken
+    /// from `CARGO_TARGET_DIR` (every build seat in this repo) never appears on
+    /// any command line — which is precisely why `ps` alone could not see it.
+    /// The process table here is EMPTY for the whole run (no argv, ever, names
+    /// the live target), and the fixture still survives, because a lease bound
+    /// it on the ledger surface S2c ships.
+    ///
+    /// Discriminating: a sibling fixture, tracked in the ledger but never bound
+    /// (`res-untouched`-shaped, per `bound_resource_paths_reflects_only_live_bindings`
+    /// in memcore), is NOT protected by this source — this test's assertion that
+    /// the run does not even reach a `delete` attempt (it is a cheap, walk-time
+    /// prune) only holds because the binding is what the ledger source keys off.
+    #[test]
+    fn a_ledger_bound_target_survives_even_when_ps_cannot_see_it() {
+        let root = unique_temp_dir("tachi-reaper-ledger-bound");
+        let live = make_target_dir(&root, "env-var-only-target");
+        let mut store = open_store(&root);
+
+        memcore::insert_exec_env(
+            store.connection(),
+            &memcore::NewExecEnvLease {
+                env_id: "env-live-build".to_string(),
+                kind: "worktree".to_string(),
+                path: "/wt/env-live-build".to_string(),
+                repo_root: "/repo".to_string(),
+                branch: "tachi/1062/w".to_string(),
+                base_sha: "abc123".to_string(),
+                dispatch_id: None,
+                env_class: memcore::EnvClass::default(),
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        let register = memcore::insert_resource(
+            store.connection_mut(),
+            &NewExecEnvResource {
+                resource_id: "res-live-build".to_string(),
+                kind: ResourceKind::BuildTarget,
+                path: live.display().to_string(),
+                bytes: Some(2048),
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        let resource_id = match register {
+            RegisterOutcome::Registered { resource_id } => resource_id,
+            other => panic!("expected a fresh registration: {other:?}"),
+        };
+        memcore::bind_resource(store.connection_mut(), "env-live-build", &resource_id).unwrap();
+
+        // The process table sees NOTHING for this entire run — the whole point.
+        let report = reap_uncertified(
+            store.connection_mut(),
+            &opts(&root, true),
+            aged_now(30),
+            &*unheld_probe(),
+        );
+
+        assert!(
+            live.join("debug/artifact.rlib").exists(),
+            "a target the ledger declares BOUND must survive even though `ps` never saw it: \
+             {report:?}"
+        );
+        assert!(report.reclaimed.is_empty(), "{report:?}");
+        // The ledger fence prunes this at the WALK, before it is ever a candidate at
+        // all — see `resource_with_a_live_binding_is_never_reclaimed` for the same
+        // shape, spelled out in full.
+        assert!(
+            report.protected.contains(&live.display().to_string()),
+            "the ledger-bound target must be in the protected set: {:?}",
+            report.protected
+        );
+        assert!(report.candidates.is_empty(), "{report:?}");
+        let pruned = report
+            .unexamined
+            .iter()
+            .find(|skip| skip.path == live.display().to_string())
+            .expect("the ledger-bound target is a pruned scan unit");
+        assert_eq!(pruned.class, "safety-refusal", "{pruned:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     // ── sol audit · BUG 2: the object judged is the object deleted ───────────
 
     /// `--root` is caller-supplied and `is_dir()` follows symlinks; the protection
@@ -3690,8 +4199,10 @@ mod tests {
         std::os::unix::fs::symlink(&judged_root, &link).unwrap();
         let mut store = open_store(&base);
 
-        // The retarget lands exactly in the window: the holder probe is the last
-        // thing the run does before it decides to delete.
+        // `probe` is invoked twice per candidate (once to decide eligibility,
+        // once again inside the deleter); this closure retargets on its FIRST
+        // call, which happens during the eligibility check — see the assertions
+        // below for exactly which fence that lands the refusal on.
         let link_for_probe = link.clone();
         let decoy_for_probe = decoy_root.clone();
         let retargeting_probe = move |_path: &Path| {
@@ -3718,15 +4229,122 @@ mod tests {
         assert!(report.reclaimed.is_empty(), "{report:?}");
         assert_eq!(report.candidates.len(), 1, "{report:?}");
         assert_eq!(report.candidates[0].decision, "refused", "{report:?}");
+        // **Correction (fix-round, 2026-07-17): checkpoint 2's own claim about
+        // this test was wrong.** `probe` is not called once, at the last possible
+        // moment before `remove_dir_all` — it is called TWICE: once as one of
+        // `run_orphan_reap_uncertified`'s "expensive checks" that decide whether a
+        // candidate is even eligible (`candidate.holders = Some(probe(...))`,
+        // BEFORE the `--force` branch is entered at all), and again inside
+        // `delete_resource_bytes` itself. This closure's retarget is unconditional
+        // on invocation, so it fires on the FIRST call — during that eligibility
+        // check, well before `delete_resource_bytes` runs a single fence. By the
+        // time the deleter's own `std::fs::canonicalize` re-resolves the pinned
+        // root, the link is ALREADY retargeted, so it is THAT check — "it now
+        // resolves to X but the verdict was rendered against Y" — that refuses the
+        // delete here, not the `(dev, ino)` recheck checkpoint 2 added (which
+        // exists for the different case where the canonical *spelling* survives
+        // unchanged — see `a_directory_replaced_at_the_same_path_between_verdict_
+        // and_delete_is_refused` for that one). The safety property this test
+        // exists to prove (the decoy survives, nothing is deleted) still holds —
+        // it was the inline claim about *which* fence catches it that was wrong.
         assert!(
             report
                 .warnings
                 .iter()
                 .any(|warning| warning.contains("verdict was rendered against")),
-            "the refusal names the identity mismatch: {report:?}"
+            "the refusal names the retargeted root: {report:?}"
         );
+        assert!(
+            !report.errors.is_empty(),
+            "an identity that no longer resolves to the judged object must land in errors, not \
+             just a warning: {report:?}"
+        );
+        assert!(report.incomplete, "{report:?}");
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// **The rest of BUG 2 (closed): a rename-and-replace, no symlink involved at
+    /// all.** The symlink test above catches a retargeted *link* — the canonical
+    /// spelling changes, and the pathname re-resolution alone is enough to see it.
+    /// This test is the hole THAT one leaves: `rm -rf` + `mkdir` at the exact same
+    /// path leaves the canonical spelling byte-for-byte identical (there is
+    /// nothing for `std::fs::canonicalize` to disagree about), so only a REAL
+    /// identity — `(dev, ino)`, captured at judgement and re-`stat`ed immediately
+    /// before the delete — can tell the judged directory from its replacement.
+    ///
+    /// Discriminating: on the pre-#1062 pathname-only check, `canonicalize(path)
+    /// == pinned` is TRUE here (same string, before and after), so that fence
+    /// alone would wave this delete through. Only the `(dev, ino)` re-check
+    /// added by this fix refuses it.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_replaced_at_the_same_path_between_verdict_and_delete_is_refused() {
+        let root = unique_temp_dir("tachi-reaper-inode-swap");
+        let target = make_target_dir(&root, "swapped-target");
+        let mut store = open_store(&root);
+
+        // `probe` is invoked twice per candidate (once to decide eligibility,
+        // once again inside the deleter); this closure swaps on its FIRST call,
+        // during the eligibility check — either invocation's identity recheck
+        // would catch it (see the assertion below).
+        let target_for_probe = target.clone();
+        let swapping_probe = move |_path: &Path| {
+            std::fs::remove_dir_all(&target_for_probe).unwrap();
+            std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
+            std::fs::write(
+                target_for_probe.join("debug/replacement.rlib"),
+                vec![9u8; 4096],
+            )
+            .unwrap();
+            HolderCheck::None
+        };
+
+        let report = reap_uncertified(
+            store.connection_mut(),
+            &opts(&root, true),
+            aged_now(30),
+            &swapping_probe,
+        );
+
+        assert!(
+            target.join("debug/replacement.rlib").exists(),
+            "the replacement directory — a different object at the same path — must survive: \
+             {report:?}"
+        );
+        assert!(report.reclaimed.is_empty(), "{report:?}");
+        assert_eq!(report.candidates.len(), 1, "{report:?}");
+        assert_eq!(report.candidates[0].decision, "refused", "{report:?}");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("(dev, ino) identity")),
+            "the refusal names the (dev, ino) mismatch, not just the pathname: {report:?}"
+        );
+        // **checkpoint 2 fix (codex-9178d) — correction, 2026-07-17: this
+        // scenario is actually caught by the FIRST `(dev, ino)` check
+        // (`delete_resource_bytes`'s pre-probe recheck), not the second one added
+        // for checkpoint 2.** `probe` runs twice per candidate — once as one of
+        // `run_orphan_reap_uncertified`'s own eligibility checks, before the
+        // `--force` branch is even entered, and again inside
+        // `delete_resource_bytes`. This closure's swap is unconditional on
+        // invocation, so it fires on that FIRST call, well before the deleter's
+        // own probe or its second recheck ever run. Either check would have
+        // caught it (that is what checkpoint 2 hardened for the case where BOTH
+        // pre-existing checks run before the swap); what matters for #1062 is
+        // that this refusal must cost the run its clean exit exactly like any
+        // other identity-unresolved unit (checkpoint 3): a fence that fires here
+        // means the run does not know what is at this path anymore, not that a
+        // designed fence worked cleanly.
+        assert!(
+            !report.errors.is_empty(),
+            "an identity that changed a second time (mid-probe) must land in errors, not just a \
+             warning: {report:?}"
+        );
+        assert!(report.incomplete, "{report:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ── sol audit · BUG 4: the scan keeps books ─────────────────────────────
@@ -3802,6 +4420,68 @@ mod tests {
         assert!(books.incomplete(), "{books:?}");
 
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **BUG 4, closed: an ATTEMPTED delete that does not cleanly finish must not
+    /// exit 0.** The first cut treated every non-`Ok` outcome from the delete path
+    /// the same way — a warning line, run still exits 0 — which conflated "a fence
+    /// fired, working as designed" with "the delete was tried and a
+    /// `remove_dir_all` failed partway". This fixture forces the second: the
+    /// candidate is genuinely eligible (stale, unheld, unbound — the OS itself is
+    /// what refuses one entry), so the failure comes from the delete path, not
+    /// from any earlier gate.
+    #[cfg(unix)]
+    #[test]
+    fn a_partial_delete_failure_forces_a_nonclean_exit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_temp_dir("tachi-reaper-partial-delete");
+        let target = make_target_dir(&root, "half-deletable-target");
+        let locked = target.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("stuck.o"), vec![1u8; 16]).unwrap();
+        // Unlinking `stuck.o` needs write+execute on its PARENT (`locked`), not on
+        // the file itself — stripping that makes `remove_dir_all` delete
+        // everything else it can (the fixture's `debug/artifact.rlib` included) and
+        // then fail on this one entry: a real partial delete, not a simulated one.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let mut store = open_store(&root);
+        let report = reap_uncertified(
+            store.connection_mut(),
+            &opts(&root, true),
+            aged_now(30),
+            &*unheld_probe(),
+        );
+
+        // Restore permissions before anything else touches the fixture, or the
+        // temp dir leaks an undeletable entry past this test.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(report.candidates.len(), 1, "{report:?}");
+        assert_eq!(
+            report.candidates[0].decision, "refused",
+            "a delete that did not finish is not `reclaim`: {report:?}"
+        );
+        assert!(
+            locked.join("stuck.o").exists(),
+            "the entry `remove_dir_all` could not touch survives: {report:?}"
+        );
+        // The discriminating assertion: the pre-#1062 shape put this in `warnings`
+        // only and still exited 0. `errors` (not just `warnings`) must carry it.
+        assert!(
+            !report.errors.is_empty(),
+            "an attempted delete that did not finish must land in `errors`, not just a warning: \
+             {report:?}"
+        );
+        assert!(report.incomplete, "{report:?}");
+        let status = reap_exit_status(&report);
+        assert!(
+            status.is_err(),
+            "a partial delete failure must never exit clean, even under --force: {status:?}"
+        );
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4198,6 +4878,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **checkpoint 1 fix, standing coverage (codex-9178d).** The test above
+    /// (`an_incomplete_protection_set_never_exits_clean`) runs `force: false` and
+    /// only proves the report-level flags — it never reaches the delete path at
+    /// all, so it cannot discriminate this bug. #1062's own text: an unresolved
+    /// protection source "refuses to delete anything," not merely a non-zero exit
+    /// after the fact. Discriminating: before the fix, `fresh.is_complete()` being
+    /// false at delete time still fell through to the `covers()` check, and a
+    /// candidate that the (incomplete) set did not happen to name as covered was
+    /// reclaimed anyway.
+    #[test]
+    fn an_incomplete_protection_set_at_delete_time_deletes_nothing() {
+        let root = unique_temp_dir("tachi-reaper-protection-gap-delete");
+        let dead = make_target_dir(&root, "dead-target");
+        let mut store = open_store(&root);
+
+        let report = run_orphan_reap_uncertified(
+            store.connection_mut(),
+            &opts(&root, true),
+            &resolved_sources().without_home(),
+            aged_now(30),
+            &*unheld_probe(),
+        );
+
+        assert!(
+            dead.join("debug/artifact.rlib").exists(),
+            "an unresolved protection source at delete time must refuse to delete, not just \
+             warn about it afterward: {report:?}"
+        );
+        assert!(report.reclaimed.is_empty(), "{report:?}");
+        assert!(!report.protection_complete, "{report:?}");
+        let status = reap_exit_status(&report);
+        assert!(status.is_err(), "must not exit clean: {status:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The gap is what makes it incomplete — not the mere presence of a note.
     #[test]
     fn a_protection_set_with_no_gaps_is_complete() {
@@ -4344,6 +5060,240 @@ mod tests {
                  whole test process, which is what made every reaper test depend on HOME and \
                  turned an unrelated test red. Inject a `ProtectionSources` instead."
             );
+        }
+    }
+
+    // ── #1062 kill-test matrix (S2d shape) — #[ignore]d, not yet executed ────
+    //
+    // Everything above this line is the STANDING suite: it runs on every `cargo test`,
+    // and every assertion in it is discriminating (red on the pre-#1062 code, green
+    // after — see the individual test docs). It is not, on its own, what S2d's doctrine
+    // calls a certification: "the unit tests pass" is this crate believing its own code.
+    //
+    // This is the separate thing S2d asks for — an EXECUTED run, checked in as a
+    // receipt. `orphan_reaper_kill_test_matrix` below drives the four scenarios #1062
+    // names as the minimum bar, back to back, against real directories, under REAL
+    // `--force` — and PRINTS a receipt in the certification.rs shape when it passes. It
+    // never writes one; that is a human/Oz decision, made by reading the printed output
+    // and checking a TOML file in by hand (`crates/tachi-dispatch/certifications/
+    // codex-cli.toml` is the precedent for the shape). Until that happens,
+    // `DESTRUCTIVE_CERTIFIED` stays `false` — no code in this module reads the printed
+    // output back to flip it, on purpose: a receipt this crate wrote to itself would
+    // recreate exactly the self-grading S2d exists to rule out.
+    mod kill_tests {
+        use super::*;
+
+        /// One line of the matrix: what was exercised, and whether it survived / was
+        /// refused as required. Printed, not asserted into a struct anyone parses —
+        /// the human checking in the receipt reads this.
+        struct MatrixResult {
+            label: &'static str,
+            outcome: &'static str,
+        }
+
+        /// The four scenarios #1062 names as the minimum kill-test bar, run back to
+        /// back against real directories under real `--force`. Each panics (failing
+        /// the test, and printing nothing) if the reaper does not behave exactly as
+        /// required; only a run where all four survive prints the receipt.
+        ///
+        /// `#[ignore]`: this is the out-of-band event S2d's own module doc describes
+        /// — it deletes real directories on the machine that runs it (inside its own
+        /// temp roots only) and is not something an ordinary `cargo test` should run
+        /// unattended. Run explicitly: `cargo test --offline -p tachi-server --lib \
+        /// exec_env_reaper::tests::kill_tests:: -- --ignored --nocapture`.
+        #[cfg(unix)]
+        #[ignore = "#1062 kill-test: real deletes under real --force; run explicitly, not on every cargo test"]
+        #[test]
+        fn orphan_reaper_kill_test_matrix() {
+            let started = std::time::Instant::now();
+            let mut results = Vec::new();
+
+            // 1. A live build holding a target via env-var-only MUST survive. The
+            //    process table is empty for the whole run — no argv ever names the
+            //    target — and the fixture survives only because a lease bound it on
+            //    the ledger (BUG 1).
+            {
+                let root = unique_temp_dir("tachi-reaper-kt-env-var-only");
+                let live = make_target_dir(&root, "kt-env-var-only-target");
+                let mut store = open_store(&root);
+                memcore::insert_exec_env(
+                    store.connection(),
+                    &memcore::NewExecEnvLease {
+                        env_id: "kt-env-live".to_string(),
+                        kind: "worktree".to_string(),
+                        path: "/wt/kt-env-live".to_string(),
+                        repo_root: "/repo".to_string(),
+                        branch: "tachi/1062/kt".to_string(),
+                        base_sha: "abc123".to_string(),
+                        dispatch_id: None,
+                        env_class: memcore::EnvClass::default(),
+                        created_at: String::new(),
+                    },
+                )
+                .unwrap();
+                let resource_id = match memcore::insert_resource(
+                    store.connection_mut(),
+                    &NewExecEnvResource {
+                        resource_id: "kt-res-live".to_string(),
+                        kind: ResourceKind::BuildTarget,
+                        path: live.display().to_string(),
+                        bytes: Some(2048),
+                        created_at: String::new(),
+                    },
+                )
+                .unwrap()
+                {
+                    RegisterOutcome::Registered { resource_id } => resource_id,
+                    other => panic!("expected a fresh registration: {other:?}"),
+                };
+                memcore::bind_resource(store.connection_mut(), "kt-env-live", &resource_id)
+                    .unwrap();
+
+                let report = reap_uncertified(
+                    store.connection_mut(),
+                    &opts(&root, true),
+                    aged_now(30),
+                    &*unheld_probe(),
+                );
+                assert!(
+                    live.join("debug/artifact.rlib").exists(),
+                    "1. env-var-only live build must survive: {report:?}"
+                );
+                assert!(report.reclaimed.is_empty(), "1. {report:?}");
+                let _ = std::fs::remove_dir_all(&root);
+                results.push(MatrixResult {
+                    label: "env_var_only_live_build_survives",
+                    outcome: "PASS: ledger-bound target untouched, ps blind throughout",
+                });
+            }
+
+            // 2. A target swapped for a different object at the same path between
+            //    scan and delete MUST NOT be followed — the replacement survives
+            //    (BUG 2).
+            {
+                let root = unique_temp_dir("tachi-reaper-kt-swap");
+                let target = make_target_dir(&root, "kt-swapped-target");
+                let mut store = open_store(&root);
+                let target_for_probe = target.clone();
+                let swapping_probe = move |_path: &Path| {
+                    std::fs::remove_dir_all(&target_for_probe).unwrap();
+                    std::fs::create_dir_all(target_for_probe.join("debug")).unwrap();
+                    std::fs::write(
+                        target_for_probe.join("debug/replacement.rlib"),
+                        vec![9u8; 4096],
+                    )
+                    .unwrap();
+                    HolderCheck::None
+                };
+                let report = reap_uncertified(
+                    store.connection_mut(),
+                    &opts(&root, true),
+                    aged_now(30),
+                    &swapping_probe,
+                );
+                assert!(
+                    target.join("debug/replacement.rlib").exists(),
+                    "2. the replacement object must survive: {report:?}"
+                );
+                assert!(report.reclaimed.is_empty(), "2. {report:?}");
+                let _ = std::fs::remove_dir_all(&root);
+                results.push(MatrixResult {
+                    label: "target_swapped_at_same_path_not_followed",
+                    outcome: "PASS: (dev, ino) mismatch refused the delete",
+                });
+            }
+
+            // 3. A protected source that cannot be resolved (HOME unset — the
+            //    default shared cache cannot be named) MUST abort the whole run under
+            //    --force, deleting nothing (BUG 3, re-proven under this matrix's
+            //    real --force + real fixtures).
+            {
+                let root = unique_temp_dir("tachi-reaper-kt-gap");
+                let dead = make_target_dir(&root, "kt-gap-target");
+                let mut store = open_store(&root);
+                let report = run_orphan_reap_uncertified(
+                    store.connection_mut(),
+                    &opts(&root, true),
+                    &resolved_sources().without_home(),
+                    aged_now(30),
+                    &*unheld_probe(),
+                );
+                assert!(
+                    dead.join("debug/artifact.rlib").exists(),
+                    "3. an unresolvable protected source must abort before any delete: {report:?}"
+                );
+                assert!(report.reclaimed.is_empty(), "3. {report:?}");
+                assert!(!report.protection_complete, "3. {report:?}");
+                assert!(
+                    reap_exit_status(&report).is_err(),
+                    "3. must not exit clean: {report:?}"
+                );
+                let _ = std::fs::remove_dir_all(&root);
+                results.push(MatrixResult {
+                    label: "unresolvable_protected_source_aborts_the_run",
+                    outcome: "PASS: fail-closed, non-zero exit, nothing deleted",
+                });
+            }
+
+            // 4. A process-table scan that cannot spawn MUST abort the whole run
+            //    under --force, deleting nothing.
+            {
+                let root = unique_temp_dir("tachi-reaper-kt-noproc");
+                let dead = make_target_dir(&root, "kt-noproc-target");
+                let mut store = open_store(&root);
+                let failing_scan: fn() -> (Vec<PathBuf>, Vec<String>) = || {
+                    (
+                        Vec::new(),
+                        vec!["process scan unavailable (ps: No such file or directory)".to_string()],
+                    )
+                };
+                let report = run_orphan_reap_uncertified(
+                    store.connection_mut(),
+                    &opts(&root, true),
+                    &resolved_sources().with_live_builds(&failing_scan),
+                    aged_now(30),
+                    &*unheld_probe(),
+                );
+                assert!(
+                    dead.join("debug/artifact.rlib").exists(),
+                    "4. a ps that cannot spawn must abort before any delete: {report:?}"
+                );
+                assert!(report.reclaimed.is_empty(), "4. {report:?}");
+                assert!(
+                    reap_exit_status(&report).is_err(),
+                    "4. must not exit clean: {report:?}"
+                );
+                let _ = std::fs::remove_dir_all(&root);
+                results.push(MatrixResult {
+                    label: "ps_unavailable_aborts_the_run",
+                    outcome: "PASS: fail-closed, non-zero exit, nothing deleted",
+                });
+            }
+
+            let duration_secs = started.elapsed().as_secs_f64();
+
+            // Printed, never written — see the section doc above for why checking in
+            // the receipt is a human act, not something this test does to itself.
+            println!("\n─── #1062 orphan reaper kill-test receipt (S2d shape) ───");
+            println!("kill_test = \"crates/tachi-server/src/exec_env_reaper.rs\"");
+            println!("kill_test_fn = \"exec_env_reaper::tests::kill_tests::orphan_reaper_kill_test_matrix\"");
+            println!("binary = \"tachi-server\"");
+            println!("binary_version = \"{}\"", env!("CARGO_PKG_VERSION"));
+            println!("host_os = \"{}\"", std::env::consts::OS);
+            println!("result = \"pass\"");
+            println!("duration_secs = \"{duration_secs:.2}\"");
+            println!("matrix = [");
+            for result in &results {
+                println!("  \"{}\", # {}", result.label, result.outcome);
+            }
+            println!("]");
+            println!(
+                "# executed_by / executed_at / executed_on_commit / kill_test_source_blob: fill \
+                 in by hand from the environment that ran this, then check in as \
+                 crates/tachi-server/certifications/orphan-reaper.toml — see \
+                 crates/tachi-dispatch/certifications/codex-cli.toml for the shape."
+            );
+            println!("───────────────────────────────────────────────────────\n");
         }
     }
 }

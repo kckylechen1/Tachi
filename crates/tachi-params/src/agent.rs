@@ -1,44 +1,17 @@
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
-fn default_true() -> bool {
-    true
-}
-
 fn default_copilot_top_k() -> usize {
     6
 }
 
 // ─── Handoff ────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct HandoffLeaveParams {
-    /// Summary of what was accomplished in this session
-    pub summary: String,
-
-    /// List of incomplete tasks / next steps for the receiving agent
-    #[serde(default)]
-    pub next_steps: Vec<String>,
-
-    /// Optional target agent ID (e.g. "claude-code", "cursor"). If omitted, any agent can pick up.
-    #[serde(default)]
-    pub target_agent: Option<String>,
-
-    /// Optional context (file paths, error messages, etc.)
-    #[serde(default)]
-    pub context: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct HandoffCheckParams {
-    /// Agent ID checking for handoff memos. If omitted, returns all pending memos.
-    #[serde(default)]
-    pub agent_id: Option<String>,
-
-    /// If true, mark retrieved memos as acknowledged (default: true)
-    #[serde(default = "default_true")]
-    pub acknowledge: bool,
-}
+//
+// #1099: `HandoffLeaveParams`/`HandoffCheckParams` retired along with the
+// `handoff_leave`/`handoff_check` routes and `tachi_handoff`'s 'leave'/
+// 'check' actions (see #1016 — sticky/orchestrator replace them).
+// `HandoffPromoteIssueParams` survives; `promote_issue` is the one
+// documented handoff capability without a replacement.
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct HandoffPromoteIssueParams {

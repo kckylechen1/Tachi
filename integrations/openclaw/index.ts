@@ -1113,16 +1113,16 @@ export const memoryHybridBridgePlugin = {
         "check_inbox",
         "List kanban cards from a Tachi inbox.",
       );
-      registerTachiPassthrough(
-        "tachi_create_handoff",
-        "handoff_leave",
-        "Create a Tachi handoff memo.",
-      );
-      registerTachiPassthrough(
-        "tachi_get_handoff",
-        "handoff_check",
-        "Read pending Tachi handoff memos.",
-      );
+      // NOTE (#1099): `tachi_create_handoff` / `tachi_get_handoff` used to
+      // forward to the server-side `handoff_leave` / `handoff_check` tools,
+      // but those routes are retired (zero live callers found in the #1099
+      // caller sweep — this experimental, default-off passthrough was the
+      // only in-repo reference to the raw names). Leaving the passthroughs
+      // registered here would advertise tools that always return `tool not
+      // found`, mirroring the ghost_whisper/ghost_listen precedent above.
+      // Removed — agents that want a handoff-style memo should use
+      // tachi_memory(action='sticky_leave'|'sticky_check') or
+      // tachi_orchestrator(action='handoff_write'|'handoff_read') instead.
       registerTachiPassthrough(
         "tachi_run_skill",
         "run_skill",

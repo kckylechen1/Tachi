@@ -5,9 +5,11 @@ mod facade;
 mod foundry;
 mod gh;
 mod hub;
+mod lesson_forge;
 mod memory;
 mod peer;
 mod project_db;
+mod recall_evidence;
 mod refinery;
 mod sandbox;
 
@@ -17,9 +19,11 @@ pub use facade::*;
 pub use foundry::*;
 pub use gh::*;
 pub use hub::*;
+pub use lesson_forge::*;
 pub use memory::*;
 pub use peer::*;
 pub use project_db::*;
+pub use recall_evidence::*;
 pub use refinery::*;
 pub use sandbox::*;
 

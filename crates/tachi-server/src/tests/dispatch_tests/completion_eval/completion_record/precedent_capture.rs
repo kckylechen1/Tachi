@@ -62,6 +62,7 @@ fn base_complete() -> TachiCompleteParams {
         signatures: Vec::new(),
         rulings: Vec::new(),
         adjudication: None,
+        eval_run_ids: Vec::new(),
     }
 }
 
@@ -81,6 +82,9 @@ async fn complete_with_rulings_persists_retrievable_precedent_rows() {
         ],
         outcome: Some("validated".to_string()),
         overturned_by: None,
+        adjudicator: None,
+        source_refs: Vec::new(),
+        engine_receipt: None,
     }];
 
     let resp = server
@@ -188,6 +192,9 @@ async fn retrying_same_ruling_dedupes_to_one_precedent_row() {
         principles_cited: vec!["precedent:1027-dedup".to_string()],
         outcome: Some("validated".to_string()),
         overturned_by: None,
+        adjudicator: None,
+        source_refs: Vec::new(),
+        engine_receipt: None,
     }];
 
     // First capture.
@@ -295,6 +302,9 @@ async fn different_ruling_content_gets_a_different_precedent_path() {
             principles_cited: vec!["precedent:1027-distinct-a".to_string()],
             outcome: Some("validated".to_string()),
             overturned_by: None,
+            adjudicator: None,
+            source_refs: Vec::new(),
+            engine_receipt: None,
         },
         RulingRecordParams {
             case: "second distinct case: review-implementation vendor separation ruling"
@@ -305,6 +315,9 @@ async fn different_ruling_content_gets_a_different_precedent_path() {
             principles_cited: vec!["precedent:1027-distinct-b".to_string()],
             outcome: Some("validated".to_string()),
             overturned_by: None,
+            adjudicator: None,
+            source_refs: Vec::new(),
+            engine_receipt: None,
         },
     ];
 
@@ -361,6 +374,9 @@ async fn same_ruling_different_dispatch_still_dedupes_to_one_row() {
         principles_cited: vec!["precedent:1027-b2".to_string()],
         outcome: Some("validated".to_string()),
         overturned_by: None,
+        adjudicator: None,
+        source_refs: Vec::new(),
+        engine_receipt: None,
     };
 
     let mut first_params = base_complete();
@@ -487,6 +503,9 @@ async fn nul_ambiguous_ruling_pair_gets_distinct_precedent_paths() {
             principles_cited: vec!["precedent:1027-b1".to_string()],
             outcome: Some("validated".to_string()),
             overturned_by: None,
+            adjudicator: None,
+            source_refs: Vec::new(),
+            engine_receipt: None,
         },
         RulingRecordParams {
             case: "nul-ambiguity check: embedded NUL byte inside `case`, no options".to_string(),
@@ -496,6 +515,9 @@ async fn nul_ambiguous_ruling_pair_gets_distinct_precedent_paths() {
             principles_cited: vec!["precedent:1027-b1".to_string()],
             outcome: Some("validated".to_string()),
             overturned_by: None,
+            adjudicator: None,
+            source_refs: Vec::new(),
+            engine_receipt: None,
         },
     ];
 
@@ -561,6 +583,9 @@ async fn malformed_ruling_skipped_but_complete_succeeds() {
             principles_cited: Vec::new(),
             outcome: None,
             overturned_by: None,
+            adjudicator: None,
+            source_refs: Vec::new(),
+            engine_receipt: None,
         },
         // Malformed: unrecognized outcome.
         RulingRecordParams {
@@ -570,6 +595,9 @@ async fn malformed_ruling_skipped_but_complete_succeeds() {
             principles_cited: Vec::new(),
             outcome: Some("maybe".to_string()),
             overturned_by: None,
+            adjudicator: None,
+            source_refs: Vec::new(),
+            engine_receipt: None,
         },
         // Valid: should still land alongside the skipped ones. Rendered body
         // is kept comfortably above the capture gate's 200-char
@@ -587,6 +615,9 @@ async fn malformed_ruling_skipped_but_complete_succeeds() {
             principles_cited: vec!["constitution:security/fail-safe".to_string()],
             outcome: None, // defaults to pending
             overturned_by: None,
+            adjudicator: None,
+            source_refs: Vec::new(),
+            engine_receipt: None,
         },
     ];
 
@@ -636,6 +667,9 @@ async fn default_format_receipt_still_surfaces_skipped_rulings() {
         principles_cited: Vec::new(),
         outcome: None,
         overturned_by: None,
+        adjudicator: None,
+        source_refs: Vec::new(),
+        engine_receipt: None,
     }];
 
     let resp = server
@@ -724,6 +758,9 @@ async fn enforce_mode_persists_valid_ruling_and_skips_gate_rejected_one() {
             ],
             outcome: Some("validated".to_string()),
             overturned_by: None,
+            adjudicator: None,
+            source_refs: Vec::new(),
+            engine_receipt: None,
         },
         // Normalization-valid (non-empty case/ruling) but the rendered body
         // is far under the 200-char capture floor — a genuine capture-gate
@@ -735,6 +772,9 @@ async fn enforce_mode_persists_valid_ruling_and_skips_gate_rejected_one() {
             principles_cited: Vec::new(),
             outcome: None,
             overturned_by: None,
+            adjudicator: None,
+            source_refs: Vec::new(),
+            engine_receipt: None,
         },
     ];
 

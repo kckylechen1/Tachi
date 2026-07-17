@@ -213,7 +213,12 @@ pub struct CompactContextParams {
     #[serde(default = "default_compact_max_output_tokens")]
     pub max_output_tokens: usize,
 
-    /// Whether Tachi should later persist durable facts from this window
+    /// #1099: `compact_context` never persists — it only drafts a compacted
+    /// text block. Setting this to true is refused with an error pointing at
+    /// `compact_session_memory` (the real persistence path); it does not (and
+    /// never did) trigger persistence itself. Kept as a param, not deleted,
+    /// so existing callers get a loud, actionable refusal instead of a
+    /// silently-dropped unknown field.
     #[serde(default)]
     pub persist: bool,
 }

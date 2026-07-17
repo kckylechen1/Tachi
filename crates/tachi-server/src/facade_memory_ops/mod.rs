@@ -7,6 +7,7 @@
 mod briefing_ops;
 mod checkpoint_ops;
 pub(crate) mod consolidate_ops;
+mod current_work_anchor;
 mod evidence_format;
 mod pattern_feedback_ops;
 mod progress_ops;

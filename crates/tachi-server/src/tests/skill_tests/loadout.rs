@@ -74,6 +74,7 @@ async fn tachi_skill_loadout_resolves_dispatch_profile_skills_and_bundle() {
             signatures: Vec::new(),
             rulings: Vec::new(),
             adjudication: None,
+            eval_run_ids: Vec::new(),
         }))
         .await
         .expect("seed loadout eval row");

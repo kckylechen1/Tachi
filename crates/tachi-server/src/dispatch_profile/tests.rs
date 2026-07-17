@@ -2,6 +2,7 @@ use super::*;
 
 mod opencode_transport;
 mod profile_resolution;
+mod profiles_listing;
 mod risk_classifier;
 mod route_policy;
 mod scoring;
@@ -39,5 +40,6 @@ fn params() -> TachiDispatchParams {
         auto_capability_bundle: None,
         mcp_access: None,
         allowed_mcp_servers: Vec::new(),
+        verbose: None,
     }
 }

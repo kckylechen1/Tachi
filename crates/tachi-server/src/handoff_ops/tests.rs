@@ -1,6 +1,4 @@
 use super::*;
-use memory_server_runtime::AgentProfile;
-use rmcp::handler::server::wrapper::Parameters;
 
 fn ensure_test_env() {
     static INIT: std::sync::Once = std::sync::Once::new();
@@ -62,6 +60,4 @@ fn test_entry(memo: HandoffMemo) -> MemoryEntry {
 }
 
 mod agent_resolution;
-mod cleanup_supersede;
-mod persisted_ack;
 mod promotion;

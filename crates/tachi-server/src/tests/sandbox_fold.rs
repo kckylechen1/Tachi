@@ -411,26 +411,17 @@ fn no_alias_is_routed_past_its_removal_release() {
 /// description instead, so any wording choice that self-identifies as
 /// deprecated still gets held to the manifest.
 ///
-/// One explicit exemption: `#1016`'s handoff routes (`handoff_leave`,
-/// `handoff_check`, `tachi_handoff`) already say "DEPRECATED" in their
-/// descriptions but signal deprecation through a DIFFERENT, pre-existing
-/// mechanism — a `deprecated` field embedded in the JSON *response* (see
-/// `handoff_tests.rs`), not `ALIAS_MANIFEST`/`AliasEntry`. They predate this
-/// widened contains-match and were never routed through this manifest, so
-/// without the exemption the widening (correctly) flags them as unregistered
-/// — but registering them here would be speaking for #1016's own compat
-/// contract, which is out of scope for the #757 Cut3-S1 sandbox fold. Keep
-/// this list named and reviewable rather than silently narrowing the match.
-const NON_MANIFEST_DEPRECATION_MECHANISMS: &[&str] =
-    &["handoff_leave", "handoff_check", "tachi_handoff"];
-
+/// #1099: the `#1016` exemption that used to live here (`handoff_leave`/
+/// `handoff_check`/`tachi_handoff` said "DEPRECATED" but signaled it via a
+/// response-embedded `deprecated` field instead of `ALIAS_MANIFEST`) is
+/// gone. `handoff_leave`/`handoff_check` no longer exist as routes, and
+/// `tachi_handoff`'s description no longer says "deprecated" (it now
+/// documents its one surviving action, `promote_issue`, which was never
+/// deprecated). The gate below is fully strict again — no exemptions.
 #[test]
 fn every_deprecated_route_is_a_registered_alias() {
     for (name, description) in router_descriptions() {
         if !description.to_ascii_lowercase().contains("deprecated") {
-            continue;
-        }
-        if NON_MANIFEST_DEPRECATION_MECHANISMS.contains(&name.as_str()) {
             continue;
         }
         let entry = find_alias(&name).unwrap_or_else(|| {

@@ -64,8 +64,10 @@ pub const REMEMBER_TOOL_PATTERNS: &[&str] = &[
 ];
 
 pub const COORDINATE_TOOL_PATTERNS: &[&str] = &[
-    "handoff_check",
-    "handoff_leave",
+    // #1099: `handoff_check`/`handoff_leave` direct routes retired (leave/
+    // check superseded by sticky/orchestrator, see #1016). `tachi_handoff`
+    // survives, narrowed to its one action without a replacement
+    // (`promote_issue`).
     // Facade coordination tools
     "tachi_handoff",
     "tachi_workflow",
@@ -146,6 +148,10 @@ pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_gh",
     // Peer-publication broker (#1016 S1): advisory read-only peer awareness.
     "peer_query",
+    // Agent eval facade (#1066): register/observe/adjudicate/get is the
+    // first-class mirror eval intake for harness-native subagents — a daily
+    // facade entrypoint for any host-native session, not an admin-only tool.
+    "tachi_agent_eval",
 ];
 
 /// Delegate profile allow-list. For worker agents spawned by tachi_dispatch.

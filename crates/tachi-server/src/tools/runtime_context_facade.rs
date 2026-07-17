@@ -4,6 +4,7 @@ use rmcp::{tool, tool_router};
 use crate::foundry_runtime_ops::{
     handle_capture_session, handle_compact_context, handle_compact_rollup,
     handle_compact_session_memory, handle_recall_context, handle_section_build,
+    COMPACT_CONTEXT_PERSIST_REFUSAL,
 };
 use crate::tool_params::{
     CaptureSessionParams, CompactContextParams, CompactRollupParams, CompactSessionMemoryParams,
@@ -44,12 +45,22 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Compact a soon-to-be-evicted session window into a ready-to-inject context block. Designed for host runtimes that know when token pressure requires compaction."
+        description = "Compact a soon-to-be-evicted session window into a ready-to-inject context block. Designed for host runtimes that know when token pressure requires compaction. Never persists (persist=true is refused, #1099) — use compact_session_memory to persist a compacted window."
     )]
     pub(crate) async fn compact_context(
         &self,
         Parameters(params): Parameters<CompactContextParams>,
     ) -> Result<String, String> {
+        // #1099/codex round-2: the persist=true refusal must be enforced here,
+        // before any daemon forwarding. An already-running daemon (even one
+        // reporting the same CARGO_PKG_VERSION, since this fix does not bump
+        // the crate version) may still be serving the pre-#1099 binary and
+        // would return the old nominal-success persist body, silently
+        // bypassing the in-process refusal below. persist=true must never
+        // reach the daemon at all.
+        if params.persist {
+            return Err(COMPACT_CONTEXT_PERSIST_REFUSAL.to_string());
+        }
         if let Some(body) =
             crate::cli_client::maybe_forward_server_read(self, "compact_context", &params).await?
         {

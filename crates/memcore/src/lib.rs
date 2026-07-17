@@ -63,10 +63,10 @@ pub use db::exec_env::{
 #[cfg(feature = "admin")]
 pub use db::exec_env_resources::{
     active_binding_count, bind_resource, find_resource_by_path, get_resource, insert_resource,
-    list_resources, quarantine_resource, reclaim_resource, record_resource_measurement,
-    release_binding, release_quarantine, BindOutcome, ExecEnvResource, NewExecEnvResource,
-    QuarantineOutcome, RegisterOutcome, ReleaseBindingOutcome, ReleaseQuarantineOutcome,
-    ResourceKind, ResourceReclaimOutcome, ResourceState,
+    list_bound_resource_paths, list_resources, quarantine_resource, reclaim_resource,
+    record_resource_measurement, release_binding, release_quarantine, BindOutcome, ExecEnvResource,
+    NewExecEnvResource, QuarantineOutcome, RegisterOutcome, ReleaseBindingOutcome,
+    ReleaseQuarantineOutcome, ResourceKind, ResourceReclaimOutcome, ResourceState,
 };
 #[cfg(feature = "admin")]
 pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};
@@ -76,6 +76,14 @@ pub use db::foundry_jobs::{
     job_status_histogram, load_pending_foundry_jobs, requeue_retryable_foundry_jobs,
     update_foundry_job_status_with_reason, FoundryJobLease, FoundryJobSummary, FoundryRetryPolicy,
     JobStatusHistogram, PersistedFoundryJob, RequeueOutcome,
+};
+#[cfg(feature = "admin")]
+pub use db::mirror_eval::{
+    append_mirror_eval_adjudication, get_mirror_eval_run_view, get_observation, get_run_by_id,
+    get_run_by_native_child_id, list_adjudications_for_run, record_mirror_eval_observation,
+    register_mirror_eval_run, run_is_adjudicated, MirrorEvalAdjudication, MirrorEvalObservation,
+    MirrorEvalRun, MirrorEvalRunView, NewMirrorEvalAdjudication, NewMirrorEvalObservation,
+    NewMirrorEvalRun,
 };
 pub use db::row_to_entry;
 #[cfg(feature = "admin")]

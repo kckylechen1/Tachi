@@ -66,7 +66,7 @@ const NON_IDEMPOTENT_TOOL_NAMES: &[&str] = &[
     "vault_init",
     "vault_setup_rotation",
     "vault_set_api_key_pool",
-    "handoff_leave",
+    // #1099: "handoff_leave" retired — the route no longer exists.
     "hub_call",
 ];
 

@@ -71,6 +71,36 @@ pub(crate) async fn handle_tachi_complete(
         }
     }
 
+    // #1066 AC-5: project ADJUDICATED, evidence-usable, non-self-eval mirror
+    // eval intake rows into the legacy subagents[]-compatible aggregation
+    // surface. Additive only — an empty/omitted eval_run_ids leaves
+    // params.subagents byte-identical to what the caller supplied, and an
+    // unresolved/ineligible id is silently skipped (never fails completion).
+    // A genuine storage-read error is a DIFFERENT event from "not found"
+    // (codex round-2 finding #4a): it is `tracing::error!`-logged inside
+    // `project_eval_run_ids` AND disclosed on the completion record's notes
+    // below, instead of being indistinguishable from a benign missing
+    // reference.
+    if !params.eval_run_ids.is_empty() {
+        let (projected, lookup_error_ids) =
+            super::mirror_eval_projection::project_eval_run_ids(server, &params.eval_run_ids);
+        params.subagents.extend(projected);
+        if !lookup_error_ids.is_empty() {
+            let caveat = format!(
+                "mirror eval projection: {} eval_run_id(s) skipped due to a storage lookup \
+                 error (not simply unregistered): {}",
+                lookup_error_ids.len(),
+                lookup_error_ids.join(", ")
+            );
+            params.notes = Some(match params.notes.take() {
+                Some(existing) if !existing.trim().is_empty() => {
+                    format!("{existing}\n{caveat}")
+                }
+                _ => caveat,
+            });
+        }
+    }
+
     let CompleteEvalRecord {
         task_id,
         path,
@@ -539,6 +569,19 @@ pub(crate) async fn handle_tachi_complete(
     // skipped + warned and never fails completion (the primary contract).
     pipeline_status["precedent_recording"] =
         crate::precedent_ops::record_complete_rulings(server, &params, project_explicit).await;
+
+    // Principle-level precedent CANDIDATE decomposition (#1076). Additive and
+    // independent of `precedent_recording` above — both read the same
+    // caller-supplied `rulings[]`, neither depends on the other's outcome.
+    // Candidates only: no pending->established promotion happens here (that
+    // is #1077's gate).
+    pipeline_status["precedent_candidate_decomposition"] =
+        crate::precedent_candidate_ops::record_complete_precedent_candidates(
+            server,
+            &params,
+            project_explicit,
+        )
+        .await;
 
     pipeline_status["post_complete_hooks"] = run_lesson_post_complete_hook(
         server,

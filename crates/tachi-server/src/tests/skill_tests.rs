@@ -12,6 +12,7 @@ use std::time::Duration;
 
 mod builtin_ingest;
 mod bundle;
+mod compact_context;
 mod compact_session;
 mod discover;
 mod from_pattern;

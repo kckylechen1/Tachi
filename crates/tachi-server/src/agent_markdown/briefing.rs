@@ -6,7 +6,6 @@ pub(crate) fn format_briefing(
     stickies: &Value,
     memories: &Value,
     wiki: &Value,
-    cross_project: &Value,
     health_summary: &Value,
     verification: &Value,
     kanban: &Value,
@@ -21,7 +20,6 @@ pub(crate) fn format_briefing(
     let wiki_cap = if compact { 3 } else { 5 };
     let kanban_cap = if compact { 3 } else { 5 };
     let checkpoint_cap = if compact { 2 } else { 3 };
-    let cross_cap = if compact { 3 } else { 5 };
     let verification_cap = if compact { 3 } else { 6 };
 
     let mut out = vec!["## Tachi briefing".to_string(), format!("Query: {query}")];
@@ -146,31 +144,11 @@ pub(crate) fn format_briefing(
         }
     }
 
-    if let Some(handoffs) = cross_project.as_array() {
-        if !handoffs.is_empty() {
-            out.push(
-                "\n### Cross-project (global handoffs) [AUTHORITY: WORKFLOW STATE]".to_string(),
-            );
-            out.push(
-                "_Pending memos from other repos/agents. Ack with `tachi_handoff(action='check')` or leave via `tachi_handoff(action='leave')` (deprecated, #1016 — prefer `tachi_memory(action='sticky_leave'|'sticky_check')` for new notes)._".to_string(),
-            );
-            for row in handoffs.iter().take(cross_cap) {
-                let from = row.get("from_agent").and_then(Value::as_str).unwrap_or("?");
-                let summary = row
-                    .get("summary")
-                    .and_then(Value::as_str)
-                    .unwrap_or("(handoff)");
-                let path = row
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .unwrap_or("/handoff");
-                out.push(format!(
-                    "- [handoff] `{path}` from **{from}**: {}",
-                    md_escape(&compact_text_line(summary, 120))
-                ));
-            }
-        }
-    }
+    // #1099: the "Cross-project (global handoffs)" section that used to
+    // render here (fed by `handoff_ops::list_pending_handoffs_for_briefing`)
+    // is retired along with the handoff_ops write/read cycle — see
+    // handoff_ops.rs's module doc. Cross-session coordination now goes
+    // through the "Sticky notes" section above.
 
     out.push("\n### Memories (this project) [AUTHORITY: LOW-MEDIUM]".to_string());
     out.push(format_section_rows(memories, memory_cap));

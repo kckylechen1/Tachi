@@ -105,5 +105,6 @@ pub(crate) use daily_distill::scrub_agent_noise;
 pub(crate) use handlers::{
     handle_capture_session, handle_compact_context, handle_compact_rollup,
     handle_compact_session_memory, handle_recall_context, handle_section_build,
+    COMPACT_CONTEXT_PERSIST_REFUSAL,
 };
 pub(crate) use maintenance::{enqueue_foundry_capture_maintenance, run_foundry_maintenance_worker};

@@ -1,4 +1,4 @@
-mod auto_link;
+pub(crate) mod auto_link;
 mod confidence_reinforce;
 mod contradiction;
 mod eval_capture;

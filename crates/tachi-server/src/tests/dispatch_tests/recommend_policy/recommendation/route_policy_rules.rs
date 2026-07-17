@@ -60,6 +60,7 @@ async fn tachi_task_recommend_consumes_approved_route_policy_rules() {
                 signatures: Vec::new(),
                 rulings: Vec::new(),
                 adjudication: None,
+                eval_run_ids: Vec::new(),
             }))
             .await
             .expect("seed eval row");
