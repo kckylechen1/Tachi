@@ -1009,4 +1009,341 @@ mod tests {
              body={body}"
         );
     }
+
+    // --- tachi#1224 CONCERN follow-up: project-name boundary pins (non-ASCII,
+    // spaces, nonexistent, empty). Test-only; no product code changes. Every
+    // assertion below reflects behavior already present on this branch — these
+    // are regression locks (baseline GREEN), not new-bug reproductions, EXCEPT
+    // where a doc comment explicitly flags an escalated finding.
+
+    /// CONCERN item 1 (CLI dispatch layer): `daemon_forward_named_project`
+    /// performs zero validation or sanitization on the project name it reads
+    /// out of `args["project"]` — a non-ASCII value passes through
+    /// byte-for-byte. Any rejection or silent rewriting happens further
+    /// downstream (transport.rs's header construction, or
+    /// `sanitize_safe_path_name`'s resolution — see the live-daemon tests
+    /// below), never at this layer.
+    #[test]
+    fn remember_project_arg_with_non_ascii_name_forwards_unvalidated() {
+        let mut args = serde_json::Map::new();
+        args.insert("text".to_string(), serde_json::json!("hello"));
+        args.insert("project".to_string(), serde_json::json!("量化"));
+
+        assert_eq!(
+            daemon_forward_named_project("remember", None, &args),
+            Some("量化".to_string()),
+            "a non-ASCII --project value must forward unchanged, not be \
+             rejected or rewritten, at the CLI dispatch layer"
+        );
+    }
+
+    /// CONCERN item 2 (CLI dispatch layer): same unvalidated pass-through for
+    /// a project name containing a plain space.
+    #[test]
+    fn remember_project_arg_with_embedded_space_forwards_unvalidated() {
+        let mut args = serde_json::Map::new();
+        args.insert("text".to_string(), serde_json::json!("hello"));
+        args.insert("project".to_string(), serde_json::json!("my project"));
+
+        assert_eq!(
+            daemon_forward_named_project("remember", None, &args),
+            Some("my project".to_string()),
+            "a --project value containing a space must forward unchanged"
+        );
+    }
+
+    /// CONCERN item 4 (CLI dispatch layer): an explicitly-empty
+    /// `--project ""` is still `Some("")` at THIS layer —
+    /// `args.get("project")` sees a present (if empty) string key, not an
+    /// absent one. The empty-string-as-absent normalization happens later,
+    /// server-side (`session_identity::normalize_identity_value`), already
+    /// pinned by that module's own `normalize_identity_trims_and_rejects_empty`
+    /// test — this test pins the DISTINCT, earlier fact that the CLI layer
+    /// itself does not perform that collapse.
+    #[test]
+    fn remember_project_arg_with_empty_string_forwards_as_explicit_empty() {
+        let mut args = serde_json::Map::new();
+        args.insert("text".to_string(), serde_json::json!("hello"));
+        args.insert("project".to_string(), serde_json::json!(""));
+
+        assert_eq!(
+            daemon_forward_named_project("remember", None, &args),
+            Some(String::new()),
+            "an explicit but empty --project value is still forwarded as \
+             Some(\"\") at the CLI dispatch layer, not treated as absent"
+        );
+    }
+
+    /// CONCERN item 3, full stack: a `--project` NAME that is legal ASCII but
+    /// does not correspond to any registered project must fail the daemon's
+    /// `initialize` binding check closed, surfacing
+    /// `apply_http_session_identity`'s wrapped error text
+    /// (server_handler.rs:284-314, `"invalid HTTP direct-connect project
+    /// binding: {err}"`) rather than silently succeeding or silently dropping
+    /// the binding. Calls `call_daemon_tool_raw` directly against a real
+    /// spawned daemon (reusing this file's own `spawn_global_only_http_daemon`
+    /// fixture), bypassing `dispatch_cli_tool`'s daemon-detection/PID-file
+    /// plumbing, which is orthogonal to this assertion.
+    #[test]
+    fn daemon_call_rejects_nonexistent_ascii_project_name_binding() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        let (result, ct, daemon_task) = rt.block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+            let (daemon_info, ct, daemon_task) =
+                spawn_global_only_http_daemon(server, &global).await;
+            let mut args = serde_json::Map::new();
+            args.insert("action".to_string(), serde_json::json!("briefing"));
+            let params = rmcp::model::CallToolRequestParams::new("tachi_memory".to_string())
+                .with_arguments(args);
+            let result = crate::cli_client::call_daemon_tool_raw(
+                &daemon_info,
+                params,
+                Some("definitely-not-a-real-project-xyz123"),
+            )
+            .await;
+            (result, ct, daemon_task)
+        });
+
+        let err = result.expect_err("binding to a nonexistent project name must fail closed");
+        let message = err.to_string();
+        assert!(
+            message.contains("invalid HTTP direct-connect project binding"),
+            "unexpected error: {message}"
+        );
+        assert!(message.contains("not found"), "unexpected error: {message}");
+
+        ct.cancel();
+        rt.block_on(daemon_task).expect("daemon task");
+    }
+
+    /// CONCERN item 1, full stack — and the escalated finding: ground truth
+    /// (verified directly against `http` 1.4.2, this crate's pinned version
+    /// per Cargo.lock, in an isolated scratch crate — NOT this repo's build)
+    /// is that `HeaderValue::from_str` accepts non-ASCII UTF-8 text; it only
+    /// rejects embedded control characters (CR/LF/NUL/DEL). It does NOT
+    /// reject Chinese, emoji, or any other valid non-ASCII text. This
+    /// contradicts the dispatch packet's stated expectation that a
+    /// non-ASCII `--project` value would fail at header construction with
+    /// "invalid proxy project header value" (see transport.rs's own test
+    /// module for the header-construction-layer half of this pin, including
+    /// the ACTUAL rejection case: an embedded control character). This test
+    /// proves the full-stack consequence with a live daemon: a non-ASCII
+    /// project name reaches the daemon intact and fails ONLY because "量化"
+    /// is not a registered project — the identical failure family as the
+    /// nonexistent-ASCII-name test above, never "invalid proxy project
+    /// header value".
+    #[test]
+    fn daemon_call_accepts_non_ascii_project_header_then_fails_as_unknown_project() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        let (result, ct, daemon_task) = rt.block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+            let (daemon_info, ct, daemon_task) =
+                spawn_global_only_http_daemon(server, &global).await;
+            let mut args = serde_json::Map::new();
+            args.insert("action".to_string(), serde_json::json!("briefing"));
+            let params = rmcp::model::CallToolRequestParams::new("tachi_memory".to_string())
+                .with_arguments(args);
+            let result =
+                crate::cli_client::call_daemon_tool_raw(&daemon_info, params, Some("量化")).await;
+            (result, ct, daemon_task)
+        });
+
+        let err = result.expect_err("an unregistered project name must fail closed");
+        let message = err.to_string();
+        assert!(
+            !message.contains("invalid proxy project header value"),
+            "a non-ASCII project name must not be rejected at header \
+             construction; got: {message}"
+        );
+        assert!(
+            message.contains("invalid HTTP direct-connect project binding"),
+            "unexpected error: {message}"
+        );
+
+        ct.cancel();
+        rt.block_on(daemon_task).expect("daemon task");
+    }
+
+    /// CONCERN item 2, full stack: same shape as the non-ASCII test above, for
+    /// a project name containing a plain space — accepted by header
+    /// construction, then fails as an unknown project once it reaches the
+    /// daemon's binding resolution (not, notably, at header construction).
+    #[test]
+    fn daemon_call_accepts_project_name_with_space_then_fails_as_unknown_project() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        let (result, ct, daemon_task) = rt.block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+            let (daemon_info, ct, daemon_task) =
+                spawn_global_only_http_daemon(server, &global).await;
+            let mut args = serde_json::Map::new();
+            args.insert("action".to_string(), serde_json::json!("briefing"));
+            let params = rmcp::model::CallToolRequestParams::new("tachi_memory".to_string())
+                .with_arguments(args);
+            let result =
+                crate::cli_client::call_daemon_tool_raw(&daemon_info, params, Some("my project"))
+                    .await;
+            (result, ct, daemon_task)
+        });
+
+        let err = result.expect_err("an unregistered project name must fail closed");
+        let message = err.to_string();
+        assert!(
+            !message.contains("invalid proxy project header value"),
+            "a project name containing a plain space must not be rejected at \
+             header construction; got: {message}"
+        );
+        assert!(
+            message.contains("invalid HTTP direct-connect project binding"),
+            "unexpected error: {message}"
+        );
+
+        ct.cancel();
+        rt.block_on(daemon_task).expect("daemon task");
+    }
+
+    /// CONCERN item 4, full stack: an empty `--project ""` header value is
+    /// accepted by header construction (see transport.rs's own test) AND then
+    /// normalized away to "absent" server-side
+    /// (`session_identity::normalize_identity_value("")` is `None` — already
+    /// pinned by that module's own `normalize_identity_trims_and_rejects_empty`
+    /// test). The net effect, proven live here, is that the session binds as
+    /// UNBOUND rather than failing closed: the call succeeds (no "invalid
+    /// HTTP direct-connect project binding" error) — an empty `--project` is
+    /// treated as though it were never passed, not rejected.
+    #[test]
+    fn daemon_call_with_empty_project_name_is_treated_as_unbound_not_rejected() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        let (result, ct, daemon_task) = rt.block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+            let (daemon_info, ct, daemon_task) =
+                spawn_global_only_http_daemon(server, &global).await;
+            let mut args = serde_json::Map::new();
+            args.insert("action".to_string(), serde_json::json!("briefing"));
+            let params = rmcp::model::CallToolRequestParams::new("tachi_memory".to_string())
+                .with_arguments(args);
+            let result =
+                crate::cli_client::call_daemon_tool_raw(&daemon_info, params, Some("")).await;
+            (result, ct, daemon_task)
+        });
+
+        assert!(
+            result.is_ok(),
+            "an empty --project value must not fail the daemon binding check \
+             (it is normalized away to \"absent\", not rejected); got: {:?}",
+            result.err().map(|e| e.to_string())
+        );
+
+        ct.cancel();
+        rt.block_on(daemon_task).expect("daemon task");
+    }
+
+    /// CONCERN escalation (flagged in the delivery report, not fixed here):
+    /// `resolve_named_project_db_path` — the exact function
+    /// `apply_http_session_identity` calls at server_handler.rs:284-314 to
+    /// resolve a named-project binding — feeds its input through
+    /// `sanitize_safe_path_name` (`crate::utils::sanitize_safe_path_name`),
+    /// which maps every non-ASCII-alphanumeric character to `_` and then
+    /// trims leading/trailing `_`/`.`/`-`. A project name made ENTIRELY of
+    /// non-ASCII characters (e.g. "量化", two CJK characters) sanitizes to
+    /// two underscores, which then trim away to nothing, falling through to
+    /// the `"unnamed"` fallback (`utils/text.rs`'s
+    /// `sanitize_safe_path_name`). This is a SILENT identity collision: a
+    /// caller declaring `--project 量化` resolves to the EXACT SAME database
+    /// as a caller who legitimately declared `--project unnamed`, with no
+    /// error, warning, or any signal that the name was rewritten. This test
+    /// pins the collision as a reproducible fact (not an endorsement) — it is
+    /// the concrete evidence behind the "candidate silent cross-project
+    /// misroute" escalation called out in this contract's delivery report,
+    /// per the dispatch packet's STOP-on-silent-misrouting clause. Test-only;
+    /// zero product code changed by this contract.
+    #[test]
+    fn non_ascii_only_project_name_collides_with_the_literal_project_named_unnamed() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+        let unnamed_db = tachi_home.join("projects/unnamed/memory.db");
+        std::fs::create_dir_all(unnamed_db.parent().expect("parent")).expect("parent dir");
+        std::fs::write(&unnamed_db, b"unnamed project db placeholder")
+            .expect("write placeholder db");
+
+        let resolved = crate::MemoryServer::resolve_named_project_db_path("量化").expect(
+            "sanitize_safe_path_name collapses an all-non-ASCII project name to \
+             \"unnamed\" with no rejection — this resolves successfully, which \
+             is exactly the silent-collision behavior this test pins",
+        );
+
+        assert_eq!(
+            resolved, unnamed_db,
+            "a caller declaring --project 量化 must not silently resolve to the \
+             SAME database path as a caller who declared --project unnamed — \
+             this is a candidate silent cross-project misroute (see this \
+             test's doc comment); escalated, not fixed, by this test-only change"
+        );
+    }
 }
