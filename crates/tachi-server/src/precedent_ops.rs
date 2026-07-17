@@ -216,20 +216,38 @@ pub(crate) fn scrub_ruling(n: &mut NormalizedRuling) -> usize {
     redactions
 }
 
-/// Truncate a single line to at most `max` chars for the ≤100-char summary
-/// field, appending an ellipsis when cut. The `summary` field is a UI teaser,
-/// not a content field — the frozen "content fields are atomic, never
-/// truncated" rule applies to `text`/`metadata`, which this never touches.
+/// Truncate a single line so the WHOLE rendered `"{prefix} {case}"` summary
+/// stays at most `max` chars total (not just the `case` portion) for the
+/// ≤100-char summary field, appending an ellipsis when cut. The `summary`
+/// field is a UI teaser, not a content field — the frozen "content fields
+/// are atomic, never truncated" rule applies to `text`/`metadata`, which
+/// this never touches.
+///
+/// `max` is a total-output budget, not a case-only budget: a longer `prefix`
+/// (e.g. `precedent_candidate_ops`'s `"[precedent-candidate]"`, 22 chars vs.
+/// `"[precedent]"`'s 11) eats into the same `max`, so two callers passing the
+/// identical `max` still both respect it end-to-end instead of the
+/// prefix-length difference silently blowing the caller's own budget (#1183
+/// fix-round finding 14: `max=80` with the candidate prefix rendered up to
+/// 102 total chars — well past what callers bounding `summary.len()` assume
+/// `max` means).
 ///
 /// `pub(crate)`: `precedent_candidate_ops` (#1076) calls this directly with
 /// a `"[precedent-candidate]"` prefix instead of duplicating the truncation
 /// logic for its own candidate summaries.
 pub(crate) fn summary_line_with_prefix(prefix: &str, case: &str, max: usize) -> String {
     let one_line = case.replace(['\n', '\r'], " ");
-    if one_line.chars().count() <= max {
+    // "prefix" + one space before `case` always precedes the (possibly
+    // truncated) case text.
+    let prefix_budget = prefix.chars().count() + 1;
+    let case_budget = max.saturating_sub(prefix_budget);
+    if one_line.chars().count() <= case_budget {
         format!("{prefix} {one_line}")
     } else {
-        let head: String = one_line.chars().take(max.saturating_sub(1)).collect();
+        let head: String = one_line
+            .chars()
+            .take(case_budget.saturating_sub(1))
+            .collect();
         format!("{prefix} {head}…")
     }
 }
