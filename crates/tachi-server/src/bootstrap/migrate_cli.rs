@@ -50,7 +50,15 @@
 //!   exact #1119 race a per-open-only BUSY check cannot: WAL +
 //!   `busy_timeout=5000` (`memcore/src/db/schema/ddl.rs`) gives a live-but-
 //!   momentarily-idle daemon no persistent write lock, so an external
-//!   `Immediate` open between its writes would otherwise succeed.
+//!   `Immediate` open between its writes would otherwise succeed. This
+//!   check is re-run fresh inside [`apply_one`] itself, at each library's
+//!   own apply attempt — NEVER cached once before the sweep's loop starts.
+//!   A daemon can start (or a lock can be acquired) between this
+//!   invocation's own start and a later library's apply; a snapshot taken
+//!   once up front and reused across every `apply_one` call would let that
+//!   later apply race straight past the guard on a now-stale "no daemon"
+//!   reading (kckylechen1/tachi#1223, second review round — the original
+//!   version of this fix made exactly that mistake).
 //!   **(2) the per-open `SQLITE_BUSY` classification** (via
 //!   [`memcore::db::sqlite_error_is_locked`]) remains as defense in depth for
 //!   contention the liveness pre-check cannot see — e.g. a second concurrent
@@ -287,7 +295,12 @@ fn a_live_daemon_holds_this_app_home(app_home: &Path, global_db_path: &Path) -> 
     }
 }
 
-fn apply_one(lib: &Library, plan: MigrateFinding, live_daemon_pid: Option<i32>) -> MigrateFinding {
+fn apply_one(
+    lib: &Library,
+    plan: MigrateFinding,
+    app_home: &Path,
+    global_db_path: &Path,
+) -> MigrateFinding {
     let mut finding = plan;
 
     match finding.status {
@@ -311,13 +324,18 @@ fn apply_one(lib: &Library, plan: MigrateFinding, live_daemon_pid: Option<i32>) 
     }
 
     // #1119 liveness pre-check: refuse to even attempt the write-open while
-    // this app home's daemon lock is held by a live process. Per-open
+    // this app home's daemon lock is held by a live process. Re-judged
+    // RIGHT HERE, at this library's own apply attempt — not from a
+    // snapshot computed once before the sweep's loop started (kckylechen1/
+    // tachi#1223, second review round: reusing a pre-loop snapshot across
+    // every `apply_one` call let a daemon that started mid-sweep race
+    // straight past every subsequent library's guard). Per-open
     // SQLITE_BUSY classification below is not a substitute for this — WAL +
     // busy_timeout gives a live-but-momentarily-idle daemon no persistent
     // write lock, so an external Immediate open between its writes would
     // otherwise succeed and silently forward-migrate the DB out from under
     // it (the exact #1119 incident). See module doc.
-    if let Some(pid) = live_daemon_pid {
+    if let Some(pid) = a_live_daemon_holds_this_app_home(app_home, global_db_path) {
         finding.applied = Some(AppliedOutcome::SkippedLocked);
         finding.note = format!(
             "skipped: a live tachi daemon (pid {pid}) holds this app home's daemon lock; \
@@ -398,23 +416,20 @@ pub(super) async fn run_migrate_command(
 ) -> Result<(), Box<dyn Error>> {
     let libraries = enumerate_known_libraries(global_db_path, project_db_path);
 
-    // Computed once per invocation, not per library: this app home has at
-    // most one daemon lock scoped to `global_db_path`, and that daemon's
-    // `FoundryScheduler` polls every manifest-listed library (global,
-    // workspace, and every named project), not only its own global DB — so
-    // one liveness check correctly gates the whole sweep. See module doc.
-    let live_daemon_pid = if apply {
-        a_live_daemon_holds_this_app_home(app_home, global_db_path)
-    } else {
-        None
-    };
-
+    // No pre-loop liveness snapshot here: `apply_one` re-queries
+    // `a_live_daemon_holds_this_app_home` itself, fresh, at each library's
+    // own apply attempt. This app home has at most one daemon lock scoped
+    // to `global_db_path`, and that daemon's `FoundryScheduler` polls every
+    // manifest-listed library (global, workspace, and every named project),
+    // not only its own global DB — so the same query correctly gates every
+    // library, but it must be asked anew each time, not cached once before
+    // this loop started. See module doc and `apply_one`.
     let findings: Vec<MigrateFinding> = libraries
         .iter()
         .map(|lib| {
             let plan = plan_one(lib);
             if apply {
-                apply_one(lib, plan, live_daemon_pid)
+                apply_one(lib, plan, app_home, global_db_path)
             } else {
                 plan
             }
@@ -739,6 +754,89 @@ mod tests {
                 "the liveness pre-check must refuse BEFORE any real open — a WAL/SHM sidecar \
                  appearing here would mean the guard was bypassed and only the after-the-fact \
                  SQLITE_BUSY catch saved this test"
+            );
+        });
+    }
+
+    /// Discriminative test for this review's own fix (kckylechen1/tachi#1223,
+    /// second round): a daemon that starts AFTER the sweep's own plan-time
+    /// probe but BEFORE a given library's apply attempt must still be
+    /// caught, even though that earlier plan pass saw no daemon at all.
+    ///
+    /// The version of this file this round is fixing computed
+    /// `live_daemon_pid` exactly once — before `run_migrate_command`'s loop
+    /// over libraries started — and threaded that one `Option<i32>`
+    /// snapshot into every `apply_one` call. A daemon that appeared partway
+    /// through a multi-library sweep would sail straight past every
+    /// subsequent library's guard on that stale `None`. This test proves
+    /// `apply_one` no longer trusts a caller-supplied snapshot at all: it
+    /// re-queries the daemon's liveness itself, at its own call site, from
+    /// `app_home`/`global_db_path` alone — so a daemon that appears strictly
+    /// between the precheck and the apply attempt is still caught. Against
+    /// this file's prior `apply_one(&Library, MigrateFinding, Option<i32>)`
+    /// signature this test does not even compile (the fix's whole point is
+    /// that `apply_one` must stop accepting a pre-computed liveness value as
+    /// an argument) — the mismatch itself is the regression this test
+    /// pins down.
+    #[test]
+    fn apply_one_catches_a_daemon_that_appears_after_the_precheck_but_before_its_own_apply() {
+        crate::test_support::with_tachi_home(|home| {
+            let dir = tempfile::tempdir().expect("tmp");
+            let db_path = make_stamped_older_fixture(dir.path(), "global.db", 2);
+            let before_version = read_user_version(&db_path);
+
+            let lib = Library {
+                label: "global".to_string(),
+                path: db_path.clone(),
+            };
+
+            // Step 1: the sweep's own precheck/plan pass, run while no
+            // daemon lock exists at all — matches `run_migrate_command`'s
+            // own `plan_one` call for this library.
+            let plan = plan_one(&lib);
+            assert_eq!(plan.status, GapStatus::NeedsMigration);
+            assert_eq!(
+                a_live_daemon_holds_this_app_home(home, &db_path),
+                None,
+                "sanity: no daemon lock exists yet at precheck time"
+            );
+
+            // Step 2: a daemon appears — strictly AFTER the precheck above,
+            // strictly BEFORE the apply attempt below. `DaemonLock::acquire`
+            // stamps the CURRENT process's own pid, which `process_alive`
+            // finds alive — this test process stands in for the daemon,
+            // exactly as `apply_refuses_when_this_app_homes_daemon_lock_is_held_by_a_live_process`
+            // does above.
+            let lock_path = crate::daemon_lock::scoped_daemon_lock_path(home, &db_path);
+            let _daemon_lock = crate::daemon_lock::DaemonLock::acquire(&lock_path)
+                .expect("acquire scoped daemon lock to simulate a daemon starting mid-sweep");
+
+            // Step 3: apply this library using the plan computed back in
+            // step 1 (mirrors `run_migrate_command` reusing `plan_one`'s
+            // result) — `apply_one` must see the daemon NOW, at its own
+            // call site, not the stale "no daemon" reading from step 1.
+            let result = apply_one(&lib, plan, home, &db_path);
+
+            assert_eq!(
+                result.applied,
+                Some(AppliedOutcome::SkippedLocked),
+                "a daemon that appears after the precheck but before this library's own apply \
+                 attempt must still be caught — re-judged at apply_one's own call site, not a \
+                 precheck snapshot"
+            );
+            assert_eq!(
+                read_user_version(&db_path),
+                before_version,
+                "a library skipped by the re-judged liveness check must be left completely \
+                 untouched"
+            );
+
+            let wal = format!("{}-wal", db_path.display());
+            let shm = format!("{}-shm", db_path.display());
+            assert!(
+                !std::path::Path::new(&wal).exists() && !std::path::Path::new(&shm).exists(),
+                "the re-judged liveness check must refuse BEFORE any real open — a WAL/SHM \
+                 sidecar appearing here would mean the guard was bypassed"
             );
         });
     }
