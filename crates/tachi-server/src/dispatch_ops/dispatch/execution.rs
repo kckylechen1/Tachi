@@ -8,6 +8,13 @@ use super::super::subprocess::{run_agent_subprocess, run_opencode_sop_subprocess
 use super::dedupe::release_flow_dispatch_slot;
 use super::response_helpers::McpCleanup;
 use crate::credential_profile::cleanup_ephemeral_credential_materializations;
+use crate::exec_env_postflight::{
+    apply_verdict,
+    FileQuarantineSink,
+    PostflightGate,
+    ProcessGroupLiveness,
+    WriteContract,
+};
 use crate::{MemoryServer, SaveMemoryParams};
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -51,6 +58,7 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) execution: DispatchExecution,
     pub(super) flow_dispatch_slot: Option<PathBuf>,
     pub(super) mcp_config_path: Option<PathBuf>,
+    pub(super) env_id: Option<String>,
 }
 
 pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
@@ -77,9 +85,82 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let execution_for_spawn = ctx.execution;
     let flow_dispatch_slot_for_spawn = ctx.flow_dispatch_slot;
     let mcp_config_path = ctx.mcp_config_path;
+    let env_id_for_spawn = ctx.env_id;
+
+    let postflight_scratch_dir = server_clone
+        .tachi_home_dir()
+        .join("tmp")
+        .join("postflight");
+    let mut preflight_gate = env_id_for_spawn.clone().and_then(|env_id| {
+        if let Err(error) = std::fs::create_dir_all(&postflight_scratch_dir) {
+            append_trajectory_event(
+                &traj_path_for_spawn,
+                json!({
+                    "event": "exec_env_postflight_preflight_error",
+                    "dispatch_id": d_id,
+                    "agent": agent_for_watchdog,
+                    "timestamp": Utc::now().to_rfc3339(),
+                    "env_id": env_id,
+                    "error": format!(
+                        "failed to create postflight scratch directory {}: {error}",
+                        postflight_scratch_dir.display()
+                    ),
+                }),
+            );
+            return None;
+        }
+
+        let preimage_path = postflight_scratch_dir.join(format!(
+            "{}-{}-preimage.json",
+            crate::utils::sanitize_safe_path_name(&env_id),
+            crate::utils::sanitize_safe_path_name(&d_id),
+        ));
+        Some(PostflightGate::new(
+            env_id,
+            workspace_dir_for_spawn.clone(),
+            preimage_path,
+            WriteContract::DetectAndReject,
+        ))
+    });
 
     tokio::task::spawn(async move {
         let _mcp_cleanup = McpCleanup(mcp_config_path);
+
+        let mut preflight_setup_error: Option<String> = None;
+        if let Some(gate) = preflight_gate.as_mut() {
+            match gate.capture_preimage() {
+                Ok(_) => {
+                    append_trajectory_event(
+                        &traj_path_for_spawn,
+                        json!({
+                            "event": "exec_env_postflight_preflight_captured",
+                            "dispatch_id": d_id,
+                            "agent": agent_for_watchdog,
+                            "timestamp": Utc::now().to_rfc3339(),
+                            "env_id": gate.env_id,
+                            "contract": gate.contract.label(),
+                        }),
+                    );
+                }
+                Err(error) => {
+                    preflight_setup_error = Some(format!(
+                        "Postflight gate pre-image capture failed for env {}: {error}",
+                        gate.env_id
+                    ));
+                    append_trajectory_event(
+                        &traj_path_for_spawn,
+                        json!({
+                            "event": "exec_env_postflight_preflight_failed",
+                            "dispatch_id": d_id,
+                            "agent": agent_for_watchdog,
+                            "timestamp": Utc::now().to_rfc3339(),
+                            "env_id": gate.env_id,
+                            "error": error,
+                        }),
+                    );
+                }
+            }
+        }
 
         // execute_started — Stage 2 (or, in V1, the only stage).
         let execute_started_at = Utc::now();
@@ -99,35 +180,122 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             }),
         );
 
-        let result = match execution_for_spawn {
-            DispatchExecution::Subprocess(cmd) if agent_for_watchdog == "opencode" => {
-                run_opencode_sop_subprocess(
-                    cmd,
-                    timeout,
-                    opencode_sop_label_for_spawn
-                        .as_deref()
-                        .unwrap_or("opencode_sop"),
-                )
-                .await
-            }
-            DispatchExecution::Subprocess(cmd) => run_agent_subprocess(cmd, timeout).await,
-            DispatchExecution::NativeAcp(spec) => {
-                run_native_acp_dispatch(
-                    spec,
-                    &workspace_dir_for_spawn,
-                    &traj_path_for_spawn,
-                    &d_id,
-                    &agent_for_watchdog,
-                    timeout,
-                )
-                .await
-            }
+        let preflight_has_error = preflight_setup_error.is_some();
+        let mut should_release_artifacts = !preflight_has_error;
+        let mut result = match preflight_setup_error {
+            Some(error) => Err(error),
+            None => match execution_for_spawn {
+                DispatchExecution::Subprocess(cmd) if agent_for_watchdog == "opencode" => {
+                    run_opencode_sop_subprocess(
+                        cmd,
+                        timeout,
+                        opencode_sop_label_for_spawn
+                            .as_deref()
+                            .unwrap_or("opencode_sop"),
+                    )
+                    .await
+                }
+                DispatchExecution::Subprocess(cmd) => run_agent_subprocess(cmd, timeout).await,
+                DispatchExecution::NativeAcp(spec) => {
+                    run_native_acp_dispatch(
+                        spec,
+                        &workspace_dir_for_spawn,
+                        &traj_path_for_spawn,
+                        &d_id,
+                        &agent_for_watchdog,
+                        timeout,
+                    )
+                    .await
+                }
+            },
         };
-        let execute_duration_ms = execute_started_instant.elapsed().as_millis() as u64;
 
-        // CLI subprocesses intentionally never acknowledge a receipt: they
-        // have no protocol field that reports an executed model. Native ACP is
-        // the sole carrier with that evidence surface.
+        if !preflight_has_error {
+            if let Some(gate) = preflight_gate.as_mut() {
+                let worker_pid = result.as_ref().ok().and_then(|outcome| outcome.worker_pid);
+                match worker_pid {
+                    Some(worker_pid) => {
+                        match gate.run(&ProcessGroupLiveness::for_worker_pid(worker_pid)) {
+                            Ok(gate_outcome) => {
+                                append_trajectory_event(
+                                    &traj_path_for_spawn,
+                                    gate_outcome.trajectory_event(),
+                                );
+                                if !gate_outcome.artifacts_released() {
+                                    should_release_artifacts = false;
+                                    let mut reason = gate_outcome
+                                        .failure_message()
+                                        .unwrap_or_else(|| {
+                                            "Postflight gate withheld artifacts without a failure message".to_string()
+                                        });
+                                    if gate_outcome.lease_quarantine_required() {
+                                        if let Err(error) = apply_verdict(
+                                            &gate_outcome,
+                                            &FileQuarantineSink {
+                                                dir: postflight_scratch_dir.clone(),
+                                            },
+                                        ) {
+                                            reason = format!("{reason}; quarantine failed: {error}");
+                                            append_trajectory_event(
+                                                &traj_path_for_spawn,
+                                                json!({
+                                                    "event": "exec_env_postflight_quarantine_failed",
+                                                    "dispatch_id": d_id,
+                                                    "agent": agent_for_watchdog,
+                                                    "timestamp": Utc::now().to_rfc3339(),
+                                                    "env_id": gate.env_id,
+                                                    "error": error,
+                                                }),
+                                            );
+                                        }
+                                    }
+                                    result = Err(reason);
+                                }
+                            }
+                            Err(error) => {
+                                let reason = format!(
+                                    "Postflight gate execution failed for env {}: {error}",
+                                    gate.env_id
+                                );
+                                should_release_artifacts = false;
+                                result = Err(reason.clone());
+                                append_trajectory_event(
+                                    &traj_path_for_spawn,
+                                    json!({
+                                        "event": "exec_env_postflight_run_failed",
+                                        "dispatch_id": d_id,
+                                        "agent": agent_for_watchdog,
+                                        "timestamp": Utc::now().to_rfc3339(),
+                                        "env_id": gate.env_id,
+                                        "error": reason,
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        should_release_artifacts = false;
+                        let reason = format!(
+                            "postflight verification could not run for env {}: worker pid unavailable",
+                            gate.env_id
+                        );
+                        result = Err(reason.clone());
+                        append_trajectory_event(
+                            &traj_path_for_spawn,
+                            json!({
+                                "event": "exec_env_postflight_run_skipped",
+                                "dispatch_id": d_id,
+                                "agent": agent_for_watchdog,
+                                "timestamp": Utc::now().to_rfc3339(),
+                                "env_id": gate.env_id,
+                                "error": reason,
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+
         if is_native_acp_transport(&harness_transport_for_spawn) {
             let observed_model = result
                 .as_ref()
@@ -148,6 +316,8 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 );
             }
         }
+
+        let execute_duration_ms = execute_started_instant.elapsed().as_millis() as u64;
 
         // Append subprocess_finished event to trajectory.jsonl
         let mut full_output = match &result {
@@ -221,7 +391,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         }
 
         // Save full output to result.md for orchestrator eval
-        {
+        if should_release_artifacts {
             let result_path = workspace_dir.join("result.md");
             if let Err(err) =
                 crate::utils::write_owner_only_file_atomic(&result_path, full_output.as_bytes())
@@ -243,6 +413,12 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     }),
                 );
             }
+        }
+
+        let result_written = should_release_artifacts;
+
+        if !should_release_artifacts {
+            full_output = String::new();
         }
 
         // --- WATCHDOG: check if sub-agent properly closed the loop ---
@@ -505,7 +681,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 },
                 "updated_at": Utc::now().to_rfc3339(),
                 "run_dir": workspace_dir_for_spawn.to_string_lossy(),
-                "result_written": true,
+                "result_written": result_written,
                 "completion_predicate": preserved_predicate,
                 "cwd": preserved_cwd,
                 "authority": preserved_authority,

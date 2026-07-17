@@ -89,6 +89,7 @@ async fn run_agent_subprocess_inner(
     Ok(DispatchResult {
         output: output_text,
         exit_code,
+        worker_pid: child_pid,
         observed_model: None,
     })
 }

@@ -2,16 +2,11 @@
 //! 4 (parent-owned postflight manifest/diff gate) and 5 (quarantine/reclaim
 //! only after descendants terminate).
 //!
-//! # ⚠ NOT WIRED YET — see #894 S2 wiring slice
-//!
-//! **This gate is a mechanism with no callers.** Nothing in the dispatch path
-//! calls [`PostflightGate::capture_preimage`], [`PostflightGate::run`] or
-//! [`apply_verdict`] today, so **zero dispatches are currently gated by it** —
-//! landing this module changed the enforcement posture of exactly nothing.
-//! Wiring it into lease provisioning / teardown (capture before spawn, run after
-//! the worker is reaped, release artifacts only on a clean verdict) is the S2c /
-//! dispatch-surface slice. Do not read the tests below as evidence that any live
-//! dispatch is protected.
+//! # Wired by dispatch runtime (#894 S2d / S2e)
+//! This gate is now called from dispatch execution after process completion:
+//! pre-image capture occurs before spawn, and postflight comparison + verdict are
+//! applied after the worker exits. The result artifact is withheld when the
+//! verdict is not clean.
 //!
 //! # The name is the contract
 //!

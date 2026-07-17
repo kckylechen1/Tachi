@@ -112,6 +112,8 @@ fn opencode_sop_label(agent_norm: &str, params: &TachiDispatchParams) -> Option<
 pub(crate) struct DispatchResult {
     pub output: String,
     pub exit_code: Option<i32>,
+    /// OS pid of the child process that executed the dispatch command.
+    pub worker_pid: Option<u32>,
     /// A concrete model only when the native ACP carrier explicitly reported
     /// it through its typed runtime config options. CLI subprocesses have no
     /// corresponding acknowledgement channel and leave this absent.
@@ -733,6 +735,7 @@ pub(crate) async fn handle_tachi_dispatch(
         execution,
         flow_dispatch_slot,
         mcp_config_path,
+        env_id: env_id_stamp,
     });
 
     // 9. Immediately return — main agent is unblocked!
