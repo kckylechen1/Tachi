@@ -185,18 +185,21 @@ pub(crate) async fn search_memory_rows_with_recall_config(
             || named_project_vec_available
             || default_wiki_vec_available)
     {
-        server.ensure_provider_secrets_materialized(&["VOYAGE_API_KEY"]);
-        let (scrubbed_query, _) = crate::memory_search_ops::scrub_secrets(&params.query);
-        match server.llm.embed_voyage(&scrubbed_query, "query").await {
-            Ok(query_vec) => {
-                params.query_vec = Some(query_vec);
+        if server.ensure_provider_secrets_materialized(&["VOYAGE_API_KEY"]) {
+            let (scrubbed_query, _) = crate::memory_search_ops::scrub_secrets(&params.query);
+            match server.llm.embed_voyage(&scrubbed_query, "query").await {
+                Ok(query_vec) => {
+                    params.query_vec = Some(query_vec);
+                }
+                Err(e) => {
+                    embed_degraded = Some(crate::memory_search_ops::recall_short_reason(&e));
+                    eprintln!(
+                        "[search_memory] query embedding failed, falling back to lexical-only search: {e}"
+                    );
+                }
             }
-            Err(e) => {
-                embed_degraded = Some(crate::memory_search_ops::recall_short_reason(&e));
-                eprintln!(
-                    "[search_memory] query embedding failed, falling back to lexical-only search: {e}"
-                );
-            }
+        } else {
+            embed_degraded = Some("VOYAGE provider secret is not configured".to_string());
         }
     }
 

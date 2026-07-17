@@ -81,7 +81,12 @@ pub(crate) fn write_owner_only_file_atomic(
     })();
 
     if result.is_err() {
-        let _ = std::fs::remove_file(&tmp_path);
+        if let Err(error) = std::fs::remove_file(&tmp_path) {
+            eprintln!(
+                "failed to remove temporary write file {}: {error}",
+                tmp_path.display()
+            );
+        }
     }
     result
 }

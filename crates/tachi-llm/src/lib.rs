@@ -39,6 +39,8 @@ pub use provider_names::{
 pub fn install_tls_provider() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        if let Err(error) = rustls::crypto::ring::default_provider().install_default() {
+            eprintln!("failed to install rustls ring provider: {error:?}");
+        }
     });
 }

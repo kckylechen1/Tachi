@@ -206,7 +206,12 @@ struct RegistryLock {
 impl Drop for RegistryLock {
     fn drop(&mut self) {
         let _ = self.file.take();
-        let _ = std::fs::remove_file(&self.path);
+        if let Err(error) = std::fs::remove_file(&self.path) {
+            eprintln!(
+                "failed to remove registry lock file {}: {error}",
+                self.path.display()
+            );
+        }
     }
 }
 

@@ -245,12 +245,17 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
 
 fn ensure_optimization_indexes(conn: &Connection) {
     if has_column(conn, "memories", "superseded_by").unwrap_or(false) {
-        let _ = conn.execute(
+        if let Err(error) = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_memories_path_active_ts \
              ON memories(path, timestamp DESC) \
              WHERE archived = 0 AND superseded_by IS NULL",
             [],
-        );
+        ) {
+            tracing::warn!(
+                error = %error,
+                "failed to ensure optimization index for active memories path/ts"
+            );
+        }
     }
 }
 
@@ -400,8 +405,22 @@ fn normalize_memory_validity_columns(conn: &Connection) -> Result<(), MemoryErro
             Ok(())
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK TO normalize_memory_validity_columns");
-            let _ = conn.execute_batch("RELEASE normalize_memory_validity_columns");
+            if let Err(rollback_error) =
+                conn.execute_batch("ROLLBACK TO normalize_memory_validity_columns")
+            {
+                tracing::warn!(
+                    error = %rollback_error,
+                    "failed to rollback normalize_memory_validity_columns savepoint"
+                );
+            }
+            if let Err(release_error) =
+                conn.execute_batch("RELEASE normalize_memory_validity_columns")
+            {
+                tracing::warn!(
+                    error = %release_error,
+                    "failed to release normalize_memory_validity_columns savepoint"
+                );
+            }
             Err(e)
         }
     }
@@ -462,8 +481,19 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
             Ok(())
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK TO migrate_enum_constraints");
-            let _ = conn.execute_batch("RELEASE migrate_enum_constraints");
+            if let Err(rollback_error) = conn.execute_batch("ROLLBACK TO migrate_enum_constraints")
+            {
+                tracing::warn!(
+                    error = %rollback_error,
+                    "failed to rollback migrate_enum_constraints savepoint"
+                );
+            }
+            if let Err(release_error) = conn.execute_batch("RELEASE migrate_enum_constraints") {
+                tracing::warn!(
+                    error = %release_error,
+                    "failed to release migrate_enum_constraints savepoint"
+                );
+            }
             Err(e)
         }
     }
@@ -1018,7 +1048,13 @@ fn retain_recent_migration_backups(db_path: &Path) {
     backups.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
 
     for old in backups.into_iter().skip(migration_backup_retain_count()) {
-        let _ = std::fs::remove_file(old.path());
+        if let Err(error) = std::fs::remove_file(old.path()) {
+            tracing::warn!(
+                error = %error,
+                "failed to remove old migration backup {}",
+                old.path().display()
+            );
+        }
     }
 }
 

@@ -9,11 +9,7 @@ use super::dedupe::release_flow_dispatch_slot;
 use super::response_helpers::McpCleanup;
 use crate::credential_profile::cleanup_ephemeral_credential_materializations;
 use crate::exec_env_postflight::{
-    apply_verdict,
-    FileQuarantineSink,
-    PostflightGate,
-    ProcessGroupLiveness,
-    WriteContract,
+    apply_verdict, FileQuarantineSink, PostflightGate, ProcessGroupLiveness, WriteContract,
 };
 use crate::{MemoryServer, SaveMemoryParams};
 use chrono::Utc;
@@ -87,10 +83,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let mcp_config_path = ctx.mcp_config_path;
     let env_id_for_spawn = ctx.env_id;
 
-    let postflight_scratch_dir = server_clone
-        .tachi_home_dir()
-        .join("tmp")
-        .join("postflight");
+    let postflight_scratch_dir = server_clone.tachi_home_dir().join("tmp").join("postflight");
     let mut preflight_gate = env_id_for_spawn.clone().and_then(|env_id| {
         if let Err(error) = std::fs::create_dir_all(&postflight_scratch_dir) {
             append_trajectory_event(
@@ -235,7 +228,8 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                                                 dir: postflight_scratch_dir.clone(),
                                             },
                                         ) {
-                                            reason = format!("{reason}; quarantine failed: {error}");
+                                            reason =
+                                                format!("{reason}; quarantine failed: {error}");
                                             append_trajectory_event(
                                                 &traj_path_for_spawn,
                                                 json!({

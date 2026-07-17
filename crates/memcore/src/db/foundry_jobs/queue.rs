@@ -175,8 +175,11 @@ pub fn load_pending_foundry_jobs(
     running_before: &str,
 ) -> Result<Vec<PersistedFoundryJob>, MemoryError> {
     // Best-effort: never block replay if the retry sweep hits an error.
-    let _ =
-        requeue_retryable_foundry_jobs(conn, &FoundryRetryPolicy::default(), chrono::Utc::now());
+    if let Err(error) =
+        requeue_retryable_foundry_jobs(conn, &FoundryRetryPolicy::default(), chrono::Utc::now())
+    {
+        tracing::warn!(error = %error, "failed to requeue retryable foundry jobs");
+    }
 
     let mut stmt = conn.prepare(
         "SELECT id, kind, lane, status, target_db, named_project, path_prefix, memory_ids,

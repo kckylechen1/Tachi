@@ -43,19 +43,22 @@ impl MemoryServer {
         })
     }
 
-    pub(crate) fn ensure_provider_secrets_materialized(&self, keys: &[&str]) {
+    pub(crate) fn ensure_provider_secrets_materialized(&self, keys: &[&str]) -> bool {
         if keys
             .iter()
             .all(|key| self.llm.has_configured_secret(&[*key]))
         {
-            return;
+            return true;
         }
         if let Err(error) = self.refresh_llm_provider_secrets_from_vault() {
             tracing::warn!(
                 missing_keys = keys.len(),
                 "failed to materialize provider secrets from vault: {error}"
             );
+            return false;
         }
+        keys.iter()
+            .all(|key| self.llm.has_configured_secret(&[*key]))
     }
 
     pub(crate) fn unlocked_env_secrets_for_child_env(

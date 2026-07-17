@@ -61,8 +61,18 @@ pub(super) fn migrate_v6_fold_persons_into_entities(
             Ok(updates.len())
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK TO migrate_v6_fold_persons");
-            let _ = conn.execute_batch("RELEASE migrate_v6_fold_persons");
+            if let Err(rollback_error) = conn.execute_batch("ROLLBACK TO migrate_v6_fold_persons") {
+                tracing::warn!(
+                    error = %rollback_error,
+                    "failed to rollback v6 fold persons savepoint"
+                );
+            }
+            if let Err(release_error) = conn.execute_batch("RELEASE migrate_v6_fold_persons") {
+                tracing::warn!(
+                    error = %release_error,
+                    "failed to release v6 fold persons savepoint"
+                );
+            }
             Err(e)
         }
     }
@@ -160,8 +170,20 @@ pub fn migrate_v9_relocate_and_drop_location(
             Ok((relocated, 1))
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK TO migrate_v9_relocate_location");
-            let _ = conn.execute_batch("RELEASE migrate_v9_relocate_location");
+            if let Err(rollback_error) =
+                conn.execute_batch("ROLLBACK TO migrate_v9_relocate_location")
+            {
+                tracing::warn!(
+                    error = %rollback_error,
+                    "failed to rollback v9 location relocation savepoint"
+                );
+            }
+            if let Err(release_error) = conn.execute_batch("RELEASE migrate_v9_relocate_location") {
+                tracing::warn!(
+                    error = %release_error,
+                    "failed to release v9 location relocation savepoint"
+                );
+            }
             Err(e)
         }
     }

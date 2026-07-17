@@ -226,7 +226,9 @@ pub fn foundry_job_status_counts(conn: &Connection) -> FoundryJobStatusCounts {
 /// not fatal, the checkpoint attempt still proceeds).
 pub fn open_for_wal_checkpoint(path: &str) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
-    let _ = conn.busy_timeout(Duration::from_millis(5_000));
+    if let Err(error) = conn.busy_timeout(Duration::from_millis(5_000)) {
+        eprintln!("failed to set wal checkpoint busy timeout: {error}");
+    }
     Ok(conn)
 }
 

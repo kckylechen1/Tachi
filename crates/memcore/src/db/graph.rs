@@ -159,8 +159,12 @@ fn write_edge_row(
             Ok(())
         }
         Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK TO write_edge_row");
-            let _ = conn.execute_batch("RELEASE write_edge_row");
+            if let Err(rollback_error) = conn.execute_batch("ROLLBACK TO write_edge_row") {
+                tracing::warn!(error = %rollback_error, "failed to rollback memory edge savepoint");
+            }
+            if let Err(release_error) = conn.execute_batch("RELEASE write_edge_row") {
+                tracing::warn!(error = %release_error, "failed to release memory edge rollback savepoint");
+            }
             Err(e)
         }
     }
