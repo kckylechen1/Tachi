@@ -20,7 +20,11 @@
 //!   session_client → dispatch_id resolution step) and tails its
 //!   `progress.jsonl` as the "recent event ledger" the ruling asks for.
 //!   Requires `target_session_client` — this noun addresses one specific
-//!   peer, it is not a board scan.
+//!   peer, it is not a board scan. **`progress.jsonl` is NOT safe-by-source**
+//!   (some writers append raw ACP message/thinking text or subprocess
+//!   output-tails to it, see [`project_progress_event`]) — the tail is only
+//!   safe because it is run through a strict allowlist projection before it
+//!   ever leaves this process, not because of anything about the file itself.
 //!
 //! ## Deliberately NOT implemented in this leaf (flagged, not guessed)
 //!
@@ -234,15 +238,45 @@ enum RunOutcome {
     },
 }
 
+/// The ONLY keys a `run` noun's progress tail may ever surface (fix-round,
+/// codex `codex-e0a3c` finding D). The module doc's original claim —
+/// `progress.jsonl` carries "never raw prompt/transcript content" — does not
+/// hold structurally: `acp_native/connection.rs`'s `acp_native_message`
+/// events, `acpx/events.rs`'s `acpx_message` events, and
+/// `dispatch/execution.rs`'s `subprocess_finished.output_tail` all append
+/// raw ACP message/thinking text or subprocess stdout to this SAME file.
+/// This projection is a strict ALLOWLIST, not a denylist of known-bad keys —
+/// any key not in this list (`text`, `acp_event`, `acpx_event`, `agent`,
+/// `output_tail`, `tachi_target`, …), from any current or future writer, is
+/// dropped before the line ever leaves this process. This is the identical
+/// trust posture the module doc already claims for `status.json`'s own
+/// fields (advisory projection, never a transcript).
+const PROGRESS_EVENT_PROJECTION_KEYS: &[&str] = &["event", "timestamp", "status", "dispatch_id"];
+
+/// Project one already-parsed progress-line JSON object down to
+/// [`PROGRESS_EVENT_PROJECTION_KEYS`]. Returns `None` for a line that did not
+/// parse to a JSON object at all (the fallback `raw_text` shape some writers
+/// emit on unparseable subprocess output) — treated as malformed by the
+/// caller, never smuggled through as an opaque non-object array element.
+fn project_progress_event(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let obj = value.as_object()?;
+    let mut projected = serde_json::Map::new();
+    for key in PROGRESS_EVENT_PROJECTION_KEYS {
+        if let Some(v) = obj.get(*key) {
+            projected.insert((*key).to_string(), v.clone());
+        }
+    }
+    Some(serde_json::Value::Object(projected))
+}
+
 /// Read `run_dir/progress.jsonl`'s trailing [`RECENT_EVENTS_DISPLAY_CAP`]
-/// lines as the "recent event ledger" the #1016 v1 ruling asks for.
-/// `progress.jsonl` mirrors `trajectory.jsonl`'s event stream 1:1
-/// (`dispatch_v2::append_trajectory_event`) — lifecycle markers
-/// (`event`/`dispatch_id`/`stage`/`timestamp`, occasionally a short `error`),
-/// never raw prompt/transcript content, so this is safe at the same
-/// advisory-projection trust level as `status.json`'s own fields. Malformed
-/// lines are skipped, never surfaced as a parse error (best-effort tail, not
-/// a strict log reader).
+/// lines as the "recent event ledger" the #1016 v1 ruling asks for, projected
+/// through [`project_progress_event`] so only the safe advisory subset ever
+/// crosses the peer boundary. A line that fails to parse as JSON, or parses
+/// but isn't a JSON object, is skipped from the tail AND logged via
+/// `tracing::warn!` — visible in daemon logs rather than silently vanishing,
+/// even though the best-effort tail itself stays lenient (one corrupt line
+/// must not sink the whole read).
 fn read_recent_progress_events(status: &serde_json::Value) -> RunSourceOutcome {
     let Some(run_dir) = status.get("run_dir").and_then(serde_json::Value::as_str) else {
         return RunSourceOutcome::Unavailable(
@@ -265,7 +299,31 @@ fn read_recent_progress_events(status: &serde_json::Value) -> RunSourceOutcome {
     let mut tail: Vec<serde_json::Value> = raw
         .lines()
         .rev()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let parsed = match serde_json::from_str::<serde_json::Value>(trimmed) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %progress_path.display(),
+                        error = %err,
+                        "peer_query noun=run: skipping malformed progress.jsonl line"
+                    );
+                    return None;
+                }
+            };
+            let Some(projected) = project_progress_event(&parsed) else {
+                tracing::warn!(
+                    path = %progress_path.display(),
+                    "peer_query noun=run: skipping non-object progress.jsonl line"
+                );
+                return None;
+            };
+            Some(projected)
+        })
         .take(RECENT_EVENTS_DISPLAY_CAP)
         .collect();
     tail.reverse();
@@ -1173,11 +1231,180 @@ mod tests {
         assert_no_forbidden_keys(&envelope);
     }
 
+    // ── fix-round (codex `codex-e0a3c` finding D): the tail must never leak
+    // raw ACP message/thinking text or subprocess output through as a
+    // "recent event" ──────────────────────────────────────────────────────
+
+    #[test]
+    fn run_noun_progress_tail_strips_raw_text_and_backend_metadata() {
+        // RED before this fix-round's `project_progress_event` allowlist:
+        // `read_recent_progress_events` used to pass every parsed JSON
+        // object through verbatim, so a line shaped like a real
+        // `acp_native_message`/`acpx_message`/`subprocess_finished` write
+        // (raw agent text under `text`/`output_tail`, plus vendor metadata
+        // like `acp_event`/`agent`/`tachi_target`) would have reached the
+        // peer-publication envelope unfiltered. GREEN after: only
+        // `event`/`timestamp`/`status`/`dispatch_id` survive the tail.
+        const SECRET_TEXT: &str = "reasoning-about-the-vault-passphrase-do-not-leak-this";
+
+        let dir = tempfile::tempdir().unwrap();
+        let global_db = dir.path().join("global").join("memory.db");
+        let server = crate::MemoryServer::new(global_db.clone(), None).expect("server");
+        {
+            let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).unwrap();
+            memcore::insert_claim(
+                store.connection(),
+                &memcore::NewSessionClaim {
+                    claim_id: "claim-run-3".to_string(),
+                    session_client: Some("codex".to_string()),
+                    issue_ref: Some("org/repo#3".to_string()),
+                    flow_id: None,
+                    dispatch_id: Some("d-run-789".to_string()),
+                    branch: "feat/z".to_string(),
+                    declared_file_scope: None,
+                    created_at: Utc::now().to_rfc3339(),
+                },
+            )
+            .unwrap();
+        }
+
+        let run_dir = dir.path().join("runs").join("d-run-789");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::json!({ "dispatch_id": "d-run-789", "agent": "codex" }).to_string(),
+        )
+        .unwrap();
+        // A real `acp_native_message`-shaped line (see `connection.rs`'s
+        // `append_mapped_event`) plus a `subprocess_finished`-shaped line
+        // (see `execution.rs`) — both real writers that append raw content
+        // to THIS file, not a synthetic worst case.
+        let acp_message_line = serde_json::json!({
+            "event": "acp_native_message",
+            "dispatch_id": "d-run-789",
+            "agent": "codex",
+            "acp_event": "session/update",
+            "text": SECRET_TEXT,
+            "status": "ok",
+            "timestamp": "t1",
+        });
+        let subprocess_line = serde_json::json!({
+            "event": "subprocess_finished",
+            "dispatch_id": "d-run-789",
+            "agent": "codex",
+            "exit_code": 0,
+            "output_tail": SECRET_TEXT,
+            "timestamp": "t2",
+        });
+        std::fs::write(
+            run_dir.join("progress.jsonl"),
+            format!("{}\n{}\n", acp_message_line, subprocess_line),
+        )
+        .unwrap();
+
+        let body = handle_peer_query(
+            &server,
+            PeerQueryParams {
+                target_session_client: Some("codex".to_string()),
+                noun: "run".to_string(),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            !body.contains(SECRET_TEXT),
+            "peer_query run tail leaked raw progress content into the envelope: {body}"
+        );
+
+        let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(envelope["status"], "ok", "envelope: {envelope}");
+        let events = envelope["result"]["recent_events"].as_array().unwrap();
+        assert_eq!(events.len(), 2, "both lines survive the tail: {envelope}");
+        for event in events {
+            let obj = event.as_object().expect("projected event is an object");
+            for key in obj.keys() {
+                assert!(
+                    PROGRESS_EVENT_PROJECTION_KEYS.contains(&key.as_str()),
+                    "progress tail leaked a non-allowlisted key '{key}': {envelope}"
+                );
+            }
+        }
+        assert_eq!(events[0]["event"], "acp_native_message");
+        assert_eq!(events[0]["dispatch_id"], "d-run-789");
+        assert_eq!(events[1]["event"], "subprocess_finished");
+        assert_no_forbidden_keys(&envelope);
+    }
+
+    #[test]
+    fn run_noun_progress_tail_logs_and_skips_malformed_line_without_faking_empty() {
+        // A single malformed line surrounded by valid ones must be dropped
+        // from the tail (never surfaced as a fabricated event) while the
+        // valid neighbors still come through — malformed-but-not-alone must
+        // not collapse the whole tail to `empty`.
+        let dir = tempfile::tempdir().unwrap();
+        let global_db = dir.path().join("global").join("memory.db");
+        let server = crate::MemoryServer::new(global_db.clone(), None).expect("server");
+        {
+            let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).unwrap();
+            memcore::insert_claim(
+                store.connection(),
+                &memcore::NewSessionClaim {
+                    claim_id: "claim-run-4".to_string(),
+                    session_client: Some("codex".to_string()),
+                    issue_ref: Some("org/repo#4".to_string()),
+                    flow_id: None,
+                    dispatch_id: Some("d-run-999".to_string()),
+                    branch: "feat/w".to_string(),
+                    declared_file_scope: None,
+                    created_at: Utc::now().to_rfc3339(),
+                },
+            )
+            .unwrap();
+        }
+        let run_dir = dir.path().join("runs").join("d-run-999");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::json!({ "dispatch_id": "d-run-999" }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            run_dir.join("progress.jsonl"),
+            "{\"event\":\"a\",\"timestamp\":\"t1\"}\n\
+             not-json-at-all\n\
+             {\"event\":\"b\",\"timestamp\":\"t2\"}\n",
+        )
+        .unwrap();
+
+        let body = handle_peer_query(
+            &server,
+            PeerQueryParams {
+                target_session_client: Some("codex".to_string()),
+                noun: "run".to_string(),
+            },
+        )
+        .unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let events = envelope["result"]["recent_events"].as_array().unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "the malformed line is skipped, not fabricated into the tail: {envelope}"
+        );
+        assert_eq!(events[0]["event"], "a");
+        assert_eq!(events[1]["event"], "b");
+    }
+
     #[test]
     fn checkpoint_and_events_nouns_remain_denied() {
-        // Documents the deliberate #1016 leaf gap (module doc): both hit a
-        // project-routing / missing-correlator wall on inspection and are
-        // NOT routed rather than guessed.
+        // NOTE: this is a regression guard for the deliberate #1016 leaf gap
+        // (module doc), not a discriminating test for THIS PR — `checkpoint`
+        // and `events` were never routable on origin/main either (S1's
+        // whitelist was `presence`-only), so this assertion is baseline-green
+        // before and after this leaf. It stays because it pins the intended
+        // invariant (both hit a project-routing / missing-correlator wall on
+        // inspection and are NOT routed rather than guessed), not because it
+        // proves anything new landed here.
         assert!(PeerNoun::parse("checkpoint").is_none());
         assert!(PeerNoun::parse("events").is_none());
         assert!(PeerNoun::parse("event_ledger").is_none());
