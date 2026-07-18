@@ -37,37 +37,14 @@ pub(in crate::hub_ops) async fn scan_skill_definition_with_llm(
 
     let llm_call_result: Result<(String, &'static str), String> = match backend {
         SecurityScanBackend::ClaudeCli => {
-            if tachi_llm::claude_pool::provider_rollout_enabled() {
-                // #1087 rollout: security scan is the strong-tier, two-vote,
-                // fail-closed path — never the plain provider-first-then-CLI
-                // pattern the other consumers use, since a single vote (or a
-                // silent LLM-error-becomes-"skipped" merge) is fail-OPEN for
-                // a security surface.
-                Ok(two_vote_provider_scan(server, &payload).await)
-            } else {
-                let llm_for_fallback = server.llm.clone();
-                let payload_for_fallback = payload.clone();
-                let model_for_fallback = model.clone();
-                tachi_llm::claude_pool::pool_call_with_fallback(
-                    &server.claude_pool,
-                    crate::prompts::SKILL_SECURITY_SCAN_PROMPT,
-                    &payload,
-                    "security-scan",
-                    move || async move {
-                        llm_for_fallback
-                            .call_extract_llm(
-                                crate::prompts::SKILL_SECURITY_SCAN_PROMPT,
-                                &payload_for_fallback,
-                                Some(&model_for_fallback),
-                                0.1,
-                                800,
-                            )
-                            .await
-                    },
-                )
-                .await
-                .map(|(text, src)| (text, src.as_str()))
-            }
+            // #1087 rollout (completed in #1261 step 2/3): security scan is
+            // the strong-tier, two-vote, fail-closed provider path — never a
+            // single vote, and never a silent LLM-error-becomes-"skipped"
+            // merge, both of which are fail-OPEN for a security surface.
+            // The CLI fallback that used to live here was removed; the
+            // backend name `ClaudeCli` is now historical (a rename is
+            // tracked with the rest of the ClaudePool decommission).
+            Ok(two_vote_provider_scan(server, &payload).await)
         }
         SecurityScanBackend::RawApi => server
             .llm
@@ -200,14 +177,14 @@ async fn one_vote(
                 outcome.text.chars().take(200).collect::<String>()
             )
         }),
-        Err(provider_err) => match server.claude_pool.call(label, &prompt).await {
-            Ok(outcome) => parse_vote(&outcome.text).ok_or_else(|| {
-                format!("cli fallback vote unparsable (provider err was: {provider_err})")
-            }),
-            Err(cli_err) => Err(format!(
-                "provider vote failed ({provider_err}); CLI pool fallback also failed ({cli_err})"
-            )),
-        },
+        // #1261 step 2/3: CLI fallback removed. A provider failure now goes
+        // straight to Err, which the caller maps to `fail_closed_sentinel`
+        // (maximally risky, blocked:true) — this is STRICTER than the old
+        // two-stage fallback, not weaker: the old CLI fallback could rescue
+        // a failed provider vote into a non-blocked verdict, while a pure
+        // provider failure now always fails closed. The fail-closed
+        // security property is preserved and tightened.
+        Err(provider_err) => Err(format!("provider vote failed: {provider_err}")),
     }
 }
 
@@ -216,8 +193,9 @@ fn parse_vote(raw: &str) -> Option<serde_json::Value> {
 }
 
 /// Sentinel standing in for a vote that could not be obtained at all
-/// (provider AND CLI fallback both failed for one of the two votes) —
-/// treated as maximally risky so `fail_closed_merge` still fails closed.
+/// (provider failed for one of the two votes; the CLI fallback that used
+/// to provide a second chance was removed in #1261 step 2/3) — treated as
+/// maximally risky so `fail_closed_merge` still fails closed.
 fn fail_closed_sentinel(reason: &str) -> serde_json::Value {
     serde_json::json!({
         "blocked": true,

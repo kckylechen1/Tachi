@@ -174,23 +174,20 @@ pub(super) async fn run_plan_stage(
 /// default) or — when `TACHI_CLAUDE_POOL_PROVIDER_FIRST` is set — via the
 /// provider executor first, with the CLI pool as a fallback for the rollout
 /// cycle. Either way the run-directory artifact contract
-/// (`prompt.md`/`result.md`/`status.json`) is preserved, since both paths go
-/// through `ClaudePool::call`/`call_via_provider` (#1214 BUG#3: this call
+/// (`prompt.md`/`result.md`/`status.json`) is preserved, since the path
+/// goes through `ClaudePool::call_via_provider` (#1214 BUG#3: this call
 /// site previously had no flag gate at all — the fifth live pool consumer
-/// the flag-coverage audit missed).
+/// the flag-coverage audit missed). #1261 step 2/3: the CLI fallback
+/// branch was removed; the only path now is the provider executor.
 async fn call_plan_llm(
     server: &crate::MemoryServer,
     label: &str,
     composed_prompt: &str,
     task: &str,
 ) -> Result<tachi_llm::claude_pool::ClaudeCallOutcome, String> {
-    if !tachi_llm::claude_pool::provider_rollout_enabled() {
-        return server.claude_pool.call(label, composed_prompt).await;
-    }
-
     let llm = server.llm.clone();
     let task_owned = task.to_string();
-    let provider_result = server
+    server
         .claude_pool
         .call_via_provider(label, composed_prompt, move || async move {
             llm.call_reasoning_llm_provider_only(
@@ -202,17 +199,7 @@ async fn call_plan_llm(
             )
             .await
         })
-        .await;
-
-    match provider_result {
-        Ok(outcome) => Ok(outcome),
-        Err(provider_err) => {
-            tracing::warn!(
-                "[dispatch_v2:{label}] provider path failed, falling back to CLI pool: {provider_err}"
-            );
-            server.claude_pool.call(label, composed_prompt).await
-        }
-    }
+        .await
 }
 
 /// Append a single JSON event line to `<run_dir>/trajectory.jsonl`. Best-effort.
@@ -417,46 +404,62 @@ impl PlanSections {
 mod tests {
     use super::*;
 
-    // ── #1214 BUG#3: plan-stage flag gate ───────────────────────────────
+    // ── #1261 step 2/3: CLI fallback removed from call_plan_llm ──────────
     //
-    // Mirrors `daily_distill::tests::call_claude_batch_default_flag_off_uses_cli_pool_only`
-    // exactly: before this fix, `run_plan_stage` called `server.claude_pool.call`
-    // directly with no `TACHI_CLAUDE_POOL_PROVIDER_FIRST` check at all — the
-    // fifth live pool consumer the flag-coverage audit missed. This proves the
-    // flag-off (shipped default) behavior is unchanged: exactly the CLI pool,
-    // no provider mention anywhere in the resulting error.
+    // Before #1261, this test proved the #1214 BUG#3 flag gate existed by
+    // asserting the flag-off path hit the CLI binary resolver and surfaced
+    // its "existing executable" error. With the CLI fallback removed, the
+    // invariant flips: `call_plan_llm` must NEVER touch the CLI binary
+    // resolver, regardless of CLAUDE_BIN / TACHI_CLAUDE_POOL_PROVIDER_FIRST.
+    // Pointing CLAUDE_BIN at a nonexistent path is now a no-op for this
+    // code path — the call goes straight to the provider executor (which
+    // fails because no real provider is configured in the test harness,
+    // but crucially NOT with the CLI-binary-resolution error the old test
+    // required). This is the discriminating guard against a CLI-fallback
+    // regression: if someone re-adds the `claude_pool.call()` branch, the
+    // nonexistent CLAUDE_BIN would surface "existing executable" again
+    // and this test would fail.
     #[test]
-    fn call_plan_llm_default_flag_off_uses_cli_pool_only() {
+    fn call_plan_llm_never_reaches_cli_binary_resolver() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let prev_rollout = std::env::var("TACHI_CLAUDE_POOL_PROVIDER_FIRST").ok();
-        std::env::remove_var("TACHI_CLAUDE_POOL_PROVIDER_FIRST");
+        // Explicitly set the legacy opt-OUT value: if any CLI path still
+        // existed, this is the flag state that would have routed to it.
+        std::env::set_var("TACHI_CLAUDE_POOL_PROVIDER_FIRST", "0");
         let prev_bin = std::env::var("CLAUDE_BIN").ok();
         std::env::set_var(
             "CLAUDE_BIN",
-            "/nonexistent/__tachi_test_planstage_default__/claude",
+            "/nonexistent/__tachi_test_planstage_no_cli__/claude",
         );
 
-        let temp = tempfile::tempdir().expect("temp dispatch v2 plan-flag db");
+        let temp = tempfile::tempdir().expect("temp dispatch v2 cli-removal db");
         let server = crate::MemoryServer::new(
             temp.path().join("global.db"),
             Some(temp.path().join("project.db")),
         )
         .expect("server");
 
-        let err = tokio::runtime::Runtime::new()
+        let result = tokio::runtime::Runtime::new()
             .expect("tokio runtime")
-            .block_on(call_plan_llm(&server, "plan", "composed prompt", "task"))
-            .expect_err("missing/invalid CLAUDE_BIN should error when the flag is off");
+            .block_on(call_plan_llm(&server, "plan", "composed prompt", "task"));
+
+        // The call no longer reaches the CLI binary resolver: regardless
+        // of whether the provider path succeeds or fails in the test
+        // harness, it must NOT surface the CLI-binary-resolution error
+        // text the old behavior produced. That error string ("existing
+        // executable") is unique to `resolve_claude_binary` — its absence
+        // proves the CLI path is unreachable from this call site.
+        let cli_resolver_unreachable = match &result {
+            Err(err) => !err.contains("existing executable"),
+            Ok(_) => true,
+        };
         assert!(
-            err.contains("existing executable"),
-            "expected the CLI-binary-resolution error with the flag off, got: {err}"
-        );
-        assert!(
-            !err.contains("provider"),
-            "flag-off path must never mention the provider path: {err}"
+            cli_resolver_unreachable,
+            "call_plan_llm must never reach the CLI binary resolver after #1261 step 2; \
+             got: {result:?}"
         );
 
         match prev_rollout {

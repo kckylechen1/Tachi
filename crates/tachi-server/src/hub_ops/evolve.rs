@@ -125,35 +125,23 @@ Respond with ONLY a JSON object (no markdown fences, no commentary before or aft
     );
 
     // ── 4. Call LLM for evolution ────────────────────────────────────────────
-    // Phase 2: route through Claude CLI pool first; on Err, fall back to the
-    // raw extract lane (SiliconFlow/Qwen) without spawning an unbounded CLI.
+    // #1261 step 2/3: the CLI fallback was removed; skill evolution now goes
+    // straight through the SiliconFlow/Qwen extract lane via the provider
+    // executor.
     const EVOLVE_SYSTEM: &str = "You are a senior prompt engineer specializing in agentic skill optimization. Analyze telemetry, diagnose failure modes, and produce a strictly improved prompt. Output valid JSON only, no markdown fences.";
-    let llm_for_fallback = server.llm.clone();
-    let evolution_prompt_for_fallback = evolution_prompt.clone();
-    let (llm_response, source) = tachi_llm::claude_pool::pool_call_with_fallback(
-        &server.claude_pool,
-        EVOLVE_SYSTEM,
-        &evolution_prompt,
-        "skill-evolve",
-        move || async move {
-            llm_for_fallback
-                .call_extract_llm(
-                    EVOLVE_SYSTEM,
-                    &evolution_prompt_for_fallback,
-                    None,
-                    0.4,
-                    4000,
-                )
+    let llm_for_call = server.llm.clone();
+    let evolution_prompt_for_call = evolution_prompt.clone();
+    let outcome = server
+        .claude_pool
+        .call_via_provider("skill-evolve", &evolution_prompt, move || async move {
+            llm_for_call
+                .call_extract_llm(EVOLVE_SYSTEM, &evolution_prompt_for_call, None, 0.4, 4000)
                 .await
-        },
-    )
-    .await
-    .map_err(|e| format!("LLM evolution call failed: {e}"))?;
-    eprintln!(
-        "[skill-evolve] {}: backend={}",
-        params.skill_id,
-        source.as_str()
-    );
+        })
+        .await
+        .map_err(|e| format!("LLM evolution call failed: {e}"))?;
+    let llm_response = outcome.text;
+    eprintln!("[skill-evolve] {}: backend=provider", params.skill_id);
 
     // Parse LLM response as JSON
     let evolved: serde_json::Value = serde_json::from_str(llm_response.trim())
