@@ -44,9 +44,26 @@ pub struct ProviderHealthStatus {
     /// Per-lane breaker/outage surface (#1197): a lane whose circuit breaker
     /// is open, or that has exhausted its full fallback chain recently,
     /// shows up here instead of only as a silent stall to background
-    /// callers. Consumed today by `tachi_status`'s verbose provider_health
-    /// block; threshold-crossing → alert-event routing is a follow-up in
-    /// the status/alert surface, not this crate.
+    /// callers. Recorded unconditionally inside `LlmClient::call_lane_llm`
+    /// before the `Err` ever reaches a caller — so this is populated
+    /// regardless of whether a given background caller (e.g. the research
+    /// digest / wiki ingest / session capture lanes in `tachi-server`, all
+    /// intentionally-degrading paths that fall back to a deterministic
+    /// result rather than fail their parent operation) propagates or
+    /// swallows that `Err` for its own control flow.
+    ///
+    /// TODO(#1197 codex-review BUG-2, deferred — crosses into
+    /// `tachi-server`, out of this packet's tachi-llm-only edit boundary):
+    /// the default (non-verbose, no-error) `tachi_status` view slims this
+    /// away — see `crates/tachi-server/src/status_ops/runtime.rs`'s
+    /// `slim_provider_health_value`, which replaces the whole
+    /// provider_health value with `{status, last_success_age_secs,
+    /// source_of_truth}` whenever `last_error`/`persist_last_error` are both
+    /// null, dropping `lane_outages` even when it's nonempty. That function
+    /// needs to also check `lane_outages` for any nonzero
+    /// `consecutive_chain_failures` before slimming, and threshold-crossing
+    /// → active alert-event routing (the issue's ask #2) still needs a home
+    /// in that same status/alert surface.
     pub lane_outages: Vec<LaneOutageStatus>,
 }
 

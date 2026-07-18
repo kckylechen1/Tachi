@@ -1147,6 +1147,175 @@ fn config_with_extract(extract: ChatLaneConfig) -> ProviderRuntimeConfig {
     }
 }
 
+/// #1197 BUG-1 (codex review, must-fix): a single bad key in the primary
+/// pool must NOT immediately escalate to the fallback tier — the contract
+/// is "fallback fires when the primary POOL is exhausted", not on one 401.
+/// Primary pool has key A (bad, 401) + key B (good) — the call must succeed
+/// on B, entirely within the primary tier, and the fallback provider must
+/// see **zero** requests.
+#[tokio::test]
+async fn extract_lane_retries_next_pool_key_on_401_before_falling_back() {
+    use axum::{
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        response::IntoResponse,
+        routing::post,
+        Json, Router,
+    };
+    use std::sync::{Arc, Mutex};
+
+    let seen_auth = Arc::new(Mutex::new(Vec::<String>::new()));
+    let primary_app = Router::new()
+        .route(
+            "/chat/completions",
+            post(
+                |State(seen_auth): State<Arc<Mutex<Vec<String>>>>,
+                 headers: HeaderMap,
+                 Json(_body): Json<Value>| async move {
+                    let auth = headers
+                        .get(AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    seen_auth
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(auth.clone());
+                    if auth == "Bearer bad-key-a" {
+                        return (StatusCode::UNAUTHORIZED, "invalid api key").into_response();
+                    }
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "ok from key b"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    }))
+                    .into_response()
+                },
+            ),
+        )
+        .with_state(seen_auth.clone());
+    let primary_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind primary mock provider");
+    let primary_port = primary_listener
+        .local_addr()
+        .expect("primary mock addr")
+        .port();
+    let primary_task = tokio::spawn(async move {
+        axum::serve(primary_listener, primary_app)
+            .await
+            .expect("primary mock provider");
+    });
+
+    let fallback_hits = Arc::new(Mutex::new(0usize));
+    let fallback_app = Router::new()
+        .route(
+            "/chat/completions",
+            post(|State(hits): State<Arc<Mutex<usize>>>| async move {
+                *hits.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+                Json(serde_json::json!({
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "fallback answered"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+            }),
+        )
+        .with_state(fallback_hits.clone());
+    let fallback_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fallback mock provider");
+    let fallback_port = fallback_listener
+        .local_addr()
+        .expect("fallback mock addr")
+        .port();
+    let fallback_task = tokio::spawn(async move {
+        axum::serve(fallback_listener, fallback_app)
+            .await
+            .expect("fallback mock provider");
+    });
+
+    let primary = ChatLaneConfig {
+        base_url: format!("http://127.0.0.1:{primary_port}/chat/completions"),
+        model: "primary-model".to_string(),
+        api_key_envs: vec!["__1197_BUG1_PRIMARY_KEY"],
+    };
+    let fallback = ChatLaneConfig {
+        base_url: format!("http://127.0.0.1:{fallback_port}/chat/completions"),
+        model: "fallback-model".to_string(),
+        api_key_envs: vec!["__1197_BUG1_FALLBACK_KEY"],
+    };
+
+    let client = LlmClient::new_with_config_and_fallbacks(
+        config_with_extract(primary),
+        LaneFallbackConfig {
+            extract: Some(fallback),
+            ..Default::default()
+        },
+        None,
+    )
+    .expect("client should initialize");
+    // Pool order matters: key A (bad) is tried first, key B (good) second.
+    client.set_provider_secret_pool(
+        "__1197_BUG1_PRIMARY_KEY",
+        vec![
+            ProviderSecret {
+                key_id: "__1197_BUG1_PRIMARY_KEY_A".to_string(),
+                value: "bad-key-a".to_string(),
+            },
+            ProviderSecret {
+                key_id: "__1197_BUG1_PRIMARY_KEY_B".to_string(),
+                value: "good-key-b".to_string(),
+            },
+        ],
+    );
+    client.set_provider_secret_pool(
+        "__1197_BUG1_FALLBACK_KEY",
+        vec![ProviderSecret {
+            key_id: "__1197_BUG1_FALLBACK_KEY".to_string(),
+            value: "fallback-secret".to_string(),
+        }],
+    );
+
+    let out = client
+        .call_extract_llm("system", "user", None, 0.0, 16)
+        .await
+        .expect("key B in the primary pool should serve the request");
+    assert_eq!(
+        out, "ok from key b",
+        "must succeed via the PRIMARY pool's second key, not the fallback provider"
+    );
+
+    let seen = seen_auth.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    assert_eq!(
+        seen,
+        vec!["Bearer bad-key-a".to_string(), "Bearer good-key-b".to_string()],
+        "primary pool must be exhausted key-by-key before any escalation"
+    );
+    assert_eq!(
+        *fallback_hits.lock().unwrap_or_else(|e| e.into_inner()),
+        0,
+        "fallback must not be touched while the primary pool still has an unexhausted key"
+    );
+
+    let status = client
+        .provider_health_status()
+        .lane_outages
+        .into_iter()
+        .find(|s| s.lane == "extract")
+        .expect("extract lane outage status should exist");
+    assert_eq!(
+        status.consecutive_chain_failures, 0,
+        "a call that succeeded on the primary pool's second key is not an outage"
+    );
+
+    primary_task.abort();
+    fallback_task.abort();
+}
+
 /// RED against the pre-#1197 single-tier lane: with no fallback wired, an
 /// unconfigured primary key fails the whole call. GREEN once the fallback
 /// tier is configured: the same call must succeed by falling through to it.

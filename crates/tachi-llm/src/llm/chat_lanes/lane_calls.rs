@@ -303,20 +303,30 @@ impl super::super::LlmClient {
             let resp_text = match resp.text().await {
                 Ok(text) => text,
                 Err(e) => {
+                    let is_auth_status = status.as_u16() == 401 || status.as_u16() == 403;
                     if status.as_u16() == 429 {
                         self.mark_secret_rate_limited(&selected, retry_after);
-                    } else if status.as_u16() == 401 || status.as_u16() == 403 {
+                    } else if is_auth_status {
                         self.mark_secret_auth_failed(
                             &selected,
                             Some(&format!("Chat auth failure {status}")),
                         );
                     }
                     last_err = format!("Chat response body read failed after HTTP {status}: {e}");
-                    if attempt < Self::MAX_ATTEMPTS && status.is_server_error() {
+                    // #1197 BUG-1 (codex review): a single bad key must not
+                    // fail the whole tier while the primary pool still has
+                    // another usable key — same fix as the main 401/403
+                    // branch below, applied here for the (rarer) case where
+                    // the body read itself also failed.
+                    let pool_has_another_key =
+                        is_auth_status && self.has_usable_secret_readonly(&cfg.api_key_envs);
+                    if attempt < Self::MAX_ATTEMPTS
+                        && (status.is_server_error() || pool_has_another_key)
+                    {
                         tokio::time::sleep(Self::retry_delay(attempt)).await;
                         continue;
                     }
-                    if status.as_u16() == 429 || status.is_server_error() {
+                    if status.as_u16() == 429 || status.is_server_error() || is_auth_status {
                         self.circuit_breakers.record_failure(breaker_key);
                     }
                     return Err(last_err);
@@ -345,7 +355,26 @@ impl super::super::LlmClient {
                         Some(&chat_auth_failure_reason(status.as_u16(), &resp_text)),
                     );
                 }
-                return Err(format!("API error {status}: {resp_text}"));
+                last_err = format!("API error {status}: {resp_text}");
+                // #1197 BUG-1 fix (codex review): marking *this* key
+                // auth-failed/exhausted must not, by itself, fail the whole
+                // tier — the contract is "fallback fires when the PRIMARY
+                // POOL is exhausted", not on one bad key. Re-check the pool
+                // (post-mark, so the just-failed key is now excluded) for
+                // another usable key before giving up on this tier; only a
+                // genuinely exhausted pool falls through to the loud error
+                // that the caller's tier-chain treats as "this tier is
+                // down".
+                if attempt < Self::MAX_ATTEMPTS && self.has_usable_secret_readonly(&cfg.api_key_envs) {
+                    eprintln!(
+                        "[llm] auth/exhausted error {status} (attempt {}/{}); pool has another key, retrying",
+                        attempt,
+                        Self::MAX_ATTEMPTS
+                    );
+                    continue;
+                }
+                self.circuit_breakers.record_failure(breaker_key);
+                return Err(last_err);
             }
             if status.is_server_error() {
                 last_err = format!("API error {status}: {resp_text}");
@@ -439,6 +468,15 @@ impl super::super::LlmClient {
         Err(last_err)
     }
 
+    // TODO(#1197 issue-ask #3, deferred — needs a `memcore` schema change,
+    // out of this packet's tachi-llm-only edit boundary): `LlmUsageEvent`
+    // only gets recorded on the success path below. Failed attempts (429,
+    // 401/403 exhaustion, 5xx, timeouts, and the full-chain "LANE OUTAGE"
+    // case) never persist a row, so outage history isn't queryable from the
+    // usage table the way successes are — only from the in-memory
+    // `lane_outage` streak (`provider_health_status().lane_outages`), which
+    // resets on process restart. Adding a failure-class `LlmUsageEvent`
+    // variant (lane/model/provider_host/error_class) is the follow-up.
     #[allow(clippy::too_many_arguments)]
     fn record_successful_llm_usage(
         &self,

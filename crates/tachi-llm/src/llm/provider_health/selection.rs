@@ -99,6 +99,72 @@ impl super::super::LlmClient {
         self.select_secret(keys).is_some()
     }
 
+    /// Read-only "is there still a usable key" check — unlike
+    /// `has_configured_secret` (which calls the real `select_secret` and, as
+    /// a side effect, advances the round-robin selection index even though
+    /// the returned secret is discarded), this never mutates
+    /// `provider_state` beyond the routine expired-cooldown prune every
+    /// selection path already does. Used inside the attempt-retry loop
+    /// (#1197 BUG-1) to decide "does the primary pool have another key to
+    /// try" without skewing which key actually gets picked next.
+    pub(in crate::llm) fn has_usable_secret_readonly(&self, keys: &[&str]) -> bool {
+        let now = Instant::now();
+        let now_utc = Self::now_utc();
+        let mut state = self
+            .provider_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.prune_expired_cooldowns(now);
+
+        keys.iter().any(|key| {
+            if let Some(entries) = state.secrets.get(*key) {
+                return entries.iter().any(|entry| {
+                    Self::entry_is_usable(&state, key, entry, now_utc)
+                });
+            }
+            let has_env_value = Self::first_env(&[*key])
+                .filter(|value| !value.trim().is_empty())
+                .filter(|value| !crate::provider_names::is_vault_alias(value))
+                .is_some();
+            if !has_env_value {
+                return false;
+            }
+            if state.cooldowns.contains_key(*key) {
+                return false;
+            }
+            let (availability, remaining_seconds) =
+                Self::key_health_blocked_in_state(&state, key, key, now_utc);
+            !Self::availability_is_unusable(availability, remaining_seconds)
+        })
+    }
+
+    fn entry_is_usable(
+        state: &ProviderState,
+        logical_key: &str,
+        entry: &ProviderSecret,
+        now_utc: DateTime<Utc>,
+    ) -> bool {
+        if entry.value.trim().is_empty() {
+            return false;
+        }
+        if state.cooldowns.contains_key(&entry.key_id) {
+            return false;
+        }
+        let (availability, remaining_seconds) =
+            Self::key_health_blocked_in_state(state, logical_key, &entry.key_id, now_utc);
+        !Self::availability_is_unusable(availability, remaining_seconds)
+    }
+
+    fn availability_is_unusable(availability: KeyAvailability, remaining_seconds: Option<i64>) -> bool {
+        match availability {
+            KeyAvailability::AuthFailed | KeyAvailability::Disabled | KeyAvailability::Exhausted => {
+                true
+            }
+            KeyAvailability::Cooldown => remaining_seconds.unwrap_or(0) > 0,
+            KeyAvailability::Available => false,
+        }
+    }
+
     fn provider_secret_unavailable_error(&self, keys: &[&str]) -> String {
         let now = Instant::now();
         let now_utc = Self::now_utc();
