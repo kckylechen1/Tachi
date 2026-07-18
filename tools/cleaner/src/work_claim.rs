@@ -94,7 +94,21 @@ fn probe_worktree_holder_at_db(db_path: &Path, worktree: &Path) -> DbHolderEvide
         Ok(store) => store,
         Err(err) => return DbHolderEvidence::Unavailable(format!("open global DB: {err}")),
     };
-    let path = match worktree.to_str() {
+    // The persisted ExecEnv path is canonical. Resolve every existing
+    // candidate before the exact lookup so sweep's walked spelling (for
+    // example /tmp versus /private/tmp) cannot turn a held managed tree into
+    // an apparent legacy/unbound environment. An unresolved path cannot
+    // establish that it is legacy, so fail closed instead of returning
+    // NotApplicable.
+    let canonical_worktree = match std::fs::canonicalize(worktree) {
+        Ok(path) => path,
+        Err(err) => {
+            return DbHolderEvidence::Unverifiable(format!(
+                "cannot resolve worktree path before ExecEnv lookup: {err}"
+            ))
+        }
+    };
+    let path = match canonical_worktree.to_str() {
         Some(path) => path,
         None => {
             return DbHolderEvidence::Unverifiable("worktree path is not valid UTF-8".to_string())
@@ -142,12 +156,13 @@ mod tests {
     }
 
     fn insert_env(store: &memcore::MemoryStore, path: &Path) {
+        let canonical_path = std::fs::canonicalize(path).unwrap();
         memcore::insert_exec_env(
             store.connection(),
             &NewExecEnvLease {
                 env_id: "env-1".to_string(),
                 kind: "worktree".to_string(),
-                path: path.display().to_string(),
+                path: canonical_path.display().to_string(),
                 repo_root: "/repo".to_string(),
                 branch: "lane/test".to_string(),
                 base_sha: "base".to_string(),
@@ -179,6 +194,7 @@ mod tests {
     fn persisted_holder_evidence_distinguishes_all_cleanup_branches() {
         let root = unique_temp_dir("work-claim-holder-evidence");
         let worktree = root.join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
 
         // Legacy / no ExecEnv is explicitly NotApplicable, not a guessed clear.
         let not_applicable_home = root.join("not-applicable");
@@ -242,6 +258,43 @@ mod tests {
             probe_worktree_holder_from_home(&unavailable_home, &worktree),
             DbHolderEvidence::Unavailable(_)
         ));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unresolved_path_is_unverifiable_not_legacy() {
+        let root = unique_temp_dir("work-claim-unresolved-path");
+        let home = root.join("legacy");
+        let _store = store(&home);
+
+        assert!(matches!(
+            probe_worktree_holder_from_home(&home, &root.join("missing-worktree")),
+            DbHolderEvidence::Unverifiable(_)
+        ));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn held_env_is_found_through_a_symlinked_path_spelling() {
+        let root = unique_temp_dir("work-claim-holder-canonical-path");
+        let worktree = root.join("worktree");
+        let alias = root.join("worktree-alias");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::os::unix::fs::symlink(&worktree, &alias).unwrap();
+
+        let home = root.join("held");
+        let store = store(&home);
+        insert_env(&store, &worktree);
+        bind_claim(&store, "active");
+
+        assert_eq!(
+            probe_worktree_holder_from_home(&home, &alias),
+            DbHolderEvidence::Held,
+            "a spelling variation must resolve to the held managed ExecEnv before deletion"
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
