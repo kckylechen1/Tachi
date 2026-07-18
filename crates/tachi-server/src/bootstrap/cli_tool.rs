@@ -158,6 +158,10 @@ pub(super) async fn run_cli_command(
             // Pre-handled above before run_cli_command dispatch.
             Ok(())
         }
+        Commands::Migrate { .. } => {
+            // Pre-handled above before run_cli_command dispatch (kckylechen1/tachi#1223).
+            Ok(())
+        }
         Commands::Rescue { .. } => {
             // Pre-handled above before run_cli_command dispatch.
             Ok(())

@@ -164,7 +164,14 @@ fn memory_error_is_locked(error: &MemoryError) -> bool {
     sqlite_error_is_locked(error)
 }
 
-pub(crate) fn sqlite_error_is_locked(error: &rusqlite::Error) -> bool {
+/// Public: classify whether a `rusqlite::Error` represents a transient
+/// BUSY/LOCKED condition (another process — typically a live daemon — holds
+/// the file lock) rather than a genuine open/query failure. Pure
+/// classification, no side effects; exposed so CLI tooling outside this
+/// crate (e.g. `tachi migrate`, kckylechen1/tachi#1223) can skip-and-report a
+/// library another process currently holds instead of treating contention as
+/// a hard error.
+pub fn sqlite_error_is_locked(error: &rusqlite::Error) -> bool {
     use rusqlite::ffi::ErrorCode;
     matches!(
         error,

@@ -122,6 +122,22 @@ pub(super) async fn run_pre_serve_command(
             .await?;
             Ok(true)
         }
+        Commands::Migrate { json, apply } => {
+            // #1223: this subcommand's own `--apply` flag is its own,
+            // independent schema-migration authorization decision (see
+            // `migrate_cli`'s module doc comment) — deliberately NOT the
+            // shared top-level `schema_migration` this function threads to
+            // every other pre-serve command.
+            super::super::migrate_cli::run_migrate_command(
+                *json,
+                *apply,
+                app_home,
+                global_db_path,
+                project_db_path.map(PathBuf::as_path),
+            )
+            .await?;
+            Ok(true)
+        }
         Commands::Rescue { action } => {
             super::super::rescue_cli::run_rescue_command(action.clone(), home).await?;
             Ok(true)

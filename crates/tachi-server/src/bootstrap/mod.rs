@@ -13,6 +13,7 @@ mod env_cmd;
 mod eval_cli;
 mod harness_cli;
 mod manifest_cli;
+mod migrate_cli;
 mod poke_cli;
 mod rescue_cli;
 mod serve;
