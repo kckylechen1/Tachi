@@ -24,6 +24,38 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
     worktree: Option<&str>,
     reclaim_worktree: bool,
 ) -> Result<String, String> {
+    handle_github_safe_merge_with_holder_gate(
+        client,
+        repo,
+        pr_number,
+        strategy,
+        dry_run,
+        flow_id,
+        tests_run,
+        policy,
+        worktree,
+        reclaim_worktree,
+        &|_| Ok(()),
+    )
+    .await
+}
+
+/// Server callers supply the durable holder gate from their live DB binding.
+/// The public test/helper entry point above remains ungated only because it
+/// has no runtime DB binding; production routing always calls this form.
+pub(crate) async fn handle_github_safe_merge_with_holder_gate<C: GhClient + ?Sized>(
+    client: &C,
+    repo: &str,
+    pr_number: u64,
+    strategy: MergeStrategy,
+    dry_run: bool,
+    flow_id: Option<&str>,
+    tests_run: &[String],
+    policy: MergeGatePolicy,
+    worktree: Option<&str>,
+    reclaim_worktree: bool,
+    holder_gate: &(dyn Fn(&str) -> Result<(), String> + Sync),
+) -> Result<String, String> {
     let flow_run_dir = match flow_id {
         Some(fid) => Some(run_dir_for_flow_id(fid)?),
         None => None,
@@ -330,6 +362,7 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         reclaim_worktree,
         flow_id,
         flow_run_dir.as_deref(),
+        holder_gate,
     )
     .await;
 
@@ -531,6 +564,7 @@ async fn reclaim_worktree_after_merge(
     reclaim_worktree: bool,
     flow_id: Option<&str>,
     run_dir: Option<&std::path::Path>,
+    holder_gate: &(dyn Fn(&str) -> Result<(), String> + Sync),
 ) -> Value {
     // No merge happened (dry-run, blocked, pending, or already-merged): nothing
     // to reclaim, and dry-run MUST NOT reclaim.
@@ -572,6 +606,21 @@ async fn reclaim_worktree_after_merge(
             "skipped": "worktree_missing",
             "worktree": worktree_path,
             "warning": "worktree does not exist locally; nothing to reclaim",
+        });
+        record_reclamation_event(flow_id, run_dir, &detail);
+        return detail;
+    }
+
+    // The durable WorkClaim check is deliberately immediately before the
+    // external cleaner.  A refusal is observable and the cleaner is never
+    // spawned, so a DB failure cannot become a silent destructive no-op.
+    if let Err(err) = holder_gate(worktree_path) {
+        let detail = json!({
+            "attempted": false,
+            "reclaimed": false,
+            "skipped": "holder_evidence_refused",
+            "worktree": worktree_path,
+            "error": err,
         });
         record_reclamation_event(flow_id, run_dir, &detail);
         return detail;
