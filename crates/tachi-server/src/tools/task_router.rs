@@ -75,6 +75,7 @@ pub(super) async fn handle_tachi_task_facade(
                 mcp_access: params.mcp_access.clone(),
                 allowed_mcp_servers: params.allowed_mcp_servers.clone(),
                 verbose: params.verbose,
+                inject_card: params.inject_card,
             };
             crate::dispatch_ops::handle_tachi_dispatch(server, dispatch_params).await
         }

@@ -38,6 +38,7 @@ async fn dispatch_prompt_invokes_stage_and_waza_skills_for_execute_slice() {
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
             verbose: None,
+            inject_card: None,
         },
     )
     .await;
@@ -100,6 +101,7 @@ async fn dispatch_prompt_invokes_native_subagent_factory_for_dispatch_stage() {
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
             verbose: None,
+            inject_card: None,
         },
     )
     .await;
