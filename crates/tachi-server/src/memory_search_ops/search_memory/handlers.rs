@@ -79,7 +79,11 @@ pub(crate) async fn handle_search_memory_with_access(
                             .map_err(|e| e.to_string())
                     });
                 }));
-                return render_search_response(&params.query, params.format.as_deref(), hit.rows_json);
+                return render_search_response(
+                    &params.query,
+                    params.format.as_deref(),
+                    hit.rows_json,
+                );
             }
         }
     }

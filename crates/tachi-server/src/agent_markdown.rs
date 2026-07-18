@@ -84,10 +84,7 @@ fn render_status_field(out: &mut Vec<String>, key: &str, value: &Value, depth: u
                 ));
             }
             if items.len() > MAX_ITEMS {
-                out.push(format!(
-                    "{indent}  … +{} more",
-                    items.len() - MAX_ITEMS
-                ));
+                out.push(format!("{indent}  … +{} more", items.len() - MAX_ITEMS));
             }
         }
         _ => out.push(format!(
@@ -102,9 +99,7 @@ fn scalar_or_compact_line(value: &Value) -> String {
     match value {
         Value::String(s) => compact_text_line(s, 200),
         Value::Null => "null".to_string(),
-        Value::Object(_) | Value::Array(_) => {
-            compact_text_line(&value.to_string(), 200)
-        }
+        Value::Object(_) | Value::Array(_) => compact_text_line(&value.to_string(), 200),
         other => other.to_string(),
     }
 }

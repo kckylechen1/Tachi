@@ -144,10 +144,21 @@ fn compact_text_line_truncates_repeated_cjk_char_at_exact_char_boundary() {
     let input = "测".repeat(300);
     let out = compact_text_line(&input, 50);
 
-    assert_eq!(out.chars().count(), 50, "output must respect the char limit");
-    assert!(out.ends_with("..."), "truncated output must end in ellipsis");
+    assert_eq!(
+        out.chars().count(),
+        50,
+        "output must respect the char limit"
+    );
+    assert!(
+        out.ends_with("..."),
+        "truncated output must end in ellipsis"
+    );
     let body = out.strip_suffix("...").expect("ellipsis suffix");
-    assert_eq!(body, "测".repeat(47), "body must be exactly 47 whole CJK chars");
+    assert_eq!(
+        body,
+        "测".repeat(47),
+        "body must be exactly 47 whole CJK chars"
+    );
     // Every byte in `out` decodes: a String is always valid UTF-8 by
     // construction, but assert it explicitly to document the contract.
     assert!(std::str::from_utf8(out.as_bytes()).is_ok());

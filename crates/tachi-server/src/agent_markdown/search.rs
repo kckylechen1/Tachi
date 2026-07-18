@@ -47,9 +47,8 @@ mod tests {
         // format_section_rows truncates `summary` at 120 chars (including
         // ellipsis) regardless of the caller's own limit param.
         let expected_summary = format!("{}...", "价".repeat(117));
-        let expected = format!(
-            "## Tachi memory search: \"q\"\n\n1. **t** `m1` ? `/p` - {expected_summary}"
-        );
+        let expected =
+            format!("## Tachi memory search: \"q\"\n\n1. **t** `m1` ? `/p` - {expected_summary}");
         assert_eq!(out, expected);
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
@@ -65,9 +64,8 @@ mod tests {
         let out = format_search_memory_markdown("q", &rows);
 
         let expected_summary = format!("{}{}...", "A".repeat(100), "中".repeat(17));
-        let expected = format!(
-            "## Tachi memory search: \"q\"\n\n1. **t4** `m4` ? `/p4` - {expected_summary}"
-        );
+        let expected =
+            format!("## Tachi memory search: \"q\"\n\n1. **t4** `m4` ? `/p4` - {expected_summary}");
         assert_eq!(out, expected);
     }
 
@@ -78,9 +76,14 @@ mod tests {
         ]);
         let out = format_search_memory_markdown("q2", &rows);
 
-        let expected = "## Tachi memory search: \"q2\"\n\n1. **t2** `m2` ? `/p2` - first part second part";
+        let expected =
+            "## Tachi memory search: \"q2\"\n\n1. **t2** `m2` ? `/p2` - first part second part";
         assert_eq!(out, expected);
-        assert_eq!(out.lines().count(), 3, "row must render as a single physical line");
+        assert_eq!(
+            out.lines().count(),
+            3,
+            "row must render as a single physical line"
+        );
     }
 
     #[test]

@@ -225,7 +225,10 @@ fn status_provider_health_json(server: &crate::MemoryServer) -> serde_json::Valu
 /// Render a status response `Value` per the raw `tachi_status` tool's
 /// `format` semantics (tachi#1201 k3): defaults to markdown, "json" opts
 /// into the full JSON payload unchanged.
-fn render_status_response(value: &serde_json::Value, format: Option<&str>) -> Result<String, String> {
+fn render_status_response(
+    value: &serde_json::Value,
+    format: Option<&str>,
+) -> Result<String, String> {
     if crate::agent_markdown::wants_explicit_json(format) {
         serde_json::to_string(value).map_err(|e| e.to_string())
     } else {
