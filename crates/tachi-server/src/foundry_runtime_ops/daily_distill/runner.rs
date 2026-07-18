@@ -381,26 +381,21 @@ async fn apply_parsed_groups(
     }
 }
 
-/// Run the Claude-pool distill batch call, either via the CLI pool
-/// (pre-#1087 default) or — when `TACHI_CLAUDE_POOL_PROVIDER_FIRST` is set —
-/// via the cheap-tier provider executor first, with the CLI pool as a
-/// fallback for the rollout cycle. Either way the run-directory artifact
-/// contract (`prompt.md`/`result.md`/`status.json`) is preserved, since both
-/// paths go through `ClaudePool::call`/`call_via_provider`.
+/// Run the distill batch call via the provider executor. The run-directory
+/// artifact contract (`prompt.md`/`result.md`/`status.json`) is preserved,
+/// since the path goes through `ClaudePool::call_via_provider`. #1261 step
+/// 2/3: the CLI fallback branch was removed; the only path now is the
+/// provider executor.
 pub(crate) async fn call_claude_batch(
     server: &MemoryServer,
     label: &str,
     prompt: &str,
     chunk: &[CandidateGroup],
 ) -> Result<tachi_llm::claude_pool::ClaudeCallOutcome, String> {
-    if !tachi_llm::claude_pool::provider_rollout_enabled() {
-        return server.claude_pool.call(label, prompt).await;
-    }
-
     let llm = server.llm.clone();
     let user_payload = build_batch_user_payload(chunk);
     let max_tokens = batch_max_tokens(chunk.len());
-    let provider_result = server
+    server
         .claude_pool
         .call_via_provider(label, prompt, move || async move {
             llm.call_distill_llm(
@@ -412,17 +407,7 @@ pub(crate) async fn call_claude_batch(
             )
             .await
         })
-        .await;
-
-    match provider_result {
-        Ok(outcome) => Ok(outcome),
-        Err(provider_err) => {
-            tracing::warn!(
-                "[distill:{label}] provider path failed, falling back to CLI pool: {provider_err}"
-            );
-            server.claude_pool.call(label, prompt).await
-        }
-    }
+        .await
 }
 
 async fn call_api_batch_distill(

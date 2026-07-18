@@ -235,34 +235,29 @@ pub(crate) async fn handle_hub_register(
             let cap_id = cap_clone.id.clone();
 
             tokio::spawn(async move {
-                // Phase 2: try Claude CLI pool first; on Err, fall back to the
-                // existing SiliconFlow/Qwen extract lane. Backend used is
-                // reported in the audit log.
-                let prompt_for_fallback = prompt_text.clone();
-                let llm_for_fallback = llm.clone();
-                let pool_result = tachi_llm::claude_pool::pool_call_with_fallback(
-                    &claude_pool,
-                    crate::prompts::SKILL_ANALYSIS_PROMPT,
-                    &prompt_text,
-                    "skill-analysis",
-                    move || async move {
-                        llm_for_fallback
+                // #1261 step 2/3: the CLI fallback was removed; skill
+                // analysis now goes straight through the SiliconFlow/Qwen
+                // extract lane via the provider executor.
+                let prompt_for_call = prompt_text.clone();
+                let llm_for_call = llm.clone();
+                let pool_result = claude_pool
+                    .call_via_provider("skill-analysis", &prompt_text, move || async move {
+                        llm_for_call
                             .call_extract_llm(
                                 crate::prompts::SKILL_ANALYSIS_PROMPT,
-                                &prompt_for_fallback,
+                                &prompt_for_call,
                                 None,
                                 0.3,
                                 500,
                             )
                             .await
-                    },
-                )
-                .await;
+                    })
+                    .await;
 
                 match pool_result {
-                    Ok((analysis_raw, source)) => {
+                    Ok(outcome) => {
                         let analysis_json: serde_json::Value = match serde_json::from_str(
-                            tachi_llm::LlmClient::strip_code_fence(&analysis_raw),
+                            tachi_llm::LlmClient::strip_code_fence(&outcome.text),
                         ) {
                             Ok(parsed) => parsed,
                             Err(e) => {
@@ -270,7 +265,7 @@ pub(crate) async fn handle_hub_register(
                                     "[skill-analysis] invalid JSON output for {}: {}; using raw summary fallback",
                                     cap_id, e
                                 );
-                                serde_json::json!({"summary": analysis_raw})
+                                serde_json::json!({"summary": outcome.text})
                             }
                         };
 
@@ -304,10 +299,8 @@ pub(crate) async fn handle_hub_register(
                             }
                         }
                         eprintln!(
-                            "[skill-analysis] {} (via {}): {:?}",
-                            cap_id,
-                            source.as_str(),
-                            analysis_json
+                            "[skill-analysis] {} (via provider): {:?}",
+                            cap_id, analysis_json
                         );
                     }
                     Err(e) => {

@@ -361,34 +361,42 @@ fn persist_distill_memory_preserves_used_or_protected_raw_sources() {
         .expect("verify guarded sources");
 }
 
-// ── #1087 provider-path rollout ─────────────────────────────────────────
+// ── #1261 step 2/3: CLI fallback removed from call_claude_batch ──────
 
-/// With `TACHI_CLAUDE_POOL_PROVIDER_FIRST` unset (the shipped default),
-/// `call_claude_batch` must reduce to exactly `server.claude_pool.call(...)`
-/// — no provider attempt, no behavior change from pre-#1087. Proven by
-/// pointing `CLAUDE_BIN` at a path that fails CLAUDE_BIN validation itself
-/// (construction-time, not spawn-time) and asserting that specific error
-/// surfaces, rather than any provider-path error text.
+/// Before #1261, this test proved the #1087 flag-off path routed to the
+/// CLI binary resolver and surfaced its "existing executable" error. With
+/// the CLI fallback removed in step 2/3, the invariant flips:
+/// `call_claude_batch` must NEVER touch the CLI binary resolver,
+/// regardless of CLAUDE_BIN / TACHI_CLAUDE_POOL_PROVIDER_FIRST. Pointing
+/// CLAUDE_BIN at a nonexistent path is now a no-op for this code path —
+/// the call goes straight to the provider executor (which fails because
+/// no real provider is configured in the test harness, but crucially NOT
+/// with the CLI-binary-resolution error the old test required). This is
+/// the discriminating guard against a CLI-fallback regression: if someone
+/// re-adds the `claude_pool.call()` branch, the nonexistent CLAUDE_BIN
+/// would surface "existing executable" again and this test would fail.
 ///
 /// `CLAUDE_BIN` is process-global and mutated by other test files too
 /// (`tests/dispatch_tests/board_first.rs`, `.../v2_smoke.rs`) — this uses
 /// the crate-wide `crate::utils::global_test_lock()`, matching their
 /// convention, not a locally-scoped mutex.
 #[test]
-fn call_claude_batch_default_flag_off_uses_cli_pool_only() {
+fn call_claude_batch_never_reaches_cli_binary_resolver() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let prev_rollout = std::env::var("TACHI_CLAUDE_POOL_PROVIDER_FIRST").ok();
-    std::env::remove_var("TACHI_CLAUDE_POOL_PROVIDER_FIRST");
+    // Explicitly set the legacy opt-OUT value: if any CLI path still
+    // existed, this is the flag state that would have routed to it.
+    std::env::set_var("TACHI_CLAUDE_POOL_PROVIDER_FIRST", "0");
     let prev_bin = std::env::var("CLAUDE_BIN").ok();
     std::env::set_var(
         "CLAUDE_BIN",
-        "/nonexistent/__tachi_test_distill_default__/claude",
+        "/nonexistent/__tachi_test_distill_no_cli__/claude",
     );
 
-    let temp = tempfile::tempdir().expect("temp daily distill provider-flag db");
+    let temp = tempfile::tempdir().expect("temp daily distill cli-removal db");
     let server = crate::MemoryServer::new(
         temp.path().join("global.db"),
         Some(temp.path().join("project.db")),
@@ -402,17 +410,24 @@ fn call_claude_batch_default_flag_off_uses_cli_pool_only() {
         entries: (0..1).map(candidate_entry).collect(),
     }];
 
-    let err = tokio::runtime::Runtime::new()
+    let result = tokio::runtime::Runtime::new()
         .expect("tokio runtime")
-        .block_on(call_claude_batch(&server, "label", "prompt text", &chunk))
-        .expect_err("missing/invalid CLAUDE_BIN should error when the flag is off");
+        .block_on(call_claude_batch(&server, "label", "prompt text", &chunk));
+
+    // The call no longer reaches the CLI binary resolver: regardless of
+    // whether the provider path succeeds or fails in the test harness, it
+    // must NOT surface the CLI-binary-resolution error text the old
+    // behavior produced. That error string ("existing executable") is
+    // unique to `resolve_claude_binary` — its absence proves the CLI path
+    // is unreachable from this call site.
+    let cli_resolver_unreachable = match &result {
+        Err(err) => !err.contains("existing executable"),
+        Ok(_) => true,
+    };
     assert!(
-        err.contains("existing executable"),
-        "expected the CLI-binary-resolution error with the flag off, got: {err}"
-    );
-    assert!(
-        !err.contains("provider"),
-        "flag-off path must never mention the provider path: {err}"
+        cli_resolver_unreachable,
+        "call_claude_batch must never reach the CLI binary resolver after #1261 step 2; \
+         got: {result:?}"
     );
 
     match prev_rollout {
