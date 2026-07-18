@@ -796,6 +796,8 @@ mod tests {
             branch: "b".to_string(),
             base_sha: "sha".to_string(),
             dispatch_id: None,
+            agent_identity_id: None,
+            claim_id: None,
             env_class: EnvClass::EditOnly,
             state,
             reclaim_reason: None,
