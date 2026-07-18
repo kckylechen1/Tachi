@@ -474,6 +474,19 @@ mod tests {
     /// today's EXPECTED_SCHEMA_VERSION == 20; using an offset rather than the
     /// literal "18" keeps this test meaningful as EXPECTED_SCHEMA_VERSION
     /// bumps further.
+    ///
+    /// The `MemoryStore::open` seed call above is a REAL schema init —
+    /// `memcore::db::schema::remember_migration_fingerprint` runs
+    /// unconditionally at the end of every `init_schema_with_label_mut`
+    /// (schema.rs:67), independent of whether anything actually migrated, so
+    /// it always leaves a `<db>.migration-marker` sibling behind as a side
+    /// effect of merely seeding the fixture — before this helper ever rolls
+    /// the stamp back, and long before any `migrate` CLI code runs. A "real
+    /// DB stamped older than this binary" that no `--apply`/#1188 migration
+    /// has ever touched should not carry that trail; remove it here so
+    /// callers asserting on plan-only's zero-write contract (no NEW
+    /// `.migration-marker`/`.migration-bak.*` sibling) are testing plan-only
+    /// itself, not an artifact of this helper's own seeding mechanics.
     fn make_stamped_older_fixture(dir: &Path, name: &str, behind: u32) -> PathBuf {
         let db_path = dir.join(name);
         MemoryStore::open(db_path.to_str().expect("utf8 path")).expect("seed current-schema db");
@@ -483,6 +496,8 @@ mod tests {
             EXPECTED_SCHEMA_VERSION - behind
         ))
         .expect("stamp older schema version");
+        drop(conn);
+        let _ = std::fs::remove_file(format!("{}.migration-marker", db_path.display()));
         db_path
     }
 
