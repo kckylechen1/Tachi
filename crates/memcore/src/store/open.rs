@@ -61,16 +61,32 @@ impl MemoryStore {
         path_validation: bool,
         ctx: &DbOpenContext,
     ) -> Result<Self, MemoryError> {
-        // #1132: one-time rename-on-open migration away from the legacy
-        // `memory.db` filename, before anything touches the file. Single
-        // seam — see `db::filename`'s doc comment for why it lives here and
-        // not scattered across every call site that builds a `db_path`.
-        db::migrate_legacy_filename_if_present(std::path::Path::new(db_path))?;
         // Register extensions BEFORE opening the connection.
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
+        // Acquire the in-process startup lock BEFORE the #1132 rename-on-open
+        // migration, not after (RESIDUAL-1). The migration's stat+rename+symlink
+        // sequence and the `open_read_write` below (which CREATES the canonical
+        // file when absent) must not interleave: without this ordering, two
+        // threads in THIS process could both stat the canonical name as absent
+        // and both `rename` the legacy file onto it, the second clobbering the
+        // first. Holding the guard across migrate + open serializes them.
+        //
+        // SCOPE NOTE: `acquire_startup_lock` is a process-local `Mutex`, so this
+        // closes the same-process race only. It does NOT exclude a SECOND daemon
+        // process opening the same store dir concurrently — that cross-process
+        // TOCTOU (stat-absent here, `Connection::open` creates+populates there,
+        // our `rename` clobbers it) needs a cross-process primitive memcore does
+        // not yet have (an flock, or an atomic rename-no-replace such as
+        // `renamex_np`/`renameat2`). See the #1132 review thread — deliberately
+        // left for a follow-up because it requires a new dependency/FFI.
         let _startup_guard = db::acquire_startup_lock();
+        // #1132: one-time rename-on-open migration away from the legacy
+        // `memory.db` filename, before the connection is opened. Single seam —
+        // see `db::filename`'s doc comment for why it lives here and not
+        // scattered across every call site that builds a `db_path`.
+        db::migrate_legacy_filename_if_present(std::path::Path::new(db_path))?;
         let mut conn = db::open_read_write(db_path)?;
         // Both labelled and unlabelled opens run schema init + data migrations
         // through init_schema_with_label_mut so the pre-migration backup and

@@ -98,6 +98,24 @@ fn longest_hex_run(s: &str) -> usize {
 ///   3. Real file + owning repo found → relocatable.
 ///   4. Real file, no owning repo → home-resident (keep, never move).
 pub fn classify_project_db(input: &ProjectDbInput) -> RelocationItem {
+    let mut item = classify_inner(input);
+    // #1132 (RESIDUAL-3): if this entry is one half of a real
+    // `tachi-memory.db` + real `memory.db` coexistence, prepend a loud marker to
+    // the rationale so the ambiguous state the store opener refuses is visible
+    // in every rendered line and in the serialized note — never silently folded
+    // into an ordinary relocate/keep plan.
+    if input.sibling_conflict {
+        item.note = format!(
+            "[AMBIGUOUS #1132: a real tachi-memory.db AND a real memory.db coexist in this \
+             project dir; the memory-store opener refuses this state as an unresolved migration \
+             — reconcile manually before relying on the plan below] {}",
+            item.note
+        );
+    }
+    item
+}
+
+fn classify_inner(input: &ProjectDbInput) -> RelocationItem {
     let db_path = input.db_path.to_string_lossy().to_string();
 
     // (1) UUID / smoke-test garbage takes precedence.

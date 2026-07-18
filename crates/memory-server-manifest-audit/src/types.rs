@@ -69,7 +69,8 @@ impl PlannedAction {
 pub struct ProjectDbInput {
     /// The project directory name (the `<name>` segment).
     pub project_name: String,
-    /// Absolute path to `~/.tachi/projects/<name>/memory.db`.
+    /// Absolute path to the discovered store, `~/.tachi/projects/<name>/` plus
+    /// either `tachi-memory.db` (#1132 canonical) or `memory.db` (legacy).
     pub db_path: PathBuf,
     /// `true` if `db_path` itself is a symlink.
     pub is_symlink: bool,
@@ -80,6 +81,12 @@ pub struct ProjectDbInput {
     /// For a real (non-symlink) file: the discovered owning repo root, if any.
     /// Determined by the caller (manifest match / git-root scan).
     pub owning_repo: Option<PathBuf>,
+    /// #1132: `true` when a real `tachi-memory.db` AND a real `memory.db`
+    /// coexist in this project dir — the ambiguous, unresolved-migration state
+    /// the memory-store opener refuses. Both coexisting entries are emitted with
+    /// this flag set so the audit surfaces the conflict instead of concealing
+    /// the legacy file behind the canonical one.
+    pub sibling_conflict: bool,
 }
 
 /// A single line of the relocation plan.
@@ -90,7 +97,7 @@ pub struct RelocationItem {
     pub class: ProjectDbClass,
     pub action: PlannedAction,
     /// For `RelocateToRepo`: the proposed destination
-    /// `<owning_repo>/.tachi/memory.db`. None otherwise.
+    /// `<owning_repo>/.tachi/tachi-memory.db` (#1132 canonical). None otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relocate_to: Option<String>,
     /// For symlink aliases: the resolved target (informational).

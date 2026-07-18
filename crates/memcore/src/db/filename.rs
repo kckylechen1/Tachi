@@ -57,14 +57,17 @@ enum LegacySibling {
 /// from any other error (present but un-stat-able -> FAIL LOUD, never treated as
 /// absent — BUG #1132-2). Then, by (canonical, legacy):
 ///
-/// - (absent, absent) / (absent, symlink) -> no-op. Genuinely fresh, or an
-///   orphaned compat symlink pointing at a not-yet-created canonical file; the
-///   normal open path creates the canonical file from scratch.
+/// - (absent, absent) -> no-op. Genuinely fresh; the normal open path creates
+///   the canonical file from scratch.
+/// - (absent, symlink) / (present, symlink) -> VALIDATE the link then no-op. A
+///   pre-existing link at the legacy path (an orphaned shim, or the healthy
+///   shim of a migrated dir) is accepted ONLY if it is exactly the relative
+///   `memory.db -> tachi-memory.db` compat shim this seam writes; a link to any
+///   other target (a stale/old DB location) is corrupted state that would
+///   resolve old-name readers to the wrong data -> FAIL LOUD (RESIDUAL-2).
 /// - (absent, real file) -> migrate: `rename` the legacy file to the canonical
 ///   name (atomic on POSIX — the data is never in two places at once), then
 ///   leave a `memory.db -> tachi-memory.db` compat symlink behind idempotently.
-/// - (present, symlink) -> no-op. Fully migrated; this is the pure "second
-///   open" fast path.
 /// - (present, absent) -> CONVERGE: the canonical file exists but its compat
 ///   symlink is missing — a crash between the atomic rename and the symlink
 ///   step, or a fresh canonical-only store. Re-establish the symlink
@@ -112,9 +115,19 @@ pub fn migrate_legacy_filename_if_present(db_path: &Path) -> Result<(), MemoryEr
     };
 
     match (canonical_present, legacy_kind) {
-        // Genuinely fresh, or an orphaned compat symlink pointing at a
-        // not-yet-created canonical file. Nothing to migrate.
-        (false, LegacySibling::Absent) | (false, LegacySibling::Symlink) => Ok(()),
+        // Genuinely fresh: no canonical file, no legacy sibling. Nothing to do.
+        (false, LegacySibling::Absent) => Ok(()),
+
+        // A pre-existing link sits at the legacy path — either an orphaned
+        // compat shim (canonical not yet created) or the healthy shim of an
+        // already-migrated dir (RESIDUAL-2). In BOTH cases we must not blindly
+        // accept it: a stale/corrupted `memory.db` symlink pointing at some
+        // OTHER path (an old DB location, a leftover from a prior move) would
+        // silently send old-name readers to the wrong data. Validate that it is
+        // exactly the compat shim this seam writes; fail loud otherwise.
+        (false, LegacySibling::Symlink) | (true, LegacySibling::Symlink) => {
+            validate_compat_symlink(&legacy_path)
+        }
 
         // Pre-#1132 install: a real legacy file, no canonical file yet.
         // `rename` is atomic on POSIX, so the bytes never live under two names
@@ -124,11 +137,6 @@ pub fn migrate_legacy_filename_if_present(db_path: &Path) -> Result<(), MemoryEr
                 .map_err(|e| rename_error(&legacy_path, db_path, e))?;
             leave_compat_symlink(&legacy_path)
         }
-
-        // Fully migrated (canonical real file + legacy compat symlink), or a
-        // canonical file whose legacy sibling is a deliberate link: pure no-op.
-        // This is the common "second open" fast path — zero fs mutation.
-        (true, LegacySibling::Symlink) => Ok(()),
 
         // Half-done migration / fresh canonical-only store: the canonical file
         // exists but the compat symlink is missing. Converge idempotently by
@@ -183,6 +191,41 @@ fn rename_error(legacy_path: &Path, db_path: &Path, e: std::io::Error) -> Memory
             db_path.display()
         ),
     ))
+}
+
+/// Validate that a pre-existing link at the legacy path is exactly the compat
+/// shim this seam itself writes: a *relative* symlink to the canonical sibling
+/// filename [`MEMORY_DB_FILENAME`]. Any other target — an absolute path, an old
+/// DB location, a leftover from a prior move — is stale/corrupted state that
+/// would silently resolve old-name readers to the WRONG data (split-brain).
+/// Refuse it loudly (RESIDUAL-2), same posture as the both-real-files case,
+/// rather than accepting it as a healthy shim.
+fn validate_compat_symlink(legacy_path: &Path) -> Result<(), MemoryError> {
+    match std::fs::read_link(legacy_path) {
+        Ok(target) if target == Path::new(MEMORY_DB_FILENAME) => Ok(()),
+        Ok(target) => Err(MemoryError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "#1132 legacy DB filename migration: the legacy path {} is a symlink pointing at \
+                 {} instead of the canonical sibling {}. This is a stale/corrupted compat link \
+                 that would resolve old-name readers to the wrong data. Refusing to proceed — \
+                 reconcile the link manually (repoint it at ./{} or remove it) and retry.",
+                legacy_path.display(),
+                target.display(),
+                MEMORY_DB_FILENAME,
+                MEMORY_DB_FILENAME,
+            ),
+        ))),
+        Err(e) => Err(MemoryError::Io(std::io::Error::new(
+            e.kind(),
+            format!(
+                "#1132 legacy DB filename migration: the legacy path {} is a symlink but its target \
+                 could not be read: {e}. Refusing to proceed until the link state is known, rather \
+                 than assume it points at the canonical DB.",
+                legacy_path.display()
+            ),
+        ))),
+    }
 }
 
 /// True if `name` is either the canonical or the legacy memory-database
@@ -471,6 +514,54 @@ mod tests {
                 .is_symlink(),
             "the pre-existing symlink must be left exactly as it was"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migrate_fails_loud_on_a_legacy_symlink_pointing_at_the_wrong_target() {
+        // RESIDUAL-2: a stale/corrupted `memory.db` symlink pointing at some
+        // OTHER path (not the canonical sibling) must NOT be silently accepted —
+        // following it would resolve old-name readers to the wrong data. Fail
+        // loud in BOTH the canonical-absent and canonical-present cases.
+        for canonical_exists in [false, true] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let target = dir.path().join(MEMORY_DB_FILENAME);
+            let legacy = dir.path().join(LEGACY_MEMORY_DB_FILENAME);
+            // A link to a plausible-but-wrong old location.
+            std::os::unix::fs::symlink("../old-place/memory.db", &legacy)
+                .expect("plant wrong-target symlink");
+            if canonical_exists {
+                std::fs::write(&target, b"canonical data").expect("write canonical");
+            }
+
+            let err = migrate_legacy_filename_if_present(&target).expect_err(
+                "a legacy symlink pointing at the wrong target must fail loud, not be accepted",
+            );
+            let message = err.to_string();
+            assert!(
+                message.contains("stale/corrupted compat link"),
+                "error must name the corrupted-link condition (canonical_exists={canonical_exists}): {message}"
+            );
+            assert!(
+                message.contains("wrong data"),
+                "error must make the wrong-data risk explicit: {message}"
+            );
+            // The seam must not have touched anything.
+            assert_eq!(
+                std::fs::read_link(&legacy).expect("legacy link"),
+                std::path::PathBuf::from("../old-place/memory.db"),
+                "the suspect symlink must be left exactly as it was"
+            );
+            if canonical_exists {
+                assert_eq!(
+                    std::fs::read(&target).expect("read canonical"),
+                    b"canonical data",
+                    "canonical data must be untouched"
+                );
+            } else {
+                assert!(!target.exists(), "no canonical file may be created");
+            }
+        }
     }
 
     #[cfg(unix)]
