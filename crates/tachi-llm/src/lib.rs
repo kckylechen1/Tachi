@@ -1,9 +1,8 @@
-pub mod claude_pool;
 pub mod llm;
+pub mod llm_recorder;
 
 mod backend_tier;
 mod default_prompts;
-mod path;
 mod provider_materialization;
 pub mod provider_names;
 mod runtime_files;

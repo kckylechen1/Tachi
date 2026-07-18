@@ -144,18 +144,22 @@ impl MemoryServer {
         let llm = Arc::new(tachi_llm::LlmClient::new_with_vault_db(Some(
             global_db_path.as_path(),
         ))?);
-        // Resolved once, ahead of `claude_pool` construction, so both the
-        // server's own `home_dir` field and `ClaudePool` bind to the SAME
+        // Resolved once, ahead of `llm_recorder` construction, so both the
+        // server's own `home_dir` field and the recorder bind to the SAME
         // resolution instead of each independently re-reading
         // TACHI_HOME/SIGIL_HOME/TACHI_APP_HOME (#1096 leaf-2a).
         let home_dir = Arc::new(crate::path_utils::tachi_home());
         let routing_config = Arc::new(RoutingConfigProvider::new((*home_dir).clone()));
-        let claude_pool_max = std::env::var("CLAUDE_POOL_MAX_CONCURRENT")
+        // #1261: `CLAUDE_POOL_MAX_CONCURRENT` env name is kept for back-compat
+        // (existing deployments pin it); it now controls the LLM-call
+        // recorder's bounded concurrency, not a CLI pool. A rename to
+        // `LLM_RECORDER_MAX_CONCURRENT` is tracked as follow-up.
+        let recorder_max = std::env::var("CLAUDE_POOL_MAX_CONCURRENT")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(tachi_llm::claude_pool::DEFAULT_MAX_CONCURRENT);
-        let claude_pool = Arc::new(tachi_llm::claude_pool::ClaudePool::new_in_app_home(
-            claude_pool_max,
+            .unwrap_or(tachi_llm::llm_recorder::DEFAULT_MAX_CONCURRENT);
+        let llm_recorder = Arc::new(tachi_llm::llm_recorder::LlmCallRecorder::new_in_app_home(
+            recorder_max,
             (*home_dir).clone(),
         ));
         let pipeline_enabled = std::env::var("ENABLE_PIPELINE")
@@ -208,7 +212,7 @@ impl MemoryServer {
         let server = Self {
             db,
             llm,
-            claude_pool,
+            llm_recorder,
             pipeline_enabled,
             tool_discovery: Arc::new(ToolDiscovery {
                 proxy_tools: StdMutex::new(HashMap::new()),

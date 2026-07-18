@@ -82,7 +82,7 @@ pub async fn run_daily_batch_distill_with_options(
     }
 
     // Opportunistically prune stale foundry-runs subdirs once per run.
-    let _ = server.claude_pool.cleanup_expired();
+    let _ = server.llm_recorder.cleanup_expired();
 
     Ok(report)
 }
@@ -120,7 +120,7 @@ async fn distill_one_project(
         &uuid::Uuid::new_v4().to_string()[..8]
     );
     let runs_root = server
-        .claude_pool
+        .llm_recorder
         .runs_dir()
         .join("distill")
         .join(&project_label)
@@ -383,21 +383,21 @@ async fn apply_parsed_groups(
 
 /// Run the distill batch call via the provider executor. The run-directory
 /// artifact contract (`prompt.md`/`result.md`/`status.json`) is preserved,
-/// since the path goes through `ClaudePool::call_via_provider`. #1261 step
-/// 2/3: the CLI fallback branch was removed; the only path now is the
-/// provider executor.
+/// since the path goes through `LlmCallRecorder::record_call`. #1261 step
+/// 2/3 removed the CLI fallback branch; step 3/3 renamed the recorder
+/// (formerly `ClaudePool::call_via_provider`) to its executor-agnostic name.
 pub(crate) async fn call_claude_batch(
     server: &MemoryServer,
     label: &str,
     prompt: &str,
     chunk: &[CandidateGroup],
-) -> Result<tachi_llm::claude_pool::ClaudeCallOutcome, String> {
+) -> Result<tachi_llm::llm_recorder::RecordedCallOutcome, String> {
     let llm = server.llm.clone();
     let user_payload = build_batch_user_payload(chunk);
     let max_tokens = batch_max_tokens(chunk.len());
     server
-        .claude_pool
-        .call_via_provider(label, prompt, move || async move {
+        .llm_recorder
+        .record_call(label, prompt, move || async move {
             llm.call_distill_llm(
                 DISTILL_DAILY_SYSTEM_PROMPT,
                 &user_payload,

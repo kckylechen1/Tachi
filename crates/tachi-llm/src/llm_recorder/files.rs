@@ -1,4 +1,13 @@
-use super::*;
+//! Filesystem helpers for the LLM-call recorder: label sanitization and
+//! the owner-only write helpers that back `prompt.md` / `result.md` /
+//! `status.json`. Migrated verbatim from the pre-#1261 `claude_pool::files`
+//! — the on-disk artifact contract is unchanged by the decommission.
+
+use std::path::PathBuf;
+
+use serde_json::Value;
+
+use crate::runtime_files::{write_owner_only_file, write_owner_only_file_atomic};
 
 const MAX_LABEL_LEN: usize = 48;
 const HASH_LEN: usize = 8;
