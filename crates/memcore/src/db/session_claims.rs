@@ -35,7 +35,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
-use crate::error::MemoryError;
+use crate::error::{MemoryError, WorkClaimTransitionReason};
 
 use super::common::normalize_utc_iso_or_now;
 
@@ -577,6 +577,7 @@ fn paths_overlap(left: &str, right: &str) -> bool {
 pub fn heartbeat_work_claim(
     conn: &mut Connection,
     claim_id: &str,
+    caller_identity_id: &str,
     expected_version: i64,
     lease_expires_at: &str,
 ) -> Result<WorkClaimHeartbeat, MemoryError> {
@@ -586,14 +587,14 @@ pub fn heartbeat_work_claim(
         ));
     }
     let tx = conn.transaction()?;
-    let existing: Option<(String, i64)> = tx
+    let existing: Option<(Option<String>, String, i64)> = tx
         .query_row(
-            "SELECT state, transition_version FROM session_claims WHERE claim_id=?1",
+            "SELECT agent_identity_id, state, transition_version FROM session_claims WHERE claim_id=?1",
             params![claim_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some((state, version)) = existing else {
+    let Some((holder_identity_id, state, version)) = existing else {
         return Err(MemoryError::NotFound(format!("claim {claim_id}")));
     };
     if state != "active" {
@@ -605,6 +606,17 @@ pub fn heartbeat_work_claim(
         return Err(MemoryError::WorkClaimConflict(format!(
             "claim {claim_id} is at version {version}, expected {expected_version}"
         )));
+    }
+    let holder_identity_id = holder_identity_id.ok_or_else(|| {
+        MemoryError::WorkClaimIncompatibleState(format!("claim {claim_id} has no proven identity"))
+    })?;
+    if holder_identity_id != caller_identity_id {
+        return Err(MemoryError::WorkClaimTransitionRefused {
+            reason: WorkClaimTransitionReason::HolderMismatch,
+            claim_id: claim_id.to_string(),
+            holder_identity_id,
+            caller_identity_id: caller_identity_id.to_string(),
+        });
     }
     let now = normalize_utc_iso_or_now("");
     let changed = tx.execute(
@@ -631,6 +643,7 @@ pub fn heartbeat_work_claim(
 pub fn handoff_work_claim(
     conn: &mut Connection,
     claim_id: &str,
+    caller_identity_id: &str,
     expected_version: i64,
     successor: &WorkClaimHandoffRequest,
 ) -> Result<WorkClaimHandoff, MemoryError> {
@@ -669,6 +682,20 @@ pub fn handoff_work_claim(
         return Err(MemoryError::WorkClaimConflict(format!(
             "claim {claim_id} is at version {version}, expected {expected_version}"
         )));
+    }
+    if successor.agent_identity_id != caller_identity_id {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "handoff successor {} does not match admitted caller {caller_identity_id}",
+            successor.agent_identity_id
+        )));
+    }
+    if state == "active" && from_identity != caller_identity_id {
+        return Err(MemoryError::WorkClaimTransitionRefused {
+            reason: WorkClaimTransitionReason::HolderMismatch,
+            claim_id: claim_id.to_string(),
+            holder_identity_id: from_identity,
+            caller_identity_id: caller_identity_id.to_string(),
+        });
     }
     let known_successor: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM agent_identities WHERE agent_identity_id=?1)",
@@ -754,33 +781,52 @@ pub fn handoff_work_claim(
 }
 
 pub fn release_work_claim(
-    conn: &Connection,
+    conn: &mut Connection,
     claim_id: &str,
+    caller_identity_id: &str,
     expected_version: i64,
     reason: &str,
 ) -> Result<i64, MemoryError> {
-    let changed = conn.execute("UPDATE session_claims SET state='released', released_at=?4, release_reason=?3, transition_version=transition_version+1 WHERE claim_id=?1 AND transition_version=?2 AND state IN ('active','orphaned')", params![claim_id, expected_version, reason, normalize_utc_iso_or_now("")])?;
-    if changed == 1 {
-        return Ok(expected_version + 1);
-    }
-    let present: Option<(String, i64)> = conn
+    let tx = conn.transaction()?;
+    let present: Option<(Option<String>, String, i64)> = tx
         .query_row(
-            "SELECT state, transition_version FROM session_claims WHERE claim_id=?1",
+            "SELECT agent_identity_id, state, transition_version FROM session_claims WHERE claim_id=?1",
             params![claim_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    match present {
-        Some((_state, version)) if version != expected_version => {
-            Err(MemoryError::WorkClaimConflict(format!(
-                "claim {claim_id} is at version {version}, expected {expected_version}"
-            )))
-        }
-        Some((state, _)) => Err(MemoryError::WorkClaimIncompatibleState(format!(
+    let Some((holder_identity_id, state, version)) = present else {
+        return Err(MemoryError::NotFound(format!("claim {claim_id}")));
+    };
+    if !matches!(state.as_str(), "active" | "orphaned") {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
             "claim {claim_id} is {state}"
-        ))),
-        None => Err(MemoryError::NotFound(format!("claim {claim_id}"))),
+        )));
     }
+    if version != expected_version {
+        return Err(MemoryError::WorkClaimConflict(format!(
+            "claim {claim_id} is at version {version}, expected {expected_version}"
+        )));
+    }
+    let holder_identity_id = holder_identity_id.ok_or_else(|| {
+        MemoryError::WorkClaimIncompatibleState(format!("claim {claim_id} has no proven identity"))
+    })?;
+    if holder_identity_id != caller_identity_id {
+        return Err(MemoryError::WorkClaimTransitionRefused {
+            reason: WorkClaimTransitionReason::HolderMismatch,
+            claim_id: claim_id.to_string(),
+            holder_identity_id,
+            caller_identity_id: caller_identity_id.to_string(),
+        });
+    }
+    let changed = tx.execute("UPDATE session_claims SET state='released', released_at=?4, release_reason=?3, transition_version=transition_version+1 WHERE claim_id=?1 AND transition_version=?2 AND state IN ('active','orphaned')", params![claim_id, expected_version, reason, normalize_utc_iso_or_now("")])?;
+    if changed != 1 {
+        return Err(MemoryError::WorkClaimConflict(format!(
+            "claim {claim_id} changed while releasing"
+        )));
+    }
+    tx.commit()?;
+    Ok(expected_version + 1)
 }
 
 /// Atomically bind a claim and ExecEnv, refusing unproved identities, stale
@@ -2019,7 +2065,7 @@ mod tests {
             "stale bind version must not overwrite the first binding"
         );
         assert_eq!(
-            release_work_claim(&conn, "claim-a", 1, "explicit").unwrap(),
+            release_work_claim(&mut conn, "claim-a", "agent-a", 1, "explicit").unwrap(),
             2
         );
         assert_eq!(
@@ -2288,6 +2334,91 @@ mod tests {
     }
 
     #[test]
+    fn work_claim_transition_authorization_is_holder_enforced_and_typed() {
+        let mut conn = open_conn();
+        identity(&conn, "agent-holder");
+        identity(&conn, "agent-intruder");
+
+        let mut heartbeat = work_claim("auth-heartbeat", "agent-holder");
+        heartbeat.issue_ref = Some("org/repo#auth-heartbeat".into());
+        heartbeat.mode = WorkClaimMode::ReadOnly;
+        heartbeat.worktree_path = String::new();
+        insert_work_claim(&mut conn, &heartbeat).unwrap();
+        let heartbeat_error = heartbeat_work_claim(
+            &mut conn,
+            "auth-heartbeat",
+            "agent-intruder",
+            0,
+            "2030-01-02T00:00:00Z",
+        )
+        .expect_err("non-holder heartbeat must be refused");
+        assert!(matches!(
+            heartbeat_error,
+            MemoryError::WorkClaimTransitionRefused {
+                reason: WorkClaimTransitionReason::HolderMismatch,
+                ..
+            }
+        ));
+
+        let mut release = work_claim("auth-release", "agent-holder");
+        release.issue_ref = Some("org/repo#auth-release".into());
+        release.mode = WorkClaimMode::ReadOnly;
+        release.worktree_path = String::new();
+        insert_work_claim(&mut conn, &release).unwrap();
+        let release_error =
+            release_work_claim(&mut conn, "auth-release", "agent-intruder", 0, "intruder")
+                .expect_err("non-holder release must be refused");
+        assert!(matches!(
+            release_error,
+            MemoryError::WorkClaimTransitionRefused {
+                reason: WorkClaimTransitionReason::HolderMismatch,
+                ..
+            }
+        ));
+
+        let mut handoff = work_claim("auth-handoff", "agent-holder");
+        handoff.issue_ref = Some("org/repo#auth-handoff".into());
+        handoff.mode = WorkClaimMode::ReadOnly;
+        handoff.worktree_path = String::new();
+        insert_work_claim(&mut conn, &handoff).unwrap();
+        let successor = WorkClaimHandoffRequest {
+            agent_identity_id: "agent-intruder".into(),
+            role: "executor".into(),
+            mode: WorkClaimMode::ReadOnly,
+            worktree_path: String::new(),
+            declared_file_scope: r#"["crates/auth/**"]"#.into(),
+            expected_head: "3c09b425".into(),
+            lease_expires_at: "2030-01-02T00:00:00Z".into(),
+        };
+        let handoff_error =
+            handoff_work_claim(&mut conn, "auth-handoff", "agent-intruder", 0, &successor)
+                .expect_err("non-holder active handoff must be refused");
+        assert!(matches!(
+            handoff_error,
+            MemoryError::WorkClaimTransitionRefused {
+                reason: WorkClaimTransitionReason::HolderMismatch,
+                ..
+            }
+        ));
+        let unchanged = get_claim(&conn, "auth-handoff").unwrap().unwrap();
+        assert_eq!(unchanged.state, ClaimState::Active);
+        assert_eq!(unchanged.transition_version, 0);
+        assert_eq!(unchanged.agent_identity_id.as_deref(), Some("agent-holder"));
+
+        conn.execute(
+            "UPDATE session_claims SET state='orphaned' WHERE claim_id='auth-handoff'",
+            [],
+        )
+        .unwrap();
+        let recovered =
+            handoff_work_claim(&mut conn, "auth-handoff", "agent-intruder", 0, &successor)
+                .expect("an admitted successor may recover an orphaned claim");
+        assert_eq!(recovered.from_agent_identity_id, "agent-holder");
+        assert_eq!(recovered.to_agent_identity_id, "agent-intruder");
+        assert_eq!(recovered.transition_version, 1);
+    }
+
+    #[test]
     fn work_claim_heartbeat_and_handoff_are_versioned_and_never_auto_take_over() {
         let mut conn = open_conn();
         for identity_id in [
@@ -2302,21 +2433,45 @@ mod tests {
         let mut heartbeat = work_claim("heartbeat", "agent-heartbeat");
         heartbeat.issue_ref = Some("org/repo#heartbeat".into());
         insert_work_claim(&mut conn, &heartbeat).unwrap();
-        let receipt =
-            heartbeat_work_claim(&mut conn, "heartbeat", 0, "2026-07-20T00:00:00Z").unwrap();
+        let receipt = heartbeat_work_claim(
+            &mut conn,
+            "heartbeat",
+            "agent-heartbeat",
+            0,
+            "2026-07-20T00:00:00Z",
+        )
+        .unwrap();
         assert_eq!(receipt.transition_version, 1);
         assert_eq!(receipt.lease_expires_at, "2026-07-20T00:00:00Z");
         assert!(matches!(
-            heartbeat_work_claim(&mut conn, "heartbeat", 0, "2026-07-21T00:00:00Z"),
+            heartbeat_work_claim(
+                &mut conn,
+                "heartbeat",
+                "agent-heartbeat",
+                0,
+                "2026-07-21T00:00:00Z"
+            ),
             Err(MemoryError::WorkClaimConflict(_))
         ));
-        release_work_claim(&conn, "heartbeat", 1, "done").unwrap();
+        release_work_claim(&mut conn, "heartbeat", "agent-heartbeat", 1, "done").unwrap();
         assert!(matches!(
-            heartbeat_work_claim(&mut conn, "heartbeat", 2, "2026-07-21T00:00:00Z"),
+            heartbeat_work_claim(
+                &mut conn,
+                "heartbeat",
+                "agent-heartbeat",
+                2,
+                "2026-07-21T00:00:00Z"
+            ),
             Err(MemoryError::WorkClaimIncompatibleState(_))
         ));
         assert!(matches!(
-            heartbeat_work_claim(&mut conn, "missing", 0, "2026-07-21T00:00:00Z"),
+            heartbeat_work_claim(
+                &mut conn,
+                "missing",
+                "agent-heartbeat",
+                0,
+                "2026-07-21T00:00:00Z"
+            ),
             Err(MemoryError::NotFound(_))
         ));
         let mut orphaned_heartbeat = work_claim("orphaned-heartbeat", "agent-heartbeat");
@@ -2328,7 +2483,13 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            heartbeat_work_claim(&mut conn, "orphaned-heartbeat", 0, "2026-07-21T00:00:00Z"),
+            heartbeat_work_claim(
+                &mut conn,
+                "orphaned-heartbeat",
+                "agent-heartbeat",
+                0,
+                "2026-07-21T00:00:00Z"
+            ),
             Err(MemoryError::WorkClaimIncompatibleState(_))
         ));
 
@@ -2352,10 +2513,11 @@ mod tests {
             lease_expires_at: "2026-07-20T00:00:00Z".into(),
         };
         assert!(matches!(
-            handoff_work_claim(&mut conn, "handoff", 7, &successor),
+            handoff_work_claim(&mut conn, "handoff", "agent-handoff-to", 7, &successor),
             Err(MemoryError::WorkClaimConflict(_))
         ));
-        let handoff_result = handoff_work_claim(&mut conn, "handoff", 0, &successor).unwrap();
+        let handoff_result =
+            handoff_work_claim(&mut conn, "handoff", "agent-handoff-to", 0, &successor).unwrap();
         assert_eq!(handoff_result.from_agent_identity_id, "agent-handoff-from");
         assert_eq!(handoff_result.to_agent_identity_id, "agent-handoff-to");
         let handed_off = get_claim(&conn, "handoff").unwrap().unwrap();
@@ -2378,7 +2540,7 @@ mod tests {
         source.declared_file_scope = r#"["crates/source/**"]"#.into();
         insert_work_claim(&mut conn, &source).unwrap();
         let conflicting_successor = WorkClaimHandoffRequest {
-            agent_identity_id: "agent-handoff-to".into(),
+            agent_identity_id: "agent-handoff-from".into(),
             role: "executor".into(),
             mode: WorkClaimMode::Writable,
             worktree_path: "/worktrees/blocker/nested".into(),
@@ -2387,7 +2549,13 @@ mod tests {
             lease_expires_at: "2026-07-20T00:00:00Z".into(),
         };
         assert!(matches!(
-            handoff_work_claim(&mut conn, "handoff-conflict", 0, &conflicting_successor),
+            handoff_work_claim(
+                &mut conn,
+                "handoff-conflict",
+                "agent-handoff-from",
+                0,
+                &conflicting_successor
+            ),
             Err(MemoryError::WorkClaimConflict(_))
         ));
         let unchanged = get_claim(&conn, "handoff-conflict").unwrap().unwrap();
@@ -2417,7 +2585,13 @@ mod tests {
             lease_expires_at: "2026-07-20T00:00:00Z".into(),
         };
         assert!(matches!(
-            handoff_work_claim(&mut conn, "empty-handoff", 0, &successor),
+            handoff_work_claim(
+                &mut conn,
+                "empty-handoff",
+                "agent-empty-handoff-to",
+                0,
+                &successor
+            ),
             Err(MemoryError::InvalidArg(_))
         ));
     }

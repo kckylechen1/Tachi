@@ -103,7 +103,7 @@ pub use db::{CategoryPathPrefixMemoryRow, FoundryJobStatusCounts, PathPrefixMemo
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use db::{DbOpenContext, MigrationAuthority, OpenIntent};
 pub use embed_config::embed_raw_tier_enabled;
-pub use error::MemoryError;
+pub use error::{MemoryError, WorkClaimTransitionReason};
 #[cfg(feature = "admin")]
 pub use foundry::{
     AgentEvolutionProposal, AgentEvolutionSynthesis, AgentProfileDocument,

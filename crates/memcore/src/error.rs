@@ -1,5 +1,18 @@
 use thiserror::Error;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkClaimTransitionReason {
+    HolderMismatch,
+}
+
+impl std::fmt::Display for WorkClaimTransitionReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HolderMismatch => formatter.write_str("holder_mismatch"),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum MemoryError {
     #[error("SQLite error: {0}")]
@@ -39,6 +52,19 @@ pub enum MemoryError {
     /// A requested WorkClaim operation is not valid for the persisted state.
     #[error("WorkClaim incompatible state: {0}")]
     WorkClaimIncompatibleState(String),
+
+    /// An admitted caller attempted a transition that only the persisted
+    /// holder may perform. The stable reason is typed so API boundaries can
+    /// distinguish authorization refusal from state/version conflicts.
+    #[error(
+        "WorkClaim transition refused ({reason}): claim {claim_id} is held by {holder_identity_id}, caller is {caller_identity_id}"
+    )]
+    WorkClaimTransitionRefused {
+        reason: WorkClaimTransitionReason,
+        claim_id: String,
+        holder_identity_id: String,
+        caller_identity_id: String,
+    },
 
     /// #1119: a process carrying [`crate::db::MigrationAuthority::Deny`] tried
     /// to open an EXISTING DB stamped below this kernel's

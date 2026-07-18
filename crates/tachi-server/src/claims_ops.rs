@@ -166,10 +166,12 @@ pub(crate) fn handle_task_heartbeat(
     server: &MemoryServer,
     params: &crate::tool_params::TachiTaskParams,
 ) -> Result<serde_json::Value, String> {
+    let caller_identity_id = task_identity(server, params.agent_identity_id.clone())?;
     let receipt = server.with_global_store(|store| {
         memcore::heartbeat_work_claim(
             store.connection_mut(),
             &task_required(params.claim_id.clone(), "claim_id")?,
+            &caller_identity_id,
             params
                 .transition_version
                 .ok_or_else(|| "transition_version is required".to_string())?,
@@ -186,9 +188,10 @@ pub(crate) fn handle_task_handoff(
     server: &MemoryServer,
     params: &crate::tool_params::TachiTaskParams,
 ) -> Result<serde_json::Value, String> {
+    let caller_identity_id = task_identity(server, params.agent_identity_id.clone())?;
     let mode = task_mode(params.claim_mode.clone())?;
     let successor = WorkClaimHandoffRequest {
-        agent_identity_id: task_identity(server, params.agent_identity_id.clone())?,
+        agent_identity_id: caller_identity_id.clone(),
         role: task_required(params.claim_role.clone(), "claim_role")?,
         mode,
         worktree_path: canonical_claim_worktree_path(params.worktree_path.clone())?,
@@ -201,6 +204,7 @@ pub(crate) fn handle_task_handoff(
         memcore::handoff_work_claim(
             store.connection_mut(),
             &task_required(params.claim_id.clone(), "claim_id")?,
+            &caller_identity_id,
             params
                 .transition_version
                 .ok_or_else(|| "transition_version is required".to_string())?,
@@ -217,11 +221,13 @@ pub(crate) fn handle_task_release(
     server: &MemoryServer,
     params: &crate::tool_params::TachiTaskParams,
 ) -> Result<serde_json::Value, String> {
+    let caller_identity_id = task_identity(server, params.agent_identity_id.clone())?;
     let claim_id = task_required(params.claim_id.clone(), "claim_id")?;
     let version = server.with_global_store(|store| {
         memcore::release_work_claim(
-            store.connection(),
+            store.connection_mut(),
             &claim_id,
+            &caller_identity_id,
             params
                 .transition_version
                 .ok_or_else(|| "transition_version is required".to_string())?,
@@ -1178,6 +1184,18 @@ mod tests {
         assert_eq!(heartbeat["transition_version"], 1);
         let stale = handle_task_heartbeat(&server, &task("heartbeat", serde_json::json!({"claim_id": claim_id, "transition_version": 0, "lease_expires_at": "2030-01-03T00:00:00Z"}))).expect_err("stale heartbeat must not succeed");
         assert!(stale.contains("WorkClaim conflict"), "{stale}");
+        server
+            .with_global_store(|store| {
+                store
+                    .connection_mut()
+                    .execute(
+                        "UPDATE session_claims SET state='orphaned' WHERE claim_id=?1",
+                        [&claim_id],
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .expect("orphan claim before recovery handoff");
         admit_agent_connection(&server, Some("agent.beta".to_string()), true).unwrap();
         let handoff = task(
             "handoff",
@@ -1192,6 +1210,103 @@ mod tests {
             stale_handoff.contains("WorkClaim conflict"),
             "{stale_handoff}"
         );
+    }
+
+    #[test]
+    fn release_heartbeat_and_active_handoff_require_the_admitted_holder() {
+        let server = make_server();
+        admit_agent_connection(&server, Some("agent.holder".to_string()), true).unwrap();
+        let new_claim = |issue_ref: &str| {
+            task(
+                "claim",
+                serde_json::json!({
+                    "issue_ref": issue_ref,
+                    "branch": "lane/holder-auth",
+                    "claim_role": "executor",
+                    "claim_mode": "read_only",
+                    "claim_scope": ["crates/tachi-server/src/claims_ops.rs"],
+                    "expected_head": "2969d6aa",
+                    "lease_expires_at": "2030-01-01T00:00:00Z"
+                }),
+            )
+        };
+        let heartbeat_claim = handle_task_claim(&server, &new_claim("org/repo#heartbeat-auth"))
+            .unwrap()["claim_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let release_claim = handle_task_claim(&server, &new_claim("org/repo#release-auth"))
+            .unwrap()["claim_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let handoff_claim = handle_task_claim(&server, &new_claim("org/repo#handoff-auth"))
+            .unwrap()["claim_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        admit_agent_connection(&server, Some("agent.intruder".to_string()), true).unwrap();
+
+        let heartbeat = handle_task_heartbeat(
+            &server,
+            &task(
+                "heartbeat",
+                serde_json::json!({
+                    "claim_id": heartbeat_claim,
+                    "transition_version": 0,
+                    "lease_expires_at": "2030-01-02T00:00:00Z"
+                }),
+            ),
+        )
+        .expect_err("a non-holder must not refresh a live claim");
+        assert!(heartbeat.contains("holder_mismatch"), "{heartbeat}");
+
+        let release = handle_task_release(
+            &server,
+            &task(
+                "release",
+                serde_json::json!({
+                    "claim_id": release_claim,
+                    "transition_version": 0,
+                    "release_reason": "intruder"
+                }),
+            ),
+        )
+        .expect_err("a non-holder must not clear held evidence");
+        assert!(release.contains("holder_mismatch"), "{release}");
+
+        let handoff = handle_task_handoff(
+            &server,
+            &task(
+                "handoff",
+                serde_json::json!({
+                    "claim_id": handoff_claim,
+                    "transition_version": 0,
+                    "claim_role": "executor",
+                    "claim_mode": "read_only",
+                    "claim_scope": ["crates/tachi-server/src/claims_ops.rs"],
+                    "expected_head": "2969d6aa",
+                    "lease_expires_at": "2030-01-02T00:00:00Z"
+                }),
+            ),
+        )
+        .expect_err("a non-holder must not take over an active claim");
+        assert!(handoff.contains("holder_mismatch"), "{handoff}");
+
+        server
+            .with_global_store_read(|store| {
+                for claim_id in [&heartbeat_claim, &release_claim, &handoff_claim] {
+                    let claim = memcore::get_claim(store.connection(), claim_id)
+                        .map_err(|error| error.to_string())?
+                        .expect("claim remains present");
+                    assert_eq!(claim.state, memcore::ClaimState::Active);
+                    assert_eq!(claim.transition_version, 0);
+                    assert_eq!(claim.agent_identity_id.as_deref(), Some("agent.holder"));
+                }
+                Ok(())
+            })
+            .expect("authorization failures leave claims unchanged");
     }
 
     #[test]
