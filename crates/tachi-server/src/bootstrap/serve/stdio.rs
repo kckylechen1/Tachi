@@ -88,6 +88,7 @@ pub(super) async fn serve_stdio_proxy(
     client_project: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let proxy = StdioProxyServer {
+        adapter_started_at: chrono::Utc::now(),
         daemon: std::sync::Arc::new(std::sync::RwLock::new(info)),
         app_home,
         global_db_path,
@@ -336,6 +337,11 @@ async fn wait_for_daemon_ready(
 
 #[derive(Clone)]
 struct StdioProxyServer {
+    // Stamped once at adapter-process construction (`serve_stdio_proxy`); this
+    // is the adapter's own lifetime anchor, reported verbatim in
+    // `runtime_info` as `adapter_started_at` — distinct from
+    // `daemon_identity_as_of` (tachi#1222), which is re-derived on every call.
+    adapter_started_at: chrono::DateTime<chrono::Utc>,
     // Shared + refreshable so a daemon restart (new ephemeral port) or death is
     // self-healed at call time instead of stranding the adapter on a dead URL.
     daemon: std::sync::Arc<std::sync::RwLock<crate::cli_client::DaemonInfo>>,
@@ -396,25 +402,63 @@ impl StdioProxyServer {
         Some(fresh)
     }
 
-    fn runtime_info_result(&self) -> rmcp::model::CallToolResult {
-        let daemon = self.current_daemon();
+    /// Re-derive the daemon identity block fresh on every call (tachi#1222):
+    /// no cached-snapshot read, so a daemon restart or death between calls is
+    /// reflected immediately instead of echoing adapter-startup state.
+    /// Reuses the exact discovery primitive (`detect_daemon_for_global_db`:
+    /// pid/lock-file re-read + TCP probe) that `compatible_daemon` /
+    /// `refresh_daemon` already use to decide routing, so "what runtime_info
+    /// reports" and "what the proxy would route to" can never silently
+    /// diverge onto two different detection mechanisms.
+    ///
+    /// When no daemon answers for this global DB, this reports `reachable:
+    /// false` and null identity fields rather than falling back to the last
+    /// cached snapshot — a stale-but-plausible-looking identity is worse than
+    /// an explicit "don't know" (dispatch-lifecycle "拒必有声").
+    async fn runtime_info_result(&self) -> rmcp::model::CallToolResult {
+        let adapter_started_at = self.adapter_started_at.to_rfc3339();
+        let fresh =
+            crate::cli_client::detect_daemon_for_global_db(&self.app_home, &self.global_db_path)
+                .await;
+        let daemon_identity_as_of = chrono::Utc::now().to_rfc3339();
+
+        let (transport_target, daemon_block) = match fresh {
+            Some(daemon) => (
+                serde_json::Value::String(daemon.url),
+                serde_json::json!({
+                    "reachable": true,
+                    "pid": daemon.pid,
+                    "version": daemon.version,
+                    "global_db": daemon.global_db,
+                    "project_db": daemon.project_db,
+                }),
+            ),
+            None => (
+                serde_json::Value::Null,
+                serde_json::json!({
+                    "reachable": false,
+                    "pid": null,
+                    "version": null,
+                    "global_db": null,
+                    "project_db": null,
+                }),
+            ),
+        };
+
         let body = serde_json::json!({
             "mode": "stdio_proxy",
             "process_role": "stdio_proxy",
             "db_handles": 0,
             "stdio_adapter": true,
             "authoritative_runtime": "daemon",
+            "adapter_started_at": adapter_started_at,
+            "daemon_identity_as_of": daemon_identity_as_of,
             "transport": {
                 "inbound": "stdio",
                 "outbound": "streamable_http",
-                "target": daemon.url,
+                "target": transport_target,
             },
-            "daemon": {
-                "pid": daemon.pid,
-                "version": daemon.version,
-                "global_db": daemon.global_db,
-                "project_db": daemon.project_db,
-            },
+            "daemon": daemon_block,
             "client": {
                 "global_db": self.global_db_path.display().to_string(),
                 "project_db": self.project_db_path.as_ref().map(|path| path.display().to_string()),
@@ -470,7 +514,7 @@ impl rmcp::ServerHandler for StdioProxyServer {
     {
         async move {
             if request.name.as_ref() == "runtime_info" {
-                return Ok(self.runtime_info_result());
+                return Ok(self.runtime_info_result().await);
             }
             let request = prepare_proxy_tool_call(request, self.client_project.as_deref())?;
             let current = self.current_daemon();
