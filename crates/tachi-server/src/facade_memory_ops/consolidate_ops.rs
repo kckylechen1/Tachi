@@ -7,6 +7,10 @@
 //!    `/scratch`); emit durable proposals for:
 //!    - `merge_into` — same path, high summary overlap → fold older into newer
 //!    - `supersede` — same path, low overlap → newer wins without text merge
+//!    - `near_dup_merge` — **cross-path** raw rows with high text-token Jaccard
+//!      (RomanBath light-sleep detection). Same-path twins stay under
+//!      `merge_into`/`supersede`. Connected components collapse to a star
+//!      (one survivor; one proposal per non-survivor) so batch apply is safe.
 //!    - `archive` — stale low-value rows
 //!    - `promote_distilled` — raw rows that earned diverse recall (≥3 / ≥3)
 //!
@@ -17,6 +21,15 @@
 //!
 //! Protected rows (never auto-proposed/applied as sources):
 //! permanent/pinned/durable retention, wiki paths/categories, pattern tier.
+//!
+//! ## Near-dup scan window (provisional)
+//!
+//! Propose scans via `list_by_path(prefix, 500)` — path lexicographic ASC,
+//! timestamp DESC — then `NEAR_DUP_RAW_SCAN_CAP` (same 500, provisional)
+//! limits the raw pairwise window. This is **not** "newest 500 overall";
+//! path bias can exclude recent rows under late prefixes. Recency-first
+//! ordering is a follow-up; do not reorder the shared scan without updating
+//! every generator that consumes it.
 
 use super::evidence_format::{json_string, wants_json};
 use crate::tool_params::TachiMemoryParams;
@@ -140,6 +153,18 @@ impl ConsolidationScope {
 }
 /// Minimum summary-token Jaccard to prefer `merge_into` over plain `supersede`.
 const MERGE_SUMMARY_JACCARD_MIN: f64 = 0.50;
+/// Minimum full-text token Jaccard for raw near-duplicate merge proposals
+/// (RomanBath `run_light_sleep` parity; env-overridable).
+const NEAR_DUP_TEXT_JACCARD_MIN_DEFAULT: f64 = 0.9;
+const NEAR_DUP_TEXT_JACCARD_MIN_ENV: &str = "TACHI_CONSOLIDATE_NEAR_DUP_JACCARD_MIN";
+
+fn near_dup_text_jaccard_min() -> f64 {
+    std::env::var(NEAR_DUP_TEXT_JACCARD_MIN_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
+        .unwrap_or(NEAR_DUP_TEXT_JACCARD_MIN_DEFAULT)
+}
 
 pub(crate) async fn handle_memory_consolidate(
     server: &MemoryServer,
@@ -474,12 +499,12 @@ fn apply_lifecycle_action(
                 }))
             })
         }
-        "merge_into" => {
+        "merge_into" | "near_dup_merge" => {
             let target = target_id.ok_or_else(|| {
-                "merge_into proposal requires target_id (canonical survivor)".to_string()
+                format!("{action} proposal requires target_id (canonical survivor)")
             })?;
             with_memory_store(server, params, |store| {
-                refuse_if_protected(store, source_id, "merge_into")?;
+                refuse_if_protected(store, source_id, action)?;
                 let source = store
                     .get(source_id)
                     .map_err(|e| format!("load source: {e}"))?
@@ -514,7 +539,7 @@ fn apply_lifecycle_action(
                     .archive_memory(source_id)
                     .map_err(|e| format!("archive after merge: {e}"))?;
                 Ok(json!({
-                    "lifecycle_action": "merge_into",
+                    "lifecycle_action": action,
                     "source_id": source_id,
                     "target_id": target,
                     "merged_keywords": survivor.keywords.len(),
@@ -569,7 +594,7 @@ fn apply_lifecycle_action(
             }))
         }),
         other => Err(format!(
-            "unsupported lifecycle_action '{other}'; expected supersede|merge_into|archive|promote_distilled"
+            "unsupported lifecycle_action '{other}'; expected supersede|merge_into|near_dup_merge|archive|promote_distilled"
         )),
     }
 }
@@ -611,6 +636,7 @@ fn generate_and_persist_proposals(
     let scope = ConsolidationScope::from_entries(entries, path_prefix);
     let mut proposals = Vec::new();
     proposals.extend(propose_same_path_lifecycle(&scope.eligible, path_prefix));
+    proposals.extend(propose_near_dup_merge(&scope.eligible, path_prefix));
     proposals.extend(propose_stale_archives(&scope.eligible, path_prefix));
     proposals.extend(propose_promote_distilled(&scope.eligible, path_prefix));
 
@@ -721,6 +747,134 @@ fn propose_same_path_lifecycle(entries: &[MemoryEntry], path_prefix: &str) -> Ve
         }
     }
     out
+}
+
+/// Cross-path raw-tier text near-duplicates (token Jaccard) → `near_dup_merge`.
+///
+/// Same-path twins are owned by [`propose_same_path_lifecycle`]; this generator
+/// skips same-path edges. Pairwise hits are collapsed per connected component
+/// into a star (one survivor; one proposal per non-survivor) so batch
+/// approve+apply cannot orphan a source that was also a target.
+/// Apply reuses the existing `merge_into` mutation path after human review.
+fn propose_near_dup_merge(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Value> {
+    let scoped: Vec<MemoryEntry> = entries
+        .iter()
+        .filter(|entry| {
+            entry.path.starts_with(path_prefix)
+                && !is_protected(entry)
+                && entry.tier.eq_ignore_ascii_case("raw")
+        })
+        .cloned()
+        .collect();
+    if scoped.len() < 2 {
+        return Vec::new();
+    }
+
+    let threshold = near_dup_text_jaccard_min();
+    let pairs = memcore::near_duplicate_raw_pairs(&scoped, threshold);
+    // Union-find over cross-path near-dup edges only.
+    let mut parent: Vec<usize> = (0..scoped.len()).collect();
+    let find = |parent: &mut [usize], mut x: usize| -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    };
+    let mut edge_similarity: HashMap<(usize, usize), f64> = HashMap::new();
+    for (left, right, similarity) in pairs {
+        if left == right || scoped[left].path == scoped[right].path {
+            continue;
+        }
+        let root_left = find(&mut parent, left);
+        let root_right = find(&mut parent, right);
+        if root_left != root_right {
+            parent[root_right] = root_left;
+        }
+        let key = if left < right {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        edge_similarity.insert(key, similarity);
+    }
+
+    let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
+    for index in 0..scoped.len() {
+        let root = find(&mut parent, index);
+        components.entry(root).or_default().push(index);
+    }
+
+    let mut out = Vec::new();
+    for mut members in components.into_values() {
+        if members.len() < 2 {
+            continue;
+        }
+        members.sort_unstable();
+        let survivor_idx = pick_near_dup_survivor_index(&scoped, &members);
+        let survivor = &scoped[survivor_idx];
+        for &source_idx in &members {
+            if source_idx == survivor_idx {
+                continue;
+            }
+            let source = &scoped[source_idx];
+            let similarity = edge_similarity
+                .get(&(source_idx.min(survivor_idx), source_idx.max(survivor_idx)))
+                .copied()
+                .unwrap_or_else(|| memcore::text_token_jaccard(&source.text, &survivor.text));
+            // Use full ids — 8-char `id_prefix` collides for `near-dup-chain-*`
+            // style names and would overwrite sibling star edges in state KV.
+            let id = format!("lifecycle:near_dup_merge:{}:{}", source.id, survivor.id);
+            out.push(json!({
+                "proposal_id": id,
+                "kind": "memory_lifecycle",
+                "lifecycle_action": "near_dup_merge",
+                "status": "pending",
+                "requires_human_approval": true,
+                "created_or_refreshed_at": Utc::now().to_rfc3339(),
+                "source_id": source.id,
+                "target_id": survivor.id,
+                "path": source.path,
+                "rationale": format!(
+                    "Raw near-duplicate text (token_jaccard={similarity:.3}) — merge lower-value `{}` into `{}`.",
+                    source.id, survivor.id
+                ),
+                "evidence": {
+                    "source_path": source.path,
+                    "target_path": survivor.path,
+                    "source_timestamp": source.timestamp,
+                    "target_timestamp": survivor.timestamp,
+                    "source_importance": source.importance,
+                    "target_importance": survivor.importance,
+                    "text_token_jaccard": similarity,
+                    "near_dup_threshold": threshold,
+                    "source_text_preview": source.text.chars().take(120).collect::<String>(),
+                    "target_text_preview": survivor.text.chars().take(120).collect::<String>(),
+                },
+            }));
+        }
+    }
+    out
+}
+
+/// Prefer higher importance; on tie prefer newer timestamp (then lower id).
+fn cmp_near_dup_survivor(a: &MemoryEntry, b: &MemoryEntry) -> std::cmp::Ordering {
+    a.importance
+        .partial_cmp(&b.importance)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| cmp_entry_timestamp_desc(a, b).reverse())
+        .then_with(|| b.id.cmp(&a.id))
+}
+
+fn pick_near_dup_survivor_index(entries: &[MemoryEntry], members: &[usize]) -> usize {
+    let mut best = members[0];
+    for &candidate in members.iter().skip(1) {
+        if cmp_near_dup_survivor(&entries[candidate], &entries[best]) == std::cmp::Ordering::Greater
+        {
+            best = candidate;
+        }
+    }
+    best
 }
 
 fn propose_promote_distilled(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Value> {
@@ -980,4 +1134,43 @@ fn with_memory_store_read<T>(
     f: impl FnOnce(&mut memcore::MemoryStore) -> Result<T, String>,
 ) -> Result<T, String> {
     with_proposal_store_read(server, params, f)
+}
+
+#[cfg(test)]
+mod near_dup_threshold_tests {
+    use super::{
+        near_dup_text_jaccard_min, NEAR_DUP_TEXT_JACCARD_MIN_DEFAULT, NEAR_DUP_TEXT_JACCARD_MIN_ENV,
+    };
+    use crate::test_support::EnvRestore;
+    use std::sync::Mutex;
+
+    /// Serialize env mutation — parallel tests racing on the same key flake.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn near_dup_threshold_env_edge_cases() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        {
+            let _guard = EnvRestore::remove(NEAR_DUP_TEXT_JACCARD_MIN_ENV);
+            assert_eq!(
+                near_dup_text_jaccard_min(),
+                NEAR_DUP_TEXT_JACCARD_MIN_DEFAULT
+            );
+        }
+        {
+            let _guard = EnvRestore::set(NEAR_DUP_TEXT_JACCARD_MIN_ENV, "0.85");
+            assert!((near_dup_text_jaccard_min() - 0.85).abs() < f64::EPSILON);
+        }
+        for bad in ["not-a-number", "0", "0.0", "1.01", "-0.1", ""] {
+            let _guard = EnvRestore::set(NEAR_DUP_TEXT_JACCARD_MIN_ENV, bad);
+            assert_eq!(
+                near_dup_text_jaccard_min(),
+                NEAR_DUP_TEXT_JACCARD_MIN_DEFAULT,
+                "bad env {bad:?} must fall back to default"
+            );
+        }
+    }
 }
