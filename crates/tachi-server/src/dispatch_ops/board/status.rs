@@ -18,6 +18,20 @@ pub(super) fn map_filter_state(state_filter: &str) -> &str {
     }
 }
 
+/// tachi#1173 item 3: terminal states that fold into a per-state count row
+/// on the default (unfiltered, non-verbose) board view. Mirrors
+/// `crate::tools::is_terminal_task_state` (private to that module, used by
+/// `wait`/`status`/`cancel`'s own terminal-poll decision) -- duplicated here
+/// rather than widening that fn's visibility across the `tools`/
+/// `dispatch_ops` module boundary for a one-line predicate both call sites
+/// already independently agree on.
+pub(super) fn is_terminal_state(state: &str) -> bool {
+    matches!(
+        state,
+        "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED"
+    )
+}
+
 pub(super) fn state_matches_filter(state_filter: &str, state: &str) -> bool {
     match state_filter {
         "all" => true,

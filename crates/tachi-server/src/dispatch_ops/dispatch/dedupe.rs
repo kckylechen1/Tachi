@@ -24,8 +24,25 @@ pub(crate) enum DispatchReceiptLoad {
 /// The identity receipt is frozen in status.json at dispatch acceptance. Later
 /// lifecycle operations read this artifact rather than resolving mutable
 /// profile definitions again.
+///
+/// tachi#1173 k2 fix: `dispatch_id` here is caller-supplied (via
+/// `TachiCompleteParams::dispatch_id` on `tachi_complete`) and was joined
+/// directly onto `dispatch_runs_root()` with no validation -- the same
+/// path-traversal shape tachi#1173's board autopsy review closed in
+/// `board::runs::collect_run_task_by_id` (eb473fd0). Gated the same way: a
+/// character allowlist plus a canonicalize-and-confine defense-in-depth
+/// check; an invalid or escaping id behaves identically to "receipt not
+/// found" rather than surfacing an error.
 pub(crate) fn load_dispatch_identity_receipt_checked(dispatch_id: &str) -> DispatchReceiptLoad {
-    let status_path = dispatch_runs_root().join(dispatch_id).join("status.json");
+    if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
+        return DispatchReceiptLoad::Missing;
+    }
+    let runs_root = dispatch_runs_root();
+    let run_dir = runs_root.join(dispatch_id);
+    if !run_dir.is_dir() || !crate::dispatch_ops::canonical_dir_is_within(&run_dir, &runs_root) {
+        return DispatchReceiptLoad::Missing;
+    }
+    let status_path = run_dir.join("status.json");
     let Some(value) = crate::task_lifecycle::read_json_file(&status_path)
         .ok()
         .flatten()
@@ -226,5 +243,75 @@ pub(super) fn reserve_dispatch_slot(
 pub(super) fn release_flow_dispatch_slot(lock_path: Option<PathBuf>) {
     if let Some(path) = lock_path {
         let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// tachi#1173 k2 fix discriminator: a caller-supplied `dispatch_id`
+    /// containing a path-traversal or absolute-path payload must be rejected
+    /// fail-closed by `load_dispatch_identity_receipt_checked` -- and must
+    /// never surface the `identity_receipt` from a decoy `status.json`
+    /// planted outside `dispatch_runs_root()` that a successful escape would
+    /// have read. Reproduces RED against eb473fd0 (the SHA this fix is
+    /// layered onto): that commit gates `board::runs::collect_run_task_by_id`
+    /// but leaves this call site un-gated.
+    #[test]
+    fn load_dispatch_identity_receipt_checked_rejects_path_traversal_dispatch_id() {
+        crate::test_support::with_tachi_home(|home| {
+            let runs_dir = home.join("runs");
+            std::fs::create_dir_all(&runs_dir).expect("create runs dir");
+
+            // Decoy directory *outside* runs_dir. A successful traversal
+            // escape would resolve into here and read this status.json's
+            // identity_receipt.
+            let decoy_dir = home.join("decoy");
+            std::fs::create_dir_all(&decoy_dir).expect("create decoy dir");
+            std::fs::write(
+                decoy_dir.join("status.json"),
+                serde_json::json!({
+                    "dispatch_id": "decoy-should-never-be-read",
+                    "identity_receipt": {
+                        "role": "leaked-via-traversal",
+                    },
+                })
+                .to_string(),
+            )
+            .expect("write decoy status.json");
+
+            for malicious in [
+                "../decoy",
+                "../../decoy",
+                "..",
+                "",
+                "/etc/passwd",
+                "a/../../decoy",
+            ] {
+                let result = load_dispatch_identity_receipt_checked(malicious);
+                assert!(
+                    matches!(result, DispatchReceiptLoad::Missing),
+                    "dispatch_id {malicious:?} must be rejected fail-closed (treated as \
+                     missing), not resolved outside runs_dir"
+                );
+            }
+        });
+    }
+
+    /// A dispatch_id shaped like a real one (matches the character
+    /// allowlist, has a run directory, but no status.json/receipt yet) must
+    /// still resolve to `Missing`, not get rejected by the gate itself --
+    /// the gate must not break the ordinary "no receipt written yet" path.
+    #[test]
+    fn load_dispatch_identity_receipt_checked_still_missing_for_legit_id_without_receipt() {
+        crate::test_support::with_tachi_home(|home| {
+            let runs_dir = home.join("runs");
+            let dispatch_id = "20260718T101010Z-claude-abc12345";
+            std::fs::create_dir_all(runs_dir.join(dispatch_id)).expect("create run dir");
+
+            let result = load_dispatch_identity_receipt_checked(dispatch_id);
+            assert!(matches!(result, DispatchReceiptLoad::Missing));
+        });
     }
 }

@@ -678,4 +678,16 @@ pub struct TachiBoardParams {
     /// Optional Tachi flow id; when set, return only dispatches linked to that flow.
     #[serde(default)]
     pub flow_id: Option<String>,
+
+    /// tachi#1173 item 3: when true, restore the full per-row payload
+    /// (identity_receipt/acpx/acpx_events) and skip folding terminal
+    /// (completed/failed/canceled) rows into per-state count rows. Default
+    /// (false/omitted): rows omit identity_receipt/acpx/acpx_events, and on
+    /// the unfiltered view (`state_filter` omitted or "all") terminal rows
+    /// are folded into count rows instead of listed individually. An
+    /// explicit non-"all" `state_filter` is itself treated as an ask to see
+    /// that state expanded and also disables folding, independent of this
+    /// flag.
+    #[serde(default)]
+    pub verbose: Option<bool>,
 }

@@ -36,6 +36,7 @@ async fn board_marks_abandoned_kanban_card_as_failed_without_live_run() {
             limit: Some(20),
             project: None,
             flow_id: None,
+            verbose: None,
         },
     )
     .await
@@ -57,6 +58,7 @@ async fn board_marks_abandoned_kanban_card_as_failed_without_live_run() {
             limit: Some(20),
             project: None,
             flow_id: None,
+            verbose: None,
         },
     )
     .await

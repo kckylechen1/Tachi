@@ -7,6 +7,7 @@ mod harness;
 mod kanban_helpers;
 mod launcher;
 mod mcp_config;
+mod path_gate;
 mod predicate;
 mod prompt;
 mod subprocess;
@@ -15,7 +16,7 @@ mod subprocess;
 // (`tools.rs`, `shell_ops.rs`, `complete_ops.rs`, `tests.rs`) keep
 // resolving symbols via `crate::dispatch_ops::<name>`.
 pub(crate) use acpx::run_acpx_control_from_status;
-pub(crate) use board::{collect_run_task_for_server, handle_tachi_board};
+pub(crate) use board::{collect_run_task_for_server, handle_tachi_board, read_failure_tail};
 #[cfg(test)]
 pub(crate) use dispatch::apply_unlocked_vault_env;
 pub(crate) use dispatch::handle_tachi_dispatch;
@@ -31,6 +32,11 @@ pub(crate) use kanban_helpers::get_kanban_state;
 #[cfg(test)]
 pub(crate) use kanban_helpers::should_cleanup_run;
 pub(crate) use kanban_helpers::update_kanban_state;
+// tachi#1173 k2 fix: shared dispatch-id path-traversal gate (allowlist +
+// canonicalize-and-confine), consumed by `board::runs`, `dispatch::dedupe`,
+// `tools::dispatch_complete_defaults`, and `predicate` -- see `path_gate` for
+// the full call-site inventory this closes.
+pub(crate) use path_gate::{canonical_dir_is_within, is_valid_dispatch_id};
 pub(crate) use predicate::{
     evaluate_completion_predicate, execution_outcome_for_kanban_state,
     resolve_completion_predicate_context, resolve_completion_state,

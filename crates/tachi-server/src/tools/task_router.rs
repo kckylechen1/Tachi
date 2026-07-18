@@ -174,6 +174,7 @@ pub(super) async fn handle_tachi_task_facade(
                 limit: params.limit,
                 project: params.project.clone(),
                 flow_id: params.flow_id.clone(),
+                verbose: params.verbose,
             };
             crate::dispatch_ops::handle_tachi_board(server, board_params).await
         }

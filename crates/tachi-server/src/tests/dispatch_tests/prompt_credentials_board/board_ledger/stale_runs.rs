@@ -34,6 +34,7 @@ async fn board_marks_abandoned_working_run_as_failed() {
             limit: Some(20),
             project: None,
             flow_id: None,
+            verbose: None,
         },
     )
     .await
@@ -58,6 +59,7 @@ async fn board_marks_abandoned_working_run_as_failed() {
             limit: Some(20),
             project: None,
             flow_id: None,
+            verbose: None,
         },
     )
     .await
@@ -80,6 +82,7 @@ async fn board_marks_abandoned_working_run_as_failed() {
             limit: Some(20),
             project: None,
             flow_id: None,
+            verbose: None,
         },
     )
     .await
@@ -131,6 +134,7 @@ async fn board_marks_working_run_with_result_as_stale_after_timeout() {
             limit: Some(20),
             project: None,
             flow_id: None,
+            verbose: None,
         },
     )
     .await
@@ -152,6 +156,7 @@ async fn board_marks_working_run_with_result_as_stale_after_timeout() {
             limit: Some(20),
             project: None,
             flow_id: None,
+            verbose: None,
         },
     )
     .await

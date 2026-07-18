@@ -123,6 +123,17 @@ pub(crate) fn evaluate_completion_predicate(
 /// instead of re-deriving it from env).
 ///
 /// Returns `(run_dir, declared_predicate, cwd)`.
+///
+/// tachi#1173 k2 fix: `dispatch_id` here is caller-supplied (via
+/// `TachiCompleteParams::dispatch_id` on `tachi_complete`, at both call
+/// sites — one directly on the leader-supplied `tachi_complete`, the other
+/// on the dispatch's own freshly-minted id from `execution.rs`) and was
+/// joined directly onto `home.join("runs")` with no validation -- the same
+/// path-traversal shape tachi#1173's board autopsy review closed in
+/// `board::runs::collect_run_task_by_id` (eb473fd0). Gated the same way,
+/// fail-closed to the existing "not found" branch (no separate warn: an
+/// out-of-allowlist id gets no signal about what does/doesn't exist on
+/// disk, same posture as the character-allowlist rejection elsewhere).
 pub(crate) fn resolve_completion_predicate_context(
     home: &Path,
     dispatch_id: &str,
@@ -131,7 +142,11 @@ pub(crate) fn resolve_completion_predicate_context(
     Option<CompletionPredicate>,
     Option<PathBuf>,
 ) {
-    let run_dir = home.join("runs").join(dispatch_id);
+    if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
+        return (None, None, None);
+    }
+    let runs_dir = home.join("runs");
+    let run_dir = runs_dir.join(dispatch_id);
     if !run_dir.is_dir() {
         // #1096 leaf-2a round-2 (codex B2): loud, not a silent fall-through
         // to Unverified. This is either a genuinely stale/foreign dispatch_id
@@ -146,6 +161,9 @@ pub(crate) fn resolve_completion_predicate_context(
             "completion predicate context: run directory not found under resolved home; \
              falling through to Unverified"
         );
+        return (None, None, None);
+    }
+    if !crate::dispatch_ops::canonical_dir_is_within(&run_dir, &runs_dir) {
         return (None, None, None);
     }
     let status_path = run_dir.join("status.json");
@@ -408,5 +426,68 @@ mod tests {
         assert!(!is_safe_relative_path("/abs"));
         assert!(!is_safe_relative_path(""));
         let _ = Path::new("x");
+    }
+
+    /// tachi#1173 k2 fix discriminator: a caller-supplied `dispatch_id`
+    /// containing a path-traversal or absolute-path payload must be rejected
+    /// fail-closed by `resolve_completion_predicate_context` -- and must
+    /// never resolve `run_dir` to a decoy directory planted outside
+    /// `home/runs` that a successful escape would have read (status.json,
+    /// then downstream result.md/cwd).
+    #[test]
+    fn resolve_completion_predicate_context_rejects_path_traversal_dispatch_id() {
+        let tmp = td();
+        let home = tmp.path();
+        let runs_dir = home.join("runs");
+        std::fs::create_dir_all(&runs_dir).expect("create runs dir");
+
+        let decoy_dir = home.join("decoy");
+        std::fs::create_dir_all(&decoy_dir).expect("create decoy dir");
+        std::fs::write(
+            decoy_dir.join("status.json"),
+            serde_json::json!({
+                "completion_predicate": {"kind": "output_matches", "pattern": ".*"},
+                "cwd": "/should/never/be/read",
+            })
+            .to_string(),
+        )
+        .expect("write decoy status.json");
+
+        for malicious in [
+            "../decoy",
+            "../../decoy",
+            "..",
+            "",
+            "/etc/passwd",
+            "a/../../decoy",
+        ] {
+            let (run_dir, pred, cwd) = resolve_completion_predicate_context(home, malicious);
+            assert!(
+                run_dir.is_none() && pred.is_none() && cwd.is_none(),
+                "dispatch_id {malicious:?} must be rejected fail-closed, not resolved \
+                 outside home/runs; got run_dir={run_dir:?} pred={pred:?} cwd={cwd:?}"
+            );
+        }
+    }
+
+    /// The gate must not break the ordinary path: a dispatch_id shaped like
+    /// a real one, with a real status.json under it, still resolves.
+    #[test]
+    fn resolve_completion_predicate_context_still_resolves_legit_dispatch_id() {
+        let tmp = td();
+        let home = tmp.path();
+        let dispatch_id = "20260718T101010Z-claude-abc12345";
+        let run_dir = home.join("runs").join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::json!({"cwd": "/legit/cwd"}).to_string(),
+        )
+        .expect("write status.json");
+
+        let (resolved_run_dir, _pred, cwd) =
+            resolve_completion_predicate_context(home, dispatch_id);
+        assert_eq!(resolved_run_dir, Some(run_dir));
+        assert_eq!(cwd, Some(PathBuf::from("/legit/cwd")));
     }
 }
