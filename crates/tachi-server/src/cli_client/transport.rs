@@ -289,6 +289,18 @@ mod tests {
         params_with_args("tachi_task", args)
     }
 
+    /// reqwest is built with `rustls-no-provider`, so a process-level rustls
+    /// `CryptoProvider` must be installed before any `reqwest::Client` is
+    /// constructed — even for a plain `http://` URL, `StreamableHttpClientTransport`
+    /// eagerly builds a TLS-capable client. Oz run 2026-07-17: three of the
+    /// tests below panicked deterministically with "No rustls crypto provider
+    /// is configured" when run in isolation (no earlier test in the same
+    /// process had installed one first). Mirrors the same fix already applied
+    /// in `mcp_connection/tests.rs::ensure_test_tls_provider`.
+    fn ensure_test_tls_provider() {
+        crate::ensure_tls_provider();
+    }
+
     #[test]
     fn normal_tool_gets_default_timeout() {
         let params = params_with_args("tachi_memory", serde_json::Map::new());
@@ -530,6 +542,7 @@ mod tests {
     /// (deliberately unreachable) daemon connection itself.
     #[tokio::test]
     async fn proxy_project_non_ascii_is_accepted_by_header_construction_not_rejected() {
+        ensure_test_tls_provider();
         let info = closed_port_daemon_info().await;
         let params = params_with_args("tachi_memory", serde_json::Map::new());
         let err = call_daemon_tool_raw(&info, params, Some("量化"))
@@ -556,6 +569,7 @@ mod tests {
     /// `HeaderValue::from_str` accepts "my project" unmodified.
     #[tokio::test]
     async fn proxy_project_with_embedded_space_is_accepted_by_header_construction_not_rejected() {
+        ensure_test_tls_provider();
         let info = closed_port_daemon_info().await;
         let params = params_with_args("tachi_memory", serde_json::Map::new());
         let err = call_daemon_tool_raw(&info, params, Some("my project"))
@@ -580,6 +594,7 @@ mod tests {
     /// module's own `normalize_identity_trims_and_rejects_empty` test).
     #[tokio::test]
     async fn proxy_project_empty_string_is_accepted_by_header_construction_not_rejected() {
+        ensure_test_tls_provider();
         let info = closed_port_daemon_info().await;
         let params = params_with_args("tachi_memory", serde_json::Map::new());
         let err = call_daemon_tool_raw(&info, params, Some(""))

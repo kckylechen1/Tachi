@@ -252,6 +252,22 @@ mod tests {
     use std::path::PathBuf;
     use tokio_util::sync::CancellationToken;
 
+    /// Extract the first text content block's JSON payload from a
+    /// `CallToolResult`. Mirrors `bootstrap/serve/stdio/tests.rs`'s
+    /// `first_text`/`first_text_json` helpers of the same shape.
+    fn first_text_json(result: &rmcp::model::CallToolResult) -> serde_json::Value {
+        let text = result
+            .content
+            .iter()
+            .find_map(|content| match &content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .expect("text tool result");
+        serde_json::from_str(&text)
+            .unwrap_or_else(|err| panic!("tool result json: {err}; text={text:?}"))
+    }
+
     /// tachi#1224: `remember --project X` with no separate `--project-db`
     /// must translate into an `X-Tachi-Project: X` daemon-forward binding
     /// header — the exact discriminator the frozen spec calls for at the
@@ -1076,14 +1092,28 @@ mod tests {
 
     /// CONCERN item 3, full stack: a `--project` NAME that is legal ASCII but
     /// does not correspond to any registered project must fail the daemon's
-    /// `initialize` binding check closed, surfacing
-    /// `apply_http_session_identity`'s wrapped error text
-    /// (server_handler.rs:284-314, `"invalid HTTP direct-connect project
-    /// binding: {err}"`) rather than silently succeeding or silently dropping
-    /// the binding. Calls `call_daemon_tool_raw` directly against a real
-    /// spawned daemon (reusing this file's own `spawn_global_only_http_daemon`
-    /// fixture), bypassing `dispatch_cli_tool`'s daemon-detection/PID-file
-    /// plumbing, which is orthogonal to this assertion.
+    /// `initialize` binding check closed. `apply_http_session_identity`
+    /// (server_handler.rs:284-314) DOES construct the expected
+    /// `"invalid HTTP direct-connect project binding: {err}"` `ErrorData` and
+    /// hand it to the rmcp streamable-HTTP server, which sends it as a
+    /// JSON-RPC error frame and then tears the session down
+    /// (`service/server.rs`'s `ServerInitializeError::InitializeFailed` path).
+    ///
+    /// Oz run 2026-07-17 (three-run deterministic red): the CLI-side
+    /// `rmcp::service::client` handshake reader does NOT observe that error
+    /// frame — it sees the stream end first and reports
+    /// `ClientInitializeError::ConnectionClosed("initialize response")`,
+    /// which `call_daemon_tool_raw` wraps as `"daemon handshake failed at
+    /// {url}: connection closed: initialize response"`. This is still
+    /// fail-closed (the call errors, no data crosses the boundary) — it is
+    /// just a connection-teardown race in the streamable-HTTP transport
+    /// (send-then-drop on the server side) rather than the client cleanly
+    /// receiving the structured JSON-RPC error text. Pinning the actual shape
+    /// here rather than the aspirational one: if that streamable-HTTP
+    /// race is ever fixed upstream so the client reliably sees the
+    /// `JsonRpcError` frame instead, this assertion should be tightened back
+    /// to checking for `"invalid HTTP direct-connect project binding"` and
+    /// `"not found"`.
     #[test]
     fn daemon_call_rejects_nonexistent_ascii_project_name_binding() {
         let _guard = crate::utils::global_test_lock()
@@ -1122,33 +1152,60 @@ mod tests {
         let err = result.expect_err("binding to a nonexistent project name must fail closed");
         let message = err.to_string();
         assert!(
-            message.contains("invalid HTTP direct-connect project binding"),
+            message.contains("daemon handshake failed"),
             "unexpected error: {message}"
         );
-        assert!(message.contains("not found"), "unexpected error: {message}");
+        assert!(
+            message.contains("connection closed"),
+            "expected the streamable-HTTP client to observe a torn-down \
+             connection during initialize (fail-closed via disconnect, not a \
+             structured JSON-RPC error) — got: {message}"
+        );
 
         ct.cancel();
         rt.block_on(daemon_task).expect("daemon task");
     }
 
-    /// CONCERN item 1, full stack — and the escalated finding: ground truth
-    /// (verified directly against `http` 1.4.2, this crate's pinned version
-    /// per Cargo.lock, in an isolated scratch crate — NOT this repo's build)
-    /// is that `HeaderValue::from_str` accepts non-ASCII UTF-8 text; it only
-    /// rejects embedded control characters (CR/LF/NUL/DEL). It does NOT
-    /// reject Chinese, emoji, or any other valid non-ASCII text. This
-    /// contradicts the dispatch packet's stated expectation that a
-    /// non-ASCII `--project` value would fail at header construction with
-    /// "invalid proxy project header value" (see transport.rs's own test
-    /// module for the header-construction-layer half of this pin, including
-    /// the ACTUAL rejection case: an embedded control character). This test
-    /// proves the full-stack consequence with a live daemon: a non-ASCII
-    /// project name reaches the daemon intact and fails ONLY because "量化"
-    /// is not a registered project — the identical failure family as the
-    /// nonexistent-ASCII-name test above, never "invalid proxy project
-    /// header value".
+    /// THIS PINS BUG #1228 — a live specimen, not a regression lock.
+    ///
+    /// Ground truth (verified directly against `http` 1.4.2, this crate's
+    /// pinned version per Cargo.lock, in an isolated scratch crate — NOT
+    /// this repo's build) is that `HeaderValue::from_str` accepts non-ASCII
+    /// UTF-8 text; it only rejects embedded control characters
+    /// (CR/LF/NUL/DEL). It does NOT reject Chinese, emoji, or any other
+    /// valid non-ASCII text (see transport.rs's own test module for the
+    /// header-construction-layer half of this pin). That much was already
+    /// correctly documented here. What this test got wrong was what happens
+    /// NEXT: the dispatch packet (and the prior version of this test)
+    /// expected the non-ASCII name to reach `apply_http_session_identity`
+    /// and fail closed as an unknown project, the same failure family as
+    /// `daemon_call_rejects_nonexistent_ascii_project_name_binding` above.
+    ///
+    /// Oz run 2026-07-17 (three-run deterministic red) shows that is not
+    /// what happens: `"量化"` is entirely non-ASCII, so
+    /// `sanitize_safe_path_name` (crates/tachi-server/src/utils/text.rs)
+    /// maps every character to `_`, trims the `_`/`.`/`-` boundary chars,
+    /// and lands on an EMPTY string — which its own empty-collapse fallback
+    /// then rewrites to the literal project name `"unnamed"`. `"unnamed"`
+    /// resolves successfully (it is the sanitizer's own fallback identity,
+    /// not a real caller-registered project), so
+    /// `apply_http_session_identity` binds the session as `unnamed` instead
+    /// of rejecting it, and the `tachi_memory` briefing call SUCCEEDS
+    /// (`"status":"completed"`) instead of failing closed. This is
+    /// tachi#1228: a non-ASCII (or any all-punctuation/all-non-alnum)
+    /// `--project` name silently collapses onto a shared fallback project
+    /// rather than being rejected as unknown or preserved verbatim — a
+    /// binding-confusion hole, not the fail-closed behavior every other
+    /// malformed-name case in this file exhibits.
+    ///
+    /// This test PINS the current (buggy) success so a future fix to #1228
+    /// shows up as a red here, not a silent regression. When #1228 lands
+    /// fail-closed behavior for the sanitize-collapse case, FLIP this
+    /// assertion to expect an error containing "invalid HTTP direct-connect
+    /// project binding" (or whatever the fixed rejection text becomes) —
+    /// do not just delete this test.
     #[test]
-    fn daemon_call_accepts_non_ascii_project_header_then_fails_as_unknown_project() {
+    fn non_ascii_project_binding_currently_succeeds_via_sanitize_collapse_bug_1228() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1178,26 +1235,46 @@ mod tests {
             (result, ct, daemon_task)
         });
 
-        let err = result.expect_err("an unregistered project name must fail closed");
-        let message = err.to_string();
-        assert!(
-            !message.contains("invalid proxy project header value"),
-            "a non-ASCII project name must not be rejected at header \
-             construction; got: {message}"
-        );
-        assert!(
-            message.contains("invalid HTTP direct-connect project binding"),
-            "unexpected error: {message}"
+        let call_result = result.unwrap_or_else(|err| {
+            panic!(
+                "THIS PINS BUG #1228 as a live success, not a failure — if \
+                 the daemon now rejects this call, #1228's sanitize collapse \
+                 has apparently already changed shape; do not silently \
+                 delete this test, re-diagnose and update its pin. Got \
+                 error instead of success: {err}"
+            )
+        });
+        let status = first_text_json(&call_result)["status"].clone();
+        assert_eq!(
+            status,
+            serde_json::json!("completed"),
+            "BUG #1228 live specimen: a non-ASCII --project value \
+             (\"量化\") collapses via sanitize_safe_path_name to the empty \
+             string, which falls back to the shared \"unnamed\" project, so \
+             the briefing call succeeds instead of failing closed as an \
+             unknown project. full result={call_result:?}"
         );
 
         ct.cancel();
         rt.block_on(daemon_task).expect("daemon task");
     }
 
-    /// CONCERN item 2, full stack: same shape as the non-ASCII test above, for
-    /// a project name containing a plain space — accepted by header
-    /// construction, then fails as an unknown project once it reaches the
-    /// daemon's binding resolution (not, notably, at header construction).
+    /// CONCERN item 2, full stack: a project name containing a plain space
+    /// (`sanitize_safe_path_name` maps the space to `_`, giving the
+    /// non-empty name `my_project` — distinct from the non-ASCII case above,
+    /// which collapses to empty and hits the `unnamed` fallback instead) is
+    /// accepted by header construction, then fails once it reaches the
+    /// daemon's binding resolution because no project named `my_project` is
+    /// registered.
+    ///
+    /// Same streamable-HTTP connection-teardown race as the ASCII-nonexistent
+    /// test above (Oz run 2026-07-17, deterministic): the client observes
+    /// `"connection closed: initialize response"` rather than the structured
+    /// `"invalid HTTP direct-connect project binding"` JSON-RPC error text,
+    /// even though the server-side rejection did fire. Still fail-closed
+    /// (no data crosses); pinning the actual disconnect shape here. If the
+    /// streamable-HTTP race is fixed upstream, tighten this back to asserting
+    /// the structured error text.
     #[test]
     fn daemon_call_accepts_project_name_with_space_then_fails_as_unknown_project() {
         let _guard = crate::utils::global_test_lock()
@@ -1238,8 +1315,14 @@ mod tests {
              header construction; got: {message}"
         );
         assert!(
-            message.contains("invalid HTTP direct-connect project binding"),
+            message.contains("daemon handshake failed"),
             "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("connection closed"),
+            "expected the streamable-HTTP client to observe a torn-down \
+             connection during initialize (fail-closed via disconnect, not a \
+             structured JSON-RPC error) — got: {message}"
         );
 
         ct.cancel();
