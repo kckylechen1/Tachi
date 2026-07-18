@@ -1,4 +1,13 @@
-use super::*;
+//! Retention sweep for the LLM-call recorder's `foundry-runs` directory.
+//! Migrated verbatim from the pre-#1261 `claude_pool::cleanup` — the
+//! retention policy (7d success / 30d failed) is a foundry-runs contract.
+
+use std::path::Path;
+use std::time::{Duration, SystemTime};
+
+use serde_json::Value;
+
+use super::{FAILED_RETENTION_DAYS, SUCCESS_RETENTION_DAYS};
 
 pub(super) fn cleanup_runs_dir(root: &Path, now: SystemTime) -> (usize, usize) {
     cleanup_runs_dir_recursive(root, now, 0)

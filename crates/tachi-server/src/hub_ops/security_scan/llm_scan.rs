@@ -157,8 +157,8 @@ async fn one_vote(
     let model_owned = model.map(str::to_string);
     let payload_owned = payload.to_string();
     let provider_result = server
-        .claude_pool
-        .call_via_provider(label, &prompt, move || async move {
+        .llm_recorder
+        .record_call(label, &prompt, move || async move {
             llm.call_reasoning_llm_provider_only(
                 crate::prompts::SKILL_SECURITY_SCAN_PROMPT,
                 &payload_owned,
