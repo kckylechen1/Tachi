@@ -747,10 +747,9 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- `heartbeat_at` (older than the TTL) is treated as expired by
         -- readers without a separate reaper process (lazy expiry, same spirit
         -- as `find_active_exec_env_by_path` filtering by state). `state` is
-        -- the two-state lifecycle (`active` -> `released`), mirroring
-        -- `exec_envs`; the release transition goes through exactly one
-        -- function (`release_claim`), same discipline as
-        -- `reclaim_exec_env`.
+        -- the three-state lifecycle (`active` -> `orphaned` -> `released`).
+        -- Lease expiry only orphans a claim; v21 ownership changes require an
+        -- explicit caller-versioned release or handoff.
         CREATE TABLE IF NOT EXISTS session_claims (
             claim_id             TEXT PRIMARY KEY,
             session_client       TEXT,
@@ -782,9 +781,10 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- keeping this partial index to legacy rows preserves old upsert
         -- behavior without making same-issue v21 claims inherently exclusive.
         -- upsert_or_heartbeat_claim's read-then-write relies on at the
-        -- application level. Partial (WHERE state='active') so a released
-        -- historical row never blocks a fresh active claim for the same
-        -- identity; COALESCE(..., '') on each nullable column so two active
+        -- application level. Partial (WHERE state='active' AND mode IS NULL)
+        -- so only legacy presence rows participate and a released historical
+        -- row never blocks a fresh active claim for the same identity;
+        -- COALESCE(..., '') on each nullable column so two active
         -- rows that are both NULL in the same slot collide the same way the
         -- upsert's `IS ?` lookup already treats them as one identity (see
         -- `migrations/session_claims_identity.rs` for the full rationale and

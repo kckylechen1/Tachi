@@ -11,21 +11,17 @@
 //! ## Lease semantics (reuses the #894 `exec_envs` shape)
 //!
 //! ```text
-//!   active ──release──▶ released
-//!     ▲                     │
-//!     └── (no transition) ◀─┘   releasing an already-released claim is an
-//!                               idempotent no-op, never an error.
+//!   active ──lease expiry──▶ orphaned
+//!      │                         │
+//!      └──── versioned release ──┴──▶ released
+//!                                └──── versioned handoff ──▶ active
 //! ```
 //!
-//! [`release_claim`] is the single per-row release path — manual `release`,
-//! `complete`, and `cancel` all route through it, same discipline as
-//! `reclaim_exec_env`. [`gc_session_claims`] (#1001 follow-up) is the one
-//! deliberate second writer: a batch sweep, not a per-row selector call, that
-//! (a) reaches the identical terminal `released` state (with
-//! `release_reason = "gc_stale"`) for `active` rows whose heartbeat has gone
-//! dark, and (b) deletes `released` rows past a retention window — see that
-//! function's doc comment for why a batch statement is used instead of N
-//! calls through `release_claim`.
+//! Legacy presence rows retain the idempotent [`release_claim`] compatibility
+//! path used by manual release, complete, and cancel. v21 WorkClaims change
+//! ownership only through caller-versioned release or handoff operations.
+//! [`gc_session_claims`] never releases a live WorkClaim: it marks stale
+//! `active` rows `orphaned` and separately deletes old `released` audit rows.
 //!
 //! [`list_active_claims`] and [`is_claim_stale`] additionally let a *reader*
 //! (the briefing splice, collision-warning checks) treat a claim whose
@@ -1209,27 +1205,21 @@ pub struct SessionClaimsGc {
 /// and staleness detection here is lazy-*read*-only (`is_claim_stale`,
 /// `list_active_claims` filter a dead-heartbeat row out of what a *reader*
 /// sees, but never write the row) — so a session that crashes or gets
-/// killed mid-dispatch without ever calling `release_claim` leaves its
-/// `active` row live in storage forever, and every released row (normal or
-/// stale) accumulates without end.
+/// killed mid-dispatch without ever releasing or handing off its claim leaves
+/// its `active` row live in storage forever, and every released row accumulates
+/// without end.
 ///
 /// Two independent sweeps, run in this order (order does not matter for
-/// correctness — they touch disjoint row sets — but staleness-release runs
-/// first so a row it flips this call is deliberately NOT also eligible for
-/// the prune below in the same pass, since its fresh `released_at` cannot
-/// be older than `released_max_age_days`):
+/// correctness — they touch disjoint row sets — but orphaning runs first so
+/// stale ownership becomes visible before old released audit rows are pruned):
 ///
-/// 1. **Staleness release**: any `active` row whose `heartbeat_at` is older
-///    than `active_staleness_days` is flipped to `released` with
-///    `release_reason = 'gc_stale'` — the same terminal state a normal
-///    release reaches, just server-initiated instead of caller-initiated.
-///    This is a batch `UPDATE` over every stale row in one statement, not a
-///    per-row call through [`release_claim`] (that function is selector-
-///    scoped to one row and only fires from an explicit session action).
-/// 2. **Aged-released prune**: any `released` row (from a normal release or
-///    from step 1 above, in a prior or this call) whose `released_at` is
-///    older than `released_max_age_days` is `DELETE`d outright — the audit
-///    retention window is bounded, not permanent.
+/// 1. **Staleness orphaning**: any `active` row whose `heartbeat_at` is older
+///    than `active_staleness_days` is flipped to `orphaned`. The server does
+///    not invent release authority; an explicit caller-versioned release or
+///    handoff is still required to leave the orphaned state.
+/// 2. **Aged-released prune**: any `released` row whose `released_at` is older
+///    than `released_max_age_days` is `DELETE`d outright — the audit retention
+///    window is bounded, not permanent.
 ///
 /// Timestamp comparison is lexicographic string comparison against a cutoff
 /// formatted with the same fixed-width, zero-padded, millisecond-precision
