@@ -805,9 +805,10 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         );
         CREATE TABLE IF NOT EXISTS identity_admissions (
             admission_id      TEXT PRIMARY KEY,
-            agent_identity_id TEXT NOT NULL,
+            agent_identity_id TEXT,
             connection_id     TEXT NOT NULL,
             state             TEXT NOT NULL CHECK (state IN ('self_asserted', 'verified', 'rejected', 'unavailable')),
+            rejection_evidence TEXT,
             created_at        TEXT NOT NULL DEFAULT '',
             UNIQUE(agent_identity_id, connection_id)
         );

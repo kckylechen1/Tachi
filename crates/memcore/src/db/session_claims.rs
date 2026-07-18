@@ -299,6 +299,36 @@ pub fn record_unverified_admission(
     Ok(())
 }
 
+/// Persist a rejected admission even when the connection supplied no stable
+/// identity that could truthfully be admitted.
+pub fn record_rejected_admission(
+    conn: &Connection,
+    admission_id: &str,
+    connection_id: &str,
+    rejection_evidence: &str,
+) -> Result<(), MemoryError> {
+    if admission_id.trim().is_empty()
+        || connection_id.trim().is_empty()
+        || rejection_evidence.trim().is_empty()
+    {
+        return Err(MemoryError::InvalidArg(
+            "admission id, connection id, and rejection evidence are required".into(),
+        ));
+    }
+    conn.execute(
+        "INSERT INTO identity_admissions \
+         (admission_id,agent_identity_id,connection_id,state,rejection_evidence,created_at) \
+         VALUES (?1,NULL,?2,'rejected',?3,?4)",
+        params![
+            admission_id,
+            connection_id,
+            rejection_evidence,
+            normalize_utc_iso_or_now("")
+        ],
+    )?;
+    Ok(())
+}
+
 /// Fields required to insert a new claim. `claim_id` must be caller-supplied
 /// and unique (generated the same nanos-XOR-pid way as `exec_envs.env_id`).
 /// `created_at`/`heartbeat_at` default to now when empty.
@@ -397,7 +427,6 @@ fn row_to_claim(row: &rusqlite::Row<'_>) -> Result<SessionClaim, rusqlite::Error
 pub fn insert_work_claim(conn: &mut Connection, claim: &NewWorkClaim) -> Result<(), MemoryError> {
     if [
         claim.agent_identity_id.as_str(),
-        claim.declared_file_scope.as_str(),
         claim.role.as_str(),
         claim.expected_head.as_str(),
         claim.lease_expires_at.as_str(),
@@ -409,6 +438,7 @@ pub fn insert_work_claim(conn: &mut Connection, claim: &NewWorkClaim) -> Result<
             "WorkClaim identity, role, scope, expected head, and lease expiry are required".into(),
         ));
     }
+    require_non_empty_declared_scope(&claim.declared_file_scope)?;
     let known_identity: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM agent_identities WHERE agent_identity_id=?1)",
         params![claim.agent_identity_id],
@@ -432,7 +462,12 @@ pub fn insert_work_claim(conn: &mut Connection, claim: &NewWorkClaim) -> Result<
     };
     let tx = conn.transaction()?;
     reject_work_claim_collision(&tx, claim)?;
-    tx.execute("INSERT INTO session_claims (claim_id, session_client, issue_ref, flow_id, dispatch_id, branch, worktree_path, declared_file_scope, agent_identity_id, role, mode, expected_head, lease_expires_at, transition_version, state, created_at, heartbeat_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0,'active',?14,?14)", params![claim.claim_id, claim.session_client, claim.issue_ref, claim.flow_id, claim.dispatch_id, claim.branch, claim.worktree_path, claim.declared_file_scope, claim.agent_identity_id, claim.role, claim.mode.as_str(), claim.expected_head, claim.lease_expires_at, created])?;
+    // v20 binaries resolve their exact active-claim upsert through the legacy
+    // identity triple. v21 claims use a claim-specific compatibility key so
+    // the legacy uniqueness constraint cannot serialize disjoint same-issue
+    // work that the role/mode admission checks permit.
+    let legacy_session_client = format!("work-claim:{}", claim.claim_id);
+    tx.execute("INSERT INTO session_claims (claim_id, session_client, issue_ref, flow_id, dispatch_id, branch, worktree_path, declared_file_scope, agent_identity_id, role, mode, expected_head, lease_expires_at, transition_version, state, created_at, heartbeat_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,0,'active',?14,?14)", params![claim.claim_id, legacy_session_client, claim.issue_ref, claim.flow_id, claim.dispatch_id, claim.branch, claim.worktree_path, claim.declared_file_scope, claim.agent_identity_id, claim.role, claim.mode.as_str(), claim.expected_head, claim.lease_expires_at, created])?;
     tx.commit()?;
     Ok(())
 }
@@ -499,6 +534,22 @@ fn scopes_overlap(left: &str, right: &str) -> bool {
     let right = parse(right);
     left.iter()
         .any(|l| right.iter().any(|r| paths_overlap(l, r)))
+}
+
+fn require_non_empty_declared_scope(scope: &str) -> Result<(), MemoryError> {
+    if scope.trim().is_empty() {
+        return Err(MemoryError::InvalidArg(
+            "WorkClaim declared file scope is required".into(),
+        ));
+    }
+    if let Ok(entries) = serde_json::from_str::<Vec<String>>(scope) {
+        if entries.is_empty() || entries.iter().all(|entry| entry.trim().is_empty()) {
+            return Err(MemoryError::InvalidArg(
+                "WorkClaim declared file scope must contain at least one path".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn paths_overlap(left: &str, right: &str) -> bool {
@@ -586,6 +637,7 @@ pub fn handoff_work_claim(
     expected_version: i64,
     successor: &WorkClaimHandoffRequest,
 ) -> Result<WorkClaimHandoff, MemoryError> {
+    require_non_empty_declared_scope(&successor.declared_file_scope)?;
     let tx = conn.transaction()?;
     let existing: Option<WorkClaimHandoffRow> = tx.query_row(
         "SELECT agent_identity_id, state, transition_version, session_client, issue_ref, flow_id, dispatch_id, branch \
@@ -1823,6 +1875,30 @@ mod tests {
     }
 
     #[test]
+    fn rejected_admission_keeps_connection_and_evidence_without_identity() {
+        let conn = open_conn();
+        record_rejected_admission(
+            &conn,
+            "admission-rejected-no-identity",
+            "connection-untrusted",
+            "stable identity receipt missing",
+        )
+        .unwrap();
+        let row: (Option<String>, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT agent_identity_id, connection_id, state, rejection_evidence \
+                 FROM identity_admissions WHERE admission_id=?1",
+                params!["admission-rejected-no-identity"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, None, "a rejected row must not fabricate identity");
+        assert_eq!(row.1, "connection-untrusted");
+        assert_eq!(row.2, "rejected");
+        assert_eq!(row.3.as_deref(), Some("stable identity receipt missing"));
+    }
+
+    #[test]
     fn incompatible_or_missing_holder_links_refuse_with_distinct_evidence() {
         let mut conn = open_conn();
         crate::db::exec_env::insert_exec_env(
@@ -1966,6 +2042,18 @@ mod tests {
     }
 
     #[test]
+    fn work_claim_refuses_an_empty_serialized_scope() {
+        let mut conn = open_conn();
+        identity(&conn, "agent-empty-scope");
+        let mut claim = work_claim("empty-scope", "agent-empty-scope");
+        claim.declared_file_scope = "[]".into();
+        assert!(matches!(
+            insert_work_claim(&mut conn, &claim),
+            Err(MemoryError::InvalidArg(_))
+        ));
+    }
+
+    #[test]
     fn work_claim_heartbeat_and_handoff_are_versioned_and_never_auto_take_over() {
         let mut conn = open_conn();
         for identity_id in [
@@ -2074,5 +2162,29 @@ mod tests {
             Some("agent-handoff-from")
         );
         assert_eq!(unchanged.transition_version, 0);
+    }
+
+    #[test]
+    fn handoff_refuses_an_empty_serialized_scope() {
+        let mut conn = open_conn();
+        identity(&conn, "agent-empty-handoff-from");
+        identity(&conn, "agent-empty-handoff-to");
+        let mut claim = work_claim("empty-handoff", "agent-empty-handoff-from");
+        claim.issue_ref = Some("org/repo#empty-handoff".into());
+        insert_work_claim(&mut conn, &claim).unwrap();
+
+        let successor = WorkClaimHandoffRequest {
+            agent_identity_id: "agent-empty-handoff-to".into(),
+            role: "executor".into(),
+            mode: WorkClaimMode::Writable,
+            worktree_path: "/worktrees/empty-handoff".into(),
+            declared_file_scope: "[]".into(),
+            expected_head: "3c09b425".into(),
+            lease_expires_at: "2026-07-20T00:00:00Z".into(),
+        };
+        assert!(matches!(
+            handoff_work_claim(&mut conn, "empty-handoff", 0, &successor),
+            Err(MemoryError::InvalidArg(_))
+        ));
     }
 }
