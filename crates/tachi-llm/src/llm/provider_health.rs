@@ -16,7 +16,7 @@ mod selection;
 mod state;
 mod types;
 
-pub use self::config::ProviderRuntimeConfig;
+pub use self::config::{LaneFallbackConfig, ProviderRuntimeConfig};
 pub(super) use self::state::{
     ProviderHealthPersistState, ProviderHealthReloadState, ProviderHealthSnapshot, ProviderState,
 };
@@ -26,7 +26,9 @@ pub(super) use self::types::{
     ChatLane, ClaudeCliFailure, ClaudeCliFailureKind, ClaudeCliSkip, KeyAvailability,
     KeyRetryStatus, SelectedProviderSecret,
 };
-pub use self::types::{ProviderHealthStatus, ProviderKeyCooldownStatus, ProviderPoolStatus};
+pub use self::types::{
+    LaneOutageStatus, ProviderHealthStatus, ProviderKeyCooldownStatus, ProviderPoolStatus,
+};
 
 pub(super) const HEALTH_OK: &str = "ok";
 pub(super) const HEALTH_COOLDOWN: &str = "cooldown";

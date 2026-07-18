@@ -168,7 +168,38 @@ impl super::super::LlmClient {
                 .last_success
                 .map(|instant| instant.elapsed().as_secs()),
             persist_last_error: persist.last_error.clone(),
+            lane_outages: self.lane_outage_statuses(),
         }
+    }
+
+    /// Per-lane breaker + fallback-chain-outage snapshot (#1197). A lane
+    /// whose provider is degraded shows up here with `breaker_state ==
+    /// "open"` and/or a nonzero `consecutive_chain_failures` instead of
+    /// only manifesting as a silent stall to whatever's calling the lane.
+    pub fn lane_outage_statuses(&self) -> Vec<LaneOutageStatus> {
+        [
+            ChatLane::Extract,
+            ChatLane::Distill,
+            ChatLane::Reasoning,
+            ChatLane::Summary,
+        ]
+        .into_iter()
+        .map(|lane| {
+            let breaker_key = format!("chat:{}", lane.as_str());
+            let breaker_state = self.circuit_breakers.state_name(&breaker_key);
+            let fallback_configured = self.fallback_lane(lane).is_some();
+            let (consecutive_chain_failures, last_outage_at, last_error) =
+                self.lane_outage.snapshot_for(lane.as_str());
+            LaneOutageStatus {
+                lane: lane.as_str().to_string(),
+                breaker_state,
+                fallback_configured,
+                consecutive_chain_failures,
+                last_outage_at,
+                last_error,
+            }
+        })
+        .collect()
     }
 
     /// Return the current in-memory provider key health map.

@@ -6,7 +6,7 @@ use reqwest::{
 use serde_json::{self, Value};
 use std::time::{Duration, Instant};
 
-use super::super::provider_health::{ChatLane, SelectedProviderSecret};
+use super::super::provider_health::{ChatLane, ChatLaneConfig, SelectedProviderSecret};
 
 #[derive(Clone, Copy)]
 struct ChatUsageTokens {
@@ -140,6 +140,19 @@ impl super::super::LlmClient {
     /// provider's `finish_reason` is `"length"` on an otherwise-successful,
     /// non-empty response (#1071 fix-round checkpoint 6: truncated synthesis
     /// must never be silently reported as a clean `completed` answer).
+    ///
+    /// #1197: walks a per-lane provider chain (primary, then a configured
+    /// cross-provider fallback if any) instead of stopping at the primary's
+    /// exhaustion. Each tier gets its own circuit breaker key, so a lane
+    /// whose primary provider is degraded (breaker open, or its key pool
+    /// exhausted/auth-failed within the shared `MAX_ATTEMPTS` retry budget —
+    /// retries up to `MAX_ATTEMPTS` distinct keys, then fails over; this
+    /// does not exhaust an arbitrarily large pool before failover)
+    /// fast-escalates to the fallback instead of silently stalling every
+    /// background caller. Only when *every* configured tier fails do we
+    /// return the loud, typed "lane outage" error and bump the lane-outage
+    /// counter (`provider_health_status().lane_outages`) — this must never
+    /// be a silent hang.
     pub(in crate::llm::chat_lanes) async fn call_lane_llm(
         &self,
         lane: ChatLane,
@@ -149,16 +162,88 @@ impl super::super::LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<(String, bool), String> {
-        let breaker_key = format!("chat:{}", lane.as_str());
-        if !self.circuit_breakers.allow(&breaker_key) {
-            return Err(format!(
-                "Circuit breaker open for {} lane — provider is failing, fast-rejecting. Retry in ~30s.",
-                lane.as_str()
-            ));
+        let primary_cfg = self.lane(lane).clone();
+        let primary_breaker_key = format!("chat:{}", lane.as_str());
+
+        let mut tiers: Vec<(ChatLaneConfig, String)> = vec![(primary_cfg.clone(), primary_breaker_key)];
+        if let Some(fallback_cfg) = self.fallback_lane(lane) {
+            // A fallback that resolves to the exact same provider config as
+            // primary (e.g. no `*_FALLBACK_*` env configured and the
+            // convenience default happens to match) carries no resilience
+            // value — skip it rather than retrying the same dead endpoint
+            // twice under a different breaker key.
+            if fallback_cfg != primary_cfg {
+                let fallback_breaker_key = format!("chat:{}:fallback", lane.as_str());
+                tiers.push((fallback_cfg, fallback_breaker_key));
+            }
+        }
+        let tier_count = tiers.len();
+
+        let mut last_err = String::new();
+        for (tier_index, (cfg, breaker_key)) in tiers.into_iter().enumerate() {
+            if !self.circuit_breakers.allow(&breaker_key) {
+                last_err = format!(
+                    "Circuit breaker open for {} (lane {}, tier {tier_index}/{tier_count}) — provider is failing, fast-rejecting. Retry in ~30s.",
+                    breaker_key,
+                    lane.as_str()
+                );
+                continue;
+            }
+
+            match self
+                .call_provider_tier(
+                    lane,
+                    &cfg,
+                    &breaker_key,
+                    system,
+                    user,
+                    model_override,
+                    temperature,
+                    max_tokens,
+                )
+                .await
+            {
+                Ok(result) => {
+                    self.lane_outage.record_chain_success(lane.as_str());
+                    return Ok(result);
+                }
+                Err(e) => last_err = e,
+            }
         }
 
-        let lane_cfg = self.lane(lane);
-        let model = model_override.unwrap_or(&lane_cfg.model);
+        // Every configured tier (primary + fallback, if any) failed. This is
+        // a full lane outage, not an ordinary within-tier retry — fail loud
+        // (拒必有声) and record it on the queryable outage surface instead of
+        // letting background callers see nothing but a swallowed Err.
+        let now_utc = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        self.lane_outage
+            .record_chain_exhausted(lane.as_str(), now_utc, last_err.clone());
+        let outage_msg = format!(
+            "LANE OUTAGE [{}]: all {tier_count} configured provider tier(s) exhausted — {last_err}",
+            lane.as_str()
+        );
+        tracing::error!("[llm] {outage_msg}");
+        Err(outage_msg)
+    }
+
+    /// One provider tier's full attempt loop (retries within `Self::MAX_ATTEMPTS`,
+    /// key-pool rotation, breaker bookkeeping). Factored out of `call_lane_llm`
+    /// so the same logic runs against either the primary or a fallback
+    /// `ChatLaneConfig` (#1197) — behavior is byte-for-byte identical to the
+    /// pre-#1197 single-tier loop when there is no fallback tier.
+    #[allow(clippy::too_many_arguments)]
+    async fn call_provider_tier(
+        &self,
+        lane: ChatLane,
+        cfg: &ChatLaneConfig,
+        breaker_key: &str,
+        system: &str,
+        user: &str,
+        model_override: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<(String, bool), String> {
+        let model = model_override.unwrap_or(&cfg.model);
 
         let mut body = serde_json::json!({
             "model": model,
@@ -169,7 +254,7 @@ impl super::super::LlmClient {
             "temperature": temperature,
             "max_tokens": max_tokens
         });
-        if Self::should_disable_thinking(&lane_cfg.base_url, model) {
+        if Self::should_disable_thinking(&cfg.base_url, model) {
             body["enable_thinking"] = Value::Bool(false);
         }
 
@@ -177,7 +262,7 @@ impl super::super::LlmClient {
 
         for attempt in 1..=Self::MAX_ATTEMPTS {
             let Some(selected) = self
-                .required_selected_secret_or_wait(&lane_cfg.api_key_envs, attempt, "chat lane")
+                .required_selected_secret_or_wait(&cfg.api_key_envs, attempt, "chat lane")
                 .await?
             else {
                 continue;
@@ -185,7 +270,7 @@ impl super::super::LlmClient {
             let attempt_started = Instant::now();
             let resp = self
                 .http_client()
-                .post(&lane_cfg.base_url)
+                .post(&cfg.base_url)
                 .header(CONTENT_TYPE, "application/json")
                 .header(AUTHORIZATION, format!("Bearer {}", selected.value))
                 .json(&body)
@@ -207,7 +292,7 @@ impl super::super::LlmClient {
                         tokio::time::sleep(Self::retry_delay(attempt)).await;
                         continue;
                     }
-                    self.circuit_breakers.record_failure(&breaker_key);
+                    self.circuit_breakers.record_failure(breaker_key);
                     return Err(last_err);
                 }
             };
@@ -221,21 +306,31 @@ impl super::super::LlmClient {
             let resp_text = match resp.text().await {
                 Ok(text) => text,
                 Err(e) => {
+                    let is_auth_status = status.as_u16() == 401 || status.as_u16() == 403;
                     if status.as_u16() == 429 {
                         self.mark_secret_rate_limited(&selected, retry_after);
-                    } else if status.as_u16() == 401 || status.as_u16() == 403 {
+                    } else if is_auth_status {
                         self.mark_secret_auth_failed(
                             &selected,
                             Some(&format!("Chat auth failure {status}")),
                         );
                     }
                     last_err = format!("Chat response body read failed after HTTP {status}: {e}");
-                    if attempt < Self::MAX_ATTEMPTS && status.is_server_error() {
+                    // #1197 BUG-1 (codex review): a single bad key must not
+                    // fail the whole tier while the primary pool still has
+                    // another usable key — same fix as the main 401/403
+                    // branch below, applied here for the (rarer) case where
+                    // the body read itself also failed.
+                    let pool_has_another_key =
+                        is_auth_status && self.has_usable_secret_readonly(&cfg.api_key_envs);
+                    if attempt < Self::MAX_ATTEMPTS
+                        && (status.is_server_error() || pool_has_another_key)
+                    {
                         tokio::time::sleep(Self::retry_delay(attempt)).await;
                         continue;
                     }
-                    if status.as_u16() == 429 || status.is_server_error() {
-                        self.circuit_breakers.record_failure(&breaker_key);
+                    if status.as_u16() == 429 || status.is_server_error() || is_auth_status {
+                        self.circuit_breakers.record_failure(breaker_key);
                     }
                     return Err(last_err);
                 }
@@ -248,7 +343,7 @@ impl super::super::LlmClient {
                 if attempt < Self::MAX_ATTEMPTS {
                     continue;
                 }
-                self.circuit_breakers.record_failure(&breaker_key);
+                self.circuit_breakers.record_failure(breaker_key);
                 return Err(last_err);
             }
             if status.as_u16() == 401 || status.as_u16() == 403 {
@@ -263,7 +358,32 @@ impl super::super::LlmClient {
                         Some(&chat_auth_failure_reason(status.as_u16(), &resp_text)),
                     );
                 }
-                return Err(format!("API error {status}: {resp_text}"));
+                last_err = format!("API error {status}: {resp_text}");
+                // #1197 BUG-1 fix (codex review): marking *this* key
+                // auth-failed/exhausted must not, by itself, fail the whole
+                // tier — the contract is "fallback fires when the PRIMARY
+                // POOL is exhausted", not on one bad key. Re-check the pool
+                // (post-mark, so the just-failed key is now excluded) for
+                // another usable key before giving up on this tier.
+                //
+                // This retries up to `MAX_ATTEMPTS` (3) distinct keys, then
+                // fails over — it does not (and is not required to)
+                // exhaust an arbitrarily large pool before failover;
+                // leader-ruled acceptable (codex round-2): retry budget is
+                // a fixed, small cap shared with the 429/5xx retry paths
+                // above, not "try every key in the pool no matter how
+                // many". A larger retry budget, if ever wanted, is a
+                // config knob for a future PR, not this one.
+                if attempt < Self::MAX_ATTEMPTS && self.has_usable_secret_readonly(&cfg.api_key_envs) {
+                    eprintln!(
+                        "[llm] auth/exhausted error {status} (attempt {}/{}); pool has another key, retrying",
+                        attempt,
+                        Self::MAX_ATTEMPTS
+                    );
+                    continue;
+                }
+                self.circuit_breakers.record_failure(breaker_key);
+                return Err(last_err);
             }
             if status.is_server_error() {
                 last_err = format!("API error {status}: {resp_text}");
@@ -282,7 +402,7 @@ impl super::super::LlmClient {
                     tokio::time::sleep(delay).await;
                     continue;
                 }
-                self.circuit_breakers.record_failure(&breaker_key);
+                self.circuit_breakers.record_failure(breaker_key);
                 return Err(last_err);
             }
 
@@ -317,11 +437,11 @@ impl super::super::LlmClient {
 
             if let Some(text) = content {
                 self.mark_secret_success(&selected);
-                self.circuit_breakers.record_success(&breaker_key);
+                self.circuit_breakers.record_success(breaker_key);
                 self.record_successful_llm_usage(
                     lane,
                     model,
-                    &lane_cfg.base_url,
+                    &cfg.base_url,
                     &selected,
                     parse_usage_tokens(json.get("usage")),
                     max_tokens,
@@ -353,10 +473,19 @@ impl super::super::LlmClient {
             }
         }
 
-        self.circuit_breakers.record_failure(&breaker_key);
+        self.circuit_breakers.record_failure(breaker_key);
         Err(last_err)
     }
 
+    // TODO(#1197 issue-ask #3, deferred — needs a `memcore` schema change,
+    // out of this packet's tachi-llm-only edit boundary): `LlmUsageEvent`
+    // only gets recorded on the success path below. Failed attempts (429,
+    // 401/403 exhaustion, 5xx, timeouts, and the full-chain "LANE OUTAGE"
+    // case) never persist a row, so outage history isn't queryable from the
+    // usage table the way successes are — only from the in-memory
+    // `lane_outage` streak (`provider_health_status().lane_outages`), which
+    // resets on process restart. Adding a failure-class `LlmUsageEvent`
+    // variant (lane/model/provider_host/error_class) is the follow-up.
     #[allow(clippy::too_many_arguments)]
     fn record_successful_llm_usage(
         &self,

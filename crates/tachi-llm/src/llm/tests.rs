@@ -56,6 +56,7 @@ mod chat_lanes;
 mod client_env;
 mod config_json;
 mod embedding_rerank;
+mod extract_quality_golden;
 mod provider_key_persistence;
 mod provider_pool;
 mod recall_pool_hygiene;
