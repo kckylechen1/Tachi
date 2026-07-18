@@ -122,6 +122,144 @@ async fn tachi_task_route_simulate_compares_policy_variants_from_live_eval() {
     );
 }
 
+/// tachi#1200 item 1 (judgmental test named by the issue): a `tachi_complete`
+/// call that carries `dispatch_id` but omits `profile` must still land its
+/// eval row where `route_simulate` can match it — via the auto-inject from
+/// the dispatch's own kanban card, not by the caller re-supplying it.
+/// `simulate_route_policy` filters live rows on an EXACT `EvalRow.profile`
+/// match against a known dispatch profile name
+/// (`crates/tachi-dispatch/src/routing.rs`); a row with `profile: None` is
+/// silently dropped from every policy's route_choices for its task_type, not
+/// merely degraded — so before this fix, `route_choices` has NO entry at all
+/// for "fix_request" here.
+#[tokio::test]
+async fn tachi_task_route_simulate_matches_dispatch_completed_without_explicit_profile() {
+    let server = make_server();
+    let dispatch_id = "20260717T000003Z-custom-route-sim-linkage";
+    let profile = "opencode_builder";
+
+    // Seed the kanban card the way a real dispatch launch would
+    // (`dispatch_ops::kanban_helpers::init_kanban_task`).
+    crate::memory_search_ops::handle_save_memory(
+        &server,
+        crate::tool_params::SaveMemoryParams {
+            text: "Dispatch Task\nAgent: custom\nTask: route sim linkage fixture".to_string(),
+            summary: "Kanban: route sim linkage fixture".to_string(),
+            path: format!("/kanban/tasks/{dispatch_id}"),
+            importance: 0.7,
+            category: "fact".to_string(),
+            topic: "kanban".to_string(),
+            keywords: vec!["kanban".to_string(), "dispatch".to_string()],
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            scope: "global".to_string(),
+            vector: None,
+            id: None,
+            force: true,
+            auto_link: true,
+            project: None,
+            project_explicit: false,
+            retention_policy: Some(memcore::RetentionPolicy::Pinned.as_str().to_string()),
+            domain: Some("system".to_string()),
+            timestamp: None,
+            valid_from: None,
+            valid_until: None,
+            metadata: Some(json!({
+                "type": "a2a_task",
+                "dispatch_id": dispatch_id,
+                "a2a_state": "TASK_STATE_WORKING",
+                "agent": "custom",
+                "profile": profile,
+                "eval_ledger_id": null,
+            })),
+            emit_continuity: false,
+        },
+    )
+    .await
+    .expect("seed kanban card with profile on file");
+
+    // Direct `tachi_complete` tool call (dispatch_facade.rs's entry point,
+    // NOT the `tachi_task(action='complete')` bridge) — the caller
+    // deliberately omits `profile`, matching the real-world dogfood gap.
+    server
+        .tachi_complete(Parameters(TachiCompleteParams {
+            task_id: Some("route-sim-linkage".to_string()),
+            task: "Implement route sim linkage from kanban profile".to_string(),
+            agent: "custom".to_string(),
+            outcome: "success".to_string(),
+            task_type: Some("fix_request".to_string()),
+            profile: None,
+            risk: Some("medium".to_string()),
+            duration_ms: Some(100_000),
+            skills_used: Vec::new(),
+            cost_tokens: Some(1000),
+            cost_usd: Some(0.01),
+            quality_score: Some(0.8),
+            notes: None,
+            trajectory: None,
+            diff: Some("diff --git a/x b/x".to_string()),
+            worktree: None,
+            subagents: Vec::new(),
+            feedback_rules_applied: Vec::new(),
+            dispatch_id: Some(dispatch_id.to_string()),
+            flow_id: None,
+            issue_ref: Some("kckylechen1/tachi#1200".to_string()),
+            pr_ref: None,
+            evidence_refs: vec!["crates/tachi-server/src/complete_ops.rs".to_string()],
+            tests_run: vec!["cargo test -p tachi-server dispatch".to_string()],
+            diff_present: Some(true),
+            scope: Some("global".to_string()),
+            project: None,
+            format: None,
+            signatures: Vec::new(),
+            rulings: Vec::new(),
+            adjudication: None,
+            eval_run_ids: Vec::new(),
+        }))
+        .await
+        .expect("complete without explicit profile should still succeed");
+
+    let mut params = task_params("route_simulate");
+    params.limit = Some(50);
+    let raw = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("route_simulate should succeed");
+    let sim: serde_json::Value = serde_json::from_str(&raw).expect("route simulation JSON");
+
+    assert_eq!(sim["row_count"], json!(1));
+    let current = sim["policies"]
+        .as_array()
+        .expect("policies")
+        .iter()
+        .find(|policy| policy["policy"] == json!("current"))
+        .expect("current policy");
+    let fix_route = current["route_choices"]
+        .as_array()
+        .and_then(|choices| {
+            choices
+                .iter()
+                .find(|choice| choice["task_type"] == json!("fix_request"))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no matching leader/profile eval rows; policy comparison is evidence-empty \
+                 (profile linkage did not reach route_simulate): {sim:#}"
+            )
+        });
+    assert_eq!(fix_route["profile"], json!(profile), "{sim:#}");
+    assert_eq!(fix_route["samples"], json!(1), "{sim:#}");
+    assert!(
+        !sim["caveats"]
+            .as_array()
+            .is_some_and(|caveats| caveats.iter().any(|caveat| caveat
+                .as_str()
+                .is_some_and(|s| s.contains("none have leader profile ids")))),
+        "the missing-profile-id caveat must be gone once linkage is backfilled: {sim:#}"
+    );
+}
+
 #[tokio::test]
 async fn tachi_task_route_policy_proposals_require_review_before_apply() {
     let server = make_server();

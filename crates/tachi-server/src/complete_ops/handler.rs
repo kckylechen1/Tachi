@@ -71,6 +71,30 @@ pub(crate) async fn handle_tachi_complete(
         }
     }
 
+    // tachi#1200 item 1: mirror the issue_ref auto-inject above for
+    // `profile`. Live policy replay (`route_simulate`/`recommend`) matches
+    // eval rows on `EvalRow.profile` against a known dispatch profile name —
+    // a row with no profile is silently dropped from every replay
+    // computation, not merely degraded (see `tachi_dispatch::routing`). The
+    // dispatch's own kanban card already has `profile` on file from launch
+    // (`init_kanban_task`), so auto-inject it here the same
+    // explicit-value-wins-then-lookup shape, covering BOTH callers of this
+    // function (the direct `tachi_complete` tool never resolves this at all
+    // today; the `tachi_task(action='complete')` bridge only resolves it from
+    // a filesystem run/flow artifact that isn't always on file). Fail-safe:
+    // a manual complete with no dispatch_id has nothing to look up and must
+    // NEVER have a profile fabricated for it.
+    if params.profile.as_deref().is_none_or(str::is_empty) {
+        if let Some(dispatch_id) = params
+            .dispatch_id
+            .as_deref()
+            .filter(|id| !id.trim().is_empty())
+        {
+            params.profile =
+                super::flow_link::resolve_profile_for_dispatch(server, dispatch_id, None);
+        }
+    }
+
     // #1066 AC-5: project ADJUDICATED, evidence-usable, non-self-eval mirror
     // eval intake rows into the legacy subagents[]-compatible aggregation
     // surface. Additive only — an empty/omitted eval_run_ids leaves
