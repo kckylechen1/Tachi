@@ -170,8 +170,7 @@ mod tests {
             ),
         )
         .expect("write progress.jsonl");
-        std::fs::write(run_dir.join("result.md"), "should not be used")
-            .expect("write result.md");
+        std::fs::write(run_dir.join("result.md"), "should not be used").expect("write result.md");
 
         let tail = read_failure_tail(run_dir).expect("failure tail");
         assert_eq!(tail, "FAILED: exit 1");
@@ -182,8 +181,11 @@ mod tests {
     fn read_failure_tail_falls_back_to_result_md() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let run_dir = tmp.path();
-        std::fs::write(run_dir.join("result.md"), "# Verdict\nFAILED: no output_tail")
-            .expect("write result.md");
+        std::fs::write(
+            run_dir.join("result.md"),
+            "# Verdict\nFAILED: no output_tail",
+        )
+        .expect("write result.md");
 
         let tail = read_failure_tail(run_dir).expect("failure tail");
         assert!(tail.contains("FAILED: no output_tail"));

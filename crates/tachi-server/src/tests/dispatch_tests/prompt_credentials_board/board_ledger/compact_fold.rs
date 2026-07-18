@@ -83,15 +83,19 @@ async fn default_board_hides_heavy_fields_and_folds_terminal_rows() {
         "completed (terminal) row should be folded away by default: {default_board:#}"
     );
     assert!(
-        tasks.iter().all(|task| task.get("identity_receipt").is_none()
-            && task.get("acpx").is_none()
-            && task.get("acpx_events").is_none()),
+        tasks
+            .iter()
+            .all(|task| task.get("identity_receipt").is_none()
+                && task.get("acpx").is_none()
+                && task.get("acpx_events").is_none()),
         "default board rows must not carry identity_receipt/acpx/acpx_events: {default_board:#}"
     );
     assert!(
-        tasks.iter().any(|task| task.get("folded").and_then(Value::as_bool) == Some(true)
-            && task["state"].as_str() == Some("TASK_STATE_COMPLETED")
-            && task["count"].as_u64().unwrap_or(0) >= 1),
+        tasks.iter().any(
+            |task| task.get("folded").and_then(Value::as_bool) == Some(true)
+                && task["state"].as_str() == Some("TASK_STATE_COMPLETED")
+                && task["count"].as_u64().unwrap_or(0) >= 1
+        ),
         "terminal rows should be folded into a count row: {default_board:#}"
     );
     assert!(
