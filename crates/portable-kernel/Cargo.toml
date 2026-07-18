@@ -2,14 +2,19 @@
 name = "portable-kernel"
 version = "1.9.0"
 edition = "2021"
-description = "Portable Tachi memory kernel for downstream forks (HyperTachi / HyperMemory / adapters)"
+description = "Portable facade over memcore with Tachi admin features disabled"
 license = "AGPL-3.0-only"
 publish = false
 
 # This facade depends on memcore *without* the admin feature.
 # Operator surfaces (vault secrets, Hub catalog, Foundry job queue, Pack)
-# are intentionally absent so HyperTachi and similar forks can sync one
-# crate graph without pulling Tachi product APIs.
+# are intentionally absent so embedders can use the memory kernel without
+# pulling Tachi product APIs.
+#
+# Historical provenance: this boundary was introduced for HyperTachi and
+# HyperMemory convergence. Per #1195, it is retained as a candidate boundary
+# for a future ZeroClaw-native module. No direct ZeroClaw Cargo integration is
+# present today.
 #
 # Schema DDL still creates admin tables so a portable consumer can open
 # DBs written by full Tachi; those tables simply stay unused.

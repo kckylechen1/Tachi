@@ -1,5 +1,4 @@
-//! Portable memory kernel: the lean, embeddable memory core ZeroClaw
-//! links directly as its native memory module (#1195).
+//! Portable facade over `memcore`, built without Tachi's admin feature.
 //!
 //! Re-exports the `memcore` public API built with
 //! `default-features = false` (no `admin` feature). That means:
@@ -11,17 +10,20 @@
 //! | Schema + migrations | Foundry job queue types |
 //! | Graph / events / sandbox | agent_profile APIs |
 //!
-//! Consumer rule of thumb:
-//! - ZeroClaw native memory module (owner-ratified direction, #1195): link
-//!   this crate directly as an embedded Rust backend (equivalently depend on
-//!   `memcore` with `default-features = false`).
+//! Current consumer rule of thumb:
+//! - Embedders that need only the memory kernel can depend on this crate, or
+//!   equivalently on `memcore` with `default-features = false`.
 //! - Full Tachi monorepo product: depend on `memcore` with default
 //!   features (admin on).
 //!
-//! Historical note (#1195, 2026-07-17): the prior "downstream forks /
-//! HyperTachi / HyperMemory convergence" framing is stale — that fork
-//! divorced 2026-07-14 (Hyperion-HyperTachi 9da2015). This crate stays;
-//! its future is the ZeroClaw-native memory module direction.
+//! Future direction (#1195, owner-ratified 2026-07-17): retain this package
+//! as a candidate boundary for a ZeroClaw-native memory module.
+//! No direct ZeroClaw Cargo integration has landed. ZeroClaw does not
+//! currently depend on this crate.
+//!
+//! Historical provenance: this facade was cut for downstream HyperTachi and
+//! HyperMemory convergence. That fork separated on 2026-07-14
+//! (Hyperion-HyperTachi `9da2015`), so it is no longer the target consumer.
 //!
 //! See `docs/engineering/architecture/portable-kernel-split.md` and
 //! `docs/engineering/architecture/downstream-sync-surface.md`.

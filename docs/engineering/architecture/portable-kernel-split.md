@@ -1,32 +1,38 @@
 # Portable Kernel Split — memcore vs admin
 
-> **Status:** landed 2026-07-09 (first cut); purpose re-pointed 2026-07-17 (#1195).  
+> **Status:** landed 2026-07-09 (first cut); historical purpose retired and
+> future direction recorded 2026-07-17 (#1195).
 > **Anchors:** #770, #790–#794, #833 Phase 1.1, #1195.  
 > **Companions:** [`kernel-surface-v1.md`](./kernel-surface-v1.md),  
 > [`downstream-sync-surface.md`](./downstream-sync-surface.md) (when present).
 >
-> **Owner ruling 2026-07-17 (#1195):** these crates STAY. Their future is a
-> **ZeroClaw-native memory module** — a lean, embeddable Rust memory core
-> ZeroClaw links directly (Tauri/ZeroClaw embedded backend), not HyperTachi
-> fork convergence. The fork formally divorced 2026-07-14 (Hyperion-HyperTachi
-> `9da2015`: vendored vault-kit, dropped the git dep, "two independent
-> products"), so the original "HyperTachi / HyperMemory / adapters need this"
-> framing below is stale as a *purpose*. It is preserved as the historical
-> record of why the split was cut; the *current* purpose is ZeroClaw-native.
+> **Current implementation:** `portable-kernel` re-exports `memcore` with
+> admin features disabled. `portable-server` exposes that kernel over MCP.
+> The current Tachi Cargo inventory contains no direct ZeroClaw integration.
+>
+> **Owner ruling 2026-07-17 (#1195):** these packages stay as candidate
+> boundaries for a future ZeroClaw-native memory module. The design and direct
+> Cargo integration have not landed.
+>
+> **Historical provenance:** this split was cut for HyperTachi, HyperMemory,
+> and adapter convergence. Hyperion-HyperTachi separated on 2026-07-14
+> (`9da2015`), so the original consumer framing below is retained only as the
+> historical record of why the split was cut.
 
 ## Why
 
 `memcore` mixed two audiences:
 
-1. **Portable kernel** — store, schema, hybrid search/scorer, graph, events,
-   sandbox. The ZeroClaw-native memory module links this directly (#1195);
-   historically this is also what HyperTachi / HyperMemory / adapters consumed
-   (see § Catch-up experiment results for the 2026-07-09 record).
-2. **Tachi admin** — vault secrets, Hub capability catalog, Foundry job queue
+1. **Portable kernel** - store, schema, hybrid search/scorer, graph, events,
+   sandbox. This is the current compile boundary. Per #1195 it is also a
+   candidate boundary for a future ZeroClaw-native module after design and
+   integration. Historically, HyperTachi, HyperMemory, and adapters motivated
+   the split (see § Catch-up experiment results for the 2026-07-09 record).
+2. **Tachi admin** - vault secrets, Hub capability catalog, Foundry job queue
    types, Pack / agent_profile product surfaces. Operator product only.
 
-Without a compile boundary, every embedder (ZeroClaw-native future) or
-downstream fork (historical: HyperTachi) either:
+Without a compile boundary, a future embedder or the historical downstream
+fork either:
 
 - rsyncs the whole monorepo and inherits operator APIs, or
 - hand-picks files and drifts.
