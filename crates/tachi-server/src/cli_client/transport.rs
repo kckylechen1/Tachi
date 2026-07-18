@@ -191,14 +191,37 @@ pub(crate) async fn call_daemon_tool_raw(
 ) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
     let tool_name = params.name.as_ref().to_string();
     let mut transport_config = StreamableHttpClientTransportConfig::with_uri(info.url.clone());
+    let mut headers = HashMap::new();
     if let Some(project) = proxy_project {
-        let mut headers = HashMap::new();
         headers.insert(
             HeaderName::from_static(crate::session_identity::HEADER_PROJECT),
             HeaderValue::from_str(project).map_err(|e| {
                 DaemonCallError::BeforeDispatch(format!("invalid proxy project header value: {e}"))
             })?,
         );
+    }
+    // #1251: forward this proxy process's OWN recursion depth to the daemon on
+    // every call, over the same per-call header rail as X-Tachi-Project. The
+    // depth was stamped into this process's env (ENV_DISPATCH_DEPTH) by the
+    // parent that dispatched this worker (see `dispatch_ops::mcp_config`); the
+    // daemon reads it back into the per-session identity so the recursion gate
+    // consults the SESSION value, not the daemon's own (always-0) env. A raw
+    // value is forwarded verbatim — malformed/negative content is caught and
+    // fails closed at the gate's `resolve_dispatch_depth`, not here.
+    if let Ok(depth) = std::env::var(crate::session_identity::ENV_DISPATCH_DEPTH) {
+        let depth = depth.trim();
+        if !depth.is_empty() {
+            headers.insert(
+                HeaderName::from_static(crate::session_identity::HEADER_DISPATCH_DEPTH),
+                HeaderValue::from_str(depth).map_err(|e| {
+                    DaemonCallError::BeforeDispatch(format!(
+                        "invalid dispatch depth header value: {e}"
+                    ))
+                })?,
+            );
+        }
+    }
+    if !headers.is_empty() {
         transport_config = transport_config.custom_headers(headers);
     }
     let transport = StreamableHttpClientTransport::from_config(transport_config);

@@ -88,6 +88,25 @@ Stance: eval rows record verdicts from the REVIEW lane (different vendor), not t
 worker's self-report (review discipline is law); route changes go through proposals
 with `confirm=true` human application — the scheduler learns, but the owner ratifies.
 
+**T8 — Recursive-dispatch resource exhaustion.** A worker that itself dispatches
+children (self-dispatch, or a chain of workers each dispatching the next) can
+exhaust the daemon with unbounded fan-out/depth.
+Stance (#1251, v1): `enforce_dispatch_depth` (`session_identity.rs`) refuses a
+dispatch once the caller's depth (`resolve_dispatch_depth`, carried per-call over
+`X-Tachi-Dispatch-Depth` in the daemon-proxy topology, or `TACHI_DISPATCH_DEPTH` env
+in the CLI in-process path) reaches `MAX_DISPATCH_DEPTH`. This is a **caller-asserted**
+gate — it stops ACCIDENTAL unbounded recursion via the normal MCP-dispatch path,
+which is the only path a well-behaved worker takes. It is explicitly the SAME trust
+class as `TACHI_AGENT_SEAT` self-report (T7's "workers self-report" framing applies
+here too): nothing binds the depth claim to an authenticated capability, so a
+DELIBERATE worker can bypass it — invoking the raw `tachi task` CLI outside the
+env-stamped path, or forging the `X-Tachi-Dispatch-Depth` header on a direct HTTP
+connection. That residual is accepted for v1 (owner ruling, #1251) on the same basis
+the rest of this document already accepts worker self-report as real-but-bounded
+exposure; a server-side capability-token binding (depth minted into a
+signed/opaque token by the parent, unforgeable by the child) is tracked as a
+follow-up hardening, not part of this gate.
+
 ## Invariants (freeze these; violating = BUG in any review)
 
 1. Workers mount no Tachi surface at all (packet in, artifacts out); secrets reach
@@ -111,3 +130,7 @@ with `confirm=true` human application — the scheduler learns, but the owner ra
 - Memory-at-rest encryption undecided (T6).
 - Key-lease mechanism (#458) is designed but not fully landed — until then, workers
   inherit whatever env the spawning harness passes: the current REAL exposure.
+- Recursive-dispatch depth gate (T8, #1251) is caller-asserted, not capability-bound
+  — a deliberate worker can bypass it via raw CLI or a forged header. Accepted for
+  v1 (matches the existing worker self-report boundary); capability-token binding
+  is the follow-up.

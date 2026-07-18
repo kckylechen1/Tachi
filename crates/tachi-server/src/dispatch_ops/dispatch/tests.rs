@@ -252,6 +252,112 @@ async fn cp2_two_dispatches_on_same_profile_get_distinct_agent_seats() {
     }
 }
 
+// ─── #1251: child recursion-depth env stamp (child = parent + 1) ──────────
+//
+// The generated worker `tachi serve` env must carry TACHI_DISPATCH_DEPTH =
+// dispatching-session depth + 1. This is the parent end of the recursion rail:
+// the child proxy reads this env back and re-emits it as the
+// X-Tachi-Dispatch-Depth header on every daemon call, so the daemon's
+// recursion gate sees the SESSION depth, never the daemon's own (always-0)
+// process env.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn dispatch_depth_child_env_is_parent_plus_one() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _home = EnvRestore::set_path("HOME", temp_home.path());
+    let _tachi_home = EnvRestore::remove("TACHI_HOME");
+
+    let server = crate::tests::make_server();
+
+    let depth_of = |path: &std::path::Path| -> String {
+        let raw = std::fs::read_to_string(path).expect("read mcp config");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse mcp config json");
+        json["mcpServers"]["tachi"]["env"]["TACHI_DISPATCH_DEPTH"]
+            .as_str()
+            .expect("TACHI_DISPATCH_DEPTH present in generated config")
+            .to_string()
+    };
+
+    // A leader session carries no depth marker (session_dispatch_depth None ≡
+    // depth 0) → the child it dispatches is stamped depth 1.
+    let leader_child = generate_mcp_config(&server, "depth-leader", true, false, None, None, &[])
+        .await
+        .expect("generate mcp config for leader")
+        .expect("config path");
+    assert_eq!(
+        depth_of(&leader_child),
+        "1",
+        "a leader (depth 0) must stamp its child at depth 1"
+    );
+
+    // A session already at depth 1 → its child is stamped depth 2.
+    server.set_session_dispatch_depth(Some("1".to_string()));
+    let depth1_child = generate_mcp_config(&server, "depth-child", true, false, None, None, &[])
+        .await
+        .expect("generate mcp config for depth-1 session")
+        .expect("config path");
+    assert_eq!(
+        depth_of(&depth1_child),
+        "2",
+        "a depth-1 session must stamp its child at depth 2"
+    );
+
+    // A malformed inbound depth marker saturates to the limit for the parent,
+    // so its child is stamped one past the limit — it can only ever fail the
+    // gate, never wrap back to a small allowed depth.
+    server.set_session_dispatch_depth(Some("garbage".to_string()));
+    let saturated_child = generate_mcp_config(&server, "depth-bad", true, false, None, None, &[])
+        .await
+        .expect("generate mcp config for malformed-depth session")
+        .expect("config path");
+    assert_eq!(
+        depth_of(&saturated_child),
+        (crate::session_identity::MAX_DISPATCH_DEPTH + 1).to_string(),
+        "a malformed parent depth saturates to the limit and stamps limit+1 on its child"
+    );
+}
+
+// ─── #1251: the gate reads the SESSION depth, not process env ─────────────
+//
+// A session whose identity carries depth == MAX_DISPATCH_DEPTH must be refused
+// by `handle_tachi_dispatch` BEFORE any workspace/run-directory work — proving
+// the depth reaches the gate via the session (the header/env-populated field),
+// which is exactly the value the daemon-proxy rail delivers. The error must be
+// the recursion-gate error, and it must fire before the (heavier) dispatch
+// stages that would otherwise fail for unrelated reasons.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn handle_tachi_dispatch_refuses_at_max_depth_from_session() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _home = EnvRestore::set_path("HOME", temp_home.path());
+    let _tachi_home = EnvRestore::remove("TACHI_HOME");
+    // Belt-and-suspenders: prove the refusal comes from the SESSION field, not
+    // this test process's own env — leave TACHI_DISPATCH_DEPTH unset (depth 0)
+    // while the session says MAX.
+    let _env_depth = EnvRestore::remove(crate::session_identity::ENV_DISPATCH_DEPTH);
+
+    let server = crate::tests::make_server();
+    server.set_session_dispatch_depth(Some(
+        crate::session_identity::MAX_DISPATCH_DEPTH.to_string(),
+    ));
+
+    let params = test_dispatch_params(Some("codex"), "noop task");
+    let err = handle_tachi_dispatch(&server, params)
+        .await
+        .expect_err("a session already at MAX_DISPATCH_DEPTH must be refused");
+    assert!(
+        err.contains("recursive dispatch depth limit reached")
+            && err.contains("MAX_DISPATCH_DEPTH"),
+        "expected the recursion-gate error, got: {err}"
+    );
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn opencode_serve_dispatch_fails_fast_when_probe_auth_fails() {

@@ -35,6 +35,23 @@ impl MemoryServer {
         self.agent_runtime_read().session_project.clone()
     }
 
+    /// #1251: stamp this session's raw dispatch recursion-depth marker. Kept a
+    /// separate setter from `set_session_identity` (rather than a 4th param)
+    /// so the many existing `set_session_identity` call sites are untouched;
+    /// only the two callers that actually know the depth — the daemon's
+    /// `apply_http_session_identity` (from the wire header) and the CLI
+    /// in-process server build (from the process's own env) — set it.
+    pub(crate) fn set_session_dispatch_depth(&self, depth: Option<String>) {
+        self.agent_runtime_write().session_dispatch_depth = depth;
+    }
+
+    /// #1251: the raw dispatch recursion-depth marker for this session, fed to
+    /// `session_identity::resolve_dispatch_depth` at the gate and when stamping
+    /// a child's depth in `dispatch_ops::mcp_config`.
+    pub(crate) fn session_dispatch_depth(&self) -> Option<String> {
+        self.agent_runtime_read().session_dispatch_depth.clone()
+    }
+
     pub(crate) fn session_client(&self) -> Option<String> {
         self.agent_runtime_read().session_client.clone()
     }

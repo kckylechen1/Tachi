@@ -266,6 +266,7 @@ impl MemoryServer {
                 session_client: None,
                 session_project: None,
                 work_claim_connection: None,
+                session_dispatch_depth: None,
             })),
             bound_agent_id: Arc::new(StdRwLock::new(bound_agent_id)),
             home_dir,

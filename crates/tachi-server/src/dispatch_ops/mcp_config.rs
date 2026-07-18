@@ -43,6 +43,24 @@ pub(super) async fn generate_mcp_config(
         if let Some(seat) = agent_seat.filter(|s| !s.trim().is_empty()) {
             env.insert("TACHI_AGENT_SEAT".to_string(), json!(seat.trim()));
         }
+        // #1251: stamp this child's recursion depth = the dispatching session's
+        // resolved depth + 1 into the worker's `tachi serve` env. The child's
+        // stdio proxy reads it back from its own env (ENV_DISPATCH_DEPTH) and
+        // re-emits it as HEADER_DISPATCH_DEPTH on every daemon call, so the
+        // recursion gate consults the SESSION depth over the wire — never the
+        // daemon's own env (always 0). `server` here is the per-session clone
+        // that carries the dispatching session's identity, so its depth is the
+        // PARENT depth. Saturating add so a pathological parent depth can only
+        // push the child further past the limit, never wrap to a small value.
+        let parent_depth = crate::session_identity::resolve_dispatch_depth(
+            server.session_dispatch_depth().as_deref(),
+            crate::session_identity::MAX_DISPATCH_DEPTH,
+        );
+        let child_depth = parent_depth.saturating_add(1);
+        env.insert(
+            crate::session_identity::ENV_DISPATCH_DEPTH.to_string(),
+            json!(child_depth.to_string()),
+        );
         let mut entry = json!({
             "command": "tachi",
             "args": ["serve"]

@@ -255,6 +255,16 @@ struct HttpSessionIdentity {
     /// analogous gap on `X-Tachi-Project`/profile/client is pre-existing
     /// behavior out of this PR's blast radius.
     workspace_root_error: Option<String>,
+    /// #1251: the raw `X-Tachi-Dispatch-Depth` header value for the recursive-
+    /// dispatch gate. Stored raw (like the other identity fields); a present
+    /// value is honored, a malformed one saturates to the limit at the gate
+    /// (`session_identity::resolve_dispatch_depth`) — deliberately NOT failed
+    /// at `initialize` the way `workspace_root_error` is, because a malformed
+    /// depth must fail CLOSED (refuse the eventual dispatch), not fail the
+    /// whole session's `initialize` (which every non-dispatch tool call would
+    /// also ride through). Header-only: the proxy injects it via
+    /// `custom_headers`, never `_meta`.
+    dispatch_depth: Option<String>,
 }
 
 /// #1120 PR1: which session-identity field supplies the bound project, when
@@ -338,6 +348,10 @@ impl MemoryServer {
                 .is_none(),
         )
         .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
+        // #1251: persist the wire depth into this session's runtime so the
+        // recursion gate in `handle_tachi_dispatch` reads the CALLER's depth
+        // (via the session), not the daemon's process env.
+        self.set_session_dispatch_depth(identity.dispatch_depth);
         Ok(())
     }
 }
@@ -357,6 +371,14 @@ fn http_session_identity(
                 .or(identity.agent_identity_id);
         identity.project =
             header_string(parts, crate::session_identity::HEADER_PROJECT).or(identity.project);
+        // #1251: read the per-call recursion-depth marker off the wire. This is
+        // the ONLY correct place to learn the caller's depth in the daemon-proxy
+        // topology — `handle_tachi_dispatch` runs in the daemon carrying the
+        // daemon's own env (always depth 0), so the depth must arrive per-call
+        // over this header rail. Header-only (no `_meta` twin): the proxy
+        // injects it via `custom_headers` in `call_daemon_tool_raw`.
+        identity.dispatch_depth =
+            header_string(parts, crate::session_identity::HEADER_DISPATCH_DEPTH);
         // Review finding [3] (#1207): a header wins over `_meta` per this
         // function's usual precedence, but ONLY when it is actually present
         // and well-formed. A PRESENT-but-malformed header must win the error
@@ -1104,6 +1126,40 @@ mod tests {
         );
     }
 
+    /// #1251: the `X-Tachi-Dispatch-Depth` header is read off the wire by the
+    /// exact expression `http_session_identity` assigns into
+    /// `HttpSessionIdentity::dispatch_depth` (`header_string(parts,
+    /// HEADER_DISPATCH_DEPTH)`), which is what `apply_http_session_identity`
+    /// then stamps into the session runtime. A present value round-trips
+    /// (trimmed); an absent header yields `None` ≡ depth 0. This is the daemon
+    /// end of the proxy→daemon rail; the full live proxy→daemon round-trip is
+    /// covered by the manual verification path documented in the #1251 PR.
+    #[test]
+    fn dispatch_depth_header_is_read_off_the_wire() {
+        let parts = axum::http::Request::builder()
+            .header(crate::session_identity::HEADER_DISPATCH_DEPTH, "2")
+            .body(())
+            .expect("build request")
+            .into_parts()
+            .0;
+        assert_eq!(
+            header_string(&parts, crate::session_identity::HEADER_DISPATCH_DEPTH).as_deref(),
+            Some("2"),
+            "a present depth header must be read into HttpSessionIdentity::dispatch_depth"
+        );
+
+        let no_header = axum::http::Request::builder()
+            .body(())
+            .expect("build request")
+            .into_parts()
+            .0;
+        assert_eq!(
+            header_string(&no_header, crate::session_identity::HEADER_DISPATCH_DEPTH),
+            None,
+            "an absent depth header yields None, which resolves to leader depth 0"
+        );
+    }
+
     /// #1120 PR1 core regression: an explicit `X-Tachi-Project` (here, its
     /// `_meta` twin `META_PROJECT`) must win over a simultaneously-present
     /// `X-Tachi-Workspace-Root` — the workspace-root path only fills the gap
@@ -1118,6 +1174,7 @@ mod tests {
             project: Some("sigil".to_string()),
             workspace_root: Some("/home/agent/repos/sigil".to_string()),
             workspace_root_error: None,
+            dispatch_depth: None,
         };
         assert_eq!(
             project_binding_source(&identity),
@@ -1134,6 +1191,7 @@ mod tests {
             project: None,
             workspace_root: Some("/home/agent/repos/sigil".to_string()),
             workspace_root_error: None,
+            dispatch_depth: None,
         };
         assert_eq!(
             project_binding_source(&identity),
