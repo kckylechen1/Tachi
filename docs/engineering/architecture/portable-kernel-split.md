@@ -1,20 +1,32 @@
 # Portable Kernel Split — memcore vs admin
 
-> **Status:** landed 2026-07-09 (first cut).  
-> **Anchors:** #770, #790–#794, #833 Phase 1.1.  
+> **Status:** landed 2026-07-09 (first cut); purpose re-pointed 2026-07-17 (#1195).  
+> **Anchors:** #770, #790–#794, #833 Phase 1.1, #1195.  
 > **Companions:** [`kernel-surface-v1.md`](./kernel-surface-v1.md),  
 > [`downstream-sync-surface.md`](./downstream-sync-surface.md) (when present).
+>
+> **Owner ruling 2026-07-17 (#1195):** these crates STAY. Their future is a
+> **ZeroClaw-native memory module** — a lean, embeddable Rust memory core
+> ZeroClaw links directly (Tauri/ZeroClaw embedded backend), not HyperTachi
+> fork convergence. The fork formally divorced 2026-07-14 (Hyperion-HyperTachi
+> `9da2015`: vendored vault-kit, dropped the git dep, "two independent
+> products"), so the original "HyperTachi / HyperMemory / adapters need this"
+> framing below is stale as a *purpose*. It is preserved as the historical
+> record of why the split was cut; the *current* purpose is ZeroClaw-native.
 
 ## Why
 
 `memcore` mixed two audiences:
 
 1. **Portable kernel** — store, schema, hybrid search/scorer, graph, events,
-   sandbox. HyperTachi / HyperMemory / adapters need this.
+   sandbox. The ZeroClaw-native memory module links this directly (#1195);
+   historically this is also what HyperTachi / HyperMemory / adapters consumed
+   (see § Catch-up experiment results for the 2026-07-09 record).
 2. **Tachi admin** — vault secrets, Hub capability catalog, Foundry job queue
    types, Pack / agent_profile product surfaces. Operator product only.
 
-Without a compile boundary, every downstream fork either:
+Without a compile boundary, every embedder (ZeroClaw-native future) or
+downstream fork (historical: HyperTachi) either:
 
 - rsyncs the whole monorepo and inherits operator APIs, or
 - hand-picks files and drifts.
@@ -117,7 +129,8 @@ cargo test -p portable-kernel
 - Physical extract of vault/hub/foundry into separate crates (schema still shared;
   feature gate is enough for fork/compile isolation).
 - `memory-server-lite` binary profile (next step once portable packaging is
-  dogfooded on HyperTachi).
+  dogfooded on the ZeroClaw-native embedder per #1195; historically framed
+  around HyperTachi dogfooding, which is no longer the target consumer).
 - Moving schema admin tables behind feature flags (would break open of full DBs).
 
 ## Acceptance

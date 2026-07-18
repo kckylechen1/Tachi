@@ -1,7 +1,17 @@
 # Downstream Sync Surface & Cratesplit Continuation Plan
 
 > **Status:** operating plan (2026-07-09), derived from live trees + kernel doctrine.  
-> **Implements / anchors:** #770, #771, #790–#794, #833, #847.  
+> **Purpose re-pointed 2026-07-17 (#1195):** the HyperTachi / HyperMemory
+> convergence direction described throughout this plan is **dead** as a
+> *purpose*. The fork formally divorced 2026-07-14 (Hyperion-HyperTachi
+> `9da2015`: vendored vault-kit, dropped the git dep, "two independent
+> products"). The current owner-ratified direction for `memcore` (portable) /
+> `portable-kernel` / `portable-server` is a **ZeroClaw-native memory module** —
+> a lean, embeddable Rust memory core ZeroClaw links directly. The body below
+> is preserved as the 2026-07-09 historical record of the sync surface and the
+> HyperTachi catch-up experiment; treat the HyperTachi-as-target-consumer
+> framing as history, not current direction.  
+> **Implements / anchors:** #770, #771, #790–#794, #833, #847, #1195.  
 > **Companion docs:** [`kernel-surface-v1.md`](./kernel-surface-v1.md),  
 > [`hypermem-compatibility-gate.md`](./hypermem-compatibility-gate.md),  
 > [`host-adapter-lifecycle-v1.md`](./host-adapter-lifecycle-v1.md),  
@@ -72,7 +82,7 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 | Crate / surface | Role | Downstream rule |
 |---|---|---|
 | **`memcore`** (portable: `default-features = false`) | Canonical rows, edges, store, scorer types, search primitives | **Primary sync unit.** Prefer package or subtree merge of this crate alone. |
-| **`portable-kernel`** | Facade re-export of portable `memcore` (admin off) | Prefer this dep for HyperTachi / adapter workspaces; see [`portable-kernel-split.md`](./portable-kernel-split.md). |
+| **`portable-kernel`** | Facade re-export of portable `memcore` (admin off) | Per #1195: prefer this dep for the ZeroClaw-native memory module (link directly as an embedded Rust backend). Historically also the recommended dep for HyperTachi / adapter workspaces; see [`portable-kernel-split.md`](./portable-kernel-split.md). |
 | Schema / migrations owned by core | `memories`, FTS, edges, access history, event ledger columns | Breaking changes need dual-gate: Tachi tests + Hypermem gate fixture |
 | Vector / backfill readiness | Coverage, degraded mode | Via core + readiness APIs, not Foundry product UI |
 | Event projection hooks | Continuity projection for adapters | Neutral events only; no GitHub/dispatch events required |
