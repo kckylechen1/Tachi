@@ -20,6 +20,7 @@
 #[cfg(feature = "admin")]
 pub mod agent_profile;
 pub mod db;
+pub mod embed_config;
 pub mod error;
 #[cfg(feature = "admin")]
 pub mod foundry;
@@ -96,6 +97,7 @@ pub use db::{anchor_id, anchor_path, AnchorKind};
 pub use db::{CategoryPathPrefixMemoryRow, FoundryJobStatusCounts, PathPrefixMemoryRow};
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use db::{DbOpenContext, MigrationAuthority, OpenIntent};
+pub use embed_config::embed_raw_tier_enabled;
 pub use error::MemoryError;
 #[cfg(feature = "admin")]
 pub use foundry::{

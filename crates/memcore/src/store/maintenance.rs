@@ -58,26 +58,32 @@ impl MemoryStore {
         )?)
     }
 
-    /// Load active non-raw entries that still lack an embedding vector,
-    /// highest importance first. Excludes `anchor:`-prefixed rows (tachi#773
-    /// item 4: anchors are plumbing rows for the memory graph, never
-    /// content that should burn embedding budget or surface as recall).
+    /// Load active entries that still lack an embedding vector, highest
+    /// importance first (non-raw rows before raw when raw embedding is enabled).
+    /// Excludes `anchor:`-prefixed rows (tachi#773 item 4: anchors are plumbing
+    /// rows for the memory graph, never content that should burn embedding
+    /// budget or surface as recall).
     pub fn entries_missing_vectors(&self, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError> {
-        let mut stmt = self.conn.prepare(
+        let tier_filter = crate::embed_config::embed_raw_tier_sql_filter("m.");
+        let order_by = crate::embed_config::embed_selection_order_by("m.");
+        let sql = format!(
             "SELECT m.id FROM memories m
              LEFT JOIN memories_vec v ON m.id = v.id
              WHERE m.archived = 0
-               AND m.tier != 'raw'
+               {tier_filter}
                AND m.id NOT LIKE 'anchor:%'
                AND v.id IS NULL
-             ORDER BY m.importance DESC
-             LIMIT ?1",
-        )?;
+             {order_by}
+             LIMIT ?1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let ids = stmt
             .query_map([limit as i64], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(db::fetch_by_ids(&self.conn, &ids, false)?
-            .into_values()
+        let fetched = db::fetch_by_ids(&self.conn, &ids, false)?;
+        Ok(ids
+            .into_iter()
+            .filter_map(|id| fetched.get(&id).cloned())
             .collect())
     }
 
@@ -249,9 +255,33 @@ mod tests {
     }
 
     #[test]
-    fn entries_missing_vectors_skips_raw_and_embedded_entries() {
+    fn entries_missing_vectors_embed_selection_and_tier_gate() {
+        struct EmbedRawTierEnvRestore {
+            saved: Option<std::ffi::OsString>,
+        }
+
+        impl EmbedRawTierEnvRestore {
+            fn capture_and_clear() -> Self {
+                let saved = std::env::var_os("TACHI_EMBED_RAW_TIER");
+                std::env::remove_var("TACHI_EMBED_RAW_TIER");
+                Self { saved }
+            }
+        }
+
+        impl Drop for EmbedRawTierEnvRestore {
+            fn drop(&mut self) {
+                match &self.saved {
+                    Some(v) => std::env::set_var("TACHI_EMBED_RAW_TIER", v),
+                    None => std::env::remove_var("TACHI_EMBED_RAW_TIER"),
+                }
+            }
+        }
+
+        let _restore = EmbedRawTierEnvRestore::capture_and_clear();
+
         let mut store = MemoryStore::open_in_memory().expect("open test store");
         assert!(store.vec_available, "sqlite-vec required for this test");
+
         let mut missing = test_entry("missing");
         missing.tier = "consolidated".to_string();
         store.upsert(&missing).expect("seed missing");
@@ -261,9 +291,41 @@ mod tests {
         store.upsert(&embedded).expect("seed embedded");
         store.upsert(&test_entry("raw-entry")).expect("seed raw");
 
+        std::env::set_var("TACHI_EMBED_RAW_TIER", "1");
         let entries = store.entries_missing_vectors(50).expect("scan vectors");
         let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
-        assert_eq!(ids, vec!["missing"]);
+        assert_eq!(
+            ids,
+            vec!["missing", "raw-entry"],
+            "flag on: raw rows lacking vectors are included alongside non-raw"
+        );
+
+        let mut raw_high = test_entry("raw-high");
+        raw_high.importance = 0.99;
+        store.upsert(&raw_high).expect("seed raw-high");
+        let mut consolidated = test_entry("consolidated-low");
+        consolidated.tier = "consolidated".to_string();
+        consolidated.importance = 0.1;
+        store.upsert(&consolidated).expect("seed consolidated");
+
+        let entries = store.entries_missing_vectors(50).expect("scan ordered");
+        let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["missing", "consolidated-low", "raw-high", "raw-entry"],
+            "non-raw rows must sort before raw regardless of importance"
+        );
+
+        std::env::set_var("TACHI_EMBED_RAW_TIER", "0");
+        let entries = store
+            .entries_missing_vectors(50)
+            .expect("scan with raw excluded");
+        let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["missing", "consolidated-low"],
+            "flag off restores pre-#1242 raw exclusion"
+        );
     }
 
     #[test]

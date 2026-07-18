@@ -15,6 +15,10 @@ const DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR: f64 = 0.55;
 const DEFAULT_OR_FALLBACK_FTS_MAX_TERMS: usize = 8;
 // Phase C lever (#708): lower k sharpens RRF so single-channel precision wins more often.
 const DEFAULT_RRF_K: f64 = 20.0;
+// Provisional #1242: raw-tier vector hits below this cosine-similarity floor are
+// dropped from the vector channel only (FTS/symbolic unaffected). Calibrated
+// below typical good-hit band (~0.41–0.48) to cut clearly-weak raw matches.
+const DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR: f64 = 0.35;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallConfig {
@@ -32,6 +36,8 @@ pub struct RecallConfig {
     pub or_fallback_fts_max_terms: usize,
     /// Reciprocal Rank Fusion k (classic is 60). Lower values amplify top ranks.
     pub rrf_k: f64,
+    /// Minimum vector similarity for raw-tier rows in the vector channel (provisional).
+    pub raw_vector_similarity_floor: f64,
 }
 
 impl Default for RecallConfig {
@@ -68,6 +74,7 @@ impl Default for RecallConfig {
             or_fallback_fts_score_factor: DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR,
             or_fallback_fts_max_terms: DEFAULT_OR_FALLBACK_FTS_MAX_TERMS,
             rrf_k: DEFAULT_RRF_K,
+            raw_vector_similarity_floor: DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR,
         }
     }
 }
@@ -165,6 +172,11 @@ impl RecallConfig {
             &mut self.or_fallback_fts_max_terms,
         );
         apply_f64(values, "TACHI_RECALL_RRF_K", &mut self.rrf_k);
+        apply_f64(
+            values,
+            "TACHI_RECALL_RAW_VECTOR_SIMILARITY_FLOOR",
+            &mut self.raw_vector_similarity_floor,
+        );
     }
 
     pub fn sanitized(mut self) -> Self {
@@ -204,6 +216,11 @@ impl RecallConfig {
             self.rrf_k = DEFAULT_RRF_K;
         }
         self.rrf_k = self.rrf_k.clamp(1.0, 200.0);
+        self.raw_vector_similarity_floor = finite_or_default(
+            self.raw_vector_similarity_floor,
+            DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR,
+        )
+        .clamp(0.0, 1.0);
         self
     }
 }
@@ -412,6 +429,10 @@ mod tests {
             config.or_fallback_fts_max_terms,
             DEFAULT_OR_FALLBACK_FTS_MAX_TERMS
         );
+        assert_eq!(
+            config.raw_vector_similarity_floor,
+            DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR
+        );
     }
 
     #[test]
@@ -426,6 +447,7 @@ mod tests {
             TACHI_RECALL_ID_LIKE_EXACT_MATCH_BOOST=15
             TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.22
             TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4
+            TACHI_RECALL_RAW_VECTOR_SIMILARITY_FLOOR=0.28
             "#,
         );
         let mut config = RecallConfig::default();
@@ -440,6 +462,7 @@ mod tests {
         assert_eq!(config.id_like_exact_match_boost, 15.0);
         assert_eq!(config.or_fallback_fts_score_factor, 0.22);
         assert_eq!(config.or_fallback_fts_max_terms, 4);
+        assert_eq!(config.raw_vector_similarity_floor, 0.28);
     }
 
     #[test]
@@ -453,6 +476,7 @@ mod tests {
             TACHI_RECALL_MAX_EXPANDED_FTS_QUERIES=0
             TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=NaN
             TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=0
+            TACHI_RECALL_RAW_VECTOR_SIMILARITY_FLOOR=NaN
             "#,
         );
         let mut config = RecallConfig::default();
@@ -472,6 +496,10 @@ mod tests {
             RecallConfig::default().or_fallback_fts_score_factor
         );
         assert_eq!(config.or_fallback_fts_max_terms, 1);
+        assert_eq!(
+            config.raw_vector_similarity_floor,
+            DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR
+        );
     }
 
     /// #1096 leaf-2a. Against the pre-fix `config_env_path()` (which only

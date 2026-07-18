@@ -629,6 +629,40 @@ mod tests {
         );
     }
 
+    /// #744 / #1242: count↔selection membership must include archived rows that
+    /// lack vectors. RED against a selection path that adds `archived = 0`
+    /// while counts still include archived (pre-review-fix PR state).
+    #[test]
+    fn vector_selection_includes_archived_missing_vectors_like_counts() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("archived-selection.db");
+        let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+
+        insert_memory(&store, "active-missing", "manual", "note");
+        insert_memory(&store, "archived-missing", "manual", "note");
+        store
+            .connection()
+            .execute(
+                "UPDATE memories SET archived = 1 WHERE id = 'archived-missing'",
+                [],
+            )
+            .expect("archive row");
+
+        let (total, with_vec) = vector_counts_filtered(&store, true).expect("counts");
+        let selected =
+            list_missing_vector_entries(&store, true, None).expect("list missing vectors");
+        let mut selected_ids: Vec<_> = selected.iter().map(|(id, _, _, _)| id.as_str()).collect();
+        selected_ids.sort();
+
+        assert_eq!(total, 2, "counts include archived rows lacking vectors");
+        assert_eq!(with_vec, 0);
+        assert_eq!(
+            selected_ids,
+            ["active-missing", "archived-missing"],
+            "selection must include archived missing-vector rows so status pending can clear"
+        );
+    }
+
     #[test]
     fn malformed_vector_sweep_state_is_error_not_absent() {
         let dir = tempfile::tempdir().expect("tmp");
