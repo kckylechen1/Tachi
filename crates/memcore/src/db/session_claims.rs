@@ -11,7 +11,7 @@
 //! ## Lease semantics (reuses the #894 `exec_envs` shape)
 //!
 //! ```text
-//!   active ──lease expiry──▶ orphaned
+//!   active ──heartbeat TTL elapsed──▶ orphaned
 //!      │                         │
 //!      └──── versioned release ──┴──▶ released
 //!                                └──── versioned handoff ──▶ active
@@ -39,12 +39,12 @@ use crate::error::{MemoryError, WorkClaimTransitionReason};
 
 use super::common::normalize_utc_iso_or_now;
 
-/// Claim lifecycle state. Two states only — see the module doc comment.
+/// Claim lifecycle state. Three states only — see the module doc comment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimState {
-    /// Registered and (per lazy TTL expiry) presumed live.
+    /// Registered and (per heartbeat-TTL expiry) presumed live.
     Active,
-    /// Lease expiry is evidence of an interrupted owner, never an implicit release.
+    /// Heartbeat-TTL expiry is evidence of an interrupted owner, never an implicit release.
     Orphaned,
     /// Released — either explicitly (`release`/`complete`/`cancel`) or
     /// superseded; the row is retained for audit and idempotent release.

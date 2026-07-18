@@ -21,6 +21,9 @@ pub(super) fn migrate_v21_identity_workclaim_spine(
     migrate_identity_admissions(conn)?;
 
     let mut added = 0;
+    // `lease_expires_at` is retained as caller-declared lease metadata for the
+    // v1 API and transition receipts. It is reserved for future direct-expiry
+    // enforcement: v1 orphaning is driven by `heartbeat_at` plus the GC TTL.
     for (table, column, ddl) in [
         ("session_claims", "agent_identity_id", "TEXT"),
         ("session_claims", "worktree_path", "TEXT"),

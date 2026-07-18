@@ -50,22 +50,25 @@ of a connection and freshness of a WorkClaim lease are separate signals.
 ## WorkClaim ledger
 
 The existing `session_claims` physical table is evolved in place; its Rust
-domain name and public APIs are `WorkClaim`. It remains the single durable join
-for:
+domain name and public APIs are `WorkClaim`. It remains the durable ledger for
+the fields actually shipped in v1:
 
 ```text
-AgentIdentity → WorkClaim → Issue / flow / ExecEnv / worktree / PR
-                                  → outcome / adjudication
+AgentIdentity → WorkClaim → Issue / flow / ExecEnv / worktree
 ```
 
 Every new WorkClaim records its claimant identity, role, mode (`read_only` or
-`writable`), declared file scope, expected HEAD, lease expiry and a monotonic
-transition version. Legacy rows are identity-unavailable: migration must not
-invent an `agent_identity_id` for them.
+`writable`), declared file scope, expected HEAD, caller-declared lease metadata,
+a monotonic transition version, and any ExecEnv/orphan binding. The
+`lease_expires_at` value is advisory and reserved for future direct-expiry
+enforcement; v1 orphaning uses `heartbeat_at` plus the configured GC TTL. Legacy
+rows are identity-unavailable: migration must not invent an
+`agent_identity_id` for them.
 
 States are `active`, `orphaned`, and `released`.
 
-- Expiry makes an `active` claim `orphaned`.
+- GC marks an `active` claim `orphaned` when its `heartbeat_at` is older than
+  the configured claim TTL.
 - An orphan blocks silent takeover.
 - Only explicit, versioned release or handoff changes ownership.
 - A failed compare-and-swap transition reports conflict rather than silently
@@ -103,8 +106,8 @@ aliases to the same engine. Board composition presents independent facts. It
 reads GitHub live where available; otherwise it reports
 `github_state=unavailable` and never infers a terminal state from a cache.
 
-WorkClaim may link PR, outcome, and adjudication references but does not claim
-authority over their source systems.
+PR, outcome, and adjudication references remain in their existing lifecycle
+ledgers; v1 does not add those columns to `session_claims`.
 
 ## Migration and compatibility
 
