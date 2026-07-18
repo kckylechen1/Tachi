@@ -44,11 +44,16 @@ fn tail_at_char_boundary(s: &str, max_bytes: usize) -> String {
     s[start..].to_string()
 }
 
-/// Strips ANSI CSI (`ESC [ ... final-byte`) and OSC (`ESC ] ... BEL|ST`)
-/// escape sequences. Any other lone ESC byte is dropped without consuming
-/// following characters -- a best-effort handling for other/malformed
-/// sequences, but every ESC (`\x1b`) byte itself is always removed, which is
-/// the property the discriminator test checks.
+/// Strips ANSI CSI (`ESC [ ... final-byte`) and the whole string-terminated
+/// family sharing OSC's shape -- OSC (`ESC ]`), DCS (`ESC P`), SOS (`ESC X`),
+/// PM (`ESC ^`), and APC (`ESC _`) -- each of which runs until a BEL or an
+/// ST (`ESC \`) terminator (tachi#1173 board autopsy review: the original
+/// implementation only recognized CSI/OSC, so a DCS/SOS/PM/APC sequence's
+/// body -- everything up to its terminator -- leaked into the tail verbatim
+/// instead of being swallowed). Any other lone ESC byte is dropped without
+/// consuming following characters -- a best-effort handling for other/
+/// malformed sequences, but every ESC (`\x1b`) byte itself is always
+/// removed, which is the property the discriminator test checks.
 fn strip_ansi_escapes(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -66,7 +71,7 @@ fn strip_ansi_escapes(input: &str) -> String {
                     }
                 }
             }
-            Some(']') => {
+            Some(']') | Some('P') | Some('X') | Some('^') | Some('_') => {
                 chars.next();
                 loop {
                     match chars.next() {
@@ -105,6 +110,36 @@ mod tests {
         let input = "\u{1b}]0;window title\u{7}visible text";
         let stripped = strip_ansi_escapes(input);
         assert_eq!(stripped, "visible text");
+        assert!(!stripped.contains('\u{1b}'));
+    }
+
+    /// tachi#1173 board autopsy review discriminator: DCS/SOS/PM/APC
+    /// (`ESC P`/`ESC X`/`ESC ^`/`ESC _`), the rest of the string-terminated
+    /// escape family alongside OSC, must be swallowed to their ST (`ESC \`)
+    /// terminator just like OSC -- previously only CSI/OSC were recognized,
+    /// so these leaked their body verbatim into the tail.
+    #[test]
+    fn strips_dcs_sos_pm_apc_sequences_to_st_terminator() {
+        for (open, label) in [('P', "DCS"), ('X', "SOS"), ('^', "PM"), ('_', "APC")] {
+            let input = format!("before\u{1b}{open}hidden payload\u{1b}\\after");
+            let stripped = strip_ansi_escapes(&input);
+            assert_eq!(
+                stripped, "beforeafter",
+                "{label} sequence body should be swallowed to its ST terminator, got: {stripped:?}"
+            );
+            assert!(
+                !stripped.contains('\u{1b}'),
+                "{label}: no raw ESC byte should remain, got: {stripped:?}"
+            );
+        }
+    }
+
+    /// Same family, terminated by BEL instead of ST (xterm accepts both).
+    #[test]
+    fn strips_dcs_sequence_terminated_by_bel() {
+        let input = "before\u{1b}Phidden payload\u{7}after";
+        let stripped = strip_ansi_escapes(input);
+        assert_eq!(stripped, "beforeafter");
         assert!(!stripped.contains('\u{1b}'));
     }
 

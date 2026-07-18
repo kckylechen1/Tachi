@@ -50,9 +50,25 @@ pub(crate) async fn handle_tachi_board(
     )
     .await?;
 
+    // tachi#1173 board autopsy review: track whether the caller explicitly
+    // passed a state_filter (even the literal value "all") vs. omitted it.
+    // The fold step below must only apply on the *default* (omitted) view --
+    // an explicit `state_filter: "all"` is itself an ask to see the
+    // unfolded, filtered-by-nothing view, same as any other explicit filter
+    // value, and previously couldn't be told apart from the omitted case
+    // because both collapsed to the same "all" string.
+    let state_filter_explicit = params
+        .state_filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some();
     let state_filter = params
         .state_filter
-        .clone()
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
         .unwrap_or_else(|| "all".to_string());
     let state_filter_name = state_filter.as_str();
 
@@ -178,16 +194,19 @@ pub(crate) async fn handle_tachi_board(
     }
 
     // tachi#1173 item 3: fold terminal (completed/failed/canceled) rows into
-    // a per-state count row on the default (unfiltered, non-verbose) view so
-    // a long-lived board doesn't drown active work under historical noise.
-    // An explicit non-"all" state_filter is itself an ask to see that state
-    // expanded, so folding never applies there regardless of `verbose`. A
+    // a per-state count row on the default (state_filter omitted, non-verbose)
+    // view so a long-lived board doesn't drown active work under historical
+    // noise. Any explicitly-passed state_filter -- including the literal
+    // value "all" -- is itself an ask to see that state (or every state)
+    // expanded, so folding never applies there regardless of `verbose`;
+    // folding is purely a default-view convenience, not a filter behavior a
+    // caller can accidentally trigger by asking for "all" on purpose. A
     // flow_id filter is the same kind of explicit, scoped ask -- a flow
     // board is expected to show every dispatch it recorded (including
     // completed ones), so folding is skipped there too (see
     // `tachi_task_board_filters_to_flow_dispatch_ids`, which asserts a
     // completed flow dispatch is still an individual row).
-    let fold_terminal = !verbose && state_filter_name == "all" && flow_filter.is_none();
+    let fold_terminal = !verbose && !state_filter_explicit && flow_filter.is_none();
     let mut folded_counts: BTreeMap<String, usize> = BTreeMap::new();
     if fold_terminal {
         let mut kept = Vec::with_capacity(tasks.len());
@@ -206,28 +225,35 @@ pub(crate) async fn handle_tachi_board(
         tasks = kept;
     }
 
-    // tachi#1173 item 7: attach a bounded, ANSI-free failure_tail to any
-    // visible individual row for a terminal-failed dispatch, so a caller can
-    // autopsy the failure without a separate file read. This only reaches
-    // failed rows that survived the fold step above (i.e. an explicit
-    // state_filter or verbose=true asked to see them expanded) -- a folded
-    // count row has no single run to read a tail from.
+    // tachi#1173 item 7 (board autopsy review): attach a bounded, ANSI-free
+    // failure_tail to every visible individual row, matching the stable
+    // shape `tachi_task(action='wait')` already commits to (see
+    // `task_facade::handle_tachi_task_wait`) -- the key is always present,
+    // defaulting to `null`, and only populated with a string for a
+    // terminal-failed dispatch whose run_dir has a readable tail. Previously
+    // the key was only inserted when a tail was actually found on a failed
+    // row, so a failed-but-tail-less row and a non-failed row were
+    // indistinguishable by key presence alone (both simply lacked
+    // `failure_tail`) -- an unstable response shape for callers deciding
+    // whether to branch on the field. This only reaches rows that survived
+    // the fold step above (i.e. an explicit state_filter or verbose=true
+    // asked to see them expanded) -- a folded count row has no single run to
+    // read a tail from and is already a distinct shape (no dispatch_id/
+    // run_dir at all), so it does not get this key.
     for task in &mut tasks {
-        if task.get("state").and_then(|v| v.as_str()) != Some("TASK_STATE_FAILED") {
-            continue;
-        }
-        let Some(run_dir) = task
-            .get("run_dir")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-        else {
+        let Some(obj) = task.as_object_mut() else {
             continue;
         };
-        if let Some(tail) = super::read_failure_tail(&run_dir) {
-            if let Some(obj) = task.as_object_mut() {
-                obj.insert("failure_tail".to_string(), json!(tail));
-            }
-        }
+        let is_failed = obj.get("state").and_then(|v| v.as_str()) == Some("TASK_STATE_FAILED");
+        let tail = if is_failed {
+            obj.get("run_dir")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .and_then(|run_dir| super::read_failure_tail(&run_dir))
+        } else {
+            None
+        };
+        obj.insert("failure_tail".to_string(), json!(tail));
     }
 
     tasks.sort_by(|a, b| {
@@ -235,9 +261,24 @@ pub(crate) async fn handle_tachi_board(
             .and_then(|v| v.as_str())
             .cmp(&a.get("updated_at").and_then(|v| v.as_str()))
     });
-    tasks.truncate(limit);
 
+    // tachi#1173 board autopsy review (folded_counts vs limit CONCERN):
+    // reserve room for the per-state folded summary rows *inside* `limit`
+    // before truncating the individual task list, so `limit` bounds the
+    // whole `tasks` array -- summary rows included -- instead of being
+    // silently exceeded. Previously `truncate(limit)` ran on individual rows
+    // only and summary rows were appended afterward unbounded, so a caller
+    // asking for `limit: 20` could get back 20 individual rows plus up to
+    // `folded_counts.len()` (at most 3: completed/failed/canceled) extra
+    // rows, and the top-level `count` field below reported that combined,
+    // over-limit total -- a self-contradiction between what was asked for
+    // and what `count` claimed was returned. `folded_counts.len()` is small
+    // in practice, so this reservation rarely displaces an individual row; a
+    // caller-supplied `limit` smaller than the number of distinct folded
+    // states is a pathological edge this fix does not special-case further.
     let folded_total: usize = folded_counts.values().sum();
+    let individual_limit = limit.saturating_sub(folded_counts.len());
+    tasks.truncate(individual_limit);
     if folded_total > 0 {
         for (state, count) in &folded_counts {
             tasks.push(json!({
