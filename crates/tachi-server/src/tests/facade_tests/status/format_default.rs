@@ -22,7 +22,14 @@ async fn tachi_status_agent_defaults_to_markdown_when_format_omitted() {
         "markdown digest must not happen to parse as JSON: {markdown}"
     );
     // Spot-check a couple of known top-level keys surface in the digest.
-    assert!(markdown.contains("health_score"), "{markdown}");
+    // `format_status_markdown` renders every object key through `md_escape`
+    // (agent_markdown/shared.rs), which backslash-escapes `_` among other
+    // markdown metacharacters -- pre-existing renderer behavior (predates
+    // this k3 chain, see 8115919e) unrelated to the format-default switch
+    // this test targets. `health_score` therefore surfaces as the escaped
+    // literal `health\_score`; `daemon` has no metacharacters so it passes
+    // through unescaped and needs no anchor change.
+    assert!(markdown.contains("health\\_score"), "{markdown}");
     assert!(markdown.contains("daemon"), "{markdown}");
 }
 
