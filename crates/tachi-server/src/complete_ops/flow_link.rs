@@ -359,8 +359,8 @@ mod tests {
         rt.block_on(handle_save_memory(&server, save))
             .expect("seed kanban");
 
-        let resolved = resolve_profile_for_dispatch(&server, dispatch_id, None)
-            .expect("profile from kanban");
+        let resolved =
+            resolve_profile_for_dispatch(&server, dispatch_id, None).expect("profile from kanban");
         assert_eq!(resolved, profile);
     }
 
