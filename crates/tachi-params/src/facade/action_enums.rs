@@ -99,6 +99,10 @@ pub enum TachiTaskAction {
     CloseLoop,
     RefineIssues,
     Adjudicate,
+    Claim,
+    Release,
+    Heartbeat,
+    Handoff,
 }
 
 impl TachiTaskAction {
@@ -130,6 +134,10 @@ impl TachiTaskAction {
         Self::CloseLoop,
         Self::RefineIssues,
         Self::Adjudicate,
+        Self::Claim,
+        Self::Release,
+        Self::Heartbeat,
+        Self::Handoff,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -160,6 +168,10 @@ impl TachiTaskAction {
             Self::CloseLoop => "close_loop",
             Self::RefineIssues => "refine_issues",
             Self::Adjudicate => "adjudicate",
+            Self::Claim => "claim",
+            Self::Release => "release",
+            Self::Heartbeat => "heartbeat",
+            Self::Handoff => "handoff",
         }
     }
 
@@ -207,6 +219,10 @@ impl FromStr for TachiTaskAction {
             "close_loop" => Ok(Self::CloseLoop),
             "refine_issues" => Ok(Self::RefineIssues),
             "adjudicate" => Ok(Self::Adjudicate),
+            "claim" => Ok(Self::Claim),
+            "release" => Ok(Self::Release),
+            "heartbeat" => Ok(Self::Heartbeat),
+            "handoff" => Ok(Self::Handoff),
             // #757: these were removed from tachi_task; point callers at tachi_gh.
             "link_pr" | "pr_status" | "pr_handoff" | "release_note" => Err(format!(
                 "Invalid tachi_task action '{s}'. GitHub PR lifecycle actions live on tachi_gh(action='{s}')."

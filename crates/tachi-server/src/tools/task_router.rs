@@ -176,7 +176,32 @@ pub(super) async fn handle_tachi_task_facade(
                 flow_id: params.flow_id.clone(),
                 verbose: params.verbose,
             };
-            crate::dispatch_ops::handle_tachi_board(server, board_params).await
+            let mut board: serde_json::Value = serde_json::from_str(
+                &crate::dispatch_ops::handle_tachi_board(server, board_params).await?,
+            )
+            .map_err(|err| format!("parse dispatch board: {err}"))?;
+            let claims = crate::claims_ops::work_claim_board(server)?;
+            if let Some(target) = board.as_object_mut() {
+                target.insert("work_claims".to_string(), claims["work_claims"].clone());
+                target.insert("github_state".to_string(), claims["github_state"].clone());
+            }
+            serde_json::to_string(&board).map_err(|err| format!("serialize task board: {err}"))
+        }
+        TachiTaskAction::Claim => {
+            serde_json::to_string(&crate::claims_ops::handle_task_claim(server, &params)?)
+                .map_err(|err| err.to_string())
+        }
+        TachiTaskAction::Release => {
+            serde_json::to_string(&crate::claims_ops::handle_task_release(server, &params)?)
+                .map_err(|err| err.to_string())
+        }
+        TachiTaskAction::Heartbeat => {
+            serde_json::to_string(&crate::claims_ops::handle_task_heartbeat(server, &params)?)
+                .map_err(|err| err.to_string())
+        }
+        TachiTaskAction::Handoff => {
+            serde_json::to_string(&crate::claims_ops::handle_task_handoff(server, &params)?)
+                .map_err(|err| err.to_string())
         }
         TachiTaskAction::Status => handle_tachi_task_status(server, &params).await,
         TachiTaskAction::Cancel => handle_tachi_task_cancel(server, &params).await,

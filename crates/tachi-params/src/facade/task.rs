@@ -24,7 +24,7 @@ pub struct TachiTaskParams {
     /// doc_index, recommend, dispatch, complete, adjudicate, profiles, profile, card,
     /// route_simulate, proposals, review_proposal, apply_proposals, status,
     /// cancel, board, wait, merge, intake, cycle_status, cycle_plan, ux_matrix,
-    /// build_references, close_loop.
+    /// build_references, close_loop, claim, release, heartbeat, handoff.
     /// action="merge" is local dispatched worktree git merge only; use
     /// tachi_gh(action='safe_merge') for GitHub PR merges.
     /// action="intake" binds a GitHub issue to a flow.
@@ -521,4 +521,43 @@ pub struct TachiTaskParams {
     /// pattern as `eval_run_ids`/`project_explicit` above.
     #[serde(default)]
     pub inject_card: Option<bool>,
+    // --- canonical WorkClaim fields (#1253) ---
+    #[serde(default)]
+    #[schemars(
+        description = "[action=claim|handoff] Stable AgentIdentity id. It is never a session id or connection id."
+    )]
+    pub agent_identity_id: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=claim|handoff] Per-work claimant role.")]
+    pub claim_role: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=claim|handoff] WorkClaim mode: read_only or writable.")]
+    pub claim_mode: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=claim|handoff] Canonical writable worktree path.")]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=claim|handoff] Declared file scope for collision checks.")]
+    pub claim_scope: Vec<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=claim|handoff] Expected Git head; incompatible heads conflict loudly."
+    )]
+    pub expected_head: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=claim|heartbeat|handoff|release] Lease expiry as UTC RFC3339."
+    )]
+    pub lease_expires_at: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=heartbeat|handoff|release] Required WorkClaim transition version for compare-and-swap."
+    )]
+    pub transition_version: Option<i64>,
+    #[serde(default)]
+    #[schemars(description = "[action=heartbeat|handoff|release] WorkClaim id.")]
+    pub claim_id: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=release] Explicit release reason.")]
+    pub release_reason: Option<String>,
 }

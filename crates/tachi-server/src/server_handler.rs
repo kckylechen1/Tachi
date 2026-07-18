@@ -235,6 +235,7 @@ fn annotate_bound_project_schema(tool: &mut rmcp::model::Tool) {
 struct HttpSessionIdentity {
     profile: Option<String>,
     client: Option<String>,
+    agent_identity_id: Option<String>,
     project: Option<String>,
     /// #1120 PR1: `X-Tachi-Workspace-Root` / `_meta.tachiWorkspaceRoot`. Only
     /// consulted when `project` is absent — an explicit named-project binding
@@ -327,7 +328,16 @@ impl MemoryServer {
             ),
             ProjectBindingSource::None => None,
         };
-        self.set_session_identity(identity.client, project, profile);
+        self.set_session_identity(identity.client.clone(), project, profile);
+        crate::claims_ops::admit_agent_connection(
+            self,
+            identity.agent_identity_id,
+            context
+                .extensions
+                .get::<axum::http::request::Parts>()
+                .is_none(),
+        )
+        .map_err(|message| rmcp::ErrorData::invalid_params(message, None))?;
         Ok(())
     }
 }
@@ -342,6 +352,9 @@ fn http_session_identity(
             header_string(parts, crate::session_identity::HEADER_PROFILE).or(identity.profile);
         identity.client =
             header_string(parts, crate::session_identity::HEADER_CLIENT).or(identity.client);
+        identity.agent_identity_id =
+            header_string(parts, crate::session_identity::HEADER_AGENT_IDENTITY)
+                .or(identity.agent_identity_id);
         identity.project =
             header_string(parts, crate::session_identity::HEADER_PROJECT).or(identity.project);
         // Review finding [3] (#1207): a header wins over `_meta` per this
@@ -372,6 +385,8 @@ fn identity_from_initialize_meta(meta: Option<&rmcp::model::Meta>) -> HttpSessio
         .or_else(|| meta_string(meta, "tachi.profile"));
     identity.client = meta_string(meta, crate::session_identity::META_CLIENT)
         .or_else(|| meta_string(meta, "tachi.client"));
+    identity.agent_identity_id = meta_string(meta, crate::session_identity::META_AGENT_IDENTITY)
+        .or_else(|| meta_string(meta, "tachi.agentIdentity"));
     identity.project = meta_string(meta, crate::session_identity::META_PROJECT)
         .or_else(|| meta_string(meta, "tachi.project"));
     // Review finding [3] (#1207): unlike the fields above, a PRESENT-but-
@@ -1099,6 +1114,7 @@ mod tests {
         let identity = HttpSessionIdentity {
             profile: None,
             client: None,
+            agent_identity_id: None,
             project: Some("sigil".to_string()),
             workspace_root: Some("/home/agent/repos/sigil".to_string()),
             workspace_root_error: None,
@@ -1114,6 +1130,7 @@ mod tests {
         let identity = HttpSessionIdentity {
             profile: None,
             client: None,
+            agent_identity_id: None,
             project: None,
             workspace_root: Some("/home/agent/repos/sigil".to_string()),
             workspace_root_error: None,

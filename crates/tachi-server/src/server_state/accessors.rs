@@ -13,6 +13,33 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 impl MemoryServer {
+    pub(crate) fn set_work_claim_connection(
+        &self,
+        agent_identity_id: Option<String>,
+        connection_id: String,
+        admission: String,
+    ) {
+        self.agent_runtime_write().work_claim_connection =
+            Some(super::runtime::WorkClaimConnection {
+                agent_identity_id,
+                connection_id,
+                admission,
+            });
+    }
+
+    pub(crate) fn work_claim_connection(&self) -> Option<(Option<String>, String, String)> {
+        self.agent_runtime_read()
+            .work_claim_connection
+            .as_ref()
+            .map(|connection| {
+                (
+                    connection.agent_identity_id.clone(),
+                    connection.connection_id.clone(),
+                    connection.admission.clone(),
+                )
+            })
+    }
+
     pub(crate) fn tool_cache_lock(
         &self,
     ) -> std::sync::MutexGuard<'_, HashMap<String, CachedResult>> {

@@ -150,6 +150,16 @@ fn task_params(action: &str) -> TachiTaskParams {
         wiki_domain: None,
         force: false,
         inject_card: None,
+        agent_identity_id: None,
+        claim_role: None,
+        claim_mode: None,
+        worktree_path: None,
+        claim_scope: Vec::new(),
+        expected_head: None,
+        lease_expires_at: None,
+        transition_version: None,
+        claim_id: None,
+        release_reason: None,
     }
 }
 

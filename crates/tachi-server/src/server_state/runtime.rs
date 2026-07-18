@@ -11,11 +11,19 @@ pub(crate) struct AgentRuntime {
     pub(crate) tool_profile: Option<ToolProfile>,
     pub(crate) session_client: Option<String>,
     pub(crate) session_project: Option<String>,
+    pub(crate) work_claim_connection: Option<WorkClaimConnection>,
     // #1099: `handoff_memos` (in-memory duplicate of the persisted
     // `handoff:<id>` store rows, LRU-capped, populated only by the retired
     // `handoff_leave`/`handoff_check` handlers) removed — it was the
     // "second memo lifecycle" the #1099 acceptance criteria call out;
     // nothing wrote or read it once those handlers went away.
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkClaimConnection {
+    pub(crate) agent_identity_id: Option<String>,
+    pub(crate) connection_id: String,
+    pub(crate) admission: String,
 }
 
 /// Bounded channel capacity for enrichment batcher

@@ -17,9 +17,205 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use icu_properties::{props::GeneralCategory, CodePointMapData};
-use memcore::{ClaimSelector, NewSessionClaim, ReleaseOutcome, SessionClaim};
+use memcore::{
+    AgentIdentity, ClaimSelector, NewSessionClaim, NewWorkClaim, ReleaseOutcome, SessionClaim,
+    UnverifiedAdmissionState, WorkClaimHandoffRequest, WorkClaimMode,
+};
 
 use crate::server_state::MemoryServer;
+
+pub(crate) fn admit_agent_connection(
+    server: &MemoryServer,
+    asserted: Option<String>,
+    local: bool,
+) -> Result<(), String> {
+    let connection_id = format!("conn-{}", uuid::Uuid::new_v4());
+    let identity =
+        asserted.filter(|id| crate::session_identity::valid_agent_identity_assertion(id));
+    let admission = if identity.is_none() {
+        "rejected"
+    } else if local {
+        "self_asserted"
+    } else {
+        "unavailable"
+    };
+    if let Some(identity_id) = identity.as_deref() {
+        server.with_global_store(|store| {
+            let row = AgentIdentity {
+                agent_identity_id: identity_id.to_string(),
+                display_name: None,
+                seat: None,
+                capability_json: None,
+                created_at: String::new(),
+            };
+            match memcore::insert_agent_identity(store.connection(), &row) {
+                Ok(()) => {}
+                Err(memcore::MemoryError::Sqlite(err))
+                    if err.sqlite_error_code()
+                        == Some(rusqlite::ErrorCode::ConstraintViolation) => {}
+                Err(err) => return Err(err.to_string()),
+            }
+            memcore::record_unverified_admission(
+                store.connection(),
+                &format!("admission-{}", uuid::Uuid::new_v4()),
+                identity_id,
+                &connection_id,
+                if local {
+                    UnverifiedAdmissionState::SelfAsserted
+                } else {
+                    UnverifiedAdmissionState::Unavailable
+                },
+            )
+            .map_err(|err| err.to_string())
+        })?;
+    }
+    server.set_work_claim_connection(identity, connection_id, admission.to_string());
+    Ok(())
+}
+
+fn task_required(value: Option<String>, name: &str) -> Result<String, String> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("{name} is required"))
+}
+fn task_mode(value: Option<String>) -> Result<WorkClaimMode, String> {
+    match task_required(value, "claim_mode")?.as_str() {
+        "read_only" => Ok(WorkClaimMode::ReadOnly),
+        "writable" => Ok(WorkClaimMode::Writable),
+        _ => Err("claim_mode must be read_only or writable".to_string()),
+    }
+}
+fn task_identity(server: &MemoryServer, asserted: Option<String>) -> Result<String, String> {
+    let Some((identity, _connection, admission)) = server.work_claim_connection() else {
+        return Err("AgentIdentity admission is unavailable; initialize first".to_string());
+    };
+    if admission == "rejected" {
+        return Err("AgentIdentity admission rejected".to_string());
+    }
+    let identity = identity.ok_or_else(|| {
+        "AgentIdentity admission unavailable; remote identity has no #1170 proof".to_string()
+    })?;
+    if asserted.is_some_and(|value| value != identity) {
+        return Err("agent_identity_id must match the admitted stable identity".to_string());
+    }
+    Ok(identity)
+}
+
+pub(crate) fn handle_task_claim(
+    server: &MemoryServer,
+    params: &crate::tool_params::TachiTaskParams,
+) -> Result<serde_json::Value, String> {
+    let scope = serde_json::to_string(&params.claim_scope).map_err(|err| err.to_string())?;
+    if params.claim_scope.is_empty() {
+        return Err("claim_scope is required".to_string());
+    }
+    let claim_id = format!("claim-{}", uuid::Uuid::new_v4());
+    let claim = NewWorkClaim {
+        claim_id: claim_id.clone(),
+        agent_identity_id: task_identity(server, params.agent_identity_id.clone())?,
+        session_client: server.session_client(),
+        issue_ref: params.issue_ref.clone(),
+        flow_id: params.flow_id.clone(),
+        dispatch_id: params.dispatch_id.clone(),
+        branch: params.branch.clone().unwrap_or_default(),
+        worktree_path: params.worktree_path.clone().unwrap_or_default(),
+        declared_file_scope: scope,
+        role: task_required(params.claim_role.clone(), "claim_role")?,
+        mode: task_mode(params.claim_mode.clone())?,
+        expected_head: task_required(params.expected_head.clone(), "expected_head")?,
+        lease_expires_at: task_required(params.lease_expires_at.clone(), "lease_expires_at")?,
+        created_at: String::new(),
+    };
+    server.with_global_store(|store| {
+        memcore::insert_work_claim(store.connection_mut(), &claim).map_err(|err| err.to_string())
+    })?;
+    Ok(
+        serde_json::json!({"status":"completed","action":"claim","claim_id":claim_id,"transition_version":0}),
+    )
+}
+
+pub(crate) fn handle_task_heartbeat(
+    server: &MemoryServer,
+    params: &crate::tool_params::TachiTaskParams,
+) -> Result<serde_json::Value, String> {
+    let receipt = server.with_global_store(|store| {
+        memcore::heartbeat_work_claim(
+            store.connection_mut(),
+            &task_required(params.claim_id.clone(), "claim_id")?,
+            params
+                .transition_version
+                .ok_or_else(|| "transition_version is required".to_string())?,
+            &task_required(params.lease_expires_at.clone(), "lease_expires_at")?,
+        )
+        .map_err(|err| err.to_string())
+    })?;
+    Ok(
+        serde_json::json!({"status":"completed","action":"heartbeat","claim_id":receipt.claim_id,"transition_version":receipt.transition_version,"lease_expires_at":receipt.lease_expires_at}),
+    )
+}
+
+pub(crate) fn handle_task_handoff(
+    server: &MemoryServer,
+    params: &crate::tool_params::TachiTaskParams,
+) -> Result<serde_json::Value, String> {
+    let successor = WorkClaimHandoffRequest {
+        agent_identity_id: task_identity(server, params.agent_identity_id.clone())?,
+        role: task_required(params.claim_role.clone(), "claim_role")?,
+        mode: task_mode(params.claim_mode.clone())?,
+        worktree_path: params.worktree_path.clone().unwrap_or_default(),
+        declared_file_scope: serde_json::to_string(&params.claim_scope)
+            .map_err(|err| err.to_string())?,
+        expected_head: task_required(params.expected_head.clone(), "expected_head")?,
+        lease_expires_at: task_required(params.lease_expires_at.clone(), "lease_expires_at")?,
+    };
+    let receipt = server.with_global_store(|store| {
+        memcore::handoff_work_claim(
+            store.connection_mut(),
+            &task_required(params.claim_id.clone(), "claim_id")?,
+            params
+                .transition_version
+                .ok_or_else(|| "transition_version is required".to_string())?,
+            &successor,
+        )
+        .map_err(|err| err.to_string())
+    })?;
+    Ok(
+        serde_json::json!({"status":"completed","action":"handoff","claim_id":receipt.claim_id,"transition_version":receipt.transition_version,"to_agent_identity_id":receipt.to_agent_identity_id}),
+    )
+}
+
+pub(crate) fn handle_task_release(
+    server: &MemoryServer,
+    params: &crate::tool_params::TachiTaskParams,
+) -> Result<serde_json::Value, String> {
+    let claim_id = task_required(params.claim_id.clone(), "claim_id")?;
+    let version = server.with_global_store(|store| {
+        memcore::release_work_claim(
+            store.connection(),
+            &claim_id,
+            params
+                .transition_version
+                .ok_or_else(|| "transition_version is required".to_string())?,
+            params
+                .release_reason
+                .as_deref()
+                .unwrap_or("explicit_release"),
+        )
+        .map_err(|err| err.to_string())
+    })?;
+    Ok(
+        serde_json::json!({"status":"completed","action":"release","claim_id":claim_id,"transition_version":version}),
+    )
+}
+
+pub(crate) fn work_claim_board(server: &MemoryServer) -> Result<serde_json::Value, String> {
+    let claims = server.with_global_store_read(|store| {
+        memcore::list_claims(store.connection(), None).map_err(|err| err.to_string())
+    })?;
+    Ok(
+        serde_json::json!({"github_state":"unavailable","work_claims":claims.into_iter().map(|claim| serde_json::json!({"claim_id":claim.claim_id,"issue_ref":claim.issue_ref,"state":claim.state.as_str(),"transition_version":claim.transition_version,"agent_identity_id":claim.agent_identity_id})).collect::<Vec<_>>() }),
+    )
+}
 
 /// Default lease TTL: a claim whose heartbeat is older than this is presented
 /// as expired by readers (briefing/collision-check), without a second write —
@@ -735,6 +931,54 @@ pub(crate) fn presence_briefing_section(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::make_server;
+
+    #[test]
+    fn admission_never_accepts_caller_verified_and_reconnect_gets_new_connection() {
+        let server = make_server();
+        admit_agent_connection(&server, Some("agent.alpha".to_string()), true)
+            .expect("local admission");
+        let first = server.work_claim_connection().expect("first connection");
+        assert_eq!(first.0.as_deref(), Some("agent.alpha"));
+        assert_eq!(first.2, "self_asserted");
+        admit_agent_connection(&server, Some("agent.alpha".to_string()), true)
+            .expect("reconnect admission");
+        let second = server.work_claim_connection().expect("second connection");
+        assert_ne!(
+            first.1, second.1,
+            "connection ids are server-generated per reconnect"
+        );
+        server
+            .with_global_store_read(|store| {
+                let states: Vec<String> = store
+                    .connection()
+                    .prepare("SELECT state FROM identity_admissions")
+                    .map_err(|e| e.to_string())?
+                    .query_map([], |row| row.get(0))
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| e.to_string())?;
+                assert!(
+                    states.iter().all(|state| state != "verified"),
+                    "caller input cannot mint verified admission: {states:?}"
+                );
+                Ok(())
+            })
+            .expect("read admissions");
+        admit_agent_connection(&server, Some("agent.remote".to_string()), false)
+            .expect("remote admission");
+        assert_eq!(
+            server.work_claim_connection().expect("remote connection").2,
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn board_explicitly_marks_github_unavailable() {
+        let board = work_claim_board(&make_server()).expect("board");
+        assert_eq!(board["github_state"], "unavailable");
+        assert!(board.get("work_claims").is_some());
+    }
 
     fn claim(session_client: &str, issue_ref: &str, scope: Option<Vec<&str>>) -> SessionClaim {
         SessionClaim {
