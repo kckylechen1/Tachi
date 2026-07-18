@@ -102,6 +102,9 @@ async fn search_falls_back_to_lexical_with_degraded_marker_when_embed_provider_b
             enable_rerank: false,
             as_of: None,
             include_metadata: false,
+            // tachi#1201 k3: search_memory now defaults to markdown; this
+            // test parses the response as JSON, so opt in explicitly.
+            format: Some("json".to_string()),
         }))
         .await
         .expect("search should succeed despite a dead embedding provider");

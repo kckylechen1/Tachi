@@ -149,6 +149,9 @@ async fn sandbox_search_filters_project_rows_with_global_rules() {
             enable_rerank: false,
             as_of: None,
             include_metadata: false,
+            // tachi#1201 k3: search_memory now defaults to markdown; this
+            // test parses the response as JSON, so opt in explicitly.
+            format: Some("json".to_string()),
         }))
         .await
         .expect("sandboxed search should succeed");

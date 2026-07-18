@@ -100,6 +100,7 @@ pub(in crate::foundry_runtime_ops) async fn process_recall_rerank_cache_job(
                 enable_rerank: false,
                 as_of: None,
                 include_metadata: false,
+                format: None,
             },
         )
         .await?;

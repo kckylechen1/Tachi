@@ -42,6 +42,7 @@ pub(crate) async fn handle_tachi_board(
             enable_rerank: false,
             as_of: None,
             include_metadata: true,
+            format: None,
         },
         false,
     )

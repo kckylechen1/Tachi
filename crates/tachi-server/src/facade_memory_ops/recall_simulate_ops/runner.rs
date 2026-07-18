@@ -374,6 +374,7 @@ fn build_search_params(
         enable_rerank: params.enable_rerank,
         as_of: case.as_of.clone().or_else(|| params.as_of.clone()),
         include_metadata: false,
+        format: None,
     })
 }
 

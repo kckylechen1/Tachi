@@ -59,7 +59,7 @@ async fn tachi_status_full_surfaces_continuity_challenge_rate() {
     };
     manifest.save(&manifest_path).expect("save manifest");
 
-    let body = crate::status_ops::handle_tachi_status_full(&server)
+    let body = crate::status_ops::handle_tachi_status_full(&server, Some("json"))
         .await
         .expect("status should serialize");
     let parsed: Value = serde_json::from_str(&body).expect("status JSON");

@@ -135,6 +135,10 @@ def test_tachi_server():
         resp = call_tool(proc, "search_memory", {
             "query": "bun OR rmcp OR test",
             "top_k": 10,
+            # tachi#1201 k3: search_memory now defaults to a markdown digest
+            # when "format" is omitted; this smoke test parses the JSON row
+            # list below, so pin the pre-k3 contract explicitly.
+            "format": "json",
         })
         results = extract_text(resp)
         check("search returns list", isinstance(results, list), f"type: {type(results)}, val: {str(results)[:200]}")

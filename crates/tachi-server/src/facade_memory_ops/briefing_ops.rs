@@ -76,7 +76,10 @@ fn insert_non_empty_compact_section(map: &mut Map<String, Value>, key: &str, val
 }
 
 async fn compact_health_summary(server: &MemoryServer, wiki_counts: Value) -> Value {
-    let status = crate::status_ops::handle_tachi_status_agent(server)
+    // tachi#1201 k3: search_memory/tachi_status now default to markdown when
+    // `format` is omitted; this internal consumer parses the body as JSON,
+    // so it must opt in explicitly to keep this call's shape unchanged.
+    let status = crate::status_ops::handle_tachi_status_agent(server, Some("json"))
         .await
         .ok()
         .and_then(|body| serde_json::from_str::<Value>(&body).ok())
@@ -152,6 +155,10 @@ pub(crate) async fn handle_memory_briefing(
         enable_rerank: params.enable_rerank,
         as_of: params.as_of.clone(),
         include_metadata: false,
+        // tachi#1201 k3: search_memory now defaults to markdown when `format`
+        // is omitted; this internal consumer parses the body as JSON via
+        // `handle_search_memory` below, so it must opt in explicitly.
+        format: Some("json".to_string()),
     };
 
     let wiki_params = if include_wiki {
@@ -184,6 +191,9 @@ pub(crate) async fn handle_memory_briefing(
             enable_rerank: false,
             as_of: params.as_of.clone(),
             include_metadata: false,
+            // Goes through search_memory_rows (Vec<Value>, no string
+            // round trip) below, so format is compile-only here.
+            format: None,
         })
     } else {
         None

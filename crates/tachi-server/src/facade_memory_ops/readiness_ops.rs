@@ -421,7 +421,12 @@ pub(crate) async fn handle_memory_readiness(
     server: &MemoryServer,
     params: &TachiMemoryParams,
 ) -> Result<String, String> {
-    let status = parse_json_or_empty(crate::status_ops::handle_tachi_status_full(server).await?);
+    // tachi#1201 k3: tachi_status now defaults to markdown when `format` is
+    // omitted; this internal consumer parses the body as JSON, so it must
+    // opt in explicitly to keep this call's shape unchanged.
+    let status = parse_json_or_empty(
+        crate::status_ops::handle_tachi_status_full(server, Some("json")).await?,
+    );
     let runtime = parse_json_or_empty(crate::memory_ops::handle_runtime_info(server).await?);
     let core_tool_names = [
         "tachi_tools",

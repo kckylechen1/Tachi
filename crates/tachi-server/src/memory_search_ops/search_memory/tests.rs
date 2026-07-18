@@ -59,6 +59,7 @@ fn params(query: &str) -> SearchMemoryParams {
         enable_rerank: false,
         as_of: None,
         include_metadata: false,
+        format: None,
     }
 }
 

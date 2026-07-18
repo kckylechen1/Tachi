@@ -72,7 +72,7 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
         .llm
         .mark_provider_key_rate_limited_for_tests("VOYAGE_API_KEY_1", Some(60));
 
-    let body = crate::status_ops::handle_tachi_status_full(&server)
+    let body = crate::status_ops::handle_tachi_status_full(&server, Some("json"))
         .await
         .expect("status should serialize");
     let parsed: Value = serde_json::from_str(&body).expect("status JSON");
@@ -177,7 +177,7 @@ async fn tachi_status_reports_durable_vector_sweep_state() {
     };
     manifest.save(&manifest_path).expect("save manifest");
 
-    let body = crate::status_ops::handle_tachi_status_full(&server)
+    let body = crate::status_ops::handle_tachi_status_full(&server, Some("json"))
         .await
         .expect("status should serialize");
     let parsed: Value = serde_json::from_str(&body).expect("status JSON");
@@ -246,7 +246,7 @@ async fn tachi_status_surfaces_malformed_vector_sweep_state() {
     };
     manifest.save(&manifest_path).expect("save manifest");
 
-    let body = crate::status_ops::handle_tachi_status_full(&server)
+    let body = crate::status_ops::handle_tachi_status_full(&server, Some("json"))
         .await
         .expect("status should serialize");
     let parsed: Value = serde_json::from_str(&body).expect("status JSON");

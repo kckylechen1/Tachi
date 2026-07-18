@@ -53,6 +53,7 @@ pub(crate) async fn handle_tachi_progress_check(
             enable_rerank: false,
             as_of: None,
             include_metadata: false,
+            format: None,
         },
         false,
     )
@@ -184,6 +185,7 @@ pub(super) async fn build_route_recommendation(
             enable_rerank: false,
             as_of: None,
             include_metadata: false,
+            format: None,
         },
         false,
     )

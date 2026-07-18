@@ -154,6 +154,17 @@ pub struct SearchMemoryParams {
     /// surface `a2a_state`, `eval_ledger_id`, `agent`, etc.
     #[serde(default)]
     pub include_metadata: bool,
+
+    /// Response shape for the raw `search_memory` MCP tool. Omitted, empty,
+    /// or anything other than "json" renders a compact human-readable
+    /// markdown digest (tachi#1201 k3); pass "json" explicitly to get the
+    /// full JSON row array, byte-identical to the pre-k3 unconditional
+    /// shape. NOTE the default polarity here is the OPPOSITE of the
+    /// `tachi_memory`/`tachi_search` facade's `format` field (that one
+    /// defaults an omitted value to JSON) — this field only governs the raw
+    /// `search_memory` tool, not the higher-level facades.
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 impl SearchMemoryParams {
@@ -289,6 +300,7 @@ mod tests {
             enable_rerank: false,
             as_of: None,
             include_metadata: false,
+            format: None,
         }
     }
 
