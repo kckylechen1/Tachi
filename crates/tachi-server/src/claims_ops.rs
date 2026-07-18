@@ -664,40 +664,37 @@ pub(crate) fn handle_manual_claim(
     if issue_ref.is_none() && flow_id.is_none() {
         return Err("tachi_memory(action='claim') requires issue_ref and/or flow_id".to_string());
     }
-    let session_client = resolve_session_client(server);
-    let live = list_live_claims_for_briefing(server);
-    let warnings = collision_warnings(
-        &live,
-        Some(session_client.as_str()),
-        issue_ref.as_deref(),
-        declared_file_scope.as_deref().unwrap_or_default(),
-    );
-
-    let new_claim = NewSessionClaim {
+    let scope = declared_file_scope.unwrap_or_else(|| vec!["legacy".to_string()]);
+    let new_claim = NewWorkClaim {
         claim_id: generate_claim_id(),
-        session_client: Some(session_client.clone()),
+        agent_identity_id: task_identity(server, None)?,
+        session_client: server.session_client(),
         issue_ref: issue_ref.clone(),
         flow_id: flow_id.clone(),
         dispatch_id: None,
         branch: branch.unwrap_or_default(),
-        declared_file_scope: declared_file_scope
-            .as_ref()
-            .map(|scope| serde_json::to_string(scope).unwrap_or_default()),
+        worktree_path: String::new(),
+        declared_file_scope: serde_json::to_string(&scope).map_err(|err| err.to_string())?,
+        role: "legacy".to_string(),
+        mode: WorkClaimMode::ReadOnly,
+        expected_head: "legacy-unspecified".to_string(),
+        lease_expires_at: (chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339(),
         created_at: String::new(),
     };
-    let claim_id: String = server.with_global_store(|store| {
-        memcore::upsert_or_heartbeat_claim(store.connection_mut(), &new_claim)
-            .map_err(|e| e.to_string())
+    let claim_id = new_claim.claim_id.clone();
+    server.with_global_store(|store| {
+        memcore::insert_work_claim(store.connection_mut(), &new_claim)
+            .map_err(|err| err.to_string())
     })?;
 
     Ok(serde_json::json!({
         "status": "completed",
         "action": "claim",
         "claim_id": claim_id,
-        "session_client": session_client,
+        "agent_identity_id": new_claim.agent_identity_id,
         "issue_ref": issue_ref,
         "flow_id": flow_id,
-        "warnings": warnings,
+        "warnings": [],
     }))
 }
 
@@ -711,10 +708,20 @@ pub(crate) fn handle_manual_release(
     dispatch_id: Option<String>,
     reason: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let selector = match (claim_id, dispatch_id) {
-        (Some(claim_id), _) if !claim_id.trim().is_empty() => ClaimSelector::ClaimId(claim_id),
+    let claim_id = match (claim_id, dispatch_id) {
+        (Some(claim_id), _) if !claim_id.trim().is_empty() => claim_id,
         (_, Some(dispatch_id)) if !dispatch_id.trim().is_empty() => {
-            ClaimSelector::DispatchId(dispatch_id)
+            server.with_global_store_read(|store| {
+                memcore::list_claims(store.connection(), None)
+                    .map_err(|err| err.to_string())?
+                    .into_iter()
+                    .find(|claim| {
+                        claim.dispatch_id.as_deref() == Some(dispatch_id.as_str())
+                            && claim.state == memcore::ClaimState::Active
+                    })
+                    .map(|claim| claim.claim_id)
+                    .ok_or_else(|| format!("no active WorkClaim for dispatch_id {dispatch_id}"))
+            })?
         }
         _ => {
             return Err(
@@ -722,20 +729,27 @@ pub(crate) fn handle_manual_release(
             )
         }
     };
-    let outcome: ReleaseOutcome = server.with_global_store(|store| {
-        memcore::release_claim(store.connection_mut(), &selector, reason.as_deref())
-            .map_err(|e| e.to_string())
+    let version = server.with_global_store_read(|store| {
+        memcore::get_claim(store.connection(), &claim_id)
+            .map_err(|err| err.to_string())?
+            .map(|claim| claim.transition_version)
+            .ok_or_else(|| format!("claim {claim_id} not found"))
     })?;
-    let (status, claim_id) = match outcome {
-        ReleaseOutcome::Released { claim_id } => ("released", Some(claim_id)),
-        ReleaseOutcome::AlreadyReleased { claim_id } => ("already_released", Some(claim_id)),
-        ReleaseOutcome::NotFound => ("not_found", None),
-    };
+    let next = server.with_global_store(|store| {
+        memcore::release_work_claim(
+            store.connection(),
+            &claim_id,
+            version,
+            reason.as_deref().unwrap_or("legacy_release"),
+        )
+        .map_err(|err| err.to_string())
+    })?;
     Ok(serde_json::json!({
         "status": "completed",
         "action": "release",
-        "outcome": status,
+        "outcome": "released",
         "claim_id": claim_id,
+        "transition_version": next,
     }))
 }
 
@@ -933,6 +947,27 @@ mod tests {
     use super::*;
     use crate::tests::make_server;
 
+    fn task(action: &str, extra: serde_json::Value) -> crate::tool_params::TachiTaskParams {
+        let mut value = serde_json::json!({"action": action});
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(value).expect("task params")
+    }
+
+    fn claim_params() -> crate::tool_params::TachiTaskParams {
+        task(
+            "claim",
+            serde_json::json!({
+                "issue_ref": "org/repo#1253", "branch": "lane/1253-server",
+                "claim_role": "executor", "claim_mode": "writable",
+                "worktree_path": "/tmp/claim-alpha", "claim_scope": ["crates/tachi-server/src/claims_ops.rs"],
+                "expected_head": "f7467b3", "lease_expires_at": "2030-01-01T00:00:00Z"
+            }),
+        )
+    }
+
     #[test]
     fn admission_never_accepts_caller_verified_and_reconnect_gets_new_connection() {
         let server = make_server();
@@ -978,6 +1013,80 @@ mod tests {
         let board = work_claim_board(&make_server()).expect("board");
         assert_eq!(board["github_state"], "unavailable");
         assert!(board.get("work_claims").is_some());
+    }
+
+    #[test]
+    fn canonical_heartbeat_and_handoff_reject_stale_versions_loudly() {
+        let server = make_server();
+        admit_agent_connection(&server, Some("agent.alpha".to_string()), true).unwrap();
+        let claim = handle_task_claim(&server, &claim_params()).unwrap();
+        let claim_id = claim["claim_id"].as_str().unwrap().to_string();
+        let heartbeat = handle_task_heartbeat(&server, &task("heartbeat", serde_json::json!({"claim_id": claim_id, "transition_version": 0, "lease_expires_at": "2030-01-02T00:00:00Z"}))).unwrap();
+        assert_eq!(heartbeat["transition_version"], 1);
+        let stale = handle_task_heartbeat(&server, &task("heartbeat", serde_json::json!({"claim_id": claim_id, "transition_version": 0, "lease_expires_at": "2030-01-03T00:00:00Z"}))).expect_err("stale heartbeat must not succeed");
+        assert!(stale.contains("WorkClaim conflict"), "{stale}");
+        admit_agent_connection(&server, Some("agent.beta".to_string()), true).unwrap();
+        let handoff = task(
+            "handoff",
+            serde_json::json!({"claim_id": claim_id, "transition_version": 1, "claim_role": "reviewer", "claim_mode": "writable", "worktree_path": "/tmp/claim-beta", "claim_scope": ["crates/tachi-server/src/claims_ops.rs"], "expected_head": "f7467b3", "lease_expires_at": "2030-01-03T00:00:00Z"}),
+        );
+        assert_eq!(
+            handle_task_handoff(&server, &handoff).unwrap()["transition_version"],
+            2
+        );
+        let stale_handoff = handle_task_handoff(&server, &task("handoff", serde_json::json!({"claim_id": claim_id, "transition_version": 1, "claim_role": "reviewer", "claim_mode": "writable", "worktree_path": "/tmp/claim-beta", "claim_scope": ["crates/tachi-server/src/claims_ops.rs"], "expected_head": "f7467b3", "lease_expires_at": "2030-01-03T00:00:00Z"}))).expect_err("stale handoff must not succeed");
+        assert!(
+            stale_handoff.contains("WorkClaim conflict"),
+            "{stale_handoff}"
+        );
+    }
+
+    #[test]
+    fn canonical_claim_surfaces_persistence_error_without_receipt() {
+        let server = make_server();
+        admit_agent_connection(&server, Some("agent.alpha".to_string()), true).unwrap();
+        server
+            .with_global_store(|store| {
+                store
+                    .connection_mut()
+                    .execute("DROP TABLE session_claims", [])
+                    .map_err(|err| err.to_string())
+            })
+            .unwrap();
+        let err = handle_task_claim(&server, &claim_params())
+            .expect_err("persistence failure must be returned");
+        assert!(err.contains("session_claims"), "{err}");
+    }
+
+    #[test]
+    fn memory_alias_uses_same_work_claim_ledger_as_canonical_claim() {
+        let server = make_server();
+        admit_agent_connection(&server, Some("agent.alpha".to_string()), true).unwrap();
+        let canonical = handle_task_claim(&server, &claim_params()).unwrap();
+        let alias = handle_manual_claim(
+            &server,
+            Some("org/repo#1254".to_string()),
+            None,
+            Some("lane/1253-server".to_string()),
+            Some(vec!["crates/tachi-server/src/claims_ops.rs".to_string()]),
+        )
+        .unwrap();
+        let ids = [
+            canonical["claim_id"].as_str().unwrap(),
+            alias["claim_id"].as_str().unwrap(),
+        ];
+        server
+            .with_global_store_read(|store| {
+                for id in ids {
+                    let row = memcore::get_claim(store.connection(), id)
+                        .map_err(|err| err.to_string())?
+                        .expect("one durable row");
+                    assert_eq!(row.agent_identity_id.as_deref(), Some("agent.alpha"));
+                    assert_eq!(row.state, memcore::ClaimState::Active);
+                }
+                Ok(())
+            })
+            .unwrap();
     }
 
     fn claim(session_client: &str, issue_ref: &str, scope: Option<Vec<&str>>) -> SessionClaim {
