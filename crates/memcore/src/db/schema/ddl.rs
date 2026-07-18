@@ -758,6 +758,7 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             flow_id              TEXT,
             dispatch_id          TEXT,
             branch               TEXT NOT NULL DEFAULT '',
+            worktree_path        TEXT,
             declared_file_scope  TEXT,
             agent_identity_id    TEXT,
             role                 TEXT,
@@ -776,7 +777,10 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_session_claims_state ON session_claims(state);
         CREATE INDEX IF NOT EXISTS idx_session_claims_issue ON session_claims(issue_ref);
         CREATE INDEX IF NOT EXISTS idx_session_claims_flow ON session_claims(flow_id);
-        -- #1001 round 2 item 2: DB-level uniqueness for the identity triple
+        -- Legacy #1001 identity-triple uniqueness. v21 WorkClaims carry an
+        -- explicit mode and use transactional collision semantics instead;
+        -- keeping this partial index to legacy rows preserves old upsert
+        -- behavior without making same-issue v21 claims inherently exclusive.
         -- upsert_or_heartbeat_claim's read-then-write relies on at the
         -- application level. Partial (WHERE state='active') so a released
         -- historical row never blocks a fresh active claim for the same
@@ -787,7 +791,7 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- the migration that retrofits this onto pre-existing DBs).
         CREATE UNIQUE INDEX IF NOT EXISTS idx_session_claims_identity_active
             ON session_claims(COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, ''))
-            WHERE state = 'active';
+            WHERE state = 'active' AND mode IS NULL;
 
         -- #1253 identity / WorkClaim spine. These tables and columns are
         -- deliberately additive: a pre-v21 claim has no identity rather than

@@ -335,8 +335,8 @@ pub fn list_exec_envs(
 /// THE single reclaim path (#894 S1): transactionally flip an `active` lease to
 /// `reclaimed`, stamping `reclaimed_at` and an optional reason. Idempotent — a
 /// lease that is already `reclaimed` returns [`ReclaimOutcome::AlreadyReclaimed`]
-/// without a second write, and a missing lease returns
-/// [`ReclaimOutcome::NotFound`]. safe_merge / cancel / terminal-state must all
+/// without a second write. A missing lease is a typed [`MemoryError::NotFound`]
+/// rather than a successful-looking outcome. safe_merge / cancel / terminal-state must all
 /// call through here; the sweep is a backstop that never owns this transition.
 pub fn reclaim_exec_env(
     conn: &mut Connection,
@@ -344,35 +344,8 @@ pub fn reclaim_exec_env(
     reason: Option<&str>,
 ) -> Result<ReclaimOutcome, MemoryError> {
     let tx = conn.transaction()?;
-    // Holder evidence is read in the same transaction as the destructive
-    // state transition. A held, contradictory, unavailable, or unverifiable
-    // ledger must refuse loudly; it must never look like a harmless no-op.
-    let holder_env_id = match selector {
-        ExecEnvSelector::EnvId(env_id) => env_id.clone(),
-        ExecEnvSelector::Path(path) => match tx
-            .query_row(
-                "SELECT env_id FROM exec_envs WHERE path = ?1 \
-                 ORDER BY CASE state WHEN 'active' THEN 0 ELSE 1 END, created_at DESC LIMIT 1",
-                params![path],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-        {
-            Some(env_id) => env_id,
-            None => return Ok(ReclaimOutcome::NotFound),
-        },
-    };
-    match super::session_claims::holder_evidence(&tx, &holder_env_id)? {
-        super::session_claims::HolderEvidence::Clear
-        | super::session_claims::HolderEvidence::NotApplicable => {}
-        evidence => {
-            return Err(MemoryError::WorkClaimIncompatibleState(format!(
-                "refusing to reclaim exec env {holder_env_id}: holder evidence is {evidence:?}"
-            )));
-        }
-    }
-    // Resolve the target row inside the transaction so the read-then-write is
-    // atomic against a concurrent reclaim of the same lease.
+    // Resolve existence before holder evidence: a missing ledger row is not
+    // unverifiable holder evidence, it is a caller-visible missing target.
     let existing: Option<(String, String)> = match selector {
         ExecEnvSelector::EnvId(env_id) => tx
             .query_row(
@@ -390,21 +363,35 @@ pub fn reclaim_exec_env(
             )
             .optional()?,
     };
-
-    let outcome = match existing {
-        None => ReclaimOutcome::NotFound,
-        Some((env_id, state_raw)) => match ExecEnvState::parse(&state_raw)? {
-            ExecEnvState::Reclaimed => ReclaimOutcome::AlreadyReclaimed { env_id },
-            ExecEnvState::Active => {
-                let now = normalize_utc_iso_or_now("");
-                tx.execute(
-                    "UPDATE exec_envs SET state = 'reclaimed', reclaimed_at = ?2, \
+    let Some((env_id, state_raw)) = existing else {
+        return Err(MemoryError::NotFound(match selector {
+            ExecEnvSelector::EnvId(env_id) => format!("exec env {env_id}"),
+            ExecEnvSelector::Path(path) => format!("exec env at {path}"),
+        }));
+    };
+    // Holder evidence is read in the same transaction as the destructive
+    // state transition. A held, contradictory, unavailable, or unverifiable
+    // ledger must refuse loudly; it must never look like a harmless no-op.
+    match super::session_claims::holder_evidence(&tx, &env_id)? {
+        super::session_claims::HolderEvidence::Clear
+        | super::session_claims::HolderEvidence::NotApplicable => {}
+        evidence => {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing to reclaim exec env {env_id}: holder evidence is {evidence:?}"
+            )));
+        }
+    }
+    let outcome = match ExecEnvState::parse(&state_raw)? {
+        ExecEnvState::Reclaimed => ReclaimOutcome::AlreadyReclaimed { env_id },
+        ExecEnvState::Active => {
+            let now = normalize_utc_iso_or_now("");
+            tx.execute(
+                "UPDATE exec_envs SET state = 'reclaimed', reclaimed_at = ?2, \
                      reclaim_reason = ?3 WHERE env_id = ?1 AND state = 'active'",
-                    params![env_id, now, reason],
-                )?;
-                ReclaimOutcome::Reclaimed { env_id }
-            }
-        },
+                params![env_id, now, reason],
+            )?;
+            ReclaimOutcome::Reclaimed { env_id }
+        }
     };
     tx.commit()?;
     Ok(outcome)
@@ -563,9 +550,9 @@ mod tests {
     #[test]
     fn reclaim_missing_lease_reports_not_found() {
         let mut conn = open_conn();
-        let outcome =
-            reclaim_exec_env(&mut conn, &ExecEnvSelector::EnvId("nope".to_string()), None).unwrap();
-        assert_eq!(outcome, ReclaimOutcome::NotFound);
+        let err = reclaim_exec_env(&mut conn, &ExecEnvSelector::EnvId("nope".to_string()), None)
+            .unwrap_err();
+        assert!(matches!(err, MemoryError::NotFound(message) if message == "exec env nope"));
     }
 
     #[test]

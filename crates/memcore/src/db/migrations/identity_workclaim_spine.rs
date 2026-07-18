@@ -31,6 +31,7 @@ pub(super) fn migrate_v21_identity_workclaim_spine(
     let mut added = 0;
     for (table, column, ddl) in [
         ("session_claims", "agent_identity_id", "TEXT"),
+        ("session_claims", "worktree_path", "TEXT"),
         ("session_claims", "role", "TEXT"),
         ("session_claims", "mode", "TEXT"),
         ("session_claims", "expected_head", "TEXT"),
@@ -51,6 +52,23 @@ pub(super) fn migrate_v21_identity_workclaim_spine(
         }
     }
     conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_exec_envs_claim ON exec_envs(claim_id);")?;
+    let has_legacy_identity_key = if table_exists(conn, "session_claims")? {
+        ["session_client", "issue_ref", "flow_id"]
+            .iter()
+            .try_fold(true, |_, column| {
+                column_exists(conn, "session_claims", column)
+            })?
+    } else {
+        false
+    };
+    if has_legacy_identity_key {
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_session_claims_identity_active;
+             CREATE UNIQUE INDEX idx_session_claims_identity_active
+             ON session_claims(COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, ''))
+             WHERE state = 'active' AND mode IS NULL;",
+        )?;
+    }
     Ok(added)
 }
 
@@ -87,7 +105,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(migrate_v21_identity_workclaim_spine(&conn).unwrap(), 10);
+        assert_eq!(migrate_v21_identity_workclaim_spine(&conn).unwrap(), 11);
         assert_eq!(
             conn.query_row(
                 "SELECT agent_identity_id FROM session_claims WHERE claim_id='legacy-claim'",
