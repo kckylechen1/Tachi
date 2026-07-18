@@ -55,6 +55,8 @@ fn task_params(action: &str) -> TachiTaskParams {
             .parse()
             .unwrap_or_else(|e| panic!("valid tachi_task action '{action}': {e}")),
         format: Some("json".to_string()),
+        verbose: None,
+        include_card: None,
         task: None,
         execution_level: None,
         agent_id: None,
@@ -123,7 +125,6 @@ fn task_params(action: &str) -> TachiTaskParams {
         auto_capability_bundle: None,
         mcp_access: None,
         allowed_mcp_servers: Vec::new(),
-        verbose: None,
         state_filter: None,
         limit: None,
         proposal_id: None,

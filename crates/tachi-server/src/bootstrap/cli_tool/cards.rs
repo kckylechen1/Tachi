@@ -47,6 +47,10 @@ async fn load_card_profiles(
     // moves, evidence_contract, authority), so this CLI facade opts back into
     // the verbose shape explicitly.
     args.insert("verbose".into(), json!(true));
+    // tachi#1201 item 1: action='profiles' now defaults to a markdown
+    // response when `format` is omitted; this CLI facade parses the raw
+    // response as JSON below, so it must request the JSON shape explicitly.
+    args.insert("format".into(), json!("json"));
     let body = dispatch_cli_tool(
         "tachi_task",
         args,

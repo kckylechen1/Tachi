@@ -4,14 +4,21 @@ use std::collections::BTreeMap;
 #[test]
 fn facade_response_defaults_to_json_and_preserves_markdown_opt_in() {
     let raw = r#"{"flow_id":"flow_1","stage":"plan","state":"instruction_ready","tasks":[{"dispatch_id":"d1","state":"running","agent":"codex","task":"Fix search"}]}"#;
-    let json = format_facade_response("Tachi shell plan", "plan", raw, None).unwrap();
+    let json = format_facade_response("Tachi shell plan", "plan", raw, None, false, false).unwrap();
     let value = serde_json::from_str::<Value>(&json).unwrap();
     assert_eq!(value["action"], "plan");
     assert_eq!(value["status"], "completed");
     assert_eq!(value["flow_id"], "flow_1");
 
-    let markdown =
-        format_facade_response("Tachi shell plan", "plan", raw, Some("markdown")).unwrap();
+    let markdown = format_facade_response(
+        "Tachi shell plan",
+        "plan",
+        raw,
+        Some("markdown"),
+        false,
+        false,
+    )
+    .unwrap();
     assert!(markdown.starts_with("## Tachi shell plan"));
     assert!(markdown.contains("flow_id: `flow_1`"));
     assert!(markdown.contains("- `d1` running agent=codex - Fix search"));
@@ -20,11 +27,18 @@ fn facade_response_defaults_to_json_and_preserves_markdown_opt_in() {
 #[test]
 fn facade_response_markdown_parse_failure_is_visible() {
     let raw = "not json";
-    let json = format_facade_response("Tachi shell plan", "plan", raw, None).unwrap();
+    let json = format_facade_response("Tachi shell plan", "plan", raw, None, false, false).unwrap();
     assert_eq!(json, raw);
 
-    let err = format_facade_response("Tachi shell plan", "plan", raw, Some("markdown"))
-        .expect_err("markdown formatting should fail on invalid JSON");
+    let err = format_facade_response(
+        "Tachi shell plan",
+        "plan",
+        raw,
+        Some("markdown"),
+        false,
+        false,
+    )
+    .expect_err("markdown formatting should fail on invalid JSON");
     assert!(err.contains("format Tachi shell plan markdown response"));
     assert!(err.contains("expected JSON"));
 }
@@ -48,6 +62,8 @@ fn facade_response_renders_recommend_and_profiles_as_markdown_tables() {
         "recommend",
         recommend_raw,
         Some("markdown"),
+        false,
+        false,
     )
     .unwrap();
     assert!(
@@ -69,13 +85,26 @@ fn facade_response_renders_recommend_and_profiles_as_markdown_tables() {
     );
     assert!(!recommend.contains("```json"), "{recommend}");
 
-    // JSON remains the default when markdown is not requested.
-    let recommend_json =
-        format_facade_response("Tachi task recommend", "recommend", recommend_raw, None).unwrap();
-    let recommend_value = serde_json::from_str::<Value>(&recommend_json).unwrap();
-    assert_eq!(recommend_value["action"], "recommend");
-    assert_eq!(recommend_value["status"], "completed");
-    assert_eq!(recommend_value["recommended_profile"], "codex_55_review");
+    // tachi#1201 item 1: recommend/profiles now default to markdown when
+    // format is omitted entirely — flip scoped to just these two actions,
+    // not the shared `wants_json` global default.
+    let recommend_default = format_facade_response(
+        "Tachi task recommend",
+        "recommend",
+        recommend_raw,
+        None,
+        false,
+        false,
+    )
+    .unwrap();
+    assert!(
+        recommend_default.starts_with("## Tachi task recommend"),
+        "{recommend_default}"
+    );
+    assert!(
+        serde_json::from_str::<Value>(&recommend_default).is_err(),
+        "action='recommend' with format omitted must default to markdown, not JSON: {recommend_default}"
+    );
 
     // #1182 checkpoint 4 (codex review round 2): tachi#1173 item 2's default
     // `dispatch_profiles_json_for_server` shape is the slim row
@@ -94,6 +123,8 @@ fn facade_response_renders_recommend_and_profiles_as_markdown_tables() {
         "profiles",
         profiles_slim_raw,
         Some("markdown"),
+        false,
+        false,
     )
     .unwrap();
     assert!(
@@ -111,6 +142,26 @@ fn facade_response_renders_recommend_and_profiles_as_markdown_tables() {
     // set (which would render every stats column as "-").
     assert!(!profiles_slim.contains("precision"), "{profiles_slim}");
 
+    // tachi#1201 item 1: action='profiles' also defaults to markdown when
+    // format is omitted.
+    let profiles_default = format_facade_response(
+        "Tachi task profiles",
+        "profiles",
+        profiles_slim_raw,
+        None,
+        false,
+        false,
+    )
+    .unwrap();
+    assert!(
+        profiles_default.starts_with("## Tachi task profiles"),
+        "{profiles_default}"
+    );
+    assert!(
+        serde_json::from_str::<Value>(&profiles_default).is_err(),
+        "action='profiles' with format omitted must default to markdown, not JSON: {profiles_default}"
+    );
+
     // verbose=true preserves the pre-#1173 full-card table shape.
     let profiles_verbose_raw = r#"{
         "verbose": true,
@@ -126,6 +177,8 @@ fn facade_response_renders_recommend_and_profiles_as_markdown_tables() {
         "profiles",
         profiles_verbose_raw,
         Some("markdown"),
+        false,
+        false,
     )
     .unwrap();
     assert!(
@@ -147,6 +200,112 @@ fn facade_response_renders_recommend_and_profiles_as_markdown_tables() {
         "{profiles_verbose}"
     );
     assert!(!profiles_verbose.contains("```json"), "{profiles_verbose}");
+}
+
+#[test]
+fn facade_response_recommend_json_slims_candidates_and_gates_cards() {
+    let recommend_raw = r#"{
+        "task": "harden the search path",
+        "recommended_profile": "codex_55_review",
+        "identity_receipt": {"profile": "codex_55_review", "signed": true},
+        "mbit_card": {"stats": {"cost": 72}},
+        "candidates": [
+            {"profile": "codex_55_review", "role": "reviewer", "score": 91.5,
+             "agent": "codex", "model": "gpt-5.5", "live_samples": 3,
+             "useful_rate": 0.84, "human_override_rate": 0.0,
+             "reasons": ["live_useful_rate=0.84", "secondary"]}
+        ]
+    }"#;
+
+    // format='json', verbose/include_card both default false: candidates are
+    // slim (profile/role/score/reasons only, no per-row mbit_card or the
+    // other 10 dropped telemetry fields), and neither identity_receipt nor
+    // the top-level mbit_card is present.
+    let slim = format_facade_response(
+        "Tachi task recommend",
+        "recommend",
+        recommend_raw,
+        Some("json"),
+        false,
+        false,
+    )
+    .unwrap();
+    let slim_value = serde_json::from_str::<Value>(&slim).expect("slim recommend JSON");
+    assert!(slim_value.get("mbit_card").is_none(), "{slim_value}");
+    assert!(slim_value.get("identity_receipt").is_none(), "{slim_value}");
+    let candidates = slim_value["candidates"].as_array().expect("candidates");
+    assert_eq!(candidates.len(), 1);
+    let row = &candidates[0];
+    assert_eq!(row["profile"], json!("codex_55_review"));
+    assert_eq!(row["role"], json!("reviewer"));
+    assert_eq!(row["score"], json!(91.5));
+    assert!(row
+        .as_object()
+        .expect("candidate row object")
+        .keys()
+        .all(|key| matches!(key.as_str(), "profile" | "role" | "score" | "reasons")));
+    assert!(row.get("mbit_card").is_none(), "{row}");
+    assert!(row.get("agent").is_none(), "{row}");
+    assert!(row.get("human_override_rate").is_none(), "{row}");
+
+    // include_card=true surfaces exactly one top-level mbit_card.
+    let with_card = format_facade_response(
+        "Tachi task recommend",
+        "recommend",
+        recommend_raw,
+        Some("json"),
+        false,
+        true,
+    )
+    .unwrap();
+    let with_card_value = serde_json::from_str::<Value>(&with_card).expect("with_card JSON");
+    assert!(
+        with_card_value["mbit_card"].is_object(),
+        "{with_card_value}"
+    );
+    assert!(
+        with_card_value.get("identity_receipt").is_none(),
+        "{with_card_value}"
+    );
+
+    // verbose=true surfaces identity_receipt (independent of include_card).
+    let with_receipt = format_facade_response(
+        "Tachi task recommend",
+        "recommend",
+        recommend_raw,
+        Some("json"),
+        true,
+        false,
+    )
+    .unwrap();
+    let with_receipt_value =
+        serde_json::from_str::<Value>(&with_receipt).expect("with_receipt JSON");
+    assert!(
+        with_receipt_value["identity_receipt"].is_object(),
+        "{with_receipt_value}"
+    );
+    assert!(
+        with_receipt_value.get("mbit_card").is_none(),
+        "{with_receipt_value}"
+    );
+
+    // format='full' bypasses slimming entirely regardless of verbose/include_card.
+    let full = format_facade_response(
+        "Tachi task recommend",
+        "recommend",
+        recommend_raw,
+        Some("full"),
+        false,
+        false,
+    )
+    .unwrap();
+    let full_value = serde_json::from_str::<Value>(&full).expect("full recommend JSON");
+    assert!(full_value["mbit_card"].is_object(), "{full_value}");
+    assert!(full_value["identity_receipt"].is_object(), "{full_value}");
+    assert_eq!(
+        full_value["candidates"][0]["human_override_rate"],
+        json!(0.0)
+    );
 }
 
 #[test]

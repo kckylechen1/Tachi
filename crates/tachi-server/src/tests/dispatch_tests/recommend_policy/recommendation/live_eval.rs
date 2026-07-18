@@ -46,6 +46,11 @@ async fn tachi_task_recommend_uses_live_eval_and_dispatch_profiles() {
     params.task = Some("review dispatch/eval profile routing change".to_string());
     params.risk = Some("high".to_string());
     params.limit = Some(50);
+    // tachi#1201 item 2: the default JSON candidate row is slimmed to
+    // profile/role/score/reasons; this test asserts on dropped per-candidate
+    // telemetry fields (performance_samples/human_override_rate/
+    // avg_retry_count/avg_latency_ms), so request the unslimmed escape hatch.
+    params.format = Some("full".to_string());
     let raw = server
         .tachi_task(Parameters(params))
         .await
@@ -170,6 +175,10 @@ async fn tachi_task_recommend_surfaces_human_override_and_retry_penalties() {
     params.task = Some("review dispatch/eval routing change".to_string());
     params.risk = Some("high".to_string());
     params.limit = Some(50);
+    // tachi#1201 item 2: see the sibling test above — this one also asserts
+    // on dropped per-candidate telemetry (performance_samples/
+    // human_override_rate/avg_retry_count), so request the unslimmed shape.
+    params.format = Some("full".to_string());
     let raw = server
         .tachi_task(Parameters(params))
         .await

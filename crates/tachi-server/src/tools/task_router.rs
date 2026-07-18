@@ -369,6 +369,8 @@ pub(super) async fn handle_tachi_task_facade(
         &action,
         &raw,
         params.format.as_deref(),
+        params.verbose.unwrap_or(false),
+        params.include_card.unwrap_or(false),
     )
 }
 

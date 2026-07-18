@@ -35,7 +35,14 @@ pub struct TachiTaskParams {
     /// GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note): use **tachi_gh only** (#757).
     #[schemars(schema_with = "tachi_task_action_schema")]
     pub action: TachiTaskAction,
-    /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
+    /// Response shape: default JSON for agent automation, with two
+    /// exceptions — [action=recommend|profiles|profile|card] (tachi#1201)
+    /// default to compact markdown (a table plus key fields) when `format`
+    /// is omitted, since these are read-heavy discovery endpoints most often
+    /// consumed by a human/agent skimming a summary, not parsing JSON. Pass
+    /// format="json" to get the machine-readable shape for those four
+    /// actions; every other action's default is unaffected. Pass "markdown"
+    /// on any action for human-readable text.
     #[serde(default)]
     pub format: Option<String>,
     /// tachi#1173 items 1+2: request the full payload instead of the default
@@ -45,8 +52,19 @@ pub struct TachiTaskParams {
     /// [action=profiles|profile|card]: each row includes the full mbit_card
     /// (stats/guidance/moves/personality/skill_loadout/evidence_contract)
     /// rather than just name/backend/model/role.
+    /// [action=recommend] (tachi#1201, format="json" only): when true, the
+    /// response includes `identity_receipt`; when omitted/false it is
+    /// dropped from the slim JSON shape.
     #[serde(default)]
     pub verbose: Option<bool>,
+    /// [action=recommend] (tachi#1201, format="json" only): when true,
+    /// include one top-level `mbit_card` for the recommended profile in the
+    /// JSON response. Default false keeps the JSON response to a
+    /// candidate-summary shape (`profile`/`role`/`score`/`reasons` per row,
+    /// no per-row or top-level `mbit_card`). Has no effect on markdown
+    /// output or on other actions.
+    #[serde(default)]
+    pub include_card: Option<bool>,
     // plan fields
     #[serde(default)]
     #[schemars(

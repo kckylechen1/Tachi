@@ -358,6 +358,9 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
     let mut recommend_params = task_params("recommend");
     recommend_params.task = Some("Plan a dispatch loadout evolution slice".to_string());
     recommend_params.limit = Some(50);
+    // tachi#1201 item 2: mbit_card is no longer embedded by default; this
+    // assertion needs it, so request the explicit escape hatch.
+    recommend_params.include_card = Some(true);
     let recommend_raw = server
         .tachi_task(Parameters(recommend_params))
         .await

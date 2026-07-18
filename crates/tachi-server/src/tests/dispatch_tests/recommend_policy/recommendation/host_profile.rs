@@ -105,7 +105,10 @@ async fn tachi_task_recommend_host_profile_mismatch_declines_l2_on_development()
     params.task = Some("inspect product data diagnostics".to_string());
     params.execution_level = Some(ExecutionLevel::L2);
     params.limit = Some(10);
-    params.format = None;
+    // tachi#1201 item 1: action='recommend' now defaults to markdown when
+    // format is omitted; this test wants the JSON decline shape, so request
+    // it explicitly instead of relying on the (now-flipped) default.
+    params.format = Some("json".to_string());
 
     let raw = server
         .tachi_task(Parameters(params))

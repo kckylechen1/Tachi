@@ -87,6 +87,41 @@ async fn action_card_defaults_to_full_card() {
 }
 
 #[tokio::test]
+async fn action_profiles_profile_card_default_to_markdown_when_format_omitted() {
+    // tachi#1201 item 1: recommend/profiles/profile/card all default to
+    // markdown when `format` is omitted; `profile`/`card` share the same
+    // `dispatch_profiles`-table renderer `profiles` uses (not the generic
+    // fallback markdown renderer, which has no table for this shape).
+    let server = make_server();
+
+    for action in ["profiles", "profile", "card"] {
+        let mut params = task_params(action);
+        params.format = None;
+        let body = server
+            .tachi_task(Parameters(params))
+            .await
+            .unwrap_or_else(|e| {
+                panic!("action='{action}' with format omitted should succeed: {e}")
+            });
+        assert!(
+            body.starts_with("## Tachi task"),
+            "action='{action}': {body}"
+        );
+        assert!(
+            body.contains("| name | backend | model | role |")
+                || body.contains(
+                    "| name | role | stage | backend | cost | precision | speed | strong_against |"
+                ),
+            "action='{action}' should render the dispatch-profiles table, not the generic fallback: {body}"
+        );
+        assert!(
+            serde_json::from_str::<Value>(&body).is_err(),
+            "action='{action}' with format omitted must default to markdown, not JSON: {body}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn action_profile_singular_honors_explicit_verbose_false() {
     let server = make_server();
 

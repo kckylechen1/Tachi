@@ -67,6 +67,10 @@ async fn tachi_task_recommend_does_not_apply_same_backend_wrong_role_subagent_ev
     let mut params = task_params("recommend");
     params.task = Some("review dispatch/eval profile routing change".to_string());
     params.risk = Some("high".to_string());
+    // tachi#1201 item 2: the default JSON candidate row is slimmed to
+    // profile/role/score/reasons; this assertion needs the full per-candidate
+    // telemetry (live_samples), so request the unslimmed escape hatch.
+    params.format = Some("full".to_string());
     let raw = server
         .tachi_task(Parameters(params))
         .await
