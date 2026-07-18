@@ -833,7 +833,9 @@ unrelated section after
         let mirrors = read_existing_mirrors(&db_path, &schema_migration).expect("read mirrors");
         let metadata = &mirrors["wizard-sonnet"].metadata;
         assert_eq!(
-            metadata.get("counter_clauses_present").and_then(Value::as_bool),
+            metadata
+                .get("counter_clauses_present")
+                .and_then(Value::as_bool),
             Some(true)
         );
         assert!(
@@ -860,7 +862,9 @@ unrelated section after
         let mirrors2 = read_existing_mirrors(&db_path, &schema_migration).expect("read mirrors");
         let metadata2 = &mirrors2["wizard-sonnet"].metadata;
         assert_eq!(
-            metadata2.get("counter_clauses_present").and_then(Value::as_bool),
+            metadata2
+                .get("counter_clauses_present")
+                .and_then(Value::as_bool),
             Some(false),
             "presence flag must flip to false: {metadata2:?}"
         );
