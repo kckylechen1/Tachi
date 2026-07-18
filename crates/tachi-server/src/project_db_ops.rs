@@ -415,10 +415,14 @@ mod resolve_or_register_workspace_root_tests {
     fn rejects_path_outside_any_git_repo() {
         with_test_home(|root| {
             let server = make_server(root);
-            let plain_dir = root.join("not-a-git-repo");
-            std::fs::create_dir_all(&plain_dir).expect("plain dir");
+            let plain_dir = tempfile::tempdir().expect("plain dir");
+            assert!(
+                find_git_root_from(plain_dir.path()).is_none(),
+                "plain_dir fixture must not be inside a git repository: {}",
+                plain_dir.path().display()
+            );
             let err = server
-                .resolve_or_register_workspace_root(&plain_dir.display().to_string())
+                .resolve_or_register_workspace_root(&plain_dir.path().display().to_string())
                 .expect_err("a directory outside any git repo must be rejected");
             assert!(
                 err.contains("not inside a git repository"),
