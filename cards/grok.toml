@@ -5,7 +5,7 @@ name = "grok"
 vendor = "xai"
 model_id = "grok-composer-2.5-fast"
 transport = "grok-cli" # ~/bin/lane-run grok, --always-approve headless
-roles = ["implementer-fast"]
+roles = ["implementer-fast", "scout-read-only"]
 
 [hexagon] # seed 2026-07-05
 spec_fidelity = 0.90
