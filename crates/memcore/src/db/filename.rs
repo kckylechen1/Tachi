@@ -327,9 +327,15 @@ enum AtomicRename {
 /// concurrent process already created the canonical file. There is no window in
 /// which an existing canonical file is overwritten.
 ///
-/// Returns `Unsupported` (not an error) when the primitive is unavailable
-/// (old kernel/filesystem -> ENOSYS/ENOTSUP, or a platform without it), so the
-/// caller can fall back. Any other errno is returned as `Err`.
+/// Outcomes: `DestinationExists` on EEXIST (a concurrent process won — converge
+/// on it) and `SourceVanished` on ENOENT (a concurrent migrator moved the legacy
+/// file — re-check the canonical and converge). `Unsupported` is reported when
+/// the primitive is unavailable (old kernel/filesystem -> ENOSYS/ENOTSUP, or a
+/// platform without it) — the caller MUST fail closed there (see
+/// [`atomic_rename_unsupported_error`]); it deliberately does NOT fall back to a
+/// plain `rename`, which is guarded only by the process-local mutex and could
+/// clobber a concurrently-created canonical DB -> money-DB data loss. Migrate
+/// offline or on a supported filesystem instead. Any other errno -> `Err`.
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
 fn atomic_rename_no_clobber(from: &Path, to: &Path) -> Result<AtomicRename, std::io::Error> {
     use std::ffi::CString;
