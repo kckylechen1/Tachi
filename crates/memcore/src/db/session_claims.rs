@@ -48,6 +48,8 @@ use super::common::normalize_utc_iso_or_now;
 pub enum ClaimState {
     /// Registered and (per lazy TTL expiry) presumed live.
     Active,
+    /// Lease expiry is evidence of an interrupted owner, never an implicit release.
+    Orphaned,
     /// Released — either explicitly (`release`/`complete`/`cancel`) or
     /// superseded; the row is retained for audit and idempotent release.
     Released,
@@ -57,6 +59,7 @@ impl ClaimState {
     pub fn as_str(self) -> &'static str {
         match self {
             ClaimState::Active => "active",
+            ClaimState::Orphaned => "orphaned",
             ClaimState::Released => "released",
         }
     }
@@ -66,9 +69,10 @@ impl ClaimState {
     pub fn parse(raw: &str) -> Result<Self, MemoryError> {
         match raw {
             "active" => Ok(ClaimState::Active),
+            "orphaned" => Ok(ClaimState::Orphaned),
             "released" => Ok(ClaimState::Released),
             other => Err(MemoryError::InvalidArg(format!(
-                "unknown session_claim state '{other}' (expected 'active' or 'released')"
+                "unknown session_claim state '{other}' (expected 'active', 'orphaned', or 'released')"
             ))),
         }
     }
@@ -84,11 +88,171 @@ pub struct SessionClaim {
     pub dispatch_id: Option<String>,
     pub branch: String,
     pub declared_file_scope: Option<String>,
+    pub agent_identity_id: Option<String>,
+    pub role: Option<String>,
+    pub mode: Option<WorkClaimMode>,
+    pub expected_head: Option<String>,
+    pub lease_expires_at: Option<String>,
+    pub transition_version: i64,
+    pub exec_env_id: Option<String>,
+    pub orphaned_at: Option<String>,
     pub state: ClaimState,
     pub release_reason: Option<String>,
     pub created_at: String,
     pub heartbeat_at: String,
     pub released_at: Option<String>,
+}
+
+/// Durable domain name for the legacy physical `session_claims` table.
+pub type WorkClaim = SessionClaim;
+
+/// Writable and read-only claims have distinct collision semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkClaimMode {
+    ReadOnly,
+    Writable,
+}
+impl WorkClaimMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Writable => "writable",
+        }
+    }
+    fn parse(raw: &str) -> Result<Self, MemoryError> {
+        match raw {
+            "read_only" => Ok(Self::ReadOnly),
+            "writable" => Ok(Self::Writable),
+            _ => Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "unknown work claim mode '{raw}'"
+            ))),
+        }
+    }
+}
+
+/// Input for a v21 WorkClaim. Unlike the compatibility `NewSessionClaim`, all
+/// holder evidence required by the frozen contract is explicit.
+#[derive(Debug, Clone)]
+pub struct NewWorkClaim {
+    pub claim_id: String,
+    pub agent_identity_id: String,
+    pub session_client: Option<String>,
+    pub issue_ref: Option<String>,
+    pub flow_id: Option<String>,
+    pub dispatch_id: Option<String>,
+    pub branch: String,
+    pub declared_file_scope: String,
+    pub role: String,
+    pub mode: WorkClaimMode,
+    pub expected_head: String,
+    pub lease_expires_at: String,
+    pub created_at: String,
+}
+
+/// Observable result for the six-way destructive-cleanup holder check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HolderEvidence {
+    Clear,
+    NotApplicable,
+    Held,
+    Contradictory,
+    Unavailable,
+    Unverifiable,
+}
+
+type HolderEvidenceRow = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// Stable agent seat/capability identity. Display data never substitutes for
+/// this opaque id in claim ownership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentIdentity {
+    pub agent_identity_id: String,
+    pub display_name: Option<String>,
+    pub seat: Option<String>,
+    pub capability_json: Option<String>,
+    pub created_at: String,
+}
+
+/// Persisted admission state. `Verified` is readable but has no public writer
+/// until the trusted #1170 verification adapter exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionState {
+    SelfAsserted,
+    Verified,
+    Rejected,
+    Unavailable,
+}
+impl AdmissionState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SelfAsserted => "self_asserted",
+            Self::Verified => "verified",
+            Self::Rejected => "rejected",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Public admission inputs deliberately exclude `verified`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnverifiedAdmissionState {
+    SelfAsserted,
+    Rejected,
+    Unavailable,
+}
+impl From<UnverifiedAdmissionState> for AdmissionState {
+    fn from(value: UnverifiedAdmissionState) -> Self {
+        match value {
+            UnverifiedAdmissionState::SelfAsserted => Self::SelfAsserted,
+            UnverifiedAdmissionState::Rejected => Self::Rejected,
+            UnverifiedAdmissionState::Unavailable => Self::Unavailable,
+        }
+    }
+}
+
+pub fn insert_agent_identity(
+    conn: &Connection,
+    identity: &AgentIdentity,
+) -> Result<(), MemoryError> {
+    if identity.agent_identity_id.trim().is_empty() {
+        return Err(MemoryError::InvalidArg(
+            "agent identity id must be non-empty".into(),
+        ));
+    }
+    let created = if identity.created_at.trim().is_empty() {
+        normalize_utc_iso_or_now("")
+    } else {
+        normalize_utc_iso_or_now(&identity.created_at)
+    };
+    conn.execute("INSERT INTO agent_identities (agent_identity_id,display_name,seat,capability_json,created_at) VALUES (?1,?2,?3,?4,?5)", params![identity.agent_identity_id, identity.display_name, identity.seat, identity.capability_json, created])?;
+    Ok(())
+}
+
+/// Record an admission that is explicitly not remote proof. The only public
+/// construction path cannot create a `verified` row.
+pub fn record_unverified_admission(
+    conn: &Connection,
+    admission_id: &str,
+    agent_identity_id: &str,
+    connection_id: &str,
+    state: UnverifiedAdmissionState,
+) -> Result<(), MemoryError> {
+    if admission_id.trim().is_empty()
+        || agent_identity_id.trim().is_empty()
+        || connection_id.trim().is_empty()
+    {
+        return Err(MemoryError::InvalidArg(
+            "admission id, identity id, and connection id are required".into(),
+        ));
+    }
+    conn.execute("INSERT INTO identity_admissions (admission_id,agent_identity_id,connection_id,state,created_at) VALUES (?1,?2,?3,?4,?5)", params![admission_id, agent_identity_id, connection_id, AdmissionState::from(state).as_str(), normalize_utc_iso_or_now("")])?;
+    Ok(())
 }
 
 /// Fields required to insert a new claim. `claim_id` must be caller-supplied
@@ -129,13 +293,29 @@ pub enum ReleaseOutcome {
 }
 
 const SELECT_COLUMNS: &str = "claim_id, session_client, issue_ref, flow_id, dispatch_id, branch, \
-     declared_file_scope, state, release_reason, created_at, heartbeat_at, released_at";
+     declared_file_scope, agent_identity_id, role, mode, expected_head, lease_expires_at, \
+     transition_version, exec_env_id, orphaned_at, state, release_reason, created_at, heartbeat_at, released_at";
 
 fn row_to_claim(row: &rusqlite::Row<'_>) -> Result<SessionClaim, rusqlite::Error> {
-    let state_raw: String = row.get(7)?;
+    let mode_raw: Option<String> = row.get(9)?;
+    let mode = mode_raw
+        .as_deref()
+        .map(WorkClaimMode::parse)
+        .transpose()
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                9,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    e.to_string(),
+                )),
+            )
+        })?;
+    let state_raw: String = row.get(15)?;
     let state = ClaimState::parse(&state_raw).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(
-            7,
+            15,
             rusqlite::types::Type::Text,
             Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -151,12 +331,168 @@ fn row_to_claim(row: &rusqlite::Row<'_>) -> Result<SessionClaim, rusqlite::Error
         dispatch_id: row.get(4)?,
         branch: row.get(5)?,
         declared_file_scope: row.get(6)?,
+        agent_identity_id: row.get(7)?,
+        role: row.get(8)?,
+        mode,
+        expected_head: row.get(10)?,
+        lease_expires_at: row.get(11)?,
+        transition_version: row.get(12)?,
+        exec_env_id: row.get(13)?,
+        orphaned_at: row.get(14)?,
         state,
-        release_reason: row.get(8)?,
-        created_at: row.get(9)?,
-        heartbeat_at: row.get(10)?,
-        released_at: row.get(11)?,
+        release_reason: row.get(16)?,
+        created_at: row.get(17)?,
+        heartbeat_at: row.get(18)?,
+        released_at: row.get(19)?,
     })
+}
+
+/// Inserts a v21 WorkClaim. Empty holder fields are refused rather than
+/// silently producing an identity-unavailable row.
+pub fn insert_work_claim(conn: &Connection, claim: &NewWorkClaim) -> Result<(), MemoryError> {
+    if [
+        claim.agent_identity_id.as_str(),
+        claim.declared_file_scope.as_str(),
+        claim.role.as_str(),
+        claim.expected_head.as_str(),
+        claim.lease_expires_at.as_str(),
+    ]
+    .iter()
+    .any(|v| v.trim().is_empty())
+    {
+        return Err(MemoryError::InvalidArg(
+            "WorkClaim identity, role, scope, expected head, and lease expiry are required".into(),
+        ));
+    }
+    let known_identity: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_identities WHERE agent_identity_id=?1)",
+        params![claim.agent_identity_id],
+        |r| r.get(0),
+    )?;
+    if !known_identity {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "unknown agent identity {}",
+            claim.agent_identity_id
+        )));
+    }
+    let created = if claim.created_at.trim().is_empty() {
+        normalize_utc_iso_or_now("")
+    } else {
+        normalize_utc_iso_or_now(&claim.created_at)
+    };
+    conn.execute("INSERT INTO session_claims (claim_id, session_client, issue_ref, flow_id, dispatch_id, branch, declared_file_scope, agent_identity_id, role, mode, expected_head, lease_expires_at, transition_version, state, created_at, heartbeat_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,'active',?13,?13)", params![claim.claim_id, claim.session_client, claim.issue_ref, claim.flow_id, claim.dispatch_id, claim.branch, claim.declared_file_scope, claim.agent_identity_id, claim.role, claim.mode.as_str(), claim.expected_head, claim.lease_expires_at, created])?;
+    Ok(())
+}
+
+/// Compare-and-swap release. A stale version is a typed conflict; orphaned
+/// claims require this explicit path and can never be released by expiry.
+pub fn release_work_claim(
+    conn: &Connection,
+    claim_id: &str,
+    expected_version: i64,
+    reason: &str,
+) -> Result<i64, MemoryError> {
+    let changed = conn.execute("UPDATE session_claims SET state='released', released_at=?4, release_reason=?3, transition_version=transition_version+1 WHERE claim_id=?1 AND transition_version=?2 AND state IN ('active','orphaned')", params![claim_id, expected_version, reason, normalize_utc_iso_or_now("")])?;
+    if changed == 1 {
+        return Ok(expected_version + 1);
+    }
+    let present: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT state, transition_version FROM session_claims WHERE claim_id=?1",
+            params![claim_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match present {
+        Some((_state, version)) if version != expected_version => {
+            Err(MemoryError::WorkClaimConflict(format!(
+                "claim {claim_id} is at version {version}, expected {expected_version}"
+            )))
+        }
+        Some((state, _)) => Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "claim {claim_id} is {state}"
+        ))),
+        None => Err(MemoryError::NotFound(format!("claim {claim_id}"))),
+    }
+}
+
+/// Atomically bind a claim and ExecEnv, refusing unproved identities, stale
+/// versions, and any existing contradictory binding.
+pub fn bind_work_claim_exec_env(
+    conn: &mut Connection,
+    claim_id: &str,
+    env_id: &str,
+    expected_version: i64,
+) -> Result<i64, MemoryError> {
+    let tx = conn.transaction()?;
+    let claim: Option<(Option<String>, String, i64, Option<String>)> = tx.query_row("SELECT agent_identity_id,state,transition_version,exec_env_id FROM session_claims WHERE claim_id=?1", params![claim_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    let Some((Some(identity), state, version, existing_env)) = claim else {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "claim {claim_id} has no proven identity"
+        )));
+    };
+    if state != "active" {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "claim {claim_id} is {state}"
+        )));
+    }
+    if version != expected_version {
+        return Err(MemoryError::WorkClaimConflict(format!(
+            "claim {claim_id} is at version {version}, expected {expected_version}"
+        )));
+    }
+    let env: Option<(Option<String>, Option<String>)> = tx
+        .query_row(
+            "SELECT agent_identity_id,claim_id FROM exec_envs WHERE env_id=?1",
+            params![env_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((env_identity, env_claim)) = env else {
+        return Err(MemoryError::NotFound(format!("exec env {env_id}")));
+    };
+    if existing_env.as_deref().is_some_and(|id| id != env_id)
+        || env_identity.as_deref().is_some_and(|id| id != identity)
+        || env_claim.as_deref().is_some_and(|id| id != claim_id)
+    {
+        return Err(MemoryError::WorkClaimConflict(format!(
+            "claim {claim_id} and exec env {env_id} already have incompatible bindings"
+        )));
+    }
+    let changed = tx.execute("UPDATE session_claims SET exec_env_id=?2, transition_version=transition_version+1 WHERE claim_id=?1 AND transition_version=?3 AND exec_env_id IS NULL", params![claim_id, env_id, expected_version])?;
+    if changed != 1 {
+        return Err(MemoryError::WorkClaimConflict(format!(
+            "claim {claim_id} changed while binding"
+        )));
+    }
+    let changed = tx.execute("UPDATE exec_envs SET agent_identity_id=?2, claim_id=?3 WHERE env_id=?1 AND agent_identity_id IS NULL AND claim_id IS NULL", params![env_id, identity, claim_id])?;
+    if changed != 1 {
+        return Err(MemoryError::WorkClaimConflict(format!(
+            "exec env {env_id} changed while binding"
+        )));
+    }
+    tx.commit()?;
+    Ok(expected_version + 1)
+}
+
+/// Query the complete holder evidence before a destructive ExecEnv action.
+pub fn holder_evidence(conn: &Connection, env_id: &str) -> Result<HolderEvidence, MemoryError> {
+    let row: Option<HolderEvidenceRow> = conn.query_row("SELECT e.agent_identity_id,e.claim_id,c.agent_identity_id,c.state,c.exec_env_id FROM exec_envs e LEFT JOIN session_claims c ON c.claim_id=e.claim_id WHERE e.env_id=?1", params![env_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+    let Some((env_identity, claim_id, claim_identity, state, claim_env)) = row else {
+        return Ok(HolderEvidence::Unverifiable);
+    };
+    match (env_identity, claim_id, claim_identity, state, claim_env) {
+        (None, None, None, None, None) => Ok(HolderEvidence::NotApplicable),
+        (Some(ei), Some(_cid), Some(ci), Some(state), Some(ce)) if ei == ci && ce == env_id => {
+            match state.as_str() {
+                "released" => Ok(HolderEvidence::Clear),
+                "active" | "orphaned" => Ok(HolderEvidence::Held),
+                _ => Ok(HolderEvidence::Unavailable),
+            }
+        }
+        (Some(_), Some(_), None, None, None) => Ok(HolderEvidence::Unverifiable),
+        _ => Ok(HolderEvidence::Contradictory),
+    }
 }
 
 /// Insert a new claim. Fails if `claim_id` already exists — a collision is a
@@ -395,6 +731,11 @@ pub fn release_claim(
         None => ReleaseOutcome::NotFound,
         Some((claim_id, state_raw)) => match ClaimState::parse(&state_raw)? {
             ClaimState::Released => ReleaseOutcome::AlreadyReleased { claim_id },
+            ClaimState::Orphaned => {
+                return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                    "claim {claim_id} is orphaned; use versioned release_work_claim"
+                )))
+            }
             ClaimState::Active => {
                 let now = normalize_utc_iso_or_now("");
                 tx.execute(
@@ -415,8 +756,8 @@ pub fn release_claim(
 pub struct SessionClaimsGc {
     /// `released` rows deleted outright (aged past the audit window).
     pub released_pruned: usize,
-    /// `active` rows server-released as `gc_stale` (dead heartbeat).
-    pub active_staled: usize,
+    /// `active` rows moved to `orphaned` after lease expiry (dead heartbeat).
+    pub active_orphaned: usize,
 }
 
 /// GC sweep for `session_claims` (#1001 follow-up; R2 review of #1007
@@ -463,9 +804,9 @@ pub fn gc_session_claims(
     let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let staleness_cutoff = (now - chrono::Duration::days(active_staleness_days))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let active_staled = conn.execute(
-        "UPDATE session_claims SET state = 'released', released_at = ?1, \
-         release_reason = 'gc_stale' WHERE state = 'active' AND heartbeat_at < ?2",
+    let active_orphaned = conn.execute(
+        "UPDATE session_claims SET state = 'orphaned', orphaned_at = ?1, \
+         release_reason = NULL WHERE state = 'active' AND heartbeat_at < ?2",
         params![now_iso, staleness_cutoff],
     )?;
 
@@ -479,7 +820,7 @@ pub fn gc_session_claims(
 
     Ok(SessionClaimsGc {
         released_pruned,
-        active_staled,
+        active_orphaned,
     })
 }
 
@@ -735,6 +1076,14 @@ mod tests {
             dispatch_id: None,
             branch: String::new(),
             declared_file_scope: None,
+            agent_identity_id: None,
+            role: None,
+            mode: None,
+            expected_head: None,
+            lease_expires_at: None,
+            transition_version: 0,
+            exec_env_id: None,
+            orphaned_at: None,
             state: ClaimState::Active,
             release_reason: None,
             created_at: heartbeat_at.to_string(),
@@ -1003,7 +1352,7 @@ mod tests {
             .to_utc();
         let outcome = gc_session_claims(&conn, now, 7, 30).unwrap();
         assert_eq!(outcome.released_pruned, 1);
-        assert_eq!(outcome.active_staled, 0);
+        assert_eq!(outcome.active_orphaned, 0);
         assert!(
             get_claim(&conn, "aged-released").unwrap().is_none(),
             "released row older than the 30-day window must be deleted, not just marked"
@@ -1011,7 +1360,7 @@ mod tests {
     }
 
     #[test]
-    fn gc_staleness_releases_dead_active_rows_past_heartbeat_ttl() {
+    fn gc_staleness_orphans_dead_active_rows_past_heartbeat_ttl() {
         let conn = open_conn();
         insert_claim(&conn, &new_claim("dead-heartbeat", "org/repo#701")).unwrap();
         // Backdate heartbeat_at to 8 days before "now" — past the 7-day
@@ -1028,17 +1377,17 @@ mod tests {
             .unwrap()
             .to_utc();
         let outcome = gc_session_claims(&conn, now, 7, 30).unwrap();
-        assert_eq!(outcome.active_staled, 1);
+        assert_eq!(outcome.active_orphaned, 1);
         assert_eq!(outcome.released_pruned, 0);
 
         let got = get_claim(&conn, "dead-heartbeat").unwrap().unwrap();
         assert_eq!(
             got.state,
-            ClaimState::Released,
-            "dead-heartbeat active row must be server-released, not left active forever"
+            ClaimState::Orphaned,
+            "dead-heartbeat active row must be orphaned, never server-released"
         );
-        assert_eq!(got.release_reason.as_deref(), Some("gc_stale"));
-        assert!(got.released_at.is_some());
+        assert!(got.release_reason.is_none());
+        assert!(got.orphaned_at.is_some());
     }
 
     #[test]
@@ -1051,8 +1400,8 @@ mod tests {
         let now = chrono::Utc::now();
         let outcome = gc_session_claims(&conn, now, 7, 30).unwrap();
         assert_eq!(
-            outcome.active_staled, 0,
-            "a fresh active row must not be staleness-released"
+            outcome.active_orphaned, 0,
+            "a fresh active row must not be orphaned"
         );
         assert_eq!(
             outcome.released_pruned, 0,
@@ -1062,5 +1411,153 @@ mod tests {
         let got = get_claim(&conn, "fresh-claim").unwrap().unwrap();
         assert_eq!(got.state, ClaimState::Active, "fresh active row untouched");
         assert!(got.released_at.is_none());
+    }
+
+    fn identity(conn: &Connection, id: &str) {
+        insert_agent_identity(
+            conn,
+            &AgentIdentity {
+                agent_identity_id: id.into(),
+                display_name: Some("display only".into()),
+                seat: None,
+                capability_json: None,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+    }
+
+    fn work_claim(id: &str, identity_id: &str) -> NewWorkClaim {
+        NewWorkClaim {
+            claim_id: id.into(),
+            agent_identity_id: identity_id.into(),
+            session_client: None,
+            issue_ref: Some("org/repo#1253".into()),
+            flow_id: None,
+            dispatch_id: None,
+            branch: "lane/1253".into(),
+            declared_file_scope: "crates/memcore/src/db/**".into(),
+            role: "executor".into(),
+            mode: WorkClaimMode::Writable,
+            expected_head: "3c09b425".into(),
+            lease_expires_at: "2026-07-19T00:00:00Z".into(),
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn v21_claim_binding_is_atomic_and_holder_evidence_is_six_way_queryable() {
+        let mut conn = open_conn();
+        identity(&conn, "agent-a");
+        record_unverified_admission(
+            &conn,
+            "admission-a",
+            "agent-a",
+            "connection-a",
+            UnverifiedAdmissionState::SelfAsserted,
+        )
+        .unwrap();
+        insert_work_claim(&conn, &work_claim("claim-a", "agent-a")).unwrap();
+        crate::db::exec_env::insert_exec_env(
+            &conn,
+            &crate::db::exec_env::NewExecEnvLease {
+                env_id: "env-a".into(),
+                kind: "worktree".into(),
+                path: "/wt/a".into(),
+                repo_root: "/repo".into(),
+                branch: "lane/1253".into(),
+                base_sha: "3c09b425".into(),
+                dispatch_id: None,
+                env_class: crate::db::exec_env::EnvClass::EditOnly,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            holder_evidence(&conn, "env-a").unwrap(),
+            HolderEvidence::NotApplicable
+        );
+        assert_eq!(
+            bind_work_claim_exec_env(&mut conn, "claim-a", "env-a", 0).unwrap(),
+            1
+        );
+        assert_eq!(
+            holder_evidence(&conn, "env-a").unwrap(),
+            HolderEvidence::Held
+        );
+        assert!(
+            matches!(
+                bind_work_claim_exec_env(&mut conn, "claim-a", "env-a", 0),
+                Err(MemoryError::WorkClaimConflict(_))
+            ),
+            "stale bind version must not overwrite the first binding"
+        );
+        assert_eq!(
+            release_work_claim(&conn, "claim-a", 1, "explicit").unwrap(),
+            2
+        );
+        assert_eq!(
+            holder_evidence(&conn, "env-a").unwrap(),
+            HolderEvidence::Clear
+        );
+    }
+
+    #[test]
+    fn incompatible_or_missing_holder_links_refuse_with_distinct_evidence() {
+        let conn = open_conn();
+        crate::db::exec_env::insert_exec_env(
+            &conn,
+            &crate::db::exec_env::NewExecEnvLease {
+                env_id: "env-b".into(),
+                kind: "worktree".into(),
+                path: "/wt/b".into(),
+                repo_root: "/repo".into(),
+                branch: String::new(),
+                base_sha: String::new(),
+                dispatch_id: None,
+                env_class: crate::db::exec_env::EnvClass::EditOnly,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        conn.execute("UPDATE exec_envs SET agent_identity_id='agent-a', claim_id='missing' WHERE env_id='env-b'", []).unwrap();
+        assert_eq!(
+            holder_evidence(&conn, "env-b").unwrap(),
+            HolderEvidence::Unverifiable
+        );
+        conn.execute(
+            "UPDATE exec_envs SET claim_id=NULL WHERE env_id='env-b'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            holder_evidence(&conn, "env-b").unwrap(),
+            HolderEvidence::Contradictory
+        );
+        conn.execute(
+            "UPDATE exec_envs SET agent_identity_id=NULL, claim_id=NULL WHERE env_id='env-b'",
+            [],
+        )
+        .unwrap();
+        identity(&conn, "agent-b");
+        insert_work_claim(&conn, &work_claim("claim-b", "agent-b")).unwrap();
+        conn.execute(
+            "UPDATE exec_envs SET agent_identity_id='agent-b', claim_id='claim-b' WHERE env_id='env-b'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE session_claims SET exec_env_id='env-b', state='bad' WHERE claim_id='claim-b'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            holder_evidence(&conn, "env-b").unwrap(),
+            HolderEvidence::Unavailable
+        );
+        assert_eq!(
+            holder_evidence(&conn, "missing-env").unwrap(),
+            HolderEvidence::Unverifiable
+        );
     }
 }

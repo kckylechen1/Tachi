@@ -32,6 +32,14 @@ pub enum MemoryError {
     #[error("Internal error: {0}")]
     Internal(String),
 
+    /// A versioned WorkClaim transition lost its compare-and-swap race.
+    #[error("WorkClaim conflict: {0}")]
+    WorkClaimConflict(String),
+
+    /// A requested WorkClaim operation is not valid for the persisted state.
+    #[error("WorkClaim incompatible state: {0}")]
+    WorkClaimIncompatibleState(String),
+
     /// #1119: a process carrying [`crate::db::MigrationAuthority::Deny`] tried
     /// to open an EXISTING DB stamped below this kernel's
     /// `EXPECTED_SCHEMA_VERSION` (or a `CreateFresh` provisioning call landed

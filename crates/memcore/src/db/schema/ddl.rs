@@ -478,6 +478,8 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             branch         TEXT NOT NULL DEFAULT '',
             base_sha       TEXT NOT NULL DEFAULT '',
             dispatch_id    TEXT,
+            agent_identity_id TEXT,
+            claim_id       TEXT,
             env_class      TEXT NOT NULL DEFAULT 'edit-only',
             state          TEXT NOT NULL DEFAULT 'active',
             reclaim_reason TEXT,
@@ -488,6 +490,7 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_exec_envs_state ON exec_envs(state);
         CREATE INDEX IF NOT EXISTS idx_exec_envs_path ON exec_envs(path);
         CREATE INDEX IF NOT EXISTS idx_exec_envs_dispatch ON exec_envs(dispatch_id);
+        CREATE INDEX IF NOT EXISTS idx_exec_envs_claim ON exec_envs(claim_id);
 
         -- Execution-environment RESOURCE ledger (#894 S2a). `exec_envs` tracks
         -- the *lease*; these two tables track the BYTES that lease owns —
@@ -756,6 +759,14 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
             dispatch_id          TEXT,
             branch               TEXT NOT NULL DEFAULT '',
             declared_file_scope  TEXT,
+            agent_identity_id    TEXT,
+            role                 TEXT,
+            mode                 TEXT,
+            expected_head        TEXT,
+            lease_expires_at     TEXT,
+            transition_version   INTEGER NOT NULL DEFAULT 0,
+            exec_env_id          TEXT,
+            orphaned_at          TEXT,
             state                TEXT NOT NULL DEFAULT 'active',
             release_reason       TEXT,
             created_at           TEXT NOT NULL DEFAULT '',
@@ -777,6 +788,26 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE UNIQUE INDEX IF NOT EXISTS idx_session_claims_identity_active
             ON session_claims(COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, ''))
             WHERE state = 'active';
+
+        -- #1253 identity / WorkClaim spine. These tables and columns are
+        -- deliberately additive: a pre-v21 claim has no identity rather than
+        -- a made-up one.
+        CREATE TABLE IF NOT EXISTS agent_identities (
+            agent_identity_id TEXT PRIMARY KEY,
+            display_name      TEXT,
+            seat              TEXT,
+            capability_json   TEXT,
+            created_at        TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS identity_admissions (
+            admission_id      TEXT PRIMARY KEY,
+            agent_identity_id TEXT NOT NULL,
+            connection_id     TEXT NOT NULL,
+            state             TEXT NOT NULL CHECK (state IN ('self_asserted', 'verified', 'rejected', 'unavailable')),
+            created_at        TEXT NOT NULL DEFAULT '',
+            UNIQUE(agent_identity_id, connection_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_identity_admissions_connection ON identity_admissions(connection_id);
 "#;
 
 pub(super) const MIGRATED_INDEXES_SQL: &str = r#"
