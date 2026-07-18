@@ -2,15 +2,18 @@
 name = "portable-server"
 version = "1.9.0"
 edition = "2021"
-description = "Portable memory-kernel MCP server (stdio): save/search/get/status over portable-kernel, no Tachi operator surfaces"
+description = "Portable memory-kernel MCP server over stdio or loopback HTTP, without Tachi operator surfaces"
 license = "AGPL-3.0-only"
 publish = false
 
-# Stripped server profile for the HyperMem runtime cutover (tachi #924).
+# This package was introduced for the HyperMem runtime cutover (tachi #924).
+# That is historical provenance, not its current product direction. Per #1195,
+# the package stays as a possible server companion to a future ZeroClaw-native
+# memory module. No direct ZeroClaw Cargo integration is present today.
 #
 # This is the *binary* companion to the `portable-kernel` *library*: a thin
-# bin crate that serves the memory-kernel surface over MCP stdio and nothing
-# else. It depends only on `portable-kernel` (memcore with `admin` off), rmcp
+# bin crate that serves the memory-kernel surface over MCP stdio or loopback
+# HTTP. It depends only on `portable-kernel` (memcore with `admin` off), rmcp
 # for the transport, tokio for the async runtime, serde(+json) for the wire
 # format, uuid for generated entry ids, and chrono for entry timestamps —
 # zero dependency on `tachi-server`, so none of the operator/product surfaces

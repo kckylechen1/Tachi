@@ -3,20 +3,25 @@
 // Rust MCP server using rmcp SDK to expose memcore functionality.
 // Stateless design: each tool opens its own DB connection per-request.
 
-//! # Build profiles: `full` (default) vs `portable` (Refs #924 / #770 #790 #798)
+//! # Feature sets: `full` (default) vs `portable` (Refs #924 / #770 #790 #798)
 //!
-//! `tachi-server` ships two Cargo profiles (see `[features]` in `Cargo.toml`):
+//! `tachi-server` declares two Cargo feature sets (see `[features]` in
+//! `Cargo.toml`):
 //!
 //! * **`full`** (default) — today's product runtime, unchanged. Memory kernel
 //!   plus every operator/product surface. Every existing build resolves this
 //!   profile, so behavior is byte-identical for full-profile users.
 //!
-//! * **`portable`** — the stripped HyperMem-cutover profile for the downstream
-//!   trading runtime (Hyperion/Quant). It exists so the Hyperion-HyperTachi
-//!   kernel fork can retire to a thin adapter over an upstream binary instead
-//!   of patching operator code out.
+//! * **`portable`** - a dependency partition and source-gating skeleton. It was
+//!   introduced for the HyperMem cutover, but Hyperion-HyperTachi separated
+//!   from Tachi on 2026-07-14 and is no longer the target consumer.
 //!
-//! ## `portable` — what is IN
+//! Owner ruling #1195 retains `portable-kernel` and `portable-server` as
+//! candidate boundaries for a future ZeroClaw-native memory module. No direct
+//! ZeroClaw Cargo integration has landed, and that direction does not make
+//! this unfinished `tachi-server` feature set a current ZeroClaw runtime.
+//!
+//! ## `portable`: what is IN
 //!
 //! * Memory facades: `save` / `search` / `get` / `briefing` / `checkpoint`.
 //! * Serving: stdio MCP + HTTP, daemon mode with per-scope pid/lock isolation.
@@ -27,7 +32,7 @@
 //! * Opens DBs written by full Tachi (admin tables present but unused — this is
 //!   guaranteed by `portable-kernel`'s `default-features = false` memcore).
 //!
-//! ## `portable` — what is OUT (operator/product surfaces)
+//! ## `portable`: what is OUT (operator/product surfaces)
 //!
 //! * Vault secrets, hub / skill catalog, foundry job queue, dispatch /
 //!   ship / merge, `tachi_gh`, PR lifecycle. The crates backing these
@@ -35,7 +40,7 @@
 //!   the operator CLIs) are `optional` deps enabled only by `full`, so a
 //!   `portable` build never compiles them into the trading runtime.
 //!
-//! ## Status (skeleton — #924)
+//! ## Status (skeleton, #924)
 //!
 //! The Cargo dependency partition is landed. The source-level module/router
 //! gates that make `cargo check --no-default-features --features portable`

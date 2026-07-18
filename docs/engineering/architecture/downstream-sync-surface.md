@@ -1,7 +1,20 @@
 # Downstream Sync Surface & Cratesplit Continuation Plan
 
-> **Status:** operating plan (2026-07-09), derived from live trees + kernel doctrine.  
-> **Implements / anchors:** #770, #771, #790–#794, #833, #847.  
+> **Status:** historical operating-plan snapshot (2026-07-09), derived from
+> live trees and kernel doctrine.
+> **Current implementation:** `portable-kernel` is a facade over `memcore`
+> with admin features disabled, and `portable-server` serves that facade over
+> MCP. The current Tachi Cargo inventory contains no direct ZeroClaw
+> integration.
+> **Future direction, owner-ratified 2026-07-17 (#1195):** retain the portable
+> packages as candidate boundaries for a ZeroClaw-native memory module. The
+> design and direct Cargo integration have not landed.
+> **Historical provenance:** the HyperTachi and HyperMemory convergence plan
+> below stopped being the package purpose when the fork separated on
+> 2026-07-14 (Hyperion-HyperTachi `9da2015`). The body remains the 2026-07-09
+> record of that sync surface and catch-up experiment, not current consumer
+> guidance.
+> **Implements / anchors:** #770, #771, #790–#794, #833, #847, #1195.  
 > **Companion docs:** [`kernel-surface-v1.md`](./kernel-surface-v1.md),  
 > [`hypermem-compatibility-gate.md`](./hypermem-compatibility-gate.md),  
 > [`host-adapter-lifecycle-v1.md`](./host-adapter-lifecycle-v1.md),  
@@ -72,7 +85,7 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 | Crate / surface | Role | Downstream rule |
 |---|---|---|
 | **`memcore`** (portable: `default-features = false`) | Canonical rows, edges, store, scorer types, search primitives | **Primary sync unit.** Prefer package or subtree merge of this crate alone. |
-| **`portable-kernel`** | Facade re-export of portable `memcore` (admin off) | Prefer this dep for HyperTachi / adapter workspaces; see [`portable-kernel-split.md`](./portable-kernel-split.md). |
+| **`portable-kernel`** | Facade re-export of portable `memcore` (admin off) | Current package boundary. Per #1195, it is a candidate for a future ZeroClaw-native module after design and integration. Historically it was the recommended dependency for HyperTachi and adapter workspaces; see [`portable-kernel-split.md`](./portable-kernel-split.md). |
 | Schema / migrations owned by core | `memories`, FTS, edges, access history, event ledger columns | Breaking changes need dual-gate: Tachi tests + Hypermem gate fixture |
 | Vector / backfill readiness | Coverage, degraded mode | Via core + readiness APIs, not Foundry product UI |
 | Event projection hooks | Continuity projection for adapters | Neutral events only; no GitHub/dispatch events required |

@@ -1,20 +1,38 @@
 # Portable Kernel Split — memcore vs admin
 
-> **Status:** landed 2026-07-09 (first cut).  
-> **Anchors:** #770, #790–#794, #833 Phase 1.1.  
+> **Status:** landed 2026-07-09 (first cut); historical purpose retired and
+> future direction recorded 2026-07-17 (#1195).
+> **Anchors:** #770, #790–#794, #833 Phase 1.1, #1195.  
 > **Companions:** [`kernel-surface-v1.md`](./kernel-surface-v1.md),  
 > [`downstream-sync-surface.md`](./downstream-sync-surface.md) (when present).
+>
+> **Current implementation:** `portable-kernel` re-exports `memcore` with
+> admin features disabled. `portable-server` exposes that kernel over MCP.
+> The current Tachi Cargo inventory contains no direct ZeroClaw integration.
+>
+> **Owner ruling 2026-07-17 (#1195):** these packages stay as candidate
+> boundaries for a future ZeroClaw-native memory module. The design and direct
+> Cargo integration have not landed.
+>
+> **Historical provenance:** this split was cut for HyperTachi, HyperMemory,
+> and adapter convergence. Hyperion-HyperTachi separated on 2026-07-14
+> (`9da2015`), so the original consumer framing below is retained only as the
+> historical record of why the split was cut.
 
 ## Why
 
 `memcore` mixed two audiences:
 
-1. **Portable kernel** — store, schema, hybrid search/scorer, graph, events,
-   sandbox. HyperTachi / HyperMemory / adapters need this.
-2. **Tachi admin** — vault secrets, Hub capability catalog, Foundry job queue
+1. **Portable kernel** - store, schema, hybrid search/scorer, graph, events,
+   sandbox. This is the current compile boundary. Per #1195 it is also a
+   candidate boundary for a future ZeroClaw-native module after design and
+   integration. Historically, HyperTachi, HyperMemory, and adapters motivated
+   the split (see § Catch-up experiment results for the 2026-07-09 record).
+2. **Tachi admin** - vault secrets, Hub capability catalog, Foundry job queue
    types, Pack / agent_profile product surfaces. Operator product only.
 
-Without a compile boundary, every downstream fork either:
+Without a compile boundary, a future embedder or the historical downstream
+fork either:
 
 - rsyncs the whole monorepo and inherits operator APIs, or
 - hand-picks files and drifts.
@@ -117,7 +135,8 @@ cargo test -p portable-kernel
 - Physical extract of vault/hub/foundry into separate crates (schema still shared;
   feature gate is enough for fork/compile isolation).
 - `memory-server-lite` binary profile (next step once portable packaging is
-  dogfooded on HyperTachi).
+  dogfooded on the ZeroClaw-native embedder per #1195; historically framed
+  around HyperTachi dogfooding, which is no longer the target consumer).
 - Moving schema admin tables behind feature flags (would break open of full DBs).
 
 ## Acceptance
