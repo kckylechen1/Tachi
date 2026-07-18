@@ -1,4 +1,4 @@
-use super::super::{ChatLaneConfig, ProviderRuntimeConfig};
+use super::super::{ChatLaneConfig, LaneFallbackConfig, ProviderRuntimeConfig};
 use super::*;
 
 #[test]
@@ -1122,4 +1122,410 @@ fn new_with_config_rejects_local_rerank_with_whitespace_endpoint() {
         err.contains("local rerank provider not configured"),
         "got: {err}"
     );
+}
+
+// ── #1197: cross-provider fallback chain + lane-outage alerting ─────────────
+
+fn unused_lane(key_env: &'static str) -> ChatLaneConfig {
+    ChatLaneConfig {
+        base_url: "https://unused.test/v1/chat/completions".to_string(),
+        model: "unused".to_string(),
+        api_key_envs: vec![key_env],
+    }
+}
+
+fn config_with_extract(extract: ChatLaneConfig) -> ProviderRuntimeConfig {
+    ProviderRuntimeConfig {
+        extract,
+        summary: unused_lane("__1197_UNUSED_SUMMARY"),
+        reasoning: unused_lane("__1197_UNUSED_REASONING"),
+        distill: unused_lane("__1197_UNUSED_DISTILL"),
+        rerank: RerankConfig {
+            provider: RerankProviderKind::Voyage,
+            local_endpoint: None,
+        },
+    }
+}
+
+/// RED against the pre-#1197 single-tier lane: with no fallback wired, an
+/// unconfigured primary key fails the whole call. GREEN once the fallback
+/// tier is configured: the same call must succeed by falling through to it.
+/// Discriminates "fallback exists as declared config" from "fallback is
+/// actually consulted when primary can't even select a key" (the #1197 ask's
+/// "key 池整体 exhausted" trigger — no HTTP call is made for the primary at
+/// all here, since key selection fails before any network I/O).
+#[tokio::test]
+async fn extract_lane_falls_through_to_fallback_when_primary_key_is_unconfigured() {
+    use axum::{extract::State, routing::post, Json, Router};
+    use std::sync::{Arc, Mutex};
+
+    let hits = Arc::new(Mutex::new(0usize));
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|State(hits): State<Arc<Mutex<usize>>>| async move {
+            *hits.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            Json(serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "fallback answered"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            }))
+        }),
+    ).with_state(hits.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fallback mock provider");
+    let port = listener.local_addr().expect("fallback mock addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("fallback mock provider");
+    });
+
+    // Primary: a key env that is never configured anywhere — key selection
+    // fails immediately (`Missing API key`), no network attempt at all.
+    let primary = unused_lane("__1197_UNCONFIGURED_PRIMARY_KEY");
+    let fallback = ChatLaneConfig {
+        base_url: format!("http://127.0.0.1:{port}/chat/completions"),
+        model: "fallback-model".to_string(),
+        api_key_envs: vec!["__1197_FALLBACK_KEY"],
+    };
+
+    let client = LlmClient::new_with_config_and_fallbacks(
+        config_with_extract(primary),
+        LaneFallbackConfig {
+            extract: Some(fallback),
+            ..Default::default()
+        },
+        None,
+    )
+    .expect("client should initialize");
+    client.set_provider_secret_pool(
+        "__1197_FALLBACK_KEY",
+        vec![ProviderSecret {
+            key_id: "__1197_FALLBACK_KEY".to_string(),
+            value: "fallback-secret".to_string(),
+        }],
+    );
+
+    let out = client
+        .call_extract_llm("system", "user", None, 0.0, 16)
+        .await
+        .expect("fallback tier should serve the request when primary can't select a key");
+    assert_eq!(out, "fallback answered");
+    assert_eq!(
+        *hits.lock().unwrap_or_else(|e| e.into_inner()),
+        1,
+        "fallback provider should be hit exactly once"
+    );
+
+    // A chain that ultimately succeeded (even via fallback) must not read as
+    // an outage.
+    let status = client
+        .provider_health_status()
+        .lane_outages
+        .into_iter()
+        .find(|s| s.lane == "extract")
+        .expect("extract lane outage status should exist");
+    assert_eq!(status.consecutive_chain_failures, 0);
+    assert!(status.fallback_configured);
+
+    server_task.abort();
+}
+
+/// Discriminates the *other* #1197 trigger condition: an open circuit
+/// breaker, not just an unconfigured key. Primary's mock provider would
+/// answer successfully if hit — proving escalation happened because of the
+/// breaker, not because primary was actually broken.
+#[tokio::test]
+async fn extract_lane_escalates_to_fallback_when_primary_breaker_is_open() {
+    use axum::{extract::State, routing::post, Json, Router};
+    use std::sync::{Arc, Mutex};
+
+    let primary_hits = Arc::new(Mutex::new(0usize));
+    let primary_app = Router::new()
+        .route(
+            "/chat/completions",
+            post(|State(hits): State<Arc<Mutex<usize>>>| async move {
+                *hits.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+                Json(serde_json::json!({
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "primary answered"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+            }),
+        )
+        .with_state(primary_hits.clone());
+    let primary_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind primary mock provider");
+    let primary_port = primary_listener
+        .local_addr()
+        .expect("primary mock addr")
+        .port();
+    let primary_task = tokio::spawn(async move {
+        axum::serve(primary_listener, primary_app)
+            .await
+            .expect("primary mock provider");
+    });
+
+    let fallback_app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            Json(serde_json::json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "fallback answered"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            }))
+        }),
+    );
+    let fallback_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fallback mock provider");
+    let fallback_port = fallback_listener
+        .local_addr()
+        .expect("fallback mock addr")
+        .port();
+    let fallback_task = tokio::spawn(async move {
+        axum::serve(fallback_listener, fallback_app)
+            .await
+            .expect("fallback mock provider");
+    });
+
+    let primary = ChatLaneConfig {
+        base_url: format!("http://127.0.0.1:{primary_port}/chat/completions"),
+        model: "primary-model".to_string(),
+        api_key_envs: vec!["__1197_BREAKER_PRIMARY_KEY"],
+    };
+    let fallback = ChatLaneConfig {
+        base_url: format!("http://127.0.0.1:{fallback_port}/chat/completions"),
+        model: "fallback-model".to_string(),
+        api_key_envs: vec!["__1197_BREAKER_FALLBACK_KEY"],
+    };
+
+    let client = LlmClient::new_with_config_and_fallbacks(
+        config_with_extract(primary),
+        LaneFallbackConfig {
+            extract: Some(fallback),
+            ..Default::default()
+        },
+        None,
+    )
+    .expect("client should initialize");
+    client.set_provider_secret_pool(
+        "__1197_BREAKER_PRIMARY_KEY",
+        vec![ProviderSecret {
+            key_id: "__1197_BREAKER_PRIMARY_KEY".to_string(),
+            value: "primary-secret".to_string(),
+        }],
+    );
+    client.set_provider_secret_pool(
+        "__1197_BREAKER_FALLBACK_KEY",
+        vec![ProviderSecret {
+            key_id: "__1197_BREAKER_FALLBACK_KEY".to_string(),
+            value: "fallback-secret".to_string(),
+        }],
+    );
+
+    // Force the primary tier's breaker open directly — this is the
+    // "breaker 开" trigger condition, independent of key availability.
+    for _ in 0..5 {
+        client.circuit_breakers.record_failure("chat:extract");
+    }
+
+    let out = client
+        .call_extract_llm("system", "user", None, 0.0, 16)
+        .await
+        .expect("fallback tier should serve the request while primary's breaker is open");
+    assert_eq!(out, "fallback answered");
+    assert_eq!(
+        *primary_hits.lock().unwrap_or_else(|e| e.into_inner()),
+        0,
+        "an open breaker must fast-reject the primary tier — zero HTTP calls to it"
+    );
+
+    primary_task.abort();
+    fallback_task.abort();
+}
+
+/// GREEN-vs-broken: with **no** fallback configured (or a fallback that is
+/// equally unusable), an exhausted lane must surface a loud, typed outage
+/// error — never a silently swallowed stall — and the failure must be
+/// recorded on the queryable outage surface that `tachi_status` reads.
+#[tokio::test]
+async fn extract_lane_all_tiers_exhausted_reports_loud_typed_outage_not_a_stall() {
+    let primary = unused_lane("__1197_ALL_FAIL_PRIMARY_KEY");
+    let fallback = unused_lane("__1197_ALL_FAIL_FALLBACK_KEY");
+
+    let client = LlmClient::new_with_config_and_fallbacks(
+        config_with_extract(primary),
+        LaneFallbackConfig {
+            extract: Some(fallback),
+            ..Default::default()
+        },
+        None,
+    )
+    .expect("client should initialize");
+
+    let err = client
+        .call_extract_llm("system", "user", None, 0.0, 16)
+        .await
+        .expect_err("both tiers unconfigured must fail loudly, not hang or return Ok");
+
+    assert!(
+        err.contains("LANE OUTAGE"),
+        "failure must be a typed, greppable outage signal, got: {err}"
+    );
+    assert!(err.contains("extract"), "got: {err}");
+    assert!(
+        err.contains("2 configured provider tier"),
+        "message should name how many tiers were tried, got: {err}"
+    );
+
+    let status = client
+        .provider_health_status()
+        .lane_outages
+        .into_iter()
+        .find(|s| s.lane == "extract")
+        .expect("extract lane outage status should exist");
+    assert_eq!(
+        status.consecutive_chain_failures, 1,
+        "a fully-exhausted chain must bump the outage streak"
+    );
+    assert!(status.last_outage_at.is_some());
+    assert!(status.last_error.is_some());
+}
+
+/// Repeated full-chain exhaustion accumulates a streak (the "连续失败超阈值"
+/// signal #1197 wants for alert routing), and a subsequent success clears it
+/// — a lane that recovers must not keep reporting a stale outage.
+#[tokio::test]
+async fn extract_lane_outage_streak_accumulates_and_clears_on_recovery() {
+    let primary = unused_lane("__1197_STREAK_PRIMARY_KEY");
+    let fallback = unused_lane("__1197_STREAK_FALLBACK_KEY");
+
+    let client = LlmClient::new_with_config_and_fallbacks(
+        config_with_extract(primary),
+        LaneFallbackConfig {
+            extract: Some(fallback),
+            ..Default::default()
+        },
+        None,
+    )
+    .expect("client should initialize");
+
+    for _ in 0..3 {
+        let _ = client
+            .call_extract_llm("system", "user", None, 0.0, 16)
+            .await;
+    }
+    assert_eq!(
+        client
+            .provider_health_status()
+            .lane_outages
+            .into_iter()
+            .find(|s| s.lane == "extract")
+            .expect("extract lane outage status should exist")
+            .consecutive_chain_failures,
+        3,
+        "three consecutive full-chain failures should accumulate a streak of 3"
+    );
+
+    // A lane recovering — via a fallback tier succeeding, or (as asserted
+    // directly here against the tracker itself) any tier at all — must clear
+    // the streak, not just decrement it. `record_chain_success` is exactly
+    // what `call_lane_llm` calls on the first tier that answers.
+    client.lane_outage.record_chain_success("extract");
+    assert_eq!(
+        client
+            .provider_health_status()
+            .lane_outages
+            .into_iter()
+            .find(|s| s.lane == "extract")
+            .expect("extract lane outage status should exist")
+            .consecutive_chain_failures,
+        0,
+        "a success must clear the outage streak, not just decrement it"
+    );
+}
+
+/// Golden-value oracle for `LaneFallbackConfig::from_env` (#1197): the
+/// concrete worked example from the issue — extract's primary is
+/// SiliconFlow, its cross-provider fallback is DeepSeek when
+/// `DEEPSEEK_API_KEY` is configured and no explicit `EXTRACT_FALLBACK_*`
+/// override is set. Also covers the inverse for a foundry lane (distill),
+/// whose fallback is SiliconFlow.
+#[test]
+fn lane_fallback_config_from_env_resolves_deepseek_default_for_extract() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _deepseek = EnvRestore::set("DEEPSEEK_API_KEY", "golden-deepseek-fallback-key");
+    let _siliconflow = EnvRestore::set("SILICONFLOW_API_KEY", "golden-siliconflow-fallback-key");
+    let _cleanup = [
+        EnvRestore::unset("EXTRACT_FALLBACK_API_KEY"),
+        EnvRestore::unset("EXTRACT_FALLBACK_BASE_URL"),
+        EnvRestore::unset("EXTRACT_FALLBACK_MODEL"),
+        EnvRestore::unset("SUMMARY_FALLBACK_API_KEY"),
+        EnvRestore::unset("SUMMARY_FALLBACK_BASE_URL"),
+        EnvRestore::unset("SUMMARY_FALLBACK_MODEL"),
+        EnvRestore::unset("DISTILL_FALLBACK_API_KEY"),
+        EnvRestore::unset("DISTILL_FALLBACK_BASE_URL"),
+        EnvRestore::unset("DISTILL_FALLBACK_MODEL"),
+        EnvRestore::unset("REASONING_FALLBACK_API_KEY"),
+        EnvRestore::unset("REASONING_FALLBACK_BASE_URL"),
+        EnvRestore::unset("REASONING_FALLBACK_MODEL"),
+        EnvRestore::unset("DEEPSEEK_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_MODEL"),
+        EnvRestore::unset("SILICONFLOW_BASE_URL"),
+        EnvRestore::unset("SILICONFLOW_MODEL"),
+    ];
+
+    let fallbacks = super::super::LaneFallbackConfig::from_env();
+
+    let extract = fallbacks
+        .extract
+        .expect("extract fallback should resolve to DeepSeek when DEEPSEEK_API_KEY is set");
+    assert_eq!(extract.base_url, "https://api.deepseek.com/chat/completions");
+    assert_eq!(extract.model, "deepseek-chat");
+    assert_eq!(
+        extract.api_key_envs,
+        vec!["EXTRACT_FALLBACK_API_KEY", "DEEPSEEK_API_KEY"]
+    );
+
+    let distill = fallbacks
+        .distill
+        .expect("distill fallback should resolve to SiliconFlow when SILICONFLOW_API_KEY is set");
+    assert_eq!(
+        distill.base_url,
+        "https://api.siliconflow.cn/v1/chat/completions"
+    );
+    assert_eq!(distill.model, "Qwen/Qwen3.5-27B");
+    assert_eq!(
+        distill.api_key_envs,
+        vec!["DISTILL_FALLBACK_API_KEY", "SILICONFLOW_API_KEY"]
+    );
+}
+
+/// A lane with no distinct fallback provider configured must resolve to
+/// `None` — #1197's fallback is additive, never invented out of thin air.
+#[test]
+fn lane_fallback_config_from_env_is_none_when_no_fallback_key_configured() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _cleanup = [
+        EnvRestore::unset("DEEPSEEK_API_KEY"),
+        EnvRestore::unset("SILICONFLOW_API_KEY"),
+        EnvRestore::unset("EXTRACT_FALLBACK_API_KEY"),
+        EnvRestore::unset("SUMMARY_FALLBACK_API_KEY"),
+        EnvRestore::unset("DISTILL_FALLBACK_API_KEY"),
+        EnvRestore::unset("REASONING_FALLBACK_API_KEY"),
+    ];
+
+    let fallbacks = super::super::LaneFallbackConfig::from_env();
+
+    assert!(fallbacks.extract.is_none());
+    assert!(fallbacks.summary.is_none());
+    assert!(fallbacks.distill.is_none());
+    assert!(fallbacks.reasoning.is_none());
 }

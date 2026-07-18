@@ -31,6 +31,27 @@ const DEEPSEEK_REASONING_DEFAULT: ProviderLaneDefault = ProviderLaneDefault {
     model: DEFAULT_DEEPSEEK_REASONING_MODEL,
 };
 
+/// Cross-provider fallback defaults (#1197). These mirror the concrete
+/// example in the issue (`extract: siliconflow -> deepseek`) and its inverse
+/// for the foundry lanes (which prefer DeepSeek as *primary* when
+/// `DEEPSEEK_API_KEY` is set, so their natural fallback is the SiliconFlow
+/// front-line provider instead).
+const DEEPSEEK_FALLBACK_DEFAULT: ProviderLaneDefault = ProviderLaneDefault {
+    api_key_env: "DEEPSEEK_API_KEY",
+    base_url_envs: &["DEEPSEEK_BASE_URL"],
+    model_envs: &["DEEPSEEK_MODEL"],
+    base_url: DEFAULT_DEEPSEEK_BASE_URL,
+    model: DEFAULT_DEEPSEEK_DISTILL_MODEL,
+};
+
+const SILICONFLOW_FALLBACK_DEFAULT: ProviderLaneDefault = ProviderLaneDefault {
+    api_key_env: "SILICONFLOW_API_KEY",
+    base_url_envs: &["SILICONFLOW_BASE_URL"],
+    model_envs: &["SILICONFLOW_MODEL"],
+    base_url: DEFAULT_CHAT_BASE_URL,
+    model: DEFAULT_EXTRACT_MODEL,
+};
+
 /// Construction-time provider/rerank configuration, separable from env reads.
 ///
 /// `from_env()` reproduces the exact env-fallback chain that
@@ -179,6 +200,94 @@ impl ProviderRuntimeConfig {
     }
 }
 
+/// Declarative per-lane cross-provider fallback (#1197): a *secondary*
+/// provider's `ChatLaneConfig`, tried when the primary lane's whole key pool
+/// is exhausted/auth-failed or its circuit breaker is open, instead of the
+/// call stalling background pipelines silently.
+///
+/// A lane with `None` here behaves exactly as it did before #1197
+/// (primary-only) — this is additive, never a behavior change for
+/// deployments that don't configure a distinct fallback provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaneFallbackConfig {
+    pub extract: Option<ChatLaneConfig>,
+    pub summary: Option<ChatLaneConfig>,
+    pub reasoning: Option<ChatLaneConfig>,
+    pub distill: Option<ChatLaneConfig>,
+}
+
+impl LaneFallbackConfig {
+    /// Resolve fallback config from env. Each lane's fallback activates only
+    /// if a distinct fallback api key resolves (either an explicit
+    /// `{LANE}_FALLBACK_API_KEY` override or the lane's cross-provider
+    /// convenience default) — never invents a fallback out of thin air.
+    pub fn from_env() -> Self {
+        let extract = Self::load_fallback(
+            &["EXTRACT_FALLBACK_API_KEY", "DEEPSEEK_API_KEY"],
+            &["EXTRACT_FALLBACK_BASE_URL", "DEEPSEEK_BASE_URL"],
+            &["EXTRACT_FALLBACK_MODEL", "DEEPSEEK_MODEL"],
+            &DEEPSEEK_FALLBACK_DEFAULT,
+        );
+        let summary = Self::load_fallback(
+            &[
+                "SUMMARY_FALLBACK_API_KEY",
+                "EXTRACT_FALLBACK_API_KEY",
+                "DEEPSEEK_API_KEY",
+            ],
+            &[
+                "SUMMARY_FALLBACK_BASE_URL",
+                "EXTRACT_FALLBACK_BASE_URL",
+                "DEEPSEEK_BASE_URL",
+            ],
+            &[
+                "SUMMARY_FALLBACK_MODEL",
+                "EXTRACT_FALLBACK_MODEL",
+                "DEEPSEEK_MODEL",
+            ],
+            &DEEPSEEK_FALLBACK_DEFAULT,
+        );
+        let reasoning = Self::load_fallback(
+            &["REASONING_FALLBACK_API_KEY", "SILICONFLOW_API_KEY"],
+            &["REASONING_FALLBACK_BASE_URL", "SILICONFLOW_BASE_URL"],
+            &["REASONING_FALLBACK_MODEL", "SILICONFLOW_MODEL"],
+            &SILICONFLOW_FALLBACK_DEFAULT,
+        );
+        let distill = Self::load_fallback(
+            &["DISTILL_FALLBACK_API_KEY", "SILICONFLOW_API_KEY"],
+            &["DISTILL_FALLBACK_BASE_URL", "SILICONFLOW_BASE_URL"],
+            &["DISTILL_FALLBACK_MODEL", "SILICONFLOW_MODEL"],
+            &SILICONFLOW_FALLBACK_DEFAULT,
+        );
+        Self {
+            extract,
+            summary,
+            reasoning,
+            distill,
+        }
+    }
+
+    /// Returns `None` when no fallback api key resolves — the lane has no
+    /// configured secondary provider and falls through to primary-only
+    /// behavior identical to pre-#1197.
+    fn load_fallback(
+        api_key_envs: &[&'static str],
+        base_url_envs: &[&str],
+        model_envs: &[&str],
+        default: &ProviderLaneDefault,
+    ) -> Option<ChatLaneConfig> {
+        super::super::LlmClient::first_env_key(api_key_envs)?;
+        let base_url = super::super::LlmClient::first_env(base_url_envs)
+            .unwrap_or_else(|| default.base_url.to_string());
+        let model = super::super::LlmClient::first_env(model_envs)
+            .unwrap_or_else(|| default.model.to_string());
+        Some(ChatLaneConfig {
+            base_url,
+            model,
+            api_key_envs: api_key_envs.to_vec(),
+        })
+    }
+}
+
 impl super::super::LlmClient {
     pub(in crate::llm) const MAX_ATTEMPTS: usize = 3;
     pub(in crate::llm) const BASE_RETRY_DELAY_MS: u64 = 500;
@@ -289,16 +398,35 @@ impl super::super::LlmClient {
     }
 
     pub fn new_with_vault_db(vault_db_path: Option<&Path>) -> Result<Self, String> {
-        Self::new_with_config(ProviderRuntimeConfig::from_env()?, vault_db_path)
+        Self::new_with_config_and_fallbacks(
+            ProviderRuntimeConfig::from_env()?,
+            LaneFallbackConfig::from_env(),
+            vault_db_path,
+        )
     }
 
     /// Build an `LlmClient` from an already-resolved [`ProviderRuntimeConfig`],
-    /// skipping all env reads. This is the construction seam: callers that
-    /// want programmatic config (tests, future config-file loaders) pass a
-    /// literal struct; `new_with_vault_db` delegates here after running
-    /// `ProviderRuntimeConfig::from_env`.
+    /// skipping all env reads, with **no** cross-provider fallback configured
+    /// (equivalent to pre-#1197 behavior). This is the construction seam:
+    /// callers that want programmatic config (tests, future config-file
+    /// loaders) pass a literal struct; `new_with_vault_db` goes through
+    /// `new_with_config_and_fallbacks` instead so production construction
+    /// also resolves `LaneFallbackConfig::from_env()`.
     pub fn new_with_config(
         config: ProviderRuntimeConfig,
+        vault_db_path: Option<&Path>,
+    ) -> Result<Self, String> {
+        Self::new_with_config_and_fallbacks(config, LaneFallbackConfig::default(), vault_db_path)
+    }
+
+    /// Build an `LlmClient` from an already-resolved [`ProviderRuntimeConfig`]
+    /// and [`LaneFallbackConfig`] (#1197), skipping all env reads. The
+    /// fallback-aware sibling of `new_with_config` — tests that want to
+    /// exercise cross-provider fallback deterministically (no env, no real
+    /// network) should use this instead of setting `*_FALLBACK_*` env vars.
+    pub fn new_with_config_and_fallbacks(
+        config: ProviderRuntimeConfig,
+        fallbacks: LaneFallbackConfig,
         vault_db_path: Option<&Path>,
     ) -> Result<Self, String> {
         let vault_db_path = vault_db_path.map(|path| path.to_path_buf());
@@ -338,6 +466,10 @@ impl super::super::LlmClient {
             distill: config.distill,
             reasoning: config.reasoning,
             summary: config.summary,
+            extract_fallback: fallbacks.extract,
+            distill_fallback: fallbacks.distill,
+            reasoning_fallback: fallbacks.reasoning,
+            summary_fallback: fallbacks.summary,
             rerank_config: config.rerank,
             vault_db_path,
             provider_state: Arc::new(RwLock::new(ProviderState::with_health(provider_health))),
@@ -345,6 +477,7 @@ impl super::super::LlmClient {
             provider_health_persist: Arc::new(RwLock::new(ProviderHealthPersistState::default())),
             claude_cli_failure: Arc::new(RwLock::new(None)),
             circuit_breakers: super::super::CircuitBreakerRegistry::new(),
+            lane_outage: super::super::LaneOutageTracker::new(),
             #[cfg(test)]
             last_rerank_dispatch: Arc::new(std::sync::Mutex::new(None)),
         })
@@ -423,6 +556,19 @@ impl super::super::LlmClient {
             ChatLane::Distill => &self.distill,
             ChatLane::Reasoning => &self.reasoning,
             ChatLane::Summary => &self.summary,
+        }
+    }
+
+    /// The configured cross-provider fallback for `lane`, if any (#1197).
+    /// `None` means the lane is primary-only — either no fallback env/default
+    /// resolved, or (via `new_with_config`, the env-free test seam) none was
+    /// injected.
+    pub(in crate::llm) fn fallback_lane(&self, lane: ChatLane) -> Option<ChatLaneConfig> {
+        match lane {
+            ChatLane::Extract => self.extract_fallback.clone(),
+            ChatLane::Distill => self.distill_fallback.clone(),
+            ChatLane::Reasoning => self.reasoning_fallback.clone(),
+            ChatLane::Summary => self.summary_fallback.clone(),
         }
     }
 }

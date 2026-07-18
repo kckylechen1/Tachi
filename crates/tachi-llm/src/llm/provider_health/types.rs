@@ -41,6 +41,28 @@ pub struct ProviderHealthStatus {
     pub persist_last_success_at: Option<String>,
     pub persist_last_success_age_secs: Option<u64>,
     pub persist_last_error: Option<String>,
+    /// Per-lane breaker/outage surface (#1197): a lane whose circuit breaker
+    /// is open, or that has exhausted its full fallback chain recently,
+    /// shows up here instead of only as a silent stall to background
+    /// callers. Consumed today by `tachi_status`'s verbose provider_health
+    /// block; threshold-crossing → alert-event routing is a follow-up in
+    /// the status/alert surface, not this crate.
+    pub lane_outages: Vec<LaneOutageStatus>,
+}
+
+/// Snapshot of one chat lane's resilience state: breaker position, whether a
+/// fallback provider is configured for it, and the running full-chain-outage
+/// streak (#1197). `consecutive_chain_failures` only increments when *every*
+/// configured tier (primary + fallback) failed on a call — an ordinary
+/// within-tier retry or a fallback-served success never counts against it.
+#[derive(Debug, Clone, Serialize)]
+pub struct LaneOutageStatus {
+    pub lane: String,
+    pub breaker_state: &'static str,
+    pub fallback_configured: bool,
+    pub consecutive_chain_failures: u32,
+    pub last_outage_at: Option<String>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Clone)]

@@ -15,9 +15,9 @@ mod provider_health;
 mod rerank;
 
 pub use chat_lanes::ReasoningOutcome;
-pub(crate) use circuit_breaker::CircuitBreakerRegistry;
+pub(crate) use circuit_breaker::{CircuitBreakerRegistry, LaneOutageTracker};
 pub use provider_health::ProviderSecret;
-pub use provider_health::{ChatLaneConfig, ProviderRuntimeConfig};
+pub use provider_health::{ChatLaneConfig, LaneFallbackConfig, ProviderRuntimeConfig};
 use provider_health::{
     ClaudeCliFailure, ProviderHealthPersistState, ProviderHealthReloadState, ProviderState,
 };
@@ -43,6 +43,12 @@ pub struct LlmClient {
     distill: ChatLaneConfig,
     reasoning: ChatLaneConfig,
     summary: ChatLaneConfig,
+    /// Cross-provider fallback config per lane (#1197). `None` = primary-only,
+    /// identical to pre-#1197 behavior.
+    extract_fallback: Option<ChatLaneConfig>,
+    distill_fallback: Option<ChatLaneConfig>,
+    reasoning_fallback: Option<ChatLaneConfig>,
+    summary_fallback: Option<ChatLaneConfig>,
     /// Rerank provider config resolved at construction (eager fail-closed).
     rerank_config: RerankConfig,
     vault_db_path: Option<PathBuf>,
@@ -51,6 +57,9 @@ pub struct LlmClient {
     provider_health_persist: Arc<RwLock<ProviderHealthPersistState>>,
     claude_cli_failure: Arc<RwLock<Option<ClaudeCliFailure>>>,
     pub(crate) circuit_breakers: CircuitBreakerRegistry,
+    /// Full-chain (all tiers) outage streak per lane (#1197) — feeds
+    /// `provider_health_status().lane_outages`.
+    pub(crate) lane_outage: LaneOutageTracker,
     /// Test-only: last provider arm entered by `rerank()` (dispatch seam probe).
     #[cfg(test)]
     last_rerank_dispatch: Arc<std::sync::Mutex<Option<RerankProviderKind>>>,

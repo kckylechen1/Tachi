@@ -113,7 +113,10 @@ impl CircuitBreaker {
         }
     }
 
-    #[cfg(test)]
+    /// Human-readable breaker state. Used both by tests and by the
+    /// production lane-outage status surface (#1197) — `tachi_status`
+    /// reports this per lane so a degraded provider shows up as `"open"`
+    /// instead of a silent stall.
     pub(crate) fn state_name(&self) -> &'static str {
         match *self.inner.state.read().unwrap_or_else(|e| e.into_inner()) {
             BreakerState::Closed => "closed",
@@ -158,6 +161,20 @@ impl CircuitBreakerRegistry {
         self.get_or_create(key).record_failure();
     }
 
+    /// Read-only breaker state for a key, without creating an entry when one
+    /// doesn't exist yet (an absent breaker behaves as `"closed"` — never
+    /// having failed is not the same as being degraded). Used by the
+    /// lane-outage status surface (#1197) so polling status never mutates
+    /// breaker state as a side effect.
+    pub(crate) fn state_name(&self, key: &str) -> &'static str {
+        self.breakers
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .map(CircuitBreaker::state_name)
+            .unwrap_or("closed")
+    }
+
     /// Introspection helper for unit tests / future status surfaces.
     #[cfg(test)]
     pub(crate) fn snapshot(&self) -> Vec<(String, &'static str)> {
@@ -167,6 +184,62 @@ impl CircuitBreakerRegistry {
             .iter()
             .map(|(k, v)| (k.clone(), v.state_name()))
             .collect()
+    }
+}
+
+/// Tracks whether a lane's **entire configured provider chain** (primary +
+/// fallback tiers) has been exhausted on the most recent call — i.e. a full
+/// lane outage, distinct from an ordinary within-tier retry/failure (#1197).
+/// A lane recovering via its fallback provider (any tier succeeding) clears
+/// the streak: the lane is healthy from the caller's point of view even if
+/// degraded to a secondary provider.
+#[derive(Clone, Default)]
+pub(crate) struct LaneOutageTracker {
+    entries: Arc<RwLock<HashMap<&'static str, LaneOutageEntry>>>,
+}
+
+#[derive(Clone, Default)]
+struct LaneOutageEntry {
+    consecutive_chain_failures: u32,
+    last_outage_at: Option<String>,
+    last_error: Option<String>,
+}
+
+impl LaneOutageTracker {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that every configured tier failed this call. `now_utc` is an
+    /// RFC3339 timestamp string (caller-supplied so this module doesn't need
+    /// its own clock dependency).
+    pub(crate) fn record_chain_exhausted(&self, lane: &'static str, now_utc: String, error: String) {
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let entry = entries.entry(lane).or_default();
+        entry.consecutive_chain_failures += 1;
+        entry.last_outage_at = Some(now_utc);
+        entry.last_error = Some(error);
+    }
+
+    /// Any tier succeeding resets the outage streak for this lane.
+    pub(crate) fn record_chain_success(&self, lane: &'static str) {
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        entries.remove(lane);
+    }
+
+    /// `(consecutive_chain_failures, last_outage_at, last_error)` for `lane`;
+    /// all-zero/`None` when the lane has never had a full-chain outage (or
+    /// has recovered since).
+    pub(crate) fn snapshot_for(&self, lane: &'static str) -> (u32, Option<String>, Option<String>) {
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        match entries.get(lane) {
+            Some(entry) => (
+                entry.consecutive_chain_failures,
+                entry.last_outage_at.clone(),
+                entry.last_error.clone(),
+            ),
+            None => (0, None, None),
+        }
     }
 }
 
@@ -238,6 +311,70 @@ mod tests {
         assert!(
             !registry.allow("test"),
             "second half-open request is fast-rejected until probe resolves"
+        );
+    }
+
+    #[test]
+    fn state_name_of_missing_key_reports_closed_without_creating_entry() {
+        let registry = CircuitBreakerRegistry::new();
+        assert_eq!(registry.state_name("never-touched"), "closed");
+        // Polling status must not be observable as a side effect: no entry
+        // should have been created just by asking.
+        assert!(registry.snapshot().is_empty());
+    }
+
+    #[test]
+    fn state_name_of_reflects_open_breaker() {
+        let registry = CircuitBreakerRegistry::new();
+        for _ in 0..FAILURE_THRESHOLD {
+            registry.record_failure("chat:extract");
+        }
+        assert_eq!(registry.state_name("chat:extract"), "open");
+    }
+
+    #[test]
+    fn lane_outage_tracker_records_and_clears_on_success() {
+        let tracker = LaneOutageTracker::new();
+        assert_eq!(
+            tracker.snapshot_for("extract"),
+            (0, None, None),
+            "never-outaged lane reports zero streak"
+        );
+
+        tracker.record_chain_exhausted(
+            "extract",
+            "2026-07-18T00:00:00.000Z".to_string(),
+            "all providers exhausted".to_string(),
+        );
+        let (count, at, err) = tracker.snapshot_for("extract");
+        assert_eq!(count, 1);
+        assert_eq!(at.as_deref(), Some("2026-07-18T00:00:00.000Z"));
+        assert_eq!(err.as_deref(), Some("all providers exhausted"));
+
+        tracker.record_chain_exhausted(
+            "extract",
+            "2026-07-18T00:01:00.000Z".to_string(),
+            "still exhausted".to_string(),
+        );
+        assert_eq!(tracker.snapshot_for("extract").0, 2, "streak accumulates");
+
+        tracker.record_chain_success("extract");
+        assert_eq!(
+            tracker.snapshot_for("extract"),
+            (0, None, None),
+            "any tier succeeding clears the outage streak"
+        );
+    }
+
+    #[test]
+    fn lane_outage_tracker_is_independent_per_lane() {
+        let tracker = LaneOutageTracker::new();
+        tracker.record_chain_exhausted("extract", "t".to_string(), "e".to_string());
+        assert_eq!(tracker.snapshot_for("extract").0, 1);
+        assert_eq!(
+            tracker.snapshot_for("distill"),
+            (0, None, None),
+            "distill must be unaffected by extract's outage"
         );
     }
 }
