@@ -76,7 +76,18 @@ struct EnvGuard {
     root_old: Option<std::ffi::OsString>,
 }
 
+/// The cleaner's persisted-holder gate reads the configured global DB before
+/// considering destructive worktree cleanup.  Lifecycle fixtures model a
+/// legacy installation with no ExecEnv rows, not an unavailable runtime, so
+/// create the valid empty DB that deterministically yields NotApplicable.
+fn initialize_empty_global_db(home: &Path) {
+    let db = home.join(".tachi").join("global").join("memory.db");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    memcore::MemoryStore::open(db.to_str().unwrap()).expect("fixture global DB should initialize");
+}
+
 fn set_env(home: &Path, root: &Path) -> EnvGuard {
+    initialize_empty_global_db(home);
     let guard = EnvGuard {
         home_old: std::env::var_os("HOME"),
         root_old: std::env::var_os("TACHI_WORKTREES_ROOT"),
