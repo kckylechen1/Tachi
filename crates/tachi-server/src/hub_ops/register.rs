@@ -221,7 +221,7 @@ pub(crate) async fn handle_hub_register(
         };
         if let Some(prompt_text) = def.get("prompt").and_then(|v| v.as_str()) {
             let llm = server.llm.clone();
-            let claude_pool = server.claude_pool.clone();
+            let llm_recorder = server.llm_recorder.clone();
             let cap_clone = cap;
             let desc_empty = params.description.is_empty();
             let db_path = match target_db {
@@ -235,13 +235,15 @@ pub(crate) async fn handle_hub_register(
             let cap_id = cap_clone.id.clone();
 
             tokio::spawn(async move {
-                // #1261 step 2/3: the CLI fallback was removed; skill
-                // analysis now goes straight through the SiliconFlow/Qwen
-                // extract lane via the provider executor.
+                // #1261 step 2/3 removed the CLI fallback; step 3/3 renamed
+                // the recorder (formerly `ClaudePool::call_via_provider`).
+                // Skill analysis goes straight through the SiliconFlow/Qwen
+                // extract lane via the provider executor, recorded to
+                // foundry-runs by `LlmCallRecorder`.
                 let prompt_for_call = prompt_text.clone();
                 let llm_for_call = llm.clone();
-                let pool_result = claude_pool
-                    .call_via_provider("skill-analysis", &prompt_text, move || async move {
+                let pool_result = llm_recorder
+                    .record_call("skill-analysis", &prompt_text, move || async move {
                         llm_for_call
                             .call_extract_llm(
                                 crate::prompts::SKILL_ANALYSIS_PROMPT,

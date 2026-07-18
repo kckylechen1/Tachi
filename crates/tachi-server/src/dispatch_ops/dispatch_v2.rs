@@ -175,21 +175,22 @@ pub(super) async fn run_plan_stage(
 /// provider executor first, with the CLI pool as a fallback for the rollout
 /// cycle. Either way the run-directory artifact contract
 /// (`prompt.md`/`result.md`/`status.json`) is preserved, since the path
-/// goes through `ClaudePool::call_via_provider` (#1214 BUG#3: this call
-/// site previously had no flag gate at all — the fifth live pool consumer
-/// the flag-coverage audit missed). #1261 step 2/3: the CLI fallback
-/// branch was removed; the only path now is the provider executor.
+/// goes through `LlmCallRecorder::record_call` (#1214 BUG#3 lineage: this
+/// call site previously had no flag gate at all — the fifth live pool
+/// consumer the flag-coverage audit missed). #1261 step 2/3 removed the
+/// CLI fallback branch; step 3/3 renamed the recorder (formerly
+/// `ClaudePool::call_via_provider`) to its executor-agnostic name.
 async fn call_plan_llm(
     server: &crate::MemoryServer,
     label: &str,
     composed_prompt: &str,
     task: &str,
-) -> Result<tachi_llm::claude_pool::ClaudeCallOutcome, String> {
+) -> Result<tachi_llm::llm_recorder::RecordedCallOutcome, String> {
     let llm = server.llm.clone();
     let task_owned = task.to_string();
     server
-        .claude_pool
-        .call_via_provider(label, composed_prompt, move || async move {
+        .llm_recorder
+        .record_call(label, composed_prompt, move || async move {
             llm.call_reasoning_llm_provider_only(
                 PLAN_SYSTEM_PROMPT,
                 &task_owned,

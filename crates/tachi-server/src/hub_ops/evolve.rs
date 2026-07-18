@@ -125,15 +125,16 @@ Respond with ONLY a JSON object (no markdown fences, no commentary before or aft
     );
 
     // ── 4. Call LLM for evolution ────────────────────────────────────────────
-    // #1261 step 2/3: the CLI fallback was removed; skill evolution now goes
-    // straight through the SiliconFlow/Qwen extract lane via the provider
-    // executor.
+    // #1261 step 2/3 removed the CLI fallback; step 3/3 renamed the
+    // recorder (formerly `ClaudePool::call_via_provider`). Skill evolution
+    // goes straight through the SiliconFlow/Qwen extract lane via the
+    // provider executor, recorded to foundry-runs by `LlmCallRecorder`.
     const EVOLVE_SYSTEM: &str = "You are a senior prompt engineer specializing in agentic skill optimization. Analyze telemetry, diagnose failure modes, and produce a strictly improved prompt. Output valid JSON only, no markdown fences.";
     let llm_for_call = server.llm.clone();
     let evolution_prompt_for_call = evolution_prompt.clone();
     let outcome = server
-        .claude_pool
-        .call_via_provider("skill-evolve", &evolution_prompt, move || async move {
+        .llm_recorder
+        .record_call("skill-evolve", &evolution_prompt, move || async move {
             llm_for_call
                 .call_extract_llm(EVOLVE_SYSTEM, &evolution_prompt_for_call, None, 0.4, 4000)
                 .await

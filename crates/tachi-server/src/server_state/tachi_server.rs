@@ -10,16 +10,15 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 pub(crate) struct MemoryServer {
     pub(crate) db: DbRuntime,
     pub(crate) llm: Arc<tachi_llm::LlmClient>,
-    /// Bounded Claude CLI pool used by the daily batch distill, Hub skill
-    /// evolve/register/security-scan, and dispatch V2's plan stage.
-    /// Being retired in favor of provider-based `tachi-llm` calls (#1087):
-    /// `TACHI_CLAUDE_POOL_PROVIDER_FIRST` flips consumers that go through
-    /// `tachi_llm::claude_pool::pool_call_with_fallback` /
-    /// `ClaudePool::call_via_provider` to try the provider path first, with
-    /// this pool kept as the fallback for the rollout cycle — see
-    /// `tachi_llm::claude_pool`'s module docs and
-    /// `foundry_runtime_ops::daily_distill::runner::call_claude_batch`.
-    pub(crate) claude_pool: Arc<tachi_llm::claude_pool::ClaudePool>,
+    /// Bounded LLM-call recorder for foundry runs. Writes the `prompt.md` /
+    /// `result.md` / `status.json` artifact triple per call under
+    /// `<tachi_home>/foundry-runs/<label>-<ts>/`. Used by the daily batch
+    /// distill, Hub skill evolve/register/security-scan, and dispatch V2's
+    /// plan stage. Pre-#1261 this was a `ClaudePool` (which combined the
+    /// recording concern with a `claude` CLI subprocess spawn path); the
+    /// decommission split out the recording as executor-agnostic and deleted
+    /// the CLI spawn path — see `tachi_llm::llm_recorder`'s module docs.
+    pub(crate) llm_recorder: Arc<tachi_llm::llm_recorder::LlmCallRecorder>,
     pub(crate) pipeline_enabled: bool,
     /// Cached proxy tools from registered MCP servers: server_id → Vec<Tool>
     pub(crate) tool_discovery: Arc<ToolDiscovery>,
