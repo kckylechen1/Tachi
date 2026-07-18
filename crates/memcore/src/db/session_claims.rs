@@ -199,6 +199,7 @@ type HolderEvidenceRow = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 
 type WorkClaimHandoffRow = (
@@ -847,20 +848,53 @@ pub fn bind_work_claim_exec_env(
 
 /// Query the complete holder evidence before a destructive ExecEnv action.
 pub fn holder_evidence(conn: &Connection, env_id: &str) -> Result<HolderEvidence, MemoryError> {
-    let row: Option<HolderEvidenceRow> = conn.query_row("SELECT e.agent_identity_id,e.claim_id,c.agent_identity_id,c.state,c.exec_env_id FROM exec_envs e LEFT JOIN session_claims c ON c.claim_id=e.claim_id WHERE e.env_id=?1", params![env_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
-    let Some((env_identity, claim_id, claim_identity, state, claim_env)) = row else {
-        return Ok(HolderEvidence::Unverifiable);
+    let mut statement = conn.prepare(
+        "SELECT e.agent_identity_id,e.claim_id,c.claim_id,c.agent_identity_id,c.state,c.exec_env_id \
+         FROM exec_envs e \
+         LEFT JOIN session_claims c ON c.claim_id=e.claim_id OR c.exec_env_id=e.env_id \
+         WHERE e.env_id=?1 \
+         ORDER BY c.claim_id",
+    )?;
+    let rows = statement
+        .query_map(params![env_id], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<HolderEvidenceRow>, _>>()?;
+    let [(env_identity, env_claim_id, claim_id, claim_identity, state, claim_env)] =
+        rows.as_slice()
+    else {
+        return if rows.is_empty() {
+            Ok(HolderEvidence::Unverifiable)
+        } else {
+            Ok(HolderEvidence::Contradictory)
+        };
     };
-    match (env_identity, claim_id, claim_identity, state, claim_env) {
-        (None, None, None, None, None) => Ok(HolderEvidence::NotApplicable),
-        (Some(ei), Some(_cid), Some(ci), Some(state), Some(ce)) if ei == ci && ce == env_id => {
+    match (
+        env_identity,
+        env_claim_id,
+        claim_id,
+        claim_identity,
+        state,
+        claim_env,
+    ) {
+        (None, None, None, None, None, None) => Ok(HolderEvidence::NotApplicable),
+        (_, Some(_), None, None, None, None) => Ok(HolderEvidence::Unverifiable),
+        (Some(ei), Some(ec), Some(cid), Some(ci), Some(state), Some(ce))
+            if ei == ci && ec == cid && ce == env_id =>
+        {
             match state.as_str() {
                 "released" => Ok(HolderEvidence::Clear),
                 "active" | "orphaned" => Ok(HolderEvidence::Held),
                 _ => Ok(HolderEvidence::Unavailable),
             }
         }
-        (Some(_), Some(_), None, None, None) => Ok(HolderEvidence::Unverifiable),
         _ => Ok(HolderEvidence::Contradictory),
     }
 }
@@ -2019,6 +2053,86 @@ mod tests {
         assert_eq!(
             holder_evidence(&conn, "missing-env").unwrap(),
             HolderEvidence::Unverifiable
+        );
+    }
+
+    #[test]
+    fn reverse_only_holder_link_is_contradictory_not_legacy_not_applicable() {
+        let mut conn = open_conn();
+        identity(&conn, "agent-reverse");
+        insert_work_claim(&mut conn, &work_claim("claim-reverse", "agent-reverse")).unwrap();
+        crate::db::exec_env::insert_exec_env(
+            &conn,
+            &crate::db::exec_env::NewExecEnvLease {
+                env_id: "env-reverse".into(),
+                kind: "worktree".into(),
+                path: "/wt/reverse".into(),
+                repo_root: "/repo".into(),
+                branch: "lane/1253".into(),
+                base_sha: "3c09b425".into(),
+                dispatch_id: None,
+                env_class: crate::db::exec_env::EnvClass::EditOnly,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE session_claims SET exec_env_id='env-reverse' WHERE claim_id='claim-reverse'",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(
+            holder_evidence(&conn, "env-reverse").unwrap(),
+            HolderEvidence::Contradictory
+        );
+    }
+
+    #[test]
+    fn forward_claim_with_different_reverse_claim_is_contradictory() {
+        let mut conn = open_conn();
+        identity(&conn, "agent-forward");
+        identity(&conn, "agent-reverse-other");
+        insert_work_claim(&mut conn, &work_claim("claim-forward", "agent-forward")).unwrap();
+        let mut reverse_other = work_claim("claim-reverse-other", "agent-reverse-other");
+        reverse_other.issue_ref = Some("org/repo#1253-other".into());
+        reverse_other.worktree_path = "/wt/1253-other".into();
+        reverse_other.declared_file_scope = "crates/memcore/src/db/other.rs".into();
+        insert_work_claim(&mut conn, &reverse_other).unwrap();
+        crate::db::exec_env::insert_exec_env(
+            &conn,
+            &crate::db::exec_env::NewExecEnvLease {
+                env_id: "env-split".into(),
+                kind: "worktree".into(),
+                path: "/wt/split".into(),
+                repo_root: "/repo".into(),
+                branch: "lane/1253".into(),
+                base_sha: "3c09b425".into(),
+                dispatch_id: None,
+                env_class: crate::db::exec_env::EnvClass::EditOnly,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE exec_envs SET agent_identity_id='agent-forward', claim_id='claim-forward' WHERE env_id='env-split'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE session_claims SET exec_env_id='env-split' WHERE claim_id='claim-reverse-other'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE session_claims SET exec_env_id='env-split' WHERE claim_id='claim-forward'",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(
+            holder_evidence(&conn, "env-split").unwrap(),
+            HolderEvidence::Contradictory
         );
     }
 
