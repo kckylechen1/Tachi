@@ -10,6 +10,27 @@ use super::{
     normalize_utc_iso, row_to_entry, serialize_f32, simple_query_input, MEMORY_SELECT_COLUMNS,
 };
 
+/// sqlite-vec's vec0 virtual table picks its nearest-`k` window FIRST, from
+/// `MATCH ?1 AND k = ?3` alone; every `m.*` predicate below (archived,
+/// superseded, path, as_of, anchor) is an ordinary post-JOIN filter that
+/// only runs after vec0 has already committed to that window. On an
+/// archived-heavy table, rows that get filtered out here still consumed a
+/// slot in vec0's top-k budget, so the caller can receive far fewer than
+/// `top_k` LIVE rows (tachi#1245: measured 54% archived -> effective live
+/// yield ~0.46*top_k, worsening monotonically as TTL-archived rows
+/// accumulate). `search_vec` compensates by widening vec0's internal `k`
+/// and re-querying until the post-filter result reaches `top_k` or a bounded
+/// number of widen attempts is exhausted -- see `run_search_vec_query` /
+/// `VEC_OVERFETCH_MULTIPLIER` below.
+const VEC_OVERFETCH_MULTIPLIER: usize = 4;
+/// Caps the widen loop at `top_k * 4^3` (64x) in the worst case: enough
+/// headroom to survive the measured 54%-archived corpus (needs ~2x) with
+/// margin for corpora that are far more archived-heavy, while keeping a
+/// near-fully-archived table from turning every query into an effectively
+/// unbounded scan -- it degrades to "as many live rows as vec0 turns up in
+/// 4 bounded passes", not "scan every row looking for a live one".
+const VEC_OVERFETCH_MAX_ATTEMPTS: usize = 3;
+
 /// KNN vector search via sqlite-vec.
 /// Returns (doc_id -> cosine_distance) for the top `top_k` results.
 /// Cosine *distance* is in [0, 2]; we convert to similarity [0, 1]:
@@ -26,6 +47,73 @@ pub fn search_vec(
     let blob = serialize_f32(query_vec);
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
     let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
+
+    // When none of the post-JOIN predicates can actually exclude a row (the
+    // caller wants archived + superseded rows and applied no path/as_of
+    // filter), vec0's top-k window already IS the final result set 1:1 --
+    // skip the widen loop entirely so this path costs exactly what it cost
+    // before tachi#1245 (no wasted re-query).
+    let may_filter =
+        !include_archived || !include_superseded || path_like.is_some() || as_of_utc.is_some();
+
+    let mut k_fetch = top_k;
+    let mut rows = run_search_vec_query(
+        conn,
+        &blob,
+        k_fetch,
+        include_archived,
+        include_superseded,
+        path_like.as_deref(),
+        as_of_utc.as_deref(),
+    )?;
+
+    if may_filter && top_k > 0 {
+        for _ in 0..VEC_OVERFETCH_MAX_ATTEMPTS {
+            if rows.len() >= top_k {
+                break;
+            }
+            k_fetch = k_fetch.saturating_mul(VEC_OVERFETCH_MULTIPLIER);
+            rows = run_search_vec_query(
+                conn,
+                &blob,
+                k_fetch,
+                include_archived,
+                include_superseded,
+                path_like.as_deref(),
+                as_of_utc.as_deref(),
+            )?;
+        }
+    }
+
+    // Budget contract: never return more than the caller asked for. Each
+    // widen pass re-queries (rather than appending) so `rows` is always the
+    // single, fully distance-ordered result for the current `k_fetch`;
+    // truncating here just applies the caller's cap to that ordering.
+    rows.truncate(top_k);
+
+    let mut scores = HashMap::new();
+    for (id, dist) in rows {
+        // sqlite-vec returns L2 / cosine distance depending on vec0 config;
+        // treat as cosine distance in [0, 2] -> similarity in [0, 1]
+        let sim = (1.0 - dist / 2.0).clamp(0.0, 1.0);
+        scores.insert(id, sim);
+    }
+    Ok(scores)
+}
+
+/// Single vec0 KNN query at a given `k`, with the post-JOIN predicates
+/// applied in SQL exactly as before tachi#1245 -- only `k` varies across
+/// widen attempts. Returns rows ordered ascending by distance (vec0 +
+/// `ORDER BY v.distance` guarantee this).
+fn run_search_vec_query(
+    conn: &Connection,
+    blob: &[u8],
+    k: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_like: Option<&str>,
+    as_of_utc: Option<&str>,
+) -> Result<Vec<(String, f64)>, MemoryError> {
     let mut stmt = conn.prepare(
         r#"SELECT v.id, v.distance
            FROM memories_vec v
@@ -44,10 +132,10 @@ pub fn search_vec(
         params![
             blob,
             include_archived as i64,
-            top_k as i64,
+            k as i64,
             include_superseded as i64,
             path_like,
-            as_of_utc.as_deref()
+            as_of_utc
         ],
         |row| {
             let id: String = row.get(0)?;
@@ -56,15 +144,11 @@ pub fn search_vec(
         },
     )?;
 
-    let mut scores = HashMap::new();
+    let mut out = Vec::new();
     for r in rows {
-        let (id, dist) = r?;
-        // sqlite-vec returns L2 / cosine distance depending on vec0 config;
-        // treat as cosine distance in [0, 2] -> similarity in [0, 1]
-        let sim = (1.0 - dist / 2.0).clamp(0.0, 1.0);
-        scores.insert(id, sim);
+        out.push(r?);
     }
-    Ok(scores)
+    Ok(out)
 }
 
 /// Full-text search using the FTS5 virtual table.
