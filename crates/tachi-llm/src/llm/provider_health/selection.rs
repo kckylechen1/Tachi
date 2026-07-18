@@ -102,11 +102,21 @@ impl super::super::LlmClient {
     /// Read-only "is there still a usable key" check — unlike
     /// `has_configured_secret` (which calls the real `select_secret` and, as
     /// a side effect, advances the round-robin selection index even though
-    /// the returned secret is discarded), this never mutates
-    /// `provider_state` beyond the routine expired-cooldown prune every
-    /// selection path already does. Used inside the attempt-retry loop
-    /// (#1197 BUG-1) to decide "does the primary pool have another key to
-    /// try" without skewing which key actually gets picked next.
+    /// the returned secret is discarded), this never mutates the round-robin
+    /// `state.indices` (the only mutation is the routine expired-cooldown
+    /// prune every selection path already does). Used inside the
+    /// attempt-retry loop (#1197 BUG-1) to decide "does the primary pool
+    /// have another key to try" without skewing which key actually gets
+    /// picked next.
+    ///
+    /// Mirrors `select_secret`'s real two-pass structure (codex round-2
+    /// review: a first version of this probe checked each key's vault pool
+    /// *or* its env value, never both — so a key with a bad vault entry but
+    /// a good env-var secret was under-reported as unusable, even though
+    /// `select_secret` itself would have found it via the env fallback
+    /// pass). Pass 1 scans every key's vault pool; only if *none* of them
+    /// have a usable entry does pass 2 scan every key's plain env value —
+    /// exactly the `vault_value.or_else(...)` shape below.
     pub(in crate::llm) fn has_usable_secret_readonly(&self, keys: &[&str]) -> bool {
         let now = Instant::now();
         let now_utc = Self::now_utc();
@@ -116,12 +126,18 @@ impl super::super::LlmClient {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.prune_expired_cooldowns(now);
 
+        let vault_usable = keys.iter().any(|key| {
+            state.secrets.get(*key).is_some_and(|entries| {
+                entries
+                    .iter()
+                    .any(|entry| Self::entry_is_usable(&state, key, entry, now_utc))
+            })
+        });
+        if vault_usable {
+            return true;
+        }
+
         keys.iter().any(|key| {
-            if let Some(entries) = state.secrets.get(*key) {
-                return entries.iter().any(|entry| {
-                    Self::entry_is_usable(&state, key, entry, now_utc)
-                });
-            }
             let has_env_value = Self::first_env(&[*key])
                 .filter(|value| !value.trim().is_empty())
                 .filter(|value| !crate::provider_names::is_vault_alias(value))

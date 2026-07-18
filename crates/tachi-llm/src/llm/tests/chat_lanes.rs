@@ -1316,6 +1316,170 @@ async fn extract_lane_retries_next_pool_key_on_401_before_falling_back() {
     fallback_task.abort();
 }
 
+/// #1197 BUG-1, codex round-2 review: `has_usable_secret_readonly` must
+/// mirror `select_secret`'s real vault->env fallback chain, not just check
+/// "does this key have a vault pool" and stop there. A single key with a
+/// bad (auth-failed) vault entry but a good plain-env-var secret must still
+/// be found — `select_secret`'s `vault_value.or_else(...)` shape falls
+/// through to the env value once the vault pass yields nothing across the
+/// whole key list. A probe that gives up the moment it sees *any* vault
+/// pool for a key (even a bad one) under-reports availability and triggers
+/// a premature tier failure / fallback escalation.
+#[tokio::test]
+async fn extract_lane_uses_env_fallback_after_bad_vault_entry_before_escalating() {
+    use axum::{
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        response::IntoResponse,
+        routing::post,
+        Json, Router,
+    };
+    use std::sync::{Arc, Mutex};
+
+    const ENV_KEY: &str = "__1197_BUG1B_PRIMARY_KEY";
+    let _env_guard = EnvRestore::set(ENV_KEY, "good-env-secret");
+
+    let seen_auth = Arc::new(Mutex::new(Vec::<String>::new()));
+    let primary_app = Router::new()
+        .route(
+            "/chat/completions",
+            post(
+                |State(seen_auth): State<Arc<Mutex<Vec<String>>>>,
+                 headers: HeaderMap,
+                 Json(_body): Json<Value>| async move {
+                    let auth = headers
+                        .get(AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    seen_auth
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(auth.clone());
+                    if auth == "Bearer bad-vault-secret" {
+                        return (StatusCode::UNAUTHORIZED, "invalid api key").into_response();
+                    }
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {"role": "assistant", "content": "ok from env key"},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    }))
+                    .into_response()
+                },
+            ),
+        )
+        .with_state(seen_auth.clone());
+    let primary_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind primary mock provider");
+    let primary_port = primary_listener
+        .local_addr()
+        .expect("primary mock addr")
+        .port();
+    let primary_task = tokio::spawn(async move {
+        axum::serve(primary_listener, primary_app)
+            .await
+            .expect("primary mock provider");
+    });
+
+    let fallback_hits = Arc::new(Mutex::new(0usize));
+    let fallback_app = Router::new()
+        .route(
+            "/chat/completions",
+            post(|State(hits): State<Arc<Mutex<usize>>>| async move {
+                *hits.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+                Json(serde_json::json!({
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "fallback answered"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+            }),
+        )
+        .with_state(fallback_hits.clone());
+    let fallback_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fallback mock provider");
+    let fallback_port = fallback_listener
+        .local_addr()
+        .expect("fallback mock addr")
+        .port();
+    let fallback_task = tokio::spawn(async move {
+        axum::serve(fallback_listener, fallback_app)
+            .await
+            .expect("fallback mock provider");
+    });
+
+    // Single key in the list — same logical key backed by both a vault
+    // pool (one bad entry) and a plain env var (good). No *second* key is
+    // involved; this isolates the vault->env fallback within one key.
+    let primary = ChatLaneConfig {
+        base_url: format!("http://127.0.0.1:{primary_port}/chat/completions"),
+        model: "primary-model".to_string(),
+        api_key_envs: vec![ENV_KEY],
+    };
+    let fallback = ChatLaneConfig {
+        base_url: format!("http://127.0.0.1:{fallback_port}/chat/completions"),
+        model: "fallback-model".to_string(),
+        api_key_envs: vec!["__1197_BUG1B_FALLBACK_KEY"],
+    };
+
+    let client = LlmClient::new_with_config_and_fallbacks(
+        config_with_extract(primary),
+        LaneFallbackConfig {
+            extract: Some(fallback),
+            ..Default::default()
+        },
+        None,
+    )
+    .expect("client should initialize");
+    client.set_provider_secret_pool(
+        ENV_KEY,
+        vec![ProviderSecret {
+            key_id: format!("{ENV_KEY}_VAULT_1"),
+            value: "bad-vault-secret".to_string(),
+        }],
+    );
+    client.set_provider_secret_pool(
+        "__1197_BUG1B_FALLBACK_KEY",
+        vec![ProviderSecret {
+            key_id: "__1197_BUG1B_FALLBACK_KEY".to_string(),
+            value: "fallback-secret".to_string(),
+        }],
+    );
+
+    let out = client
+        .call_extract_llm("system", "user", None, 0.0, 16)
+        .await
+        .expect("the env-var fallback for the same key should serve the request");
+    assert_eq!(
+        out, "ok from env key",
+        "must succeed via the same key's env-var fallback, not the fallback provider"
+    );
+
+    let seen = seen_auth.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    assert_eq!(
+        seen,
+        vec![
+            "Bearer bad-vault-secret".to_string(),
+            "Bearer good-env-secret".to_string()
+        ],
+        "vault entry must be tried first, then the env value — same key, no premature tier failure"
+    );
+    assert_eq!(
+        *fallback_hits.lock().unwrap_or_else(|e| e.into_inner()),
+        0,
+        "fallback must not be touched — a bad vault entry with a good env fallback \
+         is not a pool exhaustion"
+    );
+
+    primary_task.abort();
+    fallback_task.abort();
+}
+
 /// RED against the pre-#1197 single-tier lane: with no fallback wired, an
 /// unconfigured primary key fails the whole call. GREEN once the fallback
 /// tier is configured: the same call must succeed by falling through to it.

@@ -144,12 +144,15 @@ impl super::super::LlmClient {
     /// #1197: walks a per-lane provider chain (primary, then a configured
     /// cross-provider fallback if any) instead of stopping at the primary's
     /// exhaustion. Each tier gets its own circuit breaker key, so a lane
-    /// whose primary provider is degraded (breaker open, or its whole key
-    /// pool exhausted/auth-failed) fast-escalates to the fallback instead of
-    /// silently stalling every background caller. Only when *every*
-    /// configured tier fails do we return the loud, typed "lane outage"
-    /// error and bump the lane-outage counter (`provider_health_status()
-    /// .lane_outages`) — this must never be a silent hang.
+    /// whose primary provider is degraded (breaker open, or its key pool
+    /// exhausted/auth-failed within the shared `MAX_ATTEMPTS` retry budget —
+    /// retries up to `MAX_ATTEMPTS` distinct keys, then fails over; this
+    /// does not exhaust an arbitrarily large pool before failover)
+    /// fast-escalates to the fallback instead of silently stalling every
+    /// background caller. Only when *every* configured tier fails do we
+    /// return the loud, typed "lane outage" error and bump the lane-outage
+    /// counter (`provider_health_status().lane_outages`) — this must never
+    /// be a silent hang.
     pub(in crate::llm::chat_lanes) async fn call_lane_llm(
         &self,
         lane: ChatLane,
@@ -361,10 +364,16 @@ impl super::super::LlmClient {
                 // tier — the contract is "fallback fires when the PRIMARY
                 // POOL is exhausted", not on one bad key. Re-check the pool
                 // (post-mark, so the just-failed key is now excluded) for
-                // another usable key before giving up on this tier; only a
-                // genuinely exhausted pool falls through to the loud error
-                // that the caller's tier-chain treats as "this tier is
-                // down".
+                // another usable key before giving up on this tier.
+                //
+                // This retries up to `MAX_ATTEMPTS` (3) distinct keys, then
+                // fails over — it does not (and is not required to)
+                // exhaust an arbitrarily large pool before failover;
+                // leader-ruled acceptable (codex round-2): retry budget is
+                // a fixed, small cap shared with the 429/5xx retry paths
+                // above, not "try every key in the pool no matter how
+                // many". A larger retry budget, if ever wanted, is a
+                // config knob for a future PR, not this one.
                 if attempt < Self::MAX_ATTEMPTS && self.has_usable_secret_readonly(&cfg.api_key_envs) {
                     eprintln!(
                         "[llm] auth/exhausted error {status} (attempt {}/{}); pool has another key, retrying",
