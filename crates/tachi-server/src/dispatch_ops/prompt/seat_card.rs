@@ -82,7 +82,9 @@ fn counter_clauses_from_metadata(metadata: &serde_json::Value) -> Option<&str> {
     if !present {
         return None;
     }
-    metadata.get("counter_clauses").and_then(serde_json::Value::as_str)
+    metadata
+        .get("counter_clauses")
+        .and_then(serde_json::Value::as_str)
 }
 
 /// Project the seat-matched lane card's countermeasures section into the
@@ -192,7 +194,10 @@ fn resolve_seat<'a>(
 
     // Tier 2: unambiguous prefix match, profile id before vendor.
     for candidate in &candidates {
-        let mut matches = seats.iter().copied().filter(|seat| seat.starts_with(*candidate));
+        let mut matches = seats
+            .iter()
+            .copied()
+            .filter(|seat| seat.starts_with(*candidate));
         if let Some(first) = matches.next() {
             if matches.next().is_none() {
                 return Some(first);
