@@ -52,32 +52,40 @@ fn tachi_home() -> PathBuf {
 ///
 /// - `dispatch_id` is gated with the shared `[A-Za-z0-9_-]` allowlist so the
 ///   id-derived canonical path can't be a `../` payload;
+/// - a present id-derived fallback must canonicalize inside `runs`; a symlink
+///   planted at `runs/<valid-id>` that resolves elsewhere is rejected;
 /// - `run_dir_hint` is honored only when it canonicalizes to a directory that
 ///   still lives inside the canonical dispatch runs root (`~/.tachi/runs`).
 ///   A hint that escapes via `..`, an absolute path elsewhere, or a symlink
 ///   out of the runs tree is ignored fail-closed and the id-derived canonical
-///   path is used instead.
+///   path is used instead. The accepted resolved path, rather than the
+///   original hint, is returned so a later symlink retarget cannot redirect a
+///   reader after validation.
 ///
 /// Returns `None` (behaves identically to "run not found") for an invalid
 /// dispatch id, giving a probe no signal about what does or doesn't exist.
+fn canonical_dir_within(candidate: &Path, root: &Path) -> Option<PathBuf> {
+    let canonical_candidate = candidate.canonicalize().ok()?;
+    let canonical_root = root.canonicalize().ok()?;
+    canonical_candidate
+        .starts_with(&canonical_root)
+        .then_some(canonical_candidate)
+}
+
 fn dispatch_run_dir(dispatch_id: &str, run_dir_hint: Option<&str>) -> Option<PathBuf> {
     if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
         return None;
     }
     let runs_root = tachi_home().join("runs");
-    let canonical = runs_root.join(dispatch_id);
+    let fallback = runs_root.join(dispatch_id);
     let Some(hint) = run_dir_hint
         .map(str::trim)
         .filter(|hint| !hint.is_empty())
         .map(PathBuf::from)
     else {
-        return Some(canonical);
+        return canonical_dir_within(&fallback, &runs_root);
     };
-    if crate::dispatch_ops::canonical_dir_is_within(&hint, &runs_root) {
-        Some(hint)
-    } else {
-        Some(canonical)
-    }
+    canonical_dir_within(&hint, &runs_root).or_else(|| canonical_dir_within(&fallback, &runs_root))
 }
 
 pub(super) fn dispatch_response_summary(response: &Value) -> Value {
@@ -480,7 +488,10 @@ mod dispatch_run_dir_gate_tests {
         let hint = decoy.to_string_lossy().to_string();
         let resolved = dispatch_run_dir(id, Some(&hint)).expect("valid id");
         // Falls back to the id-derived canonical path, never the decoy.
-        assert_eq!(resolved, home.root.join("runs").join(id));
+        assert_eq!(
+            resolved,
+            home.root.join("runs").join(id).canonicalize().unwrap()
+        );
         assert_ne!(resolved.canonicalize().ok(), decoy.canonicalize().ok());
     }
 
@@ -494,7 +505,10 @@ mod dispatch_run_dir_gate_tests {
         // `..`-escape out of the runs tree, resolving to an existing dir.
         let hint = format!("{}/runs/{}/../../outside", home.root.display(), id);
         let resolved = dispatch_run_dir(id, Some(&hint)).expect("valid id");
-        assert_eq!(resolved, home.root.join("runs").join(id));
+        assert_eq!(
+            resolved,
+            home.root.join("runs").join(id).canonicalize().unwrap()
+        );
     }
 
     #[cfg(unix)]
@@ -511,7 +525,51 @@ mod dispatch_run_dir_gate_tests {
         let hint = link.to_string_lossy().to_string();
         let resolved = dispatch_run_dir(id, Some(&hint)).expect("valid id");
         // canonicalize resolves the symlink to `outside_target` → rejected.
-        assert_eq!(resolved, home.root.join("runs").join(id));
+        assert_eq!(
+            resolved,
+            home.root.join("runs").join(id).canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_valid_id_fallback_is_rejected_by_both_readers() {
+        let home = set_home();
+        let id = "abc123";
+        let outside = home.root.join("outside_target");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("status.json"), r#"{"state":"completed"}"#).unwrap();
+        std::fs::write(outside.join("result.md"), "outside result").unwrap();
+        std::os::unix::fs::symlink(&outside, home.root.join("runs").join(id)).unwrap();
+
+        assert!(dispatch_run_dir(id, None).is_none());
+        assert!(read_linked_dispatch_status(id, None).is_none());
+        assert!(read_linked_dispatch_result(id, None).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validated_hint_returns_canonical_path_that_survives_link_swap() {
+        let home = set_home();
+        let id = "abc123";
+        let safe = home.root.join("runs").join("safe_target");
+        let outside = home.root.join("outside_target");
+        std::fs::create_dir_all(&safe).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(safe.join("result.md"), "safe result").unwrap();
+        std::fs::write(outside.join("result.md"), "outside result").unwrap();
+        let hint_link = home.root.join("runs").join("hint_link");
+        std::os::unix::fs::symlink(&safe, &hint_link).unwrap();
+        let hint = hint_link.to_string_lossy().to_string();
+
+        let resolved = dispatch_run_dir(id, Some(&hint)).expect("valid id and in-root hint");
+        assert_eq!(resolved, safe.canonicalize().unwrap());
+        std::fs::remove_file(&hint_link).unwrap();
+        std::os::unix::fs::symlink(&outside, &hint_link).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(resolved.join("result.md")).unwrap(),
+            "safe result"
+        );
     }
 
     #[test]
