@@ -1,7 +1,7 @@
 # AgentIdentity → WorkClaim holder-evidence spine v1
 
-Status: frozen implementation contract for #1253  
-Design owners: #1171, #1239, #894  
+Status: frozen implementation contract for #1253
+Design owners: #1171, #1239, #894
 Depends on: #1170 only for a future `verified` admission adapter
 
 ## Purpose
