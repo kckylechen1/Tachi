@@ -111,6 +111,16 @@ fn extract_only_client(base_url: String) -> LlmClient {
 // ── Judgment predicates (the "golden" part — reused verbatim against real
 //    model output in the nightly job the issue describes; CI only checks
 //    they discriminate the two fixtures below). ──────────────────────────
+//
+// TODO: these predicates use exact-substring matching (`"from {old} to
+// {new}"`, `"{old} is now superseded"`, literal noise phrases). That's
+// fine — deliberately strict, even — for this hand-crafted MOCK golden,
+// where the fixtures are authored to exercise a specific phrasing. A real
+// model in the nightly job (issue's "① 模型/provider 准入闸") will not
+// reliably reproduce that exact phrasing; that job needs fuzzy/semantic
+// equivalence (e.g. embedding similarity or an LLM-judge prompt), not
+// this exact-substring form. Leader-ruled acceptable for this PR (codex
+// round-2): do not implement fuzzy matching here.
 
 /// Update recognition + history retention — **direction-aware** (codex
 /// review: the original version accepted a *reversed* A<-B narrative, since
@@ -137,10 +147,16 @@ fn facts_capture_supersession(facts: &[Value], old_term: &str, new_term: &str) -
 /// Noise filtering: none of the extracted facts' text may contain any of the
 /// known-junk phrases from the source conversation. A fact missing a valid
 /// string `text` field is treated as a failure, not silently skipped (codex
-/// review: the original `filter_map` dropped malformed facts from
+/// review round 1: the original `filter_map` dropped malformed facts from
 /// consideration entirely, letting a corrupted-but-textless fact pass this
-/// predicate for free).
+/// predicate for free). An **empty** result also fails (codex round 2:
+/// `.all()` over `[]` is vacuously true, so a response that drops every
+/// fact — including the one real decision this source text actually
+/// contains — silently passed as "noise-free").
 fn facts_exclude_noise(facts: &[Value], noise_phrases: &[&str]) -> bool {
+    if facts.is_empty() {
+        return false;
+    }
     facts.iter().all(|fact| {
         let Some(text) = fact.get("text").and_then(Value::as_str) else {
             return false;
@@ -152,11 +168,13 @@ fn facts_exclude_noise(facts: &[Value], noise_phrases: &[&str]) -> bool {
 /// JSON-stability / schema-holds: every fact is an object carrying all five
 /// required keys with the right JSON types, `scope` is one of the three
 /// allowed values, `importance` is a number in `[0.0, 1.0]`, and `keywords`
-/// has 2-5 entries — matching the production prompt's own contract
+/// has 2-5 STRING entries — matching the production prompt's own contract
 /// (`default_prompts.rs` `EXTRACTION_PROMPT`: `"keywords": 2-5个关键词/标签`).
-/// codex review: the original check only verified `keywords` was *an
-/// array*, with no length bound, so a 0- or 1-keyword payload (which
-/// violates the prompt's own contract) was a false green.
+/// codex review round 1: the original check only verified `keywords` was
+/// *an array*, with no length bound, so a 0- or 1-keyword payload (which
+/// violates the prompt's own contract) was a false green. codex round 2:
+/// the length-only check still passed `[null, null]` — array length alone
+/// doesn't mean the elements are actually keyword strings.
 fn facts_json_shape_holds(facts: &[Value]) -> bool {
     if facts.is_empty() {
         return false;
@@ -170,10 +188,9 @@ fn facts_json_shape_holds(facts: &[Value]) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|s| !s.trim().is_empty());
         let topic_ok = obj.get("topic").and_then(Value::as_str).is_some();
-        let keywords_ok = obj
-            .get("keywords")
-            .and_then(Value::as_array)
-            .is_some_and(|k| (2..=5).contains(&k.len()));
+        let keywords_ok = obj.get("keywords").and_then(Value::as_array).is_some_and(|k| {
+            (2..=5).contains(&k.len()) && k.iter().all(Value::is_string)
+        });
         let entities_ok = obj.get("entities").is_some_and(Value::is_array);
         let scope_ok = obj
             .get("scope")
@@ -283,6 +300,10 @@ const BROKEN_NOISE_MALFORMED_RESPONSE: &str = r#"[
   {"txt": "Decided to migrate the recall path to the new rerank provider", "topic": "recall", "keywords": ["recall", "rerank"], "entities": ["rerank provider"], "scope": "project", "importance": 0.6}
 ]"#;
 
+/// A *third* broken form (codex round-2 review): the extractor drops every
+/// fact, including the one real decision — a valid, empty JSON array.
+const BROKEN_NOISE_EMPTY_RESPONSE: &str = "[]";
+
 #[tokio::test]
 async fn extract_facts_noise_golden_discriminates_real_vs_broken() {
     let noise_phrases = ["today's weather is hot", "just had a glass of water"];
@@ -331,6 +352,27 @@ async fn extract_facts_noise_golden_discriminates_real_vs_broken() {
          predicate, not be silently skipped, got: {malformed_facts:?}"
     );
     malformed_task.abort();
+
+    // #1198 codex round-2 review: `.all()` over an empty slice is vacuously
+    // true, so an extractor that drops *every* fact (including the one real
+    // decision in this source text) must not silently pass as "noise-free".
+    let (empty_url, empty_task) =
+        spawn_content_sequence_server(vec![BROKEN_NOISE_EMPTY_RESPONSE.to_string()]).await;
+    let empty_client = extract_only_client(empty_url);
+    let empty_facts = empty_client
+        .extract_facts(source_text)
+        .await
+        .expect("an empty JSON array is still valid JSON — it fails the *judgment*, not parsing");
+    assert!(
+        empty_facts.is_empty(),
+        "sanity: the fixture is meant to produce zero facts, got: {empty_facts:?}"
+    );
+    assert!(
+        !facts_exclude_noise(&empty_facts, &noise_phrases),
+        "RED case: dropping every fact must fail the noise predicate, not \
+         vacuously pass, got: {empty_facts:?}"
+    );
+    empty_task.abort();
 }
 
 // ── Scenario 3: JSON-stability across repeated calls ─────────────────────
@@ -413,6 +455,24 @@ async fn extract_facts_json_stability_golden_rejects_schema_broken_payload() {
         "RED case: a single-keyword payload violates the prompt's 2-5 \
          keyword contract and must fail the shape check, got: {facts:?}"
     );
-
     task.abort();
+
+    // codex round-2 review: array *length* alone doesn't mean the elements
+    // are keyword strings — `[null, null]` has 2 entries and would have
+    // passed the length-only check.
+    let non_string_keywords = r#"[{"text": "A valid-looking fact", "topic": "t", "keywords": [null, null], "entities": [], "scope": "user", "importance": 0.5}]"#;
+    let (non_string_url, non_string_task) =
+        spawn_content_sequence_server(vec![non_string_keywords.to_string()]).await;
+    let non_string_client = extract_only_client(non_string_url);
+    let non_string_facts = non_string_client
+        .extract_facts("some memory-worthy text")
+        .await
+        .expect("null keyword elements are still valid JSON — it fails the *judgment*, not parsing");
+    assert!(
+        !facts_json_shape_holds(&non_string_facts),
+        "RED case: non-string keyword elements (`[null, null]`) must fail \
+         the shape check even though the array length (2) is in range, \
+         got: {non_string_facts:?}"
+    );
+    non_string_task.abort();
 }
