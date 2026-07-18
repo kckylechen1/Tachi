@@ -73,14 +73,15 @@ impl MemoryStore {
         // and both `rename` the legacy file onto it, the second clobbering the
         // first. Holding the guard across migrate + open serializes them.
         //
-        // SCOPE NOTE: `acquire_startup_lock` is a process-local `Mutex`, so this
-        // closes the same-process race only. It does NOT exclude a SECOND daemon
-        // process opening the same store dir concurrently — that cross-process
-        // TOCTOU (stat-absent here, `Connection::open` creates+populates there,
-        // our `rename` clobbers it) needs a cross-process primitive memcore does
-        // not yet have (an flock, or an atomic rename-no-replace such as
-        // `renamex_np`/`renameat2`). See the #1132 review thread — deliberately
-        // left for a follow-up because it requires a new dependency/FFI.
+        // SCOPE NOTE: `acquire_startup_lock` is a process-local `Mutex`, so it
+        // serializes the same-process race only. The remaining CROSS-process
+        // TOCTOU (a SECOND daemon opening the same store dir: stat-absent here,
+        // `Connection::open` creates+populates there, our rename would clobber
+        // it) is closed inside `migrate_legacy_filename_if_present` itself, which
+        // now migrates via an ATOMIC NO-CLOBBER rename (`renamex_np`/`renameat2`,
+        // #1226) that fails with EEXIST rather than overwriting a concurrently
+        // created canonical file. On kernels/filesystems without that primitive
+        // it degrades (loudly, once) to a plain rename under this mutex.
         let _startup_guard = db::acquire_startup_lock();
         // #1132: one-time rename-on-open migration away from the legacy
         // `memory.db` filename, before the connection is opened. Single seam —
