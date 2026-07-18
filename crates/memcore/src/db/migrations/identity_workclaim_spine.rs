@@ -58,7 +58,7 @@ pub(super) fn migrate_v21_identity_workclaim_spine(
             "DROP INDEX IF EXISTS idx_session_claims_identity_active;
              CREATE UNIQUE INDEX idx_session_claims_identity_active
              ON session_claims(COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, ''))
-             WHERE state = 'active';",
+             WHERE state = 'active' AND mode IS NULL;",
         )?;
     }
     Ok(added)
@@ -177,8 +177,8 @@ mod tests {
     }
 
     #[test]
-    fn v21_keeps_the_exact_v20_active_claim_upsert_conflict_target() {
-        let conn = Connection::open_in_memory().unwrap();
+    fn v21_keeps_the_exact_legacy_active_claim_upsert_conflict_target() {
+        let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE session_claims (
                 claim_id TEXT PRIMARY KEY,
@@ -202,16 +202,37 @@ mod tests {
         .unwrap();
 
         migrate_v21_identity_workclaim_spine(&conn).unwrap();
-        conn.execute(
-            "INSERT INTO session_claims
-             (claim_id, session_client, issue_ref, flow_id, branch, state, created_at, heartbeat_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)
-             ON CONFLICT (COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, ''))
-                 WHERE state = 'active'
-             DO UPDATE SET heartbeat_at = excluded.heartbeat_at",
-            params!["legacy-claim", "legacy-client", "org/repo#1253", "flow-1", "lane/legacy", "2026-07-18T00:00:00Z"],
+        let first = crate::db::session_claims::upsert_or_heartbeat_claim(
+            &mut conn,
+            &crate::db::session_claims::NewSessionClaim {
+                claim_id: "legacy-claim".into(),
+                session_client: Some("legacy-client".into()),
+                issue_ref: Some("org/repo#1253".into()),
+                flow_id: Some("flow-1".into()),
+                dispatch_id: None,
+                branch: "lane/legacy".into(),
+                declared_file_scope: Some("crates/memcore/src/db/**".into()),
+                created_at: "2026-07-18T00:00:00Z".into(),
+            },
         )
-        .expect("the exact v20 upsert must still resolve after v21");
+        .expect("the exact legacy upsert must still resolve after v21");
+        assert_eq!(first, "legacy-claim");
+
+        let second = crate::db::session_claims::upsert_or_heartbeat_claim(
+            &mut conn,
+            &crate::db::session_claims::NewSessionClaim {
+                claim_id: "legacy-claim-reenter".into(),
+                session_client: Some("legacy-client".into()),
+                issue_ref: Some("org/repo#1253".into()),
+                flow_id: Some("flow-1".into()),
+                dispatch_id: None,
+                branch: "lane/legacy-reenter".into(),
+                declared_file_scope: Some("crates/memcore/src/db/**".into()),
+                created_at: "2026-07-18T00:01:00Z".into(),
+            },
+        )
+        .expect("a migrated DB must heartbeat the existing legacy claim");
+        assert_eq!(second, "legacy-claim");
     }
 
     #[test]

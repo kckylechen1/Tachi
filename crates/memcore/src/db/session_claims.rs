@@ -983,22 +983,23 @@ pub fn is_claim_stale(
 /// `idx_session_claims_identity_active` (`ddl.rs` /
 /// `migrations/session_claims_identity.rs`):
 /// `(COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id,
-/// ''))  WHERE state = 'active'` — SQLite requires the `ON CONFLICT` target to
-/// match an existing unique index verbatim (same expressions, same partial
-/// predicate) to resolve against it, and a mismatched target here would make
-/// this silently fall back to raising `UNIQUE constraint failed` instead of
-/// upserting. A prior read-then-write (`SELECT` to check existence, then a
-/// separate `UPDATE`/`INSERT`) is a TOCTOU race even inside a transaction:
-/// SQLite's default deferred transaction does not take a write lock until its
-/// first write, so two concurrent callers could both `SELECT` "no existing
-/// row" before either commits, and one of the two `INSERT`s would then fail
-/// the unique index with no path to convert that failure into a heartbeat —
-/// the very race #1001 round 2's index was added to catch, but the
-/// application code never closed. `INSERT ... ON CONFLICT ... DO UPDATE` is
-/// a single statement the database resolves under one lock: concurrent
-/// same-identity callers each either insert (if they win the race) or update
-/// the winner's row (if they lose it) — both succeed, neither errors, and
-/// exactly one row exists for the identity afterward.
+/// ''))  WHERE state = 'active' AND mode IS NULL` — SQLite requires the `ON
+/// CONFLICT` target to match an existing unique index verbatim (same
+/// expressions, same partial predicate) to resolve against it, and a
+/// mismatched target here would make this silently fall back to raising
+/// `UNIQUE constraint failed` instead of upserting. A prior read-then-write
+/// (`SELECT` to check existence, then a separate `UPDATE`/`INSERT`) is a
+/// TOCTOU race even inside a transaction: SQLite's default deferred
+/// transaction does not take a write lock until its first write, so two
+/// concurrent callers could both `SELECT` "no existing row" before either
+/// commits, and one of the two `INSERT`s would then fail the unique index
+/// with no path to convert that failure into a heartbeat — the very race
+/// #1001 round 2's index was added to catch, but the application code never
+/// closed. `INSERT ... ON CONFLICT ... DO UPDATE` is a single statement the
+/// database resolves under one lock: concurrent same-identity callers each
+/// either insert (if they win the race) or update the winner's row (if they
+/// lose it) — both succeed, neither errors, and exactly one row exists for
+/// the identity afterward.
 ///
 /// Returns the `claim_id` that is now active (either the pre-existing one,
 /// heartbeated, or the newly inserted one) via `RETURNING claim_id`, so the
