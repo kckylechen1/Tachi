@@ -165,7 +165,8 @@ impl super::super::LlmClient {
         let primary_cfg = self.lane(lane).clone();
         let primary_breaker_key = format!("chat:{}", lane.as_str());
 
-        let mut tiers: Vec<(ChatLaneConfig, String)> = vec![(primary_cfg.clone(), primary_breaker_key)];
+        let mut tiers: Vec<(ChatLaneConfig, String)> =
+            vec![(primary_cfg.clone(), primary_breaker_key)];
         if let Some(fallback_cfg) = self.fallback_lane(lane) {
             // A fallback that resolves to the exact same provider config as
             // primary (e.g. no `*_FALLBACK_*` env configured and the
@@ -374,7 +375,9 @@ impl super::super::LlmClient {
                 // above, not "try every key in the pool no matter how
                 // many". A larger retry budget, if ever wanted, is a
                 // config knob for a future PR, not this one.
-                if attempt < Self::MAX_ATTEMPTS && self.has_usable_secret_readonly(&cfg.api_key_envs) {
+                if attempt < Self::MAX_ATTEMPTS
+                    && self.has_usable_secret_readonly(&cfg.api_key_envs)
+                {
                     eprintln!(
                         "[llm] auth/exhausted error {status} (attempt {}/{}); pool has another key, retrying",
                         attempt,

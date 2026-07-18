@@ -139,8 +139,7 @@ fn facts_capture_supersession(facts: &[Value], old_term: &str, new_term: &str) -
         .join(" \n ");
     let states_correct_direction = corpus.contains(&format!("from {old_term} to {new_term}"));
     let old_term_marked_superseded = corpus.contains(&format!("{old_term} is now superseded"));
-    let new_term_not_marked_superseded =
-        !corpus.contains(&format!("{new_term} is now superseded"));
+    let new_term_not_marked_superseded = !corpus.contains(&format!("{new_term} is now superseded"));
     states_correct_direction && old_term_marked_superseded && new_term_not_marked_superseded
 }
 
@@ -188,9 +187,10 @@ fn facts_json_shape_holds(facts: &[Value]) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|s| !s.trim().is_empty());
         let topic_ok = obj.get("topic").and_then(Value::as_str).is_some();
-        let keywords_ok = obj.get("keywords").and_then(Value::as_array).is_some_and(|k| {
-            (2..=5).contains(&k.len()) && k.iter().all(Value::is_string)
-        });
+        let keywords_ok = obj
+            .get("keywords")
+            .and_then(Value::as_array)
+            .is_some_and(|k| (2..=5).contains(&k.len()) && k.iter().all(Value::is_string));
         let entities_ok = obj.get("entities").is_some_and(Value::is_array);
         let scope_ok = obj
             .get("scope")
@@ -250,7 +250,9 @@ async fn extract_facts_supersede_golden_discriminates_real_vs_broken() {
     let broken_facts = broken_client
         .extract_facts("we decided backend A for auth, then later switched to backend B")
         .await
-        .expect("broken extraction response is still valid JSON — it fails the *judgment*, not parsing");
+        .expect(
+            "broken extraction response is still valid JSON — it fails the *judgment*, not parsing",
+        );
     assert!(
         !facts_capture_supersession(&broken_facts, "backend A", "backend B"),
         "RED case: a broken extractor that drops the superseded history must \
@@ -342,10 +344,9 @@ async fn extract_facts_noise_golden_discriminates_real_vs_broken() {
     let (malformed_url, malformed_task) =
         spawn_content_sequence_server(vec![BROKEN_NOISE_MALFORMED_RESPONSE.to_string()]).await;
     let malformed_client = extract_only_client(malformed_url);
-    let malformed_facts = malformed_client
-        .extract_facts(source_text)
-        .await
-        .expect("malformed-fact response is still valid JSON — it fails the *judgment*, not parsing");
+    let malformed_facts = malformed_client.extract_facts(source_text).await.expect(
+        "malformed-fact response is still valid JSON — it fails the *judgment*, not parsing",
+    );
     assert!(
         !facts_exclude_noise(&malformed_facts, &noise_phrases),
         "RED case: a fact missing its `text` field must fail the noise \
@@ -424,10 +425,7 @@ async fn extract_facts_json_stability_golden_fails_loud_on_malformed_payload() {
         .extract_facts("some memory-worthy text")
         .await
         .expect_err("a trailing-comma-malformed payload must be a typed parse error, not Ok");
-    assert!(
-        err.contains("Failed to parse facts JSON"),
-        "got: {err}"
-    );
+    assert!(err.contains("Failed to parse facts JSON"), "got: {err}");
 
     task.abort();
 }
@@ -467,7 +465,9 @@ async fn extract_facts_json_stability_golden_rejects_schema_broken_payload() {
     let non_string_facts = non_string_client
         .extract_facts("some memory-worthy text")
         .await
-        .expect("null keyword elements are still valid JSON — it fails the *judgment*, not parsing");
+        .expect(
+            "null keyword elements are still valid JSON — it fails the *judgment*, not parsing",
+        );
     assert!(
         !facts_json_shape_holds(&non_string_facts),
         "RED case: non-string keyword elements (`[null, null]`) must fail \

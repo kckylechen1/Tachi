@@ -1292,7 +1292,10 @@ async fn extract_lane_retries_next_pool_key_on_401_before_falling_back() {
     let seen = seen_auth.lock().unwrap_or_else(|e| e.into_inner()).clone();
     assert_eq!(
         seen,
-        vec!["Bearer bad-key-a".to_string(), "Bearer good-key-b".to_string()],
+        vec![
+            "Bearer bad-key-a".to_string(),
+            "Bearer good-key-b".to_string()
+        ],
         "primary pool must be exhausted key-by-key before any escalation"
     );
     assert_eq!(
@@ -1493,25 +1496,29 @@ async fn extract_lane_falls_through_to_fallback_when_primary_key_is_unconfigured
     use std::sync::{Arc, Mutex};
 
     let hits = Arc::new(Mutex::new(0usize));
-    let app = Router::new().route(
-        "/chat/completions",
-        post(|State(hits): State<Arc<Mutex<usize>>>| async move {
-            *hits.lock().unwrap_or_else(|e| e.into_inner()) += 1;
-            Json(serde_json::json!({
-                "choices": [{
-                    "message": {"role": "assistant", "content": "fallback answered"},
-                    "finish_reason": "stop"
-                }],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-            }))
-        }),
-    ).with_state(hits.clone());
+    let app = Router::new()
+        .route(
+            "/chat/completions",
+            post(|State(hits): State<Arc<Mutex<usize>>>| async move {
+                *hits.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+                Json(serde_json::json!({
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "fallback answered"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+            }),
+        )
+        .with_state(hits.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind fallback mock provider");
     let port = listener.local_addr().expect("fallback mock addr").port();
     let server_task = tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("fallback mock provider");
+        axum::serve(listener, app)
+            .await
+            .expect("fallback mock provider");
     });
 
     // Primary: a key env that is never configured anywhere — key selection
@@ -1820,7 +1827,10 @@ fn lane_fallback_config_from_env_resolves_deepseek_default_for_extract() {
     let extract = fallbacks
         .extract
         .expect("extract fallback should resolve to DeepSeek when DEEPSEEK_API_KEY is set");
-    assert_eq!(extract.base_url, "https://api.deepseek.com/chat/completions");
+    assert_eq!(
+        extract.base_url,
+        "https://api.deepseek.com/chat/completions"
+    );
     assert_eq!(extract.model, "deepseek-chat");
     assert_eq!(
         extract.api_key_envs,
