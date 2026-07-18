@@ -557,7 +557,7 @@ async fn search_memory_defaults_to_markdown_when_format_omitted() {
         .expect("seed default-format entry");
 
     let response = server
-        .search_memory(Parameters(SearchMemoryParams {
+        .search_memory(Parameters(crate::tool_params::SearchMemoryParams {
             query: "SearchDefaultFormatNeedle".to_string(),
             query_vec: None,
             top_k: 5,
@@ -607,7 +607,7 @@ async fn search_memory_explicit_json_keeps_pre_k3_row_array_shape() {
         .expect("seed explicit-json entry");
 
     let response = server
-        .search_memory(Parameters(SearchMemoryParams {
+        .search_memory(Parameters(crate::tool_params::SearchMemoryParams {
             query: "SearchExplicitJsonNeedle".to_string(),
             query_vec: None,
             top_k: 5,
@@ -646,7 +646,7 @@ async fn search_memory_format_is_case_insensitive_and_trims_whitespace() {
     let server = make_server();
     for candidate in ["JSON", " json ", "Json"] {
         let response = server
-            .search_memory(Parameters(SearchMemoryParams {
+            .search_memory(Parameters(crate::tool_params::SearchMemoryParams {
                 query: "format polarity probe".to_string(),
                 query_vec: None,
                 top_k: 3,
@@ -676,7 +676,7 @@ async fn search_memory_format_is_case_insensitive_and_trims_whitespace() {
     }
 
     let markdown = server
-        .search_memory(Parameters(SearchMemoryParams {
+        .search_memory(Parameters(crate::tool_params::SearchMemoryParams {
             query: "format polarity probe".to_string(),
             query_vec: None,
             top_k: 3,
