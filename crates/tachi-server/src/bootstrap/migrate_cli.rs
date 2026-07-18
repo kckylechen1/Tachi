@@ -156,7 +156,10 @@ struct MigrateReport {
 /// (`project_db_ops.rs`'s "alias, not a data store" doc comment). A name that
 /// fails to resolve (stale manifest entry, broken alias) is tolerated
 /// silently, matching `doctor`'s hub-capability lint collector.
-fn enumerate_known_libraries(global_db_path: &Path, project_db_path: Option<&Path>) -> Vec<Library> {
+fn enumerate_known_libraries(
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> Vec<Library> {
     let mut libs = vec![Library {
         label: "global".to_string(),
         path: global_db_path.to_path_buf(),
@@ -289,9 +292,8 @@ fn a_live_daemon_holds_this_app_home(app_home: &Path, global_db_path: &Path) -> 
     match crate::status_ops::collect_daemon_status(app_home, global_db_path) {
         crate::status_ops::DaemonStatus::Running { pid, .. }
         | crate::status_ops::DaemonStatus::Foreign { pid, .. } => Some(pid),
-        crate::status_ops::DaemonStatus::StalePid { .. } | crate::status_ops::DaemonStatus::None => {
-            None
-        }
+        crate::status_ops::DaemonStatus::StalePid { .. }
+        | crate::status_ops::DaemonStatus::None => None,
     }
 }
 
@@ -356,15 +358,14 @@ fn apply_one(
             let old_version_display = plan_stored_version_display(&finding);
             finding.stored_version = Some(EXPECTED_SCHEMA_VERSION);
             finding.applied = Some(AppliedOutcome::Migrated);
-            finding.note =
-                format!("migrated {old_version_display} -> {EXPECTED_SCHEMA_VERSION}");
+            finding.note = format!("migrated {old_version_display} -> {EXPECTED_SCHEMA_VERSION}");
         }
         Err(memcore::MemoryError::Sqlite(ref sqlite_err))
             if memcore::db::sqlite_error_is_locked(sqlite_err) =>
         {
             finding.applied = Some(AppliedOutcome::SkippedLocked);
-            finding.note = "skipped: database busy/locked (likely held by a live daemon)"
-                .to_string();
+            finding.note =
+                "skipped: database busy/locked (likely held by a live daemon)".to_string();
         }
         Err(err) => {
             finding.applied = Some(AppliedOutcome::Failed);
