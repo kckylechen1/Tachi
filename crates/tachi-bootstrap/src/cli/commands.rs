@@ -1,8 +1,8 @@
 use super::{
-    BuildAction, CardAction, CleanAction, DaemonAction, DistillAction, EnvAction, EvalAction,
-    FoundryAction, HarnessAction, HostAction, HubAction, ManifestAction, McpAction, PokeAction,
-    RepairAction, RescueAction, SkillSurfaceAction, VaultAction, WatcherAction, WikiAction,
-    WorktreeAction,
+    BuildAction, CardAction, CardsAction, CleanAction, DaemonAction, DistillAction, EnvAction,
+    EvalAction, FoundryAction, HarnessAction, HostAction, HubAction, ManifestAction, McpAction,
+    PokeAction, RepairAction, RescueAction, SkillSurfaceAction, VaultAction, WatcherAction,
+    WikiAction, WorktreeAction,
 };
 use clap::Subcommand;
 use std::path::PathBuf;
@@ -167,6 +167,15 @@ pub enum Commands {
     Card {
         #[command(subcommand)]
         action: CardAction,
+    },
+    /// Sync/list dispatch-ledger LANE cards (`~/.agents/dispatch-ledger/cards/*.md`,
+    /// leader-authored model/vendor playbooks — see `tachi#1202`) as read-only
+    /// `/cards/<seat>` mirror rows in the GLOBAL memory DB. Distinct from the
+    /// singular `Card` command above, which projects Tachikoma dispatch-profile
+    /// cards (`tachi_task(action='profiles')`) and is unrelated data.
+    Cards {
+        #[command(subcommand)]
+        action: CardsAction,
     },
     /// Run Poke product-probe smoke suites against isolated local Tachi surfaces.
     Poke {

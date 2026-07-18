@@ -25,6 +25,50 @@ fn card_cli_parses_list_and_show() {
     }
 }
 
+/// tachi#1202: `cards` (plural, dispatch-ledger lane-card ingest) must parse
+/// as a DISTINCT command from `card` (singular, Tachikoma dispatch-profile
+/// projection) above — regression guard against the two verbs colliding or
+/// clap accidentally treating one as an alias of the other.
+#[test]
+fn cards_cli_parses_sync_and_list_distinct_from_singular_card() {
+    let sync = Cli::try_parse_from([
+        "tachi",
+        "cards",
+        "sync",
+        "--dir",
+        "/tmp/fixture-cards",
+        "--json",
+    ])
+    .expect("cards sync should parse");
+    match sync.command.expect("command") {
+        Commands::Cards {
+            action: CardsAction::Sync { dir, json },
+        } => {
+            assert_eq!(dir, Some(std::path::PathBuf::from("/tmp/fixture-cards")));
+            assert!(json);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+
+    let list = Cli::try_parse_from(["tachi", "cards", "list"]).expect("cards list should parse");
+    match list.command.expect("command") {
+        Commands::Cards {
+            action: CardsAction::List { json },
+        } => assert!(!json),
+        other => panic!("unexpected command: {other:?}"),
+    }
+
+    // The pre-existing singular `card` command must still parse unaffected.
+    let card_list =
+        Cli::try_parse_from(["tachi", "card", "list"]).expect("card list should still parse");
+    match card_list.command.expect("command") {
+        Commands::Card {
+            action: CardAction::List { json },
+        } => assert!(!json),
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
 #[test]
 fn poke_cli_parses_smoke_run() {
     let parsed = Cli::try_parse_from(["tachi", "poke", "run", "--suite", "smoke", "--json"])
