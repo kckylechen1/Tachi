@@ -12,6 +12,10 @@
 pub const TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS: &[&str] =
     &["link_pr", "pr_status", "pr_handoff", "release_note"];
 
+/// Canonical WorkClaim lifecycle actions exposed on `tachi_task` by #1253.
+#[cfg(test)]
+const TACHI_TASK_WORKCLAIM_ACTIONS: &[&str] = &["claim", "release", "heartbeat", "handoff"];
+
 /// Canonical `tachi_gh` actions (includes lifecycle).
 pub const TACHI_GH_ACTIONS: &[&str] = &[
     "repo_view",
@@ -120,7 +124,7 @@ pub const TACHI_ORCHESTRATOR_ACTIONS: &[&str] = &[
 ];
 
 /// Soft ceilings for F0 monitoring (primary schema actions only).
-pub const TACHI_TASK_PRIMARY_ACTION_SOFT_MAX: usize = 28;
+pub const TACHI_TASK_PRIMARY_ACTION_SOFT_MAX: usize = 30;
 pub const TACHI_MEMORY_ACTION_SOFT_MAX: usize = 25;
 pub const TACHI_GH_ACTION_SOFT_MAX: usize = 20;
 
@@ -138,14 +142,17 @@ mod tests {
                 "primary task schema must not advertise {action}; use tachi_gh"
             );
         }
-        // #1002 Issue Refinery plus append-only adjudication bump this from
-        // 24 -> 26 (`refine_issues` is proposal-only/Observe; `adjudicate` is
-        // Remember). Still well under
-        // TACHI_TASK_PRIMARY_ACTION_SOFT_MAX (28) — the soft-ceiling
-        // assertion below still passes (`<=`), but the tripwire above is
-        // deliberately exact so the next addition gets the same explicit
-        // look this one did.
-        assert_eq!(primary.len(), 26);
+        for action in TACHI_TASK_WORKCLAIM_ACTIONS {
+            assert!(
+                primary.contains(action),
+                "#1253 WorkClaim action {action} must be advertised on tachi_task"
+            );
+        }
+        // #1002 Issue Refinery plus append-only adjudication bumped this from
+        // 24 -> 26. #1253 WorkClaim lifecycle then intentionally adds four
+        // canonical task actions: claim, release, heartbeat, and handoff.
+        // Keep this exact so the next inventory addition gets explicit review.
+        assert_eq!(primary.len(), 30);
         assert!(primary.len() <= TACHI_TASK_PRIMARY_ACTION_SOFT_MAX);
     }
 
