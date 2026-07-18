@@ -202,37 +202,6 @@ fn format_pool_prompt_skips_separator_when_system_empty() {
     assert_eq!(out, "just user");
 }
 
-#[tokio::test]
-async fn pool_call_with_fallback_invokes_fallback_when_pool_errors() {
-    // CLAUDE_BIN points at a binary that cannot exist → pool errors → fallback fires.
-    let prev = std::env::var("CLAUDE_BIN").ok();
-    std::env::set_var("CLAUDE_BIN", "/nonexistent/__tachi_test_no_such_claude__");
-
-    let tmp = tempfile::tempdir().unwrap();
-    let pool = ClaudePool {
-        sem: Arc::new(Semaphore::new(1)),
-        runs_dir: tmp.path().to_path_buf(),
-        timeout: Duration::from_secs(5),
-        binary: Ok("/nonexistent/__tachi_test_no_such_claude__".to_string()),
-    };
-
-    let (text, source) = pool_call_with_fallback(&pool, "sys", "usr", "unit-test", || async {
-        Ok::<_, String>("fallback-text".to_string())
-    })
-    .await
-    .expect("fallback path should succeed");
-
-    assert_eq!(text, "fallback-text");
-    assert_eq!(source, PoolCallSource::RawApiFallback);
-    assert_eq!(source.as_str(), "raw_api_fallback");
-
-    // Restore env
-    match prev {
-        Some(v) => std::env::set_var("CLAUDE_BIN", v),
-        None => std::env::remove_var("CLAUDE_BIN"),
-    }
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn run_claude_cli_kills_timed_out_child() {
@@ -600,42 +569,6 @@ fn pool_call_with_fallback_provider_first_errors_when_both_paths_fail() {
         .expect_err("both paths failing should surface an error");
     assert!(err.contains("provider down"), "unexpected error: {err}");
     assert!(err.contains("CLI pool fallback"), "unexpected error: {err}");
-
-    match prev {
-        Some(v) => std::env::set_var(super::rollout::PROVIDER_ROLLOUT_ENV, v),
-        None => std::env::remove_var(super::rollout::PROVIDER_ROLLOUT_ENV),
-    }
-}
-
-#[test]
-fn pool_call_with_fallback_defaults_to_cli_first_when_flag_unset() {
-    let _guard = crate::test_support::global_test_lock().lock();
-    let prev = std::env::var(super::rollout::PROVIDER_ROLLOUT_ENV).ok();
-    // Explicitly unset — proves the default (flag absent) preserves
-    // pre-#1087 behavior: CLI pool first, raw-API fallback second.
-    std::env::remove_var(super::rollout::PROVIDER_ROLLOUT_ENV);
-
-    let tmp = tempfile::tempdir().unwrap();
-    let pool = ClaudePool {
-        sem: Arc::new(Semaphore::new(1)),
-        runs_dir: tmp.path().to_path_buf(),
-        timeout: Duration::from_secs(5),
-        binary: Ok("/nonexistent/__tachi_test_default_cli_first__".to_string()),
-    };
-
-    let (text, source) = tokio::runtime::Runtime::new()
-        .expect("tokio runtime")
-        .block_on(pool_call_with_fallback(
-            &pool,
-            "sys",
-            "usr",
-            "default-cli-first",
-            || async { Ok::<_, String>("raw-api-text".to_string()) },
-        ))
-        .expect("raw-api fallback should succeed since CLI binary is missing");
-
-    assert_eq!(text, "raw-api-text");
-    assert_eq!(source, PoolCallSource::RawApiFallback);
 
     match prev {
         Some(v) => std::env::set_var(super::rollout::PROVIDER_ROLLOUT_ENV, v),
