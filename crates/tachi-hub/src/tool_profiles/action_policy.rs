@@ -152,7 +152,6 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "progress"
                 | "readiness"
                 | "claim"
-                | "release"
                 | "sticky_leave"
                 | "sticky_check"
         ),
@@ -329,6 +328,16 @@ mod tests {
             profile
         ));
         assert!(facade_action_allowed("tachi_memory", Some("save"), profile));
+        assert!(facade_action_allowed(
+            "tachi_memory",
+            Some("claim"),
+            profile
+        ));
+        assert!(!facade_action_allowed(
+            "tachi_memory",
+            Some("release"),
+            profile
+        ));
         assert!(!facade_action_allowed(
             "tachi_memory",
             Some("apply_recall_proposals"),
@@ -436,6 +445,31 @@ mod tests {
                 "delegate must not gain tachi_task(action='{action}') without an owner policy change"
             );
         }
+    }
+
+    #[test]
+    fn delegate_memory_release_denied_but_search_allowed() {
+        let profile = Some(ToolProfile::delegate());
+        assert!(facade_action_allowed(
+            "tachi_memory",
+            Some("search"),
+            profile
+        ));
+        assert!(facade_action_allowed(
+            "tachi_memory",
+            Some("claim"),
+            profile
+        ));
+        assert!(!facade_action_allowed(
+            "tachi_memory",
+            Some("release"),
+            profile
+        ));
+        assert_eq!(
+            facade_action_required_bundle("tachi_memory", "release"),
+            Some(ToolBundle::Remember),
+            "release keeps its Remember bundle outside the delegate allowlist"
+        );
     }
 
     #[test]

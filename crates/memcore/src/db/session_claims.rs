@@ -1114,44 +1114,80 @@ pub fn release_claim(
     reason: Option<&str>,
 ) -> Result<ReleaseOutcome, MemoryError> {
     let tx = conn.transaction()?;
-    let existing: Option<(String, String)> = match selector {
+    let existing: Option<(String, String, Option<String>, Option<String>)> = match selector {
         ClaimSelector::ClaimId(claim_id) => tx
             .query_row(
-                "SELECT claim_id, state FROM session_claims WHERE claim_id = ?1",
+                "SELECT claim_id, state, mode, agent_identity_id FROM session_claims WHERE claim_id = ?1",
                 params![claim_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
             )
             .optional()?,
         ClaimSelector::DispatchId(dispatch_id) => tx
             .query_row(
-                "SELECT claim_id, state FROM session_claims WHERE dispatch_id = ?1 \
+                "SELECT claim_id, state, mode, agent_identity_id FROM session_claims WHERE dispatch_id = ?1 \
                  AND mode IS NULL AND agent_identity_id IS NULL \
                  ORDER BY CASE state WHEN 'active' THEN 0 ELSE 1 END, heartbeat_at DESC LIMIT 1",
                 params![dispatch_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
             )
             .optional()?,
     };
+    if existing.is_none() {
+        if let ClaimSelector::DispatchId(dispatch_id) = selector {
+            let has_v21: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_claims WHERE dispatch_id = ?1 \
+                 AND (mode IS NOT NULL OR agent_identity_id IS NOT NULL))",
+                params![dispatch_id],
+                |row| row.get(0),
+            )?;
+            if has_v21 {
+                return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                    "dispatch_id {dispatch_id} targets a v21 WorkClaim; use canonical tachi_task release with caller-provided transition_version"
+                )));
+            }
+        }
+    }
 
     let outcome = match existing {
         None => ReleaseOutcome::NotFound,
-        Some((claim_id, state_raw)) => match ClaimState::parse(&state_raw)? {
-            ClaimState::Released => ReleaseOutcome::AlreadyReleased { claim_id },
-            ClaimState::Orphaned => {
+        Some((claim_id, state_raw, mode, agent_identity_id)) => {
+            if mode.is_some() || agent_identity_id.is_some() {
                 return Err(MemoryError::WorkClaimIncompatibleState(format!(
-                    "claim {claim_id} is orphaned; use versioned release_work_claim"
-                )))
+                    "claim {claim_id} targets a v21 WorkClaim; use canonical tachi_task release with caller-provided transition_version"
+                )));
             }
-            ClaimState::Active => {
-                let now = normalize_utc_iso_or_now("");
-                tx.execute(
-                    "UPDATE session_claims SET state = 'released', released_at = ?2, \
+            match ClaimState::parse(&state_raw)? {
+                ClaimState::Released => ReleaseOutcome::AlreadyReleased { claim_id },
+                ClaimState::Orphaned => {
+                    return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                        "claim {claim_id} is orphaned; use versioned release_work_claim"
+                    )))
+                }
+                ClaimState::Active => {
+                    let now = normalize_utc_iso_or_now("");
+                    tx.execute(
+                        "UPDATE session_claims SET state = 'released', released_at = ?2, \
                      release_reason = ?3 WHERE claim_id = ?1 AND state = 'active'",
-                    params![claim_id, now, reason],
-                )?;
-                ReleaseOutcome::Released { claim_id }
+                        params![claim_id, now, reason],
+                    )?;
+                    ReleaseOutcome::Released { claim_id }
+                }
             }
-        },
+        }
     };
     tx.commit()?;
     Ok(outcome)
@@ -1410,6 +1446,33 @@ mod tests {
     }
 
     #[test]
+    fn release_by_claim_id_rejects_v21_work_claim_alias() {
+        let mut conn = open_conn();
+        identity(&conn, "agent-v21-claim-id");
+        insert_work_claim(
+            &mut conn,
+            &work_claim("claim-v21-direct", "agent-v21-claim-id"),
+        )
+        .unwrap();
+
+        let err = release_claim(
+            &mut conn,
+            &ClaimSelector::ClaimId("claim-v21-direct".to_string()),
+            Some("legacy alias"),
+        )
+        .expect_err("legacy release must reject direct v21 WorkClaim aliases");
+        let text = err.to_string();
+        assert!(text.contains("canonical tachi_task release"), "{text}");
+        assert!(text.contains("transition_version"), "{text}");
+
+        let got = get_claim(&conn, "claim-v21-direct").unwrap().unwrap();
+        assert_eq!(got.state, ClaimState::Active);
+        assert_eq!(got.transition_version, 0);
+        assert!(got.released_at.is_none());
+        assert!(got.release_reason.is_none());
+    }
+
+    #[test]
     fn release_by_dispatch_id_targets_the_active_claim() {
         let mut conn = open_conn();
         // A stale released row plus a live active row for the same dispatch.
@@ -1441,20 +1504,22 @@ mod tests {
     }
 
     #[test]
-    fn release_by_dispatch_id_ignores_v21_work_claim_with_same_dispatch() {
+    fn release_by_dispatch_id_rejects_v21_work_claim_alias() {
         let mut conn = open_conn();
         identity(&conn, "agent-v21-dispatch");
         let mut claim = work_claim("claim-v21-dispatch", "agent-v21-dispatch");
         claim.dispatch_id = Some("dispatch-v21-only".to_string());
         insert_work_claim(&mut conn, &claim).unwrap();
 
-        let outcome = release_claim(
+        let err = release_claim(
             &mut conn,
             &ClaimSelector::DispatchId("dispatch-v21-only".to_string()),
             Some("complete"),
         )
-        .unwrap();
-        assert_eq!(outcome, ReleaseOutcome::NotFound);
+        .expect_err("legacy release must reject v21 WorkClaim dispatch aliases");
+        let text = err.to_string();
+        assert!(text.contains("canonical tachi_task release"), "{text}");
+        assert!(text.contains("transition_version"), "{text}");
 
         let got = get_claim(&conn, "claim-v21-dispatch").unwrap().unwrap();
         assert_eq!(got.state, ClaimState::Active);

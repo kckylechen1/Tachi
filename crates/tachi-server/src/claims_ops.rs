@@ -757,20 +757,10 @@ pub(crate) fn handle_manual_release(
     dispatch_id: Option<String>,
     reason: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let claim_id = match (claim_id, dispatch_id) {
-        (Some(claim_id), _) if !claim_id.trim().is_empty() => claim_id,
+    let selector = match (claim_id, dispatch_id) {
+        (Some(claim_id), _) if !claim_id.trim().is_empty() => ClaimSelector::ClaimId(claim_id),
         (_, Some(dispatch_id)) if !dispatch_id.trim().is_empty() => {
-            server.with_global_store_read(|store| {
-                memcore::list_claims(store.connection(), None)
-                    .map_err(|err| err.to_string())?
-                    .into_iter()
-                    .find(|claim| {
-                        claim.dispatch_id.as_deref() == Some(dispatch_id.as_str())
-                            && claim.state == memcore::ClaimState::Active
-                    })
-                    .map(|claim| claim.claim_id)
-                    .ok_or_else(|| format!("no active WorkClaim for dispatch_id {dispatch_id}"))
-            })?
+            ClaimSelector::DispatchId(dispatch_id)
         }
         _ => {
             return Err(
@@ -778,27 +768,24 @@ pub(crate) fn handle_manual_release(
             )
         }
     };
-    let version = server.with_global_store_read(|store| {
-        memcore::get_claim(store.connection(), &claim_id)
-            .map_err(|err| err.to_string())?
-            .map(|claim| claim.transition_version)
-            .ok_or_else(|| format!("claim {claim_id} not found"))
-    })?;
-    let next = server.with_global_store(|store| {
-        memcore::release_work_claim(
-            store.connection(),
-            &claim_id,
-            version,
-            reason.as_deref().unwrap_or("legacy_release"),
+    let outcome = server.with_global_store(|store| {
+        memcore::release_claim(
+            store.connection_mut(),
+            &selector,
+            Some(reason.as_deref().unwrap_or("legacy_release")),
         )
         .map_err(|err| err.to_string())
     })?;
+    let (outcome, claim_id) = match outcome {
+        ReleaseOutcome::Released { claim_id } => ("released", claim_id),
+        ReleaseOutcome::AlreadyReleased { claim_id } => ("already_released", claim_id),
+        ReleaseOutcome::NotFound => return Err("legacy release target not found".to_string()),
+    };
     Ok(serde_json::json!({
         "status": "completed",
         "action": "release",
-        "outcome": "released",
+        "outcome": outcome,
         "claim_id": claim_id,
-        "transition_version": next,
     }))
 }
 
@@ -1241,6 +1228,204 @@ mod tests {
                     assert_eq!(row.agent_identity_id.as_deref(), Some("agent.alpha"));
                     assert_eq!(row.state, memcore::ClaimState::Active);
                 }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn memory_release_preserves_legacy_outcome_and_reason() {
+        let server = make_server();
+        server
+            .with_global_store(|store| {
+                let mut claim = memcore::NewSessionClaim {
+                    claim_id: "legacy-release-claim".to_string(),
+                    session_client: Some("legacy-client".to_string()),
+                    issue_ref: Some("org/repo#1253".to_string()),
+                    flow_id: None,
+                    dispatch_id: Some("legacy-release-dispatch".to_string()),
+                    branch: "lane/legacy".to_string(),
+                    declared_file_scope: Some(
+                        r#"["crates/tachi-server/src/claims_ops.rs"]"#.to_string(),
+                    ),
+                    created_at: String::new(),
+                };
+                memcore::insert_claim(store.connection(), &claim).map_err(|err| err.to_string())?;
+                claim.claim_id = "legacy-released-claim".to_string();
+                claim.session_client = Some("legacy-released-client".to_string());
+                claim.dispatch_id = Some("legacy-released-dispatch".to_string());
+                memcore::insert_claim(store.connection(), &claim).map_err(|err| err.to_string())?;
+                memcore::release_claim(
+                    store.connection_mut(),
+                    &memcore::ClaimSelector::ClaimId("legacy-released-claim".to_string()),
+                    Some("first"),
+                )
+                .map_err(|err| err.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+
+        let released = handle_manual_release(
+            &server,
+            None,
+            Some("legacy-release-dispatch".to_string()),
+            Some("manual reason".to_string()),
+        )
+        .unwrap();
+        assert_eq!(released["outcome"], "released");
+        assert_eq!(released["claim_id"], "legacy-release-claim");
+
+        let already = handle_manual_release(
+            &server,
+            Some("legacy-released-claim".to_string()),
+            None,
+            Some("second".to_string()),
+        )
+        .unwrap();
+        assert_eq!(already["outcome"], "already_released");
+        assert_eq!(already["claim_id"], "legacy-released-claim");
+
+        server
+            .with_global_store_read(|store| {
+                let fresh = memcore::get_claim(store.connection(), "legacy-release-claim")
+                    .map_err(|err| err.to_string())?
+                    .unwrap();
+                assert_eq!(fresh.release_reason.as_deref(), Some("manual reason"));
+                let old = memcore::get_claim(store.connection(), "legacy-released-claim")
+                    .map_err(|err| err.to_string())?
+                    .unwrap();
+                assert_eq!(old.release_reason.as_deref(), Some("first"));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn memory_release_rejects_v21_claim_and_dispatch_aliases_unchanged() {
+        let server = make_server();
+        admit_agent_connection(&server, Some("agent.alpha".to_string()), true).unwrap();
+        let receipt = handle_task_claim(
+            &server,
+            &task(
+                "claim",
+                serde_json::json!({
+                    "issue_ref": "org/repo#1253", "dispatch_id": "dispatch-1253",
+                    "branch": "lane/1253-server", "claim_role": "executor", "claim_mode": "writable",
+                    "worktree_path": "/tmp/claim-alpha", "claim_scope": ["crates/tachi-server/src/claims_ops.rs"],
+                    "expected_head": "f7467b3", "lease_expires_at": "2030-01-01T00:00:00Z"
+                }),
+            ),
+        )
+        .unwrap();
+        let claim_id = receipt["claim_id"].as_str().unwrap().to_string();
+
+        let claim_err = handle_manual_release(
+            &server,
+            Some(claim_id.clone()),
+            None,
+            Some("bad alias".to_string()),
+        )
+        .expect_err("tachi_memory release must reject v21 claim_id aliases");
+        assert!(
+            claim_err.contains("canonical tachi_task release"),
+            "{claim_err}"
+        );
+        assert!(claim_err.contains("transition_version"), "{claim_err}");
+
+        let dispatch_err = handle_manual_release(
+            &server,
+            None,
+            Some("dispatch-1253".to_string()),
+            Some("bad alias".to_string()),
+        )
+        .expect_err("tachi_memory release must reject v21 dispatch_id aliases");
+        assert!(
+            dispatch_err.contains("canonical tachi_task release"),
+            "{dispatch_err}"
+        );
+        assert!(
+            dispatch_err.contains("transition_version"),
+            "{dispatch_err}"
+        );
+
+        server
+            .with_global_store_read(|store| {
+                let got = memcore::get_claim(store.connection(), &claim_id)
+                    .map_err(|err| err.to_string())?
+                    .unwrap();
+                assert_eq!(got.state, memcore::ClaimState::Active);
+                assert_eq!(got.transition_version, 0);
+                assert!(got.released_at.is_none());
+                assert!(got.release_reason.is_none());
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn memory_release_by_mixed_dispatch_releases_only_legacy_alias() {
+        let server = make_server();
+        admit_agent_connection(&server, Some("agent.alpha".to_string()), true).unwrap();
+        let v21 = handle_task_claim(
+            &server,
+            &task(
+                "claim",
+                serde_json::json!({
+                    "issue_ref": "org/repo#1253", "dispatch_id": "dispatch-mixed",
+                    "branch": "lane/1253-server", "claim_role": "executor", "claim_mode": "writable",
+                    "worktree_path": "/tmp/claim-alpha", "claim_scope": ["crates/tachi-server/src/claims_ops.rs"],
+                    "expected_head": "f7467b3", "lease_expires_at": "2030-01-01T00:00:00Z"
+                }),
+            ),
+        )
+        .unwrap();
+        let v21_id = v21["claim_id"].as_str().unwrap().to_string();
+        server
+            .with_global_store(|store| {
+                memcore::insert_claim(
+                    store.connection(),
+                    &memcore::NewSessionClaim {
+                        claim_id: "legacy-mixed-claim".to_string(),
+                        session_client: Some("legacy-client".to_string()),
+                        issue_ref: Some("org/repo#1253".to_string()),
+                        flow_id: None,
+                        dispatch_id: Some("dispatch-mixed".to_string()),
+                        branch: "lane/legacy".to_string(),
+                        declared_file_scope: Some(
+                            r#"["crates/tachi-server/src/claims_ops.rs"]"#.to_string(),
+                        ),
+                        created_at: String::new(),
+                    },
+                )
+                .map_err(|err| err.to_string())
+            })
+            .unwrap();
+
+        let released = handle_manual_release(
+            &server,
+            None,
+            Some("dispatch-mixed".to_string()),
+            Some("mixed legacy".to_string()),
+        )
+        .unwrap();
+        assert_eq!(released["outcome"], "released");
+        assert_eq!(released["claim_id"], "legacy-mixed-claim");
+
+        server
+            .with_global_store_read(|store| {
+                let legacy = memcore::get_claim(store.connection(), "legacy-mixed-claim")
+                    .map_err(|err| err.to_string())?
+                    .unwrap();
+                assert_eq!(legacy.state, memcore::ClaimState::Released);
+                assert_eq!(legacy.release_reason.as_deref(), Some("mixed legacy"));
+
+                let work = memcore::get_claim(store.connection(), &v21_id)
+                    .map_err(|err| err.to_string())?
+                    .unwrap();
+                assert_eq!(work.state, memcore::ClaimState::Active);
+                assert_eq!(work.transition_version, 0);
+                assert!(work.released_at.is_none());
+                assert!(work.release_reason.is_none());
                 Ok(())
             })
             .unwrap();
