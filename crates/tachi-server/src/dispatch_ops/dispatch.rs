@@ -216,6 +216,16 @@ pub(crate) async fn handle_tachi_dispatch(
     // the daemon's process env — which is always the leader's depth 0 and would
     // make this gate security theater. Absent marker = depth 0 (leader); a
     // malformed value saturates to the limit and fails closed here.
+    //
+    // v1 residual (owner-accepted, see `session_identity::enforce_dispatch_depth`
+    // for the full writeup): this is a CALLER-ASSERTED gate. It stops
+    // ACCIDENTAL unbounded recursion through the normal MCP-dispatch path; a
+    // DELIBERATE worker can still bypass it (raw `tachi task` CLI outside the
+    // env-stamped path, or a forged `X-Tachi-Dispatch-Depth` header) because
+    // nothing here binds the depth claim to an authenticated capability —
+    // same trust class as the existing `TACHI_AGENT_SEAT` self-report. A
+    // server-side capability-token binding is tracked as a follow-up, not
+    // this gate.
     let dispatch_depth = crate::session_identity::resolve_dispatch_depth(
         server.session_dispatch_depth().as_deref(),
         crate::session_identity::MAX_DISPATCH_DEPTH,
