@@ -24,59 +24,165 @@ pub const MEMORY_DB_FILENAME: &str = "tachi-memory.db";
 /// one-release-window compat symlink pointing at [`MEMORY_DB_FILENAME`].
 pub const LEGACY_MEMORY_DB_FILENAME: &str = "memory.db";
 
+/// How the legacy `memory.db` sibling classifies on disk. The three cases are
+/// kept explicit (rather than collapsed to a bool) because each drives a
+/// different, data-safety-critical branch in the state machine below, and
+/// because "definitively absent" MUST NOT be conflated with "present but
+/// un-stat-able" (see [`stat_error`] and BUG #1132-2).
+enum LegacySibling {
+    /// `symlink_metadata` returned `NotFound` — the file genuinely does not
+    /// exist.
+    Absent,
+    /// A symlink at the legacy path — either a compat shim from a prior
+    /// migration or some other deliberate link. Never renamed.
+    Symlink,
+    /// A real (regular/other non-symlink) file holding pre-#1132 data.
+    RealFile,
+}
+
 /// Compat contract for the #1132 rename, applied right before a DB file at
-/// `db_path` is opened/created:
+/// `db_path` is opened/created. This is a crash-safe, idempotent state machine
+/// over the pair (canonical file present?, legacy sibling kind). It is the ONLY
+/// place that may rename/relink these files, so every combination is handled
+/// explicitly — the seam never falls through to letting a later
+/// `Connection::open` create an empty DB when the on-disk truth is ambiguous or
+/// unknown.
 ///
 /// - `db_path`'s file name isn't [`MEMORY_DB_FILENAME`] -> no-op (caller is
-///   opening something else — an in-memory DB, an explicit non-standard
-///   path, etc. — not this seam's concern).
-/// - `db_path` already exists -> no-op (already migrated, or a fresh DB
-///   already created under the new name).
-/// - no legacy `memory.db` sits next to it either -> no-op (genuinely fresh;
-///   the normal open path creates `db_path` from scratch).
-/// - a legacy `memory.db` **regular file** exists -> rename it to the new
-///   name, then leave a `memory.db -> tachi-memory.db` symlink behind as a
-///   one-release compat shim for anything still hard-coded to the old name.
-/// - the legacy path is already a symlink (e.g. a previous run already
-///   migrated this directory) -> treated as already-migrated, no-op.
-/// - the rename itself fails (permissions, cross-device, read-only fs, ...)
-///   -> returns a loud [`MemoryError`] rather than silently opening/creating
-///   under the legacy name.
+///   opening something else — an in-memory DB, an explicit non-standard path,
+///   etc. — not this seam's concern).
+///
+/// Otherwise, both `db_path` (canonical) and the legacy `memory.db` sibling are
+/// `symlink_metadata`-stat'd, distinguishing `NotFound` (definitively absent)
+/// from any other error (present but un-stat-able -> FAIL LOUD, never treated as
+/// absent — BUG #1132-2). Then, by (canonical, legacy):
+///
+/// - (absent, absent) / (absent, symlink) -> no-op. Genuinely fresh, or an
+///   orphaned compat symlink pointing at a not-yet-created canonical file; the
+///   normal open path creates the canonical file from scratch.
+/// - (absent, real file) -> migrate: `rename` the legacy file to the canonical
+///   name (atomic on POSIX — the data is never in two places at once), then
+///   leave a `memory.db -> tachi-memory.db` compat symlink behind idempotently.
+/// - (present, symlink) -> no-op. Fully migrated; this is the pure "second
+///   open" fast path.
+/// - (present, absent) -> CONVERGE: the canonical file exists but its compat
+///   symlink is missing — a crash between the atomic rename and the symlink
+///   step, or a fresh canonical-only store. Re-establish the symlink
+///   idempotently so a half-done migration reaches its defined terminal state.
+///   The canonical data is never touched.
+/// - (present, real file) -> FAIL LOUD (BUG #1132-1): both a real canonical AND
+///   a real legacy file exist side by side — a partially-failed/ambiguous
+///   migration. We cannot know which holds the authoritative rows; silently
+///   picking either could shadow or discard real data. Refuse without touching
+///   either file and demand manual reconciliation.
+/// - any stat or the rename itself failing (permissions, cross-device,
+///   read-only fs, ...) -> returns a loud [`MemoryError`] rather than silently
+///   opening/creating under the wrong name.
 pub fn migrate_legacy_filename_if_present(db_path: &Path) -> Result<(), MemoryError> {
     let is_canonical_name = db_path
         .file_name()
         .and_then(|f| f.to_str())
         .map(|f| f == MEMORY_DB_FILENAME)
         .unwrap_or(false);
-    if !is_canonical_name || db_path.exists() {
+    if !is_canonical_name {
         return Ok(());
     }
 
     let legacy_path = db_path.with_file_name(LEGACY_MEMORY_DB_FILENAME);
-    let legacy_meta = match std::fs::symlink_metadata(&legacy_path) {
-        Ok(meta) => meta,
-        Err(_) => return Ok(()), // no legacy file present — genuinely fresh
+
+    // Classify the legacy sibling FIRST, with strict absent-vs-error discipline.
+    // A non-`NotFound` error here means the legacy file may exist but be
+    // unreadable (permissions, transient I/O); treating that as "absent" (the
+    // pre-fix bug) would let us proceed to create an empty canonical DB that
+    // shadows the still-present real data. Fail loud instead.
+    let legacy_kind = match std::fs::symlink_metadata(&legacy_path) {
+        Ok(meta) if meta.file_type().is_symlink() => LegacySibling::Symlink,
+        Ok(_) => LegacySibling::RealFile,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => LegacySibling::Absent,
+        Err(e) => return Err(stat_error("legacy", &legacy_path, e)),
     };
-    if legacy_meta.file_type().is_symlink() {
-        // Already a compat shim from a prior migration (or some other
-        // deliberate link at this path) — don't touch it again.
-        return Ok(());
-    }
 
-    std::fs::rename(&legacy_path, db_path).map_err(|e| {
-        MemoryError::Io(std::io::Error::new(
-            e.kind(),
+    // Classify the canonical target with the same discipline. `NotFound` ->
+    // genuinely not there; any other error -> present-but-un-stat-able, fail
+    // loud rather than risk renaming/creating over data we couldn't read.
+    let canonical_present = match std::fs::symlink_metadata(db_path) {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(stat_error("canonical", db_path, e)),
+    };
+
+    match (canonical_present, legacy_kind) {
+        // Genuinely fresh, or an orphaned compat symlink pointing at a
+        // not-yet-created canonical file. Nothing to migrate.
+        (false, LegacySibling::Absent) | (false, LegacySibling::Symlink) => Ok(()),
+
+        // Pre-#1132 install: a real legacy file, no canonical file yet.
+        // `rename` is atomic on POSIX, so the bytes never live under two names
+        // at once; the compat symlink is then (re-)established idempotently.
+        (false, LegacySibling::RealFile) => {
+            std::fs::rename(&legacy_path, db_path)
+                .map_err(|e| rename_error(&legacy_path, db_path, e))?;
+            leave_compat_symlink(&legacy_path)
+        }
+
+        // Fully migrated (canonical real file + legacy compat symlink), or a
+        // canonical file whose legacy sibling is a deliberate link: pure no-op.
+        // This is the common "second open" fast path — zero fs mutation.
+        (true, LegacySibling::Symlink) => Ok(()),
+
+        // Half-done migration / fresh canonical-only store: the canonical file
+        // exists but the compat symlink is missing. Converge idempotently by
+        // (re-)leaving the symlink. The canonical data is never touched.
+        (true, LegacySibling::Absent) => leave_compat_symlink(&legacy_path),
+
+        // AMBIGUOUS / partially-failed migration (BUG #1132-1): BOTH a real
+        // canonical file AND a real legacy file exist. We cannot know which is
+        // authoritative; opening/renaming either could shadow or discard real
+        // rows. Refuse loudly, touch nothing, demand manual reconciliation.
+        (true, LegacySibling::RealFile) => Err(MemoryError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
             format!(
-                "#1132 legacy DB filename migration failed: could not rename {} -> {}: {e}. \
-                 Refusing to silently open/create under the legacy name — fix the underlying \
-                 filesystem/permissions issue and retry.",
+                "#1132 legacy DB filename migration: refusing to open — both a canonical {} and a \
+                 legacy {} regular file exist in the same directory. This is a partially-failed or \
+                 ambiguous migration; opening either could shadow real data. No file was touched. \
+                 Reconcile manually (verify which holds the authoritative rows, back it up, then \
+                 remove or merge the other) and retry.",
+                db_path.display(),
                 legacy_path.display(),
-                db_path.display()
             ),
-        ))
-    })?;
+        ))),
+    }
+}
 
-    leave_compat_symlink(&legacy_path)
+/// Loud error for a stat failure on either the canonical or legacy DB path.
+/// The entire point is to NEVER treat "I couldn't read this path's metadata"
+/// as "this path is absent": that conflation (BUG #1132-2) is exactly what
+/// lets an empty canonical DB get created beside real-but-unreadable data.
+fn stat_error(which: &str, path: &Path, e: std::io::Error) -> MemoryError {
+    MemoryError::Io(std::io::Error::new(
+        e.kind(),
+        format!(
+            "#1132 legacy DB filename migration: could not stat the {which} memory-database path \
+             {}: {e}. Refusing to open/create — the file may exist but be unreadable (permissions, \
+             transient I/O), and treating it as absent could create an empty DB that shadows real \
+             data. Fix the underlying filesystem/permissions issue and retry.",
+            path.display()
+        ),
+    ))
+}
+
+/// Loud error for a failed `rename` of the legacy file onto the canonical name.
+fn rename_error(legacy_path: &Path, db_path: &Path, e: std::io::Error) -> MemoryError {
+    MemoryError::Io(std::io::Error::new(
+        e.kind(),
+        format!(
+            "#1132 legacy DB filename migration failed: could not rename {} -> {}: {e}. \
+             Refusing to silently open/create under the legacy name — fix the underlying \
+             filesystem/permissions issue and retry.",
+            legacy_path.display(),
+            db_path.display()
+        ),
+    ))
 }
 
 /// True if `name` is either the canonical or the legacy memory-database
@@ -92,19 +198,47 @@ pub fn is_memory_db_filename(name: &str) -> bool {
 
 #[cfg(unix)]
 fn leave_compat_symlink(legacy_path: &Path) -> Result<(), MemoryError> {
-    std::os::unix::fs::symlink(MEMORY_DB_FILENAME, legacy_path).map_err(|e| {
-        MemoryError::Io(std::io::Error::new(
+    match std::os::unix::fs::symlink(MEMORY_DB_FILENAME, legacy_path) {
+        Ok(()) => Ok(()),
+        // Idempotent: a concurrent open (or a prior convergence run) may have
+        // already planted the compat symlink between our stat and this call.
+        // That's success as long as it points where we want; if some OTHER
+        // entry grabbed the legacy name, refuse rather than clobber it.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            match std::fs::read_link(legacy_path) {
+                Ok(target) if target == Path::new(MEMORY_DB_FILENAME) => Ok(()),
+                Ok(target) => Err(MemoryError::Io(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "#1132 legacy DB filename migration: {} already exists but points at {} \
+                         instead of the canonical {}. Refusing to overwrite an unexpected entry at \
+                         the legacy path.",
+                        legacy_path.display(),
+                        target.display(),
+                        MEMORY_DB_FILENAME
+                    ),
+                ))),
+                Err(read_err) => Err(MemoryError::Io(std::io::Error::new(
+                    read_err.kind(),
+                    format!(
+                        "#1132 legacy DB filename migration: an entry already exists at {} but its \
+                         link target could not be read: {read_err}. Refusing to overwrite it.",
+                        legacy_path.display()
+                    ),
+                ))),
+            }
+        }
+        Err(e) => Err(MemoryError::Io(std::io::Error::new(
             e.kind(),
             format!(
-                "#1132 legacy DB filename migration: renamed {} -> {} but failed to leave the \
-                 compat symlink at {}: {e}. The data is safe under the new name; this only \
+                "#1132 legacy DB filename migration: the canonical {} is in place but leaving the \
+                 compat symlink at {} failed: {e}. The data is safe under the new name; this only \
                  means old-name readers won't find it this release window.",
-                legacy_path.display(),
                 MEMORY_DB_FILENAME,
                 legacy_path.display()
             ),
-        ))
-    })
+        ))),
+    }
 }
 
 #[cfg(not(unix))]
@@ -157,18 +291,145 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn migrate_is_a_no_op_when_the_canonical_target_already_exists() {
+    fn migrate_converges_the_compat_symlink_when_canonical_exists_without_it() {
+        // A crash between the atomic rename and the symlink step (or a fresh
+        // canonical-only store) leaves the canonical file present but no compat
+        // symlink. A subsequent open must CONVERGE — leave the symlink — without
+        // clobbering the canonical data, and be a pure no-op thereafter.
         let dir = tempfile::tempdir().expect("tempdir");
         let target = dir.path().join(MEMORY_DB_FILENAME);
+        let legacy = dir.path().join(LEGACY_MEMORY_DB_FILENAME);
         std::fs::write(&target, b"already migrated").expect("write target");
 
-        migrate_legacy_filename_if_present(&target).expect("no-op must not error");
+        migrate_legacy_filename_if_present(&target).expect("convergence must not error");
 
         assert_eq!(
             std::fs::read(&target).expect("read target"),
             b"already migrated",
             "an existing canonical-named file must not be clobbered"
+        );
+        let legacy_meta = std::fs::symlink_metadata(&legacy)
+            .expect("convergence must leave a compat symlink where none existed");
+        assert!(
+            legacy_meta.file_type().is_symlink(),
+            "the half-done migration must converge by leaving the compat symlink"
+        );
+        assert_eq!(
+            std::fs::read_link(&legacy).expect("read compat symlink target"),
+            std::path::PathBuf::from(MEMORY_DB_FILENAME),
+            "the converged compat symlink must point at the canonical filename"
+        );
+
+        // Second run: canonical file + compat symlink both in place -> pure
+        // no-op. Nothing may change.
+        migrate_legacy_filename_if_present(&target).expect("idempotent second open");
+        assert_eq!(
+            std::fs::read(&target).expect("read target"),
+            b"already migrated"
+        );
+        assert!(std::fs::symlink_metadata(&legacy)
+            .expect("legacy metadata")
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migrate_fails_loud_when_both_canonical_and_legacy_real_files_exist() {
+        // BUG #1132-1: a partially-failed/ambiguous migration where BOTH a real
+        // canonical file AND a real legacy file exist. The seam must NOT silently
+        // pick one (that could shadow/discard real rows) — it must fail loud and
+        // touch nothing.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join(MEMORY_DB_FILENAME);
+        let legacy = dir.path().join(LEGACY_MEMORY_DB_FILENAME);
+        std::fs::write(&target, b"canonical real data").expect("write canonical");
+        std::fs::write(&legacy, b"legacy real data").expect("write legacy");
+
+        let err = migrate_legacy_filename_if_present(&target).expect_err(
+            "both-files-present is ambiguous and must fail loud, not silently pick one",
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("both a canonical"),
+            "error must name the both-files ambiguity: {message}"
+        );
+        assert!(
+            message.contains("No file was touched"),
+            "error must make the touch-nothing guarantee explicit: {message}"
+        );
+
+        // Neither file may have been renamed, clobbered, or turned into a link.
+        assert_eq!(
+            std::fs::read(&target).expect("read canonical"),
+            b"canonical real data",
+            "canonical file must be left exactly as it was"
+        );
+        assert_eq!(
+            std::fs::read(&legacy).expect("read legacy"),
+            b"legacy real data",
+            "legacy file must be left exactly as it was"
+        );
+        assert!(
+            std::fs::symlink_metadata(&legacy)
+                .expect("legacy metadata")
+                .file_type()
+                .is_file(),
+            "legacy real file must not have been converted to a symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migrate_fails_loud_when_a_db_path_is_present_but_un_stat_able() {
+        // BUG #1132-2: a metadata error (permission denied, transient I/O) on a
+        // memory-database path must FAIL LOUD, never be read as "absent" and fall
+        // through to creating a fresh empty canonical DB that shadows the real,
+        // still-present data. We strip search (x) permission on the store dir so
+        // that lstat() of the paths inside returns EACCES rather than NotFound —
+        // the "present but un-stat-able" class.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_dir = dir.path().join("store");
+        std::fs::create_dir(&store_dir).expect("mk store dir");
+        // Real pre-#1132 data that the buggy path would have shadowed.
+        let legacy = store_dir.join(LEGACY_MEMORY_DB_FILENAME);
+        std::fs::write(&legacy, b"real pre-#1132 data").expect("write legacy");
+        let target = store_dir.join(MEMORY_DB_FILENAME);
+
+        let original_mode = std::fs::metadata(&store_dir)
+            .expect("store dir metadata")
+            .permissions()
+            .mode();
+        std::fs::set_permissions(&store_dir, std::fs::Permissions::from_mode(0o000))
+            .expect("make store dir unsearchable");
+
+        let result = migrate_legacy_filename_if_present(&target);
+
+        // Restore permission BEFORE any assertion can panic and skip cleanup.
+        std::fs::set_permissions(&store_dir, std::fs::Permissions::from_mode(original_mode))
+            .expect("restore store dir permissions");
+
+        let err =
+            result.expect_err("an un-stat-able DB path must fail loud, not be treated as absent");
+        let message = err.to_string();
+        assert!(
+            message.contains("could not stat"),
+            "error must name the stat failure: {message}"
+        );
+        assert!(
+            message.contains("could create an empty DB that shadows real data"),
+            "error must make the shadow-avoidance intent explicit: {message}"
+        );
+        assert!(
+            !target.exists(),
+            "a failed stat must NOT have created an empty canonical DB"
+        );
+        assert!(
+            legacy.is_file(),
+            "the real legacy data must be left exactly where it was"
         );
     }
 

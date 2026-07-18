@@ -44,7 +44,8 @@ fn real_file_with_owning_repo_is_relocatable() {
     assert_eq!(item.action, PlannedAction::RelocateToRepo);
     assert_eq!(
         item.relocate_to.as_deref(),
-        Some("/Users/me/repos/quant/.tachi/memory.db")
+        // #1132: relocation destination uses the canonical filename.
+        Some("/Users/me/repos/quant/.tachi/tachi-memory.db")
     );
 }
 
@@ -212,6 +213,65 @@ fn gather_project_inputs_reads_symlinks_and_real_files() {
         .find(|i| i.project_name == "home-proj")
         .unwrap();
     assert_eq!(home.action, PlannedAction::KeepHomeResident);
+}
+
+#[cfg(unix)]
+#[test]
+fn gather_discovers_both_canonical_and_legacy_filenames() {
+    // #1132 compat window: the audit must recognize canonical `tachi-memory.db`
+    // stores (post-migration, the in-use file) AND legacy `memory.db` stores
+    // (un-migrated), and prefer the canonical file — not the compat symlink —
+    // for a dir that carries both.
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let projects = dir.path().join("projects");
+
+    // (a) canonical-only store: a fresh post-#1132 real file.
+    let canon_dir = projects.join("canon-proj");
+    std::fs::create_dir_all(&canon_dir).unwrap();
+    std::fs::write(canon_dir.join("tachi-memory.db"), b"db").unwrap();
+
+    // (b) legacy-only store: an un-migrated real file under the old name.
+    let legacy_dir = projects.join("legacy-proj");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    std::fs::write(legacy_dir.join("memory.db"), b"db").unwrap();
+
+    // (c) migrated store: canonical real file + `memory.db -> tachi-memory.db`
+    // compat symlink. The audit must pick the canonical real file (relocatable),
+    // NOT double-count the compat symlink.
+    let migrated_dir = projects.join("migrated-proj");
+    std::fs::create_dir_all(&migrated_dir).unwrap();
+    std::fs::write(migrated_dir.join("tachi-memory.db"), b"db").unwrap();
+    symlink("tachi-memory.db", migrated_dir.join("memory.db")).unwrap();
+
+    let inputs = gather_project_inputs(&projects, &[], &[]).unwrap();
+
+    // Exactly one entry per project dir — the migrated dir's compat symlink is
+    // not counted separately.
+    assert_eq!(inputs.len(), 3, "one entry per project dir");
+
+    let by_name = |n: &str| inputs.iter().find(|i| i.project_name == n).unwrap();
+
+    // Canonical-only: real file under the new name is discovered.
+    let canon = by_name("canon-proj");
+    assert!(canon.db_path.ends_with("tachi-memory.db"));
+    assert!(!canon.is_symlink, "canonical store is a real file");
+
+    // Legacy-only: still discovered under the old name during the compat window.
+    let legacy = by_name("legacy-proj");
+    assert!(legacy.db_path.ends_with("memory.db"));
+    assert!(
+        !legacy.is_symlink,
+        "un-migrated legacy store is a real file"
+    );
+
+    // Migrated: canonical real file wins over the compat symlink.
+    let migrated = by_name("migrated-proj");
+    assert!(migrated.db_path.ends_with("tachi-memory.db"));
+    assert!(
+        !migrated.is_symlink,
+        "the canonical real file must be chosen over the memory.db compat symlink"
+    );
 }
 
 #[test]

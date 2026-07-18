@@ -432,7 +432,7 @@ pub struct TachiWikiParams {
     pub scope: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, wiki recall targets ONLY that library."
+        description = "Named project library under ~/.tachi/projects/<name>/tachi-memory.db. When set, wiki recall targets ONLY that library."
     )]
     pub project: Option<String>,
     #[serde(default)]
@@ -491,7 +491,7 @@ pub struct TachiComponentParams {
     /// Cap on the number of records returned by action="list".
     #[serde(default)]
     pub limit: Option<usize>,
-    /// Named project library under ~/.tachi/projects/<name>/memory.db. Component records are global;
+    /// Named project library under ~/.tachi/projects/<name>/tachi-memory.db. Component records are global;
     /// this only scopes read-forward behavior, mirroring other read-only facade tools.
     #[serde(default)]
     pub project: Option<String>,

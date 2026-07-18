@@ -103,7 +103,7 @@ pub struct TachiSearchParams {
     /// Optional named project DB
     #[serde(default)]
     #[schemars(
-        description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, search/save targets ONLY that library (not the daemon-bound workspace DB). Omit to use global + daemon-bound project DB."
+        description = "Named project library under ~/.tachi/projects/<name>/tachi-memory.db. When set, search/save targets ONLY that library (not the daemon-bound workspace DB). Omit to use global + daemon-bound project DB."
     )]
     pub project: Option<String>,
 
@@ -491,7 +491,7 @@ pub struct TachiMemoryParams {
     // --- shared ---
     #[serde(default)]
     #[schemars(
-        description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, recall/save targets ONLY that library. Omit to use global + the daemon-bound workspace project DB (shown in every response)."
+        description = "Named project library under ~/.tachi/projects/<name>/tachi-memory.db. When set, recall/save targets ONLY that library. Omit to use global + the daemon-bound workspace project DB (shown in every response)."
     )]
     pub project: Option<String>,
     /// #1041 F2: see `crate::memory::SaveMemoryParams::project_explicit` —

@@ -146,7 +146,11 @@ pub fn classify_project_db(input: &ProjectDbInput) -> RelocationItem {
 
     // (3) Real file with a discoverable owning repo → relocatable.
     if let Some(repo) = &input.owning_repo {
-        let dest = repo.join(".tachi").join("memory.db");
+        // #1132: new/relocated DBs are created under the canonical filename, so
+        // the relocation destination is `<repo>/.tachi/tachi-memory.db`, never
+        // the legacy `memory.db` name. Mirrors
+        // `memcore::db::filename::MEMORY_DB_FILENAME`.
+        let dest = repo.join(".tachi").join("tachi-memory.db");
         return RelocationItem {
             project_name: input.project_name.clone(),
             db_path,
