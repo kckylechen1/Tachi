@@ -29,7 +29,7 @@ pub fn resolve_hub_db(db_override: Option<&Path>, app_home: &Path) -> PathBuf {
     if let Ok(p) = std::env::var("MEMORY_DB_PATH") {
         return expand_path(&p);
     }
-    app_home.join("global/memory.db")
+    app_home.join("global").join(memcore::MEMORY_DB_FILENAME)
 }
 
 pub fn run(action: &HubAction, db_path: &Path, app_home: &Path) -> Result<(), String> {

@@ -19,7 +19,7 @@ pub(super) async fn run_if_backfill_command(
             let target_path = if let Some(p) = db {
                 expand_user_path(home, p.to_string_lossy().as_ref())
             } else if let Some(project) = project {
-                let path = crate::path_utils::plan_c_global_db_path(project);
+                let path = crate::path_utils::plan_c_global_db_path_existing(project);
                 if !path.exists() {
                     return Err(format!(
                         "named project DB not found for '{project}': {}",

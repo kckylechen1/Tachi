@@ -205,12 +205,25 @@ async fn resolve_global_db(
     } else if let Ok(p) = std::env::var("MEMORY_DB_PATH") {
         expand_user_path(&p, &ctx.home)
     } else {
-        let default_global = ctx.app_home.join("global/memory.db");
-        // Migration: move legacy DBs into ${TACHI_HOME}/global/memory.db
+        let default_global = ctx
+            .app_home
+            .join("global")
+            .join(memcore::MEMORY_DB_FILENAME);
+        // Migration: move legacy (pre-app_home-layout AND pre-#1132-filename)
+        // DBs into ${TACHI_HOME}/global/tachi-memory.db. These candidates are
+        // literally named `memory.db` on disk (they predate the app_home/
+        // global/ layout entirely) — the #1132 rename-on-open seam inside
+        // MemoryStore::open then takes over for the already-standard-layout
+        // case (an existing ${TACHI_HOME}/global/memory.db sitting right next
+        // to where `default_global` now points).
         let legacy_candidates = vec![
-            ctx.app_home.join("memory.db"),
-            ctx.home.join(".sigil/global/memory.db"),
-            ctx.home.join(".sigil/memory.db"),
+            ctx.app_home.join(memcore::LEGACY_MEMORY_DB_FILENAME),
+            ctx.home
+                .join(".sigil/global")
+                .join(memcore::LEGACY_MEMORY_DB_FILENAME),
+            ctx.home
+                .join(".sigil")
+                .join(memcore::LEGACY_MEMORY_DB_FILENAME),
         ];
         if !default_global.exists() {
             for legacy in legacy_candidates {
@@ -423,8 +436,11 @@ async fn run_startup_hygiene(
     } else if let Some(p) = cli.project_db.as_ref() {
         Some(expand_cli_path(p, &ctx.home))
     } else if let Some(root) = ctx.git_root.as_ref() {
-        let project_default = root.join(".tachi/memory.db");
-        let project_legacy = root.join(".sigil/memory.db");
+        let project_default = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+        // Pre-.tachi-layout legacy source; the #1132 rename-on-open seam
+        // inside MemoryStore::open handles an already-standard-layout
+        // `.tachi/memory.db` sitting next to where `project_default` points.
+        let project_legacy = root.join(".sigil").join(memcore::LEGACY_MEMORY_DB_FILENAME);
 
         if project_legacy.exists() && !project_default.exists() {
             if let Some(parent) = project_default.parent() {
@@ -443,7 +459,7 @@ async fn run_startup_hygiene(
         None
     };
 
-    // Plan C: link <tachi_home>/projects/<sanitized-dir>/memory.db -> repo-local DB.
+    // Plan C: link <tachi_home>/projects/<sanitized-dir>/tachi-memory.db -> repo-local DB.
     // Explicit project DBs are caller-owned (for example embedded agent workspaces)
     // and must not rewrite the repo's global named-project alias.
     if should_refresh_plan_c_symlink(

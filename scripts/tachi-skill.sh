@@ -18,7 +18,14 @@ set -euo pipefail
 TACHI_HOME="${TACHI_HOME:-$HOME/.tachi}"
 SKILLS_DIR="$TACHI_HOME/skills"
 CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
-DB_PATH="$TACHI_HOME/global/memory.db"
+# #1132: memory.db -> tachi-memory.db. Prefer the canonical name, but fall
+# back to the pre-#1132 name for a global DB not yet touched by an `open()`
+# call since the rename shipped (the rename-on-open seam only fires inside
+# the Rust daemon/CLI, not this standalone script).
+DB_PATH="$TACHI_HOME/global/tachi-memory.db"
+if [ ! -e "$DB_PATH" ] && [ -e "$TACHI_HOME/global/memory.db" ]; then
+    DB_PATH="$TACHI_HOME/global/memory.db"
+fi
 
 # Colors
 RED='\033[0;31m'

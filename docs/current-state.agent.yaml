@@ -40,7 +40,7 @@ implemented_now:
   project_db:
     tools:
       - tachi_init_project_db
-    default_path: .tachi/memory.db
+    default_path: .tachi/tachi-memory.db
     hot_swap:
       - activate_project_db() on MemoryServer
       - has_project_db() / with_hot_project_store()

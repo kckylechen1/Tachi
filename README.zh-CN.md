@@ -323,9 +323,9 @@ SILICONFLOW_API_KEY=your_siliconflow_key_here
 SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1/chat/completions
 SILICONFLOW_MODEL=Qwen/Qwen3.5-27B
 
-# 可选：覆盖全局 DB 路径。默认 ~/.tachi/global/memory.db；
-# 项目库在 <git-root>/.tachi/memory.db 自动检测。
-MEMORY_DB_PATH=~/.tachi/global/memory.db
+# 可选：覆盖全局 DB 路径。默认 ~/.tachi/global/tachi-memory.db；
+# 项目库在 <git-root>/.tachi/tachi-memory.db 自动检测。
+MEMORY_DB_PATH=~/.tachi/global/tachi-memory.db
 ```
 
 服务器启动时会自动加载项目根目录的 `.env`。
@@ -338,7 +338,7 @@ Tachi 使用 WAL 模式的 SQLite。违反以下规则可能导致数据库损�
 
 | 规则 | 原因 |
 |------|------|
-| **每个库单一实例** | 服务器持有排他文件锁（`memory.db.lock`）。同一数据库文件同一时间只应有一个 Tachi 进程写入。 |
+| **每个库单一实例** | 服务器持有排他文件锁（`tachi-memory.db.lock`）。同一数据库文件同一时间只应有一个 Tachi 进程写入。 |
 | **不要放在云同步目录** | iCloud、Dropbox、OneDrive、Google Drive 与 SQLite WAL 不兼容。数据库请放在 `~/.tachi/` 或本地项目路径。 |
 | **不要并发裸写** | 服务器运行时不要用 `sqlite3` 直接 INSERT/UPDATE。只读查询是安全的。 |
 | **优雅关闭** | 服务器处理 SIGINT/SIGTERM，退出时执行 `PRAGMA optimize`。避免 `kill -9`。 |

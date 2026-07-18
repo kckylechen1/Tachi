@@ -2,7 +2,7 @@ name: Release CLI binaries + public brew
 
 # #728 pipeline:
 #   tag vX.Y.Z
-#     → build stamped memory-server → package tachi-vX.Y.Z-<triple>.tar.gz
+#     → build stamped tachi → package tachi-vX.Y.Z-<triple>.tar.gz
 #     → attach to private GitHub Release
 #     → promote binary + rewrite public homebrew-tachi formula
 #
@@ -50,7 +50,7 @@ jobs:
 
           cargo_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/tachi-server/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
           if [ -z "$cargo_version" ]; then
-            echo "Could not find memory-server version in Cargo.toml."
+            echo "Could not find tachi-server version in Cargo.toml."
             exit 1
           fi
           if [ -z "$version" ]; then

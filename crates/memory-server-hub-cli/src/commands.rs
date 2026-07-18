@@ -265,17 +265,28 @@ pub fn cmd_stats(db: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 pub(super) fn cmd_doctor(app_home: &Path, fix: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut dbs: Vec<PathBuf> = Vec::new();
-    let global = app_home.join("global/memory.db");
+    let global = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+    let global_legacy = app_home
+        .join("global")
+        .join(memcore::LEGACY_MEMORY_DB_FILENAME);
     if global.exists() {
         dbs.push(global);
+    } else if global_legacy.exists() {
+        dbs.push(global_legacy);
     }
     let projects = app_home.join("projects");
     if projects.is_dir() {
         for entry in std::fs::read_dir(&projects)? {
             let entry = entry?;
-            let p = entry.path().join("memory.db");
-            if p.exists() {
-                dbs.push(p);
+            for name in [
+                memcore::MEMORY_DB_FILENAME,
+                memcore::LEGACY_MEMORY_DB_FILENAME,
+            ] {
+                let p = entry.path().join(name);
+                if p.exists() {
+                    dbs.push(p);
+                    break;
+                }
             }
         }
     }

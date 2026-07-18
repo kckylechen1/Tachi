@@ -7,6 +7,7 @@ mod alias_drift;
 mod gc_flow;
 mod gc_hygiene;
 mod registry;
+mod rename_path_sync;
 mod schema_kind;
 mod sweep_plan;
 

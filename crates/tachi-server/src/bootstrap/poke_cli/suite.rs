@@ -33,8 +33,12 @@ pub(super) async fn run_poke_smoke_suite(app_home: &Path) -> Result<Value, Strin
         .map_err(|e| format!("create sandbox project: {e}"))?;
 
     let _env = PokeEnvGuard::new(&sandbox_home, &sandbox_runs);
-    let global_db = sandbox_home.join("global").join("memory.db");
-    let project_db = sandbox_home.join("project").join("memory.db");
+    let global_db = sandbox_home
+        .join("global")
+        .join(memcore::MEMORY_DB_FILENAME);
+    let project_db = sandbox_home
+        .join("project")
+        .join(memcore::MEMORY_DB_FILENAME);
     tokio::fs::create_dir_all(global_db.parent().ok_or("global db path has no parent")?)
         .await
         .map_err(|e| format!("create global db parent: {e}"))?;

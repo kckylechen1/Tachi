@@ -55,7 +55,7 @@ the global Tachi daemon:
 ~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist
 ```
 
-That service runs `tachi --daemon --port 6919 --global-db ~/.tachi/global/memory.db
+That service runs `tachi --daemon --port 6919 --global-db ~/.tachi/global/tachi-memory.db
 --no-project-db` with `TACHI_DAEMON_IDLE_TIMEOUT_SECS=0`, so it is a stable
 global/background worker on the canonical HTTP MCP port and does not accidentally
 bind itself to the directory where the installer was run. It keeps projection,
@@ -407,13 +407,13 @@ Tachi uses SQLite with zero external dependencies:
 
 | Database | Path | Purpose |
 |---|---|---|
-| Global | `~/.tachi/global/memory.db` | Cross-project memories, user preferences |
-| Project | `.tachi/memory.db` (at git root) | Project-specific context, auto-detected |
+| Global | `~/.tachi/global/tachi-memory.db` | Cross-project memories, user preferences |
+| Project | `.tachi/tachi-memory.db` (at git root) | Project-specific context, auto-detected |
 
 > **Safety**: Never place database files in cloud-synced folders (iCloud, Dropbox, OneDrive). SQLite WAL mode is incompatible with network filesystems.
 
 Plan C project routing keeps the repo-local project DB as canonical and uses
-`~/.tachi/projects/<sanitized-repo-name>/memory.db` only as a symlink alias.
+`~/.tachi/projects/<sanitized-repo-name>/tachi-memory.db` only as a symlink alias.
 If `tachi status`, `tachi_memory(action="readiness")`, or daemon startup reports
 “Plan C split-brain”, the alias is a stale regular SQLite file. Repair it
 explicitly:
@@ -425,13 +425,13 @@ tachi repair --rule R11 --apply --db <label-from-status>
 
 The repair backs up the regular alias DB, copies alias-only memory ids into the
 repo-local DB without overwriting existing canonical ids, rebuilds FTS, then
-replaces the alias file with a symlink to `.tachi/memory.db`.
+replaces the alias file with a symlink to `.tachi/tachi-memory.db`.
 
 ### Database Safety Rules
 
 | Rule | Why |
 |------|-----|
-| **Single instance per DB** | The server acquires an exclusive file lock (`memory.db.lock`) at startup. Only one Tachi process should write to a given database file. |
+| **Single instance per DB** | The server acquires an exclusive file lock (`tachi-memory.db.lock`) at startup. Only one Tachi process should write to a given database file. |
 | **No cloud-synced paths** | iCloud, Dropbox, OneDrive, and Google Drive are **incompatible** with SQLite WAL. Use a local-only directory (e.g., `~/.tachi/`). |
 | **No concurrent CLI writes** | Do not run `sqlite3` INSERT/UPDATE on the database while the server is running. Read-only queries are safe with `PRAGMA busy_timeout = 5000`. |
 | **Auto-recovery on startup** | The server runs `PRAGMA quick_check` on startup and auto-backfills an empty FTS index from the main `memories` table. |
@@ -469,7 +469,7 @@ For embedded runtimes with their own workspace/agent memory store, pass that
 store as an explicit project DB while keeping Tachi's global DB separate:
 
 ```bash
-tachi --global-db ~/.tachi/global/memory.db --project-db /path/to/openclaw/agent/memory.db --profile openclaw serve
+tachi --global-db ~/.tachi/global/tachi-memory.db --project-db /path/to/openclaw/agent/tachi-memory.db --profile openclaw serve
 ```
 
 For host-spawned MCP processes that intentionally need only the global Tachi

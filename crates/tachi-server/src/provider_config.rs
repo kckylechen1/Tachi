@@ -79,7 +79,7 @@ fn resolve_vault_pools(
 fn default_global_db_path() -> std::path::PathBuf {
     crate::status_ops::resolve_app_home()
         .join("global")
-        .join("memory.db")
+        .join(memcore::MEMORY_DB_FILENAME)
 }
 
 fn vault_config_exists(global_db_path: &Path) -> bool {

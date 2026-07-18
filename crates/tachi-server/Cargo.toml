@@ -139,34 +139,34 @@ path = "src/lib.rs"
 name = "tachi-server"
 path = "src/main.rs"
 
-# Install/PATH compatibility aliases for the MemCore/Tachi brand rename
-# (#912 / #890). All three bins compile the SAME `src/main.rs`, so with default
-# flags `cargo test` / `cargo nextest run` / `--all-targets` / `cargo bench`
-# build three byte-identical copies of this (test-free, bench-free) main.rs.
-# The two aliases below set `test = false` / `bench = false` to drop those two
-# redundant copies (Refs #1095).
+# Install/PATH compatibility alias for the MemCore/Tachi brand rename
+# (#912 / #890). Compiles the SAME `src/main.rs`, so with default flags
+# `cargo test` / `cargo nextest run` / `--all-targets` / `cargo bench` would
+# build a byte-identical second copy of this (test-free, bench-free) main.rs.
+# `test = false` / `bench = false` drop that redundant copy (Refs #1095).
 #
 # Equivalence -- the release binary SET and the tested test SET are both
 # unchanged:
 #   * src/main.rs has NO `#[cfg(test)]` / `#[test]` / `mod tests` (verified by
-#     grep), so disabling these bin TEST targets removes ZERO tests; the only
+#     grep), so disabling this bin's TEST target removes ZERO tests; the only
 #     thing removed is duplicate compilation/linking of an empty test harness.
 #   * `test` / `bench` affect only test/bench TARGET discovery -- `cargo build`
-#     and `cargo build --release` still produce all three bin ARTIFACTS, so
-#     release packaging (scripts/package_release_binary.sh -> the `tachi`
-#     binary) and the install/PATH surface are byte-identical.
+#     and `cargo build --release` still produce the bin ARTIFACT, so release
+#     packaging (scripts/package_release_binary.sh -> the `tachi` binary) and
+#     the install/PATH surface are unchanged.
 #   * No `CARGO_BIN_EXE_*` reference exists anywhere in the repo (verified by
-#     grep, zero hits), so no integration test depends on these bins' test
-#     targets; and there is no `[[bench]]` / `#[bench]` in this crate, so
+#     grep, zero hits), so no integration test depends on this bin's test
+#     target; and there is no `[[bench]]` / `#[bench]` in this crate, so
 #     `bench = false` removes nothing.
+#
+# The `memory-server` [[bin]] alias that used to live here (the #890/#912
+# brand-rename PATH-compat shim) is retired (tachi#1132, owner-ratified
+# 2026-07-17): it was compiled on every release build but never distributed —
+# scripts/package_release_binary.sh builds/installs only `tachi`, and the
+# Homebrew formula's only install line is `bin.install "tachi"`. Not to be
+# confused with the Hyperion fork's own, unrelated `memory-server` crate.
 [[bin]]
 name = "tachi"
-path = "src/main.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "memory-server"
 path = "src/main.rs"
 test = false
 bench = false

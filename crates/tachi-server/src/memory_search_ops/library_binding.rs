@@ -88,10 +88,16 @@ pub(crate) fn library_binding_receipt(
     let workspace_git_root = crate::utils::find_project_git_root();
     let workspace_local_db = workspace_git_root
         .as_ref()
-        .map(|root| root.join(".tachi").join("memory.db"));
+        .map(|root| root.join(".tachi").join(memcore::MEMORY_DB_FILENAME));
+    let workspace_local_db_legacy = workspace_git_root
+        .as_ref()
+        .map(|root| root.join(".tachi").join(memcore::LEGACY_MEMORY_DB_FILENAME));
     let workspace_local_db_exists = workspace_local_db
         .as_ref()
-        .is_some_and(|path| path.exists());
+        .is_some_and(|path| path.exists())
+        || workspace_local_db_legacy
+            .as_ref()
+            .is_some_and(|path| path.exists());
     let workspace_plan_c_alias = workspace_git_root
         .as_ref()
         .and_then(|root| crate::path_utils::plan_c_dir_name_from_root(root));

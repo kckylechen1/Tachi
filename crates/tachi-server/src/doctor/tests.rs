@@ -304,11 +304,11 @@ fn doctor_fix_retires_old_hash_alias_without_touching_legacy() {
         );
 
         assert!(
-            new_dir.join("memory.db").is_symlink(),
+            new_dir.join(memcore::MEMORY_DB_FILENAME).is_symlink(),
             "doctor --fix must explicitly create the current hashed alias"
         );
         assert_eq!(
-            fs::canonicalize(new_dir.join("memory.db")).unwrap(),
+            fs::canonicalize(new_dir.join(memcore::MEMORY_DB_FILENAME)).unwrap(),
             local_db
         );
         assert!(
@@ -435,7 +435,7 @@ fn doctor_fix_plan_c_alias_retirement_is_idempotent() {
         let new_db = tachi_home
             .join("projects")
             .join(&new_name)
-            .join("memory.db");
+            .join(memcore::MEMORY_DB_FILENAME);
 
         let first = scan(
             &[repo.join(".tachi")],

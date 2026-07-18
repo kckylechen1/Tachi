@@ -77,9 +77,16 @@ pub(crate) fn count_unregistered_project_dbs(
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.path().is_dir())
         .filter(|entry| {
-            let db_path = entry.path().join("memory.db");
-            db_path.is_file()
-                && !registered.contains(&crate::manifest::canonicalize_db_path(&db_path))
+            [
+                memcore::MEMORY_DB_FILENAME,
+                memcore::LEGACY_MEMORY_DB_FILENAME,
+            ]
+            .into_iter()
+            .map(|name| entry.path().join(name))
+            .any(|db_path| {
+                db_path.is_file()
+                    && !registered.contains(&crate::manifest::canonicalize_db_path(&db_path))
+            })
         })
         .count()
 }

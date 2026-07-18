@@ -75,15 +75,22 @@ pub fn apply_rescue(
     // Open / cache one connection per target.
     let mut conns: BTreeMap<String, (Connection, TargetCaps)> = BTreeMap::new();
     for target in plan.per_target.keys() {
-        let path = targets_root.join(target).join("memory.db");
-        if !path.exists() {
+        let canonical_path = targets_root.join(target).join(memcore::MEMORY_DB_FILENAME);
+        let legacy_path = targets_root
+            .join(target)
+            .join(memcore::LEGACY_MEMORY_DB_FILENAME);
+        let path = if canonical_path.exists() {
+            canonical_path
+        } else if legacy_path.exists() {
+            legacy_path
+        } else {
             report.errors.push(format!(
                 "target DB missing: {} (skipping {} rows for this target)",
-                path.display(),
+                canonical_path.display(),
                 plan.per_target[target]
             ));
             continue;
-        }
+        };
         let conn =
             Connection::open(&path).map_err(|e| format!("open target {}: {e}", path.display()))?;
         let caps = detect_target_caps(&conn)?;

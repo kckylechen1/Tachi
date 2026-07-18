@@ -4,7 +4,7 @@ A standalone toolkit that shadows Tachi's memory search against
 [zvec](https://github.com/alibaba/zvec) (an in-process vector+FTS library)
 **without touching the tachi-server daemon**. Zero lines changed under
 `crates/`. Everything here is a separate process that reads an exported,
-read-only snapshot of `memory.db` and never opens the live database for
+read-only snapshot of `tachi-memory.db` and never opens the live database for
 writing.
 
 ## Why sidecar, never in-process (frozen decision, not re-litigated here)
@@ -31,7 +31,7 @@ data is at risk -- worst case, re-run the export+load.
 ## Architecture
 
 ```
- ~/.tachi/global/memory.db  (live, WAL, owned by the tachi-server daemon)
+ ~/.tachi/global/tachi-memory.db  (live, WAL, owned by the tachi-server daemon)
             |
             |  read-only SQLite connection (mode=ro), momentary shared lock,
             |  loads the sqlite-vec extension to read the memories_vec
@@ -55,7 +55,7 @@ data is at risk -- worst case, re-run the export+load.
       sidecar.py  --snapshot snapshot.jsonl --port 8791
             |
             |  loads the JSONL into a *fresh, private* zvec collection
-            |  (own temp dir, never the live memory.db), flush()es once,
+            |  (own temp dir, never the live tachi-memory.db), flush()es once,
             |  then serves:
             |    GET  /health
             |    POST /query  {"text": ..., "top_k": 10, "embedding": [..]?}
@@ -76,9 +76,9 @@ data is at risk -- worst case, re-run the export+load.
 cd tools/zvec-shadow
 python3 -m pip install -r requirements.txt   # zvec, numpy, sqlite-vec
 
-# 1. Export a snapshot from the live global memory.db (read-only; never
+# 1. Export a snapshot from the live global tachi-memory.db (read-only; never
 #    writes to it; safe to run while the daemon is up).
-python3 export_snapshot.py --db ~/.tachi/global/memory.db --out snapshot.jsonl
+python3 export_snapshot.py --db ~/.tachi/global/tachi-memory.db --out snapshot.jsonl
 
 # 2. Start the sidecar (loads the snapshot into its own private zvec
 #    collection, then serves HTTP on :8791).

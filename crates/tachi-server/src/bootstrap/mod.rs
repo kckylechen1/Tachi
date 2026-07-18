@@ -295,7 +295,7 @@ pub(super) fn collect_memory_db_files(
         let is_memory_db = path
             .file_name()
             .and_then(|name| name.to_str())
-            .map(|name| name == "memory.db")
+            .map(memcore::is_memory_db_filename)
             .unwrap_or(false);
         let is_symlink = std::fs::symlink_metadata(&path)
             .map(|meta| meta.file_type().is_symlink())

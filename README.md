@@ -419,9 +419,9 @@ SILICONFLOW_API_KEY=your_siliconflow_key_here
 SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1/chat/completions
 SILICONFLOW_MODEL=Qwen/Qwen3.5-27B
 
-# Optional: override the global DB path. Defaults to ~/.tachi/global/memory.db;
-# project DBs are auto-detected at <git-root>/.tachi/memory.db.
-MEMORY_DB_PATH=~/.tachi/global/memory.db
+# Optional: override the global DB path. Defaults to ~/.tachi/global/tachi-memory.db;
+# project DBs are auto-detected at <git-root>/.tachi/tachi-memory.db.
+MEMORY_DB_PATH=~/.tachi/global/tachi-memory.db
 ```
 
 The server loads `.env` from the project root automatically.
@@ -445,7 +445,7 @@ Tachi uses SQLite in WAL mode. Violating these rules can corrupt the database:
 
 | Rule | Why |
 |------|-----|
-| **Single instance per DB** | The server holds an exclusive file lock (`memory.db.lock`). Only one Tachi process should write to a given database file. |
+| **Single instance per DB** | The server holds an exclusive file lock (`tachi-memory.db.lock`). Only one Tachi process should write to a given database file. |
 | **No cloud-synced paths** | iCloud, Dropbox, OneDrive, and Google Drive are incompatible with SQLite WAL. Keep databases in `~/.tachi/` or local project paths. |
 | **No concurrent raw writes** | Do not run `sqlite3` INSERT/UPDATE on the DB while the server is running. Read-only queries are safe. |
 | **Graceful shutdown** | The server handles SIGINT/SIGTERM and runs `PRAGMA optimize` on exit. Avoid `kill -9`. |

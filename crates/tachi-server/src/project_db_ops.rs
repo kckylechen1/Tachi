@@ -8,13 +8,15 @@ use std::path::PathBuf;
 /// doc). Fixed, not caller-configurable, for the session-init auto-register
 /// path: the header carries a filesystem root, not a `db_relpath` — that
 /// customization stays on the explicit `tachi_init_project_db` tool.
-const WORKSPACE_ROOT_DB_RELPATH: &str = ".tachi/memory.db";
+fn workspace_root_db_relpath() -> String {
+    format!(".tachi/{}", memcore::MEMORY_DB_FILENAME)
+}
 
 impl MemoryServer {
     /// #1120 PR1: resolve an `X-Tachi-Workspace-Root` (or
     /// `_meta.tachiWorkspaceRoot`) declaration to the project identity name
     /// [`MemoryServer::resolve_named_project_db_path`] will later resolve,
-    /// auto-registering the project DB (creating `<git_root>/.tachi/memory.db`
+    /// auto-registering the project DB (creating `<git_root>/.tachi/tachi-memory.db`
     /// plus the Plan C alias symlink) on first contact instead of requiring a
     /// prior explicit `tachi_init_project_db` call.
     ///
@@ -87,14 +89,15 @@ impl MemoryServer {
         // canonicalizes the resolved parent directory and rejects anything
         // that escapes `git_root` after symlink resolution (review finding
         // [1], #1207).
+        let workspace_root_db_relpath = workspace_root_db_relpath();
         let db_path = crate::path_utils::resolve_project_db_path(
             &git_root,
-            std::path::Path::new(WORKSPACE_ROOT_DB_RELPATH),
+            std::path::Path::new(&workspace_root_db_relpath),
         )
         .map_err(|e| {
             format!(
                 "workspace root '{raw_root}' resolved to git root '{}' but its \
-                 {WORKSPACE_ROOT_DB_RELPATH} path is unsafe: {e}",
+                 {workspace_root_db_relpath} path is unsafe: {e}",
                 git_root.display()
             )
         })?;
@@ -194,7 +197,7 @@ impl MemoryServer {
     }
 }
 
-/// Register a just-created repo-local `<git_root>/.tachi/memory.db` in the
+/// Register a just-created repo-local `<git_root>/.tachi/tachi-memory.db` in the
 /// manifest so [`MemoryServer::resolve_named_project_db_path`] can find it by
 /// name independent of the (Unix-only, best-effort) Plan C symlink — see
 /// `server_methods/db.rs::resolve_named_project_db_path`'s doc comment: the
@@ -461,7 +464,7 @@ mod resolve_or_register_workspace_root_tests {
                 "expected a containment-guard rejection, got: {err}"
             );
             assert!(
-                !escape_target.join("memory.db").exists(),
+                !escape_target.join(memcore::MEMORY_DB_FILENAME).exists(),
                 "no DB file may be created outside the git root via the symlink"
             );
         });
@@ -499,7 +502,7 @@ mod resolve_or_register_workspace_root_tests {
             );
             assert_eq!(
                 std::fs::canonicalize(&resolved).expect("canonicalize resolved"),
-                std::fs::canonicalize(repo.join(".tachi/memory.db"))
+                std::fs::canonicalize(repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME))
                     .expect("canonicalize expected"),
             );
         });
@@ -516,7 +519,7 @@ mod resolve_or_register_workspace_root_tests {
             let repo = root.join("Fresh-Repo");
             std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
 
-            let db_path = repo.join(".tachi/memory.db");
+            let db_path = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
             crate::test_support::assert_repo_local_db_fixture_not_skipped(&db_path);
             assert!(
                 !db_path.exists(),
@@ -558,7 +561,7 @@ mod resolve_or_register_workspace_root_tests {
                 .expect("registered project resolves");
             assert_eq!(
                 std::fs::canonicalize(&resolved).expect("canonicalize resolved"),
-                std::fs::canonicalize(repo.join(".tachi/memory.db"))
+                std::fs::canonicalize(repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME))
                     .expect("canonicalize expected"),
             );
         });

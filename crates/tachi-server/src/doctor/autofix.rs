@@ -102,10 +102,19 @@ fn reconcile_plan_c_alias_for_local_db(local_db: &Path, project_root: &Path) -> 
         if !looks_like_old_plan_c_hash_alias(name, &legacy_name) {
             continue;
         }
-        let candidate = entry.path().join("memory.db");
-        if !old_hash_alias_points_to_local_db(&candidate, local_db) {
+        // Check the canonical (post-#1132) filename first, then the legacy
+        // one — an old-hash alias dir not yet touched by an `open()` call
+        // since the rename shipped may still only have the legacy symlink.
+        let candidate = [
+            memcore::MEMORY_DB_FILENAME,
+            memcore::LEGACY_MEMORY_DB_FILENAME,
+        ]
+        .into_iter()
+        .map(|name| entry.path().join(name))
+        .find(|candidate| old_hash_alias_points_to_local_db(candidate, local_db));
+        let Some(candidate) = candidate else {
             continue;
-        }
+        };
         old_hash_aliases.push(candidate);
     }
     if old_hash_aliases.is_empty() {
@@ -364,7 +373,7 @@ fn quarantine_placeholder(src: &str, dest_dir: &Path) -> AutoFixAction {
     let basename = src_path
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("memory.db");
+        .unwrap_or(memcore::MEMORY_DB_FILENAME);
     if let Err(e) = fs::create_dir_all(dest_dir) {
         return AutoFixAction {
             path: src.to_string(),

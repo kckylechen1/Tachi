@@ -231,8 +231,13 @@ pub(crate) fn list_available_named_projects(home: &std::path::Path) -> Vec<Strin
             if name.starts_with('.') || name.contains("..") {
                 return None;
             }
-            let db_path = entry.path().join("memory.db");
-            db_path.exists().then_some(name)
+            let has_db = [
+                memcore::MEMORY_DB_FILENAME,
+                memcore::LEGACY_MEMORY_DB_FILENAME,
+            ]
+            .into_iter()
+            .any(|db_name| entry.path().join(db_name).exists());
+            has_db.then_some(name)
         })
         .collect()
 }

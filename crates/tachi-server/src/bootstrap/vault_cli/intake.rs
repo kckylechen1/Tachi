@@ -76,9 +76,22 @@ pub(super) fn run_intake_action(
 
 // Only unit tests in this module call the thin wrapper; production uses
 // `discover_report` / CLI entrypoints directly.
+//
+// Path resolution here mirrors `path_utils::plan_c_global_db_path_existing`:
+// prefer the canonical (post-#1132) filename, but fall back to the legacy
+// name so fixtures seeded via `seed_vault_entry` (which write the vault DB
+// directly with `MemoryStore::open`, and so never pass through the
+// canonical-only rename-on-open seam) still resolve to the DB they actually
+// created on disk.
 #[cfg(test)]
 pub(crate) fn discover_candidates(env_home: &Path, cwd: &Path) -> Vec<Candidate> {
-    let global_db_path = env_home.join(".tachi").join("global").join("memory.db");
+    let global_dir = env_home.join(".tachi").join("global");
+    let canonical = global_dir.join(memcore::MEMORY_DB_FILENAME);
+    let global_db_path = if canonical.exists() {
+        canonical
+    } else {
+        global_dir.join(memcore::LEGACY_MEMORY_DB_FILENAME)
+    };
     discover_report(env_home, cwd, &global_db_path, None).candidates
 }
 

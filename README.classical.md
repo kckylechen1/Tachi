@@ -67,7 +67,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.9.0
 - **🗂️ 藏经阁流**：以 `path` 分层（如 `/user/preferences`、`/project/architecture`），各阁互不沾染。
 - **🔍 五脉归元**：语义、词法、时间衰减、图谱激活蔓延、RRF 融合五路合一。
 - **🕸️ 因果千丝**：图谱引擎织就因果、时序、实体之缘；`add_edge` / `get_edges` / `memory_graph` 深藏不出（`memcore::MemoryStore` 内秘之器，不列 MCP 曲面，#757 已收），唯托 `tachi_save` / `tachi_memory` 自动牵丝、暨五脉归元之图谱蔓延一脉而显其效，别无单列寻迹之诀。
-- **🔌 两界分治**：大千识海 `~/.tachi/global/memory.db`，宗门密库 `<git-root>/.tachi/memory.db`。
+- **🔌 两界分治**：大千识海 `~/.tachi/global/tachi-memory.db`，宗门密库 `<git-root>/.tachi/tachi-memory.db`。
 - **🔐 藏经密室**：Argon2id + AES-256-GCM 本地加密宝库，逐秘 ACL，多钥轮换。
 - **🎯 万宝楼**：Skill、MCP、仙诀一次登录，诸路灵核共享。
 - **👻 跨界传信**：幽灵低语、看板、交接令牌，跨灵核协同。

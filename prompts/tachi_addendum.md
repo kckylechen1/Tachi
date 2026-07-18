@@ -75,11 +75,11 @@ tachi doctor                    # 巡检 SQLite 藏库健康
 tachi env plan                  # 查看 .tachi/vault.env 绑定（不解密）
 tachi env sync --keychain       # 预览 env.generated（默认不写盘）
 tachi env sync --apply --keychain  # 写入 .tachi/env.generated（0600）
-tachi backfill-vectors --db ~/.tachi/global/memory.db
+tachi backfill-vectors --db ~/.tachi/global/tachi-memory.db
 tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry-run）
 ```
 
-输出与 Hub MCP 工具一致；CLI 默认走 `~/.tachi/global/memory.db`。
+输出与 Hub MCP 工具一致；CLI 默认走 `~/.tachi/global/tachi-memory.db`。
 
 ## Path 命名约定
 

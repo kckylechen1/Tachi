@@ -384,7 +384,7 @@ fn parse_command(raw: Vec<String>) -> BuildCommand {
 fn open_global_store() -> Result<MemoryStore, String> {
     let global_db = crate::path_utils::tachi_home()
         .join("global")
-        .join("memory.db");
+        .join(memcore::MEMORY_DB_FILENAME);
     if let Some(parent) = global_db.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }

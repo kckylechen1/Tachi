@@ -32,5 +32,11 @@ regex = { workspace = true }
 libsimple = "~0.7"
 sqlite-vec = { workspace = true }
 
+# Atomic no-clobber rename FFI (renamex_np / renameat2) for the #1226
+# cross-process migration TOCTOU close in `db::filename`. Only referenced under
+# the same target cfg, so it isn't pulled in on other platforms.
+[target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

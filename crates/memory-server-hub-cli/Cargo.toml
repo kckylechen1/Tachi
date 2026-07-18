@@ -10,8 +10,8 @@ rusqlite = { workspace = true }
 tachi-bootstrap = { path = "../tachi-bootstrap" }
 dirs = "5.0"
 serde_json = { workspace = true }
+memcore = { path = "../memcore" }
 
 [dev-dependencies]
 chrono = { workspace = true }
 tempfile = "3"
-memcore = { path = "../memcore" }

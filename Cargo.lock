@@ -1240,6 +1240,7 @@ name = "memcore"
 version = "1.9.0"
 dependencies = [
  "chrono",
+ "libc",
  "libsimple",
  "regex",
  "rusqlite",

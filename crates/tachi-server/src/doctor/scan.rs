@@ -45,8 +45,8 @@ pub fn is_backup_filename(name: &str) -> bool {
     if n.contains(".checkpointed.db") {
         return true;
     }
-    if n.starts_with("memory.db.") {
-        // memory.db.20260330_211247 etc.
+    if n.starts_with("memory.db.") || n.starts_with(&format!("{}.", memcore::MEMORY_DB_FILENAME)) {
+        // memory.db.20260330_211247, tachi-memory.db.20260330_211247, etc.
         return true;
     }
     false
@@ -99,14 +99,17 @@ fn walk_one(root: &Path, out: &mut Vec<PathBuf>, max_depth: usize) {
 }
 
 fn is_db_candidate_filename(name: &str) -> bool {
-    if name == "memory.db" {
+    if memcore::is_memory_db_filename(name) {
         return true;
     }
     if name.ends_with(".sqlite") || name.ends_with(".db") {
         return true;
     }
-    // memory.db.bak.<ts>, memory.db.broken.<ts>, etc.
-    if name.starts_with("memory.db.") {
+    // memory.db.bak.<ts>, tachi-memory.db.migration-bak.<ts>, etc. — a suffixed
+    // backup doesn't end in .db/.sqlite so the generic check above misses it.
+    if name.starts_with("memory.db.")
+        || name.starts_with(&format!("{}.", memcore::MEMORY_DB_FILENAME))
+    {
         return true;
     }
     false

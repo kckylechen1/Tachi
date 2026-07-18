@@ -33,5 +33,8 @@ fn workspace_data_tachi_home() -> Option<PathBuf> {
 }
 
 fn is_tachi_home_layout(path: &std::path::Path) -> bool {
-    path.join("global").join("memory.db").exists() || path.join("projects").is_dir()
+    let global = path.join("global");
+    global.join(memcore::MEMORY_DB_FILENAME).exists()
+        || global.join(memcore::LEGACY_MEMORY_DB_FILENAME).exists()
+        || path.join("projects").is_dir()
 }

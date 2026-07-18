@@ -126,8 +126,11 @@ pub(super) async fn run_doctor_command(
     } else {
         None
     };
-    let provider_section =
-        collect_provider_key_report(&app_home.join("global").join("memory.db"), probe_keys).await;
+    let provider_section = collect_provider_key_report(
+        &app_home.join("global").join(memcore::MEMORY_DB_FILENAME),
+        probe_keys,
+    )
+    .await;
 
     if json_output {
         let mut full = serde_json::to_value(&report)?;

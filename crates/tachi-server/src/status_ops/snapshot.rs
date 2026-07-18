@@ -402,7 +402,7 @@ fn db_status_label(entry: &DbEntry, path: &Path) -> String {
     let file = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("memory.db");
+        .unwrap_or(memcore::MEMORY_DB_FILENAME);
     let parent = path
         .parent()
         .and_then(|parent| parent.file_name())

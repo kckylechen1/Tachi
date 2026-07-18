@@ -244,7 +244,7 @@ install_daemon_service() {
   local launch_agents="$HOME/Library/LaunchAgents"
   local app_home="${TACHI_HOME:-$HOME/.tachi}"
   local logs_dir="$app_home/logs"
-  local global_db="${TACHI_DAEMON_GLOBAL_DB:-$app_home/global/memory.db}"
+  local global_db="${TACHI_DAEMON_GLOBAL_DB:-$app_home/global/tachi-memory.db}"
   local port="${TACHI_DAEMON_PORT:-0}"
   local profile="${TACHI_PROFILE:-standard}"
   local path_env="${TACHI_LAUNCHD_PATH:-$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.cargo/bin}"

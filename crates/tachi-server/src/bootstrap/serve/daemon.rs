@@ -479,7 +479,10 @@ fn daemon_uses_manifest_background(
     project_db_path: Option<&Path>,
 ) -> bool {
     project_db_path.is_some()
-        && paths_match(global_db_path, &app_home.join("global").join("memory.db"))
+        && paths_match(
+            global_db_path,
+            &app_home.join("global").join(memcore::MEMORY_DB_FILENAME),
+        )
 }
 
 /// Shared `/health` JSON for the streamable-HTTP daemon (#732).
@@ -721,14 +724,20 @@ mod tests {
     fn manifest_background_only_runs_for_default_global_db() {
         let tmp = tempfile::tempdir().expect("tmp");
         let app_home = tmp.path().join(".tachi");
-        let default_global = app_home.join("global").join("memory.db");
-        let agent_global = app_home.join("agents").join("main").join("memory.db");
+        let default_global = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        let agent_global = app_home
+            .join("agents")
+            .join("main")
+            .join(memcore::MEMORY_DB_FILENAME);
         std::fs::create_dir_all(default_global.parent().unwrap()).expect("default parent");
         std::fs::create_dir_all(agent_global.parent().unwrap()).expect("agent parent");
         std::fs::write(&default_global, b"").expect("default db");
         std::fs::write(&agent_global, b"").expect("agent db");
 
-        let project_db = app_home.join("projects").join("repo").join("memory.db");
+        let project_db = app_home
+            .join("projects")
+            .join("repo")
+            .join(memcore::MEMORY_DB_FILENAME);
 
         assert!(daemon_uses_manifest_background(
             &app_home,

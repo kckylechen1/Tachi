@@ -16,7 +16,7 @@ pub(crate) async fn handle_tachi_doctor_scan() -> Result<String, String> {
         max_depth: 10,
     };
     let report = scan(&roots, &quarantine_dir, opts);
-    let global_db_path = app_home.join("global").join("memory.db");
+    let global_db_path = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
     let mut value =
         serde_json::to_value(&report).map_err(|e| format!("serialize report failed: {e}"))?;
     if let Some(obj) = value.as_object_mut() {

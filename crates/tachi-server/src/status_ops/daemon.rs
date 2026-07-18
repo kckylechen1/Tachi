@@ -139,7 +139,7 @@ fn daemon_inventory_entry_from_process_line(
         .unwrap_or_else(|| {
             app_home
                 .join("global")
-                .join("memory.db")
+                .join(memcore::MEMORY_DB_FILENAME)
                 .display()
                 .to_string()
         });
