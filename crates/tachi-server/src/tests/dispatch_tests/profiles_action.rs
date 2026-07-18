@@ -100,7 +100,9 @@ async fn action_profiles_profile_card_default_to_markdown_when_format_omitted() 
         let body = server
             .tachi_task(Parameters(params))
             .await
-            .unwrap_or_else(|e| panic!("action='{action}' with format omitted should succeed: {e}"));
+            .unwrap_or_else(|e| {
+                panic!("action='{action}' with format omitted should succeed: {e}")
+            });
         assert!(
             body.starts_with("## Tachi task"),
             "action='{action}': {body}"

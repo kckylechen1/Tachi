@@ -10,9 +10,15 @@ fn facade_response_defaults_to_json_and_preserves_markdown_opt_in() {
     assert_eq!(value["status"], "completed");
     assert_eq!(value["flow_id"], "flow_1");
 
-    let markdown =
-        format_facade_response("Tachi shell plan", "plan", raw, Some("markdown"), false, false)
-            .unwrap();
+    let markdown = format_facade_response(
+        "Tachi shell plan",
+        "plan",
+        raw,
+        Some("markdown"),
+        false,
+        false,
+    )
+    .unwrap();
     assert!(markdown.starts_with("## Tachi shell plan"));
     assert!(markdown.contains("flow_id: `flow_1`"));
     assert!(markdown.contains("- `d1` running agent=codex - Fix search"));
@@ -24,8 +30,15 @@ fn facade_response_markdown_parse_failure_is_visible() {
     let json = format_facade_response("Tachi shell plan", "plan", raw, None, false, false).unwrap();
     assert_eq!(json, raw);
 
-    let err = format_facade_response("Tachi shell plan", "plan", raw, Some("markdown"), false, false)
-        .expect_err("markdown formatting should fail on invalid JSON");
+    let err = format_facade_response(
+        "Tachi shell plan",
+        "plan",
+        raw,
+        Some("markdown"),
+        false,
+        false,
+    )
+    .expect_err("markdown formatting should fail on invalid JSON");
     assert!(err.contains("format Tachi shell plan markdown response"));
     assert!(err.contains("expected JSON"));
 }
@@ -246,7 +259,10 @@ fn facade_response_recommend_json_slims_candidates_and_gates_cards() {
     )
     .unwrap();
     let with_card_value = serde_json::from_str::<Value>(&with_card).expect("with_card JSON");
-    assert!(with_card_value["mbit_card"].is_object(), "{with_card_value}");
+    assert!(
+        with_card_value["mbit_card"].is_object(),
+        "{with_card_value}"
+    );
     assert!(
         with_card_value.get("identity_receipt").is_none(),
         "{with_card_value}"
@@ -268,7 +284,10 @@ fn facade_response_recommend_json_slims_candidates_and_gates_cards() {
         with_receipt_value["identity_receipt"].is_object(),
         "{with_receipt_value}"
     );
-    assert!(with_receipt_value.get("mbit_card").is_none(), "{with_receipt_value}");
+    assert!(
+        with_receipt_value.get("mbit_card").is_none(),
+        "{with_receipt_value}"
+    );
 
     // format='full' bypasses slimming entirely regardless of verbose/include_card.
     let full = format_facade_response(
