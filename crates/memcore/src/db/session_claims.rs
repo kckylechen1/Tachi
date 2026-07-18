@@ -1091,6 +1091,7 @@ pub fn release_claim(
         ClaimSelector::DispatchId(dispatch_id) => tx
             .query_row(
                 "SELECT claim_id, state FROM session_claims WHERE dispatch_id = ?1 \
+                 AND mode IS NULL AND agent_identity_id IS NULL \
                  ORDER BY CASE state WHEN 'active' THEN 0 ELSE 1 END, heartbeat_at DESC LIMIT 1",
                 params![dispatch_id],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
@@ -1403,6 +1404,69 @@ mod tests {
                 claim_id: "claim-new".to_string()
             }
         );
+    }
+
+    #[test]
+    fn release_by_dispatch_id_ignores_v21_work_claim_with_same_dispatch() {
+        let mut conn = open_conn();
+        identity(&conn, "agent-v21-dispatch");
+        let mut claim = work_claim("claim-v21-dispatch", "agent-v21-dispatch");
+        claim.dispatch_id = Some("dispatch-v21-only".to_string());
+        insert_work_claim(&mut conn, &claim).unwrap();
+
+        let outcome = release_claim(
+            &mut conn,
+            &ClaimSelector::DispatchId("dispatch-v21-only".to_string()),
+            Some("complete"),
+        )
+        .unwrap();
+        assert_eq!(outcome, ReleaseOutcome::NotFound);
+
+        let got = get_claim(&conn, "claim-v21-dispatch").unwrap().unwrap();
+        assert_eq!(got.state, ClaimState::Active);
+        assert_eq!(got.transition_version, 0);
+        assert!(got.released_at.is_none());
+        assert!(got.release_reason.is_none());
+    }
+
+    #[test]
+    fn release_by_dispatch_id_releases_only_legacy_presence_when_mixed_with_v21_work_claim() {
+        let mut conn = open_conn();
+        identity(&conn, "agent-v21-mixed");
+
+        let mut v21 = work_claim("claim-v21-mixed", "agent-v21-mixed");
+        v21.dispatch_id = Some("dispatch-mixed".to_string());
+        v21.created_at = "2030-01-01T00:00:00Z".to_string();
+        insert_work_claim(&mut conn, &v21).unwrap();
+
+        let mut legacy = new_claim("claim-legacy-mixed", "org/repo#legacy-mixed");
+        legacy.dispatch_id = Some("dispatch-mixed".to_string());
+        legacy.created_at = "2020-01-01T00:00:00Z".to_string();
+        insert_claim(&conn, &legacy).unwrap();
+
+        let outcome = release_claim(
+            &mut conn,
+            &ClaimSelector::DispatchId("dispatch-mixed".to_string()),
+            Some("complete"),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            ReleaseOutcome::Released {
+                claim_id: "claim-legacy-mixed".to_string()
+            }
+        );
+
+        let released_legacy = get_claim(&conn, "claim-legacy-mixed").unwrap().unwrap();
+        assert_eq!(released_legacy.state, ClaimState::Released);
+        assert_eq!(released_legacy.release_reason.as_deref(), Some("complete"));
+        assert!(released_legacy.released_at.is_some());
+
+        let active_v21 = get_claim(&conn, "claim-v21-mixed").unwrap().unwrap();
+        assert_eq!(active_v21.state, ClaimState::Active);
+        assert_eq!(active_v21.transition_version, 0);
+        assert!(active_v21.released_at.is_none());
+        assert!(active_v21.release_reason.is_none());
     }
 
     #[test]
