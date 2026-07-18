@@ -423,3 +423,146 @@ async fn merge_into_for_project_cannot_reach_other_lifecycle_actions() {
         "merge_into folds source keywords into the survivor"
     );
 }
+
+#[tokio::test]
+async fn consolidate_propose_near_dup_merge_for_cross_path_raw_twins() {
+    let server = make_server();
+    let shared = "alpha bravo charlie delta echo foxtrot golf hotel india juliet \
+                  kilo lima mike november oscar papa quebec romeo sierra";
+    let mut lower = seed_scratch(
+        "near-dup-low",
+        "/scratch/sigil/topic-a",
+        &format!("{shared} tango"),
+        12,
+    );
+    lower.importance = 0.3;
+    let mut higher = seed_scratch(
+        "near-dup-high",
+        "/scratch/sigil/topic-b",
+        &format!("{shared} uniform"),
+        2,
+    );
+    higher.importance = 0.8;
+    server
+        .with_global_store(|store| {
+            store.upsert(&lower).map_err(|e| e.to_string())?;
+            store.upsert(&higher).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed cross-path near-dup twins");
+
+    let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
+    propose.path_prefix = Some("/scratch".to_string());
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, propose)
+        .await
+        .expect("propose");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    let proposals = parsed["generated"].as_array().cloned().unwrap_or_default();
+    let near_dup = proposals
+        .iter()
+        .find(|p| {
+            p.get("lifecycle_action").and_then(Value::as_str) == Some("near_dup_merge")
+                && p.get("source_id").and_then(Value::as_str) == Some("near-dup-low")
+                && p.get("target_id").and_then(Value::as_str) == Some("near-dup-high")
+        })
+        .expect("near_dup_merge proposal for cross-path raw twins");
+    let proposal_id = near_dup["proposal_id"].as_str().unwrap().to_string();
+
+    let mut review = tachi_memory_params("consolidate");
+    review.format = Some("json".to_string());
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("approved".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("review");
+
+    let mut apply = tachi_memory_params("consolidate");
+    apply.format = Some("json".to_string());
+    apply.proposal_id = Some(proposal_id);
+    apply.confirm = true;
+    let apply_body = crate::facade_memory_ops::handle_tachi_memory(&server, apply)
+        .await
+        .expect("apply");
+    let apply_json: Value = serde_json::from_str(&apply_body).expect("json");
+    assert_eq!(
+        apply_json["apply_result"]["lifecycle_action"],
+        json!("near_dup_merge")
+    );
+    assert_eq!(apply_json["apply_result"]["archived"], json!(true));
+    assert_eq!(
+        apply_json["apply_result"]["target_id"],
+        json!("near-dup-high")
+    );
+
+    let source_after = server
+        .with_global_store_read(|store| {
+            store
+                .get_with_options("near-dup-low", true)
+                .map_err(|e| e.to_string())
+                .map(|e| e.expect("source still present for provenance"))
+        })
+        .expect("read source");
+    assert!(
+        source_after.archived,
+        "near_dup_merge apply must archive the source row"
+    );
+
+    let target_after = server
+        .with_global_store_read(|store| {
+            store
+                .get("near-dup-high")
+                .map_err(|e| e.to_string())
+                .map(|e| e.expect("target exists"))
+        })
+        .expect("read target");
+    assert!(!target_after.archived, "survivor must stay active");
+}
+
+#[tokio::test]
+async fn consolidate_near_dup_merge_never_proposes_protected_rows() {
+    let server = make_server();
+    let shared = "alpha bravo charlie delta echo foxtrot golf hotel india juliet \
+                  kilo lima mike november oscar papa quebec romeo sierra";
+    let mut pinned = seed_scratch(
+        "near-dup-pinned",
+        "/scratch/sigil/pinned-twin",
+        &format!("{shared} tango"),
+        20,
+    );
+    pinned.retention_policy = Some("pinned".to_string());
+    let eligible = seed_scratch(
+        "near-dup-eligible",
+        "/scratch/sigil/eligible-twin",
+        &format!("{shared} uniform"),
+        5,
+    );
+    server
+        .with_global_store(|store| {
+            store.upsert(&pinned).map_err(|e| e.to_string())?;
+            store.upsert(&eligible).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed pinned twin");
+
+    let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
+    propose.path_prefix = Some("/scratch".to_string());
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, propose)
+        .await
+        .expect("propose");
+    let parsed: Value = serde_json::from_str(&body).expect("json");
+    let proposals = parsed["generated"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !proposals.iter().any(|p| {
+            p.get("source_id").and_then(Value::as_str) == Some("near-dup-pinned")
+                || p.get("target_id").and_then(Value::as_str) == Some("near-dup-pinned")
+        }),
+        "protected pinned rows must never appear in near_dup_merge proposals: {parsed}"
+    );
+    assert_eq!(parsed["scope_accounting"]["evaluated"], json!(1));
+    assert_eq!(
+        parsed["scope_accounting"]["expected_exclusions"]["count"],
+        json!(1)
+    );
+}

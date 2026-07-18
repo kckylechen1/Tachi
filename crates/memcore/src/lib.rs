@@ -26,6 +26,7 @@ pub mod foundry;
 #[cfg(feature = "admin")]
 pub mod hub;
 pub mod namespace;
+pub mod near_dup;
 pub mod noise;
 pub mod path_router;
 pub mod recall_config;
@@ -111,6 +112,7 @@ pub use namespace::{
     path_prefix_opts_into_recall_cache, FOUNDRY_RECALL_CACHE_SOURCE, RECALL_CACHE_SQL_WHERE,
     RECALL_CACHE_SQL_WHERE_M,
 };
+pub use near_dup::{near_duplicate_raw_pairs, text_token_jaccard, NEAR_DUP_RAW_SCAN_CAP};
 pub use noise::{is_noise_text, should_skip_query};
 pub use recall_config::RecallConfig;
 pub use relation_ontology::ComponentGovernanceRelation;

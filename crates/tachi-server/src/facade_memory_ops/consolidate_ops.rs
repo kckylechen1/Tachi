@@ -7,6 +7,7 @@
 //!    `/scratch`); emit durable proposals for:
 //!    - `merge_into` — same path, high summary overlap → fold older into newer
 //!    - `supersede` — same path, low overlap → newer wins without text merge
+//!    - `near_dup_merge` — raw rows with high text-token Jaccard (RomanBath light-sleep detection)
 //!    - `archive` — stale low-value rows
 //!    - `promote_distilled` — raw rows that earned diverse recall (≥3 / ≥3)
 //!
@@ -140,6 +141,18 @@ impl ConsolidationScope {
 }
 /// Minimum summary-token Jaccard to prefer `merge_into` over plain `supersede`.
 const MERGE_SUMMARY_JACCARD_MIN: f64 = 0.50;
+/// Minimum full-text token Jaccard for raw near-duplicate merge proposals
+/// (RomanBath `run_light_sleep` parity; env-overridable).
+const NEAR_DUP_TEXT_JACCARD_MIN_DEFAULT: f64 = 0.9;
+const NEAR_DUP_TEXT_JACCARD_MIN_ENV: &str = "TACHI_CONSOLIDATE_NEAR_DUP_JACCARD_MIN";
+
+fn near_dup_text_jaccard_min() -> f64 {
+    std::env::var(NEAR_DUP_TEXT_JACCARD_MIN_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
+        .unwrap_or(NEAR_DUP_TEXT_JACCARD_MIN_DEFAULT)
+}
 
 pub(crate) async fn handle_memory_consolidate(
     server: &MemoryServer,
@@ -474,7 +487,7 @@ fn apply_lifecycle_action(
                 }))
             })
         }
-        "merge_into" => {
+        "merge_into" | "near_dup_merge" => {
             let target = target_id.ok_or_else(|| {
                 "merge_into proposal requires target_id (canonical survivor)".to_string()
             })?;
@@ -514,7 +527,7 @@ fn apply_lifecycle_action(
                     .archive_memory(source_id)
                     .map_err(|e| format!("archive after merge: {e}"))?;
                 Ok(json!({
-                    "lifecycle_action": "merge_into",
+                    "lifecycle_action": action,
                     "source_id": source_id,
                     "target_id": target,
                     "merged_keywords": survivor.keywords.len(),
@@ -569,7 +582,7 @@ fn apply_lifecycle_action(
             }))
         }),
         other => Err(format!(
-            "unsupported lifecycle_action '{other}'; expected supersede|merge_into|archive|promote_distilled"
+            "unsupported lifecycle_action '{other}'; expected supersede|merge_into|near_dup_merge|archive|promote_distilled"
         )),
     }
 }
@@ -611,6 +624,7 @@ fn generate_and_persist_proposals(
     let scope = ConsolidationScope::from_entries(entries, path_prefix);
     let mut proposals = Vec::new();
     proposals.extend(propose_same_path_lifecycle(&scope.eligible, path_prefix));
+    proposals.extend(propose_near_dup_merge(&scope.eligible, path_prefix));
     proposals.extend(propose_stale_archives(&scope.eligible, path_prefix));
     proposals.extend(propose_promote_distilled(&scope.eligible, path_prefix));
 
@@ -721,6 +735,86 @@ fn propose_same_path_lifecycle(entries: &[MemoryEntry], path_prefix: &str) -> Ve
         }
     }
     out
+}
+
+/// Raw-tier text near-duplicates (token Jaccard) → `near_dup_merge` proposals.
+/// Apply reuses the existing `merge_into` mutation path after human review.
+fn propose_near_dup_merge(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Value> {
+    let scoped: Vec<MemoryEntry> = entries
+        .iter()
+        .filter(|entry| {
+            entry.path.starts_with(path_prefix)
+                && !is_protected(entry)
+                && entry.tier.eq_ignore_ascii_case("raw")
+        })
+        .cloned()
+        .collect();
+    if scoped.len() < 2 {
+        return Vec::new();
+    }
+
+    let threshold = near_dup_text_jaccard_min();
+    let pairs = memcore::near_duplicate_raw_pairs(&scoped, threshold);
+    let mut out = Vec::new();
+    for (left, right, similarity) in pairs {
+        let left_entry = &scoped[left];
+        let right_entry = &scoped[right];
+        if left_entry.id == right_entry.id {
+            continue;
+        }
+        let (target, source) = pick_near_dup_survivor(left_entry, right_entry);
+        let id = format!(
+            "lifecycle:near_dup_merge:{}:{}",
+            id_prefix(&source.id),
+            id_prefix(&target.id)
+        );
+        out.push(json!({
+            "proposal_id": id,
+            "kind": "memory_lifecycle",
+            "lifecycle_action": "near_dup_merge",
+            "status": "pending",
+            "requires_human_approval": true,
+            "created_or_refreshed_at": Utc::now().to_rfc3339(),
+            "source_id": source.id,
+            "target_id": target.id,
+            "path": source.path,
+            "rationale": format!(
+                "Raw near-duplicate text (token_jaccard={similarity:.3}) — merge lower-value `{}` into `{}`.",
+                source.id, target.id
+            ),
+            "evidence": {
+                "source_path": source.path,
+                "target_path": target.path,
+                "source_timestamp": source.timestamp,
+                "target_timestamp": target.timestamp,
+                "source_importance": source.importance,
+                "target_importance": target.importance,
+                "text_token_jaccard": similarity,
+                "near_dup_threshold": threshold,
+                "source_text_preview": source.text.chars().take(120).collect::<String>(),
+                "target_text_preview": target.text.chars().take(120).collect::<String>(),
+            },
+        }));
+    }
+    out
+}
+
+fn pick_near_dup_survivor<'a>(
+    left: &'a MemoryEntry,
+    right: &'a MemoryEntry,
+) -> (&'a MemoryEntry, &'a MemoryEntry) {
+    match left
+        .importance
+        .partial_cmp(&right.importance)
+        .unwrap_or(std::cmp::Ordering::Equal)
+    {
+        std::cmp::Ordering::Greater => (left, right),
+        std::cmp::Ordering::Less => (right, left),
+        std::cmp::Ordering::Equal => match cmp_entry_timestamp_desc(left, right) {
+            std::cmp::Ordering::Less | std::cmp::Ordering::Equal => (left, right),
+            std::cmp::Ordering::Greater => (right, left),
+        },
+    }
 }
 
 fn propose_promote_distilled(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Value> {
