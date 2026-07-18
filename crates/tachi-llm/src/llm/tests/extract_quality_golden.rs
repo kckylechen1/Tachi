@@ -112,35 +112,51 @@ fn extract_only_client(base_url: String) -> LlmClient {
 //    model output in the nightly job the issue describes; CI only checks
 //    they discriminate the two fixtures below). ──────────────────────────
 
-/// Update recognition + history retention: the old term must still appear
-/// *somewhere* in the extracted facts (not silently dropped), tagged with a
-/// supersession signal, and the new term must also appear.
+/// Update recognition + history retention — **direction-aware** (codex
+/// review: the original version accepted a *reversed* A<-B narrative, since
+/// it only checked that both terms plus some supersede-signal word
+/// appeared anywhere in the corpus, never which one was actually being
+/// marked as superseded). Requires:
+/// 1. an explicit `"from {old_term} to {new_term}"` transition statement
+///    (fails on the reverse phrasing), and
+/// 2. `old_term` — not `new_term` — is the one explicitly tagged
+///    `"{old_term} is now superseded"`.
 fn facts_capture_supersession(facts: &[Value], old_term: &str, new_term: &str) -> bool {
     let corpus: String = facts
         .iter()
         .filter_map(|f| f.get("text").and_then(Value::as_str))
         .collect::<Vec<_>>()
         .join(" \n ");
-    let mentions_old = corpus.contains(old_term);
-    let mentions_new = corpus.contains(new_term);
-    let signals_supersession = ["superseded", "switched", "replaced", "migrat", "废弃", "替代"]
-        .iter()
-        .any(|signal| corpus.to_ascii_lowercase().contains(signal));
-    mentions_old && mentions_new && signals_supersession
+    let states_correct_direction = corpus.contains(&format!("from {old_term} to {new_term}"));
+    let old_term_marked_superseded = corpus.contains(&format!("{old_term} is now superseded"));
+    let new_term_not_marked_superseded =
+        !corpus.contains(&format!("{new_term} is now superseded"));
+    states_correct_direction && old_term_marked_superseded && new_term_not_marked_superseded
 }
 
 /// Noise filtering: none of the extracted facts' text may contain any of the
-/// known-junk phrases from the source conversation.
+/// known-junk phrases from the source conversation. A fact missing a valid
+/// string `text` field is treated as a failure, not silently skipped (codex
+/// review: the original `filter_map` dropped malformed facts from
+/// consideration entirely, letting a corrupted-but-textless fact pass this
+/// predicate for free).
 fn facts_exclude_noise(facts: &[Value], noise_phrases: &[&str]) -> bool {
-    facts
-        .iter()
-        .filter_map(|f| f.get("text").and_then(Value::as_str))
-        .all(|text| noise_phrases.iter().all(|noise| !text.contains(noise)))
+    facts.iter().all(|fact| {
+        let Some(text) = fact.get("text").and_then(Value::as_str) else {
+            return false;
+        };
+        noise_phrases.iter().all(|noise| !text.contains(noise))
+    })
 }
 
 /// JSON-stability / schema-holds: every fact is an object carrying all five
 /// required keys with the right JSON types, `scope` is one of the three
-/// allowed values, and `importance` is a number in `[0.0, 1.0]`.
+/// allowed values, `importance` is a number in `[0.0, 1.0]`, and `keywords`
+/// has 2-5 entries — matching the production prompt's own contract
+/// (`default_prompts.rs` `EXTRACTION_PROMPT`: `"keywords": 2-5个关键词/标签`).
+/// codex review: the original check only verified `keywords` was *an
+/// array*, with no length bound, so a 0- or 1-keyword payload (which
+/// violates the prompt's own contract) was a false green.
 fn facts_json_shape_holds(facts: &[Value]) -> bool {
     if facts.is_empty() {
         return false;
@@ -154,7 +170,10 @@ fn facts_json_shape_holds(facts: &[Value]) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|s| !s.trim().is_empty());
         let topic_ok = obj.get("topic").and_then(Value::as_str).is_some();
-        let keywords_ok = obj.get("keywords").is_some_and(Value::is_array);
+        let keywords_ok = obj
+            .get("keywords")
+            .and_then(Value::as_array)
+            .is_some_and(|k| (2..=5).contains(&k.len()));
         let entities_ok = obj.get("entities").is_some_and(Value::is_array);
         let scope_ok = obj
             .get("scope")
@@ -180,6 +199,16 @@ const REAL_SUPERSEDE_RESPONSE: &str = r#"[
 /// #1198's "历史保留" axis exists to catch.
 const BROKEN_SUPERSEDE_RESPONSE: &str = r#"[
   {"text": "Team uses backend B for auth", "topic": "auth", "keywords": ["auth"], "entities": ["backend B"], "scope": "project", "importance": 0.5}
+]"#;
+
+/// A *second*, more subtle broken form (codex review, must-fix): the
+/// direction is flipped — it claims backend B (the actual new/final
+/// decision) is the one being superseded, i.e. a reversed A<-B narrative.
+/// Both terms and a supersede-signal word are present, so the *original*
+/// (pre-review) predicate wrongly accepted this; the direction-aware
+/// predicate must reject it.
+const BROKEN_SUPERSEDE_REVERSED_RESPONSE: &str = r#"[
+  {"text": "Team switched auth backend from backend B to backend A; backend B is now superseded", "topic": "auth backend", "keywords": ["auth", "backend-a", "migration"], "entities": ["backend A", "backend B"], "scope": "project", "importance": 0.8}
 ]"#;
 
 #[tokio::test]
@@ -211,6 +240,24 @@ async fn extract_facts_supersede_golden_discriminates_real_vs_broken() {
          fail the supersession predicate, got: {broken_facts:?}"
     );
     broken_task.abort();
+
+    // #1198 codex review: a *reversed* narrative (claims the final decision
+    // is what got superseded) must also be RED — this is the exact
+    // false-positive the pre-review predicate had.
+    let (reversed_url, reversed_task) =
+        spawn_content_sequence_server(vec![BROKEN_SUPERSEDE_REVERSED_RESPONSE.to_string()]).await;
+    let reversed_client = extract_only_client(reversed_url);
+    let reversed_facts = reversed_client
+        .extract_facts("we decided backend A for auth, then later switched to backend B")
+        .await
+        .expect("reversed-narrative response is still valid JSON — it fails the *judgment*, not parsing");
+    assert!(
+        !facts_capture_supersession(&reversed_facts, "backend A", "backend B"),
+        "RED case: a reversed A<-B narrative (claims the true final decision, \
+         backend B, is the one superseded) must fail the direction-aware \
+         supersession predicate, got: {reversed_facts:?}"
+    );
+    reversed_task.abort();
 }
 
 // ── Scenario 2: noise filtering ──────────────────────────────────────────
@@ -225,6 +272,15 @@ const BROKEN_NOISE_RESPONSE: &str = r#"[
   {"text": "Decided to migrate the recall path to the new rerank provider", "topic": "recall", "keywords": ["recall", "rerank"], "entities": ["rerank provider"], "scope": "project", "importance": 0.6},
   {"text": "today's weather is hot", "topic": "small talk", "keywords": ["weather"], "entities": [], "scope": "general", "importance": 0.1},
   {"text": "just had a glass of water", "topic": "small talk", "keywords": ["water"], "entities": [], "scope": "general", "importance": 0.1}
+]"#;
+
+/// A *malformed* broken form (codex review, must-fix): the fact object is
+/// missing its `text` field entirely (typo'd key). The pre-review
+/// predicate used `filter_map`, which silently *dropped* this fact from
+/// consideration — a corrupted/textless fact got a free pass instead of
+/// failing the check.
+const BROKEN_NOISE_MALFORMED_RESPONSE: &str = r#"[
+  {"txt": "Decided to migrate the recall path to the new rerank provider", "topic": "recall", "keywords": ["recall", "rerank"], "entities": ["rerank provider"], "scope": "project", "importance": 0.6}
 ]"#;
 
 #[tokio::test]
@@ -259,13 +315,33 @@ async fn extract_facts_noise_golden_discriminates_real_vs_broken() {
          fail the noise-filtering predicate, got: {broken_facts:?}"
     );
     broken_task.abort();
+
+    // #1198 codex review: a malformed fact (missing `text`) must fail the
+    // predicate outright, not be silently excluded from consideration.
+    let (malformed_url, malformed_task) =
+        spawn_content_sequence_server(vec![BROKEN_NOISE_MALFORMED_RESPONSE.to_string()]).await;
+    let malformed_client = extract_only_client(malformed_url);
+    let malformed_facts = malformed_client
+        .extract_facts(source_text)
+        .await
+        .expect("malformed-fact response is still valid JSON — it fails the *judgment*, not parsing");
+    assert!(
+        !facts_exclude_noise(&malformed_facts, &noise_phrases),
+        "RED case: a fact missing its `text` field must fail the noise \
+         predicate, not be silently skipped, got: {malformed_facts:?}"
+    );
+    malformed_task.abort();
 }
 
 // ── Scenario 3: JSON-stability across repeated calls ─────────────────────
 
-const REAL_STABLE_RESPONSE_1: &str = r#"[{"text": "First stable fact", "topic": "t1", "keywords": ["k1"], "entities": [], "scope": "user", "importance": 0.4}]"#;
-const REAL_STABLE_RESPONSE_2: &str = r#"[{"text": "Second stable fact", "topic": "t2", "keywords": ["k2"], "entities": [], "scope": "project", "importance": 0.5}]"#;
-const REAL_STABLE_RESPONSE_3: &str = r#"[{"text": "Third stable fact", "topic": "t3", "keywords": ["k3"], "entities": [], "scope": "general", "importance": 0.6}]"#;
+// Keywords use 2-5 entries each — matching the production prompt's own
+// contract (codex review flagged the earlier 1-keyword fixtures as a false
+// green: they'd pass a shape check that didn't enforce the count, while
+// looking nothing like prompt-faithful output).
+const REAL_STABLE_RESPONSE_1: &str = r#"[{"text": "First stable fact", "topic": "t1", "keywords": ["k1", "k1b"], "entities": [], "scope": "user", "importance": 0.4}]"#;
+const REAL_STABLE_RESPONSE_2: &str = r#"[{"text": "Second stable fact", "topic": "t2", "keywords": ["k2", "k2b", "k2c"], "entities": [], "scope": "project", "importance": 0.5}]"#;
+const REAL_STABLE_RESPONSE_3: &str = r#"[{"text": "Third stable fact", "topic": "t3", "keywords": ["k3", "k3b"], "entities": [], "scope": "general", "importance": 0.6}]"#;
 
 #[tokio::test]
 async fn extract_facts_json_stability_golden_holds_across_three_consecutive_calls() {
@@ -309,6 +385,33 @@ async fn extract_facts_json_stability_golden_fails_loud_on_malformed_payload() {
     assert!(
         err.contains("Failed to parse facts JSON"),
         "got: {err}"
+    );
+
+    task.abort();
+}
+
+/// RED case (codex review, must-fix — the missing fifth discriminative
+/// test): a payload that is **syntactically valid JSON** but violates the
+/// production schema contract (here: only 1 keyword, below the prompt's
+/// 2-5 range) must parse fine (`extract_facts` returns `Ok`) yet fail
+/// `facts_json_shape_holds`. This is the case the malformed-payload test
+/// above cannot cover — that one never reaches the schema predicate at all
+/// because the parse itself fails first. A shape check with no real
+/// schema-violation red case would be unfalsifiable.
+#[tokio::test]
+async fn extract_facts_json_stability_golden_rejects_schema_broken_payload() {
+    let schema_broken = r#"[{"text": "A valid-looking fact", "topic": "t", "keywords": ["only-one"], "entities": [], "scope": "user", "importance": 0.5}]"#;
+    let (url, task) = spawn_content_sequence_server(vec![schema_broken.to_string()]).await;
+    let client = extract_only_client(url);
+
+    let facts = client
+        .extract_facts("some memory-worthy text")
+        .await
+        .expect("a schema-violating-but-syntactically-valid payload must still parse as JSON");
+    assert!(
+        !facts_json_shape_holds(&facts),
+        "RED case: a single-keyword payload violates the prompt's 2-5 \
+         keyword contract and must fail the shape check, got: {facts:?}"
     );
 
     task.abort();
