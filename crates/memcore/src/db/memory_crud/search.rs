@@ -18,10 +18,17 @@ use super::{
 /// slot in vec0's top-k budget, so the caller can receive far fewer than
 /// `top_k` LIVE rows (tachi#1245: measured 54% archived -> effective live
 /// yield ~0.46*top_k, worsening monotonically as TTL-archived rows
-/// accumulate). `search_vec` compensates by widening vec0's internal `k`
-/// and re-querying until the post-filter result reaches `top_k` or a bounded
-/// number of widen attempts is exhausted -- see `run_search_vec_query` /
-/// `VEC_OVERFETCH_MULTIPLIER` below.
+/// accumulate). One of those post-JOIN predicates (`id NOT LIKE
+/// 'anchor:%'`) is UNCONDITIONAL -- it is not gated by any caller flag -- so
+/// there is no combination of `include_archived`/`include_superseded`/
+/// `path_prefix`/`as_of` that provably makes post-JOIN filtering a no-op.
+/// `search_vec` therefore always widens vec0's internal `k` and re-queries
+/// whenever the current pass came up short of `top_k`, capped at a bounded
+/// number of widen attempts -- see `run_search_vec_query` /
+/// `VEC_OVERFETCH_MULTIPLIER` below. When nothing actually gets filtered out
+/// (the common case), the first query already returns `top_k` rows and the
+/// loop below exits immediately, so this costs exactly one query, same as
+/// before tachi#1245.
 const VEC_OVERFETCH_MULTIPLIER: usize = 4;
 /// Caps the widen loop at `top_k * 4^3` (64x) in the worst case: enough
 /// headroom to survive the measured 54%-archived corpus (needs ~2x) with
@@ -48,14 +55,6 @@ pub fn search_vec(
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
     let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
 
-    // When none of the post-JOIN predicates can actually exclude a row (the
-    // caller wants archived + superseded rows and applied no path/as_of
-    // filter), vec0's top-k window already IS the final result set 1:1 --
-    // skip the widen loop entirely so this path costs exactly what it cost
-    // before tachi#1245 (no wasted re-query).
-    let may_filter =
-        !include_archived || !include_superseded || path_like.is_some() || as_of_utc.is_some();
-
     let mut k_fetch = top_k;
     let mut rows = run_search_vec_query(
         conn,
@@ -67,7 +66,16 @@ pub fn search_vec(
         as_of_utc.as_deref(),
     )?;
 
-    if may_filter && top_k > 0 {
+    // Widen unconditionally whenever the current pass came up short --
+    // there is no flag combination that provably rules out post-JOIN
+    // filtering (the anchor exclusion is always active), so a fast-path
+    // guard keyed on caller flags would be wrong by construction (it must
+    // also treat the anchor filter as always-active, which makes it
+    // redundant with just trying and checking the actual result length).
+    // When nothing was filtered out, `rows.len() >= top_k` already holds
+    // after the first query above and this loop is a no-op -- zero extra
+    // queries, identical to pre-tachi#1245 cost.
+    if top_k > 0 {
         for _ in 0..VEC_OVERFETCH_MAX_ATTEMPTS {
             if rows.len() >= top_k {
                 break;
