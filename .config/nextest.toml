@@ -27,6 +27,17 @@ failure-output = "immediate-final"
 success-output = "never"
 status-level = "fail"
 final-status-level = "flaky"
+# Retries absorb environment-sensitive flakes (issue #1261) without masking
+# real bugs. The CI-discovered flakes all stem from CI-runner-specific
+# behavior (overlayfs inode reuse, container PID-namespace kill() semantics,
+# fork+exec pipe timing) that does not reproduce deterministically within a
+# single attempt but also does not indicate a product defect. A genuine bug
+# fails three times in a row; a flake lands as `flaky` in the final status
+# (still visible via `final-status-level = "flaky"` above) without aborting
+# the whole run. Without this, one flake cancels ~2684 remaining tests
+# (observed: 896/3581 run, 1 failed, rest cancelled) and blocks every PR
+# that happens to hit the flaky order.
+retries = 2
 
 # JUnit timing telemetry (Refs #1095): the ci profile writes a machine-readable
 # JUnit report at this path (the location the header comment above already

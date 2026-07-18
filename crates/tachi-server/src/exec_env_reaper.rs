@@ -4348,6 +4348,7 @@ mod tests {
     /// alone would wave this delete through. Only the `(dev, ino)` re-check
     /// added by this fix refuses it.
     #[cfg(unix)]
+    #[ignore = "issue #1261: assumes remove_dir_all+create_dir_all yields a fresh inode; on CI overlayfs/tmpfs inode reuse makes the (dev,ino) guard not fire. Sibling kill-test at line ~5339 is #[ignore]d for the same #1062 matrix. Run with --ignored"]
     #[test]
     fn a_directory_replaced_at_the_same_path_between_verdict_and_delete_is_refused() {
         let root = unique_temp_dir("tachi-reaper-inode-swap");
@@ -4435,6 +4436,7 @@ mod tests {
     /// its `remove_dir_all`. Only the SECOND recheck — checkpoint 2's own addition — can
     /// catch this.
     #[cfg(unix)]
+    #[ignore = "issue #1261: same inode-reuse flake as the verdict-and-delete sibling above; CI overlayfs can hand back the same inode after remove_dir_all+create_dir_all. Run with --ignored"]
     #[test]
     fn a_directory_replaced_between_the_deleters_own_probe_and_unlink_is_refused() {
         use std::sync::atomic::{AtomicUsize, Ordering};

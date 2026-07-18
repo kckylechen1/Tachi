@@ -527,6 +527,7 @@ fn pool_call_with_fallback_provider_first_skips_cli_when_provider_succeeds() {
     }
 }
 
+#[ignore = "issue #1261: forks+execs a fake claude shell binary; broken-pipe flake on shared CI runners where spawn() returns before the child is schedulable. Run with --ignored"]
 #[test]
 fn pool_call_with_fallback_provider_first_falls_back_to_cli_on_provider_error() {
     let _guard = crate::test_support::global_test_lock().lock();
