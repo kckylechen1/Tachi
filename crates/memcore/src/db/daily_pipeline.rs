@@ -156,15 +156,19 @@ pub fn list_memory_ids_needing_embedding(
     conn: &Connection,
     limit: usize,
 ) -> Result<Vec<String>, MemoryError> {
-    let mut stmt = conn.prepare(
+    let tier_filter = crate::embed_config::embed_raw_tier_sql_filter("m.");
+    let order_by = crate::embed_config::embed_selection_order_by("m.");
+    let sql = format!(
         "SELECT m.id FROM memories m
          LEFT JOIN memories_vec v ON m.id = v.id
          WHERE m.archived = 0
-           AND m.tier != 'raw'
+           {tier_filter}
+           AND m.id NOT LIKE 'anchor:%'
            AND v.id IS NULL
-         ORDER BY m.importance DESC
-         LIMIT ?1",
-    )?;
+         {order_by}
+         LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![limit as i64], |row| row.get(0))?;
     let mut out = Vec::new();
     for row in rows {

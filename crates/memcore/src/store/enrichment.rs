@@ -230,6 +230,8 @@ impl MemoryStore {
         limit: Option<usize>,
     ) -> Result<Vec<(String, String, String, i64)>, MemoryError> {
         let limit_val = limit.map(|l| l as i64).unwrap_or(-1);
+        let tier_filter = crate::embed_config::embed_raw_tier_sql_filter("");
+        let order_by = crate::embed_config::embed_selection_order_by("");
         let mut out = Vec::new();
         match exclude_source {
             Some(source)
@@ -237,10 +239,12 @@ impl MemoryStore {
             {
                 let mut stmt = self.conn.prepare(&format!(
                     "SELECT id, text, summary, revision FROM memories
-                     WHERE id NOT IN (SELECT id FROM memories_vec)
+                     WHERE archived = 0
+                       AND id NOT IN (SELECT id FROM memories_vec)
+                       {tier_filter}
                        AND id NOT LIKE 'anchor:%'
                        AND NOT ({})
-                     ORDER BY rowid
+                     {order_by}
                      LIMIT ?1",
                     crate::namespace::RECALL_CACHE_SQL_WHERE
                 ))?;
@@ -257,14 +261,16 @@ impl MemoryStore {
                 }
             }
             Some(source) => {
-                let mut stmt = self.conn.prepare(
+                let mut stmt = self.conn.prepare(&format!(
                     "SELECT id, text, summary, revision FROM memories
-                     WHERE id NOT IN (SELECT id FROM memories_vec)
-                     AND id NOT LIKE 'anchor:%'
-                     AND source != ?1
-                     ORDER BY rowid
-                     LIMIT ?2",
-                )?;
+                     WHERE archived = 0
+                       AND id NOT IN (SELECT id FROM memories_vec)
+                       {tier_filter}
+                       AND id NOT LIKE 'anchor:%'
+                       AND source != ?1
+                     {order_by}
+                     LIMIT ?2"
+                ))?;
                 let rows = stmt.query_map(rusqlite::params![source, limit_val], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -278,13 +284,15 @@ impl MemoryStore {
                 }
             }
             None => {
-                let mut stmt = self.conn.prepare(
+                let mut stmt = self.conn.prepare(&format!(
                     "SELECT id, text, summary, revision FROM memories
-                     WHERE id NOT IN (SELECT id FROM memories_vec)
-                     AND id NOT LIKE 'anchor:%'
-                     ORDER BY rowid
-                     LIMIT ?1",
-                )?;
+                     WHERE archived = 0
+                       AND id NOT IN (SELECT id FROM memories_vec)
+                       {tier_filter}
+                       AND id NOT LIKE 'anchor:%'
+                     {order_by}
+                     LIMIT ?1"
+                ))?;
                 let rows = stmt.query_map(rusqlite::params![limit_val], |row| {
                     Ok((
                         row.get::<_, String>(0)?,

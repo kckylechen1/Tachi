@@ -40,7 +40,7 @@ pub(super) fn collect_candidates(
     // channel was structurally off we record `vec: None` (honest "did not
     // run") rather than `Some({0 elapsed, 0 count})`.
     let vec_start = sample.then(Instant::now);
-    let vec_scores = if opts.vec_available {
+    let mut vec_scores = if opts.vec_available {
         if let Some(qv) = &opts.query_vec {
             search_vec(
                 conn,
@@ -57,6 +57,7 @@ pub(super) fn collect_candidates(
     } else {
         HashMap::new()
     };
+    apply_raw_vector_similarity_floor(conn, &mut vec_scores, recall_config(opts))?;
     let vec_receipt = if opts.vec_available && opts.query_vec.is_some() {
         vec_start.map(|s| ChannelPhaseReceipt {
             elapsed: s.elapsed(),
@@ -149,4 +150,33 @@ fn exact_memory_id_query(query: &str) -> Option<String> {
     uuid::Uuid::parse_str(trimmed)
         .ok()
         .map(|_| trimmed.to_string())
+}
+
+/// Drop raw-tier vector-channel hits whose similarity is below the configured floor.
+fn apply_raw_vector_similarity_floor(
+    conn: &Connection,
+    vec_scores: &mut HashMap<String, f64>,
+    config: &crate::RecallConfig,
+) -> Result<(), MemoryError> {
+    let floor = config.raw_vector_similarity_floor;
+    if vec_scores.is_empty() || floor <= 0.0 {
+        return Ok(());
+    }
+
+    let ids: Vec<String> = vec_scores.keys().cloned().collect();
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!("SELECT id, tier FROM memories WHERE id IN ({placeholders})");
+    let mut stmt = conn.prepare(&sql)?;
+    let tiers = stmt
+        .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<HashMap<_, _>, _>>()?;
+
+    vec_scores.retain(|id, sim| {
+        tiers
+            .get(id)
+            .is_none_or(|tier| tier != "raw" || *sim >= floor)
+    });
+    Ok(())
 }
