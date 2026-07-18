@@ -15,6 +15,7 @@ use rmcp::model::JsonObject;
 
 pub(crate) const HEADER_PROFILE: &str = "x-tachi-profile";
 pub(crate) const HEADER_CLIENT: &str = "x-tachi-client";
+pub(crate) const HEADER_AGENT_IDENTITY: &str = "x-tachi-agent-identity";
 pub(crate) const HEADER_PROJECT: &str = "x-tachi-project";
 /// #1120 PR1: same shape as `HEADER_PROJECT`, but carries a filesystem path
 /// (a git repo root, or any path beneath one) instead of an already-registered
@@ -31,6 +32,7 @@ pub(crate) const HEADER_WORKSPACE_ROOT: &str = "x-tachi-workspace-root";
 
 pub(crate) const META_PROFILE: &str = "tachiProfile";
 pub(crate) const META_CLIENT: &str = "tachiClient";
+pub(crate) const META_AGENT_IDENTITY: &str = "tachiAgentIdentity";
 pub(crate) const META_PROJECT: &str = "tachiProject";
 /// `_meta` twin of [`HEADER_WORKSPACE_ROOT`] for transports that carry MCP
 /// `initialize._meta` instead of (or in addition to) HTTP headers.
@@ -406,6 +408,14 @@ pub(crate) fn reject_unbound_cross_project_write(
 pub(crate) fn normalize_identity_value(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+pub(crate) fn valid_agent_identity_assertion(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 160
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
 #[cfg(test)]

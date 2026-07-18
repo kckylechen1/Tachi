@@ -160,8 +160,16 @@ pub(crate) async fn handle_tachi_gh(
                 params.allow_umbrella_close,
             )?;
             let client = gh_client_for_server(server)?;
-            let worktree_for_lease = params.worktree.clone();
-            let out = handle_github_safe_merge(
+            // Resolve the spelling before the cleaner can delete the path; after
+            // deletion canonicalization is impossible, but lease reclaim must
+            // still select the same canonical row used by holder evidence.
+            let worktree_for_lease = params
+                .worktree
+                .as_deref()
+                .map(crate::exec_env_ops::canonical_worktree_path)
+                .transpose()?;
+            let holder_gate = |worktree: &str| worktree_holder_gate(server, worktree);
+            let out = handle_github_safe_merge_with_holder_gate(
                 &client,
                 &target.repo,
                 target.number,
@@ -170,18 +178,21 @@ pub(crate) async fn handle_tachi_gh(
                 params.flow_id.as_deref(),
                 &params.tests_run,
                 policy,
-                params.worktree.as_deref(),
+                worktree_for_lease.as_deref(),
                 params.reclaim_worktree.unwrap_or(true),
+                &holder_gate,
             )
             .await?;
             // #894 S1: the exec_envs lease is the single owner of a managed env.
             // When safe_merge reclaimed the local worktree, flip the lease
-            // through the one reclaim path — best-effort and idempotent (a
-            // worktree with no lease is a no-op; the sweep is the backstop, not
-            // a second owner). Never fails the already-successful merge.
+            // through the one reclaim path. A failed transition is surfaced:
+            // discarding it after physical deletion would falsely report a
+            // complete reclaim while the durable lifecycle still says active.
             if let Some(worktree) = worktree_for_lease.as_deref() {
                 if safe_merge_reclaimed_worktree(&out) {
-                    let _ = server.reclaim_exec_env_for_worktree(worktree, Some("safe_merge"));
+                    server
+                        .reclaim_exec_env_for_worktree(worktree, Some("safe_merge"))
+                        .map_err(|err| format!("safe_merge cleaner removed {worktree}, but ExecEnv reclaim refused: {err}"))?;
                 }
             }
             Ok(out)
@@ -239,6 +250,32 @@ pub(crate) async fn handle_tachi_gh(
         )),
     }?;
     normalize_gh_response(&action, &raw, params.format.as_deref())
+}
+
+/// Read-only WorkClaim gate used immediately before safe-merge invokes the
+/// external cleaner. Missing active leases are legacy/not-applicable; every
+/// held or uncertain holder answer is a loud refusal.
+pub(crate) fn worktree_holder_gate(
+    server: &MemoryServer,
+    worktree_path: &str,
+) -> Result<(), String> {
+    let canonical_path = crate::exec_env_ops::canonical_worktree_path(worktree_path)?;
+    server.with_global_store_read(|store| {
+        let Some(lease) =
+            memcore::find_active_exec_env_by_path(store.connection(), &canonical_path)
+            .map_err(|err| format!("holder evidence unavailable while locating ExecEnv: {err}"))?
+        else {
+            return Ok(());
+        };
+        match memcore::holder_evidence(store.connection(), &lease.env_id)
+            .map_err(|err| format!("holder evidence unavailable for ExecEnv {}: {err}", lease.env_id))?
+        {
+            memcore::HolderEvidence::Clear | memcore::HolderEvidence::NotApplicable => Ok(()),
+            evidence => Err(format!(
+                "refusing external cleaner for {worktree_path}: persisted WorkClaim holder evidence is {evidence:?}"
+            )),
+        }
+    })
 }
 
 /// #1000 issue-freshness scan: three independent detectors (zombie / stale

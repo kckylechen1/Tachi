@@ -53,7 +53,7 @@ fn expected_gc_keys(include_session_claims: bool) -> std::collections::BTreeSet<
     .collect::<std::collections::BTreeSet<_>>();
     if include_session_claims {
         keys.insert("session_claims_released_pruned".to_string());
-        keys.insert("session_claims_active_staled".to_string());
+        keys.insert("session_claims_active_orphaned".to_string());
     }
     keys
 }
@@ -187,7 +187,7 @@ async fn memory_gc_preserves_two_store_scope_and_count_contracts() {
             json!(usize::from(seed_project)),
             "project kanban count changed for {case}"
         );
-        assert_eq!(output["global"]["session_claims_active_staled"], json!(0));
+        assert_eq!(output["global"]["session_claims_active_orphaned"], json!(0));
         assert_eq!(output["global"]["session_claims_released_pruned"], json!(0));
 
         let global_remaining = server
@@ -243,10 +243,10 @@ async fn memory_gc_reaps_session_claims_only_in_global_store() {
             .expect("two-store GC succeeds"),
     )
     .expect("two-store GC response JSON");
-    assert_eq!(output["global"]["session_claims_active_staled"], json!(1));
+    assert_eq!(output["global"]["session_claims_active_orphaned"], json!(1));
     assert!(
         output["project"]
-            .get("session_claims_active_staled")
+            .get("session_claims_active_orphaned")
             .is_none(),
         "project result must never report a global-only claim sweep"
     );
@@ -275,6 +275,6 @@ async fn memory_gc_reaps_session_claims_only_in_global_store() {
                 .map_err(|error| format!("read project claim: {error}"))
         })
         .expect("read project claim state");
-    assert_eq!(global_state, "released");
+    assert_eq!(global_state, "orphaned");
     assert_eq!(project_state, "active");
 }

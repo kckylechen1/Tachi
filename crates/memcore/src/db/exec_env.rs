@@ -160,6 +160,10 @@ pub struct ExecEnvLease {
     pub branch: String,
     pub base_sha: String,
     pub dispatch_id: Option<String>,
+    /// Opaque v21 holder evidence; ExecEnv never owns identity transitions.
+    pub agent_identity_id: Option<String>,
+    /// Opaque v21 WorkClaim link; only `bind_work_claim_exec_env` writes it.
+    pub claim_id: Option<String>,
     pub env_class: EnvClass,
     pub state: ExecEnvState,
     pub reclaim_reason: Option<String>,
@@ -204,7 +208,8 @@ pub enum ReclaimOutcome {
     NotFound,
 }
 
-const SELECT_COLUMNS: &str = "env_id, kind, path, repo_root, branch, base_sha, dispatch_id, \
+const SELECT_COLUMNS: &str =
+    "env_id, kind, path, repo_root, branch, base_sha, dispatch_id, agent_identity_id, claim_id, \
      env_class, state, reclaim_reason, schema_version, created_at, reclaimed_at";
 
 fn conv_err(idx: usize, e: MemoryError) -> rusqlite::Error {
@@ -219,10 +224,10 @@ fn conv_err(idx: usize, e: MemoryError) -> rusqlite::Error {
 }
 
 fn row_to_lease(row: &rusqlite::Row<'_>) -> Result<ExecEnvLease, rusqlite::Error> {
-    let class_raw: String = row.get(7)?;
-    let env_class = EnvClass::parse(&class_raw).map_err(|e| conv_err(7, e))?;
-    let state_raw: String = row.get(8)?;
-    let state = ExecEnvState::parse(&state_raw).map_err(|e| conv_err(8, e))?;
+    let class_raw: String = row.get(9)?;
+    let env_class = EnvClass::parse(&class_raw).map_err(|e| conv_err(9, e))?;
+    let state_raw: String = row.get(10)?;
+    let state = ExecEnvState::parse(&state_raw).map_err(|e| conv_err(10, e))?;
     Ok(ExecEnvLease {
         env_id: row.get(0)?,
         kind: row.get(1)?,
@@ -231,12 +236,14 @@ fn row_to_lease(row: &rusqlite::Row<'_>) -> Result<ExecEnvLease, rusqlite::Error
         branch: row.get(4)?,
         base_sha: row.get(5)?,
         dispatch_id: row.get(6)?,
+        agent_identity_id: row.get(7)?,
+        claim_id: row.get(8)?,
         env_class,
         state,
-        reclaim_reason: row.get(9)?,
-        schema_version: row.get(10)?,
-        created_at: row.get(11)?,
-        reclaimed_at: row.get(12)?,
+        reclaim_reason: row.get(11)?,
+        schema_version: row.get(12)?,
+        created_at: row.get(13)?,
+        reclaimed_at: row.get(14)?,
     })
 }
 
@@ -250,9 +257,9 @@ pub fn insert_exec_env(conn: &Connection, lease: &NewExecEnvLease) -> Result<(),
     };
     conn.execute(
         "INSERT INTO exec_envs
-         (env_id, kind, path, repo_root, branch, base_sha, dispatch_id,
+         (env_id, kind, path, repo_root, branch, base_sha, dispatch_id, agent_identity_id, claim_id,
           env_class, state, reclaim_reason, schema_version, created_at, reclaimed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', NULL, 1, ?9, NULL)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, 'active', NULL, 1, ?9, NULL)",
         params![
             lease.env_id,
             lease.kind,
@@ -328,8 +335,8 @@ pub fn list_exec_envs(
 /// THE single reclaim path (#894 S1): transactionally flip an `active` lease to
 /// `reclaimed`, stamping `reclaimed_at` and an optional reason. Idempotent — a
 /// lease that is already `reclaimed` returns [`ReclaimOutcome::AlreadyReclaimed`]
-/// without a second write, and a missing lease returns
-/// [`ReclaimOutcome::NotFound`]. safe_merge / cancel / terminal-state must all
+/// without a second write. A missing lease is a typed [`MemoryError::NotFound`]
+/// rather than a successful-looking outcome. safe_merge / cancel / terminal-state must all
 /// call through here; the sweep is a backstop that never owns this transition.
 pub fn reclaim_exec_env(
     conn: &mut Connection,
@@ -337,8 +344,8 @@ pub fn reclaim_exec_env(
     reason: Option<&str>,
 ) -> Result<ReclaimOutcome, MemoryError> {
     let tx = conn.transaction()?;
-    // Resolve the target row inside the transaction so the read-then-write is
-    // atomic against a concurrent reclaim of the same lease.
+    // Resolve existence before holder evidence: a missing ledger row is not
+    // unverifiable holder evidence, it is a caller-visible missing target.
     let existing: Option<(String, String)> = match selector {
         ExecEnvSelector::EnvId(env_id) => tx
             .query_row(
@@ -356,21 +363,35 @@ pub fn reclaim_exec_env(
             )
             .optional()?,
     };
-
-    let outcome = match existing {
-        None => ReclaimOutcome::NotFound,
-        Some((env_id, state_raw)) => match ExecEnvState::parse(&state_raw)? {
-            ExecEnvState::Reclaimed => ReclaimOutcome::AlreadyReclaimed { env_id },
-            ExecEnvState::Active => {
-                let now = normalize_utc_iso_or_now("");
-                tx.execute(
-                    "UPDATE exec_envs SET state = 'reclaimed', reclaimed_at = ?2, \
+    let Some((env_id, state_raw)) = existing else {
+        return Err(MemoryError::NotFound(match selector {
+            ExecEnvSelector::EnvId(env_id) => format!("exec env {env_id}"),
+            ExecEnvSelector::Path(path) => format!("exec env at {path}"),
+        }));
+    };
+    // Holder evidence is read in the same transaction as the destructive
+    // state transition. A held, contradictory, unavailable, or unverifiable
+    // ledger must refuse loudly; it must never look like a harmless no-op.
+    match super::session_claims::holder_evidence(&tx, &env_id)? {
+        super::session_claims::HolderEvidence::Clear
+        | super::session_claims::HolderEvidence::NotApplicable => {}
+        evidence => {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing to reclaim exec env {env_id}: holder evidence is {evidence:?}"
+            )));
+        }
+    }
+    let outcome = match ExecEnvState::parse(&state_raw)? {
+        ExecEnvState::Reclaimed => ReclaimOutcome::AlreadyReclaimed { env_id },
+        ExecEnvState::Active => {
+            let now = normalize_utc_iso_or_now("");
+            tx.execute(
+                "UPDATE exec_envs SET state = 'reclaimed', reclaimed_at = ?2, \
                      reclaim_reason = ?3 WHERE env_id = ?1 AND state = 'active'",
-                    params![env_id, now, reason],
-                )?;
-                ReclaimOutcome::Reclaimed { env_id }
-            }
-        },
+                params![env_id, now, reason],
+            )?;
+            ReclaimOutcome::Reclaimed { env_id }
+        }
     };
     tx.commit()?;
     Ok(outcome)
@@ -456,6 +477,35 @@ mod tests {
     }
 
     #[test]
+    fn reclaim_refuses_a_held_work_claim_instead_of_reporting_success() {
+        let mut conn = open_conn();
+        insert_exec_env(&conn, &new_lease("env-held", "/wt/held")).unwrap();
+        conn.execute(
+            "INSERT INTO session_claims (claim_id, branch, state, created_at, heartbeat_at, \
+             agent_identity_id, exec_env_id) VALUES ('claim-held', '', 'active', '', '', 'agent-held', 'env-held')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE exec_envs SET agent_identity_id='agent-held', claim_id='claim-held' WHERE env_id='env-held'",
+            [],
+        )
+        .unwrap();
+
+        let err = reclaim_exec_env(
+            &mut conn,
+            &ExecEnvSelector::EnvId("env-held".to_string()),
+            Some("cleanup"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, MemoryError::WorkClaimIncompatibleState(_)));
+        assert_eq!(
+            get_exec_env(&conn, "env-held").unwrap().unwrap().state,
+            ExecEnvState::Active
+        );
+    }
+
+    #[test]
     fn reclaim_is_idempotent_no_second_write() {
         let mut conn = open_conn();
         insert_exec_env(&conn, &new_lease("env-3", "/wt/3")).unwrap();
@@ -500,9 +550,9 @@ mod tests {
     #[test]
     fn reclaim_missing_lease_reports_not_found() {
         let mut conn = open_conn();
-        let outcome =
-            reclaim_exec_env(&mut conn, &ExecEnvSelector::EnvId("nope".to_string()), None).unwrap();
-        assert_eq!(outcome, ReclaimOutcome::NotFound);
+        let err = reclaim_exec_env(&mut conn, &ExecEnvSelector::EnvId("nope".to_string()), None)
+            .unwrap_err();
+        assert!(matches!(err, MemoryError::NotFound(message) if message == "exec env nope"));
     }
 
     #[test]

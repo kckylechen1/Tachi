@@ -265,6 +265,7 @@ impl MemoryServer {
                 tool_profile: Some(tachi_hub::default_tool_profile()),
                 session_client: None,
                 session_project: None,
+                work_claim_connection: None,
             })),
             bound_agent_id: Arc::new(StdRwLock::new(bound_agent_id)),
             home_dir,

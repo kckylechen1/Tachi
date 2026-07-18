@@ -90,16 +90,20 @@ pub use db::mirror_eval::{
 pub use db::row_to_entry;
 #[cfg(feature = "admin")]
 pub use db::session_claims::{
-    gc_session_claims, get_claim, heartbeat_claim, insert_claim, is_claim_stale,
-    list_active_claims, list_claims, release_claim, upsert_or_heartbeat_claim, ClaimSelector,
-    ClaimState, NewSessionClaim, ReleaseOutcome, SessionClaim, SessionClaimsGc,
+    bind_work_claim_exec_env, gc_session_claims, get_claim, handoff_work_claim, heartbeat_claim,
+    heartbeat_work_claim, holder_evidence, insert_agent_identity, insert_claim, insert_work_claim,
+    is_claim_stale, list_active_claims, list_claims, record_rejected_admission,
+    record_unverified_admission, release_claim, release_work_claim, upsert_or_heartbeat_claim,
+    AdmissionState, AgentIdentity, ClaimSelector, ClaimState, HolderEvidence, NewSessionClaim,
+    NewWorkClaim, ReleaseOutcome, SessionClaim, SessionClaimsGc, UnverifiedAdmissionState,
+    WorkClaim, WorkClaimHandoff, WorkClaimHandoffRequest, WorkClaimHeartbeat, WorkClaimMode,
 };
 pub use db::{anchor_id, anchor_path, AnchorKind};
 pub use db::{CategoryPathPrefixMemoryRow, FoundryJobStatusCounts, PathPrefixMemoryRow};
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use db::{DbOpenContext, MigrationAuthority, OpenIntent};
 pub use embed_config::embed_raw_tier_enabled;
-pub use error::MemoryError;
+pub use error::{MemoryError, WorkClaimTransitionReason};
 #[cfg(feature = "admin")]
 pub use foundry::{
     AgentEvolutionProposal, AgentEvolutionSynthesis, AgentProfileDocument,

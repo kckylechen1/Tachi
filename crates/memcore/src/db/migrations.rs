@@ -38,6 +38,7 @@
 //! - v20: `mirror_eval_runs` + `mirror_eval_observations` +
 //!   `mirror_eval_adjudications` tables (#1066) — first-class mirror eval
 //!   intake for harness-native subagents (register/observe/adjudicate/get).
+//! - v21: AgentIdentity / WorkClaim holder-evidence spine (#1253).
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -81,7 +82,7 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 20;
+pub const EXPECTED_SCHEMA_VERSION: u32 = 21;
 
 mod basic;
 mod cross_db;
@@ -92,6 +93,7 @@ mod dispatch_outcomes_reported;
 mod domain_retire;
 mod exec_env_class;
 mod hard_state_index;
+mod identity_workclaim_spine;
 mod idless_identity;
 mod legacy_columns;
 mod mirror_eval;
@@ -108,6 +110,7 @@ use dispatch_outcomes_reported::*;
 use domain_retire::*;
 use exec_env_class::*;
 use hard_state_index::*;
+use identity_workclaim_spine::*;
 use idless_identity::*;
 use legacy_columns::*;
 pub use legacy_columns::{
@@ -145,6 +148,7 @@ pub struct MigrationReport {
     pub dispatch_adjudications_created: usize,
     pub idless_identity_constraint_added: usize,
     pub mirror_eval_tables_created: usize,
+    pub identity_workclaim_columns_added: usize,
 }
 
 /// Read the schema version stamp (`PRAGMA user_version`). Absent/fresh DBs
@@ -499,6 +503,12 @@ pub(crate) fn run_data_migrations_in_tx(
 
     report.mirror_eval_tables_created =
         apply_versioned_migration(conn, "v20_mirror_eval", migrate_v20_mirror_eval)?.unwrap_or(0);
+    report.identity_workclaim_columns_added = apply_versioned_migration(
+        conn,
+        "v21_identity_workclaim_spine",
+        migrate_v21_identity_workclaim_spine,
+    )?
+    .unwrap_or(0);
 
     Ok(report)
 }

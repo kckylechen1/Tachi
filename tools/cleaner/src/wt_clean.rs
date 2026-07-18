@@ -4,6 +4,7 @@ use std::process::Command;
 use crate::holder::{self, HolderEvidence, HolderProbeFn};
 use crate::registry;
 use crate::scrap_ledger;
+use crate::work_claim::{self, DbHolderProbeFn};
 
 #[derive(Debug, Clone, Copy)]
 pub enum OutputFormat {
@@ -34,7 +35,12 @@ struct WtRemoveReport {
 }
 
 pub fn run_wt_remove(options: WtRemoveOptions) -> Result<(), String> {
-    let report = plan_wt_remove(&options.path, !options.force, &holder::probe_holders);
+    let report = plan_wt_remove(
+        &options.path,
+        !options.force,
+        &work_claim::probe_worktree_holder,
+        &holder::probe_holders,
+    );
     let report = if options.force && report.allowed {
         execute_wt_remove(report)
     } else {
@@ -55,7 +61,12 @@ pub fn run_wt_remove(options: WtRemoveOptions) -> Result<(), String> {
 /// (possibly PATH-shimmed) `lsof`. Production callers always pass
 /// `&holder::probe_holders`; tests inject a fake to exercise `Held` /
 /// `Unknown` deterministically.
-fn plan_wt_remove(path: &Path, dry_run: bool, probe: &HolderProbeFn) -> WtRemoveReport {
+fn plan_wt_remove(
+    path: &Path,
+    dry_run: bool,
+    db_probe: &DbHolderProbeFn,
+    probe: &HolderProbeFn,
+) -> WtRemoveReport {
     let mut report = WtRemoveReport {
         action: "wt-remove",
         path: path.display().to_string(),
@@ -151,6 +162,17 @@ fn plan_wt_remove(path: &Path, dry_run: bool, probe: &HolderProbeFn) -> WtRemove
     // freeze boundary 3: a scrapped tree may only reopen under a NEW
     // branch + NEW path).
     report.branch = current_branch(&worktree_root).ok();
+
+    // Durable WorkClaim evidence is a separate precondition from OS process
+    // evidence.  Clear and legacy NotApplicable may proceed; every other
+    // answer is a loud refusal before any destructive action is considered.
+    let db_evidence = db_probe(&worktree_root);
+    if let Some(reason) = db_evidence.refusal_reason() {
+        report
+            .errors
+            .push(format!("refusing to remove worktree: {reason}"));
+        return report;
+    }
 
     // OS-view attributed process-holder evidence (tachi#1118 freeze
     // boundary 1/2). Fail-closed: `Unknown` (probe unavailable/parse
@@ -515,7 +537,12 @@ mod tests {
             }])
         };
 
-        let report = plan_wt_remove(&worktree, false, &fake_held);
+        let report = plan_wt_remove(
+            &worktree,
+            false,
+            &|_| crate::work_claim::DbHolderEvidence::Clear,
+            &fake_held,
+        );
         assert!(
             !report.allowed,
             "a live attributed holder must refuse the close predicate"
@@ -542,7 +569,12 @@ mod tests {
         let fake_unknown =
             |_path: &Path| HolderEvidence::Unknown("lsof unavailable: No such file".to_string());
 
-        let report = plan_wt_remove(&worktree, false, &fake_unknown);
+        let report = plan_wt_remove(
+            &worktree,
+            false,
+            &|_| crate::work_claim::DbHolderEvidence::Clear,
+            &fake_unknown,
+        );
         assert!(
             !report.allowed,
             "inconclusive holder evidence must never be treated as safe to reclaim (fail-closed, tachi#1118)"
@@ -562,13 +594,70 @@ mod tests {
         let root = unique_temp_dir("wt-clean-clear-holder");
         let (_home_guard, worktree) = setup_registered_worktree(&root);
 
-        let report = plan_wt_remove(&worktree, false, &|_path: &Path| HolderEvidence::Clear);
+        let report = plan_wt_remove(
+            &worktree,
+            false,
+            &|_| crate::work_claim::DbHolderEvidence::Clear,
+            &|_path: &Path| HolderEvidence::Clear,
+        );
         assert!(
             report.allowed,
             "a clean, unheld, registered worktree must be allowed: {:?}",
             report.errors
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn persisted_holder_refusals_are_loud_while_clear_and_legacy_proceed() {
+        // RED/GREEN discrimination: without the DB gate every case below
+        // reaches the Clear OS probe and is allowed. The fixed predicate only
+        // permits explicit Clear and legacy NotApplicable evidence.
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let root = unique_temp_dir("wt-clean-db-holder");
+        let (_home_guard, worktree) = setup_registered_worktree(&root);
+        let clear_os = |_path: &Path| HolderEvidence::Clear;
+
+        for evidence in [
+            crate::work_claim::DbHolderEvidence::Held,
+            crate::work_claim::DbHolderEvidence::Contradictory,
+            crate::work_claim::DbHolderEvidence::Unavailable("DB locked".to_string()),
+            crate::work_claim::DbHolderEvidence::Unverifiable("missing claim row".to_string()),
+        ] {
+            let probe_evidence = evidence.clone();
+            let report = plan_wt_remove(
+                &worktree,
+                false,
+                &move |_| probe_evidence.clone(),
+                &clear_os,
+            );
+            assert!(
+                !report.allowed,
+                "{evidence:?} must refuse before OS-clear deletion"
+            );
+            assert!(report
+                .errors
+                .join(" | ")
+                .contains("persisted WorkClaim holder evidence"));
+        }
+
+        for evidence in [
+            crate::work_claim::DbHolderEvidence::Clear,
+            crate::work_claim::DbHolderEvidence::NotApplicable,
+        ] {
+            let probe_evidence = evidence.clone();
+            let report = plan_wt_remove(
+                &worktree,
+                false,
+                &move |_| probe_evidence.clone(),
+                &clear_os,
+            );
+            assert!(
+                report.allowed,
+                "{evidence:?} may proceed to the OS/dirty guards"
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

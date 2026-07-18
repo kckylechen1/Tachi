@@ -18,7 +18,7 @@ pub(crate) use check_state::{
 pub(crate) use check_state::CheckStateLedgerState;
 pub(crate) use cli::CliGhClient;
 pub(in crate::gh_ops) use error::{classify_gh_error, is_no_checks_reported};
-pub(crate) use handler::handle_github_safe_merge;
+pub(crate) use handler::{handle_github_safe_merge, handle_github_safe_merge_with_holder_gate};
 pub(crate) use http::{gh_client_for_server, SelectedGhClient};
 pub(in crate::gh_ops) use parser::parse_pr_view_json;
 #[cfg(test)]

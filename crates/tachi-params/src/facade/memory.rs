@@ -68,9 +68,8 @@ fn tachi_memory_action_schema(
             "doctor_scan",
             "ingest",
             "ingest_source",
-            // #1001: manual presence-claim backstop (auto hooks cover
-            // briefing/intake/dispatch; these two are for harness-native work
-            // that never routes through those call sites).
+            // #1253 compatibility aliases: canonical claim/release live on
+            // tachi_task and use the WorkClaim ledger.
             "claim",
             "release",
             // #964: read-once agent-to-agent ephemeral notes.
@@ -592,7 +591,7 @@ pub struct TachiMemoryParams {
     #[schemars(description = "[action=ingest] Messages in the conversation turn.")]
     pub messages: Vec<Message>,
 
-    // --- presence claim fields (#1001) ---
+    // --- WorkClaim compatibility-alias fields (#1253) ---
     #[serde(default)]
     #[schemars(
         description = "[action=claim] GitHub issue this session is working (e.g. org/repo#123). At least one of issue_ref/flow_id is required."

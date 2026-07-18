@@ -30,6 +30,8 @@ mod prs;
 mod repo;
 mod review_digest;
 mod router;
+#[cfg(test)]
+pub(crate) use router::worktree_holder_gate;
 mod safe_merge;
 mod ship;
 mod transport;

@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::holder::{self, HolderEvidence};
 use crate::scrap_ledger;
+use crate::work_claim;
 use crate::wt_clean::OutputFormat;
 
 pub const DEFAULT_SWEEP_MAX_AGE_DAYS: u64 = 7;
@@ -250,6 +251,16 @@ fn execute_sweep(report: &mut SweepReport) {
                 candidate.path,
                 recheck.describe_family()
             ));
+            continue;
+        }
+        // The persisted holder ledger is independent from the OS probe above.
+        // Do not infer a clear answer when this CLI cannot resolve its runtime
+        // DB/home: every non-clear/non-legacy result is a loud skip.
+        let db_evidence = work_claim::probe_worktree_holder(Path::new(&candidate.path));
+        if let Some(reason) = db_evidence.refusal_reason() {
+            report
+                .warnings
+                .push(format!("skipped worktree {} ({reason})", candidate.path));
             continue;
         }
 

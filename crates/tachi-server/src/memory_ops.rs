@@ -469,8 +469,8 @@ pub(crate) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, St
                 json!(claims_gc.released_pruned),
             );
             object.insert(
-                "session_claims_active_staled".into(),
-                json!(claims_gc.active_staled),
+                "session_claims_active_orphaned".into(),
+                json!(claims_gc.active_orphaned),
             );
         }
         Ok(gc)

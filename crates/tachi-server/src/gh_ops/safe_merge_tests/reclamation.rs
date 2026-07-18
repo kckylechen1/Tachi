@@ -138,6 +138,73 @@ async fn safe_merge_reclaims_worktree_after_successful_merge() {
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
+async fn safe_merge_holder_refusal_happens_before_external_cleaner() {
+    // RED/GREEN discrimination: before the holder gate, this exact fake
+    // cleaner removes the directory and writes its invocation marker. The
+    // fixed path reports the durable refusal before spawning the cleaner.
+    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let original_run_root = std::env::var_os("TACHI_RUN_ROOT");
+    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let (bin_path, marker_path) = install_fake_cleaner(&bin_dir, true);
+    let original_clean_bin = std::env::var_os("TACHI_CLEAN_BIN");
+    std::env::set_var("TACHI_CLEAN_BIN", &bin_path);
+    let worktree = tmp.path().join("wt-held");
+    std::fs::create_dir_all(&worktree).unwrap();
+
+    let flow = "flow_reclaim-held";
+    write_verification(tmp.path(), flow, "passed", "deadbeef");
+    let client = MockGhClient::new()
+        .with_pr("o/r", ready_pr())
+        .with_checks("o/r", 42, vec![]);
+    let out = handle_github_safe_merge_with_holder_gate(
+        &client,
+        "o/r",
+        42,
+        MergeStrategy::Squash,
+        false,
+        Some(flow),
+        &[],
+        MergeGatePolicy::standard(),
+        Some(worktree.to_str().unwrap()),
+        true,
+        &|_| Err("persisted WorkClaim holder evidence is Held".to_string()),
+    )
+    .await
+    .expect("merge remains observable even though cleanup refuses");
+
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["reclamation"]["skipped"], "holder_evidence_refused");
+    assert!(value["reclamation"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("Held"));
+    assert!(
+        !marker_path.exists(),
+        "holder refusal must prevent cleaner spawn"
+    );
+    assert!(
+        worktree.exists(),
+        "holder refusal must preserve the worktree"
+    );
+
+    if let Some(v) = original_run_root {
+        std::env::set_var("TACHI_RUN_ROOT", v);
+    } else {
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+    match original_clean_bin {
+        Some(v) => std::env::set_var("TACHI_CLEAN_BIN", v),
+        None => std::env::remove_var("TACHI_CLEAN_BIN"),
+    }
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
 async fn safe_merge_dry_run_does_not_reclaim_worktree() {
     // A dry-run (preview) must NOT reclaim — even when a worktree is supplied
     // and reclaim_worktree=true. The merge never executes, so there is nothing
