@@ -473,29 +473,36 @@ fn reject_work_claim_collision(
     tx: &Transaction<'_>,
     incoming: &NewWorkClaim,
 ) -> Result<(), MemoryError> {
-    let Some(issue_ref) = incoming.issue_ref.as_deref() else {
-        return Ok(());
-    };
     let mut statement = tx.prepare(
-        "SELECT claim_id, mode, worktree_path, declared_file_scope, expected_head
+        "SELECT claim_id, issue_ref, mode, worktree_path, declared_file_scope, expected_head
          FROM session_claims
-         WHERE issue_ref = ?1 AND state IN ('active', 'orphaned') AND claim_id != ?2",
+         WHERE state IN ('active', 'orphaned') AND claim_id != ?1",
     )?;
-    let existing = statement.query_map(params![issue_ref, incoming.claim_id], |row| {
+    let existing = statement.query_map(params![incoming.claim_id], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, Option<String>>(1)?,
             row.get::<_, Option<String>>(2)?,
             row.get::<_, Option<String>>(3)?,
             row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
         ))
     })?;
     for row in existing {
-        let (claim_id, mode, worktree_path, scope, expected_head) = row?;
-        if expected_head
-            .as_deref()
-            .is_some_and(|head| head != incoming.expected_head)
+        let (claim_id, issue_ref, mode, worktree_path, scope, expected_head) = row?;
+        let same_issue = matches!(
+            (incoming.issue_ref.as_deref(), issue_ref.as_deref()),
+            (Some(incoming_issue), Some(existing_issue)) if incoming_issue == existing_issue
+        );
+        if same_issue
+            && expected_head
+                .as_deref()
+                .is_some_and(|head| head != incoming.expected_head)
         {
+            let issue_ref = incoming
+                .issue_ref
+                .as_deref()
+                .expect("same_issue requires an incoming issue");
             return Err(MemoryError::WorkClaimConflict(format!(
                 "issue {issue_ref} expected head conflicts with protected claim {claim_id}"
             )));
@@ -508,13 +515,19 @@ fn reject_work_claim_collision(
             worktree_path.as_deref().unwrap_or(""),
         ) {
             return Err(MemoryError::WorkClaimConflict(format!(
-                "issue {issue_ref} writable worktree path overlaps protected claim {claim_id}"
+                "writable worktree path overlaps protected claim {claim_id}"
             )));
         }
-        if scopes_overlap(
-            &incoming.declared_file_scope,
-            scope.as_deref().unwrap_or(""),
-        ) {
+        if same_issue
+            && scopes_overlap(
+                &incoming.declared_file_scope,
+                scope.as_deref().unwrap_or(""),
+            )
+        {
+            let issue_ref = incoming
+                .issue_ref
+                .as_deref()
+                .expect("same_issue requires an incoming issue");
             return Err(MemoryError::WorkClaimConflict(format!(
                 "issue {issue_ref} writable file scope overlaps protected claim {claim_id}"
             )));
@@ -2319,6 +2332,51 @@ mod tests {
             insert_work_claim(&mut conn, &takeover),
             Err(MemoryError::WorkClaimConflict(_))
         ));
+    }
+
+    #[test]
+    fn writable_work_claims_collide_on_one_tree_across_issue_boundaries() {
+        let mut conn = open_conn();
+        for identity_id in ["agent-tree-a", "agent-tree-b", "agent-tree-none"] {
+            identity(&conn, identity_id);
+        }
+
+        let mut first = work_claim("tree-a", "agent-tree-a");
+        first.issue_ref = Some("org/repo#tree-a".into());
+        first.worktree_path = "/worktrees/canonical-shared".into();
+        first.declared_file_scope = r#"["crates/a/**"]"#.into();
+        insert_work_claim(&mut conn, &first).unwrap();
+
+        let mut different_issue = work_claim("tree-b", "agent-tree-b");
+        different_issue.issue_ref = Some("org/repo#tree-b".into());
+        different_issue.worktree_path = first.worktree_path.clone();
+        different_issue.declared_file_scope = r#"["crates/b/**"]"#.into();
+        let different_issue_error = insert_work_claim(&mut conn, &different_issue)
+            .expect_err("different issues cannot own the same writable physical tree");
+        assert!(matches!(
+            different_issue_error,
+            MemoryError::WorkClaimConflict(_)
+        ));
+        assert!(
+            different_issue_error
+                .to_string()
+                .contains("writable worktree path overlaps"),
+            "unexpected conflict: {different_issue_error}"
+        );
+
+        let mut no_issue = work_claim("tree-none", "agent-tree-none");
+        no_issue.issue_ref = None;
+        no_issue.worktree_path = first.worktree_path.clone();
+        no_issue.declared_file_scope = r#"["crates/no-issue/**"]"#.into();
+        let no_issue_error = insert_work_claim(&mut conn, &no_issue)
+            .expect_err("an unscoped claim cannot own an already-held writable physical tree");
+        assert!(matches!(no_issue_error, MemoryError::WorkClaimConflict(_)));
+        assert!(
+            no_issue_error
+                .to_string()
+                .contains("writable worktree path overlaps"),
+            "unexpected conflict: {no_issue_error}"
+        );
     }
 
     #[test]
