@@ -447,6 +447,7 @@ mod tests {
             TACHI_RECALL_ID_LIKE_EXACT_MATCH_BOOST=15
             TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.22
             TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4
+            TACHI_RECALL_RAW_VECTOR_SIMILARITY_FLOOR=0.28
             "#,
         );
         let mut config = RecallConfig::default();
@@ -461,6 +462,7 @@ mod tests {
         assert_eq!(config.id_like_exact_match_boost, 15.0);
         assert_eq!(config.or_fallback_fts_score_factor, 0.22);
         assert_eq!(config.or_fallback_fts_max_terms, 4);
+        assert_eq!(config.raw_vector_similarity_floor, 0.28);
     }
 
     #[test]
@@ -474,6 +476,7 @@ mod tests {
             TACHI_RECALL_MAX_EXPANDED_FTS_QUERIES=0
             TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=NaN
             TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=0
+            TACHI_RECALL_RAW_VECTOR_SIMILARITY_FLOOR=NaN
             "#,
         );
         let mut config = RecallConfig::default();
@@ -493,6 +496,10 @@ mod tests {
             RecallConfig::default().or_fallback_fts_score_factor
         );
         assert_eq!(config.or_fallback_fts_max_terms, 1);
+        assert_eq!(
+            config.raw_vector_similarity_floor,
+            DEFAULT_RAW_VECTOR_SIMILARITY_FLOOR
+        );
     }
 
     /// #1096 leaf-2a. Against the pre-fix `config_env_path()` (which only

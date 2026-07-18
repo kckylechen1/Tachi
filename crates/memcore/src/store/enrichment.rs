@@ -229,8 +229,11 @@ impl MemoryStore {
         exclude_source: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<(String, String, String, i64)>, MemoryError> {
+        // Predicate must stay aligned with `vector_counts_filtered` / status
+        // coverage (#744): no archived filter, no raw-tier gate (this path
+        // always included raw at base). Ordering only: non-raw first, then
+        // importance DESC — not part of the count↔selection membership set.
         let limit_val = limit.map(|l| l as i64).unwrap_or(-1);
-        let tier_filter = crate::embed_config::embed_raw_tier_sql_filter("");
         let order_by = crate::embed_config::embed_selection_order_by("");
         let mut out = Vec::new();
         match exclude_source {
@@ -239,9 +242,7 @@ impl MemoryStore {
             {
                 let mut stmt = self.conn.prepare(&format!(
                     "SELECT id, text, summary, revision FROM memories
-                     WHERE archived = 0
-                       AND id NOT IN (SELECT id FROM memories_vec)
-                       {tier_filter}
+                     WHERE id NOT IN (SELECT id FROM memories_vec)
                        AND id NOT LIKE 'anchor:%'
                        AND NOT ({})
                      {order_by}
@@ -263,9 +264,7 @@ impl MemoryStore {
             Some(source) => {
                 let mut stmt = self.conn.prepare(&format!(
                     "SELECT id, text, summary, revision FROM memories
-                     WHERE archived = 0
-                       AND id NOT IN (SELECT id FROM memories_vec)
-                       {tier_filter}
+                     WHERE id NOT IN (SELECT id FROM memories_vec)
                        AND id NOT LIKE 'anchor:%'
                        AND source != ?1
                      {order_by}
@@ -286,9 +285,7 @@ impl MemoryStore {
             None => {
                 let mut stmt = self.conn.prepare(&format!(
                     "SELECT id, text, summary, revision FROM memories
-                     WHERE archived = 0
-                       AND id NOT IN (SELECT id FROM memories_vec)
-                       {tier_filter}
+                     WHERE id NOT IN (SELECT id FROM memories_vec)
                        AND id NOT LIKE 'anchor:%'
                      {order_by}
                      LIMIT ?1"

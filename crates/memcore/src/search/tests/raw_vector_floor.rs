@@ -19,22 +19,24 @@ fn insert_with_vector(
     upsert(conn, &entry, true).unwrap();
 }
 
-fn has_vec_table(conn: &Connection) -> bool {
-    conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'memories_vec'",
-        [],
-        |row| row.get::<_, i64>(0),
-    )
-    .unwrap_or(0)
-        > 0
+fn require_vec_table(conn: &Connection) {
+    let has_vec: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'memories_vec'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    assert!(
+        has_vec > 0,
+        "sqlite-vec required for this test (memories_vec missing after setup())"
+    );
 }
 
 #[test]
 fn raw_below_floor_dropped_from_vector_channel_but_reachable_via_fts() {
     let mut conn = setup();
-    if !has_vec_table(&conn) {
-        return;
-    }
+    require_vec_table(&conn);
 
     const DIM: usize = 1024;
     let query_vec = vec![1.0_f32; DIM];
@@ -92,10 +94,10 @@ fn raw_below_floor_dropped_from_vector_channel_but_reachable_via_fts() {
 
 #[test]
 fn consolidated_tier_unaffected_by_raw_vector_floor() {
+    // Regression guard only: this assertion also holds on pre-#1242 base
+    // (no raw floor existed). Not claimed as discrimination evidence.
     let mut conn = setup();
-    if !has_vec_table(&conn) {
-        return;
-    }
+    require_vec_table(&conn);
 
     const DIM: usize = 1024;
     let query_vec = vec![1.0_f32; DIM];
