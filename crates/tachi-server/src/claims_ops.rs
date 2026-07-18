@@ -107,6 +107,11 @@ fn task_identity(server: &MemoryServer, asserted: Option<String>) -> Result<Stri
     if admission == "rejected" {
         return Err("AgentIdentity admission rejected".to_string());
     }
+    if admission == "unavailable" {
+        return Err(
+            "AgentIdentity admission unavailable; remote identity has no #1170 proof".to_string(),
+        );
+    }
     let identity = identity.ok_or_else(|| {
         "AgentIdentity admission unavailable; remote identity has no #1170 proof".to_string()
     })?;
@@ -571,9 +576,13 @@ pub(crate) fn list_live_claims_for_briefing(server: &MemoryServer) -> Vec<Sessio
 fn own_live_claim_scope(
     live_claims: &[SessionClaim],
     session_client: &str,
+    agent_identity_id: Option<&str>,
     issue_ref: Option<&str>,
 ) -> Vec<String> {
-    let mine = |c: &&SessionClaim| c.session_client.as_deref() == Some(session_client);
+    let mine = |c: &&SessionClaim| {
+        c.session_client.as_deref() == Some(session_client)
+            || agent_identity_id.is_some() && c.agent_identity_id.as_deref() == agent_identity_id
+    };
     let claim = issue_ref
         .and_then(|want| {
             live_claims
@@ -593,17 +602,32 @@ fn own_live_claim_scope(
 /// line, not an error. `exclude_session_client` lets a caller ignore its own
 /// prior claim (re-claiming the same issue from the same session is not a
 /// collision).
+#[cfg(test)]
 pub(crate) fn collision_warnings(
     live_claims: &[SessionClaim],
     exclude_session_client: Option<&str>,
     issue_ref: Option<&str>,
     new_scope: &[String],
 ) -> Vec<String> {
+    collision_warnings_excluding(
+        live_claims,
+        exclude_session_client,
+        None,
+        issue_ref,
+        new_scope,
+    )
+}
+
+fn collision_warnings_excluding(
+    live_claims: &[SessionClaim],
+    exclude_session_client: Option<&str>,
+    exclude_agent_identity_id: Option<&str>,
+    issue_ref: Option<&str>,
+    new_scope: &[String],
+) -> Vec<String> {
     let mut warnings = Vec::new();
     for claim in live_claims {
-        if exclude_session_client.is_some()
-            && claim.session_client.as_deref() == exclude_session_client
-        {
+        if claim_matches_exclusion(claim, exclude_session_client, exclude_agent_identity_id) {
             continue;
         }
         // #1001 round 2 item 5: every value below (session_client, the
@@ -661,6 +685,16 @@ pub(crate) fn collision_warnings(
         }
     }
     warnings
+}
+
+fn claim_matches_exclusion(
+    claim: &SessionClaim,
+    exclude_session_client: Option<&str>,
+    exclude_agent_identity_id: Option<&str>,
+) -> bool {
+    exclude_session_client.is_some() && claim.session_client.as_deref() == exclude_session_client
+        || exclude_agent_identity_id.is_some()
+            && claim.agent_identity_id.as_deref() == exclude_agent_identity_id
 }
 
 /// `tachi_memory(action='claim')` — manual claim registration for
@@ -817,12 +851,27 @@ pub(crate) fn briefing_claims_board(server: &MemoryServer) -> serde_json::Value 
 /// reader's rendered output regardless of which surface renders it.
 fn sanitize_board_row(c: &SessionClaim) -> serde_json::Value {
     serde_json::json!({
-        "session_client": sanitize_presence_identifier(c.session_client.as_deref()),
+        "session_client": sanitize_presence_identifier(display_session_client(c)),
         "issue_ref": sanitize_presence_identifier(c.issue_ref.as_deref()),
         "flow_id": sanitize_presence_identifier(c.flow_id.as_deref()),
         "branch": sanitize_presence_field(&c.branch, SANITIZE_IDENTIFIER_CAP),
         "heartbeat_at": sanitize_presence_field(&c.heartbeat_at, SANITIZE_IDENTIFIER_CAP),
     })
+}
+
+fn display_session_client(c: &SessionClaim) -> Option<&str> {
+    match c.session_client.as_deref() {
+        Some(session_client) if is_work_claim_compat_session_client(session_client) => {
+            c.agent_identity_id.as_deref()
+        }
+        other => other,
+    }
+}
+
+fn is_work_claim_compat_session_client(value: &str) -> bool {
+    value
+        .strip_prefix("work-claim:")
+        .is_some_and(|id| !id.trim().is_empty())
 }
 
 /// Result of projecting a set of snapshot-time-fresh presence claims into the
@@ -949,8 +998,28 @@ pub(crate) fn presence_briefing_section(
     let live = list_live_claims_for_briefing(server);
     let board = briefing_claims_board(server);
     let session_client = resolve_session_client(server);
-    let own_scope = own_live_claim_scope(&live, &session_client, issue_ref);
-    let warnings = collision_warnings(&live, Some(session_client.as_str()), issue_ref, &own_scope);
+    let agent_identity_id = server
+        .work_claim_connection()
+        .and_then(|(identity, _, admission)| {
+            if admission == "rejected" || admission == "unavailable" {
+                None
+            } else {
+                identity
+            }
+        });
+    let own_scope = own_live_claim_scope(
+        &live,
+        &session_client,
+        agent_identity_id.as_deref(),
+        issue_ref,
+    );
+    let warnings = collision_warnings_excluding(
+        &live,
+        Some(session_client.as_str()),
+        agent_identity_id.as_deref(),
+        issue_ref,
+        &own_scope,
+    );
     serde_json::json!({
         "board": board,
         "warnings": warnings,
@@ -1056,6 +1125,47 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_admission_cannot_become_work_claim_holder() {
+        let server = make_server();
+        admit_agent_connection(&server, Some("agent.remote".to_string()), false)
+            .expect("remote identity records unavailable admission");
+        let connection = server
+            .work_claim_connection()
+            .expect("unavailable connection is retained");
+
+        let err = handle_task_claim(&server, &claim_params())
+            .expect_err("unavailable admission must not create a WorkClaim holder");
+        assert!(err.contains("AgentIdentity admission unavailable"), "{err}");
+
+        server
+            .with_global_store_read(|store| {
+                let claim_count: i64 = store
+                    .connection()
+                    .query_row("SELECT COUNT(*) FROM session_claims", [], |row| row.get(0))
+                    .map_err(|err| err.to_string())?;
+                assert_eq!(
+                    claim_count, 0,
+                    "failed unavailable admission must not persist a claim"
+                );
+
+                let state: String = store
+                    .connection()
+                    .query_row(
+                        "SELECT state FROM identity_admissions WHERE connection_id=?1",
+                        [&connection.1],
+                        |row| row.get(0),
+                    )
+                    .map_err(|err| err.to_string())?;
+                assert_eq!(
+                    state, "unavailable",
+                    "durable unavailable admission receipt must be preserved"
+                );
+                Ok(())
+            })
+            .expect("read unavailable admission receipt");
+    }
+
+    #[test]
     fn board_explicitly_marks_github_unavailable() {
         let board = work_claim_board(&make_server()).expect("board");
         assert_eq!(board["github_state"], "unavailable");
@@ -1134,6 +1244,42 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn work_claim_compat_session_client_is_not_holder_collision_or_display_identity() {
+        let server = make_server();
+        admit_agent_connection(&server, Some("agent.alpha".to_string()), true).unwrap();
+        let receipt = handle_task_claim(&server, &claim_params()).unwrap();
+        let claim_id = receipt["claim_id"].as_str().unwrap();
+
+        let stored_session_client = server
+            .with_global_store_read(|store| {
+                memcore::get_claim(store.connection(), claim_id)
+                    .map_err(|err| err.to_string())?
+                    .and_then(|claim| claim.session_client)
+                    .ok_or_else(|| "stored WorkClaim missing session_client".to_string())
+            })
+            .expect("read stored WorkClaim compatibility row");
+        assert_eq!(
+            stored_session_client,
+            format!("work-claim:{claim_id}"),
+            "legacy adapter compatibility row must remain durable"
+        );
+
+        let section = presence_briefing_section(&server, Some("org/repo#1253"));
+        let warnings = section["warnings"].as_array().unwrap();
+        assert!(
+            warnings.is_empty(),
+            "a holder must not see its own compatibility row as an external collision: {warnings:?}"
+        );
+        let items = section["board"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "holder claim remains visible on the board");
+        assert_eq!(items[0]["session_client"], "agent.alpha");
+        assert_ne!(
+            items[0]["session_client"], stored_session_client,
+            "synthetic compatibility session_client must not be shown"
+        );
     }
 
     fn claim(session_client: &str, issue_ref: &str, scope: Option<Vec<&str>>) -> SessionClaim {
