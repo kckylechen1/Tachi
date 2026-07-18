@@ -160,7 +160,14 @@ pub(crate) async fn handle_tachi_gh(
                 params.allow_umbrella_close,
             )?;
             let client = gh_client_for_server(server)?;
-            let worktree_for_lease = params.worktree.clone();
+            // Resolve the spelling before the cleaner can delete the path; after
+            // deletion canonicalization is impossible, but lease reclaim must
+            // still select the same canonical row used by holder evidence.
+            let worktree_for_lease = params
+                .worktree
+                .as_deref()
+                .map(crate::exec_env_ops::canonical_worktree_path)
+                .transpose()?;
             let holder_gate = |worktree: &str| worktree_holder_gate(server, worktree);
             let out = handle_github_safe_merge_with_holder_gate(
                 &client,
@@ -171,7 +178,7 @@ pub(crate) async fn handle_tachi_gh(
                 params.flow_id.as_deref(),
                 &params.tests_run,
                 policy,
-                params.worktree.as_deref(),
+                worktree_for_lease.as_deref(),
                 params.reclaim_worktree.unwrap_or(true),
                 &holder_gate,
             )
@@ -248,9 +255,14 @@ pub(crate) async fn handle_tachi_gh(
 /// Read-only WorkClaim gate used immediately before safe-merge invokes the
 /// external cleaner. Missing active leases are legacy/not-applicable; every
 /// held or uncertain holder answer is a loud refusal.
-fn worktree_holder_gate(server: &MemoryServer, worktree_path: &str) -> Result<(), String> {
+pub(crate) fn worktree_holder_gate(
+    server: &MemoryServer,
+    worktree_path: &str,
+) -> Result<(), String> {
+    let canonical_path = crate::exec_env_ops::canonical_worktree_path(worktree_path)?;
     server.with_global_store_read(|store| {
-        let Some(lease) = memcore::find_active_exec_env_by_path(store.connection(), worktree_path)
+        let Some(lease) =
+            memcore::find_active_exec_env_by_path(store.connection(), &canonical_path)
             .map_err(|err| format!("holder evidence unavailable while locating ExecEnv: {err}"))?
         else {
             return Ok(());

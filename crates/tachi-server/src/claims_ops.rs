@@ -100,6 +100,13 @@ fn task_mode(value: Option<String>) -> Result<WorkClaimMode, String> {
         _ => Err("claim_mode must be read_only or writable".to_string()),
     }
 }
+fn canonical_claim_worktree_path(value: Option<String>) -> Result<String, String> {
+    let path = value.unwrap_or_default();
+    if path.trim().is_empty() {
+        return Ok(path);
+    }
+    crate::exec_env_ops::canonical_worktree_path(&path)
+}
 fn task_identity(server: &MemoryServer, asserted: Option<String>) -> Result<String, String> {
     let Some((identity, _connection, admission)) = server.work_claim_connection() else {
         return Err("AgentIdentity admission is unavailable; initialize first".to_string());
@@ -130,6 +137,7 @@ pub(crate) fn handle_task_claim(
         return Err("claim_scope is required".to_string());
     }
     let claim_id = format!("claim-{}", uuid::Uuid::new_v4());
+    let mode = task_mode(params.claim_mode.clone())?;
     let claim = NewWorkClaim {
         claim_id: claim_id.clone(),
         agent_identity_id: task_identity(server, params.agent_identity_id.clone())?,
@@ -138,10 +146,10 @@ pub(crate) fn handle_task_claim(
         flow_id: params.flow_id.clone(),
         dispatch_id: params.dispatch_id.clone(),
         branch: params.branch.clone().unwrap_or_default(),
-        worktree_path: params.worktree_path.clone().unwrap_or_default(),
+        worktree_path: canonical_claim_worktree_path(params.worktree_path.clone())?,
         declared_file_scope: scope,
         role: task_required(params.claim_role.clone(), "claim_role")?,
-        mode: task_mode(params.claim_mode.clone())?,
+        mode,
         expected_head: task_required(params.expected_head.clone(), "expected_head")?,
         lease_expires_at: task_required(params.lease_expires_at.clone(), "lease_expires_at")?,
         created_at: String::new(),
@@ -178,11 +186,12 @@ pub(crate) fn handle_task_handoff(
     server: &MemoryServer,
     params: &crate::tool_params::TachiTaskParams,
 ) -> Result<serde_json::Value, String> {
+    let mode = task_mode(params.claim_mode.clone())?;
     let successor = WorkClaimHandoffRequest {
         agent_identity_id: task_identity(server, params.agent_identity_id.clone())?,
         role: task_required(params.claim_role.clone(), "claim_role")?,
-        mode: task_mode(params.claim_mode.clone())?,
-        worktree_path: params.worktree_path.clone().unwrap_or_default(),
+        mode,
+        worktree_path: canonical_claim_worktree_path(params.worktree_path.clone())?,
         declared_file_scope: serde_json::to_string(&params.claim_scope)
             .map_err(|err| err.to_string())?,
         expected_head: task_required(params.expected_head.clone(), "expected_head")?,
@@ -2052,3 +2061,7 @@ mod tests {
         assert_eq!(out, "aaaa…");
     }
 }
+
+#[cfg(test)]
+#[path = "exec_env/tests/canonical_paths.rs"]
+mod canonical_path_tests;

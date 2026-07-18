@@ -52,7 +52,7 @@
 //! NOT get to poison the seat's shared target from a diverged tree. That
 //! containment, not enforcement, is the guarantee.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use memcore::{
     EnvClass, ExecEnvLease, ExecEnvSelector, ExecEnvState, NewExecEnvLease, NewExecEnvResource,
@@ -66,6 +66,48 @@ use crate::server_state::MemoryServer;
 
 /// `hard_state` namespace for booked private-target reservations; key = env_id.
 pub(crate) const PRIVATE_RESERVATION_NS: &str = "exec_env_private_target";
+
+/// Resolve a worktree to the one persisted physical-path spelling. Existing
+/// trees are fully canonicalized. For a claim made before its leaf is created,
+/// the nearest existing ancestor is canonicalized and the future suffix is
+/// appended, so aliases such as macOS `/tmp` still cannot fork identity.
+pub(crate) fn canonical_worktree_path(worktree_path: &str) -> Result<String, String> {
+    let input = Path::new(worktree_path);
+    let absolute = if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("cannot resolve current directory: {error}"))?
+            .join(input)
+    };
+    let canonical = match std::fs::canonicalize(&absolute) {
+        Ok(path) => path,
+        Err(full_error) => {
+            let mut ancestor = absolute.as_path();
+            let mut suffix = Vec::new();
+            while !ancestor.exists() {
+                let leaf = ancestor.file_name().ok_or_else(|| {
+                    format!("cannot canonicalize worktree path '{worktree_path}': {full_error}")
+                })?;
+                suffix.push(leaf.to_os_string());
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    format!("cannot canonicalize worktree path '{worktree_path}': {full_error}")
+                })?;
+            }
+            let mut path = std::fs::canonicalize(ancestor).map_err(|error| {
+                format!("cannot canonicalize ancestor for worktree path '{worktree_path}': {error}")
+            })?;
+            for leaf in suffix.into_iter().rev() {
+                path.push(leaf);
+            }
+            path
+        }
+    };
+    canonical
+        .into_os_string()
+        .into_string()
+        .map_err(|_| format!("canonical worktree path for '{worktree_path}' is not valid UTF-8"))
+}
 
 /// Explicit approval for a `build-private` env: who signed off, and how much
 /// disk was reserved for the private target dir. Provisioning refuses the class
@@ -392,6 +434,18 @@ pub(crate) fn provision_managed_env(
             report,
         });
     }
+    report.path = match canonical_worktree_path(&report.path) {
+        Ok(path) => path,
+        Err(error) => {
+            report.warnings.push(format!(
+                "worktree provisioned but its path could not be canonicalized: {error}; no ExecEnv lease was recorded"
+            ));
+            return Ok(ProvisionedEnv {
+                env_id: None,
+                report,
+            });
+        }
+    };
     // The worktree path is only known after the open, so the private-target
     // default (`<worktree>/target`) is resolved here and the config written now.
     if opts.env_class == EnvClass::BuildPrivate {
