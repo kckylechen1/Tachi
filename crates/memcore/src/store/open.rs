@@ -80,8 +80,9 @@ impl MemoryStore {
         // it) is closed inside `migrate_legacy_filename_if_present` itself, which
         // now migrates via an ATOMIC NO-CLOBBER rename (`renamex_np`/`renameat2`,
         // #1226) that fails with EEXIST rather than overwriting a concurrently
-        // created canonical file. On kernels/filesystems without that primitive
-        // it degrades (loudly, once) to a plain rename under this mutex.
+        // created canonical file. On kernels/filesystems/platforms without that
+        // primitive it FAILS CLOSED (loud error) rather than degrading to a
+        // plain rename, which would reopen the very clobber race it closes.
         let _startup_guard = db::acquire_startup_lock();
         // #1132: one-time rename-on-open migration away from the legacy
         // `memory.db` filename, before the connection is opened. Single seam —

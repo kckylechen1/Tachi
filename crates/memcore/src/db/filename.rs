@@ -70,8 +70,11 @@ enum LegacySibling {
 ///   to overwrite a canonical file a concurrent process created between our
 ///   stat and the rename; #1226 cross-process TOCTOU close), then leave a
 ///   `memory.db -> tachi-memory.db` compat symlink behind idempotently. If the
-///   kernel reports the canonical file already exists (EEXIST), we converge on
-///   it instead of clobbering.
+///   kernel reports the canonical file already exists (EEXIST) or the legacy
+///   source vanished under a concurrent migrator (ENOENT), we converge on the
+///   canonical instead of clobbering. If no atomic no-clobber primitive exists
+///   (ENOSYS/ENOTSUP / unsupported platform), we FAIL CLOSED — never degrade to
+///   a plain rename, which would reopen the clobber race.
 /// - (present, absent) -> CONVERGE: the canonical file exists but its compat
 ///   symlink is missing — a crash between the atomic rename and the symlink
 ///   step, or a fresh canonical-only store. Re-establish the symlink
@@ -173,21 +176,41 @@ fn migrate_real_legacy(legacy_path: &Path, db_path: &Path) -> Result<(), MemoryE
             converge_on_existing_canonical(legacy_kind, legacy_path, db_path)
         }
 
-        // The running kernel/filesystem does not implement the atomic
-        // no-clobber primitive (ENOSYS/ENOTSUP). Fall back to a plain rename,
-        // guarded only by the process-local startup mutex the caller already
-        // holds (the degraded, same-process-only guard). Warn loudly, once.
-        Ok(AtomicRename::Unsupported) => {
-            warn_atomic_rename_unsupported_once();
-            std::fs::rename(legacy_path, db_path)
-                .map_err(|e| rename_error(legacy_path, db_path, e))?;
-            leave_compat_symlink(legacy_path)
-        }
+        // ENOENT: a concurrent migrator moved the legacy file out from under us
+        // between our stat and the rename. If that peer already renamed it onto
+        // the canonical name, the canonical now exists — converge on it rather
+        // than fail spuriously. Only if the canonical is ALSO absent (the data
+        // genuinely vanished) do we fail loud.
+        Ok(AtomicRename::SourceVanished) => converge_after_source_vanished(legacy_path, db_path),
+
+        // No atomic no-clobber primitive on this kernel/filesystem/platform
+        // (ENOSYS/ENOTSUP). FAIL CLOSED — a plain rename would reopen the
+        // cross-process clobber race (#1226). Never degrade.
+        Ok(AtomicRename::Unsupported) => Err(atomic_rename_unsupported_error(legacy_path, db_path)),
 
         // Any other errno (permissions, cross-device, read-only fs, ...) is a
         // genuine failure: surface it loudly rather than falling through to an
         // open/create under the wrong name.
         Err(e) => Err(rename_error(legacy_path, db_path, e)),
+    }
+}
+
+/// Handle the ENOENT / source-vanished case: a concurrent migrator moved the
+/// legacy file before our rename. Re-check the canonical file — if the peer
+/// already migrated it (canonical now present) CONVERGE exactly as the
+/// (canonical present, *) arms do; if the canonical is also absent the data
+/// genuinely vanished, so fail loud rather than open an empty DB.
+fn converge_after_source_vanished(legacy_path: &Path, db_path: &Path) -> Result<(), MemoryError> {
+    let canonical_present = match std::fs::symlink_metadata(db_path) {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(stat_error("canonical", db_path, e)),
+    };
+    if canonical_present {
+        let legacy_kind = classify_legacy_sibling(legacy_path)?;
+        converge_on_existing_canonical(legacy_kind, legacy_path, db_path)
+    } else {
+        Err(legacy_vanished_error(legacy_path, db_path))
     }
 }
 
@@ -279,9 +302,16 @@ enum AtomicRename {
     /// process created the canonical file first. Nothing was clobbered — the
     /// caller must CONVERGE on the existing canonical file.
     DestinationExists,
+    /// The kernel reported the source is gone (ENOENT): another process moved
+    /// the legacy file out from under us (a concurrent migrator) between our
+    /// stat and the rename. The caller must re-check the canonical file and
+    /// CONVERGE if the peer already migrated it, rather than fail spuriously.
+    SourceVanished,
     /// The running kernel/filesystem does not implement the no-clobber rename
-    /// primitive (ENOSYS/ENOTSUP), so the caller must fall back to a plain
-    /// `rename` under the degraded process-local mutex guard.
+    /// primitive (ENOSYS/ENOTSUP), or the platform has no such primitive at
+    /// all. There is NO safe degraded path (a plain rename would reopen the
+    /// cross-process clobber race this whole seam exists to close), so the
+    /// caller MUST FAIL CLOSED — never fall back to a clobbering rename.
     Unsupported,
 }
 
@@ -353,33 +383,69 @@ fn atomic_rename_no_clobber(from: &Path, to: &Path) -> Result<AtomicRename, std:
         // Destination already exists: a concurrent process won the race. This
         // is the no-clobber refusal we asked for, not a failure.
         Some(libc::EEXIST) => Ok(AtomicRename::DestinationExists),
-        // The syscall/flag isn't implemented on this kernel/filesystem: the
-        // caller degrades to a plain rename under the process-local mutex.
+        // Source is gone: a concurrent migrator moved the legacy file already.
+        // The caller re-checks the canonical file and converges if so.
+        Some(libc::ENOENT) => Ok(AtomicRename::SourceVanished),
+        // The syscall/flag isn't implemented on this kernel/filesystem. There
+        // is no safe degraded path — the caller MUST fail closed.
         Some(libc::ENOSYS) | Some(libc::ENOTSUP) => Ok(AtomicRename::Unsupported),
         _ => Err(err),
     }
 }
 
 /// Platforms without a no-clobber rename primitive: report `Unsupported` so the
-/// caller degrades to a plain rename under the process-local mutex.
+/// caller FAILS CLOSED. We deliberately do NOT degrade to a plain rename — that
+/// would reopen the cross-process clobber race (#1226) this seam closes.
 #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux")))]
 fn atomic_rename_no_clobber(_from: &Path, _to: &Path) -> Result<AtomicRename, std::io::Error> {
     Ok(AtomicRename::Unsupported)
 }
 
-/// Emit the "atomic no-clobber rename unavailable, degrading to plain rename"
-/// warning at most once per process, so a genuinely old kernel/filesystem is
-/// surfaced loudly without spamming the log on every store open.
-fn warn_atomic_rename_unsupported_once() {
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    WARNED.call_once(|| {
-        tracing::warn!(
-            "#1226: atomic no-clobber rename (renamex_np/renameat2) is unavailable on this \
-             kernel/filesystem; falling back to a plain rename guarded only by the process-local \
-             startup mutex. Concurrent FIRST-migration of the same store from a SECOND process \
-             could theoretically race here. Upgrade the kernel/filesystem to close it fully."
-        );
-    });
+/// Loud hard error for the case where no atomic no-clobber rename primitive is
+/// available (ENOSYS/ENOTSUP, or a platform without one). We FAIL CLOSED here
+/// rather than fall back to a plain `rename`: a plain rename is guarded only by
+/// the process-local startup mutex, which cannot exclude a SECOND daemon, so it
+/// would atomically overwrite a canonical file a concurrent process created —
+/// the exact money-DB data loss this seam exists to prevent (#1226, round-5).
+///
+/// FUTURE: to genuinely support such a platform/filesystem, replace the plain
+/// rename with a cross-process protocol — e.g. open+`F_SETLK` (advisory lock) an
+/// intent file in the store dir, then link-then-rename under the lock — rather
+/// than trading the no-clobber guarantee for compatibility. Not implemented
+/// now: prod runs modern macOS (`renamex_np` always present) and Linux
+/// (`renameat2`), which never reach this path.
+fn atomic_rename_unsupported_error(legacy_path: &Path, db_path: &Path) -> MemoryError {
+    MemoryError::Io(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!(
+            "#1132/#1226 legacy DB filename migration: cannot migrate {} -> {} because this \
+             platform/filesystem provides no atomic no-clobber rename (renamex_np/renameat2 \
+             unsupported). Refusing to fall back to a plain rename, which could clobber a \
+             canonical DB another process created concurrently and lose data. Migrate offline \
+             (with no other Tachi process running) or on a supported filesystem, then retry.",
+            legacy_path.display(),
+            db_path.display(),
+        ),
+    ))
+}
+
+/// Loud hard error for the ENOENT case where the legacy file vanished AND no
+/// canonical file exists to converge on: the pre-#1132 data was removed out
+/// from under us by something other than a migration (a delete, an external
+/// move). There is nothing left to bring forward — fail loud rather than
+/// silently open an empty DB.
+fn legacy_vanished_error(legacy_path: &Path, db_path: &Path) -> MemoryError {
+    MemoryError::Io(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!(
+            "#1132 legacy DB filename migration: the legacy file {} vanished during migration and \
+             no canonical file {} exists to converge on. The pre-#1132 data appears to have been \
+             removed (not migrated) concurrently. Refusing to open an empty DB under the canonical \
+             name — investigate what removed it, restore from backup if needed, and retry.",
+            legacy_path.display(),
+            db_path.display(),
+        ),
+    ))
 }
 
 /// Validate that a pre-existing link at the legacy path is exactly the compat
@@ -591,6 +657,81 @@ mod tests {
         assert!(
             !legacy.exists(),
             "the legacy name must be free after a successful atomic move"
+        );
+    }
+
+    // #1226 round-5: when the legacy source is gone, the primitive must report
+    // SourceVanished (ENOENT), not a generic error — so the caller can converge
+    // on a concurrent migrator instead of failing spuriously. Deterministic:
+    // with BOTH names absent the only possible errno is ENOENT (missing source),
+    // with no EEXIST ambiguity.
+    #[cfg(all(unix, any(target_os = "macos", target_os = "ios", target_os = "linux")))]
+    #[test]
+    fn atomic_rename_reports_source_vanished_when_legacy_is_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let legacy = dir.path().join(LEGACY_MEMORY_DB_FILENAME); // never created
+        let canonical = dir.path().join(MEMORY_DB_FILENAME); // also absent
+
+        let outcome = atomic_rename_no_clobber(&legacy, &canonical)
+            .expect("a missing source must be a SourceVanished signal, not an error");
+        assert!(
+            matches!(outcome, AtomicRename::SourceVanished),
+            "a vanished legacy source (ENOENT) must report SourceVanished"
+        );
+    }
+
+    // #1226 round-5 (codex secondary): a concurrent migrator moved the legacy
+    // file onto the canonical name before our rename. Our ENOENT must CONVERGE
+    // on the peer's canonical file (not hard-error), leaving the compat symlink
+    // and never touching the peer's bytes.
+    #[cfg(unix)]
+    #[test]
+    fn source_vanished_converges_when_canonical_now_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let legacy = dir.path().join(LEGACY_MEMORY_DB_FILENAME); // peer already moved it away
+        let canonical = dir.path().join(MEMORY_DB_FILENAME);
+        std::fs::write(&canonical, b"migrated by a concurrent peer").expect("write canonical");
+
+        converge_after_source_vanished(&legacy, &canonical)
+            .expect("a peer-migrated canonical must converge, not fail");
+
+        assert_eq!(
+            std::fs::read(&canonical).expect("read canonical"),
+            b"migrated by a concurrent peer",
+            "the concurrent peer's canonical data must not be touched"
+        );
+        let legacy_meta = std::fs::symlink_metadata(&legacy)
+            .expect("convergence must leave a compat symlink where the legacy file was");
+        assert!(
+            legacy_meta.file_type().is_symlink(),
+            "converging on a peer's migration must (re-)leave the compat symlink"
+        );
+        assert_eq!(
+            std::fs::read_link(&legacy).expect("read compat symlink target"),
+            std::path::PathBuf::from(MEMORY_DB_FILENAME),
+            "the compat symlink must point at the canonical filename"
+        );
+    }
+
+    // The other side of ENOENT: the legacy file genuinely vanished (a delete /
+    // external move, NOT a migration) and no canonical exists to converge on.
+    // There is nothing to bring forward — fail loud, never open an empty DB.
+    #[cfg(unix)]
+    #[test]
+    fn source_vanished_fails_loud_when_canonical_also_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let legacy = dir.path().join(LEGACY_MEMORY_DB_FILENAME); // gone
+        let canonical = dir.path().join(MEMORY_DB_FILENAME); // also gone
+
+        let err = converge_after_source_vanished(&legacy, &canonical)
+            .expect_err("a genuinely-vanished legacy with no canonical must fail loud");
+        assert!(
+            err.to_string().contains("vanished during migration"),
+            "error must name the vanished-data condition: {err}"
+        );
+        assert!(
+            !canonical.exists(),
+            "a failed convergence must NOT have created an empty canonical DB"
         );
     }
 
