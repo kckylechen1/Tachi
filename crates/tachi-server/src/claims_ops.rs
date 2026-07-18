@@ -30,6 +30,11 @@ pub(crate) fn admit_agent_connection(
     local: bool,
 ) -> Result<(), String> {
     let connection_id = format!("conn-{}", uuid::Uuid::new_v4());
+    let rejection_evidence = match asserted.as_deref() {
+        None => Some("agent identity assertion is missing"),
+        Some(identity) if crate::session_identity::valid_agent_identity_assertion(identity) => None,
+        Some(_) => Some("agent identity assertion is invalid"),
+    };
     let identity =
         asserted.filter(|id| crate::session_identity::valid_agent_identity_assertion(id));
     let admission = if identity.is_none() {
@@ -39,7 +44,17 @@ pub(crate) fn admit_agent_connection(
     } else {
         "unavailable"
     };
-    if let Some(identity_id) = identity.as_deref() {
+    if let Some(rejection_evidence) = rejection_evidence {
+        server.with_global_store(|store| {
+            memcore::record_rejected_admission(
+                store.connection(),
+                &format!("admission-{}", uuid::Uuid::new_v4()),
+                &connection_id,
+                rejection_evidence,
+            )
+            .map_err(|err| err.to_string())
+        })?;
+    } else if let Some(identity_id) = identity.as_deref() {
         server.with_global_store(|store| {
             let row = AgentIdentity {
                 agent_identity_id: identity_id.to_string(),
@@ -1006,6 +1021,38 @@ mod tests {
             server.work_claim_connection().expect("remote connection").2,
             "unavailable"
         );
+    }
+
+    #[test]
+    fn invalid_assertion_persists_rejected_identityless_admission() {
+        let server = make_server();
+        admit_agent_connection(&server, Some("agent invalid".to_string()), true)
+            .expect("invalid assertion is recorded as a rejected admission");
+        let connection = server
+            .work_claim_connection()
+            .expect("rejected connection is retained");
+        assert_eq!(connection.0, None);
+        assert_eq!(connection.2, "rejected");
+        server
+            .with_global_store_read(|store| {
+                let receipt: (Option<String>, String, Option<String>) = store
+                    .connection()
+                    .query_row(
+                        "SELECT agent_identity_id, state, rejection_evidence \
+                         FROM identity_admissions WHERE connection_id=?1",
+                        [&connection.1],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .map_err(|err| err.to_string())?;
+                assert_eq!(receipt.0, None, "rejection must not invent an identity");
+                assert_eq!(receipt.1, "rejected");
+                assert_eq!(
+                    receipt.2.as_deref(),
+                    Some("agent identity assertion is invalid")
+                );
+                Ok(())
+            })
+            .expect("read rejected admission receipt");
     }
 
     #[test]
