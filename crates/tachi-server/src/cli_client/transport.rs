@@ -289,6 +289,18 @@ mod tests {
         params_with_args("tachi_task", args)
     }
 
+    /// reqwest is built with `rustls-no-provider`, so a process-level rustls
+    /// `CryptoProvider` must be installed before any `reqwest::Client` is
+    /// constructed — even for a plain `http://` URL, `StreamableHttpClientTransport`
+    /// eagerly builds a TLS-capable client. Oz run 2026-07-17: three of the
+    /// tests below panicked deterministically with "No rustls crypto provider
+    /// is configured" when run in isolation (no earlier test in the same
+    /// process had installed one first). Mirrors the same fix already applied
+    /// in `mcp_connection/tests.rs::ensure_test_tls_provider`.
+    fn ensure_test_tls_provider() {
+        crate::ensure_tls_provider();
+    }
+
     #[test]
     fn normal_tool_gets_default_timeout() {
         let params = params_with_args("tachi_memory", serde_json::Map::new());
@@ -465,5 +477,133 @@ mod tests {
         // (those go through the wait-default path above).
         let params = CallToolRequestParams::new("tachi_task".to_string());
         assert_eq!(daemon_call_timeout(&params), DAEMON_CALL_TIMEOUT);
+    }
+
+    // --- tachi#1224 CONCERN follow-up: `proxy_project` header-construction
+    // boundary pins (non-ASCII, spaces, empty, control characters). Test-only;
+    // no product code changes. These isolate the `HeaderValue::from_str` step
+    // inside `call_daemon_tool_raw` (which runs and can fail *before* any
+    // network I/O) from the network step (which runs after) by pointing at a
+    // `127.0.0.1` port nothing is bound to — the connection attempt fails
+    // immediately (loopback ECONNREFUSED, no timeout risk) so any test whose
+    // header construction *doesn't* fail still resolves fast and
+    // deterministically, distinguishable from a header-construction failure
+    // by its distinct "daemon handshake failed" message.
+
+    /// A `DaemonInfo` pointed at a `127.0.0.1` port nothing is listening on.
+    async fn closed_port_daemon_info() -> DaemonInfo {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        DaemonInfo {
+            url: format!("http://127.0.0.1:{port}/mcp"),
+            global_db: None,
+            project_db: None,
+            version: None,
+            pid: None,
+        }
+    }
+
+    /// The TRUE rejection case: a project name containing a raw control
+    /// character (here `\n`) cannot be represented as an HTTP header value at
+    /// all — `HeaderValue::from_str` rejects it (transport.rs:194-200) — and
+    /// the CLI must fail loudly here rather than silently truncating,
+    /// mangling, or dropping the header. Contrast with the two tests below:
+    /// plain non-ASCII text and embedded spaces do NOT hit this branch.
+    #[tokio::test]
+    async fn proxy_project_with_embedded_newline_is_rejected_before_dispatch() {
+        let info = closed_port_daemon_info().await;
+        let params = params_with_args("tachi_memory", serde_json::Map::new());
+        let err = call_daemon_tool_raw(&info, params, Some("bad\nproject"))
+            .await
+            .expect_err("a project name with an embedded newline must be rejected");
+        assert!(
+            matches!(err, DaemonCallError::BeforeDispatch(_)),
+            "unexpected error variant: {err:?}"
+        );
+        assert!(
+            err.message().contains("invalid proxy project header value"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    /// CONCERN item 1 ground truth: verified directly against `http` 1.4.2
+    /// (this crate's pinned version per Cargo.lock) in an isolated scratch
+    /// crate — NOT this repo's build — that `HeaderValue::from_str` accepts
+    /// any valid UTF-8 text containing no control characters (Chinese,
+    /// emoji, anything) as RFC 7230 "obs-text". It does NOT reject non-ASCII
+    /// text. This contradicts the dispatch packet's stated expectation that
+    /// a non-ASCII `--project` value would fail here with "invalid proxy
+    /// project header value"; that failure only happens for embedded control
+    /// characters (the test above). This test pins the ACTUAL behavior: the
+    /// header is accepted, and the only failure surfacing here is the
+    /// (deliberately unreachable) daemon connection itself.
+    #[tokio::test]
+    async fn proxy_project_non_ascii_is_accepted_by_header_construction_not_rejected() {
+        ensure_test_tls_provider();
+        let info = closed_port_daemon_info().await;
+        let params = params_with_args("tachi_memory", serde_json::Map::new());
+        let err = call_daemon_tool_raw(&info, params, Some("量化"))
+            .await
+            .expect_err("closed port must still fail, but not at header construction");
+        assert!(
+            matches!(err, DaemonCallError::BeforeDispatch(_)),
+            "unexpected error variant: {err:?}"
+        );
+        assert!(
+            !err.message().contains("invalid proxy project header value"),
+            "non-ASCII UTF-8 project name must not be rejected as an invalid \
+             header value; got: {err}"
+        );
+        assert!(
+            err.message().contains("daemon handshake failed"),
+            "expected the connection-refused network failure, not a header \
+             construction failure; got: {err}"
+        );
+    }
+
+    /// CONCERN item 2: same ground truth as the non-ASCII case above — a
+    /// plain space is valid header-value text (RFC 7230 VCHAR/SP), so
+    /// `HeaderValue::from_str` accepts "my project" unmodified.
+    #[tokio::test]
+    async fn proxy_project_with_embedded_space_is_accepted_by_header_construction_not_rejected() {
+        ensure_test_tls_provider();
+        let info = closed_port_daemon_info().await;
+        let params = params_with_args("tachi_memory", serde_json::Map::new());
+        let err = call_daemon_tool_raw(&info, params, Some("my project"))
+            .await
+            .expect_err("closed port must still fail, but not at header construction");
+        assert!(
+            matches!(err, DaemonCallError::BeforeDispatch(_)),
+            "unexpected error variant: {err:?}"
+        );
+        assert!(
+            !err.message().contains("invalid proxy project header value"),
+            "a project name containing a plain space must not be rejected as \
+             an invalid header value; got: {err}"
+        );
+    }
+
+    /// CONCERN item 4, transport-layer half: an empty `--project ""` is still
+    /// a valid (empty) header value — `HeaderValue::from_str("")` succeeds —
+    /// so this layer neither rejects it nor treats it as absent (that
+    /// normalization happens later, server-side, in
+    /// `session_identity::normalize_identity_value`, already pinned by that
+    /// module's own `normalize_identity_trims_and_rejects_empty` test).
+    #[tokio::test]
+    async fn proxy_project_empty_string_is_accepted_by_header_construction_not_rejected() {
+        ensure_test_tls_provider();
+        let info = closed_port_daemon_info().await;
+        let params = params_with_args("tachi_memory", serde_json::Map::new());
+        let err = call_daemon_tool_raw(&info, params, Some(""))
+            .await
+            .expect_err("closed port must still fail, but not at header construction");
+        assert!(
+            !err.message().contains("invalid proxy project header value"),
+            "an empty project name must not be rejected as an invalid header \
+             value; got: {err}"
+        );
     }
 }

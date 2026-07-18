@@ -240,6 +240,9 @@ pub enum Commands {
     },
     /// Quick-capture a memory note. Mirrors the `remember` MCP tool.
     /// Forwards to a running daemon if one is detected; otherwise runs in-process.
+    /// `--project` binds the (one-time) daemon session to that project at
+    /// initialize, so the write lands in that project's DB — it is not a
+    /// project param on an otherwise-unbound session.
     #[command(alias = "save")]
     Remember {
         /// Full text content to remember.
@@ -250,7 +253,10 @@ pub enum Commands {
         /// Scope: "user" | "project" | "general". Defaults to "project".
         #[arg(long)]
         scope: Option<String>,
-        /// Optional named project DB target (e.g. "hyperion", "wiki").
+        /// Optional named project DB target (e.g. "hyperion", "wiki"). When
+        /// forwarding to a daemon, this binds that one-time session to the
+        /// named project at initialize (X-Tachi-Project) rather than sending
+        /// an unbound project= arg.
         #[arg(long)]
         project: Option<String>,
         /// Optional path override. Defaults to /notes/YYYY-MM-DD.
@@ -293,6 +299,9 @@ pub enum Commands {
         project: Option<String>,
     },
     /// Write a wiki entry. Mirrors the `tachi_wiki_write` MCP tool.
+    /// `--project` binds the (one-time) daemon session to that project at
+    /// initialize, so the write lands in that project's DB — it is not a
+    /// project param on an otherwise-unbound session.
     WikiWrite {
         /// Short title for the wiki entry.
         title: String,
@@ -319,7 +328,10 @@ pub enum Commands {
         /// Scope (default: "global" for wiki).
         #[arg(long)]
         scope: Option<String>,
-        /// Optional named project DB.
+        /// Optional named project DB target (e.g. "hyperion", "wiki"). When
+        /// forwarding to a daemon, this binds that one-time session to the
+        /// named project at initialize (X-Tachi-Project) rather than sending
+        /// an unbound project= arg.
         #[arg(long)]
         project: Option<String>,
         /// Optional domain.
