@@ -183,10 +183,13 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             "plan" | "briefing" | "doc_index" | "status" | "board" | "wait" | "profiles"
             | "profile" | "card" | "cycle_status" | "cycle_plan" | "ux_matrix"
             | "build_references" | "refine_issues" => Some(ToolBundle::Observe),
-            "complete" | "adjudicate" => Some(ToolBundle::Remember),
+            "complete" | "adjudicate" | "claim" | "release" | "heartbeat" => {
+                Some(ToolBundle::Remember)
+            }
             "dispatch" | "recommend" | "cancel" | "merge" | "intake" | "close_loop" => {
                 Some(ToolBundle::Coordinate)
             }
+            "handoff" => Some(ToolBundle::Coordinate),
             "route_simulate" | "proposals" | "review_proposal" | "apply_proposals" => {
                 Some(ToolBundle::Operate)
             }
@@ -377,6 +380,62 @@ mod tests {
             Some("dispatch"),
             Some(ToolProfile::coordinate())
         ));
+    }
+
+    #[test]
+    fn f1253_tachi_task_workclaim_actions_have_explicit_bundles() {
+        for action in ["claim", "release", "heartbeat"] {
+            assert_eq!(
+                facade_action_required_bundle("tachi_task", action),
+                Some(ToolBundle::Remember),
+                "tachi_task(action='{action}') must map to Remember"
+            );
+        }
+        assert_eq!(
+            facade_action_required_bundle("tachi_task", "handoff"),
+            Some(ToolBundle::Coordinate),
+            "tachi_task(action='handoff') must map to Coordinate"
+        );
+    }
+
+    #[test]
+    fn f1253_tachi_task_workclaim_actions_respect_restricted_profiles() {
+        for action in ["claim", "release", "heartbeat", "handoff"] {
+            assert!(
+                !facade_action_allowed("tachi_task", Some(action), Some(ToolProfile::observe())),
+                "observe must not call tachi_task(action='{action}')"
+            );
+        }
+
+        for action in ["claim", "release", "heartbeat"] {
+            assert!(
+                facade_action_allowed("tachi_task", Some(action), Some(ToolProfile::remember())),
+                "remember must call tachi_task(action='{action}')"
+            );
+            assert!(
+                facade_action_allowed("tachi_task", Some(action), Some(ToolProfile::coordinate())),
+                "coordinate must call tachi_task(action='{action}')"
+            );
+        }
+        assert!(
+            !facade_action_allowed("tachi_task", Some("handoff"), Some(ToolProfile::remember())),
+            "remember must not call coordinate-tier tachi_task(action='handoff')"
+        );
+        assert!(
+            facade_action_allowed(
+                "tachi_task",
+                Some("handoff"),
+                Some(ToolProfile::coordinate())
+            ),
+            "coordinate must call tachi_task(action='handoff')"
+        );
+
+        for action in ["claim", "release", "heartbeat", "handoff"] {
+            assert!(
+                !facade_action_allowed("tachi_task", Some(action), Some(ToolProfile::delegate())),
+                "delegate must not gain tachi_task(action='{action}') without an owner policy change"
+            );
+        }
     }
 
     #[test]

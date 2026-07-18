@@ -176,3 +176,41 @@ async fn delegate_tachi_task_board_is_allowed_end_to_end() {
         "delegate should be able to call tachi_task(action='board')"
     );
 }
+
+#[tokio::test]
+async fn delegate_tachi_task_handoff_is_denied_end_to_end() {
+    let server = make_server();
+    server.set_tool_profile(Some(
+        tachi_hub::parse_tool_profile("delegate").expect("delegate profile should parse"),
+    ));
+
+    let mut args = serde_json::Map::new();
+    args.insert("action".to_string(), serde_json::json!("handoff"));
+    args.insert("claim_id".to_string(), serde_json::json!("claim-1"));
+    args.insert("transition_version".to_string(), serde_json::json!(0));
+
+    let result = call_tool_via_server(server, "tachi_task", Some(args))
+        .await
+        .expect("denied action should return a tool result, not a transport error");
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "delegate must not be able to hand off via tachi_task"
+    );
+    let message = result
+        .content
+        .first()
+        .and_then(|content| content.as_text())
+        .map(|text| text.text.as_str())
+        .unwrap_or("");
+    assert!(
+        message.contains("not allowed") || message.contains("not available"),
+        "expected a permission-denied message, got: {message}"
+    );
+    assert!(
+        message.contains("handoff"),
+        "denial message should name the denied action, got: {message}"
+    );
+    assert!(!message.contains("tool not found"));
+}
