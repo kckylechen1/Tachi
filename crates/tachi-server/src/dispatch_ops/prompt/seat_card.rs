@@ -8,8 +8,11 @@
 //!   source of truth per the owner's ruling on tachi#1202 — and mirrors each
 //!   card into the GLOBAL store as a wiki-class [`memcore::MemoryEntry`] at
 //!   `path = "/cards/<seat>"`, `category = "wiki"`, `metadata` carrying
-//!   `{source_file, source: "dispatch-ledger", content_hash}` and an
-//!   `authority: "advisory"` marker. Content changes bump `revision`;
+//!   `{source_file, source: "dispatch-ledger", content_hash}`, an
+//!   `authority: "advisory"` marker, and the already-extracted
+//!   `counter_clauses_present`/`counter_clauses` pair this module (L2) reads
+//!   from directly — see [`counter_clauses_from_metadata`]. Content changes
+//!   bump `revision`;
 //!   unchanged content is an idempotent no-op; a vanished source file flips
 //!   the mirror row to `archived` (never deletes it). This module never
 //!   touches the FS cards directly — "single source in FS, consumption in
@@ -22,15 +25,23 @@
 //!   match them against the seat suffixes of every `/cards/<seat>` mirror
 //!   row (exact match preferred over a prefix match; an ambiguous prefix
 //!   match against multiple seats is treated as no match — injecting the
-//!   wrong seat's countermeasures is worse than injecting none), extract
-//!   that card's 反制条款 (counter-clause) section(s), and inline them under
-//!   a clearly marked header. No mirror row, no matching seat, or no
-//!   matching section inside it -> zero injection, zero noise (byte-identical
+//!   wrong seat's countermeasures is worse than injecting none), and read
+//!   the already-extracted 反制条款 (counter-clause) text straight out of the
+//!   matched mirror row's `metadata.counter_clauses` field (written once, at
+//!   L1 sync time, by the single heading-regex extractor that lives in
+//!   `bootstrap/cli_tool/cards_ledger.rs`) — **this module never re-parses
+//!   `entry.text` itself**; two independent extractors reading the same
+//!   heading contract is exactly the drift the L1/L2 split was reworked to
+//!   close (tachi#1202 review). The read is fail-closed:
+//!   `metadata.counter_clauses_present` must be the literal `true` AND
+//!   `metadata.counter_clauses` must be a string — a missing key, a `false`,
+//!   or a `null`/non-string value under `true` (an inconsistent write this
+//!   module has no way to repair) all fall through to "nothing to inject",
+//!   never a crash and never stale/guessed text. Inline the result under a
+//!   clearly marked header. No mirror row, no matching seat, or no
+//!   qualifying metadata -> zero injection, zero noise (byte-identical
 //!   prompt to today). `inject_card=false` on the dispatch params suppresses
 //!   this overlay unconditionally.
-
-use regex::Regex;
-use std::sync::OnceLock;
 
 use crate::tool_params::TachiDispatchParams;
 use crate::MemoryServer;
@@ -42,32 +53,45 @@ use super::overlays::resolve_dispatch_vendor;
 /// consumer/human can find (or strip) it deterministically.
 const SEAT_CARD_HEADER: &str = "## Seat countermeasures (from lane card)";
 
-/// 1.5 KB (1536 bytes treated as chars, consistent with the rest of prompt
-/// assembly's character-counted budgets — see `budget.rs`) ceiling on the
-/// injected countermeasures text. Longer sections are truncated with an
-/// ellipsis marker by [`PromptInputBudget::admit`].
+/// 1536-character ceiling on the injected countermeasures text — a character
+/// count (Unicode scalar values, per [`PromptInputBudget::admit`]), not a
+/// byte count, consistent with the rest of prompt assembly's
+/// character-counted budgets (see `budget.rs`). Longer sections are
+/// truncated with an ellipsis marker.
 const SEAT_CARD_BUDGET_CHARS: usize = 1536;
 
 /// Path prefix every lane-card mirror row lives under.
 const SEAT_CARD_PATH_PREFIX: &str = "/cards";
 
-/// Section-heading matcher for the "反制条款 section" the frozen contract
-/// names: an ATX (`#`…) heading whose title contains 反制, 必带, or
-/// case-insensitive "Counter". A card with no such heading has no
-/// countermeasures to project (zero injection, not a fallback to some other
-/// section).
-fn counter_clause_heading_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"反制|必带|(?i)Counter").expect("static regex is valid"))
+/// Read the already-extracted counter-clause text out of a `/cards/<seat>`
+/// mirror row's `metadata`, fail-closed. The L1 writer
+/// (`bootstrap/cli_tool/cards_ledger.rs`) is the single source of the
+/// heading-regex extraction; this reads its output, never re-derives it.
+///
+/// Returns `Some` only when `counter_clauses_present` is literally `true`
+/// AND `counter_clauses` is a string. Any other shape — the key missing
+/// entirely, `counter_clauses_present: false`, or a `null`/non-string
+/// `counter_clauses` under a `true` present flag (a write-side
+/// inconsistency this reader cannot repair) — returns `None`: zero
+/// injection, never a guess and never a panic.
+fn counter_clauses_from_metadata(metadata: &serde_json::Value) -> Option<&str> {
+    let present = metadata
+        .get("counter_clauses_present")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !present {
+        return None;
+    }
+    metadata.get("counter_clauses").and_then(serde_json::Value::as_str)
 }
 
 /// Project the seat-matched lane card's countermeasures section into the
 /// dispatch prompt. Returns `None` (never an error) when the overlay is
 /// disabled, no vendor/profile is derivable, no mirror row matches, or the
-/// matched card has no countermeasures section — every one of these is a
-/// legitimate "nothing to inject" outcome, not a fault (mirrors the
-/// swallow-and-degrade discipline `render_vendor_vaccination_overlay` already
-/// uses for #735).
+/// matched card's metadata carries no qualifying countermeasures text —
+/// every one of these is a legitimate "nothing to inject" outcome, not a
+/// fault (mirrors the swallow-and-degrade discipline
+/// `render_vendor_vaccination_overlay` already uses for #735).
 pub(super) fn render_seat_countermeasures_overlay(
     server: &MemoryServer,
     params: &TachiDispatchParams,
@@ -125,9 +149,9 @@ pub(super) fn render_seat_countermeasures_overlay(
         .find(|(name, _)| name == matched_seat)
         .map(|(_, entry)| *entry)?;
 
-    let section = extract_counter_clause_sections(&entry.text)?;
+    let section = counter_clauses_from_metadata(&entry.metadata)?;
     let mut budget = PromptInputBudget::new(SEAT_CARD_BUDGET_CHARS);
-    let admitted = budget.admit(&section)?;
+    let admitted = budget.admit(section)?;
 
     let source_file = entry
         .metadata
@@ -179,98 +203,61 @@ fn resolve_seat<'a>(
     None
 }
 
-/// ATX heading level (number of leading `#`) if `line` (already left-trimmed)
-/// is a valid markdown heading, else `None`. Requires a space (or end of
-/// line) after the hashes so `#comment`-shaped lines never misparse as
-/// headings.
-fn heading_level(line: &str) -> Option<usize> {
-    if !line.starts_with('#') {
-        return None;
-    }
-    let hashes = line.chars().take_while(|&c| c == '#').count();
-    let rest = &line[hashes..];
-    (rest.is_empty() || rest.starts_with(' ')).then_some(hashes)
-}
-
-/// Extract every section (heading line inclusive, through the next heading
-/// of equal-or-shallower depth, exclusive) whose title matches
-/// [`counter_clause_heading_re`]. Concatenated in document order, `\n\n`
-/// separated. `None` when the card has no matching heading at all — the
-/// frozen contract's "no matching section -> zero injection, never borrow
-/// from another section."
-fn extract_counter_clause_sections(card_text: &str) -> Option<String> {
-    let lines: Vec<&str> = card_text.lines().collect();
-    let mut sections: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        let trimmed = lines[i].trim_start();
-        let Some(level) = heading_level(trimmed) else {
-            i += 1;
-            continue;
-        };
-        let title = trimmed.trim_start_matches('#').trim();
-        if !counter_clause_heading_re().is_match(title) {
-            i += 1;
-            continue;
-        }
-
-        let mut section_lines = vec![lines[i]];
-        let mut j = i + 1;
-        while j < lines.len() {
-            let next_trimmed = lines[j].trim_start();
-            if let Some(next_level) = heading_level(next_trimmed) {
-                if next_level <= level {
-                    break;
-                }
-            }
-            section_lines.push(lines[j]);
-            j += 1;
-        }
-        while section_lines
-            .last()
-            .map(|l| l.trim().is_empty())
-            .unwrap_or(false)
-        {
-            section_lines.pop();
-        }
-        sections.push(section_lines.join("\n"));
-        i = j;
-    }
-
-    (!sections.is_empty()).then(|| sections.join("\n\n"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const GLM_CARD: &str = "详见 Claude 记忆.\n\n## 反制条款(派单必带,2026-07-06)\n- 只给窄单。\n- 自报永不可信。\n\n## 流量定向\n- 量上去。\n";
+    use serde_json::json;
 
     #[test]
-    fn extracts_matching_section_only() {
-        let section = extract_counter_clause_sections(GLM_CARD).expect("section found");
-        assert!(section.contains("## 反制条款"));
-        assert!(section.contains("只给窄单"));
-        assert!(!section.contains("流量定向"));
+    fn metadata_present_true_with_string_injects_verbatim() {
+        let metadata = json!({
+            "counter_clauses_present": true,
+            "counter_clauses": "## 反制条款\n- 只给窄单。",
+        });
+        assert_eq!(
+            counter_clauses_from_metadata(&metadata),
+            Some("## 反制条款\n- 只给窄单。")
+        );
     }
 
     #[test]
-    fn no_matching_heading_yields_none() {
-        let card = "## 定位\n一句话定位。\n\n## 病谱\n- 一条病。\n";
-        assert!(extract_counter_clause_sections(card).is_none());
+    fn metadata_null_counter_clauses_yields_none() {
+        // L1's explicit-Null-over-omission stale-clear write (tachi#1202
+        // 499dbe10): present is false, and the value itself is Null too.
+        let metadata = json!({
+            "counter_clauses_present": false,
+            "counter_clauses": serde_json::Value::Null,
+        });
+        assert_eq!(counter_clauses_from_metadata(&metadata), None);
     }
 
     #[test]
-    fn multiple_matching_sections_are_concatenated_in_order() {
-        let card = "## 反制条款 A\n- one\n\n## unrelated\n- skip\n\n## 继承反制条款 B\n- two\n";
-        let section = extract_counter_clause_sections(card).expect("sections found");
-        assert!(section.contains("反制条款 A"));
-        assert!(section.contains("- one"));
-        assert!(section.contains("继承反制条款 B"));
-        assert!(section.contains("- two"));
-        assert!(!section.contains("unrelated"));
-        // Order preserved: A before B.
-        assert!(section.find("A").unwrap() < section.find("B").unwrap());
+    fn metadata_missing_key_yields_none() {
+        let metadata = json!({
+            "source_file": "glm-5.2.md",
+            "source": "dispatch-ledger",
+        });
+        assert_eq!(counter_clauses_from_metadata(&metadata), None);
+    }
+
+    #[test]
+    fn metadata_present_true_but_null_value_yields_none() {
+        // Defensive: an inconsistent write (present=true, value still Null)
+        // must fail closed rather than inject a Null/garbage placeholder.
+        let metadata = json!({
+            "counter_clauses_present": true,
+            "counter_clauses": serde_json::Value::Null,
+        });
+        assert_eq!(counter_clauses_from_metadata(&metadata), None);
+    }
+
+    #[test]
+    fn metadata_present_true_but_non_string_value_yields_none() {
+        let metadata = json!({
+            "counter_clauses_present": true,
+            "counter_clauses": 42,
+        });
+        assert_eq!(counter_clauses_from_metadata(&metadata), None);
     }
 
     #[test]
@@ -298,12 +285,5 @@ mod tests {
     fn resolve_seat_none_when_nothing_matches() {
         let seats = vec!["glm-5.2", "grok-4.5"];
         assert_eq!(resolve_seat(&seats, Some("kimi_arch"), Some("kimi")), None);
-    }
-
-    #[test]
-    fn heading_level_rejects_non_atx_hash_lines() {
-        assert_eq!(heading_level("#nospace"), None);
-        assert_eq!(heading_level("## 反制条款"), Some(2));
-        assert_eq!(heading_level("#"), Some(1));
     }
 }

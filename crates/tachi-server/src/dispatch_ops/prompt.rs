@@ -732,10 +732,21 @@ mod tests {
 
     /// A `/cards/<seat>` mirror row shaped the way the frozen L1/L2 contract
     /// describes it: GLOBAL store, wiki-class, `authority: advisory` +
-    /// `source: dispatch-ledger` metadata. Tests seed this directly (L1's own
+    /// `source: dispatch-ledger` metadata, plus the L1 writer's own
+    /// already-extracted `counter_clauses_present`/`counter_clauses` pair —
+    /// the single source L2 reads from (`seat_card.rs`'s
+    /// `counter_clauses_from_metadata`, never a second extraction over
+    /// `text`). `text` carries the full raw card body for realism (source
+    /// display, human debugging) but is deliberately NOT re-parsed by L2.
+    /// `counter_clauses` mirrors what L1's heading-regex extractor would
+    /// have produced from that body — tests set it directly (L1's own
     /// FS-sync writer is out of this leaf's scope) to exercise the L2
     /// projection/consumption side in isolation.
-    fn seat_card_entry(seat: &str, text: &str) -> memcore::MemoryEntry {
+    fn seat_card_entry(
+        seat: &str,
+        text: &str,
+        counter_clauses: Option<&str>,
+    ) -> memcore::MemoryEntry {
         memcore::MemoryEntry {
             id: format!("seat-card-{seat}"),
             path: format!("/cards/{seat}"),
@@ -762,6 +773,8 @@ mod tests {
                 "source": "dispatch-ledger",
                 "source_file": format!("{seat}.md"),
                 "content_hash": "test-hash",
+                "counter_clauses_present": counter_clauses.is_some(),
+                "counter_clauses": counter_clauses,
             }),
             vector: None,
             retention_policy: Some("permanent".to_string()),
@@ -772,8 +785,13 @@ mod tests {
         }
     }
 
-    fn seed_seat_card(server: &MemoryServer, seat: &str, text: &str) {
-        let entry = seat_card_entry(seat, text);
+    fn seed_seat_card(
+        server: &MemoryServer,
+        seat: &str,
+        text: &str,
+        counter_clauses: Option<&str>,
+    ) {
+        let entry = seat_card_entry(seat, text, counter_clauses);
         server
             .with_global_store(|store| store.upsert(&entry).map_err(|e| e.to_string()))
             .expect("seed seat-card mirror row");
@@ -787,6 +805,7 @@ mod tests {
             &server,
             "glm-5.2",
             "详见 Claude 记忆.\n\n## 反制条款(派单必带)\n- 只给窄单,架构类绝对不给。\n- 自报永不可信。\n\n## 流量定向\n- 量上去。\n",
+            Some("## 反制条款(派单必带)\n- 只给窄单,架构类绝对不给。\n- 自报永不可信。"),
         );
         let params = seat_card_dispatch_params("glm-5.2", None);
 
@@ -804,7 +823,7 @@ mod tests {
         );
         assert!(
             !prompt.contains("流量定向"),
-            "only the 反制条款 section should be inlined, not sibling sections: {prompt}"
+            "only the metadata-extracted counter-clause text should be inlined, not sibling sections of the raw card body: {prompt}"
         );
     }
 
@@ -834,9 +853,9 @@ mod tests {
     fn oversized_countermeasures_section_is_truncated_with_ellipsis_marker() {
         let temp = tempfile::tempdir().expect("tempdir");
         let server = MemoryServer::new(temp.path().join("global.sqlite"), None).expect("server");
-        let long_clause = "反制条款过长测试内容片段。".repeat(200); // well over 1.5KB
+        let long_clause = "反制条款过长测试内容片段。".repeat(200); // well over 1536 characters
         let card_text = format!("## 反制条款(压测)\n- {long_clause}\n");
-        seed_seat_card(&server, "glm-5.2", &card_text);
+        seed_seat_card(&server, "glm-5.2", &card_text, Some(&card_text));
         let params = seat_card_dispatch_params("glm-5.2", None);
 
         let prompt = tokio::runtime::Runtime::new()
@@ -865,6 +884,7 @@ mod tests {
             &server,
             "glm-5.2",
             "## 反制条款\n- 只给窄单。\n",
+            Some("## 反制条款\n- 只给窄单。"),
         );
         let params = seat_card_dispatch_params("glm-5.2", Some(false));
 
