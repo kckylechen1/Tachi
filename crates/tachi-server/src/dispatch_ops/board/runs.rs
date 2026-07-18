@@ -149,36 +149,22 @@ pub(crate) fn collect_run_task_for_server(
 /// value containing a path separator or a `..` component would otherwise let
 /// a caller read (or, worse, have `read_failure_tail` read) an arbitrary file
 /// outside `~/.tachi/runs` -- e.g. `dispatch_id = "../../../../etc/passwd"`.
-/// Every real dispatch id minted by `dispatch::dedupe::new_dispatch_id` is a
-/// single path component drawn from `[A-Za-z0-9_-]` (timestamp-agent-suffix),
-/// so anything outside that allowlist is rejected fail-closed -- treated
-/// identically to "run not found" rather than surfaced as an error, so a
-/// probe gets no signal about what does or doesn't exist on disk.
-fn is_valid_dispatch_id(dispatch_id: &str) -> bool {
-    !dispatch_id.is_empty()
-        && dispatch_id
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
-}
-
+/// tachi#1173 k2 fix: the character allowlist and the canonicalize-and-confine
+/// defense-in-depth layer are now the shared `dispatch_ops::path_gate` gate
+/// (three more caller-supplied-dispatch_id call sites needed the identical
+/// check) rather than a copy local to this module.
 pub(super) fn collect_run_task_by_id(
     runs_dir: &Path,
     dispatch_id: &str,
 ) -> Option<serde_json::Value> {
-    if !is_valid_dispatch_id(dispatch_id) {
+    if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
         return None;
     }
     let run_dir = runs_dir.join(dispatch_id);
     if !run_dir.is_dir() {
         return None;
     }
-    // Defense in depth on top of the character allowlist above: canonicalize
-    // and confirm the resolved directory still lives under runs_dir. Catches
-    // anything the allowlist alone might miss (e.g. a symlinked run
-    // directory planted inside runs_dir that points elsewhere).
-    let canonical_run_dir = run_dir.canonicalize().ok()?;
-    let canonical_runs_dir = runs_dir.canonicalize().ok()?;
-    if !canonical_run_dir.starts_with(&canonical_runs_dir) {
+    if !crate::dispatch_ops::canonical_dir_is_within(&run_dir, runs_dir) {
         return None;
     }
     collect_run_task_from_dir(&run_dir)
