@@ -12,6 +12,13 @@ pub(crate) struct AgentRuntime {
     pub(crate) session_client: Option<String>,
     pub(crate) session_project: Option<String>,
     pub(crate) work_claim_connection: Option<WorkClaimConnection>,
+    /// #1251: the raw dispatch recursion-depth marker for THIS session, as it
+    /// arrived over the wire (`HEADER_DISPATCH_DEPTH` in the daemon path, or
+    /// the process's own `ENV_DISPATCH_DEPTH` in the CLI in-process path).
+    /// Stored raw (not pre-parsed) so the single resolve/saturate decision
+    /// lives at the gate in `session_identity::resolve_dispatch_depth`; `None`
+    /// means "no marker seen" ≡ depth 0 (a leader session).
+    pub(crate) session_dispatch_depth: Option<String>,
     // #1099: `handoff_memos` (in-memory duplicate of the persisted
     // `handoff:<id>` store rows, LRU-capped, populated only by the retired
     // `handoff_leave`/`handoff_check` handlers) removed — it was the

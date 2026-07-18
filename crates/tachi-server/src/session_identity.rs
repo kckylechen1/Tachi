@@ -30,6 +30,35 @@ pub(crate) const HEADER_PROJECT: &str = "x-tachi-project";
 /// topology).
 pub(crate) const HEADER_WORKSPACE_ROOT: &str = "x-tachi-workspace-root";
 
+/// #1251: per-call recursion-depth marker for the recursive-dispatch gate.
+/// It rides the SAME proxy→daemon per-call header rail as [`HEADER_PROJECT`]
+/// (injected in `cli_client::transport::call_daemon_tool_raw`, read back in
+/// `server_handler::http_session_identity`), NOT process env. A dispatched
+/// worker's `tachi serve` is a thin stdio proxy that forwards every tool call
+/// over HTTP to the singleton shared daemon, so `handle_tachi_dispatch` runs
+/// IN the daemon carrying the DAEMON's env (always depth 0). A gate that read
+/// process env would therefore always see depth 0 — security theater. The
+/// depth must travel per-call over the wire so the daemon reads the CALLER's
+/// depth into that session's identity.
+pub(crate) const HEADER_DISPATCH_DEPTH: &str = "x-tachi-dispatch-depth";
+
+/// #1251: the process-env var a parent stamps onto a child worker's
+/// `tachi serve` (see `dispatch_ops::mcp_config`). The child's stdio proxy
+/// reads it back from its OWN process env and re-emits it as
+/// [`HEADER_DISPATCH_DEPTH`] on every daemon call. It is also the authoritative
+/// depth source for the CLI in-process dispatch path, where the process IS the
+/// real caller (no daemon hop), so its own env is genuine — not the daemon-env
+/// theater the header rail exists to avoid.
+pub(crate) const ENV_DISPATCH_DEPTH: &str = "TACHI_DISPATCH_DEPTH";
+
+/// #1251: hard ceiling on nested dispatch depth. A session already at (or, via
+/// malformed-value saturation, beyond) this depth is refused BEFORE any run
+/// directory is created. Depth accounting: leader = 0, each child = parent + 1.
+/// With a limit of 3, sessions at depth 0/1/2 may dispatch (minting children at
+/// depth 1/2/3); a depth-3 worker can no longer dispatch — a bounded fan-out
+/// that stops a runaway self-dispatch loop from exhausting the daemon.
+pub(crate) const MAX_DISPATCH_DEPTH: u32 = 3;
+
 pub(crate) const META_PROFILE: &str = "tachiProfile";
 pub(crate) const META_CLIENT: &str = "tachiClient";
 pub(crate) const META_AGENT_IDENTITY: &str = "tachiAgentIdentity";
@@ -416,6 +445,56 @@ pub(crate) fn valid_agent_identity_assertion(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+/// #1251: resolve a caller's dispatch recursion depth from the (optional) wire
+/// marker carried by [`HEADER_DISPATCH_DEPTH`] / [`ENV_DISPATCH_DEPTH`]. The
+/// accounting is fail-closed by construction:
+/// - absent marker → `0` (a leader session — the dispatch plumbing stamps a
+///   depth onto every real child, so absence genuinely means "top of tree",
+///   not "child that dropped its marker"),
+/// - a present, well-formed non-negative integer → honored verbatim,
+/// - a present but malformed / negative (`"-1"`) / overflowing value →
+///   saturates to `limit`, so it can only ever FAIL the gate, never
+///   parse-error into an implicit "allow".
+pub(crate) fn resolve_dispatch_depth(raw: Option<&str>, limit: u32) -> u32 {
+    match raw {
+        None => 0,
+        // `u32::from_str` rejects a leading `-`, non-digits, and anything past
+        // `u32::MAX`; every one of those saturates to the limit and fails
+        // closed rather than being misread as a small (or zero) depth.
+        Some(marker) => marker.trim().parse::<u32>().unwrap_or(limit),
+    }
+}
+
+/// #1251: the pure fail-closed recursion gate. A dispatch requested by a
+/// session already at `depth` is refused once `depth >= limit`. Kept a free
+/// function (no I/O, no session handle) so the depth math is unit-testable in
+/// isolation from the header/env plumbing that feeds it, and so the single
+/// comparison that decides "allow vs refuse" lives in exactly one place.
+///
+/// #1251 v1 residual (owner-accepted, matches the existing worker
+/// self-report trust boundary — same class as `TACHI_AGENT_SEAT`): this gate
+/// is CALLER-ASSERTED. It defends against ACCIDENTAL unbounded recursion via
+/// the normal MCP-dispatch path (a leader/worker that keeps calling
+/// `tachi_task(action='dispatch')` on itself). It does NOT defend against a
+/// DELIBERATE worker choosing to bypass the marker — e.g. invoking the raw
+/// `tachi task` CLI outside the env-stamped path, or a forged
+/// `X-Tachi-Dispatch-Depth` header on a direct HTTP connection — because
+/// nothing here binds the depth claim to an authenticated capability. A
+/// server-side capability-token binding (the depth carried in a signed/opaque
+/// token minted by the parent, unforgeable by the child) is the follow-up
+/// hardening, tracked as a separate issue; it is explicitly OUT OF SCOPE for
+/// this v1 accidental-runaway defense.
+pub(crate) fn enforce_dispatch_depth(depth: u32, limit: u32) -> Result<(), String> {
+    if depth >= limit {
+        return Err(format!(
+            "recursive dispatch depth limit reached: caller is at dispatch depth {depth}, which \
+             meets or exceeds MAX_DISPATCH_DEPTH ({limit}); refusing to spawn a deeper child \
+             before any run directory is created (fail-closed recursion gate, #1251)"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1223,6 +1302,71 @@ mod tests {
             "save_memory",
             &map_from(&[("project", json!("other")), ("text", json!("t"))])
         ));
+    }
+
+    // ── #1251: recursive-dispatch depth gate ─────────────────────────────────
+
+    #[test]
+    fn enforce_dispatch_depth_allows_below_limit() {
+        // depth 0 (leader), 1, 2 all under a limit of 3 → allowed.
+        for depth in 0..MAX_DISPATCH_DEPTH {
+            enforce_dispatch_depth(depth, MAX_DISPATCH_DEPTH).unwrap_or_else(|err| {
+                panic!("depth {depth} < {MAX_DISPATCH_DEPTH} must pass: {err}")
+            });
+        }
+    }
+
+    #[test]
+    fn enforce_dispatch_depth_fails_closed_at_and_beyond_limit() {
+        for depth in [MAX_DISPATCH_DEPTH, MAX_DISPATCH_DEPTH + 1, u32::MAX] {
+            let err = enforce_dispatch_depth(depth, MAX_DISPATCH_DEPTH)
+                .expect_err("depth >= limit must be refused");
+            assert!(
+                err.contains("recursive dispatch depth limit reached")
+                    && err.contains("MAX_DISPATCH_DEPTH"),
+                "unexpected error for depth {depth}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_dispatch_depth_absent_marker_is_leader_zero() {
+        assert_eq!(resolve_dispatch_depth(None, MAX_DISPATCH_DEPTH), 0);
+    }
+
+    #[test]
+    fn resolve_dispatch_depth_honors_present_well_formed_value() {
+        assert_eq!(resolve_dispatch_depth(Some("0"), MAX_DISPATCH_DEPTH), 0);
+        assert_eq!(resolve_dispatch_depth(Some("2"), MAX_DISPATCH_DEPTH), 2);
+        // whitespace-padded (as an env/header round-trip can produce) is trimmed
+        assert_eq!(resolve_dispatch_depth(Some("  1 "), MAX_DISPATCH_DEPTH), 1);
+    }
+
+    #[test]
+    fn resolve_dispatch_depth_malformed_saturates_to_limit_fail_closed() {
+        // non-numeric, negative, blank, and overflowing all saturate to the
+        // limit so `enforce_dispatch_depth` then refuses — never an implicit
+        // "allow" from a parse error.
+        for raw in ["abc", "-1", "", "   ", "99999999999999999999", "1.5", "0x2"] {
+            let resolved = resolve_dispatch_depth(Some(raw), MAX_DISPATCH_DEPTH);
+            assert_eq!(
+                resolved, MAX_DISPATCH_DEPTH,
+                "malformed depth {raw:?} must saturate to the limit"
+            );
+            enforce_dispatch_depth(resolved, MAX_DISPATCH_DEPTH)
+                .expect_err("a saturated malformed depth must fail the gate closed");
+        }
+    }
+
+    #[test]
+    fn resolve_dispatch_depth_present_value_at_limit_still_fails_closed() {
+        // A genuinely-present depth equal to the limit is honored as-is (not
+        // treated as absent) and the gate refuses it — the recursion actually
+        // stops at the boundary.
+        let resolved = resolve_dispatch_depth(Some("3"), MAX_DISPATCH_DEPTH);
+        assert_eq!(resolved, 3);
+        enforce_dispatch_depth(resolved, MAX_DISPATCH_DEPTH)
+            .expect_err("a caller already at the limit must not dispatch");
     }
 
     #[test]

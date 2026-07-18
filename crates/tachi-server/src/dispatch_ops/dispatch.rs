@@ -208,6 +208,23 @@ pub(crate) async fn handle_tachi_dispatch(
     server: &MemoryServer,
     mut params: TachiDispatchParams,
 ) -> Result<String, String> {
+    // #1251: fail-closed recursive-dispatch depth gate — BEFORE any run
+    // directory, workspace, prompt, credential, or child process. The depth is
+    // read from the SESSION identity (populated from the per-call
+    // HEADER_DISPATCH_DEPTH rail in the daemon-proxy topology, or from this
+    // process's own ENV_DISPATCH_DEPTH in the CLI in-process path), NEVER from
+    // the daemon's process env — which is always the leader's depth 0 and would
+    // make this gate security theater. Absent marker = depth 0 (leader); a
+    // malformed value saturates to the limit and fails closed here.
+    let dispatch_depth = crate::session_identity::resolve_dispatch_depth(
+        server.session_dispatch_depth().as_deref(),
+        crate::session_identity::MAX_DISPATCH_DEPTH,
+    );
+    crate::session_identity::enforce_dispatch_depth(
+        dispatch_depth,
+        crate::session_identity::MAX_DISPATCH_DEPTH,
+    )?;
+
     // Fail before ANY run directory, workspace, prompt, or child process is
     // created. This is the machine boundary; confirmation for a permitted L3
     // action remains the responsibility of that action's existing gate.

@@ -64,6 +64,20 @@ pub(crate) fn build_in_process_server_with_migration_authority(
         schema_migration,
     )?;
     crate::provider_config::bootstrap_provider_runtime(&server);
+    // #1251: in the CLI in-process dispatch path there is no daemon hop and no
+    // HTTP header — this process IS the real caller, so its own
+    // ENV_DISPATCH_DEPTH is the authoritative recursion depth (NOT the
+    // daemon-env theater the header rail exists to avoid). Stamping it here
+    // makes the recursion gate in `handle_tachi_dispatch` structural on this
+    // path too: a dispatched worker that shells a raw `tachi task` CLI (daemon
+    // unreachable → in-process fallback) still cannot bypass the gate by
+    // escaping the header rail. Absent env var → left None ≡ leader depth 0.
+    if let Ok(depth) = std::env::var(crate::session_identity::ENV_DISPATCH_DEPTH) {
+        let depth = depth.trim();
+        if !depth.is_empty() {
+            server.set_session_dispatch_depth(Some(depth.to_string()));
+        }
+    }
     Ok(server)
 }
 
