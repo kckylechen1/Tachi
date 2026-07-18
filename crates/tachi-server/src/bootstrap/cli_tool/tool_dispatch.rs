@@ -798,8 +798,7 @@ mod tests {
             .enable_all()
             .build()
             .expect("test runtime");
-        let saved_text =
-            "cli wiki-write 1224 bound write lands in named project db, not global";
+        let saved_text = "cli wiki-write 1224 bound write lands in named project db, not global";
 
         let (ct, daemon_task) = rt.block_on(async {
             // Daemon is global-only (project_db=None). The CLI request below
@@ -833,7 +832,10 @@ mod tests {
             std::fs::write(&pid_path, parsed_url.to_string()).expect("pid file");
 
             let mut args = serde_json::Map::new();
-            args.insert("title".to_string(), serde_json::json!("cli wiki-write 1224"));
+            args.insert(
+                "title".to_string(),
+                serde_json::json!("cli wiki-write 1224"),
+            );
             args.insert("text".to_string(), serde_json::json!(saved_text));
             args.insert("project".to_string(), serde_json::json!(cli_project_name));
 
