@@ -1063,7 +1063,7 @@ mod tests {
         // candidate path is spelled through it too, so the literal pass
         // alone already matches here — this establishes the fixture is
         // sound before the next assertion exercises the canonicalize pass.
-        assert!(is_under_any_root(&candidate, &[alias.clone()]));
+        assert!(is_under_any_root(&candidate, std::slice::from_ref(&alias)));
 
         // Now spell the SAME candidate through its canonical (real_dir)
         // form, while the roots list only knows the alias spelling — the
@@ -1074,7 +1074,7 @@ mod tests {
             canonical_candidate, candidate,
             "fixture must actually traverse a symlink for this test to mean anything"
         );
-        assert!(is_under_any_root(&canonical_candidate, &[alias.clone()]));
+        assert!(is_under_any_root(&canonical_candidate, std::slice::from_ref(&alias)));
 
         let _ = std::fs::remove_dir_all(&base);
     }
