@@ -195,26 +195,33 @@ struct Candidate {
 /// only explained by leaked, logically-finished sub-sessions never exiting
 /// (the same #1273 Gap 1 bug: they *should* have died on their own, whether
 /// via stdin EOF or a signal, and didn't). Only the OLDEST adapters beyond
-/// the cap (lowest pid == started earliest, since pids are monotonic within
-/// a boot cycle) become reap candidates; the newest `cap` are always kept,
-/// so an actively-busy host is never starved mid-burst.
+/// the cap become reap candidates, ranked by actual process age (`etimes`
+/// from `ps`, descending — oldest first), NOT by pid: pid is only monotonic
+/// within an uninterrupted boot cycle, and wraps/reuse mean the numerically
+/// lowest pid is not reliably the oldest process (a long-running leaked
+/// adapter can hold a HIGHER pid than a freshly-spawned one after a wrap).
+/// Pid is used only as a deterministic tiebreaker between two candidates of
+/// equal age. The newest `cap` (by age) are always kept, so an
+/// actively-busy host is never starved mid-burst.
 fn per_parent_dedup_candidates(
-    live_parent_stdio: &[(i64, i64)],
+    live_parent_stdio: &[(i64, i64, u64)],
     cap: usize,
 ) -> std::collections::BTreeSet<i64> {
     use std::collections::BTreeMap;
-    let mut by_parent: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
-    for &(pid, ppid) in live_parent_stdio {
-        by_parent.entry(ppid).or_default().push(pid);
+    let mut by_parent: BTreeMap<i64, Vec<(i64, u64)>> = BTreeMap::new();
+    for &(pid, ppid, etimes) in live_parent_stdio {
+        by_parent.entry(ppid).or_default().push((pid, etimes));
     }
     let mut reap = std::collections::BTreeSet::new();
     for (_ppid, mut pids) in by_parent {
         if pids.len() <= cap {
             continue;
         }
-        pids.sort_unstable();
+        // Oldest (highest etimes) first; pid only breaks ties between two
+        // candidates that report the same age.
+        pids.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         let excess = pids.len() - cap;
-        for pid in pids.into_iter().take(excess) {
+        for (pid, _etimes) in pids.into_iter().take(excess) {
             reap.insert(pid);
         }
     }
@@ -233,11 +240,20 @@ fn per_parent_dedup_candidates(
 ///    the race where a rebuild lands moments before/after a brand-new
 ///    process's start timestamp is sampled, so a process that started
 ///    seconds before a same-window rebuild is never misclassified.
-/// 2. No exe path was resolvable at all (missing `lsof`, process already
-///    gone, unexpected output) AND the process exceeds `max_age` — the
+/// 2. No exe path was resolvable at all (the host launched `tachi` via a
+///    bare/relative `argv0` resolved through its own `PATH` — see
+///    `process_executable_path`) AND the process exceeds `max_age` — the
 ///    pragmatic backstop #1273 calls for when the precise signal can't be
 ///    computed: an unverifiable stdio adapter that has been running for
 ///    days is still worth flagging even without binary-identity proof.
+///
+/// Known false-positive modes accepted as adjudicated tradeoffs: a `touch`
+/// (or any metadata-only rewrite) without an actual rebuild bumps `mtime`
+/// just like a real rebuild would, and host/filesystem clock skew can shift
+/// `exe_mtime` relative to `process_started_at` independent of either one's
+/// truth. Both are judged acceptable because `reap` only ever *proposes* —
+/// the default CLI contract is preview-first, and `--apply` (a human
+/// decision) is the actual gate before anything is signaled.
 fn stdio_version_skew_reason(
     age: Duration,
     exe_mtime: Option<SystemTime>,
@@ -254,34 +270,45 @@ fn stdio_version_skew_reason(
         },
         None if age > max_age => Some(
             "stdio process exceeds max age and its running binary image could not be verified \
-             (version-skew backstop; install/rebuild lsof-based identity check to sharpen this)",
+             (version-skew backstop; the host launched tachi via a non-absolute argv0)",
         ),
         None => None,
     }
 }
 
-/// #1273 Gap 3 (best-effort, OS-probing): resolve the on-disk executable
-/// path a live pid was exec'd from via `lsof`'s `txt` (text/code segment) fd
-/// — the standard way to recover a running process's binary path on Darwin
-/// (there is no `/proc/<pid>/exe`). Any failure (missing `lsof`, process
-/// gone, unexpected output) yields `None`; callers MUST treat `None` as
-/// "cannot determine", never as a positive skew signal — see
-/// `stdio_version_skew_reason`'s age-only backstop for that case.
-#[cfg(unix)]
-fn process_executable_path(pid: i64) -> Option<PathBuf> {
-    let out = std::process::Command::new("lsof")
-        .args(["-p", &pid.to_string(), "-a", "-d", "txt", "-Fn"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
+/// #1273 Gap 3: resolve the on-disk executable path for a candidate from
+/// `argv0` of the SAME `ps` command line already parsed for classification
+/// — usually free (no extra shell-out) and unambiguous, since an MCP host
+/// virtually always spawns `tachi` via an absolute path (verified against
+/// this host's real processes: every live `tachi` pid reports an absolute
+/// `argv0`, e.g. `/Users/x/bin/tachi`, never a bare `tachi`).
+///
+/// This replaces an earlier `lsof -d txt` design, dropped after review: a
+/// process can hold MANY "txt" (text/code segment) fds simultaneously — the
+/// executable itself, `dyld`, and any shared library or resource/cache file
+/// the OS happens to mmap — and `lsof`'s record order is NOT guaranteed to
+/// put the actual executable first. Verified on this host: a real process's
+/// `lsof -p <pid> -a -d txt -Fn` output interleaved the executable with
+/// `/usr/lib/dyld` and, on a heavier process, a dozen+ unrelated resource
+/// bundles/caches, all reported as `txt` fds with no field distinguishing
+/// "this one is the executable". Trusting the first `n` record risked
+/// reading an unrelated file's mtime instead of the binary's own — a false
+/// attribution, not just a missed detection.
+///
+/// Only when `argv0` is NOT absolute (the host resolved a bare name via its
+/// own `PATH`, so we cannot know which directory it came from) does this
+/// fail closed to `None` — "cannot determine". Callers MUST treat `None` as
+/// exactly that, never as a positive skew signal — see
+/// `stdio_version_skew_reason`'s age-only backstop for that case. Pure
+/// string parsing over already-fetched data, so — unlike the `lsof` design
+/// it replaces — this needs no OS/platform gate and is directly
+/// unit-testable.
+fn process_executable_path(command: &str) -> Option<PathBuf> {
+    let argv0 = command.split_whitespace().next()?;
+    if !argv0.starts_with('/') {
         return None;
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    // `-Fn` field output: the file-name field is a line starting with `n`.
-    text.lines()
-        .find_map(|line| line.strip_prefix('n'))
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
+    Some(PathBuf::from(argv0))
 }
 
 /// Env-tunable knobs for the #1273 Gap 2/3 criteria, all with fail-safe
@@ -397,7 +424,7 @@ fn reap_stale_processes(
         let Some(started_at) = now.checked_sub(age) else {
             continue;
         };
-        let exe_mtime = process_executable_path(c.pid)
+        let exe_mtime = process_executable_path(&c.command)
             .and_then(|p| std::fs::metadata(p).ok())
             .and_then(|m| m.modified().ok());
         if let Some(reason) =
@@ -411,10 +438,10 @@ fn reap_stale_processes(
 
     // #1273 Gap 2: per-parent dedup, over whatever the skew pass left kept.
     let parent_cap = reap_stdio_parent_cap();
-    let still_kept_stdio: Vec<(i64, i64)> = candidates
+    let still_kept_stdio: Vec<(i64, i64, u64)> = candidates
         .iter()
         .filter(|c| c.kind == "stdio" && !c.reap)
-        .map(|c| (c.pid, c.ppid))
+        .map(|c| (c.pid, c.ppid, c.etimes))
         .collect();
     let dedup_reap = per_parent_dedup_candidates(&still_kept_stdio, parent_cap);
     for c in candidates.iter_mut() {
@@ -608,37 +635,93 @@ mod tests {
     }
 
     // ---- #1273 Gap 2: per-parent dedup ------------------------------------
+    //
+    // `per_parent_dedup_candidates` takes `(pid, ppid, etimes)` and MUST rank
+    // by `etimes` (actual process age), not by pid value — pid is only
+    // monotonic within an uninterrupted boot cycle, so a leaked adapter that
+    // has been running for hours can hold a numerically HIGHER pid than a
+    // freshly-spawned one after any pid reuse/wraparound. Every fixture below
+    // deliberately varies etimes independently of pid ordering so a
+    // regression back to pid-based sorting fails loudly.
 
     #[test]
     fn dedup_keeps_all_adapters_within_cap() {
-        let live = [(100, 1), (101, 1), (102, 1)];
+        let live = [(100, 1, 500), (101, 1, 50), (102, 1, 5000)];
         assert!(per_parent_dedup_candidates(&live, 3).is_empty());
     }
 
     #[test]
     fn dedup_reaps_oldest_excess_beyond_cap_keeping_newest() {
         // One live parent (ppid 500) with 8 adapters: the exact #1273
-        // forensics shape (3 live + 5 leaked). Cap 3 must reap the 5 lowest
-        // pids (oldest) and keep the 3 highest (newest).
-        let live: Vec<(i64, i64)> = vec![10, 11, 12, 13, 14, 20, 21, 22]
-            .into_iter()
-            .map(|pid| (pid, 500))
-            .collect();
+        // forensics shape (3 live + 5 leaked). Cap 3 must reap the 5 OLDEST
+        // BY AGE (etimes descending) and keep the 3 youngest — pid happens to
+        // correlate with age here (lower pid, older) but the sibling test
+        // below proves the selection key is genuinely etimes, not pid.
+        let live: Vec<(i64, i64, u64)> = vec![
+            (10, 500, 500_000),
+            (11, 500, 400_000),
+            (12, 500, 300_000),
+            (13, 500, 200_000),
+            (14, 500, 100_000),
+            (20, 500, 300),
+            (21, 500, 200),
+            (22, 500, 100),
+        ];
         let reap = per_parent_dedup_candidates(&live, 3);
         assert_eq!(reap.len(), 5);
         for pid in [10, 11, 12, 13, 14] {
-            assert!(reap.contains(&pid), "expected oldest pid {pid} reaped");
+            assert!(reap.contains(&pid), "expected oldest-by-age pid {pid} reaped");
         }
         for pid in [20, 21, 22] {
-            assert!(!reap.contains(&pid), "newest pid {pid} must be kept");
+            assert!(!reap.contains(&pid), "youngest-by-age pid {pid} must be kept");
         }
+    }
+
+    #[test]
+    fn dedup_ranks_by_age_not_pid_under_wraparound() {
+        // #1273 review fix: a wrapped/reused pid counter can hand a leaked,
+        // hours-old adapter a numerically LOWER pid than a freshly-spawned
+        // one, or vice versa. Here the ancient leaked adapter (etimes=500000,
+        // ~5.8 days) has the HIGHEST pid (99999); three genuinely fresh
+        // adapters (etimes in seconds) have the lowest pids. Sorting by pid
+        // (the pre-fix bug) would reap pid 5 — the NEWEST adapter — and keep
+        // the 5.8-day-old leak. Sorting by age must reap pid 99999 instead.
+        let live: Vec<(i64, i64, u64)> = vec![
+            (5, 900, 10),
+            (6, 900, 20),
+            (7, 900, 30),
+            (99999, 900, 500_000),
+        ];
+        let reap = per_parent_dedup_candidates(&live, 3);
+        assert_eq!(reap.len(), 1);
+        assert!(
+            reap.contains(&99999),
+            "the actually-ancient adapter (highest etimes) must be reaped regardless of its pid: {reap:?}"
+        );
+        for pid in [5, 6, 7] {
+            assert!(
+                !reap.contains(&pid),
+                "genuinely fresh adapter pid {pid} must never be reaped just for having a low pid: {reap:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dedup_tiebreaks_equal_age_deterministically_by_pid() {
+        // Two candidates that report identical etimes (ps-resolution ties):
+        // the tiebreak must be deterministic (lowest pid reaped first) so
+        // repeated runs of the same process table always agree.
+        let live: Vec<(i64, i64, u64)> = vec![(30, 1, 100), (31, 1, 100), (32, 1, 100)];
+        let reap = per_parent_dedup_candidates(&live, 2);
+        assert_eq!(reap.len(), 1);
+        assert!(reap.contains(&30), "equal-age tiebreak must reap the lowest pid: {reap:?}");
     }
 
     #[test]
     fn dedup_is_scoped_per_parent_not_global() {
         // Two different live parents, each under cap on their own, must not
         // be reaped even though the combined total exceeds the cap.
-        let live = [(1, 700), (2, 700), (3, 800), (4, 800)];
+        let live = [(1, 700, 400), (2, 700, 300), (3, 800, 200), (4, 800, 100)];
         assert!(per_parent_dedup_candidates(&live, 2).is_empty());
     }
 
@@ -723,6 +806,28 @@ mod tests {
             reason.is_none(),
             "an unverifiable but young process must not be reaped"
         );
+    }
+
+    // ---- #1273 Gap 3: executable-path resolution --------------------------
+
+    #[test]
+    fn executable_path_resolves_absolute_argv0() {
+        let path = process_executable_path("/Users/x/bin/tachi serve --daemon --port 6919")
+            .expect("absolute argv0 must resolve");
+        assert_eq!(path, PathBuf::from("/Users/x/bin/tachi"));
+    }
+
+    #[test]
+    fn executable_path_fails_closed_for_bare_relative_argv0() {
+        // A host that resolved a bare name via its own PATH gives us no
+        // directory to trust; must return None ("cannot determine"), never
+        // guess at a path.
+        assert!(process_executable_path("tachi serve").is_none());
+    }
+
+    #[test]
+    fn executable_path_fails_closed_for_empty_command() {
+        assert!(process_executable_path("").is_none());
     }
 
     // ---- #1273 Gap 2/3: env knob defaults ---------------------------------

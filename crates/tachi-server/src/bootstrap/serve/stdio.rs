@@ -142,6 +142,14 @@ pub(super) async fn serve_stdio(server: MemoryServer) -> Result<(), Box<dyn std:
 /// direct, DB-holding path) already flushed/joined the background tasks that
 /// matter — see the `!cli.daemon` tail of `start_server_transport` in
 /// `serve.rs`, which calls this same function after that join completes.
+///
+/// This can still land mid-write inside an untracked enrichment/foundry
+/// worker task that isn't one of the explicitly-joined `bg_handles` (or
+/// mid-request in a proxied tool call); that is judged acceptable because
+/// SQLite's WAL mode is crash-consistent by design — an in-flight
+/// transaction with no COMMIT simply never lands and rolls back cleanly on
+/// next open, which strictly improves on the pre-fix status quo of the
+/// process never exiting at all and requiring a literal `kill -9`.
 pub(super) fn stdio_hard_exit() -> ! {
     std::process::exit(0)
 }
