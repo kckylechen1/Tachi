@@ -153,8 +153,7 @@ fn observe_terminal(server: &MemoryServer, event: &TachiEventRecord) -> Result<(
 fn normalize_host_outcome(raw: Option<&str>) -> String {
     match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
         Some(
-            "success" | "succeeded" | "completed" | "complete" | "done" | "ok" | "pass"
-            | "passed",
+            "success" | "succeeded" | "completed" | "complete" | "done" | "ok" | "pass" | "passed",
         ) => "completed",
         Some("failure" | "failed" | "fail" | "error" | "errored") => "failed",
         Some("cancelled" | "canceled" | "aborted" | "abort" | "interrupted" | "killed") => {
@@ -339,7 +338,11 @@ mod tests {
         register_spawn(&server, &event)
             .expect("duplicate register must CONVERGE (Ok), never a UNIQUE-constraint Err");
 
-        assert_eq!(run_count(&server), 1, "duplicate spawned must not duplicate the run");
+        assert_eq!(
+            run_count(&server),
+            1,
+            "duplicate spawned must not duplicate the run"
+        );
         let run = run_by_child(&server, "child-1");
         assert_eq!(run.execution_origin, "host_native_subagent");
         assert_eq!(run.lifecycle_owner, "host");
@@ -440,7 +443,10 @@ mod tests {
                     .map_err(|e| e.to_string())
             })
             .expect("observation row");
-        assert_eq!(terminal_outcome, "completed", "'success' normalizes to the kanban 'completed'");
+        assert_eq!(
+            terminal_outcome, "completed",
+            "'success' normalizes to the kanban 'completed'"
+        );
         assert_eq!(duration_ms, Some(4200));
     }
 
@@ -472,7 +478,10 @@ mod tests {
         let (server, _dir) = test_server();
         register_spawn(
             &server,
-            &host_event(SPAWNED_EVENT_TYPE, json!({ "child_session_key": "child-dup" })),
+            &host_event(
+                SPAWNED_EVENT_TYPE,
+                json!({ "child_session_key": "child-dup" }),
+            ),
         )
         .expect("register");
         let ended = host_event(
@@ -484,7 +493,10 @@ mod tests {
             .expect("duplicate ended must CONVERGE (Ok), not error or duplicate");
 
         let (count, outcome) = observation_of(&server, "child-dup");
-        assert_eq!(count, 1, "duplicate ended must not duplicate the observation");
+        assert_eq!(
+            count, 1,
+            "duplicate ended must not duplicate the observation"
+        );
         assert_eq!(outcome.as_deref(), Some("completed"));
     }
 
@@ -512,9 +524,16 @@ mod tests {
         // Late/duplicate spawned replay.
         register_spawn(&server, &spawned).expect("late spawned replay converges");
 
-        assert_eq!(run_count(&server), 1, "late spawned replay mints no second run");
+        assert_eq!(
+            run_count(&server),
+            1,
+            "late spawned replay mints no second run"
+        );
         let (count, outcome) = observation_of(&server, "child-late");
-        assert_eq!(count, 1, "terminal observation survives the late spawned replay");
+        assert_eq!(
+            count, 1,
+            "terminal observation survives the late spawned replay"
+        );
         assert_eq!(
             outcome.as_deref(),
             Some("failed"),
@@ -529,7 +548,10 @@ mod tests {
         let (server, _dir) = test_server();
         bridge_host_spawn_event(
             &server,
-            &host_event(SPAWNED_EVENT_TYPE, json!({ "child_session_key": "child-3" })),
+            &host_event(
+                SPAWNED_EVENT_TYPE,
+                json!({ "child_session_key": "child-3" }),
+            ),
         );
         bridge_host_spawn_event(
             &server,
@@ -577,7 +599,9 @@ mod tests {
             .with_global_store_read(|store| {
                 store
                     .connection()
-                    .query_row("SELECT COUNT(*) FROM mirror_eval_observations", [], |r| r.get(0))
+                    .query_row("SELECT COUNT(*) FROM mirror_eval_observations", [], |r| {
+                        r.get(0)
+                    })
                     .map_err(|e| e.to_string())
             })
             .expect("count");
@@ -600,6 +624,10 @@ mod tests {
             &host_event("host.before_prompt", json!({ "turn_id": "t-1" })),
         );
 
-        assert_eq!(run_count(&server), 0, "non-spawn events mint no mirror_eval run");
+        assert_eq!(
+            run_count(&server),
+            0,
+            "non-spawn events mint no mirror_eval run"
+        );
     }
 }
