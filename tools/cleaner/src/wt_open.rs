@@ -994,10 +994,7 @@ mod tests {
     #[test]
     fn private_tmp_and_tmp_are_ephemeral() {
         let roots = vec![PathBuf::from("/tmp"), PathBuf::from("/private/tmp")];
-        assert!(is_under_any_root(
-            Path::new("/private/tmp/wz-1184"),
-            &roots
-        ));
+        assert!(is_under_any_root(Path::new("/private/tmp/wz-1184"), &roots));
         assert!(is_under_any_root(Path::new("/tmp/some-session"), &roots));
         // The bare root itself also counts, not just children of it.
         assert!(is_under_any_root(Path::new("/private/tmp"), &roots));
@@ -1074,7 +1071,10 @@ mod tests {
             canonical_candidate, candidate,
             "fixture must actually traverse a symlink for this test to mean anything"
         );
-        assert!(is_under_any_root(&canonical_candidate, std::slice::from_ref(&alias)));
+        assert!(is_under_any_root(
+            &canonical_candidate,
+            std::slice::from_ref(&alias)
+        ));
 
         let _ = std::fs::remove_dir_all(&base);
     }

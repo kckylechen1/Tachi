@@ -46,8 +46,7 @@ use super::DoctorWarning;
 /// a private orphan candidate — see the module doc for why this check is
 /// independent of (and a defense-in-depth complement to) the env/process
 /// based protection `exec_env_reaper::protected_paths` already applies.
-const BLESSED_SHARED_TARGET_BASENAMES: &[&str] =
-    &["sigil-shared-target", "hyperion-shared-target"];
+const BLESSED_SHARED_TARGET_BASENAMES: &[&str] = &["sigil-shared-target", "hyperion-shared-target"];
 
 /// Default staleness gate for the patrol — same default `exec_env_reaper`'s
 /// own CLI uses (7 days), so the doctor section and `tachi clean
@@ -345,7 +344,9 @@ fn scan_orphan_build_resources_with_roots(
 /// Parse an RFC3339 timestamp and return its age in whole days against `now`.
 /// `None` on an unparseable timestamp (never a panic, never a guessed age).
 fn age_in_days(rfc3339: &str, now: DateTime<Utc>) -> Option<i64> {
-    let parsed = DateTime::parse_from_rfc3339(rfc3339).ok()?.with_timezone(&Utc);
+    let parsed = DateTime::parse_from_rfc3339(rfc3339)
+        .ok()?
+        .with_timezone(&Utc);
     Some((now - parsed).num_days())
 }
 
@@ -581,8 +582,7 @@ mod tests {
     fn ledger_held_paths_is_empty_when_the_global_db_does_not_exist_yet() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("never-provisioned.db");
-        let held =
-            ledger_held_paths(&db_path).expect("a missing db is an empty ledger, not a gap");
+        let held = ledger_held_paths(&db_path).expect("a missing db is an empty ledger, not a gap");
         assert!(held.is_empty());
     }
 
@@ -751,7 +751,11 @@ mod tests {
         assert_eq!(warning.path, facts.path);
         assert!(warning.message.contains("3.0GB"), "{}", warning.message);
         assert!(warning.message.contains("9d"), "{}", warning.message);
-        assert!(warning.message.contains("build_target"), "{}", warning.message);
+        assert!(
+            warning.message.contains("build_target"),
+            "{}",
+            warning.message
+        );
         assert!(warning.remediation.contains("rm -rf"));
     }
 
