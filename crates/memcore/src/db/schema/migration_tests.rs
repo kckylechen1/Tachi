@@ -865,3 +865,235 @@ fn pre_v21_legacy_db_boots_through_init_schema_inner() {
         "a full-path boot of a legacy DB must end stamped at the current version"
     );
 }
+
+/// Legacy single-table shape for `exec_envs` at a v15..v20 era: it has
+/// `env_class` (v15) but lacks the v21 `agent_identity_id` / `claim_id`.
+const SIGIL_1289_LEGACY_EXEC_ENVS_SQL: &str = r#"
+    CREATE TABLE exec_envs (
+        env_id         TEXT PRIMARY KEY,
+        kind           TEXT NOT NULL DEFAULT 'worktree',
+        path           TEXT NOT NULL,
+        repo_root      TEXT NOT NULL DEFAULT '',
+        branch         TEXT NOT NULL DEFAULT '',
+        base_sha       TEXT NOT NULL DEFAULT '',
+        dispatch_id    TEXT,
+        env_class      TEXT NOT NULL DEFAULT 'edit-only',
+        state          TEXT NOT NULL DEFAULT 'active',
+        reclaim_reason TEXT,
+        schema_version INTEGER NOT NULL DEFAULT 1,
+        created_at     TEXT NOT NULL DEFAULT '',
+        reclaimed_at   TEXT
+    );
+"#;
+
+/// Legacy single-table shape for `session_claims` before the v21 spine: no
+/// `mode` (nor the rest of the v21 columns).
+const SIGIL_1289_LEGACY_SESSION_CLAIMS_SQL: &str = r#"
+    CREATE TABLE session_claims (
+        claim_id             TEXT PRIMARY KEY,
+        session_client       TEXT,
+        issue_ref            TEXT,
+        flow_id              TEXT,
+        dispatch_id          TEXT,
+        branch               TEXT NOT NULL DEFAULT '',
+        declared_file_scope  TEXT,
+        state                TEXT NOT NULL DEFAULT 'active',
+        release_reason       TEXT,
+        created_at           TEXT NOT NULL DEFAULT '',
+        heartbeat_at         TEXT NOT NULL DEFAULT '',
+        released_at          TEXT
+    );
+"#;
+
+/// Full fresh path over an empty file: init_schema_inner + all v1..v21
+/// migrations (unset sentinels), stamped at the current version.
+fn sigil_1289_fresh_full_path() -> (Connection, tempfile::NamedTempFile) {
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let path = tmp.path().to_path_buf();
+    sigil_1289_register_exts();
+    let mut conn = Connection::open(&path).expect("open fresh");
+    let ctx = crate::db::DbOpenContext::create_fresh();
+    crate::db::init_schema_with_label_mut(&mut conn, "global", &path, &ctx)
+        .expect("fresh full-path init must succeed");
+    (conn, tmp)
+}
+
+/// The migration-free `init_schema` path (owner ruling A: its product IS the
+/// complete current schema).
+fn sigil_1289_init_schema_only() -> Connection {
+    sigil_1289_register_exts();
+    let conn = Connection::open_in_memory().expect("in-memory");
+    crate::db::init_schema(&conn).expect("init_schema must succeed");
+    conn
+}
+
+/// Normalize a live DB into a comparable schema shape:
+///   - table -> SET of column names (compared as a set: ALTER-appended columns
+///     land in a different ordinal position than a fresh CREATE TABLE, so
+///     ordinal is not a difference that matters here).
+///   - named index -> normalized CREATE sql (lowercased, `IF NOT EXISTS`
+///     stripped, whitespace collapsed) so the same index created via different
+///     statements (BASE vs migration DROP+CREATE) compares equal.
+/// FTS5 virtual/shadow tables and sqlite autoindexes are excluded: identical
+/// across build paths and pure noise for the #1289 convergence question.
+fn sigil_1289_normalized_schema(
+    conn: &Connection,
+) -> (
+    std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    std::collections::BTreeMap<String, String>,
+) {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let table_names: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type='table' AND name NOT LIKE 'sqlite_%' \
+                   AND name NOT LIKE 'memories_fts%' \
+                 ORDER BY name",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    };
+    let mut tables = BTreeMap::new();
+    for t in table_names {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info(\"{t}\")"))
+            .unwrap();
+        let cols = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<BTreeSet<_>, _>>()
+            .unwrap();
+        tables.insert(t, cols);
+    }
+
+    let mut indexes = BTreeMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, sql FROM sqlite_master \
+                 WHERE type='index' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%' \
+                 ORDER BY name",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for (name, sql) in rows {
+            let norm = sql
+                .to_lowercase()
+                .replace("if not exists ", "")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            indexes.insert(name, norm);
+        }
+    }
+    (tables, indexes)
+}
+
+#[test]
+fn init_paths_converge_to_the_same_schema() {
+    // (a) fresh full path, (b) init_schema-only, (c) pre-v21 legacy replay must
+    // all land on the SAME normalized schema. This one net catches #1289 (path
+    // c crashes without the fix) AND any evolutionary index that lives only in
+    // a sentinel migration (path b would then be missing it — the class that
+    // hid idx_hard_state_ns_updated).
+    let (a_conn, _a_tmp) = sigil_1289_fresh_full_path();
+    let b_conn = sigil_1289_init_schema_only();
+    let (c_conn, _c_tmp) = sigil_1289_init_full_path_with_setup(SIGIL_1289_PRE_V21_LEGACY_SQL);
+
+    let a = sigil_1289_normalized_schema(&a_conn);
+    let b = sigil_1289_normalized_schema(&b_conn);
+    let c = sigil_1289_normalized_schema(&c_conn);
+
+    assert_eq!(
+        a.0, b.0,
+        "table column-sets differ: fresh-full (left) vs init_schema-only (right)"
+    );
+    assert_eq!(
+        a.0, c.0,
+        "table column-sets differ: fresh-full (left) vs legacy-replay (right)"
+    );
+    assert_eq!(
+        a.1, b.1,
+        "index definitions differ: fresh-full (left) vs init_schema-only (right)"
+    );
+    assert_eq!(
+        a.1, c.1,
+        "index definitions differ: fresh-full (left) vs legacy-replay (right)"
+    );
+}
+
+#[test]
+fn legacy_access_history_backfills_query_hash_index() {
+    let (conn, _tmp) = sigil_1289_init_full_path_with_setup(
+        "CREATE TABLE access_history (memory_id TEXT NOT NULL, accessed_at TEXT NOT NULL);",
+    );
+    assert!(
+        has_column(&conn, "access_history", "query_hash").unwrap(),
+        "query_hash must be ensured on a legacy access_history"
+    );
+    assert!(
+        sigil_1289_index_exists(&conn, "idx_access_hist_hash"),
+        "idx_access_hist_hash must exist after backfilling query_hash"
+    );
+}
+
+#[test]
+fn legacy_exec_envs_backfills_claim_index() {
+    let (conn, _tmp) = sigil_1289_init_full_path_with_setup(SIGIL_1289_LEGACY_EXEC_ENVS_SQL);
+    assert!(
+        has_column(&conn, "exec_envs", "claim_id").unwrap(),
+        "claim_id must be ensured on a legacy exec_envs"
+    );
+    assert!(
+        has_column(&conn, "exec_envs", "agent_identity_id").unwrap(),
+        "agent_identity_id must be ensured on a legacy exec_envs"
+    );
+    assert!(
+        sigil_1289_index_exists(&conn, "idx_exec_envs_claim"),
+        "idx_exec_envs_claim must exist after backfilling claim_id"
+    );
+}
+
+#[test]
+fn legacy_session_claims_backfills_identity_index() {
+    let (conn, _tmp) = sigil_1289_init_full_path_with_setup(SIGIL_1289_LEGACY_SESSION_CLAIMS_SQL);
+    assert!(
+        has_column(&conn, "session_claims", "mode").unwrap(),
+        "mode must be ensured on a legacy session_claims"
+    );
+    assert!(
+        sigil_1289_index_exists(&conn, "idx_session_claims_identity_active"),
+        "idx_session_claims_identity_active must exist after backfilling mode"
+    );
+}
+
+#[test]
+fn init_schema_only_carries_all_evolutionary_indexes() {
+    // owner ruling A: init_schema (no migrations) must produce the complete
+    // current schema. The three relocated indexes plus idx_hard_state_ns_updated
+    // (previously reachable only via the v13 migration) must all be present on
+    // the migration-free path.
+    let conn = sigil_1289_init_schema_only();
+    for idx in [
+        "idx_access_hist_hash",
+        "idx_exec_envs_claim",
+        "idx_session_claims_identity_active",
+        "idx_hard_state_ns_updated",
+    ] {
+        assert!(
+            sigil_1289_index_exists(&conn, idx),
+            "init_schema (no migrations) must carry {idx} (#1289 ruling A)"
+        );
+    }
+}
