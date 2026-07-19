@@ -88,6 +88,20 @@ fn dispatch_run_dir(dispatch_id: &str, run_dir_hint: Option<&str>) -> Option<Pat
     canonical_dir_within(&hint, &runs_root).or_else(|| canonical_dir_within(&fallback, &runs_root))
 }
 
+/// tachi#1270: defense-in-depth against the residual TOCTOU window between
+/// `dispatch_run_dir`'s validation and the actual read that follows it in
+/// the readers below. `dispatch_run_dir` already returns a canonical,
+/// contained path, but the subsequent `read_to_string`/`read_json_file`
+/// against that same `PathBuf` resolves symlinks fresh at OS-open time --
+/// so an actor with write access to the runs tree could `rm` + symlink the
+/// *validated final directory itself* out of the runs root in the gap
+/// between validation and read. Re-run the identical canonicalize +
+/// `starts_with(runs_root)` check immediately before the read; on failure
+/// return `None`, indistinguishable from "not found" (no probe signal).
+fn revalidate_run_dir_at_read_time(run_dir: &Path) -> Option<PathBuf> {
+    canonical_dir_within(run_dir, &tachi_home().join("runs"))
+}
+
 pub(super) fn dispatch_response_summary(response: &Value) -> Value {
     json!({
         "dispatch_id": response.get("dispatch_id").cloned().unwrap_or(Value::Null),
@@ -185,6 +199,7 @@ pub(super) fn compact_mission_status(status: &Value) -> Value {
 
 fn read_linked_dispatch_status(dispatch_id: &str, run_dir_hint: Option<&str>) -> Option<Value> {
     let run_dir = dispatch_run_dir(dispatch_id, run_dir_hint)?;
+    let run_dir = revalidate_run_dir_at_read_time(&run_dir)?;
     let status_path = run_dir.join("status.json");
     let status = read_json_file(&status_path).ok()?;
     let result_written = run_dir.join("result.md").exists();
@@ -209,6 +224,7 @@ pub(super) fn read_linked_dispatch_result(
     run_dir_hint: Option<&str>,
 ) -> Option<String> {
     let run_dir = dispatch_run_dir(dispatch_id, run_dir_hint)?;
+    let run_dir = revalidate_run_dir_at_read_time(&run_dir)?;
     let raw = std::fs::read_to_string(run_dir.join("result.md")).ok()?;
     if raw.trim().is_empty() {
         None
@@ -570,6 +586,43 @@ mod dispatch_run_dir_gate_tests {
             std::fs::read_to_string(resolved.join("result.md")).unwrap(),
             "safe result"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_time_revalidation_rejects_validated_dir_swapped_before_read() {
+        // tachi#1270: `dispatch_run_dir` validates once and hands back a
+        // canonical `PathBuf`; the residual TOCTOU is the *validated
+        // directory itself* being swapped for an outward symlink in the
+        // window between that validation and the reader's later
+        // `read_to_string`/`read_json_file` against the same path (which
+        // resolves symlinks fresh at OS-open time, not at canonicalize
+        // time). Mirrors `validated_hint_returns_canonical_path_that_survives_link_swap`'s
+        // setup: validate once via `dispatch_run_dir`, mutate the
+        // filesystem after, then exercise the exact check the readers now
+        // run immediately before reading (`revalidate_run_dir_at_read_time`)
+        // against the *same* already-resolved path.
+        let home = set_home();
+        let id = "abc123";
+        let real = home.root.join("runs").join(id);
+        let outside = home.root.join("outside_target");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(real.join("result.md"), "safe result").unwrap();
+        std::fs::write(outside.join("result.md"), "outside result").unwrap();
+
+        let resolved = dispatch_run_dir(id, None).expect("valid id");
+        assert_eq!(resolved, real.canonicalize().unwrap());
+
+        // TOCTOU: the validated directory itself is replaced by an
+        // outward-pointing symlink after validation, before the read.
+        std::fs::remove_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&outside, &real).unwrap();
+
+        // Re-validating the same already-resolved path immediately before
+        // the read must fail closed rather than silently following the
+        // swapped symlink out of the runs root.
+        assert!(revalidate_run_dir_at_read_time(&resolved).is_none());
     }
 
     #[test]
