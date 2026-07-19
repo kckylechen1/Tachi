@@ -259,6 +259,38 @@ fn rotation_members_configure_their_logical_provider_key() {
     assert_eq!(rotation.members[1].status, "rate_limited");
 }
 
+// tachi#1287 fix 1: the health-probe seam (`probes::run_provider_probe_report`)
+// used to discard `MaterializeReport.skipped_aliases` on the `Ok` branch — a
+// skip was only visible in tracing output, never in the probe report itself
+// (which is what `status doctor`/health snapshots actually read). Assert the
+// conversion helper surfaces it as a queryable `ProviderProbeResult`, not just
+// a log line.
+#[test]
+fn skipped_alias_surfaces_as_a_probe_result_not_only_a_log_line() {
+    let report = tachi_llm::MaterializeReport {
+        skipped_aliases: vec![(
+            "OPENAI_API_KEY".to_string(),
+            "Config key 'OPENAI_API_KEY' references Vault alias 'MISSING_ALIAS' but the secret is missing or Vault is locked.".to_string(),
+        )],
+        ..Default::default()
+    };
+
+    let probe = super::probes::skipped_alias_probe_result(&report)
+        .expect("a non-empty skipped_aliases must surface as a probe result");
+
+    assert_eq!(probe.name, "provider_secret_materialization");
+    assert_eq!(probe.status, "degraded");
+    let message = probe.message.expect("probe message present");
+    assert!(message.contains("OPENAI_API_KEY") || message.contains("MISSING_ALIAS"));
+    assert!(message.contains("skipped during materialization"));
+}
+
+#[test]
+fn no_skipped_aliases_yields_no_probe_result() {
+    let report = tachi_llm::MaterializeReport::default();
+    assert!(super::probes::skipped_alias_probe_result(&report).is_none());
+}
+
 #[test]
 fn provider_probe_cache_round_trips() {
     let dir = tempfile::tempdir().expect("tempdir");

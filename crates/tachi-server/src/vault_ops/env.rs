@@ -155,19 +155,33 @@ pub(super) fn attach_provider_refresh_warning(
     body: String,
 ) -> Result<String, String> {
     match server.refresh_llm_provider_secrets_from_vault() {
-        Ok(_) => Ok(body),
-        Err(err) => {
-            let mut value: serde_json::Value = serde_json::from_str(&body)
-                .map_err(|e| format!("serialize provider refresh warning: {e}"))?;
-            if let Some(obj) = value.as_object_mut() {
-                obj.insert(
-                    "provider_secret_refresh_warning".to_string(),
-                    json!(format!(
-                        "Vault operation succeeded, but provider key cache refresh failed: {err}"
-                    )),
-                );
-            }
-            serde_json::to_string(&value).map_err(|e| format!("serialize: {e}"))
-        }
+        // Clean refresh with no skipped aliases: pass the response through unchanged.
+        Ok(report) if report.skipped_aliases.is_empty() => Ok(body),
+        // #1279: the refresh succeeded but one or more `vault:` aliases were skipped
+        // (missing/locked secret). The vault_set/unlock caller must not read a bare
+        // success — surface the skipped aliases (with remediation) into the response.
+        Ok(report) => attach_refresh_warning_field(
+            body,
+            format!(
+                "Vault operation succeeded, but {}",
+                crate::provider_config::describe_skipped_aliases(&report.skipped_aliases)
+            ),
+        ),
+        Err(err) => attach_refresh_warning_field(
+            body,
+            format!("Vault operation succeeded, but provider key cache refresh failed: {err}"),
+        ),
     }
+}
+
+fn attach_refresh_warning_field(body: String, warning: String) -> Result<String, String> {
+    let mut value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("serialize provider refresh warning: {e}"))?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "provider_secret_refresh_warning".to_string(),
+            json!(warning),
+        );
+    }
+    serde_json::to_string(&value).map_err(|e| format!("serialize: {e}"))
 }

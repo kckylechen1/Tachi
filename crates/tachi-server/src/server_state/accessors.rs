@@ -55,19 +55,30 @@ impl MemoryServer {
         self.db.global_read_pool_size()
     }
 
-    pub(crate) fn refresh_llm_provider_secrets_from_vault(&self) -> Result<usize, String> {
-        crate::provider_config::materialize_for_server(self).map(|report| {
-            if report.from_alias > 0 || report.env_fallbacks_bypassed > 0 {
-                tracing::info!(
-                    "[provider] materialized {} secret(s) (vault={}, aliases={}, env_fallbacks_bypassed={})",
-                    report.loaded,
-                    report.from_vault,
-                    report.from_alias,
-                    report.env_fallbacks_bypassed
-                );
-            }
-            report.loaded
-        })
+    pub(crate) fn refresh_llm_provider_secrets_from_vault(
+        &self,
+    ) -> Result<crate::provider_config::MaterializeReport, String> {
+        let report = crate::provider_config::materialize_for_server(self)?;
+        if report.from_alias > 0 || report.env_fallbacks_bypassed > 0 {
+            tracing::info!(
+                "[provider] materialized {} secret(s) (vault={}, aliases={}, env_fallbacks_bypassed={})",
+                report.loaded,
+                report.from_vault,
+                report.from_alias,
+                report.env_fallbacks_bypassed
+            );
+        }
+        // #1279: this is the single refresh seam (daemon auto-refresh, keychain
+        // auto-unlock, ensure_materialized, vault_set/unlock). A per-alias skip
+        // must never be swallowed by the discarded report — log each skipped alias
+        // loudly with its vault_unlock/vault_set remediation before returning.
+        for (key, reason) in &report.skipped_aliases {
+            tracing::warn!(
+                "[provider] skipped alias for '{key}': {}",
+                crate::provider_config::format_skipped_alias_reason(reason)
+            );
+        }
+        Ok(report)
     }
 
     pub(crate) fn ensure_provider_secrets_materialized(&self, keys: &[&str]) {

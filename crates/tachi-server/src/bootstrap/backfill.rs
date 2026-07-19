@@ -15,6 +15,30 @@ use tachi_llm::LlmClient;
 const DEFAULT_BACKFILL_LLM_CONCURRENCY: usize = 4;
 const MAX_BACKFILL_LLM_CONCURRENCY: usize = 32;
 
+/// #1279: backfill stays strict — batch jobs fail-fast on skipped aliases.
+///
+/// The server refresh path tolerates a skipped `vault:` alias (degrade only that
+/// lane), but a batch sweep is all-or-nothing: a missing/locked key would let the
+/// sweep proceed and then either embed/summarize zero rows or storm per-row LLM
+/// failures deep inside the job. So a batch that materialized any skipped alias
+/// refuses up front, carrying the shared `vault_unlock`/`vault_set` remediation.
+///
+/// POLICY (pending owner/upstream ratify, tachi#1279): strict-here vs.
+/// tolerant-in-server is a deliberate split, not an oversight — if a batch should
+/// instead skip only the affected provider and continue, that is an owner call.
+fn ensure_no_skipped_aliases(
+    report: &crate::provider_config::MaterializeReport,
+) -> Result<(), Box<dyn Error>> {
+    if report.skipped_aliases.is_empty() {
+        return Ok(());
+    }
+    Err(IoError::new(
+        ErrorKind::Other,
+        crate::provider_config::describe_skipped_aliases(&report.skipped_aliases),
+    )
+    .into())
+}
+
 /// #1181: build the write-open [`DbOpenContext`] every `backfill-*` in-process
 /// open uses, threading the top-level `--allow-schema-migration` decision
 /// (resolved once into a typed [`MigrationAuthority`] at CLI startup,
@@ -121,7 +145,10 @@ pub(super) async fn run_backfill_vectors(
     }
 
     let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
-    materialize_standalone(&llm, vault_db_path).map_err(|e| IoError::new(ErrorKind::Other, e))?;
+    let materialize_report =
+        materialize_standalone(&llm, vault_db_path).map_err(|e| IoError::new(ErrorKind::Other, e))?;
+    // #1279: backfill stays strict — batch jobs fail-fast on skipped aliases.
+    ensure_no_skipped_aliases(&materialize_report)?;
     let entries = list_missing_vector_entries(&store, skip_recall_cache, None)
         .map_err(|e| IoError::new(ErrorKind::Other, e))?;
 
@@ -250,7 +277,10 @@ pub(super) async fn run_backfill_summaries(
 
     let llm = LlmClient::new_with_vault_db(Some(vault_db_path))
         .map_err(|e| format!("LLM client init failed: {e}"))?;
-    materialize_standalone(&llm, vault_db_path).map_err(|e| IoError::new(ErrorKind::Other, e))?;
+    let materialize_report =
+        materialize_standalone(&llm, vault_db_path).map_err(|e| IoError::new(ErrorKind::Other, e))?;
+    // #1279: backfill stays strict — batch jobs fail-fast on skipped aliases.
+    ensure_no_skipped_aliases(&materialize_report)?;
     let concurrency = backfill_llm_concurrency();
 
     println!("\nBackfilling {missing} entries (concurrency={concurrency})...\n");
@@ -355,7 +385,10 @@ pub(super) async fn run_backfill_metadata(
 
     let llm = LlmClient::new_with_vault_db(Some(vault_db_path))
         .map_err(|e| format!("LLM client init failed: {e}"))?;
-    materialize_standalone(&llm, vault_db_path).map_err(|e| IoError::new(ErrorKind::Other, e))?;
+    let materialize_report =
+        materialize_standalone(&llm, vault_db_path).map_err(|e| IoError::new(ErrorKind::Other, e))?;
+    // #1279: backfill stays strict — batch jobs fail-fast on skipped aliases.
+    ensure_no_skipped_aliases(&materialize_report)?;
     let concurrency = backfill_llm_concurrency();
 
     println!("\nBackfilling metadata for {missing} entries (concurrency={concurrency})...\n");
