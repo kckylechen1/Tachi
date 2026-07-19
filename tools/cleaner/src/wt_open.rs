@@ -119,16 +119,45 @@ fn ephemeral_root_prefixes() -> Vec<PathBuf> {
     prefixes
 }
 
-/// Pure decision: does `path` sit at or under one of `ephemeral_roots`?
-/// Lexical component comparison (not `canonicalize_prefix`'s symlink-aware
-/// resolution) is intentional here — `path` may not exist yet, and `/tmp` /
-/// `/private/tmp` are both checked literally by [`ephemeral_root_prefixes`]
-/// specifically so the macOS `/tmp` -> `/private/tmp` symlink is covered
-/// without needing the path to exist first.
+/// Does `path` sit at or under one of `ephemeral_roots`? Two passes, neither
+/// one fatal:
+///
+/// 1. **Literal component comparison** first — `path` commonly does not
+///    exist yet (nobody has provisioned into this root), so `/tmp` /
+///    `/private/tmp` are both checked literally by
+///    [`ephemeral_root_prefixes`] specifically so the well-known macOS
+///    `/tmp` -> `/private/tmp` symlink is covered without needing anything
+///    to exist on disk first.
+/// 2. **Canonicalized comparison** as a fallback (tachi#1184 review C4) —
+///    catches the case the literal pass cannot: a root whose *given* spelling
+///    differs from a listed root only through a symlink or case variant it
+///    resolves to on disk (e.g. `$TMPDIR` reporting `/var/folders/xy/T` while
+///    the filesystem's real path is `/private/var/folders/xy/T`).
+///    `std::fs::canonicalize` fails (`ENOENT`, permission) whenever either
+///    side does not exist — that failure is swallowed here and simply drops
+///    this pass, never turning "cannot canonicalize" into a hard error; the
+///    literal pass above already covers the common not-yet-provisioned case.
+///
+/// **Residual, accepted gap:** a root that does not exist yet AND differs
+/// from every listed root only by case on a case-insensitive filesystem
+/// evades both passes — canonicalize has nothing on disk to resolve the case
+/// against, and the literal component comparison is case-sensitive by
+/// design (it must be, to avoid false-positiving on genuinely distinct
+/// paths elsewhere in this file). This is a loud *warning* surface, not a
+/// security fence, so the gap is accepted rather than chased with a
+/// case-folding heuristic that would risk false positives of its own.
 fn is_under_any_root(path: &Path, ephemeral_roots: &[PathBuf]) -> bool {
-    ephemeral_roots
-        .iter()
-        .any(|root| path == root || path_is_within_components(path, root))
+    ephemeral_roots.iter().any(|root| {
+        if path == root || path_is_within_components(path, root) {
+            return true;
+        }
+        match (std::fs::canonicalize(path), std::fs::canonicalize(root)) {
+            (Ok(canon_path), Ok(canon_root)) => {
+                canon_path == canon_root || path_is_within_components(&canon_path, &canon_root)
+            }
+            _ => false,
+        }
+    })
 }
 
 /// Loud (never fatal) warning when an explicitly configured managed
@@ -1007,6 +1036,47 @@ mod tests {
             Path::new("/var/folders/xy/abc/session-42"),
             &roots
         ));
+    }
+
+    // symlink construction is unix-only; the canonicalize fallback it
+    // exercises is a portable code path, but this fixture needs a real
+    // symlink to prove it fires, so the test itself is unix-only too (same
+    // convention as `work_claim.rs`'s `held_env_is_found_through_a_symlinked_path_spelling`).
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_root_is_caught_via_canonicalization_c4() {
+        // tachi#1184 review C4: a listed root that is ITSELF a symlink to a
+        // real directory must still catch a candidate path spelled through
+        // the symlink's TARGET (not just the literal listed spelling) — the
+        // exact `/tmp` -> `/private/tmp`-shaped case, reproduced with a real
+        // (hermetic, tempdir-scoped) symlink rather than relying on the
+        // system's actual /tmp layout.
+        let base = unique_temp("wt-open-c4-root");
+        let real_dir = base.join("real-ephemeral-root");
+        let alias = base.join("alias-into-real");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::os::unix::fs::symlink(&real_dir, &alias).unwrap();
+        let candidate = alias.join("session-under-symlink");
+        std::fs::create_dir_all(&candidate).unwrap();
+
+        // The ephemeral roots list only knows the ALIAS spelling; the
+        // candidate path is spelled through it too, so the literal pass
+        // alone already matches here — this establishes the fixture is
+        // sound before the next assertion exercises the canonicalize pass.
+        assert!(is_under_any_root(&candidate, &[alias.clone()]));
+
+        // Now spell the SAME candidate through its canonical (real_dir)
+        // form, while the roots list only knows the alias spelling — the
+        // literal pass cannot match this, only the canonicalize fallback
+        // can.
+        let canonical_candidate = std::fs::canonicalize(&candidate).unwrap();
+        assert_ne!(
+            canonical_candidate, candidate,
+            "fixture must actually traverse a symlink for this test to mean anything"
+        );
+        assert!(is_under_any_root(&canonical_candidate, &[alias.clone()]));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn unique_temp(prefix: &str) -> PathBuf {
