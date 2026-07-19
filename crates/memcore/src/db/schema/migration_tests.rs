@@ -746,3 +746,122 @@ fn legacy_column_work_rolls_back_with_stamp_on_injected_failure() {
         "user_version must be stamped after a real run"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1289: schema-init ordering-escape regression + convergence oracle.
+//
+// Class of bug: `init_schema_inner` runs `execute_batch(BASE_SCHEMA_SQL)`
+// (unconditional `CREATE TABLE/INDEX IF NOT EXISTS`) BEFORE the `ensure_column`
+// + sentinel migrations that add "evolutionary" columns. On a fresh DB the
+// `CREATE TABLE` builds every column so the indexes are fine — which is why CI
+// (always fresh) stayed green. On a legacy DB the table already exists, so
+// `CREATE TABLE IF NOT EXISTS` is a no-op and does NOT add the missing column;
+// the immediately-following `CREATE INDEX` on that column then dies with
+// `no such column`, rolling back the whole init transaction. The three escapes
+// were `idx_access_hist_hash` (query_hash), `idx_exec_envs_claim` (v21
+// claim_id), and `idx_session_claims_identity_active` (v21 mode predicate).
+//
+// The fixtures below use `user_version == 0` + `CreateFresh` deliberately: the
+// ordering crash lives in `init_schema_inner`, which runs before and
+// independent of the version-stamp gate, and because a hand-built fixture
+// carries no migration sentinels the full v1..v21 sequence replays regardless
+// of the stamp. That keeps the tests free of `.migration-bak`/marker side
+// files while still exercising the real legacy-column-backfill path.
+
+/// A pre-v21 legacy shape for the three tables #1289 touches: `access_history`
+/// without `query_hash`, `exec_envs` without the v21 `agent_identity_id` /
+/// `claim_id`, and `session_claims` without the v21 `mode` (and the rest of the
+/// v21 spine columns). All other tables are left for `init_schema_inner` to
+/// build fresh via `CREATE TABLE IF NOT EXISTS`.
+const SIGIL_1289_PRE_V21_LEGACY_SQL: &str = r#"
+    CREATE TABLE access_history (
+        memory_id  TEXT NOT NULL,
+        accessed_at TEXT NOT NULL
+    );
+    CREATE TABLE exec_envs (
+        env_id         TEXT PRIMARY KEY,
+        kind           TEXT NOT NULL DEFAULT 'worktree',
+        path           TEXT NOT NULL,
+        repo_root      TEXT NOT NULL DEFAULT '',
+        branch         TEXT NOT NULL DEFAULT '',
+        base_sha       TEXT NOT NULL DEFAULT '',
+        dispatch_id    TEXT,
+        env_class      TEXT NOT NULL DEFAULT 'edit-only',
+        state          TEXT NOT NULL DEFAULT 'active',
+        reclaim_reason TEXT,
+        schema_version INTEGER NOT NULL DEFAULT 1,
+        created_at     TEXT NOT NULL DEFAULT '',
+        reclaimed_at   TEXT
+    );
+    CREATE TABLE session_claims (
+        claim_id             TEXT PRIMARY KEY,
+        session_client       TEXT,
+        issue_ref            TEXT,
+        flow_id              TEXT,
+        dispatch_id          TEXT,
+        branch               TEXT NOT NULL DEFAULT '',
+        declared_file_scope  TEXT,
+        state                TEXT NOT NULL DEFAULT 'active',
+        release_reason       TEXT,
+        created_at           TEXT NOT NULL DEFAULT '',
+        heartbeat_at         TEXT NOT NULL DEFAULT '',
+        released_at          TEXT
+    );
+"#;
+
+fn sigil_1289_register_exts() {
+    let _ = crate::db::enable_simple_auto_extension();
+    crate::db::register_sqlite_vec();
+}
+
+fn sigil_1289_index_exists(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1 LIMIT 1",
+        params![name],
+        |_| Ok(true),
+    )
+    .unwrap_or(false)
+}
+
+/// Build a file DB pre-seeded with `setup_sql` (a legacy table shape) on a bare
+/// connection, then drive the FULL init path (`init_schema_with_label_mut` under
+/// `CreateFresh`) over it with extensions registered. Panics if init fails —
+/// which is exactly the #1289 crash before the fix.
+fn sigil_1289_init_full_path_with_setup(setup_sql: &str) -> (Connection, tempfile::NamedTempFile) {
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let path = tmp.path().to_path_buf();
+    {
+        let conn = Connection::open(&path).expect("open fixture");
+        conn.execute_batch(setup_sql).expect("build legacy fixture");
+    }
+    sigil_1289_register_exts();
+    let mut conn = Connection::open(&path).expect("reopen with extensions");
+    let ctx = crate::db::DbOpenContext::create_fresh();
+    crate::db::init_schema_with_label_mut(&mut conn, "global", &path, &ctx)
+        .expect("init_schema_with_label_mut must succeed on a pre-v21 legacy DB (#1289)");
+    (conn, tmp)
+}
+
+#[test]
+fn pre_v21_legacy_db_boots_through_init_schema_inner() {
+    // Before the fix this panics inside the helper: init_schema_inner's
+    // BASE_SCHEMA index build hits `no such column` on the pre-v21 tables and
+    // the whole init transaction rolls back. After the fix, init succeeds and
+    // the three previously-crashing indexes are present.
+    let (conn, _tmp) = sigil_1289_init_full_path_with_setup(SIGIL_1289_PRE_V21_LEGACY_SQL);
+    for idx in [
+        "idx_access_hist_hash",
+        "idx_exec_envs_claim",
+        "idx_session_claims_identity_active",
+    ] {
+        assert!(
+            sigil_1289_index_exists(&conn, idx),
+            "index {idx} must exist after booting a pre-v21 legacy DB (#1289)"
+        );
+    }
+    assert_eq!(
+        crate::db::migrations::read_schema_version(&conn).unwrap(),
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION,
+        "a full-path boot of a legacy DB must end stamped at the current version"
+    );
+}
