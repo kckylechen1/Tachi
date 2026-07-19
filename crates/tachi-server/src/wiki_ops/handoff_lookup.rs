@@ -8,9 +8,7 @@ use super::*;
 /// `handoff_ops` module doc for the full three-way split #1037 reserved).
 #[derive(Debug, Clone)]
 pub(crate) struct HandoffMirrorRef {
-    pub(crate) id: String,
     pub(crate) path: String,
-    pub(crate) repo: String,
     pub(crate) issue: u64,
     pub(crate) published_at: Option<DateTime<Utc>>,
     pub(crate) supersedes_issue: Option<u64>,
@@ -20,8 +18,14 @@ pub(crate) struct HandoffMirrorRef {
 
 /// List wiki `/wiki/handoffs/...` mirrors scoped to `repo` (exact
 /// `metadata.repo` match — #1285's multi-repo isolation requirement), newest
-/// first by `metadata.published_at`. Local-only (no `gh`, no network) — safe
-/// to call when GitHub transport is unavailable, which is exactly why
+/// first by `metadata.published_at`. The isolation happens *before* a
+/// `HandoffMirrorRef` is ever constructed (the `filter_map` below rejects any
+/// entry whose `metadata.repo` doesn't match the caller's `repo` argument),
+/// so `HandoffMirrorRef` itself doesn't need to carry `repo` (or `id` —
+/// mirror identity downstream is keyed by `path`/`issue`, not the wiki
+/// entry's own id) for any caller; every ref this function returns is
+/// already known-scoped by construction. Local-only (no `gh`, no network) —
+/// safe to call when GitHub transport is unavailable, which is exactly why
 /// `handoff_draft`'s offline-degrade path leans on this instead of a gh
 /// query for previous-handoff discovery.
 pub(crate) fn list_handoff_mirrors_for_repo(
@@ -50,9 +54,7 @@ pub(crate) fn list_handoff_mirrors_for_repo(
                 .and_then(Value::as_u64);
             let references = preferred_wiki_references(&entry.metadata);
             Some(HandoffMirrorRef {
-                id: entry.id.clone(),
                 path: entry.path.clone(),
-                repo: meta_repo.to_string(),
                 issue,
                 published_at,
                 supersedes_issue,
