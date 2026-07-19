@@ -1346,7 +1346,8 @@ exit 1
         );
         let final_state = std::fs::read_to_string(&state_path).expect("read final state");
         assert_eq!(
-            final_state, "CLOSED:handoff-superseded",
+            final_state.trim(),
+            "CLOSED:handoff-superseded",
             "both the close AND the label swap must have run, in that order"
         );
     }
