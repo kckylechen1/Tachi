@@ -1,7 +1,7 @@
 # AGENTS.md — backend-agent injection kernel
 
-> **Subordinate to and generated from [`docs/engineering/architecture/dispatch-lifecycle.md`](docs/engineering/architecture/dispatch-lifecycle.md)** (owner-ratified 2026-07-06).
-> This file is a thin injection surface: backend agents auto-read it into their prompt at turn zero, so it inlines ONLY the non-negotiables an executing lane must obey. The doctrine body — tiering, card ontology, the closed loop, the porting guide — lives in exactly one kernel, the canon doc. If this file and the canon doc disagree, the canon doc wins.
+> **Domain precedence:** this summary is subordinate to the owning sources named at the end. [`dispatch-lifecycle.md`](docs/engineering/architecture/dispatch-lifecycle.md) governs dispatch/card law; continuity, AgentSoul, and end-state contracts govern their own domains. On conflict, the source governing that domain wins.
+> This file is a thin injection surface: backend agents auto-read it into their prompt at turn zero, so it inlines ONLY cross-domain non-negotiables. Full doctrine and implementation status remain in the owning sources.
 >
 > **Relationship to per-carrier private manuals:** this is the repo-scoped execution kernel that every backend lane reads, whatever its carrier. A carrier with its own global private manual composes with this file — that manual already declares repo-specific rules authoritative in the repo's own AGENTS.md, so where they overlap they agree, and this file is authoritative for repo-scoped execution. Carriers without a rich private manual rely on this file alone. **Carrier-specific mechanism — which tool plays which role, concrete dispatch commands, current default vendor assignments — is never stated here; it lives in that carrier's own private manual**, if it has one (repo-root files named after a specific tool are that tool's private manual, not a public contract). If you don't have one, treat this file as the whole contract and do not invent mechanism it doesn't state.
 
@@ -17,6 +17,31 @@ Read the branch that applies to you before treating the rest of this file as lit
 - **Dispatched-lane only:** work in a **worktree cut from the leader-verified base SHA** given in the packet — never the primary checkout, never a base you fetched/derived yourself (no-network sandboxes make "cut from origin/main" a lie). If you are the sole session, work in the current checkout.
 - Before any `cargo`: `export CARGO_TARGET_DIR=$HOME/.cache/sigil-shared-target`. This repo's multiple crates share one build-cache directory as a standing speed path — any session, dispatched or sole, can export it directly before building. It is a speed path, not a correctness guarantee: concurrent same-crate worktrees can collide on metadata-hashed test binaries and produce phantom failures. **Dispatched-lane only:** when you are a reviewer/discrimination-run lane and another lane may be building the same crate, use an isolated target dir instead — your packet states which path.
 - **Never touch another agent's dirty or untracked files.** Reconcile by commit tree, not by branch name.
+
+## Current-truth and human-conversation law
+
+- **Real typed objects outrank reports and remembered prose.** Reconcile live issue/PR/ref/test/deployment evidence before acting. Keep these states distinct: `implemented != merged != accepted != deployed(host) != owner_closed`. An open issue may already be implemented; a merged PR may still be undeployed.
+- Preserve the user's verbatim request. Inferred intent, assumptions, conflicts, scope, and approval gates are labeled projections, never authority. Ask only when ambiguity materially changes scope, authority, or an irreversible/shared action.
+- After work, report in project-aware human terms: what changed, what evidence supports it, what remains unknown/unverified, what decision is needed, and the next choices. Default to a concise summary with immutable receipts/detail available; never substitute "done" or a tool transcript for reconciliation.
+- Model summaries, journals, handoffs, issue bodies, and generated timelines are read models. When stale, retain history and derive the current action queue from current evidence rather than rewriting or trusting the narrative.
+
+## Identity, memory, and authority law
+
+- A model/provider is a replaceable **carrier**, not the agent's identity. A carrier/model string never establishes `AgentIdentity`. If a persistent binding is ambiguous or revoked, project no AgentSoul and assert no persistent identity; task/tool authority remains independently compiled and checked.
+- Keep truth species separate: continuity owns events/current truth; precedent owns engineering rulings; lane cards own role×vendor evidence and counter-clauses; user-model owns ratified user values/goals/habits; bonding/journal own private dyadic language/reflection; AgentSoul owns one verified AgentIdentity's reviewed operating dispositions. Shared machinery does not merge authority.
+- Soul, memory, reputation, and carrier choice never grant credentials, filesystem/network rights, merge/close authority, or permission to bypass a frozen gate. Models may propose amendments; they do not self-promote, erase counterevidence, or mutate active authority.
+
+## Issue portfolio and lifecycle law
+
+- Every open issue has exactly one primary portfolio: `area:memory-continuity` → #734; `area:product-surface` → #745; `area:trust-security` → #748; `area:agent-control-plane` → #749; `area:platform-reliability` → #1299. Existing protected umbrellas are subtracks, not additional peer portfolios.
+- Before designing or dispatching from an issue, read its latest disposition and inspect current code. A historical body with `DESIGN-SPLIT`, `PREMISE-COLLAPSED`, `ABSORBED`, or a supersession warning is not an executable contract.
+- Mark code/current-state honestly: `STALE-COMPLETE`, `STALE-BODY / VALID-REMAINDER`, `PREMISE-COLLAPSED / SUPERSEDED`, `STILL-VALID`, or `UNVERIFIED`. Code presence never proves host deployment or live-data repair.
+- New work attaches to one existing portfolio/subtrack and a bounded leaf; do not open a new umbrella for a renderer, project-manager persona, summary cache, carrier integration, or shared helper.
+
+## Execution ownership boundary
+
+- Canonical target: the **harness** owns spawn/wait/cancel/resume and process/session lifecycle; Tachi owns admission, policy, work claims, ledger, receipts, and eval. Current code is still migrating away from Tachi-owned execution, so do not claim the target has landed or create a new Tachi process-control surface from historical #839/#1111/#1172 designs.
+- Carrier capacity or subscription failure is a routing event, not identity loss. Preserve the same frozen contract/evidence head and reroute only through an admitted carrier/harness; never improvise credentials, silently weaken gates, or treat tone imitation as continuity.
 
 ## Report contract (a delivery missing any of these is INCOMPLETE, for dispatched lanes)
 
@@ -50,4 +75,4 @@ Read the branch that applies to you before treating the rest of this file as lit
 
 ## Where the rest lives
 
-Tiering (T0–T4), pre-dispatch card consult, the card ontology and storage split, the vaccination projection, the closed-loop diagram, the current-state/gap map, and the zeroclaw porting guide are all in the canon doc: [`docs/engineering/architecture/dispatch-lifecycle.md`](docs/engineering/architecture/dispatch-lifecycle.md). Read it before designing anything; this file only tells you how to execute and return.
+Tiering, dispatch/card doctrine, and the closed loop live in [`dispatch-lifecycle.md`](docs/engineering/architecture/dispatch-lifecycle.md). Current-truth/reconciliation lives in [`tachi-continuity-memory-architecture.md`](docs/engineering/architecture/tachi-continuity-memory-architecture.md). AgentSoul and authority boundaries live in [`memory-soul-architecture.md`](docs/engineering/architecture/memory-soul-architecture.md). The human-facing end state lives in [`endgame-experience.md`](docs/engineering/architecture/endgame-experience.md). Read only the canon relevant to the task; this file is the turn-zero kernel, not a replacement for those specs.

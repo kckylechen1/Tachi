@@ -1,6 +1,6 @@
 # The Endgame Experience (北极星)
 
-> Owner-articulated 2026-07-10; drafted by the leader session the same day.
+> Owner-articulated 2026-07-10; AgentSoul clarification ratified 2026-07-19.
 > **Discipline of this document**: it states *invariants of the finished experience*
 > and their acceptance tests — nothing else. It contains **zero current-state
 > claims** (those rot; see how fast #734's status sections aged). Mechanisms live
@@ -14,6 +14,33 @@ identical — because every kind of work is a conversation with agents, and
 everything that makes those agents *ours* (memory, language, judgment,
 personality, crew, librarian) lives in Tachi, not in any vendor's weights or any
 single machine's disk.
+
+## The interaction invariant: conversation feels like a project manager
+
+The human may speak in fragments, shorthand, corrections, or an unstructured
+dump. They do not manually assemble task packets or read tool transcripts. One
+project-aware conversation layer performs two grounded translations:
+
+```text
+human intent
+  → resolve project/current-work context
+  → explicit assumptions, unknowns, proposed scope, acceptance and next action
+  → machine/crew execution
+  → reconcile objects, verification and unresolved work
+  → concise human status, decisions needed and next choices
+```
+
+This is not permission for a model to turn ambiguity into invented authority.
+The original request remains verbatim evidence; inferred intent is labeled,
+material ambiguity is surfaced, and irreversible/shared actions retain their
+approval gates. On the return path, a fluent progress report cannot outrank PR,
+test, deployment, or owner-decision evidence. Machine receipts remain available
+for inspection, but the default interface speaks in project-aware human terms.
+
+“Project manager” is a conversational projection over the same truth and ask
+contracts, not a new truth store or workflow engine. #954 owns the single
+user-facing ask/conversation lifecycle; current truth, timeline, task briefing,
+and execution stay with their existing owners.
 
 ## The five pillars (experience invariants)
 
@@ -48,11 +75,15 @@ paged event, not a silent stall).
   checkpoints), generated from ground truth and never hand-written, and can
   state what happened yesterday and what is next.
 - **The agent's own memory** — an internalization gradient, ascending in
-  slowness-of-change and tamper-resistance:
+  slowness-of-change and review cost, while preserving distinct authorities:
 
   ```
-  facts (memory) → knowledge (wiki/guide) → precedents (判例, governs doing)
-                                          → personality (soul, governs speaking)
+  events/facts ──┬──> knowledge (wiki/guide)
+                 ├──> precedent (engineering rulings)
+                 ├──> lane cards (role/carrier evidence)
+                 └──> AgentSoul proposals ──review──> operating identity
+
+  user-model (human values/goals/habits) ──separate sensitive authority
   ```
 
   - **Precedents (L3)**: principle-level records of adjudications — case,
@@ -63,9 +94,15 @@ paged event, not a silent stall).
     Repeatedly-validated precedents harden upward: 判例 → principle →
     constitutional clause, by the amendment threshold (a large consistent body
     of experience; never a single edit).
-  - **Personality (soul)**: how the agent converses with its human — register,
-    梗, warmth. Grown from the dialogue-correction loop; never hand-edited into
-    being. Swap the carrier, keep the person.
+  - **AgentSoul (operating identity)**: the stable temperament, craft habits,
+    judgment posture, and relationship protocol of one persistent
+    `AgentIdentity`. It grows from reviewed, cross-event behavioral evidence;
+    register, 梗, and warmth are only its conversational surface. The model may
+    propose a revision but cannot install one. The owner can veto, suspend,
+    reset, or overturn the active projection through append-only transitions;
+    privacy erasure separately removes sensitive source/derived text and leaves
+    only a non-sensitive tombstone where policy permits. Swap the carrier, keep
+    the admitted agent and its reviewed operating identity.
   - **The user-model**: the agent understands its human — habits, goals, and
     the *why* behind preferences (values, from which tactics are derived).
     Values change slowly and are hand-ratified; habits are learned from
@@ -82,8 +119,9 @@ is deliberate.
 
 ## Acceptance (the four-question test)
 
-1. **Swap test** — change agent or machine: same 梗, same tone, same
-   understanding of the user?
+1. **Swap test** — change carrier or machine while retaining the same admitted
+   AgentIdentity: under comparable pressure, does it make the same evidenced
+   choices without being reminded? Same 梗 or tone alone does not pass.
 2. **Cold-start test** — a fresh agent on any project reads the timeline and
    states, unprompted, what was done yesterday and what is next?
 3. **Unattended-loop test** — file an issue: it comes back as a reviewed,
@@ -92,17 +130,19 @@ is deliberate.
    four sources?
 
 Plus the standing discrimination law inherited from the soul design: swapping
-any grown layer (precedents, personality, user-model) must *change behavior*;
+any grown layer (precedents, AgentSoul, user-model) must *change behavior*;
 if behavior is unchanged, that layer is a prompt costume, not memory.
 
-## Owner rulings recorded (2026-07-10)
+## Owner rulings recorded (2026-07-10; Soul scope clarified 2026-07-19)
 
 1. Precedent granularity is **per principle**, decomposed by a backend model.
 2. Precedents establish automatically on ruling + validation; the **owner holds
    overturn power** (the propose/review/apply lifecycle is the veto surface).
-3. Precedents and soul are **not parallel systems** — layers of one gradient.
-4. **Soul = personality**: how to talk with the human. Engineering judgment
-   belongs to the precedent store, not the soul.
+3. Precedent, lane card, user-model, and AgentSoul consume a common evidence
+   substrate but remain **distinct authorities**, not one editable profile.
+4. **Soul = operating identity**, not personality alone. Engineering truth
+   belongs to precedent; Soul can internalize a judgment posture (for example,
+   seeking legacy-path evidence) but cannot establish the concrete ruling.
 5. Review economics: **small tasks get one review round**; multi-round
    adversarial battles are reserved for security, authorization, external-input
    surfaces, and large structural change.
@@ -112,6 +152,7 @@ if behavior is unchanged, that layer is a prompt costume, not memory.
 Substrate #734 #773 #774 · crew/runtime #839 #894 · circulation #906 (+ the
 autonomous-loop leaf, to be filed) · project timeline (leaf, to be filed) ·
 precedents (leaf: filed with this document) · soul #855 #858 · user-model
-(leaf, to be filed) · librarian #530 #745 (+ resident-service leaf, to be
-filed) · multi-device sync (leaf, to be filed). Mechanism details belong in
+(leaf, to be filed) · ask/project-manager conversation #954/#1071 · research
+sources #530/#745 (+ resident-service leaf, to be filed) · multi-device sync
+(leaf, to be filed). Mechanism details belong in
 those issues and their design docs — never here.

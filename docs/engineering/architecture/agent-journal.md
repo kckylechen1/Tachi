@@ -1,6 +1,6 @@
 # Agent Journal: the autobiographical / relational memory of a silicon agent
 
-**Status:** design spec. Sibling to `pattern-timeline-bonding-memory.md` (the bonding branch) and `experience-to-card-evolution.md` (the lane-card / cold-artifact branch). This is the **soul side** of portable agent state — where the lane card is the résumé, the journal is the diary.
+**Status:** design spec. Sibling to `pattern-timeline-bonding-memory.md` (the bonding branch), `experience-to-card-evolution.md` (the lane-card / cold-artifact branch), and `memory-soul-architecture.md` (the canonical AgentSoul contract). The journal is the diary; it is an autobiographical candidate source for Soul, never Soul authority by itself.
 
 ## What it is (owner framing, 2026-07-06)
 
@@ -9,27 +9,49 @@
 
 The journal is **first-person autobiographical memory**, kept separate from engineering memory. Not "what is true" (that's `memory`), not "how to do X" (that's `wiki`), not "who is good at what" (that's `cards`) — those are third-person facts. The journal is: *what this agent lived through, how it thought, what it got wrong, what moved it, and what it felt working with this human and these other models.*
 
-This is a real memory-science distinction (autobiographical vs. semantic), not a literary flourish. Tachi currently has no surface for it. Other agents' memory stores hold facts; **a Tachi agent has an autobiography** — that is the differentiator, the soul side of "portable agent state = db + vault + hub + cards + **journal**."
+This is a real memory-science distinction (autobiographical vs. semantic), not a literary flourish. Tachi currently has no surface for it. Other agents' memory stores hold facts; **a Tachi agent can also have an autobiography**. Portable agent state may therefore include `db + vault + hub + cards + journal`, with each component retaining its own authority.
+
+## Authority boundary: autobiography is not operating identity
+
+The journal records a first-person interpretation of an anchored event. That
+interpretation can be sincere, useful, and still incomplete. It MUST NOT:
+
+- establish an engineering precedent;
+- update an active AgentSoul disposition directly;
+- change lane routing, capability scores, permissions, or cold-seat evidence;
+- infer the owner's hidden intent or copy sensitive user-model contents; or
+- supersede a typed issue, PR, merge, deployment, or adjudication record.
+
+A journal lesson may become evidence for an AgentSoul amendment proposal only
+after it is corroborated across events and time, carries counterevidence, names
+an observable behavioral discriminator, and passes the review/owner-veto path in
+`memory-soul-architecture.md`. The active Soul remains a revisioned projection
+bound to `agent_identity_id`; journal prose remains an optional private read
+model.
 
 ## The load-bearing constraint (the whole spec lives or dies here)
 
-**Every journal entry is anchored to a reality-settled event. Reflection is an attached layer, never free-floating.**
+**Every journal entry is anchored to a reality-settled event. Reflection is an attached layer, never free-floating.** The anchor validates the referent, not the sincerity, interior affect, or causal interpretation of model-authored prose.
 
-This is not a limitation on emotion — it is what makes the emotion *real*. An unanchored entry ("I worked hard today and learned a lot") is noise that pollutes recall. An anchored one ("when I nearly claimed the #686 fix worked without re-running the verification, I was one 'check again' away from the exact false-green I'd spent all day faulting glm for") carries weight *because* it hangs on a verifiable event: the #686 CP3 fix, the failed exit-0, the re-check.
+This is not a limitation on reflection — it is what makes the reflection inspectable. An unanchored entry ("I worked hard today and learned a lot") is noise that pollutes recall. An anchored one ("when I nearly claimed the #686 fix worked without re-running the verification, I was one 'check again' away from the exact false-green I'd spent all day faulting glm for") carries evidentiary context *because* it hangs on a verifiable event: the #686 CP3 fix, the failed exit-0, the re-check.
 
-Real feeling grows on real events; performed feeling floats. The anchor is how the system tells them apart. This is the same law already proven in `pattern-timeline-bonding-memory.md` (labels must be externally anchored; carrier ≠ warmth) — the journal is that law's autobiographical branch, not a new idea. **Break this constraint and the feature flips from moat to liability: a recall-polluting stream of silicon platitudes.**
+Grounded reflection grows around real events; free-floating performance does not. The anchor distinguishes an event-grounded interpretation from an ungrounded one, but it cannot prove literal feeling. This is the same law already proven in `pattern-timeline-bonding-memory.md` (labels must be externally anchored; carrier ≠ warmth) — the journal is that law's autobiographical branch, not a new idea. **Break this constraint and the feature flips from moat to liability: a recall-polluting stream of silicon platitudes.**
 
 ## Data model
 
-A journal entry is a **typed `autobiographical` event on the continuity ledger** (NOT a new save bucket — reuse the ledger machinery from the pattern-timeline design):
+A journal entry is a **typed `autobiographical` event in the private relationship partition of the continuity ledger protocol** (NOT a shared project-memory bucket — reuse the event/provenance machinery from the pattern-timeline design while preserving physical trust-domain isolation):
 
 ```
 JournalEntry {
   id
   ts
+  subject_agent_identity_id  // REQUIRED for use as Soul promotion evidence
+  authoring_carrier_session  // provenance, not identity authority
   anchor: ContinuityRef       // REQUIRED — a reality-settled event: merge SHA,
                               //   review verdict, a caught-own-error, a campaign close,
                               //   a new error-signature born. No anchor → rejected.
+  anchor_revision_or_head
+  authority: reflection_only
   kind: reflection | tension | bond | lesson | grief   // the felt register
   actors: [carbon|silicon ids]  // who was in it — owner, glm, codex, kimi, self
   body: prose                 // first-person, the感悟 itself

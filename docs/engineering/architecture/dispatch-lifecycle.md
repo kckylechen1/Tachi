@@ -1,7 +1,7 @@
 # The Dispatch Lifecycle canon (怎么派 / 怎么回 / 怎么load card)
 
-Status: canonical doctrine record, ratified by owner across 2026-07-04/05/06. Implementable and auditable in Tachi; portable to zeroclaw.
-Updated: 2026-07-06
+Status: canonical doctrine record, ratified by owner across 2026-07-04/05/06 and amended by the #1202 card-authority ruling on 2026-07-17. Implementable and auditable in Tachi; portable to zeroclaw.
+Updated: 2026-07-19
 Related: [`experience-to-card-evolution.md`](./experience-to-card-evolution.md), [`dispatch-policy-learning-spec.md`](./dispatch-policy-learning-spec.md), [`subagent-eval-system.md`](./subagent-eval-system.md), [`agent-router-spec.md`](./agent-router-spec.md), [`credentialed-dispatch-profiles.md`](./credentialed-dispatch-profiles.md), [`host-adapter-lifecycle-v1.md`](./host-adapter-lifecycle-v1.md), [`issue-refinery-memory-lanes.md`](./issue-refinery-memory-lanes.md). Issues/PRs: [#734](https://github.com/kckylechen1/tachi/issues/734), [#735](https://github.com/kckylechen1/tachi/issues/735), [#516](https://github.com/kckylechen1/tachi/issues/516), [#534](https://github.com/kckylechen1/tachi/issues/534), PR [#738](https://github.com/kckylechen1/tachi/pull/738).
 
 This document is the source of truth for how bounded work is dispatched to a lane, how the lane returns evidence, and how a lane's card is loaded and evolved. It distills two days of live multi-vendor dispatch practice (2026-07-05/06) into one canon so the loop can be (a) implemented and audited inside Tachi and (b) ported when zeroclaw — the Rust agent runtime behind the Quant and RomanBath products — adopts the same loop. The doctrine bodies below are owner-ratified law; the current-state map (§6) is the only part that changes as code lands, and every claim there carries a `file:line` / issue / PR anchor.
@@ -121,9 +121,13 @@ A card is not flavor text; a card that does not change routing is not a valid ca
 
 ### 4.2 Storage split — three layers, never merged
 
-- **Declaration** (vendor, lanes, tool whitelist, forbidden domains) → TOML seed files (serde-native, commentable; matches the `config.toml` / `agents/*.toml` precedent). The birth certificate.
-- **Evidence** (eval rows, signatures, timestamps) → SQLite, append-only, temporal, `(role, vendor)`-queryable. Never a file. The medical record.
-- **Projection** (hexagon, current top-N clauses) → computed at render/assembly time, *never persisted as truth*. The health report — always computed from the record, never hand-edited.
+Owner ruling #1202 (2026-07-17) supersedes the original TOML-as-card-declaration shape. The three truth species remain separate, but the reviewed declaration is now narrative rather than a persisted statistical card:
+
+- **Declaration** (role × vendor positioning, dated failure patterns, packet-ready counter-clauses, thin routing frontmatter) → reviewed Markdown lane cards under the governed dispatch-ledger card source. Leader/owner approval controls atomic append; model/eval output may draft but never writes the declaration directly. Tachi ingests a read-only mirror. TOML remains valid for typed runtime/profile configuration, not as a competing lane-card authority.
+- **Evidence** (eval rows, signatures, timestamps, adjudication/run references) → SQLite, append-only, temporal, `(role, vendor)`-queryable. Evidence proposes or supports a card amendment; it does not become declaration merely because it was recorded. The medical record.
+- **Projection** (current counter-clauses, card excerpt, routing index) → computed from the reviewed card plus evidence at render/assembly time, *never persisted as a second truth*. MBIT/statistical summaries are derived evidence only. The health report — always reproducible from the reviewed declaration and record, never hand-edited as an alternate authority.
+
+Engineering precedent, user values/goals/habits, Soul disposition, and lane-card operational evidence remain separate content authorities even when they reuse proposal/review/apply machinery (#950, #953, #858, #1202).
 
 ### 4.3 Surfaces
 
