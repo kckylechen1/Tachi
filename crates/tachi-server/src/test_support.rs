@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
-/// Create repo-local DB fixtures outside OS temp roots. Production skip logic
-/// intentionally drops `/.tachi/memory.db` under `/tmp` and `/private/tmp`.
+/// Create repo-local DB fixtures outside OS temp roots and git worktrees.
+/// Production skip logic intentionally drops `/.tachi/memory.db` under
+/// `/tmp` and `/private/tmp`; root-resolution tests additionally need a path
+/// that cannot walk upward into a repository through Cargo's in-tree target.
 pub(crate) fn non_skipped_fixture_tempdir(prefix: &str) -> tempfile::TempDir {
     let base = non_skipped_fixture_base().join("repo-local-db-fixtures");
     std::fs::create_dir_all(&base).expect("repo-local DB fixture base");
@@ -23,8 +25,8 @@ fn non_skipped_fixture_base() -> PathBuf {
         .into_iter()
         .chain(repo_target)
         .chain(dirs::home_dir().map(|home| home.join(".cache/sigil-repo-local-db-fixtures")))
-        .find(|candidate| !has_tmp_skip_prefix(candidate))
-        .unwrap_or_else(|| PathBuf::from("target"))
+        .find(|candidate| !has_tmp_skip_prefix(candidate) && !has_git_ancestor(candidate))
+        .expect("repo-local DB tests need a fixture base outside temp roots and git worktrees")
 }
 
 fn has_tmp_skip_prefix(path: &Path) -> bool {
@@ -33,6 +35,13 @@ fn has_tmp_skip_prefix(path: &Path) -> bool {
         .replace('\\', "/")
         .to_ascii_lowercase();
     path_lower.starts_with("/tmp/") || path_lower.starts_with("/private/tmp/")
+}
+
+fn has_git_ancestor(path: &Path) -> bool {
+    path.ancestors()
+        .find(|candidate| candidate.exists())
+        .and_then(|candidate| crate::utils::find_git_root_from(candidate))
+        .is_some()
 }
 
 pub(crate) fn assert_repo_local_db_fixture_not_skipped(path: &Path) {
