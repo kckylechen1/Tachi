@@ -385,7 +385,8 @@ pub(crate) async fn handle_wiki_ingest(
     let entities = string_list_from_value(metadata.get("entities"));
     let path = format!("/wiki/general/{}", sanitize_safe_path_name(&topic));
     let id = uuid::Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339();
+    let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let evidence_refs_v1 = build_evidence_refs_v1(&[params.source.clone()], &timestamp);
 
     let entry = MemoryEntry {
         id: id.clone(),
@@ -393,7 +394,7 @@ pub(crate) async fn handle_wiki_ingest(
         summary: summary.clone(),
         text: content.clone(),
         importance: 0.8,
-        timestamp,
+        timestamp: timestamp.clone(),
         valid_from: String::new(),
         valid_until: None,
         category: "experience".to_string(),
@@ -423,11 +424,11 @@ pub(crate) async fn handle_wiki_ingest(
             // Ingested content is unreviewed by construction (no approval
             // step exists here); stamp it `pending_review` honestly, same
             // vocabulary `wiki_layer_metadata` stamps for the MCP write
-            // path, with the ingest source recorded as its source ref.
+            // path, with the ingest source recorded as its typed evidence ref.
             "lifecycle": WikiLifecycleV1::PendingReview.as_str(),
             "authority": WikiAuthorityV1::Advisory.as_str(),
             "artifact_kind": WikiArtifactKindV1::Wiki.as_str(),
-            "source_refs": [params.source.clone()],
+            "evidence_refs_v1": evidence_refs_v1,
         }),
         vector: None,
         retention_policy: Some("permanent".to_string()),

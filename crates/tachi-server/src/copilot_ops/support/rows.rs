@@ -51,6 +51,25 @@ pub(in crate::copilot_ops) fn compact_layer_rows(
                 }
             }
 
+            let references = row.get("references").cloned().or_else(|| {
+                let typed = metadata
+                    .get("evidence_refs_v1")
+                    .and_then(Value::as_array)
+                    .map(|refs| {
+                        refs.iter()
+                            .filter_map(|value| value.get("ref").and_then(Value::as_str))
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|refs| !refs.is_empty());
+                typed
+                    .map(|refs| json!(refs))
+                    .or_else(|| metadata.get("source_refs").cloned())
+            });
+            if let Some(references) = references {
+                out.insert("references".to_string(), references);
+            }
+
             Value::Object(out)
         })
         .collect()

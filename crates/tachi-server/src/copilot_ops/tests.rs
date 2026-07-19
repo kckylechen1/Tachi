@@ -1,6 +1,46 @@
 use super::*;
 
 #[test]
+fn compact_layer_rows_prefers_normalized_typed_references() {
+    let rows = vec![json!({
+        "id": "typed-row",
+        "references": ["#1296", "docs/spec.md"],
+        "metadata": {
+            "source_refs": ["#legacy"],
+            "evidence_refs_v1": [{"ref": "#typed-metadata"}]
+        }
+    })];
+    let compact = compact_layer_rows(rows, 1, Some("wiki"), None);
+    assert_eq!(compact[0]["references"], json!(["#1296", "docs/spec.md"]));
+}
+
+#[test]
+fn compact_layer_rows_prefers_typed_metadata_when_both_channels_exist() {
+    let rows = vec![json!({
+        "id": "both-row",
+        "metadata": {
+            "source_refs": ["#legacy"],
+            "evidence_refs_v1": [{"ref": "#typed"}, {"ref": "docs/typed.md"}]
+        }
+    })];
+    let compact = compact_layer_rows(rows, 1, Some("wiki"), None);
+    assert_eq!(compact[0]["references"], json!(["#typed", "docs/typed.md"]));
+}
+
+#[test]
+fn compact_layer_rows_falls_back_to_legacy_references() {
+    let rows = vec![json!({
+        "id": "legacy-row",
+        "metadata": {"source_refs": ["#legacy", "docs/legacy.md"]}
+    })];
+    let compact = compact_layer_rows(rows, 1, Some("wiki"), None);
+    assert_eq!(
+        compact[0]["references"],
+        json!(["#legacy", "docs/legacy.md"])
+    );
+}
+
+#[test]
 fn build_debug_checklist_prefers_wiki_guidance() {
     let checklist = build_debug_checklist(&[json!({
         "path": "/wiki/debug/mcp-args",

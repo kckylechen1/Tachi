@@ -98,9 +98,17 @@ async fn tachi_wiki_ingest_stamps_pending_review_lifecycle_not_active() {
         json!("pending_review"),
         "ingested content must never be default-retrievable as reviewed truth: {entry:?}"
     );
+    assert!(
+        entry["metadata"].get("source_refs").is_none(),
+        "new ingest writes must not emit legacy source_refs: {entry:#}"
+    );
     assert_eq!(
-        entry["metadata"]["source_refs"],
-        json!([source_path.to_string_lossy().to_string()])
+        entry["metadata"]["evidence_refs_v1"][0]["ref"],
+        json!(source_path.to_string_lossy().to_string())
+    );
+    assert_eq!(
+        entry["metadata"]["evidence_refs_v1"][0]["captured_at"], entry["timestamp"],
+        "typed ref and entry must share one captured timestamp"
     );
 }
 

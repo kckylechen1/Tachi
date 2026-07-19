@@ -97,12 +97,33 @@ fn reference_line(ref_str: &str) -> String {
     }
 }
 
-/// #1072 RED case 7: Obsidian export must preserve BOTH the legacy
-/// `metadata.source_refs: string[]` (unchanged, rendered exactly as before
-/// this leaf) AND the new typed `metadata.evidence_refs_v1` refs (canon doc
-/// §7.1: "exporters render the typed `ref` field when present") during the
-/// dual-write migration window — never one in place of the other.
 fn append_references_section(body: &mut String, metadata: &serde_json::Value) {
+    let typed_refs = metadata
+        .get("evidence_refs_v1")
+        .and_then(|v| v.as_array())
+        .filter(|refs| {
+            refs.iter()
+                .any(|value| value.get("ref").and_then(|v| v.as_str()).is_some())
+        });
+    if let Some(typed_refs) = typed_refs {
+        body.push_str("\n\n## Evidence Refs (typed)\n\n");
+        for typed_ref in typed_refs {
+            let Some(ref_str) = typed_ref.get("ref").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let kind = typed_ref
+                .get("target_kind")
+                .and_then(|v| v.as_str())
+                .map(|kind| format!(" ({kind})"))
+                .unwrap_or_default();
+            let mut line = reference_line(ref_str);
+            line.truncate(line.trim_end_matches('\n').len());
+            body.push_str(&line);
+            body.push_str(&kind);
+            body.push('\n');
+        }
+        return;
+    }
     if let Some(refs) = metadata.get("source_refs").and_then(|v| v.as_array()) {
         if !refs.is_empty() {
             body.push_str("\n\n## References\n\n");
@@ -111,26 +132,6 @@ fn append_references_section(body: &mut String, metadata: &serde_json::Value) {
                     continue;
                 };
                 body.push_str(&reference_line(ref_str));
-            }
-        }
-    }
-    if let Some(typed_refs) = metadata.get("evidence_refs_v1").and_then(|v| v.as_array()) {
-        if !typed_refs.is_empty() {
-            body.push_str("\n\n## Evidence Refs (typed)\n\n");
-            for typed_ref in typed_refs {
-                let Some(ref_str) = typed_ref.get("ref").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                let kind = typed_ref
-                    .get("target_kind")
-                    .and_then(|v| v.as_str())
-                    .map(|kind| format!(" ({kind})"))
-                    .unwrap_or_default();
-                let mut line = reference_line(ref_str);
-                line.truncate(line.trim_end_matches('\n').len());
-                body.push_str(&line);
-                body.push_str(&kind);
-                body.push('\n');
             }
         }
     }
