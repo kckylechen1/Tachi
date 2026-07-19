@@ -123,7 +123,10 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_access_hist_mem ON access_history(memory_id);
         CREATE INDEX IF NOT EXISTS idx_access_hist_time ON access_history(accessed_at DESC);
         CREATE INDEX IF NOT EXISTS idx_access_hist_mem_time ON access_history(memory_id, accessed_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_access_hist_hash ON access_history(memory_id, query_hash) WHERE query_hash != '';
+        -- idx_access_hist_hash references the evolutionary `query_hash` column and
+        -- is created in MIGRATED_INDEXES_SQL, AFTER `ensure_column` adds query_hash
+        -- to legacy access_history tables (#1289). Creating it here would `no such
+        -- column: query_hash`-crash init_schema_inner on a pre-query_hash DB.
 
         -- Derived items (causal extractions, distilled rules, etc.)
         CREATE TABLE IF NOT EXISTS derived_items (
@@ -490,7 +493,10 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_exec_envs_state ON exec_envs(state);
         CREATE INDEX IF NOT EXISTS idx_exec_envs_path ON exec_envs(path);
         CREATE INDEX IF NOT EXISTS idx_exec_envs_dispatch ON exec_envs(dispatch_id);
-        CREATE INDEX IF NOT EXISTS idx_exec_envs_claim ON exec_envs(claim_id);
+        -- idx_exec_envs_claim references the v21 `claim_id` column and is created
+        -- in MIGRATED_INDEXES_SQL, AFTER `ensure_column` adds claim_id to legacy
+        -- exec_envs tables (#1289). Creating it here would `no such column:
+        -- claim_id`-crash init_schema_inner on a pre-v21 DB.
 
         -- Execution-environment RESOURCE ledger (#894 S2a). `exec_envs` tracks
         -- the *lease*; these two tables track the BYTES that lease owns —
@@ -789,9 +795,12 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         -- upsert's `IS ?` lookup already treats them as one identity (see
         -- `migrations/session_claims_identity.rs` for the full rationale and
         -- the migration that retrofits this onto pre-existing DBs).
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_session_claims_identity_active
-            ON session_claims(COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, ''))
-            WHERE state = 'active' AND mode IS NULL;
+        --
+        -- The index's `WHERE ... AND mode IS NULL` predicate references the v21
+        -- `mode` column, so it is created in MIGRATED_INDEXES_SQL AFTER
+        -- `ensure_column` adds `mode` to legacy session_claims tables (#1289).
+        -- Creating it here would `no such column: mode`-crash init_schema_inner
+        -- on a pre-v21 DB.
 
         -- #1253 identity / WorkClaim spine. These tables and columns are
         -- deliberately additive: a pre-v21 claim has no identity rather than
@@ -829,4 +838,27 @@ pub(super) const MIGRATED_INDEXES_SQL: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by);
         CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier);
         CREATE INDEX IF NOT EXISTS idx_memories_recall ON memories(recall_count DESC);
+
+        -- Indexes on evolutionary columns of NON-memories tables. These MUST be
+        -- created here (after init_schema_inner's `ensure_column` calls) rather
+        -- than inline in BASE_SCHEMA_SQL: on a legacy DB the table already
+        -- exists so `CREATE TABLE IF NOT EXISTS` is a no-op and does NOT add the
+        -- column, and a bare `CREATE INDEX` referencing that column would crash
+        -- init_schema_inner with `no such column` before any sentinel migration
+        -- ran (#1289). The matching `ensure_column` for each column runs above.
+        CREATE INDEX IF NOT EXISTS idx_access_hist_hash
+            ON access_history(memory_id, query_hash) WHERE query_hash != '';
+        CREATE INDEX IF NOT EXISTS idx_exec_envs_claim ON exec_envs(claim_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_session_claims_identity_active
+            ON session_claims(COALESCE(session_client, ''), COALESCE(issue_ref, ''), COALESCE(flow_id, ''))
+            WHERE state = 'active' AND mode IS NULL;
+        -- idx_hard_state_ns_updated is on always-present columns (no ordering
+        -- crash), but it previously lived ONLY in the v13 sentinel migration, so
+        -- the migration-free `init_schema` path lacked it — the same class of
+        -- init-path/migration-path divergence as the three indexes above (owner
+        -- ruling A: `init_schema`'s product IS the complete current schema). The
+        -- v13 migration's own doc comment already anticipated base schema would
+        -- carry it. `CREATE INDEX IF NOT EXISTS` keeps v13 an idempotent no-op.
+        CREATE INDEX IF NOT EXISTS idx_hard_state_ns_updated
+            ON hard_state(namespace, updated_at DESC);
 "#;

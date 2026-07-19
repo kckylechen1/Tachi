@@ -208,6 +208,17 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
         "TEXT NOT NULL DEFAULT 'direct'",
     )?;
 
+    // v21 identity/WorkClaim spine columns referenced by MIGRATED_INDEXES_SQL
+    // below. The v21 sentinel migration (identity_workclaim_spine.rs) also adds
+    // these, but that migration runs AFTER init_schema_inner — so on a legacy
+    // pre-v21 DB the index build below would `no such column`-crash unless the
+    // columns are ensured here first (#1289). Idempotent: no-op on a fresh DB
+    // whose CREATE TABLE already carries them, and the later v21 ALTER is then
+    // skipped by its own `column_exists` guard.
+    ensure_column(conn, "exec_envs", "agent_identity_id", "TEXT")?;
+    ensure_column(conn, "exec_envs", "claim_id", "TEXT")?;
+    ensure_column(conn, "session_claims", "mode", "TEXT")?;
+
     // Indexes on migrated columns — MUST come after ensure_column so the
     // columns exist on legacy databases that were created without them.
     execute_batch_retry(conn, ddl::MIGRATED_INDEXES_SQL)?;
