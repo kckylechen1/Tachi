@@ -12,8 +12,12 @@
 //!
 //! Three actions, all wired through `tachi_gh`:
 //!   - `handoff_draft`   — read-only, assembles the four-section skeleton.
-//!   - `handoff_publish` — issue create → wiki mirror → supersede (comment +
-//!     label swap + restricted close) → continuity event, in that order.
+//!   - `handoff_publish` — issue create → wiki mirror → supersede (target
+//!     verify + comment + restricted close + label swap) → continuity
+//!     event, in that order. #1285 codex review: the restricted close gate
+//!     re-verifies the `handoff` label live immediately before closing —
+//!     close MUST run before the label swap, or the gate is checking a
+//!     label the swap already removed and refuses every normal-flow close.
 //!   - `handoff_repair`  — idempotent mirror-only rebuild for an existing
 //!     handoff issue (does not create a second issue or a second mirror).
 //!
@@ -604,14 +608,30 @@ pub(crate) async fn handle_gh_handoff_publish(
                     "supersede",
                     json!({ "status": "failed", "error": err }),
                 );
-                receipt.insert(
-                    "next_step".to_string(),
-                    json!(format!(
+                // #1285 codex review: `verify_supersede_target`'s rejection
+                // (un-widenable — the previous_issue is not open/handoff-labeled)
+                // must NOT be answered with a "fix by hand" suggestion that
+                // tells the caller how to force the comment/close/label-edit
+                // through anyway — that would hand back, in the receipt
+                // itself, a manual recipe for bypassing the gate that just
+                // fired. Only the genuine partial-mutation failure modes
+                // (comment posted but the API call itself errored, etc.) get
+                // the manual-completion fallback.
+                let next_step = if err.starts_with("refusing to supersede") {
+                    format!(
+                        "supersede target verification refused {repo}#{prev_issue} — {err}. \
+                         No mutation was attempted (comment/close/label-swap were never called). \
+                         This is not a transient failure: re-check the `supersedes` argument (or \
+                         auto-discovery result) against an actually-open, handoff-labeled issue."
+                    )
+                } else {
+                    format!(
                         "supersede comment/label on {repo}#{prev_issue} did not complete — {err}. \
                          Fix by hand: `gh issue comment {prev_issue} --repo {repo} --body \"superseded by {repo}#{issue_number}\"` \
                          then `gh issue edit {prev_issue} --repo {repo} --remove-label {HANDOFF_LABEL} --add-label {HANDOFF_SUPERSEDED_LABEL}`."
-                    )),
-                );
+                    )
+                };
+                receipt.insert("next_step".to_string(), json!(next_step));
                 return serde_json::to_string(&Value::Object(receipt))
                     .map_err(|e| format!("serialize partial handoff_publish receipt: {e}"));
             }
@@ -720,16 +740,40 @@ async fn write_handoff_mirror(
     serde_json::from_str(&raw).map_err(|e| format!("parse wiki mirror write response: {e}"))
 }
 
-/// Comment → label swap → restricted close. Only the first two are
-/// load-bearing ("comment+label 两笔仍算成功" — a close failure/refusal
-/// degrades to a manual fallback command, never fails the overall
-/// supersede step).
+/// Verify target → comment → restricted close → label swap. #1285 codex
+/// review, two fixes:
+///
+/// 1. **Ordering** (close before swap, not after): `attempt_restricted_close`
+///    re-verifies the `handoff` label LIVE (not a stale discovery snapshot)
+///    immediately before closing — that is the entire point of the
+///    restricted-close gate (only ever close a handoff-labeled issue). If
+///    the label swap ran first, the live re-fetch would see
+///    `handoff-superseded` (the swap's own output) and `restricted_close_allowed`
+///    would refuse every single normal-flow close — the gate would never
+///    once fire in production. Running close first means the live re-fetch
+///    still observes the pre-swap `handoff` label, preserving both the
+///    gate's live-re-verify semantics AND making it actually reachable.
+/// 2. **Target verification is un-widenable**: `verify_supersede_target`
+///    runs before ANY mutation (comment/close/label-swap), for both the
+///    auto-discovered path and an explicit caller-supplied
+///    `params.supersedes` — this function is the single call site for
+///    both (see `handle_gh_handoff_publish`), so gating here covers both by
+///    construction. A caller-supplied override does not get to skip the
+///    open+handoff-labeled check that auto-discovery already enforces via
+///    `--label handoff --state open`.
+///
+/// Comment and label-swap remain the two load-bearing steps ("comment+label
+/// 两笔仍算成功") — a close failure/refusal degrades to a manual fallback
+/// command inside the returned `Value`, never fails the overall supersede
+/// step.
 fn supersede_previous_handoff(
     server: &MemoryServer,
     repo: &str,
     previous_issue: u64,
     new_issue: u64,
 ) -> Result<Value, String> {
+    verify_supersede_target(server, repo, previous_issue)?;
+
     let comment_body = format!("superseded by {repo}#{new_issue}");
     let (mut cmd, token) = build_gh_command(server)?;
     cmd.args(["issue", "comment", &previous_issue.to_string()])
@@ -737,17 +781,63 @@ fn supersede_previous_handoff(
     let _body_file = attach_gh_body_file(&mut cmd, &comment_body)?;
     run_gh(cmd, &token).map_err(|e| format!("supersede comment failed: {e}"))?;
 
-    swap_handoff_label(server, repo, previous_issue)
-        .map_err(|e| format!("supersede label swap failed (comment already posted): {e}"))?;
-
+    // Close BEFORE the label swap — see the fn doc above for why the order
+    // matters (the close gate's live re-fetch must not observe our own swap).
     let close_result = attempt_restricted_close(server, repo, previous_issue);
+
+    swap_handoff_label(server, repo, previous_issue)
+        .map_err(|e| format!("supersede label swap failed (comment/close already done): {e}"))?;
 
     Ok(json!({
         "previous_issue": previous_issue,
         "comment": "ok",
-        "label_swap": "ok",
         "close": close_result,
+        "label_swap": "ok",
     }))
+}
+
+/// Un-widenable pre-mutation gate: `previous_issue` must be open AND carry
+/// the `handoff` label before `supersede_previous_handoff` posts a comment,
+/// closes it, or swaps its label. Applies identically whether
+/// `previous_issue` came from `fetch_open_handoff_issues` auto-discovery
+/// (already `--label handoff --state open` filtered, so this is normally a
+/// no-op re-check) or an explicit caller-supplied `params.supersedes` (#1285
+/// codex review — an explicit override must not bypass this: it is the ONLY
+/// path that can name an arbitrary same-repo issue number, so it is exactly
+/// the path this gate exists for). Reuses `restricted_close_allowed`'s label
+/// check rather than a second label-matching implementation.
+fn verify_supersede_target(server: &MemoryServer, repo: &str, number: u64) -> Result<(), String> {
+    let (mut cmd, token) = build_gh_command(server)?;
+    cmd.args(["issue", "view", &number.to_string()])
+        .args(["--repo", repo])
+        .args(["--json", "state,labels"]);
+    let output = run_gh_json(cmd, &token)
+        .map_err(|e| format!("could not verify supersede target {repo}#{number}: {e}"))?;
+    let value: Value = serde_json::from_str(&output)
+        .map_err(|e| format!("parse issue view json for {repo}#{number}: {e}"))?;
+
+    let state = value
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !state.eq_ignore_ascii_case("open") {
+        return Err(format!(
+            "refusing to supersede {repo}#{number}: issue is not open (state={state})"
+        ));
+    }
+    let labels: Vec<String> = value
+        .get("labels")
+        .and_then(Value::as_array)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|l| l.get("name").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    restricted_close_allowed(&labels, number, number)
+        .map_err(|e| format!("refusing to supersede {repo}#{number}: {e}"))
 }
 
 fn swap_handoff_label(server: &MemoryServer, repo: &str, number: u64) -> Result<String, String> {
@@ -1016,7 +1106,13 @@ pub(crate) async fn handle_gh_handoff_repair(
     .map_err(|e| format!("serialize handoff_repair receipt: {e}"))
 }
 
-// ─────────────────────────── tests (pure logic only — no gh, no DB) ───────────────────────────
+// ─────────────────────────── tests ───────────────────────────
+// Most of these are pure logic (no gh, no DB). The `supersede_*` tests at
+// the bottom (#1285 codex review regression coverage) are the exception:
+// they drive `supersede_previous_handoff` against a fake `gh` shim on PATH
+// (same pattern as `tests::gh_comment_tests`), because the two bugs they
+// guard against are about the ORDER/gating of real `gh` calls, which a
+// pure-logic test of `restricted_close_allowed` alone cannot discriminate.
 
 #[cfg(test)]
 mod tests {
@@ -1103,5 +1199,216 @@ mod tests {
     fn resolve_since_rejects_invalid_override() {
         let err = resolve_since(Some("not-a-date"), None).unwrap_err();
         assert!(err.contains("invalid 'since'"), "err: {err}");
+    }
+
+    // ─── #1285 codex review regression tests: fake-`gh`-shim integration ───
+    // (see the module-header note above for why these are here rather than
+    // folded into the pure-logic tests above them).
+
+    struct PathEnvGuard {
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl PathEnvGuard {
+        fn prepend(dir: &std::path::Path) -> Self {
+            let original = std::env::var_os("PATH");
+            let mut paths = vec![dir.to_path_buf()];
+            if let Some(value) = original.as_ref() {
+                paths.extend(std::env::split_paths(value));
+            }
+            let joined = std::env::join_paths(paths).expect("join PATH");
+            std::env::set_var("PATH", joined);
+            Self { original }
+        }
+    }
+
+    impl Drop for PathEnvGuard {
+        fn drop(&mut self) {
+            if let Some(path) = self.original.as_ref() {
+                std::env::set_var("PATH", path);
+            } else {
+                std::env::remove_var("PATH");
+            }
+        }
+    }
+
+    fn write_executable(path: &std::path::Path, contents: &str) {
+        std::fs::write(path, contents).expect("write shim");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path)
+                .expect("shim metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).expect("chmod shim");
+        }
+    }
+
+    /// A fake `gh` whose `issue view` answer tracks mutable state in
+    /// `state_path` (format `"<OPEN|CLOSED>:<label>"`), so a test can prove
+    /// whether a LATER `issue view` call observes a label an EARLIER step
+    /// in the same `supersede_previous_handoff` invocation already changed
+    /// — exactly the condition BUG1 was about (the close gate's live
+    /// re-fetch seeing the swap's own output). `issue comment` is a no-op
+    /// success; `issue close` flips status to CLOSED; `issue edit
+    /// --add-label X` overwrites the label to X. Anything else is an
+    /// unexpected call and fails loudly.
+    fn stateful_gh_shim_script(state_path: &std::path::Path) -> String {
+        format!(
+            r#"#!/bin/sh
+STATE="{state}"
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  cur=$(cat "$STATE")
+  status=$(echo "$cur" | cut -d: -f1)
+  label=$(echo "$cur" | cut -d: -f2)
+  printf '{{"number":%s,"state":"%s","labels":[{{"name":"%s"}}]}}\n' "$3" "$status" "$label"
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "close" ]; then
+  cur=$(cat "$STATE")
+  label=$(echo "$cur" | cut -d: -f2)
+  echo "CLOSED:$label" > "$STATE"
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then
+  add=""
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "--add-label" ]; then
+      shift
+      add="$1"
+    fi
+    shift
+  done
+  cur=$(cat "$STATE")
+  status=$(echo "$cur" | cut -d: -f1)
+  echo "$status:$add" > "$STATE"
+  exit 0
+fi
+echo "unhandled/unexpected gh mutation attempted: $@" >&2
+exit 1
+"#,
+            state = state_path.display()
+        )
+    }
+
+    /// A fake `gh` whose `issue view` answer is FIXED (never mutated) and
+    /// whose every other subcommand fails loudly — used by the BUG2 tests,
+    /// where a correct fix must never reach comment/close/edit at all.
+    fn readonly_gh_shim_script(fixed_view_json: &str) -> String {
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  echo '{json}'
+  exit 0
+fi
+echo "unhandled/unexpected gh mutation attempted: $@" >&2
+exit 1
+"#,
+            json = fixed_view_json
+        )
+    }
+
+    /// #1285 codex review, BUG 1: on origin/main, `swap_handoff_label` ran
+    /// BEFORE `attempt_restricted_close`, whose live label re-fetch would
+    /// then observe `handoff-superseded` (the swap's own output) and
+    /// refuse — `close.status` was therefore ALWAYS `"refused"` in the
+    /// normal supersede flow, never `"ok"`. This is red against that order
+    /// (the fake gh's `issue edit` call flips the state file to
+    /// `OPEN:handoff-superseded` before the close gate's `issue view` runs)
+    /// and green against the fixed order (close's live re-fetch runs while
+    /// the state file still reads back the pre-swap `handoff` label).
+    #[test]
+    fn supersede_close_actually_executes_in_normal_flow() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fake_bin = tempfile::tempdir().expect("fake bin dir");
+        let gh_path = fake_bin.path().join("gh");
+        let state_dir = tempfile::tempdir().expect("state dir");
+        let state_path = state_dir.path().join("issue-100-state");
+        std::fs::write(&state_path, "OPEN:handoff").expect("seed state");
+        write_executable(&gh_path, &stateful_gh_shim_script(&state_path));
+        let _path_guard = PathEnvGuard::prepend(fake_bin.path());
+
+        let server = crate::tests::make_server();
+        let result = supersede_previous_handoff(&server, "owner/repo", 100, 101)
+            .expect("supersede should succeed in the normal flow");
+
+        assert_eq!(
+            result["close"]["status"],
+            json!("ok"),
+            "close must actually execute (not be refused) when the previous \
+             issue was open+handoff-labeled at the start of supersede — got: {result}"
+        );
+        let final_state = std::fs::read_to_string(&state_path).expect("read final state");
+        assert_eq!(
+            final_state, "CLOSED:handoff-superseded",
+            "both the close AND the label swap must have run, in that order"
+        );
+    }
+
+    /// #1285 codex review, BUG 2: `verify_supersede_target` must reject a
+    /// `previous_issue` missing the `handoff` label BEFORE any mutation —
+    /// this fake gh fails loudly on anything other than `issue view`, so if
+    /// the fix regressed and a comment/close/edit call were attempted, the
+    /// test would fail on the shim's own error text instead of the expected
+    /// refusal message.
+    #[test]
+    fn supersede_refuses_non_handoff_labeled_target_with_zero_mutation() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fake_bin = tempfile::tempdir().expect("fake bin dir");
+        let gh_path = fake_bin.path().join("gh");
+        write_executable(
+            &gh_path,
+            &readonly_gh_shim_script(r#"{"number":999,"state":"OPEN","labels":[{"name":"bug"}]}"#),
+        );
+        let _path_guard = PathEnvGuard::prepend(fake_bin.path());
+
+        let server = crate::tests::make_server();
+        let err = supersede_previous_handoff(&server, "owner/repo", 999, 101)
+            .expect_err("a non-handoff-labeled target must be refused");
+
+        assert!(err.contains("refusing to supersede"), "err: {err}");
+        assert!(err.contains("handoff"), "err: {err}");
+        assert!(
+            !err.contains("unexpected gh mutation attempted"),
+            "verification must reject BEFORE any comment/close/edit call — err: {err}"
+        );
+    }
+
+    /// Same gate, closed-issue clause: a target pointing at an
+    /// already-closed (even if still handoff-labeled) issue must also be
+    /// refused before any mutation.
+    #[test]
+    fn supersede_refuses_closed_target_with_zero_mutation() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fake_bin = tempfile::tempdir().expect("fake bin dir");
+        let gh_path = fake_bin.path().join("gh");
+        write_executable(
+            &gh_path,
+            &readonly_gh_shim_script(
+                r#"{"number":999,"state":"CLOSED","labels":[{"name":"handoff"}]}"#,
+            ),
+        );
+        let _path_guard = PathEnvGuard::prepend(fake_bin.path());
+
+        let server = crate::tests::make_server();
+        let err = supersede_previous_handoff(&server, "owner/repo", 999, 101)
+            .expect_err("a closed target must be refused");
+
+        assert!(err.contains("refusing to supersede"), "err: {err}");
+        assert!(err.contains("not open"), "err: {err}");
+        assert!(
+            !err.contains("unexpected gh mutation attempted"),
+            "verification must reject BEFORE any comment/close/edit call — err: {err}"
+        );
     }
 }
