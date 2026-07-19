@@ -129,6 +129,7 @@ mod gh_ops;
 mod gh_safe_merge;
 mod handoff_ops;
 mod host_profile;
+mod host_spawn_bridge;
 mod hub_ops;
 mod kanban;
 pub mod lesson_forge_ops;
