@@ -1078,6 +1078,114 @@ fn legacy_session_claims_backfills_identity_index() {
     );
 }
 
+/// Pre-v21 legacy `session_claims` (no `mode` column) carrying TWO active rows
+/// with the SAME identity triple — the exact on-disk state a pre-#1001-round-2
+/// kernel could leave, since its read-then-write upsert had no DB constraint to
+/// prevent duplicate active rows. Before #1289's init-path dedup, booting this
+/// DB crashes: `init_schema_inner`'s `MIGRATED_INDEXES_SQL` runs
+/// `CREATE UNIQUE INDEX idx_session_claims_identity_active` over the two
+/// un-deduped active rows and the whole init transaction rolls back.
+const SIGIL_1289_LEGACY_SESSION_CLAIMS_DUP_SQL: &str = r#"
+    CREATE TABLE session_claims (
+        claim_id             TEXT PRIMARY KEY,
+        session_client       TEXT,
+        issue_ref            TEXT,
+        flow_id              TEXT,
+        dispatch_id          TEXT,
+        branch               TEXT NOT NULL DEFAULT '',
+        declared_file_scope  TEXT,
+        state                TEXT NOT NULL DEFAULT 'active',
+        release_reason       TEXT,
+        created_at           TEXT NOT NULL DEFAULT '',
+        heartbeat_at         TEXT NOT NULL DEFAULT '',
+        released_at          TEXT
+    );
+    INSERT INTO session_claims
+        (claim_id, session_client, issue_ref, flow_id, state, created_at, heartbeat_at)
+    VALUES
+        ('dup-old', 'claude-code', 'org/repo#7', 'flow-7', 'active',
+         '2026-07-11T00:00:00Z', '2026-07-11T00:00:00Z'),
+        ('dup-new', 'claude-code', 'org/repo#7', 'flow-7', 'active',
+         '2026-07-11T00:10:00Z', '2026-07-11T00:10:00Z');
+"#;
+
+#[test]
+fn legacy_session_claims_with_duplicate_active_rows_dedupes_and_boots() {
+    // RED before the fix: init_schema_inner's MIGRATED_INDEXES_SQL builds the
+    // partial UNIQUE index over the two un-deduped active rows and init dies
+    // with a UNIQUE-constraint failure. GREEN after: the init-path dedup
+    // (crate::db::migrations::dedupe_session_claims_identity_conflicts, called
+    // right before the index build) collapses the older duplicate first, so
+    // init succeeds, the index is built, and exactly one identity row stays
+    // active.
+    let (conn, _tmp) =
+        sigil_1289_init_full_path_with_setup(SIGIL_1289_LEGACY_SESSION_CLAIMS_DUP_SQL);
+
+    assert!(
+        sigil_1289_index_exists(&conn, "idx_session_claims_identity_active"),
+        "the partial UNIQUE index must be built after deduping legacy duplicates"
+    );
+
+    // Exactly one of the two same-identity rows survives active.
+    let active_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM session_claims WHERE state = 'active'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        active_count, 1,
+        "duplicate active identity must be collapsed to one"
+    );
+
+    // The older heartbeat is the one released, with the migration's reason.
+    let old_state: String = conn
+        .query_row(
+            "SELECT state FROM session_claims WHERE claim_id = 'dup-old'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        old_state, "released",
+        "the older-heartbeat duplicate is released"
+    );
+    let old_reason: String = conn
+        .query_row(
+            "SELECT release_reason FROM session_claims WHERE claim_id = 'dup-old'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_reason, "superseded-by-unique-identity-migration");
+
+    let new_state: String = conn
+        .query_row(
+            "SELECT state FROM session_claims WHERE claim_id = 'dup-new'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        new_state, "active",
+        "the newest-heartbeat row survives as the single active claim"
+    );
+
+    // Re-running init over the now-deduped DB is a clean no-op (the index
+    // already enforces uniqueness, so nothing is left to collapse and the
+    // release_reason does not change).
+    crate::db::init_schema(&conn).expect("second init over a deduped DB must succeed");
+    let active_after: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM session_claims WHERE state = 'active'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(active_after, 1, "dedup is idempotent on a second init");
+}
+
 #[test]
 fn init_schema_only_carries_all_evolutionary_indexes() {
     // owner ruling A: init_schema (no migrations) must produce the complete

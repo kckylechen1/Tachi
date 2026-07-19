@@ -75,6 +75,35 @@ pub(super) fn migrate_v12_session_claims_unique_identity(
     Ok(released)
 }
 
+/// Guarded, `mode IS NULL`-scoped dedup entry point shared with
+/// `init_schema_inner` (#1289).
+///
+/// `init_schema_inner`'s `MIGRATED_INDEXES_SQL` builds the partial UNIQUE
+/// index `idx_session_claims_identity_active` (`WHERE state = 'active' AND
+/// mode IS NULL`) on EVERY open, and it runs BEFORE the v12/v21 sentinel
+/// migrations. On a legacy DB written by the pre-#1001-round-2 kernel that
+/// still carries duplicate active rows for one identity, that `CREATE UNIQUE
+/// INDEX` would crash init unless the duplicates are collapsed first — so
+/// `init_schema_inner` calls this right before the index build.
+///
+/// Scoped to `mode IS NULL` (via [`dedupe_duplicate_active_claims`]) to match
+/// the index predicate EXACTLY: v21 WorkClaims carry a non-null `mode` and are
+/// deliberately allowed to share an identity triple (they use transactional
+/// collision semantics, not this legacy presence index — see
+/// `identity_workclaim_spine.rs`), so a mode-agnostic dedup running on every
+/// startup would wrongly release live v21 claims. Table-exists guarded, so a
+/// DB that has never built `session_claims` is a clean no-op; and idempotent
+/// on every subsequent startup because once the index exists no second active
+/// modeless row for an identity can be inserted, leaving nothing to collapse.
+pub(in crate::db) fn dedupe_session_claims_identity_conflicts(
+    conn: &Connection,
+) -> Result<usize, MemoryError> {
+    if !table_exists(conn, "session_claims")? {
+        return Ok(0);
+    }
+    dedupe_duplicate_active_claims(conn)
+}
+
 fn table_exists(conn: &Connection, name: &str) -> Result<bool, MemoryError> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?1",
@@ -90,13 +119,22 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool, MemoryError> {
 /// the row with the latest `heartbeat_at` (ties broken by `claim_id` so the
 /// choice is deterministic), and release every other row in the group with a
 /// dedicated `release_reason`. Returns the count of rows released.
+///
+/// Scoped to `mode IS NULL` so it matches the partial UNIQUE index predicate
+/// (`WHERE state = 'active' AND mode IS NULL`) exactly. v21 WorkClaims carry a
+/// non-null `mode` and may legitimately share an identity triple, so they must
+/// never be deduped here (#1289). On a legacy pre-v21 DB the `mode` column was
+/// just added by `init_schema_inner`'s `ensure_column` with no default, so all
+/// existing rows are `mode IS NULL` and the scope is transparent.
 fn dedupe_duplicate_active_claims(conn: &Connection) -> Result<usize, MemoryError> {
     let mut stmt = conn.prepare(
         "SELECT claim_id FROM session_claims s1
          WHERE state = 'active'
+           AND mode IS NULL
            AND EXISTS (
              SELECT 1 FROM session_claims s2
              WHERE s2.state = 'active'
+               AND s2.mode IS NULL
                AND COALESCE(s2.session_client, '') = COALESCE(s1.session_client, '')
                AND COALESCE(s2.issue_ref, '') = COALESCE(s1.issue_ref, '')
                AND COALESCE(s2.flow_id, '') = COALESCE(s1.flow_id, '')
@@ -117,7 +155,7 @@ fn dedupe_duplicate_active_claims(conn: &Connection) -> Result<usize, MemoryErro
         conn.execute(
             "UPDATE session_claims SET state = 'released', released_at = ?2, \
              release_reason = 'superseded-by-unique-identity-migration' \
-             WHERE claim_id = ?1 AND state = 'active'",
+             WHERE claim_id = ?1 AND state = 'active' AND mode IS NULL",
             params![claim_id, now],
         )?;
         released += 1;

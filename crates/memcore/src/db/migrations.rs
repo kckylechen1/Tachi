@@ -119,6 +119,7 @@ pub use legacy_columns::{
 use mirror_eval::*;
 use pack_retire::*;
 use sentinel::*;
+pub(in crate::db) use session_claims_identity::dedupe_session_claims_identity_conflicts;
 use session_claims_identity::*;
 
 const MIGRATION_NS: &str = "migrations";

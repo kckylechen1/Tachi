@@ -219,6 +219,19 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     ensure_column(conn, "exec_envs", "claim_id", "TEXT")?;
     ensure_column(conn, "session_claims", "mode", "TEXT")?;
 
+    // #1289: collapse any pre-existing duplicate *modeless* active claims for
+    // the same identity triple BEFORE MIGRATED_INDEXES_SQL builds the partial
+    // UNIQUE index `idx_session_claims_identity_active` (WHERE state = 'active'
+    // AND mode IS NULL). A legacy DB written by the pre-#1001-round-2 kernel can
+    // carry such duplicates; without this the CREATE UNIQUE INDEX below crashes
+    // init on that DB (a crash previously masked by the mode-column ordering
+    // bug fixed above). Reuses the v12 migration's dedup logic (single source),
+    // scoped to `mode IS NULL` to match the index predicate exactly — v21
+    // WorkClaims carrying a non-null mode legitimately share an identity and are
+    // never deduped. No-op on a fresh/empty table and idempotent on every
+    // subsequent startup (the index then prevents any new duplicate).
+    crate::db::migrations::dedupe_session_claims_identity_conflicts(conn)?;
+
     // Indexes on migrated columns — MUST come after ensure_column so the
     // columns exist on legacy databases that were created without them.
     execute_batch_retry(conn, ddl::MIGRATED_INDEXES_SQL)?;
