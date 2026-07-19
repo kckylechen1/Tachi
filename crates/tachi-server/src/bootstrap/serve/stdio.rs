@@ -98,7 +98,10 @@ pub(super) async fn serve_stdio_proxy(
     let transport = (stdin(), stdout());
     let running = rmcp::service::serve_server(proxy, transport).await?;
     wait_for_stdio_shutdown(running, None).await;
-    Ok(())
+    // #1273 Gap 1: a proxy adapter holds no DB state to flush, so it is safe
+    // (and required — see `stdio_hard_exit`'s doc comment) to force-exit
+    // immediately once `wait_for_stdio_shutdown` decides it is time to stop.
+    stdio_hard_exit();
 }
 
 pub(super) async fn serve_stdio(server: MemoryServer) -> Result<(), Box<dyn std::error::Error>> {
@@ -107,6 +110,40 @@ pub(super) async fn serve_stdio(server: MemoryServer) -> Result<(), Box<dyn std:
     let running = rmcp::service::serve_server(server, transport).await?;
     wait_for_stdio_shutdown(running, idle_token).await;
     Ok(())
+}
+
+/// #1273 Gap 1 — root cause of "SIGTERM ignored" zombies.
+///
+/// `wait_for_stdio_shutdown`'s `sigterm()`/`ctrl_c()`/`wait_for_parent_death()`
+/// arms all fire correctly — the eprintln for each DOES run on a real signal.
+/// The zombies survive anyway because of what happens *after* that: this
+/// process's stdio transport is backed by `tokio::io::stdin()`, which — on
+/// every platform, because a raw OS stdin fd cannot be portably driven by an
+/// async reactor — services its reads via ONE persistent background thread
+/// in tokio's blocking-task pool that performs a genuine synchronous
+/// `read(2)` in a loop. That thread has no cancellation hook: dropping the
+/// async-side future that was awaiting its result does not interrupt the
+/// blocking syscall underneath. In the exact leak mode #1273 measured (a
+/// live MCP host that finished a sub-session but never closed this specific
+/// stdio pipe), that `read(2)` never returns — no more data, no EOF, forever.
+///
+/// `#[tokio::main]` builds its `Runtime` inline and drops it when the
+/// wrapped async fn returns; `Runtime::drop` performs a BLOCKING shutdown
+/// that waits for every outstanding task — including that un-cancellable
+/// blocking-pool thread — before the process is allowed to exit. So a plain
+/// `return Ok(())` here is a correct in-application decision that the OS
+/// process never gets to act on: `main()` never returns, so the process
+/// never calls `exit()`, and `kill -TERM` looks identical to "ignored" from
+/// outside even though the signal was received and handled.
+///
+/// The only way to guarantee termination within a bounded time (the
+/// contract #1273 asks for) is to bypass `Runtime::drop` entirely with an
+/// explicit process exit once we have already decided to stop and (for the
+/// direct, DB-holding path) already flushed/joined the background tasks that
+/// matter — see the `!cli.daemon` tail of `start_server_transport` in
+/// `serve.rs`, which calls this same function after that join completes.
+pub(super) fn stdio_hard_exit() -> ! {
+    std::process::exit(0)
 }
 
 async fn wait_for_stdio_shutdown(
