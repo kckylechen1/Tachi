@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::provider_names::{parse_rotation_member_name, parse_vault_alias};
+use crate::provider_names::{
+    parse_rotation_member_name, parse_vault_alias, validate_vault_alias_name,
+};
 use crate::{LlmClient, ProviderSecret};
 
 #[derive(Debug, Clone, Default)]
@@ -85,6 +87,15 @@ where
         }
 
         if let Some(vault_name) = parse_vault_alias(trimmed) {
+            // tachi#1287: syntactically-malformed alias names (space, stray
+            // punctuation, oversized) are a config typo, not a "secret not yet
+            // provisioned" condition — those must stay fatal instead of being
+            // folded into the tolerable `skipped_aliases` degrade below.
+            if let Err(reason) = validate_vault_alias_name(vault_name) {
+                return Err(format!(
+                    "Config key '{key}' references Vault alias '{vault_name}' which is not a valid Vault secret name: {reason}"
+                ));
+            }
             let Some(pool) = vault_pools.get(vault_name).cloned().or_else(|| {
                 vault_map.get(vault_name).cloned().map(|secret| {
                     vec![ProviderSecret {
@@ -321,5 +332,43 @@ mod tests {
             .skipped_aliases
             .iter()
             .any(|(key, _reason)| key == "TACHI_TEST_BAD_ALIAS_KEY"));
+    }
+
+    // tachi#1287 fix 2: a missing-but-syntactically-valid alias is a tolerable
+    // skip (covered above); a syntactically malformed alias name (space here)
+    // is a config typo and must stay fatal, not be folded into
+    // `skipped_aliases`.
+    #[test]
+    fn materialize_provider_secrets_rejects_malformed_alias_name() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let _env = EnvGuard::set(
+            "TACHI_TEST_MALFORMED_ALIAS_KEY",
+            "vault:invalid key with spaces",
+        );
+        let llm = LlmClient::new().expect("llm client");
+
+        let err =
+            materialize_provider_secrets(&llm, &HashMap::new(), ["TACHI_TEST_MALFORMED_ALIAS_KEY"])
+                .expect_err("malformed alias name must fail loudly, not degrade to a skip");
+
+        assert!(err.contains("TACHI_TEST_MALFORMED_ALIAS_KEY"));
+        assert!(err.contains("not a valid Vault secret name"));
+    }
+
+    #[test]
+    fn materialize_provider_secrets_rejects_oversized_alias_name() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let oversized_name = "A".repeat(129);
+        let _env = EnvGuard::set(
+            "TACHI_TEST_OVERSIZED_ALIAS_KEY",
+            &format!("vault:{oversized_name}"),
+        );
+        let llm = LlmClient::new().expect("llm client");
+
+        let err =
+            materialize_provider_secrets(&llm, &HashMap::new(), ["TACHI_TEST_OVERSIZED_ALIAS_KEY"])
+                .expect_err("oversized alias name must fail loudly, not degrade to a skip");
+
+        assert!(err.contains("not a valid Vault secret name"));
     }
 }
