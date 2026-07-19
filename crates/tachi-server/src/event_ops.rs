@@ -123,6 +123,13 @@ fn emit_event(server: &MemoryServer, params: TachiEventParams) -> Result<String,
             .map_err(|e| format!("insert tachi event: {e}"))
     })?;
 
+    // #1249: a host-native agent spawn lifecycle event (OpenClaw
+    // `subagent_spawned`/`subagent_ended`, integration #1) also bridges into
+    // the `mirror_eval` ledger (Option B ruling — see `host_spawn_bridge`).
+    // Fail-safe: this never fails the emit; the event-ledger write above is
+    // authoritative, the mirror_eval projection is best-effort.
+    crate::host_spawn_bridge::bridge_host_spawn_event(server, &event);
+
     json_string(&json!({
         "status": "saved",
         "id": event.id,
