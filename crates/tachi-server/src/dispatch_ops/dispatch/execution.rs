@@ -248,28 +248,40 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         // --- WATCHDOG: check if sub-agent properly closed the loop ---
         // Poll for kanban state instead of a fixed sleep to avoid race conditions
         let (watchdog_polls, watchdog_interval) = watchdog_poll_config();
+        let mut receipt_terminal_state = None;
         let mut kanban_state = None;
         for _ in 0..watchdog_polls {
             tokio::time::sleep(watchdog_interval).await;
+            let receipt_state = resolved_completion_terminal_state(&workspace_dir_for_spawn);
+            if receipt_state.is_some() {
+                receipt_terminal_state = receipt_state;
+                break;
+            }
             let state = get_kanban_state(&server_clone, &d_id).await;
-            if let Some(ref s) = state {
-                if matches!(
-                    s.as_str(),
-                    "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED"
-                ) {
-                    kanban_state = state;
-                    break;
-                }
+            if canonical_terminal_state(state.as_deref()).is_some() {
+                kanban_state = state;
+                break;
             }
         }
         let kanban_state = match kanban_state {
             Some(s) => Some(s),
             None => get_kanban_state(&server_clone, &d_id).await,
         };
-        let is_closed = matches!(
-            kanban_state.as_deref(),
-            Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED")
-        );
+        let receipt_terminal_state = receipt_terminal_state
+            .or_else(|| resolved_completion_terminal_state(&workspace_dir_for_spawn));
+        let polled_terminal_state = canonical_terminal_state(kanban_state.as_deref());
+        let is_closed = receipt_terminal_state.is_some() || polled_terminal_state.is_some();
+        // #1250: terminal accounting in the final `status.json` rewrite must
+        // reflect the resolved predicate verdict, NOT the raw process exit
+        // code. The watchdog branch below is the only path that actually
+        // evaluates the predicate (via the same `resolve_completion_state`
+        // machinery used at the success seam) — when it runs and resolves a
+        // state, capture it here so the status write prefers it over the
+        // exit-code derivation. Stays `None` when the watchdog branch does
+        // not run (run already closed via `tachi_complete`) or runs the
+        // crash/timeout sub-branch, preserving the existing exit-code
+        // semantics for those non-predicate paths.
+        let mut watchdog_resolved_state: Option<&'static str> = None;
         if !is_closed {
             let exited_ok = matches!(&result, Ok(r) if r.exit_code == Some(0));
 
@@ -302,6 +314,11 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 );
                 let (kanban_state, reviewed, override_reason) =
                     crate::dispatch_ops::resolve_completion_state("success", &verdict);
+                // #1250: thread the predicate-resolved state into the final
+                // `status.json` rewrite so an exit-0 run whose predicate
+                // verdict is FAILURE lands FAILED there too — not collapsed
+                // back to COMPLETED via the raw exit code.
+                watchdog_resolved_state = Some(kanban_state);
                 eprintln!(
                     "[watchdog] dispatch {} exited 0 without tachi_complete; predicate={} → {} reviewed={} tail={}",
                     d_id,
@@ -485,6 +502,12 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             .and_then(|v| v.get("authority").cloned())
             .unwrap_or(Value::Null);
 
+        let final_status_state = terminal_status_state(
+            receipt_terminal_state,
+            watchdog_resolved_state,
+            polled_terminal_state,
+            final_exit_code,
+        );
         write_status_json(
             &workspace_dir_for_spawn,
             &d_id,
@@ -498,11 +521,8 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             Some(total_duration_ms),
             Some(json!({
                 "agent": agent_for_watchdog.clone(),
-                "state": match final_exit_code {
-                    Some(0) => "TASK_STATE_COMPLETED",
-                    Some(_) => "TASK_STATE_FAILED",
-                    None => "TASK_STATE_FAILED",
-                },
+                "state": final_status_state,
+                "closure_kind": terminal_closure_kind(final_status_state),
                 "updated_at": Utc::now().to_rfc3339(),
                 "run_dir": workspace_dir_for_spawn.to_string_lossy(),
                 "result_written": true,
@@ -669,6 +689,105 @@ fn watchdog_poll_config() -> (usize, Duration) {
     (polls, Duration::from_millis(poll_ms))
 }
 
+/// Resolve the terminal kanban `state` field written into the final
+/// `status.json` rewrite (#1250).
+///
+/// The raw process exit code is NOT a faithful terminal signal: a vendor can
+/// exit 0 while the declared completion contract is unmet — a FALSE SUCCESS.
+/// Two sites resolve the real terminal state and we must honor either over
+/// the exit code:
+///
+/// 1. **Durable completion receipt (round 3):** when `tachi_complete` resolves
+///    an outcome it writes `resolved_completion` to `status.json` before the
+///    best-effort kanban projection. This is authoritative because kanban may
+///    be missing or stale.
+/// 2. **Watchdog path (round 1):** when the run exits 0 without calling
+///    `tachi_complete`, the watchdog branch in [`spawn_background_dispatch`]
+///    evaluates the predicate via `resolve_completion_state("success",
+///    &verdict)` and threads the result through `watchdog_resolved`.
+/// 3. **`tachi_complete` kanban projection (round 2):** when the agent DID call
+///    `tachi_complete`, `complete_ops::handler.rs` already ran the same
+///    `resolve_completion_state` machinery and persisted the resolved state
+///    to the kanban row. The watchdog spawn's kanban poll reads that state
+///    back; `polled_terminal_state` carries it into this helper so an exit-0
+///    run cannot collapse a deliberate close (including `partial` /
+///    INPUT_REQUIRED) back to COMPLETED.
+///
+/// Priority: the durable receipt beats every derived signal. Then
+/// `watchdog_resolved` beats `polled_terminal_state` (both never set
+/// simultaneously in the live path — the watchdog branch only runs when
+/// `!is_closed`). When all are `None`, the exit-code-derived mapping is kept.
+fn terminal_status_state(
+    receipt_terminal_state: Option<&'static str>,
+    watchdog_resolved: Option<&'static str>,
+    polled_terminal_state: Option<&'static str>,
+    final_exit_code: Option<i32>,
+) -> &'static str {
+    receipt_terminal_state
+        .or(watchdog_resolved)
+        .or(polled_terminal_state)
+        .unwrap_or(match final_exit_code {
+            Some(0) => "TASK_STATE_COMPLETED",
+            Some(_) => "TASK_STATE_FAILED",
+            None => "TASK_STATE_FAILED",
+        })
+}
+
+/// Read a handler-written completion receipt from the dispatch run. A partial
+/// receipt is valid only with its explicit closure marker, so the generic
+/// INPUT_REQUIRED vocabulary used by plan review cannot be misclassified as a
+/// terminal partial close.
+fn resolved_completion_terminal_state(run_dir: &std::path::Path) -> Option<&'static str> {
+    let status = crate::task_lifecycle::read_json_file(&run_dir.join("status.json"))
+        .ok()
+        .flatten()?;
+    let receipt = status.get("resolved_completion")?.as_object()?;
+    let state = canonical_terminal_state(Some(receipt.get("state")?.as_str()?));
+    receipt
+        .get("eval_ledger_id")?
+        .as_str()
+        .filter(|value| !value.trim().is_empty())?;
+    receipt.get("reviewed")?.as_bool()?;
+    chrono::DateTime::parse_from_rfc3339(receipt.get("recorded_at")?.as_str()?).ok()?;
+    match state {
+        Some("TASK_STATE_INPUT_REQUIRED")
+            if receipt.get("closure_kind").and_then(Value::as_str) == Some("partial") =>
+        {
+            state
+        }
+        Some("TASK_STATE_INPUT_REQUIRED") => None,
+        terminal if receipt.get("closure_kind").is_some_and(Value::is_null) => terminal,
+        _ => None,
+    }
+}
+
+/// The status ledger keeps INPUT_REQUIRED for both partial outcomes and plan
+/// review. The execution path only reaches this state after a closed partial,
+/// so persist the discriminator that downstream readers need to preserve that
+/// distinction once the kanban row is no longer available.
+fn terminal_closure_kind(terminal_state: &str) -> Option<&'static str> {
+    (terminal_state == "TASK_STATE_INPUT_REQUIRED").then_some("partial")
+}
+
+/// Reduce a polled kanban state `String` (whose lifetime is not `'static`) to
+/// its canonical `&'static str` literal when it is one of the recognized
+/// terminal states; otherwise `None`. INPUT_REQUIRED is terminal for this
+/// execution watchdog when it was written by `tachi_complete(partial)`, even
+/// though other dispatch flows may use that vocabulary while awaiting input.
+/// Used at the `terminal_status_state` call site to thread the polled kanban
+/// value through the helper without leaking the borrowed `String`'s lifetime.
+/// Non-terminal / unknown values map to `None` so the helper's exit-code
+/// fallback still applies.
+fn canonical_terminal_state(polled: Option<&str>) -> Option<&'static str> {
+    polled.and_then(|s| match s {
+        "TASK_STATE_COMPLETED" => Some("TASK_STATE_COMPLETED"),
+        "TASK_STATE_FAILED" => Some("TASK_STATE_FAILED"),
+        "TASK_STATE_CANCELED" => Some("TASK_STATE_CANCELED"),
+        "TASK_STATE_INPUT_REQUIRED" => Some("TASK_STATE_INPUT_REQUIRED"),
+        _ => None,
+    })
+}
+
 fn bounded_env_usize(name: &str, default: usize, max: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -811,6 +930,295 @@ mod tests {
         assert_eq!(
             read_receipt(temp.path()).observed.acknowledgement,
             DispatchAcknowledgement::Unconfirmed
+        );
+    }
+
+    /// #1250 discriminator: a dispatch that exits 0 but whose watchdog
+    /// predicate verdict is FAILURE must be recorded as FAILED in the
+    /// terminal `status.json` rewrite — NOT as COMPLETED.
+    ///
+    /// The watchdog branch in [`spawn_background_dispatch`] resolves the
+    /// predicate via `resolve_completion_state("success", &verdict)` (the
+    /// same machinery the `tachi_complete` seam uses). For a `Fail` verdict
+    /// that resolved state is `TASK_STATE_FAILED` — see
+    /// `predicate::tests::resolve_state_matrix_success_row`. This test fixes
+    /// the contract end-to-end at the status-write helper: passing the
+    /// resolved FAILED state alongside a raw `Some(0)` exit code must yield
+    /// FAILED. Pre-fix the `match final_exit_code { Some(0) => COMPLETED }`
+    /// branch overrode the predicate and produced COMPLETED — the exact
+    /// accounting bug this issue closes.
+    ///
+    /// Deterministic: pure function only, no tokio task, no sleeps, no fs.
+    #[test]
+    fn exit_zero_with_predicate_resolved_failed_lands_failed_in_status() {
+        // The resolved state the watchdog threads through when the predicate
+        // intercepted a false success — exactly what
+        // `resolve_completion_state("success", &PredicateVerdict::Fail(_))`
+        // returns (first tuple element).
+        let resolved_failed: &'static str = "TASK_STATE_FAILED";
+
+        // Fixed behavior: the resolved predicate state wins over the raw
+        // exit code, so exit-0-but-failed-predicate lands FAILED.
+        assert_eq!(
+            terminal_status_state(None, Some(resolved_failed), None, Some(0)),
+            "TASK_STATE_FAILED",
+            "exit-0 + predicate-resolved FAILED must stay FAILED in status.json"
+        );
+
+        // Regression guards — the fix must NOT widen into the non-predicate
+        // paths. When the watchdog did not resolve a predicate state (run
+        // closed via `tachi_complete`, or the crash/timeout sub-branch), the
+        // pre-existing exit-code-derived mapping is preserved exactly.
+        assert_eq!(
+            terminal_status_state(None, None, None, Some(0)),
+            "TASK_STATE_COMPLETED",
+            "exit-0 without a resolved predicate state keeps the conservative COMPLETED"
+        );
+        assert_eq!(
+            terminal_status_state(None, None, None, Some(1)),
+            "TASK_STATE_FAILED",
+            "non-zero exit without a resolved predicate state stays FAILED"
+        );
+        assert_eq!(
+            terminal_status_state(None, None, None, None),
+            "TASK_STATE_FAILED",
+            "missing exit code (subprocess error) stays FAILED"
+        );
+
+        // Symmetry guard: a Pass verdict resolves to COMPLETED — the helper
+        // must honor that too, not silently downgrade an earned success.
+        let resolved_completed: &'static str = "TASK_STATE_COMPLETED";
+        assert_eq!(
+            terminal_status_state(None, Some(resolved_completed), None, Some(0)),
+            "TASK_STATE_COMPLETED",
+            "exit-0 + predicate-resolved COMPLETED stays COMPLETED"
+        );
+    }
+
+    /// #1250 round 2 discriminator (the case round 1 missed): a run that
+    /// closed via `tachi_complete(outcome="success")` whose predicate
+    /// resolved FAILED, then exited 0 — the terminal `status.json` rewrite
+    /// must stay FAILED, NOT collapse back to COMPLETED via the raw exit
+    /// code.
+    ///
+    /// `complete_ops::handler.rs` already runs `resolve_completion_state`
+    /// and calls `update_kanban_state(... new_state ...)` with the resolved
+    /// FAILED before the agent exits. The watchdog spawn's kanban poll at
+    /// `execution.rs:248-272` reads that FAILED back; `is_closed` is true;
+    /// the watchdog branch (the ONLY path round 1 threaded into the helper)
+    /// is skipped, leaving `watchdog_resolved_state = None`. Round 1 then
+    /// fell through to the exit-code match and overwrote FAILED → COMPLETED.
+    ///
+    /// Round 2 closes the seam by also feeding the polled terminal state
+    /// through `canonical_terminal_state` into `terminal_status_state`'s
+    /// new middle parameter. This test exercises that path directly: with
+    /// `watchdog_resolved = None` (watchdog did not run because the run was
+    /// already closed) and `polled_terminal_state = Some(FAILED)`, exit 0
+    /// must still produce FAILED.
+    ///
+    /// RED against b29a513f (round 1): the helper took only 2 args there
+    /// (no `polled_terminal_state`), and the call site never populated any
+    /// polled-state thread, so the same scenario yielded COMPLETED. This
+    /// test cannot even compile against b29a513f — round 1 has no code
+    /// path that exercises the `tachi_complete` seam at the helper level.
+    ///
+    /// Deterministic: pure function only, no tokio task, no sleeps, no fs.
+    #[test]
+    fn tachi_complete_success_with_predicate_failed_then_exit_zero_stays_failed() {
+        // The polled kanban state when handler.rs intercepted a false
+        // success: kanban was set to TASK_STATE_FAILED by the
+        // `update_kanban_state(new_state=...)` call in `complete_ops::
+        // handler.rs:420-426` after `resolve_completion_state("success",
+        // &PredicateVerdict::Fail(_))` returned FAILED.
+        let polled_failed = canonical_terminal_state(Some("TASK_STATE_FAILED"));
+        assert_eq!(
+            polled_failed,
+            Some("TASK_STATE_FAILED"),
+            "canon: a polled FAILED kanban state normalizes to its static literal"
+        );
+
+        // The bug scenario: watchdog did not run (run already closed via
+        // tachi_complete, so `watchdog_resolved_state = None`), kanban was
+        // set to FAILED by the tachi_complete path, agent then exited 0.
+        // Pre-fix this returned COMPLETED; post-fix it returns FAILED.
+        assert_eq!(
+            terminal_status_state(None, None, polled_failed, Some(0)),
+            "TASK_STATE_FAILED",
+            "tachi_complete(success) + predicate FAILED + exit 0 must stay FAILED"
+        );
+
+        // Regression guards.
+        // 1. A genuine COMPLETED self-report (predicate Pass) → COMPLETED
+        //    still holds; the polled thread must not downgrade earned
+        //    successes.
+        let polled_completed = canonical_terminal_state(Some("TASK_STATE_COMPLETED"));
+        assert_eq!(
+            terminal_status_state(None, None, polled_completed, Some(0)),
+            "TASK_STATE_COMPLETED",
+            "tachi_complete(success) + predicate Pass + exit 0 stays COMPLETED"
+        );
+
+        // 2. A CANCELED self-report lands CANCELED, not FAILED/COMPLETED —
+        //    the polled state must beat the exit code even for non-binary
+        //    terminal states.
+        let polled_canceled = canonical_terminal_state(Some("TASK_STATE_CANCELED"));
+        assert_eq!(
+            terminal_status_state(None, None, polled_canceled, Some(0)),
+            "TASK_STATE_CANCELED",
+            "tachi_complete canceled + exit 0 must stay CANCELED, not COMPLETED"
+        );
+
+        // 3. The watchdog-resolved thread still wins over the polled thread
+        //    when both are somehow populated (defensive — they are
+        //    mutually exclusive in the live code path, but the helper's
+        //    priority must be deterministic).
+        assert_eq!(
+            terminal_status_state(
+                None,
+                Some("TASK_STATE_FAILED"),
+                Some("TASK_STATE_COMPLETED"),
+                Some(0)
+            ),
+            "TASK_STATE_FAILED",
+            "watchdog-resolved state has priority over the polled state"
+        );
+
+        // 4. A non-terminal polled state (e.g. TASK_STATE_WORKING, which
+        //    cannot survive the `is_closed` gate but could be observed
+        //    transiently) maps to None and falls through to the exit code,
+        //    preserving the conservative fallback.
+        assert_eq!(
+            canonical_terminal_state(Some("TASK_STATE_WORKING")),
+            None,
+            "canon: non-terminal polled states map to None"
+        );
+        assert_eq!(
+            terminal_status_state(
+                None,
+                None,
+                canonical_terminal_state(Some("TASK_STATE_WORKING")),
+                Some(0)
+            ),
+            "TASK_STATE_COMPLETED",
+            "non-terminal polled state falls through to the exit-code mapping"
+        );
+    }
+
+    /// A deliberate `tachi_complete(outcome="partial")` writes
+    /// INPUT_REQUIRED.  For this execution, that is a terminal close: the
+    /// watchdog must not synthesize another outcome, and the final status
+    /// rewrite must preserve the self-reported partial state over exit 0.
+    #[test]
+    fn tachi_complete_partial_then_exit_zero_stays_input_required() {
+        let polled_partial = canonical_terminal_state(Some("TASK_STATE_INPUT_REQUIRED"));
+        assert_eq!(
+            polled_partial,
+            Some("TASK_STATE_INPUT_REQUIRED"),
+            "a partial tachi_complete state must be recognized as terminal by the watchdog"
+        );
+        assert_eq!(
+            terminal_status_state(None, None, polled_partial, Some(0)),
+            "TASK_STATE_INPUT_REQUIRED",
+            "tachi_complete(partial) + exit 0 must stay INPUT_REQUIRED in status.json"
+        );
+        assert_eq!(
+            terminal_closure_kind("TASK_STATE_INPUT_REQUIRED"),
+            Some("partial"),
+            "the final status rewrite must persist the partial discriminator"
+        );
+        assert_eq!(
+            terminal_closure_kind("TASK_STATE_COMPLETED"),
+            None,
+            "ordinary terminal states must not carry partial closure metadata"
+        );
+    }
+
+    /// A missing kanban card must not erase a deliberate partial close.  The
+    /// completion handler records the resolved close in the run receipt first;
+    /// the watchdog reads that receipt before consulting kanban, whose card may
+    /// have been deleted or may be temporarily unavailable.
+    #[test]
+    fn partial_receipt_beats_missing_kanban_and_exit_zero() {
+        let temp = tempfile::tempdir().expect("temporary run directory");
+        std::fs::write(
+            temp.path().join("status.json"),
+            serde_json::json!({
+                "resolved_completion": {
+                    "state": "TASK_STATE_INPUT_REQUIRED",
+                    "closure_kind": "partial",
+                    "eval_ledger_id": "eval-partial-receipt",
+                    "reviewed": true,
+                    "recorded_at": "2026-07-19T00:00:00Z",
+                }
+            })
+            .to_string(),
+        )
+        .expect("write resolved completion receipt");
+
+        let receipt_terminal_state = resolved_completion_terminal_state(temp.path());
+        assert_eq!(
+            receipt_terminal_state,
+            Some("TASK_STATE_INPUT_REQUIRED"),
+            "a valid partial receipt must remain terminal when kanban is missing"
+        );
+        assert_eq!(
+            terminal_status_state(receipt_terminal_state, None, None, Some(0)),
+            "TASK_STATE_INPUT_REQUIRED",
+            "receipt-backed partial must beat missing kanban and an exit-zero fallback"
+        );
+
+        std::fs::write(
+            temp.path().join("status.json"),
+            serde_json::json!({
+                "state": "TASK_STATE_INPUT_REQUIRED",
+                "closure_kind": null,
+            })
+            .to_string(),
+        )
+        .expect("write ordinary plan-input status");
+        assert_eq!(
+            resolved_completion_terminal_state(temp.path()),
+            None,
+            "ordinary plan input without a resolved-completion receipt must remain open"
+        );
+
+        std::fs::write(
+            temp.path().join("status.json"),
+            serde_json::json!({
+                "resolved_completion": {
+                    "state": "TASK_STATE_INPUT_REQUIRED",
+                    "closure_kind": "partial",
+                    "reviewed": true,
+                    "recorded_at": "not-a-timestamp",
+                }
+            })
+            .to_string(),
+        )
+        .expect("write incomplete partial receipt");
+        assert_eq!(
+            resolved_completion_terminal_state(temp.path()),
+            None,
+            "an incomplete or garbled partial receipt must not close the watchdog"
+        );
+
+        std::fs::write(
+            temp.path().join("status.json"),
+            serde_json::json!({
+                "resolved_completion": {
+                    "state": "TASK_STATE_COMPLETED",
+                    "closure_kind": "partial",
+                    "eval_ledger_id": "eval-garbled-receipt",
+                    "reviewed": true,
+                    "recorded_at": "2026-07-19T00:00:00Z",
+                }
+            })
+            .to_string(),
+        )
+        .expect("write garbled completed receipt");
+        assert_eq!(
+            resolved_completion_terminal_state(temp.path()),
+            None,
+            "a non-partial outcome carrying a partial marker must be rejected"
         );
     }
 }

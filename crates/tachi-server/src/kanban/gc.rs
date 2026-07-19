@@ -39,7 +39,14 @@ pub(crate) fn gc_expired_kanban_cards(
             metadata
                 .get("a2a_state")
                 .and_then(|value| value.as_str())
-                .map(|state| KANBAN_DISPATCH_NON_TERMINAL_STATES.contains(&state))
+                .map(|state| {
+                    KANBAN_DISPATCH_NON_TERMINAL_STATES.contains(&state)
+                        && !(state == "TASK_STATE_INPUT_REQUIRED"
+                            && metadata
+                                .get("closure_kind")
+                                .and_then(|value| value.as_str())
+                                == Some("partial"))
+                })
                 .unwrap_or(false)
         } else {
             false

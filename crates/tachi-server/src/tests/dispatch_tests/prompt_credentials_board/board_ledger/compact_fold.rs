@@ -137,6 +137,99 @@ async fn default_board_hides_heavy_fields_and_folds_terminal_rows() {
     let _ = std::fs::remove_dir_all(&completed_dir);
 }
 
+/// A partial completion keeps INPUT_REQUIRED as its public state, while an
+/// unmarked INPUT_REQUIRED remains an actionable plan-review row. The board
+/// must therefore fold only the durable partial closure by default and omit
+/// it from the explicit active view.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn board_distinguishes_partial_closed_input_required_from_open_plan_input() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let runs_dir = temp_home.temp_home.join(".tachi/runs");
+    let partial_id = format!(
+        "99991231T235959Z-partial-{}",
+        uuid::Uuid::new_v4().as_simple()
+    );
+    let plan_id = format!("99991231T235958Z-plan-{}", uuid::Uuid::new_v4().as_simple());
+
+    for (dispatch_id, closure_kind) in [(&partial_id, Some("partial")), (&plan_id, None)] {
+        let run_dir = runs_dir.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("create input-required fixture");
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::to_string(&serde_json::json!({
+                "dispatch_id": dispatch_id,
+                "agent": "codex",
+                "task": "needs input",
+                "state": "TASK_STATE_INPUT_REQUIRED",
+                "closure_kind": closure_kind,
+                "updated_at": "9999-12-31T23:59:59Z",
+                "exit_code": 0,
+            }))
+            .expect("serialize input-required fixture"),
+        )
+        .expect("write input-required fixture");
+    }
+
+    let default_board: serde_json::Value = serde_json::from_str(
+        &crate::dispatch_ops::handle_tachi_board(
+            &server,
+            TachiBoardParams {
+                state_filter: None,
+                limit: Some(20),
+                project: None,
+                flow_id: None,
+                verbose: None,
+            },
+        )
+        .await
+        .expect("default board should render"),
+    )
+    .expect("default board JSON");
+    let default_tasks = default_board["tasks"].as_array().expect("tasks array");
+    assert!(
+        !default_tasks
+            .iter()
+            .any(|task| task["dispatch_id"].as_str() == Some(partial_id.as_str())),
+        "partial closure must fold in the default board: {default_board:#}"
+    );
+    assert!(
+        default_tasks
+            .iter()
+            .any(|task| task["dispatch_id"].as_str() == Some(plan_id.as_str())),
+        "ordinary plan INPUT_REQUIRED must remain visible: {default_board:#}"
+    );
+
+    let active_board: serde_json::Value = serde_json::from_str(
+        &crate::dispatch_ops::handle_tachi_board(
+            &server,
+            TachiBoardParams {
+                state_filter: Some("active".to_string()),
+                limit: Some(20),
+                project: None,
+                flow_id: None,
+                verbose: None,
+            },
+        )
+        .await
+        .expect("active board should render"),
+    )
+    .expect("active board JSON");
+    let active_tasks = active_board["tasks"].as_array().expect("tasks array");
+    assert!(
+        !active_tasks
+            .iter()
+            .any(|task| task["dispatch_id"].as_str() == Some(partial_id.as_str())),
+        "partial closure must not appear in active board: {active_board:#}"
+    );
+    assert!(
+        active_tasks
+            .iter()
+            .any(|task| task["dispatch_id"].as_str() == Some(plan_id.as_str())),
+        "open plan INPUT_REQUIRED must appear in active board: {active_board:#}"
+    );
+}
+
 /// tachi#1173 item 7 discriminator: an individually-visible (non-folded)
 /// failed board row must carry an ANSI-free `failure_tail`.
 #[tokio::test]

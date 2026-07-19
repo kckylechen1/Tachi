@@ -94,3 +94,35 @@ fn gc_keeps_old_terminal_dispatch_cards() {
         "terminal (COMPLETED) dispatch card must be retained"
     );
 }
+
+/// INPUT_REQUIRED is normally reapable when an abandoned plan review has
+/// aged out, but a durable partial-closure marker makes the same displayed
+/// state terminal history that GC must retain.
+#[test]
+fn gc_keeps_old_partial_closed_input_required_but_reaps_open_plan_input() {
+    let mut store = test_store();
+    let old = (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+
+    let mut partial = dispatch_card_entry("old-partial", "TASK_STATE_INPUT_REQUIRED", old.clone());
+    partial.metadata["closure_kind"] = json!("partial");
+    store
+        .upsert(&partial)
+        .expect("upsert partial dispatch card");
+
+    let plan = dispatch_card_entry("old-plan-input", "TASK_STATE_INPUT_REQUIRED", old);
+    store.upsert(&plan).expect("upsert plan dispatch card");
+
+    let deleted = gc_expired_kanban_cards(&mut store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS).expect("gc");
+    assert_eq!(
+        deleted, 1,
+        "only the open plan INPUT_REQUIRED card is reapable"
+    );
+    assert!(
+        store.get("old-partial").expect("get partial").is_some(),
+        "partial-closed INPUT_REQUIRED card must be retained as terminal history"
+    );
+    assert!(
+        store.get("old-plan-input").expect("get plan").is_none(),
+        "ordinary stale plan INPUT_REQUIRED card must remain GC-reapable"
+    );
+}

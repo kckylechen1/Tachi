@@ -28,7 +28,7 @@ pub(super) async fn handle_tachi_task_wait(
                 .get("state")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
-            let terminal = is_terminal_task_state(state);
+            let terminal = is_terminal_task(&task);
             if terminal {
                 // tachi#1173 item 7: on a terminal *failed* dispatch, attach
                 // a bounded, ANSI-free failure_tail so the caller can
@@ -114,7 +114,7 @@ pub(super) async fn handle_tachi_task_status(
     let mut response = json!({
         "status": "ok",
         "dispatch_id": dispatch_id,
-        "terminal": is_terminal_task_state(state),
+        "terminal": is_terminal_task(&task),
         "state": state,
         "task": task,
         "run_status": status,
@@ -198,7 +198,7 @@ pub(super) async fn handle_tachi_task_cancel(
     // — degrades to a warn, never fails cancel.
     crate::claims_ops::release_claim_for_dispatch(server, &dispatch_id, "cancel");
 
-    if is_terminal_task_state(state) {
+    if is_terminal_task(&task) {
         return serde_json::to_string(&json!({
             "status": "already_terminal",
             "dispatch_id": dispatch_id,
@@ -262,6 +262,16 @@ pub(super) fn is_terminal_task_state(state: &str) -> bool {
     )
 }
 
+fn is_terminal_task(task: &Value) -> bool {
+    let state = task
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    is_terminal_task_state(state)
+        || (state == "TASK_STATE_INPUT_REQUIRED"
+            && task.get("closure_kind").and_then(Value::as_str) == Some("partial"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +316,31 @@ mod tests {
             dispatch_id
         );
         serde_json::from_str(&json_str).expect("deserialize wait params")
+    }
+
+    fn cancel_params(dispatch_id: &str) -> TachiTaskParams {
+        let json_str = format!(r#"{{"action":"cancel","dispatch_id":"{}"}}"#, dispatch_id);
+        serde_json::from_str(&json_str).expect("deserialize cancel params")
+    }
+
+    fn write_input_required_run(
+        runs_dir: &std::path::Path,
+        dispatch_id: &str,
+        closure_kind: Option<&str>,
+    ) {
+        let run_dir = runs_dir.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+        let mut status = json!({
+            "dispatch_id": dispatch_id,
+            "agent": "claude",
+            "state": "TASK_STATE_INPUT_REQUIRED",
+            "exit_code": 0,
+            "updated_at": Utc::now().to_rfc3339(),
+        });
+        if let Some(closure_kind) = closure_kind {
+            status["closure_kind"] = json!(closure_kind);
+        }
+        std::fs::write(run_dir.join("status.json"), status.to_string()).expect("write status.json");
     }
 
     /// tachi#1173 item 7: a terminal-FAILED run whose `progress.jsonl` carries
@@ -494,5 +529,63 @@ mod tests {
             response["failure_tail"].is_null(),
             "completed dispatch should not carry a failure_tail, got: {response}"
         );
+    }
+
+    /// A partial verdict keeps its public INPUT_REQUIRED state, but its
+    /// durable closure marker makes it terminal for every task-facade action.
+    #[tokio::test]
+    async fn partial_closed_input_required_is_terminal_across_task_facade() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-partial-closed";
+        write_input_required_run(&runs_dir, dispatch_id, Some("partial"));
+
+        let status: Value = serde_json::from_str(
+            &handle_tachi_task_status(&server, &status_params(dispatch_id, false))
+                .await
+                .expect("status call"),
+        )
+        .expect("parse status response");
+        assert_eq!(status["state"], "TASK_STATE_INPUT_REQUIRED");
+        assert_eq!(status["terminal"], true, "partial closure must be terminal");
+
+        let wait: Value = serde_json::from_str(
+            &handle_tachi_task_wait(&server, &wait_params(dispatch_id))
+                .await
+                .expect("wait call"),
+        )
+        .expect("parse wait response");
+        assert_eq!(wait["status"], "completed");
+        assert_eq!(wait["terminal"], true);
+        assert_eq!(wait["state"], "TASK_STATE_INPUT_REQUIRED");
+
+        let cancel: Value = serde_json::from_str(
+            &handle_tachi_task_cancel(&server, &cancel_params(dispatch_id))
+                .await
+                .expect("cancel call"),
+        )
+        .expect("parse cancel response");
+        assert_eq!(cancel["status"], "already_terminal");
+        assert_eq!(cancel["terminal"], true);
+        assert_eq!(cancel["state"], "TASK_STATE_INPUT_REQUIRED");
+    }
+
+    /// The same state without a closure marker is an ordinary plan-review
+    /// request and must stay actionable rather than silently becoming closed.
+    #[tokio::test]
+    async fn ordinary_input_required_without_closure_marker_stays_active() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-plan-input-required";
+        write_input_required_run(&runs_dir, dispatch_id, None);
+
+        let status: Value = serde_json::from_str(
+            &handle_tachi_task_status(&server, &status_params(dispatch_id, false))
+                .await
+                .expect("status call"),
+        )
+        .expect("parse status response");
+        assert_eq!(status["state"], "TASK_STATE_INPUT_REQUIRED");
+        assert_eq!(status["terminal"], false, "plan input must stay active");
     }
 }

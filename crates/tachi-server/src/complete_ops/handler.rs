@@ -1,5 +1,5 @@
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::facade_memory_ops::shape_complete_response;
 use crate::hub_ops::handle_distill_trajectory;
@@ -23,6 +23,105 @@ struct CompletionVerdict {
     new_state: &'static str,
     reviewed_flag: bool,
     override_reason: Option<String>,
+}
+
+/// Persist the resolved close in the dispatch's own run receipt before
+/// projecting it to kanban. Kanban is a derived view and may be missing or
+/// temporarily unreadable; the watchdog therefore needs this durable source
+/// of truth to avoid collapsing a deliberate partial close to exit-0 success.
+fn persist_resolved_completion_receipt(
+    server: &MemoryServer,
+    dispatch_id: &str,
+    new_state: &str,
+    eval_memory_id: &str,
+    reviewed: bool,
+) -> Result<(), String> {
+    if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
+        return Err(format!(
+            "cannot persist resolved completion receipt: invalid dispatch_id={dispatch_id:?}"
+        ));
+    }
+
+    let run_dir = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id)?;
+
+    persist_resolved_completion_receipt_at(
+        &run_dir,
+        dispatch_id,
+        new_state,
+        eval_memory_id,
+        reviewed,
+    )
+}
+
+fn resolved_completion_run_dir(
+    home_dir: &std::path::Path,
+    dispatch_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    // The run directory is the dispatch receipt's authority boundary. Never
+    // manufacture it from a caller-supplied id: a missing or symlink-escaped
+    // directory is a broken dispatch, not a place to create new truth.
+    let (run_dir, _, _) =
+        crate::dispatch_ops::resolve_completion_predicate_context(home_dir, dispatch_id);
+    run_dir.ok_or_else(|| {
+        format!(
+            "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
+             validated run directory is unavailable"
+        )
+    })
+}
+
+fn persist_resolved_completion_receipt_at(
+    run_dir: &std::path::Path,
+    dispatch_id: &str,
+    new_state: &str,
+    eval_memory_id: &str,
+    reviewed: bool,
+) -> Result<(), String> {
+    let status_path = run_dir.join("status.json");
+    let mut status = match crate::task_lifecycle::read_json_file(&status_path) {
+        Ok(Some(status)) => status,
+        Ok(None) => json!({ "dispatch_id": dispatch_id }),
+        Err(error) => {
+            return Err(format!(
+                "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
+                 read {}: {error}",
+                status_path.display()
+            ));
+        }
+    };
+    let status_object = status.as_object_mut().ok_or_else(|| {
+        format!(
+            "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
+             {} is not a JSON object",
+            status_path.display()
+        )
+    })?;
+    status_object.insert(
+        "resolved_completion".to_string(),
+        json!({
+            "state": new_state,
+            "closure_kind": if new_state == "TASK_STATE_INPUT_REQUIRED" {
+                Value::String("partial".to_string())
+            } else {
+                Value::Null
+            },
+            "eval_ledger_id": eval_memory_id,
+            "reviewed": reviewed,
+            "recorded_at": Utc::now().to_rfc3339(),
+        }),
+    );
+    let body = serde_json::to_string_pretty(&status).map_err(|error| {
+        format!(
+            "cannot serialize resolved completion receipt for dispatch_id={dispatch_id}: {error}"
+        )
+    })?;
+    crate::utils::write_owner_only_file_atomic(&status_path, body.as_bytes()).map_err(|error| {
+        format!(
+            "cannot persist resolved completion receipt for dispatch_id={dispatch_id}: \
+             write {}: {error}",
+            status_path.display()
+        )
+    })
 }
 
 pub(crate) async fn handle_tachi_complete(
@@ -417,6 +516,30 @@ pub(crate) async fn handle_tachi_complete(
             completion_warning = Some(reason);
         }
 
+        // This receipt is authoritative for terminal accounting. It must be
+        // durable before kanban is touched; a failed write is loud because
+        // continuing would allow the watchdog to manufacture COMPLETED from
+        // an exit-zero process after a missing/stale kanban projection.
+        persist_resolved_completion_receipt(
+            server,
+            did,
+            new_state,
+            &eval_memory_id,
+            reviewed_flag,
+        )?;
+        pipeline_status["completion_receipt"] = json!({
+            "status": "persisted",
+            "dispatch_id": did,
+            "state": new_state,
+            "closure_kind": if new_state == "TASK_STATE_INPUT_REQUIRED" {
+                Value::String("partial".to_string())
+            } else {
+                Value::Null
+            },
+            "eval_memory_id": eval_memory_id,
+            "reviewed": reviewed_flag,
+        });
+
         match crate::dispatch_ops::update_kanban_state(
             server,
             did,
@@ -667,4 +790,57 @@ pub(crate) async fn handle_tachi_complete(
     let response = shape_complete_response(review_bundle, params.format.as_deref());
     serde_json::to_string(&response)
         .map_err(|e| format!("Failed to serialize review bundle: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The receipt is the only source the watchdog can trust when the kanban
+    /// projection disappears. A write failure therefore has to escape as an
+    /// error; converting it to the handler's best-effort kanban warning would
+    /// silently turn a partial + exit 0 into COMPLETED.
+    #[test]
+    fn resolved_completion_receipt_write_failure_is_loud() {
+        let temp = tempfile::tempdir().expect("temporary receipt parent");
+        let non_directory = temp.path().join("not-a-run-directory");
+        std::fs::write(&non_directory, "not a directory").expect("seed blocking file");
+
+        let error = persist_resolved_completion_receipt_at(
+            &non_directory,
+            "20260719T000001Z-receipt-write-failure",
+            "TASK_STATE_INPUT_REQUIRED",
+            "eval-receipt-write-failure",
+            true,
+        )
+        .expect_err("receipt write failure must abort completion");
+
+        assert!(error.contains("cannot persist resolved completion receipt"));
+        assert!(error.contains("not-a-run-directory/status.json"), "{error}");
+    }
+
+    #[test]
+    fn resolved_completion_receipt_requires_a_preexisting_confined_run_dir() {
+        let temp = tempfile::tempdir().expect("temporary tachi home");
+        let dispatch_id = "20260719T000002Z-receipt-existing-run";
+
+        let error = resolved_completion_run_dir(temp.path(), dispatch_id)
+            .expect_err("unknown dispatch ids must not create a new receipt directory");
+        assert!(
+            error.contains("validated run directory is unavailable"),
+            "{error}"
+        );
+        assert!(
+            !temp.path().join("runs").join(dispatch_id).exists(),
+            "receipt lookup must not create a run directory for an unknown dispatch"
+        );
+
+        let run_dir = temp.path().join("runs").join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("seed trusted run directory");
+        assert_eq!(
+            resolved_completion_run_dir(temp.path(), dispatch_id)
+                .expect("pre-existing confined run directory is accepted"),
+            run_dir
+        );
+    }
 }

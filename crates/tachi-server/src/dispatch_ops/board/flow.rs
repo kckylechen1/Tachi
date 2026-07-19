@@ -25,6 +25,7 @@ pub(super) fn merge_run_task(
         for key in [
             "run_dir",
             "result_written",
+            "closure_kind",
             "exit_code",
             "stale",
             "stale_reason",
@@ -58,6 +59,13 @@ pub(super) fn merge_run_task(
                 "updated_at".to_string(),
                 run_task
                     .get("updated_at")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            obj.insert(
+                "closure_kind".to_string(),
+                run_task
+                    .get("closure_kind")
                     .cloned()
                     .unwrap_or(serde_json::Value::Null),
             );

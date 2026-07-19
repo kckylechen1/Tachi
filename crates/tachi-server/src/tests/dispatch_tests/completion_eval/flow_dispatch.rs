@@ -1,11 +1,25 @@
 use super::*;
 
+/// Completion now refuses to invent a durable receipt for an arbitrary
+/// dispatch id. Fixtures that exercise a legitimate completion must therefore
+/// seed the run authority the dispatch launcher would have created.
+fn seed_dispatch_run(server: &crate::MemoryServer, dispatch_id: &str) {
+    let run_dir = server.tachi_home_dir().join("runs").join(dispatch_id);
+    std::fs::create_dir_all(&run_dir).expect("create trusted dispatch run directory");
+    std::fs::write(
+        run_dir.join("status.json"),
+        json!({ "dispatch_id": dispatch_id }).to_string(),
+    )
+    .expect("seed trusted dispatch status");
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
     let (server, _temp_home) = make_server_with_temp_home();
     let flow_id = "flow_20260609T000002Z_complete_link_test";
     let dispatch_id = "20260609T000002Z-custom-complete-link";
+    seed_dispatch_run(&server, dispatch_id);
 
     crate::task_lifecycle::mark_task_dispatch(
         flow_id,
@@ -97,6 +111,7 @@ async fn tachi_complete_infers_task_agent_and_profile_from_dispatch_card() {
     let (server, _temp_home) = make_server_with_temp_home();
     let flow_id = "flow_20260609T000004Z_complete_defaults_test";
     let dispatch_id = "20260609T000004Z-custom-defaults";
+    seed_dispatch_run(&server, dispatch_id);
 
     crate::task_lifecycle::mark_task_dispatch(
         flow_id,
@@ -164,6 +179,7 @@ async fn tachi_complete_infers_task_agent_and_profile_from_dispatch_card() {
 async fn tachi_complete_auto_injects_issue_ref_from_kanban_card_when_missing() {
     let (server, _temp_home) = make_server_with_temp_home();
     let dispatch_id = "20260712T000001Z-custom-issueref-autoinject";
+    seed_dispatch_run(&server, dispatch_id);
     let issue_ref = "kckylechen1/tachi#773";
 
     // Seed the kanban card the way a real dispatch launch would
@@ -262,6 +278,7 @@ async fn tachi_complete_auto_injects_issue_ref_from_kanban_card_when_missing() {
 async fn tachi_complete_proceeds_without_issue_ref_when_no_dispatch_record_found() {
     let (server, _temp_home) = make_server_with_temp_home();
     let dispatch_id = "20260712T000002Z-custom-no-kanban-record";
+    seed_dispatch_run(&server, dispatch_id);
 
     let mut complete_params = task_params("complete");
     complete_params.format = Some("full".to_string());
@@ -319,6 +336,7 @@ async fn tachi_complete_proceeds_without_issue_ref_when_no_dispatch_record_found
 async fn tachi_complete_auto_injects_profile_from_kanban_card_when_missing() {
     let (server, _temp_home) = make_server_with_temp_home();
     let dispatch_id = "20260717T000001Z-custom-profile-autoinject";
+    seed_dispatch_run(&server, dispatch_id);
     let profile = "opencode_builder";
 
     // Seed the kanban card the way a real dispatch launch would
@@ -417,6 +435,7 @@ async fn tachi_complete_auto_injects_profile_from_kanban_card_when_missing() {
 async fn tachi_complete_does_not_fabricate_profile_without_dispatch_record() {
     let (server, _temp_home) = make_server_with_temp_home();
     let dispatch_id = "20260717T000002Z-custom-no-kanban-profile";
+    seed_dispatch_run(&server, dispatch_id);
 
     let mut complete_params = task_params("complete");
     complete_params.format = Some("full".to_string());
@@ -463,12 +482,19 @@ async fn tachi_complete_does_not_fabricate_profile_without_dispatch_record() {
 async fn tachi_complete_surfaces_warning_when_kanban_card_is_missing() {
     let (server, _temp_home) = make_server_with_temp_home();
     let dispatch_id = "20260615T000008Z-kanban-warning";
+    let run_dir = server.tachi_home_dir().join("runs").join(dispatch_id);
+    std::fs::create_dir_all(&run_dir).expect("create dispatch run directory");
+    std::fs::write(
+        run_dir.join("status.json"),
+        json!({ "dispatch_id": dispatch_id }).to_string(),
+    )
+    .expect("seed dispatch status");
 
     let mut complete_params = task_params("complete");
     complete_params.format = Some("full".to_string());
     complete_params.task = Some("Write completion while kanban is stale".to_string());
     complete_params.agent = Some("codex".to_string());
-    complete_params.outcome = Some("success".to_string());
+    complete_params.outcome = Some("partial".to_string());
     complete_params.task_id = Some("eval-kanban-warning".to_string());
     complete_params.dispatch_id = Some(dispatch_id.to_string());
     complete_params.evidence_refs = vec!["result.md".to_string()];
@@ -495,5 +521,19 @@ async fn tachi_complete_surfaces_warning_when_kanban_card_is_missing() {
     assert_eq!(
         bundle["pipeline"]["kanban_update"]["dispatch_id"],
         json!(dispatch_id)
+    );
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json")).expect("read completion receipt"),
+    )
+    .expect("receipt JSON");
+    assert_eq!(
+        status["resolved_completion"]["state"],
+        json!("TASK_STATE_INPUT_REQUIRED"),
+        "missing kanban must not prevent the durable partial receipt: {status:#}"
+    );
+    assert_eq!(
+        status["resolved_completion"]["closure_kind"],
+        json!("partial"),
+        "the durable receipt must distinguish partial from ordinary input: {status:#}"
     );
 }

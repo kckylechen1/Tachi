@@ -1,7 +1,10 @@
 use super::flow::{flow_dispatch_ids, merge_run_task};
 use super::paths::runs_dir_for_server;
 use super::runs::{collect_run_task_by_id, collect_run_tasks_from_dir};
-use super::status::{is_terminal_state, mark_abandoned_kanban_task, state_matches_filter};
+use super::status::{
+    is_terminal_state_with_closure_kind, mark_abandoned_kanban_task,
+    state_matches_filter_with_closure_kind,
+};
 use crate::tool_params::{SearchMemoryParams, TachiBoardParams};
 use crate::MemoryServer;
 use chrono::Utc;
@@ -85,6 +88,7 @@ pub(crate) async fn handle_tachi_board(
                 "dispatch_id": meta.get("dispatch_id"),
                 "agent": meta.get("agent"),
                 "state": meta.get("a2a_state"),
+                "closure_kind": meta.get("closure_kind"),
                 "eval_id": meta.get("eval_ledger_id"),
                 "summary": row.get("summary"),
                 "updated_at": updated_at,
@@ -172,7 +176,13 @@ pub(crate) async fn handle_tachi_board(
         tasks.retain(|task| {
             task.get("state")
                 .and_then(|v| v.as_str())
-                .is_some_and(|state| state_matches_filter(state_filter_name, state))
+                .is_some_and(|state| {
+                    state_matches_filter_with_closure_kind(
+                        state_filter_name,
+                        state,
+                        task.get("closure_kind").and_then(|v| v.as_str()),
+                    )
+                })
         });
     }
 
@@ -216,7 +226,10 @@ pub(crate) async fn handle_tachi_board(
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            if is_terminal_state(&state) {
+            if is_terminal_state_with_closure_kind(
+                &state,
+                task.get("closure_kind").and_then(|v| v.as_str()),
+            ) {
                 *folded_counts.entry(state).or_insert(0) += 1;
             } else {
                 kept.push(task);

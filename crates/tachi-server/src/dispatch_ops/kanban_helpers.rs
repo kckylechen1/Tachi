@@ -167,6 +167,13 @@ pub(crate) async fn update_kanban_state(
             if let Some(flag) = reviewed {
                 obj.insert("reviewed".to_string(), json!(flag));
             }
+            if new_state == "TASK_STATE_INPUT_REQUIRED" && reviewed == Some(true) {
+                obj.insert("closure_kind".to_string(), json!("partial"));
+            } else {
+                // A later state transition must not inherit a prior partial
+                // closure and make unrelated INPUT_REQUIRED work terminal.
+                obj.remove("closure_kind");
+            }
             obj.insert("updated_at".to_string(), json!(Utc::now().to_rfc3339()));
         }
         crate::memory_search_ops::handle_save_memory(
