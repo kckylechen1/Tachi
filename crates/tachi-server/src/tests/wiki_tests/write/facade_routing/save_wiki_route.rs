@@ -58,8 +58,9 @@ async fn tachi_save_title_with_wiki_path_routes_to_wiki() {
         fetched_json["metadata"]["wiki_title"],
         json!("Routing Boundary Wiki")
     );
-    assert_eq!(
-        fetched_json["metadata"]["source_refs"],
-        json!(["https://example.com/spec", "kckylechen1/tachi#149"])
-    );
+    let refs = fetched_json["metadata"]["evidence_refs_v1"]
+        .as_array()
+        .expect("typed evidence refs");
+    assert_eq!(refs[0]["ref"], json!("https://example.com/spec"));
+    assert_eq!(refs[1]["ref"], json!("kckylechen1/tachi#149"));
 }

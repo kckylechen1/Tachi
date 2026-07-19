@@ -70,7 +70,6 @@ pub(crate) async fn handle_tachi_wiki_write(
         obj.insert("wiki_title".to_string(), json!(params.title.clone()));
         obj.insert("user_force".to_string(), json!(params.force));
         obj.insert("allow_cross_project".to_string(), json!(true));
-        obj.insert("source_refs".to_string(), json!(references));
         if params.include_patterns {
             obj.insert("pattern_refs".to_string(), json!(pattern_refs));
         }

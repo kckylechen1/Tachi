@@ -69,13 +69,10 @@ async fn tachi_wiki_write_stores_and_rejects_invalid_references() {
         .await
         .expect("get wiki memory");
     let entry: Value = serde_json::from_str(&fetched).expect("entry json");
-    let refs = entry["metadata"]["source_refs"]
-        .as_array()
-        .expect("source_refs array");
-    assert_eq!(refs.len(), 2);
-    // #1072: dual-write — the legacy `source_refs: string[]` is untouched
-    // (asserted above) AND the new typed `evidence_refs_v1` is populated
-    // alongside it, never replacing it.
+    assert!(
+        entry["metadata"].get("source_refs").is_none(),
+        "new wiki writes must not dual-write legacy source_refs: {entry:#}"
+    );
     let typed_refs = entry["metadata"]["evidence_refs_v1"]
         .as_array()
         .expect("evidence_refs_v1 array");
