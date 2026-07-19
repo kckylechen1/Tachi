@@ -412,8 +412,19 @@ pub(crate) fn mark_task_dispatch_completion(
         json!(completed_at.clone()),
     );
     obj.insert("updated_at".to_string(), json!(completed_at.clone()));
-    write_json_atomic(&status_path, &status)?;
 
+    // tachi#1271 (review follow-up): the event append must precede the
+    // status persist that records `completed_dispatch_ids` -- the exact
+    // signal `had_completion_marker` above is keyed on. If the append ran
+    // second and a crash landed between the two writes, the status write
+    // would already be durable on every retry, `had_completion_marker`
+    // would read true, and the `dispatch_completed` event would be
+    // permanently skipped (at-most-once, with total loss on that one
+    // unlucky crash window). Append-first means the same crash window
+    // instead produces at most a rare duplicate event on retry (the guard
+    // reads pre-mutation state), which is the correct trade for a
+    // lifecycle log: an occasional duplicate is recoverable, a silently
+    // lost completion is not.
     if !had_completion_marker {
         append_flow_event(
             &run_dir,
@@ -427,6 +438,8 @@ pub(crate) fn mark_task_dispatch_completion(
             }),
         )?;
     }
+
+    write_json_atomic(&status_path, &status)?;
 
     Ok(json!({
         "recorded": true,
