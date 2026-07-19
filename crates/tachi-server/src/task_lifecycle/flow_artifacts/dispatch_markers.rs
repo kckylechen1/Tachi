@@ -118,8 +118,20 @@ pub(crate) fn mark_task_dispatch(
     if obj.get("created_at").is_none() {
         obj.insert("created_at".to_string(), json!(recorded_at.clone()));
     }
-    write_json_atomic(&status_path, &status)?;
 
+    // tachi#1288/#1276 (mirrors 438f57f1's dispatch_completed reorder): the
+    // event append must precede the status persist that records
+    // dispatch_ids / dispatch_cards / artifacts.dispatches -- the exact
+    // signal dispatch_marker_has_any_projection (and thus had_marker) reads
+    // on the next call. If the persist ran first and a crash/failure landed
+    // between the two writes, the status write would already be durable on
+    // every retry, had_marker would read true, and the dispatch_linked
+    // event would be permanently skipped (at-most-once, with total loss on
+    // that one unlucky crash window). Append-first means the same crash
+    // window instead produces at most a rare duplicate event on retry (the
+    // guard reads pre-mutation state), which is the correct trade for a
+    // lifecycle log: an occasional duplicate is recoverable, a silently
+    // lost dispatch_linked record is not.
     if !had_marker {
         append_flow_event(
             &run_dir,
@@ -132,6 +144,9 @@ pub(crate) fn mark_task_dispatch(
             }),
         )?;
     }
+
+    write_json_atomic(&status_path, &status)?;
+
     Ok(())
 }
 
