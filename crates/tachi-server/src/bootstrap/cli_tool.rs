@@ -1,4 +1,5 @@
 mod cards;
+mod cards_governance;
 mod cards_ledger;
 mod hub;
 mod tool_dispatch;

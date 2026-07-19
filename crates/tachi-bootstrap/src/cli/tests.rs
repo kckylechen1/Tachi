@@ -70,6 +70,30 @@ fn cards_cli_parses_sync_and_list_distinct_from_singular_card() {
 }
 
 #[test]
+fn cards_governance_cli_parses_explicit_json_artifacts() {
+    let draft =
+        Cli::try_parse_from(["tachi", "cards", "draft", "--input", "request.json"]).unwrap();
+    assert!(
+        matches!(draft.command, Some(Commands::Cards { action: CardsAction::Draft { input } }) if input == std::path::Path::new("request.json"))
+    );
+    let apply = Cli::try_parse_from([
+        "tachi",
+        "cards",
+        "apply",
+        "--approval",
+        "approval.json",
+        "--evidence",
+        "fresh.json",
+        "--dir",
+        "/cards",
+    ])
+    .unwrap();
+    assert!(
+        matches!(apply.command, Some(Commands::Cards { action: CardsAction::Apply { approval, evidence, dir } }) if approval == std::path::Path::new("approval.json") && evidence == std::path::Path::new("fresh.json") && dir.as_deref() == Some(std::path::Path::new("/cards")))
+    );
+}
+
+#[test]
 fn poke_cli_parses_smoke_run() {
     let parsed = Cli::try_parse_from(["tachi", "poke", "run", "--suite", "smoke", "--json"])
         .expect("poke run should parse");

@@ -22,3 +22,4 @@ uuid = { workspace = true }
 # edge onto something already compiled (same rationale as the `blake2`/`argon2`
 # edge in tachi-server's Cargo.toml).
 ring = "0.17"
+blake2 = "0.10"

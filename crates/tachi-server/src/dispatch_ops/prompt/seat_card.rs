@@ -63,6 +63,70 @@ const SEAT_CARD_BUDGET_CHARS: usize = 1536;
 /// Path prefix every lane-card mirror row lives under.
 const SEAT_CARD_PATH_PREFIX: &str = "/cards";
 
+pub(crate) fn complete_counter_clause_projection(section: &str) -> bool {
+    let mut budget = PromptInputBudget::new(SEAT_CARD_BUDGET_CHARS);
+    budget.admit(section).as_deref() == Some(section)
+}
+
+/// Readiness describes the exact mirror row resolved for a future projection;
+/// it does not claim that any prompt has already been injected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SeatCardReadinessReceipt {
+    pub seat: String,
+    pub source_hash: String,
+    pub mirror_revision: i64,
+    pub counter_clause_hash: String,
+    pub counter_clauses: String,
+    pub source_file: String,
+    pub complete_projection: bool,
+}
+
+/// Resolve one exact seat using the same metadata parser as prompt rendering.
+pub(crate) fn resolve_exact_seat_card_readiness(
+    server: &MemoryServer,
+    seat: &str,
+) -> Option<SeatCardReadinessReceipt> {
+    let entries = server
+        .with_global_store_read(|store| {
+            store
+                .list_by_path(&format!("{SEAT_CARD_PATH_PREFIX}/{seat}"), 10, false)
+                .map_err(|e| e.to_string())
+        })
+        .ok()?;
+    let exact: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.path == format!("{SEAT_CARD_PATH_PREFIX}/{seat}") && entry.is_wiki())
+        .collect();
+    if exact.len() != 1 {
+        return None;
+    }
+    let entry = exact[0];
+    readiness_from_entry(seat, entry)
+}
+
+fn readiness_from_entry(
+    seat: &str,
+    entry: &memcore::MemoryEntry,
+) -> Option<SeatCardReadinessReceipt> {
+    let section = counter_clauses_from_metadata(&entry.metadata)?;
+    let source_file = entry.metadata.get("source_file")?.as_str()?;
+    if entry.metadata.get("source")?.as_str()? != "dispatch-ledger"
+        || entry.metadata.get("authority")?.as_str()? != "advisory"
+    {
+        return None;
+    }
+    let complete_projection = complete_counter_clause_projection(section);
+    Some(SeatCardReadinessReceipt {
+        seat: seat.to_string(),
+        source_hash: entry.metadata.get("content_hash")?.as_str()?.to_string(),
+        mirror_revision: entry.revision,
+        counter_clause_hash: tachi_params::hash_bytes(section.as_bytes()),
+        counter_clauses: section.to_string(),
+        source_file: source_file.to_string(),
+        complete_projection,
+    })
+}
+
 /// Read the already-extracted counter-clause text out of a `/cards/<seat>`
 /// mirror row's `metadata`, fail-closed. The L1 writer
 /// (`bootstrap/cli_tool/cards_ledger.rs`) is the single source of the
@@ -102,6 +166,25 @@ pub(super) fn render_seat_countermeasures_overlay(
         return None;
     }
 
+    let readiness = resolve_seat_card_readiness(server, params)?;
+    let mut budget = PromptInputBudget::new(SEAT_CARD_BUDGET_CHARS);
+    let admitted = budget.admit(&readiness.counter_clauses)?;
+
+    Some(format!(
+        "{SEAT_CARD_HEADER}\n- seat: {} (source: {})\n{admitted}",
+        readiness.seat, readiness.source_file
+    ))
+}
+
+/// Resolve source/readiness from the same exact mirror row used by prompt
+/// rendering. Suppression and fail-closed matching semantics are shared.
+pub(super) fn resolve_seat_card_readiness(
+    server: &MemoryServer,
+    params: &TachiDispatchParams,
+) -> Option<SeatCardReadinessReceipt> {
+    if params.inject_card == Some(false) {
+        return None;
+    }
     let profile_id = params
         .profile
         .as_deref()
@@ -151,19 +234,7 @@ pub(super) fn render_seat_countermeasures_overlay(
         .find(|(name, _)| name == matched_seat)
         .map(|(_, entry)| *entry)?;
 
-    let section = counter_clauses_from_metadata(&entry.metadata)?;
-    let mut budget = PromptInputBudget::new(SEAT_CARD_BUDGET_CHARS);
-    let admitted = budget.admit(section)?;
-
-    let source_file = entry
-        .metadata
-        .get("source_file")
-        .and_then(|v| v.as_str())
-        .unwrap_or("dispatch-ledger");
-
-    Some(format!(
-        "{SEAT_CARD_HEADER}\n- seat: {matched_seat} (source: {source_file})\n{admitted}"
-    ))
+    readiness_from_entry(matched_seat, entry)
 }
 
 /// Match `profile_id`/`vendor` against the available seat names, exact match

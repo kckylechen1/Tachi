@@ -2,7 +2,7 @@ mod budget;
 mod completion;
 mod context;
 mod overlays;
-mod seat_card;
+pub(crate) mod seat_card;
 mod skills;
 mod types;
 
