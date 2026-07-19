@@ -42,7 +42,7 @@ mod safe_merge_tests;
 #[cfg(test)]
 mod ship_tests;
 
-use self::handoff::handle_gh_handoff_draft;
+use self::handoff::{handle_gh_handoff_draft, handle_gh_handoff_publish};
 use self::issues::*;
 use self::labels::*;
 use self::prs::*;

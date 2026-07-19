@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Unified GitHub facade — one tool for all GitHub operations.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct TachiGhParams {
-    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "issue_comment", "issue_label", "issue_freshness_scan", "pr_list", "pr_read", "pr_comments", "pr_comment", "pr_review_digest", "safe_merge", "ship", "link_pr", "pr_status", "pr_handoff", "release_note", "handoff_draft"
+    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "issue_comment", "issue_label", "issue_freshness_scan", "pr_list", "pr_read", "pr_comments", "pr_comment", "pr_review_digest", "safe_merge", "ship", "link_pr", "pr_status", "pr_handoff", "release_note", "handoff_draft", "handoff_publish"
     pub action: String,
     /// Repository in "owner/repo" format. Required for GitHub primitive actions; lifecycle actions may infer from issue_ref/pr_ref/flow_id.
     #[serde(default)]
@@ -166,6 +166,20 @@ pub struct TachiGhParams {
     /// `published_at`, or a 7-day lookback when no previous handoff exists.
     #[serde(default)]
     pub since: Option<String>,
+    /// #1285: campaign-handoff evidence references for action="handoff_publish"
+    /// (dual-written into the wiki mirror as typed `evidence_refs_v1`,
+    /// validated same as `tachi_wiki(action='write')`'s `references`).
+    #[serde(default)]
+    pub refs: Vec<String>,
+    /// #1285: explicit issue number to supersede for action="handoff_publish".
+    /// When omitted, the previous open `handoff`-labeled issue for `repo` is
+    /// auto-discovered.
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
+    #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
+    pub supersedes: Option<u64>,
 }
 
 /// Parameters for adding/removing labels on a GitHub issue or PR (write-back arc).

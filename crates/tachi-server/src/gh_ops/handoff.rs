@@ -11,7 +11,7 @@
 //! typed-evidence retrieval.
 //!
 //! Three actions, wired through `tachi_gh` (this commit ships `handoff_draft`
-//! only; `handoff_publish`/`handoff_repair` land in follow-up commits of the
+//! + `handoff_publish`; `handoff_repair` lands in a follow-up commit of the
 //! same #1285 P0 change):
 //!   - `handoff_draft`   — read-only, assembles the four-section skeleton.
 //!   - `handoff_publish` — issue create → wiki mirror → supersede (comment +
@@ -21,20 +21,28 @@
 //!
 //! §3 ("next steps") is **always leader-authored**: `handoff_draft` returns
 //! raw material only (open issues + the previous handoff's own §3 text, on a
-//! best-effort basis), never a synthesized recommendation.
+//! best-effort basis), never a synthesized recommendation, and
+//! `handoff_publish` only ever writes the leader's own verbatim `body`.
 
 use super::*;
-use crate::tool_params::WikiBrowseParams;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use crate::tool_params::{TachiEventParams, WikiBrowseParams, WikiWriteParams};
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 
-/// GitHub label marking an open campaign-handoff issue. The restricted
-/// `issue_close` primitive that closes issues carrying this label lands with
-/// `handoff_publish` in a follow-up commit; this commit only ever *reads*
-/// (`--label` filter) issues carrying it.
+/// GitHub label marking an open campaign-handoff issue. The ONLY place in
+/// this crate that closes an issue programmatically (`close_superseded_handoff_issue`
+/// below) refuses to act on anything not carrying this label — router.rs's
+/// frozen "closing an issue is a leader/owner action on GitHub itself"
+/// posture (see `handle_issue_freshness_scan`'s module doc) continues to
+/// hold for every issue outside this exact, non-widenable call site.
 const HANDOFF_LABEL: &str = "handoff";
+const HANDOFF_SUPERSEDED_LABEL: &str = "handoff-superseded";
+const HANDOFF_SCHEMA_VERSION: u64 = 1;
 /// Lookback window when no previous handoff exists to anchor `since` on
 /// (first-ever handoff for a repo).
 const DEFAULT_HANDOFF_WINDOW_DAYS: i64 = 7;
+/// R2c concurrency advisory: a mirror published within this window for the
+/// same repo surfaces a (non-blocking) warning.
+const CONCURRENT_PUBLISH_WARNING_MINUTES: i64 = 10;
 
 // ─────────────────────────── handoff_draft (read-only) ───────────────────────────
 
@@ -462,11 +470,500 @@ fn discover_previous_handoff_for_draft(
     }
 }
 
+// ─────────────────────────── handoff_publish ───────────────────────────
+
+pub(crate) async fn handle_gh_handoff_publish(
+    server: &MemoryServer,
+    params: &TachiGhParams,
+    repo: String,
+) -> Result<String, String> {
+    validate_repo(&repo)?;
+    let title = params
+        .title
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| "handoff_publish requires a non-empty 'title'".to_string())?;
+    let body = params
+        .body
+        .clone()
+        .filter(|b| !b.trim().is_empty())
+        .ok_or_else(|| {
+            "handoff_publish requires a non-empty 'body' (leader-authored, verbatim)".to_string()
+        })?;
+    let refs = params.refs.clone();
+    crate::wiki_ops::validate_references(&refs)?;
+
+    let mut receipt = serde_json::Map::new();
+    receipt.insert("action".to_string(), json!("handoff_publish"));
+    receipt.insert("repo".to_string(), json!(repo));
+    if let Some(warning) = concurrent_publish_warning(server, &repo) {
+        receipt.insert("concurrent_publish_warning".to_string(), warning);
+    }
+
+    // Discover the previous open handoff issue (if any) BEFORE creating the
+    // new one — this determines the supersede target, scoped to `repo` only
+    // (multi-repo isolation: `fetch_open_handoff_issues` passes `--repo`).
+    // An explicit `params.supersedes` short-circuits auto-discovery entirely
+    // (leader-supplied override, per the frozen contract).
+    let previous_issue = match params.supersedes {
+        Some(explicit) => Ok(Some(explicit)),
+        None => fetch_open_handoff_issues(server, &repo).map(|issues| {
+            issues
+                .iter()
+                .filter_map(|issue| {
+                    let number = issue.get("number")?.as_u64()?;
+                    let created_at = issue.get("createdAt").and_then(Value::as_str)?;
+                    Some((number, created_at.to_string()))
+                })
+                .max_by(|a, b| a.1.cmp(&b.1))
+                .map(|(number, _)| number)
+        }),
+    };
+    let previous_issue = match previous_issue {
+        Ok(previous_issue) => previous_issue,
+        Err(err) => {
+            receipt.insert("ok".to_string(), json!(false));
+            receipt.insert(
+                "error".to_string(),
+                json!(format!(
+                    "could not discover previous handoff (gh transport): {err}"
+                )),
+            );
+            return serde_json::to_string(&Value::Object(receipt))
+                .map_err(|e| format!("serialize handoff_publish receipt: {e}"));
+        }
+    };
+
+    // Step 1: issue create.
+    let (mut cmd, token) = build_gh_command(server)?;
+    cmd.args(["issue", "create"])
+        .args(["--repo", &repo])
+        .args(["--title", &title])
+        .args(["--label", HANDOFF_LABEL]);
+    let _body_file = attach_gh_body_file(&mut cmd, &body)?;
+    let create_output = run_gh(cmd, &token)?;
+    let issue_number = parse_issue_number_from_gh_url(&create_output).ok_or_else(|| {
+        format!("could not parse issue number from `gh issue create` output: {create_output}")
+    })?;
+    let published_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+
+    receipt.insert("ok".to_string(), json!(true));
+    receipt.insert("issue".to_string(), json!(issue_number));
+    receipt.insert("issue_url".to_string(), json!(create_output.trim()));
+    receipt.insert("published_at".to_string(), json!(published_at));
+    let mut steps = serde_json::Map::new();
+    steps.insert("issue_create".to_string(), json!("ok"));
+    receipt.insert("steps".to_string(), Value::Object(steps));
+
+    // Step 2: wiki mirror.
+    let path = mirror_path_for(&repo, &published_at, &title);
+    match write_handoff_mirror(
+        server,
+        &repo,
+        issue_number,
+        &title,
+        &body,
+        &refs,
+        &published_at,
+        previous_issue,
+        &path,
+    )
+    .await
+    {
+        Ok(mirror_receipt) => {
+            set_step(&mut receipt, "mirror", json!("ok"));
+            receipt.insert("mirror".to_string(), mirror_receipt);
+        }
+        Err(err) => {
+            receipt.insert("ok".to_string(), json!(false));
+            set_step(
+                &mut receipt,
+                "mirror",
+                json!({ "status": "failed", "error": err }),
+            );
+            receipt.insert(
+                "next_step".to_string(),
+                json!(format!(
+                    "tachi_gh(action='handoff_repair', repo='{repo}', number={issue_number}) to retry the wiki mirror"
+                )),
+            );
+            return serde_json::to_string(&Value::Object(receipt))
+                .map_err(|e| format!("serialize partial handoff_publish receipt: {e}"));
+        }
+    }
+
+    // Step 3: supersede (only if a previous open handoff exists for this repo).
+    if let Some(prev_issue) = previous_issue {
+        match supersede_previous_handoff(server, &repo, prev_issue, issue_number) {
+            Ok(supersede_receipt) => {
+                set_step(&mut receipt, "supersede", json!("ok"));
+                receipt.insert("supersedes".to_string(), supersede_receipt);
+            }
+            Err(err) => {
+                receipt.insert("ok".to_string(), json!(false));
+                set_step(
+                    &mut receipt,
+                    "supersede",
+                    json!({ "status": "failed", "error": err }),
+                );
+                receipt.insert(
+                    "next_step".to_string(),
+                    json!(format!(
+                        "supersede comment/label on {repo}#{prev_issue} did not complete — {err}. \
+                         Fix by hand: `gh issue comment {prev_issue} --repo {repo} --body \"superseded by {repo}#{issue_number}\"` \
+                         then `gh issue edit {prev_issue} --repo {repo} --remove-label {HANDOFF_LABEL} --add-label {HANDOFF_SUPERSEDED_LABEL}`."
+                    )),
+                );
+                return serde_json::to_string(&Value::Object(receipt))
+                    .map_err(|e| format!("serialize partial handoff_publish receipt: {e}"));
+            }
+        }
+    } else {
+        set_step(&mut receipt, "supersede", json!("skipped_no_previous"));
+    }
+
+    // Step 4: continuity event — best-effort, never fails the publish.
+    let event_result =
+        emit_handoff_published_event(server, &repo, issue_number, &published_at, previous_issue)
+            .await;
+    match event_result {
+        Ok(_) => set_step(&mut receipt, "event", json!("ok")),
+        Err(err) => set_step(
+            &mut receipt,
+            "event",
+            json!({ "status": "failed_non_blocking", "error": err }),
+        ),
+    }
+
+    serde_json::to_string(&Value::Object(receipt))
+        .map_err(|e| format!("serialize handoff_publish receipt: {e}"))
+}
+
+fn set_step(receipt: &mut serde_json::Map<String, Value>, step: &str, value: Value) {
+    if let Some(steps) = receipt.get_mut("steps").and_then(Value::as_object_mut) {
+        steps.insert(step.to_string(), value);
+    }
+}
+
+/// R2c: best-effort advisory only — never blocks publish. A mirror
+/// published in the last `CONCURRENT_PUBLISH_WARNING_MINUTES` for the same
+/// repo is surfaced so a leader can notice a likely-concurrent publish
+/// race.
+fn concurrent_publish_warning(server: &MemoryServer, repo: &str) -> Option<Value> {
+    let mirrors = crate::wiki_ops::list_handoff_mirrors_for_repo(server, repo).ok()?;
+    let latest = mirrors.first()?;
+    let published_at = latest.published_at?;
+    let age = Utc::now().signed_duration_since(published_at);
+    if age >= ChronoDuration::zero()
+        && age < ChronoDuration::minutes(CONCURRENT_PUBLISH_WARNING_MINUTES)
+    {
+        Some(json!({
+            "other_issue": latest.issue,
+            "other_published_at": published_at.to_rfc3339(),
+            "age_seconds": age.num_seconds(),
+        }))
+    } else {
+        None
+    }
+}
+
+async fn write_handoff_mirror(
+    server: &MemoryServer,
+    repo: &str,
+    issue: u64,
+    title: &str,
+    body: &str,
+    refs: &[String],
+    published_at: &str,
+    supersedes_issue: Option<u64>,
+    path: &str,
+) -> Result<Value, String> {
+    let now = Utc::now().to_rfc3339();
+    let metadata = json!({
+        "repo": repo,
+        "issue": issue,
+        "published_at": published_at,
+        "supersedes_issue": supersedes_issue,
+        "handoff_schema_version": HANDOFF_SCHEMA_VERSION,
+        // #1285 owner-ratified: publish IS the leader-authored approval —
+        // stamping `review_receipt.decision = "approved"` here is what
+        // makes `wiki_layer_metadata` (copilot_ops/support/wiki.rs) compute
+        // `lifecycle: "active"` instead of the ordinary agent-write default
+        // `pending_review`, through the SAME mechanism every other active
+        // wiki entry uses (no special-casing of the lifecycle field).
+        "review_receipt": {
+            "approver": "tachi_gh:handoff_publish",
+            "decision": "approved",
+            "decided_at": now,
+        },
+    });
+    let write_params = WikiWriteParams {
+        title: title.to_string(),
+        text: body.to_string(),
+        path: Some(path.to_string()),
+        topic: None,
+        summary: None,
+        category: "handoff".to_string(),
+        keywords: vec!["handoff".to_string()],
+        entities: vec![],
+        importance: 0.9,
+        scope: "global".to_string(),
+        retention_policy: "permanent".to_string(),
+        domain: Some("handoff".to_string()),
+        project: Some("wiki".to_string()),
+        metadata: Some(metadata),
+        force: true,
+        references: refs.to_vec(),
+        include_patterns: false,
+        pattern_query: None,
+        pattern_top_k: None,
+    };
+    let raw = crate::copilot_ops::handle_tachi_wiki_write(server, write_params).await?;
+    serde_json::from_str(&raw).map_err(|e| format!("parse wiki mirror write response: {e}"))
+}
+
+/// Comment → label swap → restricted close. Only the first two are
+/// load-bearing ("comment+label 两笔仍算成功" — a close failure/refusal
+/// degrades to a manual fallback command, never fails the overall
+/// supersede step).
+fn supersede_previous_handoff(
+    server: &MemoryServer,
+    repo: &str,
+    previous_issue: u64,
+    new_issue: u64,
+) -> Result<Value, String> {
+    let comment_body = format!("superseded by {repo}#{new_issue}");
+    let (mut cmd, token) = build_gh_command(server)?;
+    cmd.args(["issue", "comment", &previous_issue.to_string()])
+        .args(["--repo", repo]);
+    let _body_file = attach_gh_body_file(&mut cmd, &comment_body)?;
+    run_gh(cmd, &token).map_err(|e| format!("supersede comment failed: {e}"))?;
+
+    swap_handoff_label(server, repo, previous_issue)
+        .map_err(|e| format!("supersede label swap failed (comment already posted): {e}"))?;
+
+    let close_result = attempt_restricted_close(server, repo, previous_issue);
+
+    Ok(json!({
+        "previous_issue": previous_issue,
+        "comment": "ok",
+        "label_swap": "ok",
+        "close": close_result,
+    }))
+}
+
+fn swap_handoff_label(server: &MemoryServer, repo: &str, number: u64) -> Result<String, String> {
+    let (mut cmd, token) = build_gh_command(server)?;
+    cmd.args(["issue", "edit", &number.to_string()])
+        .args(["--repo", repo])
+        .args(["--remove-label", HANDOFF_LABEL])
+        .args(["--add-label", HANDOFF_SUPERSEDED_LABEL]);
+    run_gh(cmd, &token)
+}
+
+/// Re-verifies label state live (not the earlier discovery snapshot) right
+/// before closing, then runs the restricted close gate. Never propagates an
+/// `Err` up to the caller — a refused/failed close degrades to a manual
+/// fallback command inside the returned `Value` (see module doc).
+fn attempt_restricted_close(server: &MemoryServer, repo: &str, number: u64) -> Value {
+    let fallback = format!("gh issue close {number} --repo {repo} --reason completed");
+    let labels = match fetch_issue_labels(server, repo, number) {
+        Ok(labels) => labels,
+        Err(err) => {
+            return json!({ "status": "failed", "error": err, "fallback": fallback });
+        }
+    };
+    if let Err(gate_err) = restricted_close_allowed(&labels, number, number) {
+        return json!({ "status": "refused", "error": gate_err, "fallback": fallback });
+    }
+    match close_superseded_handoff_issue(server, repo, number) {
+        Ok(_) => json!({ "status": "ok" }),
+        Err(err) => json!({ "status": "failed", "error": err, "fallback": fallback }),
+    }
+}
+
+fn fetch_issue_labels(
+    server: &MemoryServer,
+    repo: &str,
+    number: u64,
+) -> Result<Vec<String>, String> {
+    let (mut cmd, token) = build_gh_command(server)?;
+    cmd.args(["issue", "view", &number.to_string()])
+        .args(["--repo", repo])
+        .args(["--json", "labels"]);
+    let output = run_gh_json(cmd, &token)?;
+    let value: Value =
+        serde_json::from_str(&output).map_err(|e| format!("parse issue view json: {e}"))?;
+    Ok(value
+        .get("labels")
+        .and_then(Value::as_array)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|l| l.get("name").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// The restricted-close gate itself — pure, unit-testable without `gh`.
+/// Refuses to close anything that does not carry the `handoff` label, and
+/// refuses (as a belt-and-suspenders invariant check) any number that does
+/// not match what supersede discovery selected.
+fn restricted_close_allowed(
+    labels: &[String],
+    expected_issue: u64,
+    actual_issue: u64,
+) -> Result<(), String> {
+    if actual_issue != expected_issue {
+        return Err(format!(
+            "refusing to close #{actual_issue}: not the issue this supersede discovered (#{expected_issue})"
+        ));
+    }
+    if !labels.iter().any(|label| label == HANDOFF_LABEL) {
+        return Err(format!(
+            "refusing to close #{actual_issue}: missing '{HANDOFF_LABEL}' label — restricted issue_close only closes handoff-labeled issues"
+        ));
+    }
+    Ok(())
+}
+
+/// The ONLY call site in this crate that runs `gh issue close`. NOT exposed
+/// as a standalone `tachi_gh` action — callers reach it exclusively through
+/// `attempt_restricted_close`, which re-verifies the `handoff` label live
+/// immediately beforehand.
+fn close_superseded_handoff_issue(
+    server: &MemoryServer,
+    repo: &str,
+    number: u64,
+) -> Result<String, String> {
+    let (mut cmd, token) = build_gh_command(server)?;
+    cmd.args(["issue", "close", &number.to_string()])
+        .args(["--repo", repo])
+        .args(["--reason", "completed"]);
+    run_gh(cmd, &token)
+}
+
+async fn emit_handoff_published_event(
+    server: &MemoryServer,
+    repo: &str,
+    issue: u64,
+    published_at: &str,
+    supersedes_issue: Option<u64>,
+) -> Result<String, String> {
+    let params = TachiEventParams {
+        action: "emit".to_string(),
+        format: None,
+        id: None,
+        source_repo: Some(repo.to_string()),
+        adapter: Some("tachi-server".to_string()),
+        project: None,
+        project_explicit: false,
+        domain: Some("handoff".to_string()),
+        session_id: None,
+        actor: Some("leader".to_string()),
+        event_type: Some("handoff.published".to_string()),
+        authority: Some("collect_only".to_string()),
+        effects: vec!["memory_write".to_string()],
+        projection_hints: vec![],
+        payload: Some(json!({
+            "repo": repo,
+            "issue": issue,
+            "published_at": published_at,
+            "supersedes_issue": supersedes_issue,
+        })),
+        provenance: Some(json!({ "source": "tachi_gh:handoff_publish" })),
+        created_at: None,
+        limit: 20,
+        path_prefix: None,
+        dry_run: false,
+    };
+    crate::event_ops::handle_tachi_event(server, params).await
+}
+
+fn parse_issue_number_from_gh_url(output: &str) -> Option<u64> {
+    output.trim().rsplit('/').next()?.parse::<u64>().ok()
+}
+
+fn slugify(input: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in input.trim().chars() {
+        if ch.is_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = out.trim_end_matches('-').to_string();
+    if trimmed.is_empty() {
+        "handoff".to_string()
+    } else {
+        trimmed
+    }
+}
+
+/// Repo folded into the path (not just the date) so two different repos
+/// publishing a same-dated, similarly-titled handoff can never collide onto
+/// the same `/wiki` path — a collision there would silently UPDATE the
+/// wrong repo's mirror in place (the write path's find-by-path idempotency
+/// is exactly what `handoff_repair` relies on being repo-scoped).
+fn mirror_path_for(repo: &str, published_at: &str, title: &str) -> String {
+    let date = published_at.get(0..10).unwrap_or("undated");
+    let repo_slug = repo.replace('/', "-");
+    format!("/wiki/handoffs/{date}-{repo_slug}-{}", slugify(title))
+}
+
 // ─────────────────────────── tests (pure logic only — no gh, no DB) ───────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restricted_close_refuses_missing_handoff_label() {
+        let err = restricted_close_allowed(&["bug".to_string()], 42, 42).unwrap_err();
+        assert!(err.contains("handoff"), "err: {err}");
+    }
+
+    #[test]
+    fn restricted_close_refuses_number_mismatch() {
+        let err = restricted_close_allowed(&[HANDOFF_LABEL.to_string()], 42, 43).unwrap_err();
+        assert!(err.contains("not the issue"), "err: {err}");
+    }
+
+    #[test]
+    fn restricted_close_allows_matching_handoff_labeled_issue() {
+        restricted_close_allowed(&[HANDOFF_LABEL.to_string(), "other".to_string()], 42, 42)
+            .expect("handoff-labeled matching issue should be allowed");
+    }
+
+    #[test]
+    fn parse_issue_number_from_gh_url_extracts_trailing_number() {
+        assert_eq!(
+            parse_issue_number_from_gh_url("https://github.com/kckylechen1/tachi/issues/1285\n"),
+            Some(1285)
+        );
+        assert_eq!(parse_issue_number_from_gh_url("not a url"), None);
+    }
+
+    #[test]
+    fn slugify_lowercases_and_collapses_separators() {
+        assert_eq!(slugify("Session Wrap-Up: #1285!"), "session-wrap-up-1285");
+        assert_eq!(slugify(""), "handoff");
+    }
+
+    #[test]
+    fn mirror_path_for_folds_repo_and_date_to_avoid_cross_repo_collision() {
+        let a = mirror_path_for("owner/repo-a", "2026-07-19T00:00:00Z", "Session wrap");
+        let b = mirror_path_for("owner/repo-b", "2026-07-19T00:00:00Z", "Session wrap");
+        assert_ne!(a, b);
+        assert!(a.starts_with("/wiki/handoffs/2026-07-19-owner-repo-a-"));
+        assert!(b.starts_with("/wiki/handoffs/2026-07-19-owner-repo-b-"));
+    }
 
     #[test]
     fn extract_next_steps_section_finds_heading_case_insensitively() {
