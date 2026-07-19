@@ -119,6 +119,7 @@ pub use legacy_columns::{
 use mirror_eval::*;
 use pack_retire::*;
 use sentinel::*;
+pub(in crate::db) use session_claims_identity::dedupe_session_claims_identity_conflicts;
 use session_claims_identity::*;
 
 const MIGRATION_NS: &str = "migrations";
@@ -706,6 +707,92 @@ mod tests {
     }
 
     #[test]
+    fn v12_dedupes_pre_v21_legacy_db_via_standalone_run_data_migrations() {
+        // #1289 Claim5, end-to-end through the PUBLIC entry point: the
+        // standalone `run_data_migrations` path (NOT `init_schema_inner`, which
+        // pre-ensures `mode`) runs v12 BEFORE v21 adds `session_claims.mode`.
+        // On a legacy DB carrying duplicate active claims, v12's dedup must not
+        // reference `mode` or it crashes with `no such column: mode`, rolling
+        // the whole migration back. We reconstruct that on-disk state by
+        // downgrading a freshly-inited DB to its pre-v21 shape — drop the
+        // mode-scoped identity index, drop the `mode` column, and clear the
+        // v12/v21 sentinels so both replay — then re-drive the public entry.
+        let (mut conn, tmp) = open_test_db();
+
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_session_claims_identity_active;
+             ALTER TABLE session_claims DROP COLUMN mode;",
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM hard_state WHERE namespace = 'migrations' \
+             AND key IN ('v12_session_claims_unique_identity', \
+                         'v21_identity_workclaim_spine')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            !table_has_column(&conn, "session_claims", "mode").unwrap(),
+            "fixture precondition: the mode column must be absent (pre-v21 shape)"
+        );
+
+        // Two duplicate active claims for one identity; the index is gone so the
+        // mode-less inserts are not blocked.
+        for (id, hb) in [
+            ("old-dup", "2026-07-11T00:00:00Z"),
+            ("new-dup", "2026-07-11T00:10:00Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO session_claims
+                 (claim_id, session_client, issue_ref, flow_id, branch, state, created_at, heartbeat_at)
+                 VALUES (?1, 'claude-code', 'org/repo#1289', 'flow-1', 'feat/x', 'active', ?2, ?2)",
+                params![id, hb],
+            )
+            .unwrap();
+        }
+
+        let report = run_data_migrations(&mut conn, "global", tmp.path()).expect(
+            "standalone run_data_migrations must not crash on a pre-v21 legacy DB (#1289 Claim5)",
+        );
+        assert_eq!(
+            report.session_claims_duplicates_deduped, 1,
+            "v12 must release exactly the older modeless duplicate"
+        );
+
+        // Convergence: v21 re-added `mode` and rebuilt the mode-scoped index; the
+        // newest heartbeat survived active, the older is released.
+        assert!(
+            table_has_column(&conn, "session_claims", "mode").unwrap(),
+            "v21 must re-add the mode column after v12"
+        );
+        let old_state: String = conn
+            .query_row(
+                "SELECT state FROM session_claims WHERE claim_id = 'old-dup'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_state, "released");
+        let new_state: String = conn
+            .query_row(
+                "SELECT state FROM session_claims WHERE claim_id = 'new-dup'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_state, "active");
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' \
+                 AND name='idx_session_claims_identity_active'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "the identity index must be rebuilt after convergence");
+    }
+
+    #[test]
     fn v7_reconciles_indexed_tags_after_v5_sentinel() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -1029,8 +1116,20 @@ mod tests {
     #[test]
     fn v13_adds_hard_state_namespace_updated_index() {
         let (mut conn, tmp) = open_test_db();
-        assert!(!index_present(&conn, "idx_hard_state_ns_updated"));
+        // #1289 ruling A: `init_schema`'s product IS the complete current
+        // schema, so a freshly built DB already carries this index (it now
+        // lives in ddl.rs's MIGRATED_INDEXES_SQL, not only in the v13 sentinel
+        // migration). The v13 migration is therefore an idempotent no-op on a
+        // fresh DB and only does real creation work on a legacy DB predating
+        // the index — exercised explicitly at the end of this test.
+        assert!(
+            index_present(&conn, "idx_hard_state_ns_updated"),
+            "init_schema must carry idx_hard_state_ns_updated (#1289 ruling A)"
+        );
 
+        // init_schema runs DDL only, not run_data_migrations, so the v13
+        // sentinel is unset and the migration still runs — as an
+        // IF NOT EXISTS no-op — reporting it ran once. The index stays.
         let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
         assert_eq!(report.hard_state_index_added, 1);
         assert!(index_present(&conn, "idx_hard_state_ns_updated"));
@@ -1064,6 +1163,42 @@ mod tests {
         let report2 = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
         assert_eq!(report2.hard_state_index_added, 0);
         assert!(index_present(&conn, "idx_hard_state_ns_updated"));
+
+        // v13's creation behavior on a GENUINELY pre-v13 legacy DB, through the
+        // REAL sentinel-gated `run_data_migrations` path — NOT the migration
+        // helper in isolation (#1289 Claim4). Calling the helper directly proves
+        // only its `CREATE INDEX IF NOT EXISTS`; it bypasses the sentinel gate,
+        // so it never shows that the migration, as invoked in production, fires
+        // on an index-absent DB. And `hard_state_index_added == 1` above is not
+        // creation evidence: `migrate_v13_add_hard_state_index` returns a
+        // constant 1 whenever it runs, and there the index already existed.
+        //
+        // Reconstruct the real pre-v13 state — index absent AND v13 sentinel
+        // unset — then drive the public entry. Only if the gate actually re-runs
+        // v13 does the index reappear.
+        conn.execute_batch("DROP INDEX IF EXISTS idx_hard_state_ns_updated;")
+            .unwrap();
+        conn.execute(
+            "DELETE FROM hard_state WHERE namespace = 'migrations' \
+             AND key = 'v13_hard_state_ns_updated_index'",
+            [],
+        )
+        .unwrap();
+        assert!(!index_present(&conn, "idx_hard_state_ns_updated"));
+        assert!(
+            !was_run(&conn, "v13_hard_state_ns_updated_index").unwrap(),
+            "fixture precondition: v13 sentinel cleared so the gate re-runs it"
+        );
+
+        let report3 = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+        assert_eq!(
+            report3.hard_state_index_added, 1,
+            "the sentinel-gated v13 migration must fire on a pre-v13 (index-absent) DB"
+        );
+        assert!(
+            index_present(&conn, "idx_hard_state_ns_updated"),
+            "v13 must create the index on a legacy DB that lacks it"
+        );
     }
 
     fn index_present(conn: &Connection, name: &str) -> bool {

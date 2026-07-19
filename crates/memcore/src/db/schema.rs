@@ -8,6 +8,34 @@ use super::common::normalize_utc_iso;
 
 mod ddl;
 
+/// Bare, transaction-less schema init: applies connection PRAGMAs then runs
+/// [`init_schema_inner`] directly on `conn`.
+///
+/// ## Why the missing outer transaction is safe here (#1289 Claim1)
+///
+/// `init_schema_inner` performs its `session_claims` dedup
+/// ([`crate::db::migrations::dedupe_session_claims_identity_conflicts`]) and
+/// the `CREATE UNIQUE INDEX idx_session_claims_identity_active`
+/// (`MIGRATED_INDEXES_SQL`) as two separate connection ops. If a *concurrent*
+/// writer could insert a fresh duplicate active claim between them, the index
+/// build would fail — so that pair would need a transaction to be race-free.
+/// It is not wrapped here because this entry point is only ever reached where
+/// there is NO concurrent writer:
+///
+/// - The sole production caller is [`crate::MemoryStore::open_in_memory`],
+///   which builds a plain `Connection::open_in_memory()` — a private,
+///   single-connection, non-shared-cache DB that no other connection can write
+///   to, so the interleaving window cannot exist.
+/// - Every file-backed production open routes through
+///   [`init_schema_with_label_mut`] instead, which runs `init_schema_inner` +
+///   `run_data_migrations_in_tx` + the version stamp inside ONE
+///   `BEGIN IMMEDIATE` transaction (#984 F1 round 3) — already atomic against
+///   concurrent writers.
+/// - All remaining callers are `#[cfg(test)]` single-threaded fixtures.
+///
+/// A caller that ever wires this bare path onto a *shared* file/in-memory DB
+/// with concurrent writers must switch to [`init_schema_with_label_mut`]'s
+/// transactional entry instead.
 pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     apply_connection_pragmas(conn)?;
     init_schema_inner(conn)
@@ -125,6 +153,14 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     ensure_column(conn, "memories", "domain", "TEXT")?;
     ensure_column(conn, "memories", "superseded_by", "TEXT")?;
     ensure_column(conn, "memories", "idless_identity", "TEXT")?;
+    // #1289 note: unlike the non-memories evolutionary indexes centralized in
+    // ddl.rs's MIGRATED_INDEXES_SQL, this one is built inline right after its
+    // own `ensure_column` (its own ensure+build unit) — deliberately NOT in the
+    // central list, because the `memories` table is fully rebuilt by
+    // `rebuild_memories_with_check_constraints`, which recreates this same index
+    // by name, so all of `memories`' indexes travel with that rebuild. It still
+    // satisfies ruling A (present on the migration-free init_schema path) and is
+    // covered by the convergence oracle in migration_tests.rs.
     conn.execute(
         r#"CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_idless_identity_active
            ON memories(idless_identity)
@@ -207,6 +243,30 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
         "exposure_mode",
         "TEXT NOT NULL DEFAULT 'direct'",
     )?;
+
+    // v21 identity/WorkClaim spine columns referenced by MIGRATED_INDEXES_SQL
+    // below. The v21 sentinel migration (identity_workclaim_spine.rs) also adds
+    // these, but that migration runs AFTER init_schema_inner — so on a legacy
+    // pre-v21 DB the index build below would `no such column`-crash unless the
+    // columns are ensured here first (#1289). Idempotent: no-op on a fresh DB
+    // whose CREATE TABLE already carries them, and the later v21 ALTER is then
+    // skipped by its own `column_exists` guard.
+    ensure_column(conn, "exec_envs", "agent_identity_id", "TEXT")?;
+    ensure_column(conn, "exec_envs", "claim_id", "TEXT")?;
+    ensure_column(conn, "session_claims", "mode", "TEXT")?;
+
+    // #1289: collapse any pre-existing duplicate *modeless* active claims for
+    // the same identity triple BEFORE MIGRATED_INDEXES_SQL builds the partial
+    // UNIQUE index `idx_session_claims_identity_active` (WHERE state = 'active'
+    // AND mode IS NULL). A legacy DB written by the pre-#1001-round-2 kernel can
+    // carry such duplicates; without this the CREATE UNIQUE INDEX below crashes
+    // init on that DB (a crash previously masked by the mode-column ordering
+    // bug fixed above). Reuses the v12 migration's dedup logic (single source),
+    // scoped to `mode IS NULL` to match the index predicate exactly — v21
+    // WorkClaims carrying a non-null mode legitimately share an identity and are
+    // never deduped. No-op on a fresh/empty table and idempotent on every
+    // subsequent startup (the index then prevents any new duplicate).
+    crate::db::migrations::dedupe_session_claims_identity_conflicts(conn)?;
 
     // Indexes on migrated columns — MUST come after ensure_column so the
     // columns exist on legacy databases that were created without them.
