@@ -10,9 +10,7 @@
 //! a GitHub issue (durable, commentable, closeable) mirrored into `/wiki` for
 //! typed-evidence retrieval.
 //!
-//! Three actions, wired through `tachi_gh` (this commit ships `handoff_draft`
-//! + `handoff_publish`; `handoff_repair` lands in a follow-up commit of the
-//! same #1285 P0 change):
+//! Three actions, all wired through `tachi_gh`:
 //!   - `handoff_draft`   — read-only, assembles the four-section skeleton.
 //!   - `handoff_publish` — issue create → wiki mirror → supersede (comment +
 //!     label swap + restricted close) → continuity event, in that order.
@@ -915,6 +913,107 @@ fn mirror_path_for(repo: &str, published_at: &str, title: &str) -> String {
     let date = published_at.get(0..10).unwrap_or("undated");
     let repo_slug = repo.replace('/', "-");
     format!("/wiki/handoffs/{date}-{repo_slug}-{}", slugify(title))
+}
+
+// ─────────────────────────── handoff_repair ───────────────────────────
+
+/// Idempotent mirror-only rebuild for an existing `handoff`-labeled issue:
+/// reads the issue itself (source of truth for title/body), reuses the
+/// existing mirror's wiki path when one already exists (repeat calls
+/// update the SAME entry, never create a second one), or derives a fresh
+/// deterministic path from the issue's own `createdAt` otherwise. Never
+/// creates a second GitHub issue.
+pub(crate) async fn handle_gh_handoff_repair(
+    server: &MemoryServer,
+    repo: String,
+    number: u64,
+) -> Result<String, String> {
+    validate_repo(&repo)?;
+    let (mut cmd, token) = build_gh_command(server)?;
+    cmd.args(["issue", "view", &number.to_string()])
+        .args(["--repo", &repo])
+        .args(["--json", "number,title,body,labels,createdAt"]);
+    let output = run_gh_json(cmd, &token)?;
+    let issue: Value =
+        serde_json::from_str(&output).map_err(|e| format!("parse gh issue view json: {e}"))?;
+
+    let labels: Vec<String> = issue
+        .get("labels")
+        .and_then(Value::as_array)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|l| l.get("name").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !labels.iter().any(|label| label == HANDOFF_LABEL) {
+        return Err(format!(
+            "{repo}#{number} does not carry the '{HANDOFF_LABEL}' label — handoff_repair only rebuilds handoff mirrors"
+        ));
+    }
+    let title = issue
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let body = issue
+        .get("body")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let created_at = issue
+        .get("createdAt")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    let existing = crate::wiki_ops::list_handoff_mirrors_for_repo(server, &repo)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|mirror| mirror.issue == number);
+
+    let (path, published_at, supersedes_issue, refs) = match &existing {
+        Some(mirror) => (
+            mirror.path.clone(),
+            mirror
+                .published_at
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| created_at.clone()),
+            mirror.supersedes_issue,
+            mirror.references.clone(),
+        ),
+        None => (
+            mirror_path_for(&repo, &created_at, &title),
+            created_at.clone(),
+            None,
+            Vec::new(),
+        ),
+    };
+
+    let mirror = write_handoff_mirror(
+        server,
+        &repo,
+        number,
+        &title,
+        &body,
+        &refs,
+        &published_at,
+        supersedes_issue,
+        &path,
+    )
+    .await?;
+
+    serde_json::to_string(&json!({
+        "ok": true,
+        "action": "handoff_repair",
+        "repo": repo,
+        "issue": number,
+        "wiki_write_mode": mirror.get("wiki_write_mode").cloned().unwrap_or(Value::Null),
+        "mirror": mirror,
+    }))
+    .map_err(|e| format!("serialize handoff_repair receipt: {e}"))
 }
 
 // ─────────────────────────── tests (pure logic only — no gh, no DB) ───────────────────────────
