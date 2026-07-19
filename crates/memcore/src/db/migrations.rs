@@ -1164,13 +1164,37 @@ mod tests {
         assert_eq!(report2.hard_state_index_added, 0);
         assert!(index_present(&conn, "idx_hard_state_ns_updated"));
 
-        // v13's own creation behavior still holds on a legacy-shaped DB that
-        // predates the index (the DB the migration exists for): drop the index
-        // and drive the migration directly — it must recreate it.
+        // v13's creation behavior on a GENUINELY pre-v13 legacy DB, through the
+        // REAL sentinel-gated `run_data_migrations` path — NOT the migration
+        // helper in isolation (#1289 Claim4). Calling the helper directly proves
+        // only its `CREATE INDEX IF NOT EXISTS`; it bypasses the sentinel gate,
+        // so it never shows that the migration, as invoked in production, fires
+        // on an index-absent DB. And `hard_state_index_added == 1` above is not
+        // creation evidence: `migrate_v13_add_hard_state_index` returns a
+        // constant 1 whenever it runs, and there the index already existed.
+        //
+        // Reconstruct the real pre-v13 state — index absent AND v13 sentinel
+        // unset — then drive the public entry. Only if the gate actually re-runs
+        // v13 does the index reappear.
         conn.execute_batch("DROP INDEX IF EXISTS idx_hard_state_ns_updated;")
             .unwrap();
+        conn.execute(
+            "DELETE FROM hard_state WHERE namespace = 'migrations' \
+             AND key = 'v13_hard_state_ns_updated_index'",
+            [],
+        )
+        .unwrap();
         assert!(!index_present(&conn, "idx_hard_state_ns_updated"));
-        migrate_v13_add_hard_state_index(&conn).unwrap();
+        assert!(
+            !was_run(&conn, "v13_hard_state_ns_updated_index").unwrap(),
+            "fixture precondition: v13 sentinel cleared so the gate re-runs it"
+        );
+
+        let report3 = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
+        assert_eq!(
+            report3.hard_state_index_added, 1,
+            "the sentinel-gated v13 migration must fire on a pre-v13 (index-absent) DB"
+        );
         assert!(
             index_present(&conn, "idx_hard_state_ns_updated"),
             "v13 must create the index on a legacy DB that lacks it"
