@@ -1,7 +1,7 @@
 use super::paths::runs_dir_for_server;
 use super::status::{
-    is_abandoned_working_run, parse_status_updated_at, stale_after_secs, state_matches_filter,
-    status_state,
+    is_abandoned_working_run, parse_status_updated_at, stale_after_secs,
+    state_matches_filter_with_closure_kind, status_state,
 };
 use crate::dispatch_ops::probe_harness_server_status;
 use crate::MemoryServer;
@@ -83,7 +83,8 @@ pub(super) fn collect_run_tasks_from_dir(
         } else {
             status_state(&status, result_written)
         };
-        if !state_matches_filter(state_filter, state) {
+        let closure_kind = status.get("closure_kind").and_then(Value::as_str);
+        if !state_matches_filter_with_closure_kind(state_filter, state, closure_kind) {
             continue;
         }
         let updated_at = status
@@ -109,6 +110,7 @@ pub(super) fn collect_run_tasks_from_dir(
             "dispatch_id": dispatch_id,
             "agent": status.get("agent").cloned().unwrap_or(serde_json::Value::Null),
             "state": state,
+            "closure_kind": status.get("closure_kind").cloned().unwrap_or(serde_json::Value::Null),
             "exit_code": status.get("exit_code").cloned().unwrap_or(serde_json::Value::Null),
             "summary": status.get("task").cloned().unwrap_or(serde_json::Value::Null),
             "updated_at": updated_at,
@@ -216,6 +218,7 @@ fn collect_run_task_from_dir(run_dir: &Path) -> Option<serde_json::Value> {
         "dispatch_id": dispatch_id,
         "agent": status.get("agent").cloned().unwrap_or(serde_json::Value::Null),
         "state": state,
+        "closure_kind": status.get("closure_kind").cloned().unwrap_or(serde_json::Value::Null),
         "exit_code": status.get("exit_code").cloned().unwrap_or(serde_json::Value::Null),
         "summary": status.get("task").cloned().unwrap_or(serde_json::Value::Null),
         "updated_at": updated_at,

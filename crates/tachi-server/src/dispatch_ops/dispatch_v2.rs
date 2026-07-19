@@ -284,7 +284,12 @@ pub(super) fn write_status_json(
     // state but must not erase that admission decision from the receipt.
     if let Ok(previous) = std::fs::read_to_string(&path) {
         if let Ok(Value::Object(previous)) = serde_json::from_str::<Value>(&previous) {
-            for key in ["host_profile", "execution_level", "identity_receipt"] {
+            for key in [
+                "host_profile",
+                "execution_level",
+                "identity_receipt",
+                "resolved_completion",
+            ] {
                 if !obj.contains_key(key) {
                     if let Some(value) = previous.get(key) {
                         obj.insert(key.to_string(), value.clone());
@@ -404,6 +409,46 @@ impl PlanSections {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_status_rewrite_preserves_resolved_completion_receipt() {
+        let temp = tempfile::tempdir().expect("temporary run directory");
+        std::fs::write(
+            temp.path().join("status.json"),
+            serde_json::json!({
+                "resolved_completion": {
+                    "state": "TASK_STATE_INPUT_REQUIRED",
+                    "closure_kind": "partial",
+                }
+            })
+            .to_string(),
+        )
+        .expect("write completion receipt");
+
+        write_status_json(
+            temp.path(),
+            "20260719T000002Z-preserve-completion-receipt",
+            false,
+            None,
+            None,
+            "n/a",
+            Some(0),
+            None,
+            None,
+            None,
+            Some(serde_json::json!({ "state": "TASK_STATE_INPUT_REQUIRED" })),
+        );
+
+        let status: Value = serde_json::from_slice(
+            &std::fs::read(temp.path().join("status.json")).expect("read rewritten status"),
+        )
+        .expect("rewritten status JSON");
+        assert_eq!(
+            status["resolved_completion"]["closure_kind"],
+            serde_json::json!("partial"),
+            "terminal rewrite must not erase the handler's authoritative receipt"
+        );
+    }
 
     // ── #1261 step 2/3: CLI fallback removed from call_plan_llm ──────────
     //

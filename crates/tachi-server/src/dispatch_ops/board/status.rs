@@ -32,6 +32,23 @@ pub(super) fn is_terminal_state(state: &str) -> bool {
     )
 }
 
+/// INPUT_REQUIRED is normally actionable plan-review work. Only the explicit
+/// durable marker written for a `tachi_complete(partial)` outcome turns that
+/// displayed state into terminal history.
+pub(super) fn is_terminal_state_with_closure_kind(state: &str, closure_kind: Option<&str>) -> bool {
+    is_terminal_state(state)
+        || (state == "TASK_STATE_INPUT_REQUIRED" && closure_kind == Some("partial"))
+}
+
+pub(super) fn state_matches_filter_with_closure_kind(
+    state_filter: &str,
+    state: &str,
+    closure_kind: Option<&str>,
+) -> bool {
+    state_matches_filter(state_filter, state)
+        && !(state_filter == "active" && is_terminal_state_with_closure_kind(state, closure_kind))
+}
+
 pub(super) fn state_matches_filter(state_filter: &str, state: &str) -> bool {
     match state_filter {
         "all" => true,
@@ -130,7 +147,11 @@ pub(super) fn mark_abandoned_kanban_task(task: &mut Value, now: DateTime<Utc>) {
     let Some(state) = task.get("state").and_then(Value::as_str) else {
         return;
     };
-    if !state_matches_filter("active", state) {
+    if !state_matches_filter_with_closure_kind(
+        "active",
+        state,
+        task.get("closure_kind").and_then(Value::as_str),
+    ) {
         return;
     }
     let Some(updated_at) = task
