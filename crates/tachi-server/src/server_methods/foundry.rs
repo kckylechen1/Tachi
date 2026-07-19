@@ -27,8 +27,8 @@ impl MemoryServer {
                     .map_err(|e| format!("persist foundry job: {e}"))
             })
         };
-        if let Err(err) = persist_result {
-            eprintln!("[foundry] failed to persist job {}: {err}", item.job.id);
+        if persist_result? == memcore::InsertFoundryJobResult::Existing {
+            return Ok(());
         }
 
         self.foundry_lock()

@@ -267,7 +267,8 @@ mod tests {
             &["memory-1".to_string()],
             3,
             Some("sigil"),
-        );
+        )
+        .expect("emit session captured event");
         assert_eq!(status["status"], json!("saved"));
 
         let events = server

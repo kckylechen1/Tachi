@@ -38,6 +38,7 @@ fn continuity_pipeline_enabled() -> bool {
 pub(crate) fn maybe_spawn_session_continuity_pipeline(
     server: &MemoryServer,
     target: ContinuityEventTarget,
+    operation_key: &str,
     conversation_id: String,
     turn_id: String,
     agent_id: String,
@@ -49,6 +50,14 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
             "status": "disabled",
             "reason": "set TACHI_CONTINUITY_PIPELINE=1 to run distill/reasoning continuity labelers",
         });
+    }
+
+    match target.claim_pipeline_schedule(server, operation_key) {
+        Ok(false) => return json!({"status": "already_scheduled", "operation_key": operation_key}),
+        Err(error) => {
+            return json!({"status": "failed", "reason": "schedule_claim_failed", "error": error})
+        }
+        Ok(true) => {}
     }
 
     let server_clone = server.clone();
@@ -192,7 +201,9 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
     });
 
     json!({
-        "status": "enqueued",
+        "status": "scheduled_best_effort",
+        "delivery": "at_most_once",
+        "operation_key": operation_key,
         "messages": event_count_hint,
         "lanes": ["distill", "reasoning"],
     })

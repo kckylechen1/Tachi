@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::MemoryError;
 use crate::types::{
@@ -103,6 +103,59 @@ pub fn insert_tachi_event(conn: &Connection, event: &TachiEventRecord) -> Result
         ],
     )?;
     Ok(())
+}
+
+pub fn insert_tachi_event_if_absent(
+    conn: &Connection,
+    event: &TachiEventRecord,
+) -> Result<bool, MemoryError> {
+    let effects = event.effects.iter().map(|v| v.as_str()).collect::<Vec<_>>();
+    let hints = event
+        .projection_hints
+        .iter()
+        .map(|v| v.as_str())
+        .collect::<Vec<_>>();
+    let changed = conn.execute(
+        "INSERT INTO tachi_events (id, source_repo, adapter, project, domain, session_id, actor,
+         event_type, authority, effects, projection_hints, payload_json, provenance_json, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+         ON CONFLICT(id) DO NOTHING",
+        params![&event.id, &event.source_repo, &event.adapter, &event.project, &event.domain,
+            &event.session_id, &event.actor, &event.event_type, event.authority.as_str(),
+            serde_json::to_string(&effects)?, serde_json::to_string(&hints)?,
+            serde_json::to_string(&event.payload)?, serde_json::to_string(&event.provenance)?,
+            &event.created_at],
+    )?;
+    if changed == 1 {
+        return Ok(true);
+    }
+    let existing = conn
+        .query_row(
+            "SELECT id, source_repo, adapter, project, domain, session_id, actor,
+                event_type, authority, effects, projection_hints, payload_json,
+                provenance_json, created_at
+         FROM tachi_events WHERE id = ?1",
+            [&event.id],
+            event_row,
+        )
+        .optional()?;
+    if let Some(mut existing) = existing {
+        // Wall-clock insertion time is not event content. Stable identity must
+        // protect every semantic field without turning a retry into conflict.
+        existing.created_at = event.created_at.clone();
+        let same = serde_json::to_value(&existing)? == serde_json::to_value(event)?;
+        if same {
+            return Ok(false);
+        }
+        return Err(MemoryError::InvalidArg(format!(
+            "tachi event id collision: {}",
+            event.id
+        )));
+    }
+    Err(MemoryError::Internal(format!(
+        "tachi event '{}' disappeared after id conflict",
+        event.id
+    )))
 }
 
 pub fn list_tachi_events(

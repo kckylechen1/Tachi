@@ -62,12 +62,24 @@ fn build_foundry_maintenance_job(
     path_prefix: &str,
     memory_ids: &[String],
     metadata: serde_json::Value,
+    deterministic_key: Option<&str>,
 ) -> memcore::FoundryJobSpec {
     let mut sorted_memory_ids = memory_ids.to_vec();
     sorted_memory_ids.sort();
     sorted_memory_ids.dedup();
     memcore::FoundryJobSpec {
-        id: format!("foundry-job:{}", uuid::Uuid::new_v4()),
+        id: deterministic_key.map_or_else(
+            || format!("foundry-job:{}", uuid::Uuid::new_v4()),
+            |key| {
+                format!(
+                    "foundry-job:{}",
+                    uuid::Uuid::new_v5(
+                        &uuid::Uuid::NAMESPACE_OID,
+                        format!("{key}:{}", foundry_job_label(&kind)).as_bytes()
+                    )
+                )
+            },
+        ),
         kind: kind.clone(),
         lane: foundry_job_lane(&kind),
         status: memcore::FoundryJobStatus::Queued,
@@ -94,6 +106,7 @@ pub(in crate::foundry_runtime_ops) fn enqueue_capture_maintenance_jobs(
     memory_ids: &[String],
     merged_count: usize,
     duplicate_count: usize,
+    deterministic_key: Option<&str>,
 ) -> Result<Vec<memcore::FoundryJobSpec>, String> {
     if memory_ids.is_empty() {
         return Ok(Vec::new());
@@ -106,6 +119,7 @@ pub(in crate::foundry_runtime_ops) fn enqueue_capture_maintenance_jobs(
         memory_ids,
         merged_count,
         duplicate_count,
+        deterministic_key,
     );
 
     for spec in &specs {
@@ -139,6 +153,7 @@ pub(in crate::foundry_runtime_ops) fn capture_maintenance_specs(
     memory_ids: &[String],
     merged_count: usize,
     duplicate_count: usize,
+    deterministic_key: Option<&str>,
 ) -> Vec<memcore::FoundryJobSpec> {
     let mut specs = vec![build_foundry_maintenance_job(
         server,
@@ -152,6 +167,7 @@ pub(in crate::foundry_runtime_ops) fn capture_maintenance_specs(
             "merged_count": merged_count,
             "duplicate_count": duplicate_count,
         }),
+        deterministic_key,
     )];
 
     if durable_recall_cache_enabled() {
@@ -166,6 +182,7 @@ pub(in crate::foundry_runtime_ops) fn capture_maintenance_specs(
                 "top_k": FOUNDRY_RECALL_RERANK_TOP_K,
                 "candidate_multiplier": FOUNDRY_RECALL_RERANK_CANDIDATE_MULTIPLIER,
             }),
+            deterministic_key,
         ));
     }
 
@@ -184,6 +201,7 @@ pub(in crate::foundry_runtime_ops) fn capture_maintenance_specs(
             "kind": "forget_sweep",
             "keep_latest": FOUNDRY_DISTILL_KEEP,
         }),
+        deterministic_key,
     ));
 
     specs
@@ -208,5 +226,6 @@ pub(crate) fn enqueue_foundry_capture_maintenance(
         memory_ids,
         0,
         0,
+        None,
     )
 }

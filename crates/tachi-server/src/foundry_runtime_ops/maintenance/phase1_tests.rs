@@ -14,7 +14,7 @@ async fn capture_specs_exclude_disabled_jobs_and_gate_recall_cache() {
         let tmp = tempdir().expect("tempdir");
         let db_path = tmp.path().join("global.db");
         let server = crate::MemoryServer::new(db_path, None).expect("server");
-        let specs = capture_maintenance_specs(&server, "agent", "/a/b", &memory_ids, 0, 0);
+        let specs = capture_maintenance_specs(&server, "agent", "/a/b", &memory_ids, 0, 0, None);
 
         let kinds: Vec<memcore::FoundryJobKind> = specs.iter().map(|s| s.kind.clone()).collect();
         assert!(
@@ -34,7 +34,7 @@ async fn capture_specs_exclude_disabled_jobs_and_gate_recall_cache() {
         let tmp = tempdir().expect("tempdir");
         let db_path = tmp.path().join("global.db");
         let server = crate::MemoryServer::new(db_path, None).expect("server");
-        let specs = capture_maintenance_specs(&server, "agent", "/a/b", &memory_ids, 0, 0);
+        let specs = capture_maintenance_specs(&server, "agent", "/a/b", &memory_ids, 0, 0, None);
 
         let kinds: Vec<memcore::FoundryJobKind> = specs.iter().map(|s| s.kind.clone()).collect();
         assert!(kinds.contains(&memcore::FoundryJobKind::RecallRerankCache));

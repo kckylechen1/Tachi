@@ -54,6 +54,53 @@ impl ContinuityEventTarget {
         crate::memory_search_ops::resolve_workspace_named_project()
             .unwrap_or_else(|| self.target_db.as_str().to_string())
     }
+
+    /// Durable at-most-once scheduling receipt. This intentionally is not an
+    /// execution-completion claim: the current pipeline is best-effort and has
+    /// no recoverable worker/outbox.
+    pub(super) fn claim_pipeline_schedule(
+        &self,
+        server: &MemoryServer,
+        operation_key: &str,
+    ) -> Result<bool, String> {
+        let value = serde_json::json!({
+            "operation_key": operation_key,
+            "policy": "continuity-pipeline-at-most-once-best-effort-v1",
+            "scheduled_at": chrono::Utc::now().to_rfc3339(),
+        })
+        .to_string();
+        if let Some(project) = self.named_project.as_deref() {
+            server.with_named_project_store(project, |store| {
+                store
+                    .insert_state_if_absent(
+                        "continuity-pipeline-schedules-v1",
+                        operation_key,
+                        &value,
+                    )
+                    .map_err(|e| e.to_string())
+            })
+        } else if let Some(path) = self.db_path.as_ref() {
+            server.with_path_store(path, |store| {
+                store
+                    .insert_state_if_absent(
+                        "continuity-pipeline-schedules-v1",
+                        operation_key,
+                        &value,
+                    )
+                    .map_err(|e| e.to_string())
+            })
+        } else {
+            server.with_store_for_scope(self.target_db, |store| {
+                store
+                    .insert_state_if_absent(
+                        "continuity-pipeline-schedules-v1",
+                        operation_key,
+                        &value,
+                    )
+                    .map_err(|e| e.to_string())
+            })
+        }
+    }
 }
 
 /// Label precedence for a continuity projection over the cheap (non-git-walk)
@@ -83,19 +130,22 @@ pub(super) fn write_event(
     if let Some(project_name) = target.named_project.as_deref() {
         server.with_named_project_store(project_name, |store| {
             store
-                .insert_tachi_event(event)
+                .insert_tachi_event_if_absent(event)
+                .map(|_| ())
                 .map_err(|e| format!("insert continuity event: {e}"))
         })
     } else if let Some(db_path) = target.db_path.as_ref() {
         server.with_path_store(db_path, |store| {
             store
-                .insert_tachi_event(event)
+                .insert_tachi_event_if_absent(event)
+                .map(|_| ())
                 .map_err(|e| format!("insert continuity event: {e}"))
         })
     } else {
         server.with_store_for_scope(target.target_db, |store| {
             store
-                .insert_tachi_event(event)
+                .insert_tachi_event_if_absent(event)
+                .map(|_| ())
                 .map_err(|e| format!("insert continuity event: {e}"))
         })
     }

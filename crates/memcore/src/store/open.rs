@@ -186,6 +186,19 @@ impl MemoryStore {
         })
     }
 
+    /// Atomically insert a memory and all of its search projections, without
+    /// rewriting an existing id.
+    pub fn insert_if_absent(
+        &mut self,
+        entry: &MemoryEntry,
+    ) -> Result<db::InsertMemoryResult, MemoryError> {
+        self.validate_write_path(entry)?;
+        let db_label = self.db_label.clone();
+        db::retry_memory_locked("insert_if_absent", &db_label, || {
+            db::insert_if_absent(&mut self.conn, entry, self.vec_available)
+        })
+    }
+
     /// Atomically save a modern id-less entry. The DB identity chooses a
     /// winner, while legacy rows without an identity remain untouched.
     pub fn upsert_idless(

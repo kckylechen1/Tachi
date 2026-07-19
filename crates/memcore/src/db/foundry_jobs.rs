@@ -26,11 +26,20 @@ pub struct PersistedFoundryJob {
     pub memory_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertFoundryJobResult {
+    Inserted,
+    Existing,
+}
+
 /// Insert a new Foundry job.
 ///
 /// Existing rows are intentionally left alone. Re-inserting the same job id must
 /// not resurrect a terminal job back to `queued`.
-pub fn insert_foundry_job(conn: &Connection, job: &PersistedFoundryJob) -> Result<(), MemoryError> {
+pub fn insert_foundry_job(
+    conn: &Connection,
+    job: &PersistedFoundryJob,
+) -> Result<InsertFoundryJobResult, MemoryError> {
     let now = chrono::Utc::now().to_rfc3339();
     let kind_str = serde_json::to_string(&job.spec.kind)
         .unwrap_or_default()
@@ -45,7 +54,7 @@ pub fn insert_foundry_job(conn: &Connection, job: &PersistedFoundryJob) -> Resul
         .trim_matches('"')
         .to_string();
 
-    conn.execute(
+    let changed = conn.execute(
         "INSERT OR IGNORE INTO foundry_jobs
          (id, kind, lane, status, target_db, named_project, path_prefix, memory_ids,
           target_agent_id, requested_by, evidence_count, goal_count, metadata,
@@ -73,7 +82,11 @@ pub fn insert_foundry_job(conn: &Connection, job: &PersistedFoundryJob) -> Resul
             now,
         ],
     )?;
-    Ok(())
+    Ok(if changed == 1 {
+        InsertFoundryJobResult::Inserted
+    } else {
+        InsertFoundryJobResult::Existing
+    })
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ pub(crate) fn emit_session_captured_event(
     captured_memory_ids: &[String],
     message_count: usize,
     project: Option<&str>,
-) -> Value {
+) -> Result<Value, String> {
     let event = TachiEventRecord {
         id: stable_event_payload_id(&[
             "session.captured",
@@ -52,10 +52,12 @@ pub(crate) fn emit_session_captured_event(
         created_at: now_rfc3339(),
     };
 
-    match write_event(server, target, &event) {
-        Ok(()) => json!({"status": "saved", "event_id": event.id, "event_type": event.event_type}),
-        Err(error) => json!({"status": "failed", "error": error, "event_type": event.event_type}),
-    }
+    write_event(server, target, &event)?;
+    Ok(json!({
+        "status": "saved",
+        "event_id": event.id,
+        "event_type": event.event_type,
+    }))
 }
 
 fn infer_saved_memory_projection_hints(entry: &MemoryEntry) -> Vec<ProjectionKind> {

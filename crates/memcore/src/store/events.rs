@@ -29,6 +29,15 @@ impl MemoryStore {
         db::insert_tachi_event(&self.conn, event)
     }
 
+    /// Idempotent event insertion. An identical existing id succeeds, while
+    /// different content under that id is rejected closed.
+    pub fn insert_tachi_event_if_absent(
+        &self,
+        event: &TachiEventRecord,
+    ) -> Result<bool, MemoryError> {
+        db::insert_tachi_event_if_absent(&self.conn, event)
+    }
+
     /// List recent continuity events with optional metadata filters.
     pub fn list_tachi_events(
         &self,

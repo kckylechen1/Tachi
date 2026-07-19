@@ -1,4 +1,4 @@
-use super::super::capture::{persist_capture_entry, queue_capture_enrichment};
+use super::super::capture::queue_capture_enrichment;
 use super::super::helpers::{
     build_entry_path, build_openclaw_agent_root, dedup_strings, normalize_category, normalize_scope,
 };
@@ -9,9 +9,58 @@ use super::target::resolve_capture_target;
 use crate::server_state::MemoryServer;
 use crate::tool_params::CaptureSessionParams;
 use crate::DbScope;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use memcore::MemoryEntry;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+/// #1301 provisional capture policy. The named constant is deliberately kept
+/// beside the classifier so archive policy never grows a second flat age.
+const CAPTURE_EPHEMERAL_TTL_DAYS: i64 = 30;
+const CAPTURE_RETENTION_POLICY_VERSION: &str = "capture-v1";
+const CAPTURE_MANIFEST_NAMESPACE: &str = "capture-session-manifest-v1";
+const CAPTURE_MANIFEST_STAGING_POLICY: &str = "capture-manifest-staging-v1";
+const CAPTURE_MANIFEST_COMPLETED_RETENTION_POLICY: &str = "capture-manifest-receipt-retain-v1";
+const CAPTURE_MANIFEST_STAGING_TTL_DAYS: i64 = 30;
+/// The fenced section contains only synchronous local SQLite writes, queue
+/// inserts, and task spawning. Slow model/embedding awaits happen before it.
+const CAPTURE_PROCESSING_LEASE_SECONDS: i64 = 30;
+
+#[cfg(test)]
+static CAPTURE_FAILPOINT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
+fn set_capture_failpoint(stage: &str) {
+    let value = match stage {
+        "after_manifest_admission" => 1,
+        "after_artifact_0" => 2,
+        "after_maintenance" => 3,
+        _ => panic!("unknown capture failpoint: {stage}"),
+    };
+    CAPTURE_FAILPOINT.store(value, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn capture_failpoint(stage: &str) -> Result<(), String> {
+    let value = match stage {
+        "after_manifest_admission" => 1,
+        "after_artifact_0" => 2,
+        "after_maintenance" => 3,
+        _ => return Ok(()),
+    };
+    if CAPTURE_FAILPOINT
+        .compare_exchange(
+            value,
+            0,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_ok()
+    {
+        return Err(format!("capture_session test failpoint: {stage}"));
+    }
+    Ok(())
+}
 
 /// #1114 (codex round-1 B3 fix): a `MemoryEntry` carried alongside its OWN
 /// resolved write-affinity destination — computed once, per entry, before
@@ -24,6 +73,302 @@ struct CapturedEntry {
     entry: MemoryEntry,
     target_db: DbScope,
     named_project: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct CaptureManifestArtifact {
+    id: String,
+    replay_key: String,
+    source_revision: String,
+    content_digest: String,
+    target_db: String,
+    named_project: Option<String>,
+    entry: Option<MemoryEntry>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct CaptureDestinationReceipts {
+    target_db: String,
+    named_project: Option<String>,
+    memory_ids: Vec<String>,
+    maintenance_job_ids: Vec<String>,
+    session_event_id: String,
+    pipeline_schedule_key: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct CaptureManifest {
+    owner: String,
+    lease_until: String,
+    completed: bool,
+    staging_policy: String,
+    expires_at: Option<String>,
+    completed_retention_policy: String,
+    artifacts: Vec<CaptureManifestArtifact>,
+    destination_receipts: Vec<CaptureDestinationReceipts>,
+}
+
+fn manifest_artifacts(entries: &[CapturedEntry]) -> Vec<CaptureManifestArtifact> {
+    entries
+        .iter()
+        .map(|captured| {
+            let replay_key = captured.entry.metadata["capture_replay_key"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let source_revision = captured.entry.metadata["source_revision"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let content_digest = crate::tool_params::canonical_json_sha256(&json!({
+                "text": captured.entry.text,
+                "summary": captured.entry.summary,
+                "keywords": captured.entry.keywords,
+                "entities": captured.entry.entities,
+            }))
+            .expect("memory entry content is JSON serializable");
+            CaptureManifestArtifact {
+                id: captured.entry.id.clone(),
+                replay_key,
+                source_revision,
+                content_digest,
+                target_db: captured.target_db.as_str().to_string(),
+                named_project: captured.named_project.clone(),
+                entry: Some(captured.entry.clone()),
+            }
+        })
+        .collect()
+}
+
+fn captured_entries(artifacts: &[CaptureManifestArtifact]) -> Vec<CapturedEntry> {
+    artifacts
+        .iter()
+        .filter_map(|artifact| {
+            artifact.entry.clone().map(|entry| CapturedEntry {
+                entry,
+                target_db: if artifact.target_db == DbScope::Global.as_str() {
+                    DbScope::Global
+                } else {
+                    DbScope::Project
+                },
+                named_project: artifact.named_project.clone(),
+            })
+        })
+        .collect()
+}
+
+fn with_manifest_store<T>(
+    server: &MemoryServer,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    db_path: Option<&std::path::PathBuf>,
+    f: impl FnOnce(&mut memcore::MemoryStore) -> Result<T, String>,
+) -> Result<T, String> {
+    if let Some(project) = named_project {
+        server.with_named_project_store(project, f)
+    } else if let Some(path) = db_path {
+        server.with_path_store(path, f)
+    } else {
+        server.with_store_for_scope(target_db, f)
+    }
+}
+
+fn load_manifest(
+    server: &MemoryServer,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    db_path: Option<&std::path::PathBuf>,
+    key: &str,
+) -> Result<Option<(CaptureManifest, u32)>, String> {
+    with_manifest_store(server, target_db, named_project, db_path, |store| {
+        store
+            .get_state_kv(CAPTURE_MANIFEST_NAMESPACE, key)
+            .map_err(|e| format!("capture manifest read: {e}"))?
+            .map(|(raw, version)| {
+                serde_json::from_str(&raw)
+                    .map(|manifest| (manifest, version))
+                    .map_err(|e| format!("capture manifest parse: {e}"))
+            })
+            .transpose()
+    })
+}
+
+fn manifest_artifacts_all_present(
+    server: &MemoryServer,
+    manifest: &CaptureManifest,
+    db_path: Option<&std::path::PathBuf>,
+) -> Result<bool, String> {
+    for artifact in &manifest.artifacts {
+        let target_db = if artifact.target_db == DbScope::Global.as_str() {
+            DbScope::Global
+        } else {
+            DbScope::Project
+        };
+        if load_capture_entry_at_destination(
+            server,
+            target_db,
+            artifact.named_project.as_deref(),
+            db_path,
+            &artifact.id,
+        )?
+        .is_none()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn capture_target_identity(
+    target_db: DbScope,
+    named_project: Option<&str>,
+    db_path: Option<&std::path::PathBuf>,
+) -> String {
+    if let Some(path) = db_path {
+        format!("path:{}", path.display())
+    } else if let Some(project) = named_project {
+        format!("named-project:{project}")
+    } else {
+        format!("scope:{}", target_db.as_str())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_capture_replay_key(
+    target_identity: &str,
+    agent_id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    source_revision: &str,
+    artifact_kind: &str,
+    artifact_discriminator: &str,
+) -> Result<String, String> {
+    let basis = json!({
+        "version": 1,
+        "target_identity": target_identity,
+        "agent_id": agent_id,
+        "conversation_id": conversation_id,
+        "turn_id": turn_id,
+        "source_revision": source_revision,
+        "artifact_kind": artifact_kind,
+        "artifact_discriminator": artifact_discriminator,
+    });
+    let hash = crate::tool_params::canonical_json_sha256(&basis)?;
+    Ok(format!(
+        "capture-replay:{}",
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, hash.as_bytes())
+    ))
+}
+
+fn apply_capture_governance_metadata(
+    mut metadata: Value,
+    replay_key: &str,
+    source_revision: &str,
+    source_event_id: &str,
+    artifact_kind: &str,
+    retention: memcore::RetentionPolicy,
+) -> Value {
+    let object = metadata
+        .as_object_mut()
+        .expect("inject_provenance always returns an object");
+    object.insert("capture_replay_key".into(), json!(replay_key));
+    object.insert("capture_replay_keys".into(), json!([replay_key]));
+    object.insert("source_revision".into(), json!(source_revision));
+    object.insert("source_revisions".into(), json!([source_revision]));
+    object.insert("source_event_id".into(), json!(source_event_id));
+    object.insert("artifact_kind".into(), json!(artifact_kind));
+    object.insert(
+        "capture_retention".into(),
+        json!({
+            "class": retention.as_str(),
+            "policy_version": CAPTURE_RETENTION_POLICY_VERSION,
+            "ttl_days": if retention == memcore::RetentionPolicy::Ephemeral {
+                Some(CAPTURE_EPHEMERAL_TTL_DAYS)
+            } else {
+                None
+            },
+        }),
+    );
+    metadata
+}
+
+fn entry_has_capture_replay_key(entry: &MemoryEntry, replay_key: &str) -> bool {
+    entry
+        .metadata
+        .get("capture_replay_key")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value == replay_key)
+        || entry
+            .metadata
+            .get("capture_replay_keys")
+            .and_then(Value::as_array)
+            .is_some_and(|keys| keys.iter().any(|key| key.as_str() == Some(replay_key)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn renew_capture_lease(
+    server: &MemoryServer,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    db_path: Option<&std::path::PathBuf>,
+    manifest_key: &str,
+    manifest: &mut CaptureManifest,
+    manifest_version: &mut u32,
+    owner: &str,
+) -> Result<(), String> {
+    if manifest.owner != owner || manifest.completed {
+        return Err("capture manifest ownership was lost".to_string());
+    }
+    manifest.lease_until =
+        (Utc::now() + Duration::seconds(CAPTURE_PROCESSING_LEASE_SECONDS)).to_rfc3339();
+    let raw = serde_json::to_string(manifest)
+        .map_err(|e| format!("capture manifest lease serialize: {e}"))?;
+    let renewed = with_manifest_store(server, target_db, named_project, db_path, |store| {
+        store
+            .set_state_if_version(
+                CAPTURE_MANIFEST_NAMESPACE,
+                manifest_key,
+                &raw,
+                *manifest_version,
+            )
+            .map_err(|e| format!("capture manifest lease renew: {e}"))
+    })?;
+    if !renewed {
+        return Err("capture manifest ownership was lost".to_string());
+    }
+    *manifest_version += 1;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn release_capture_lease(
+    server: &MemoryServer,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    db_path: Option<&std::path::PathBuf>,
+    manifest_key: &str,
+    manifest: &mut CaptureManifest,
+    manifest_version: &mut u32,
+) -> Result<(), String> {
+    manifest.owner.clear();
+    manifest.lease_until = (Utc::now() - Duration::seconds(1)).to_rfc3339();
+    let raw = serde_json::to_string(manifest)
+        .map_err(|e| format!("capture manifest release serialize: {e}"))?;
+    let released = with_manifest_store(server, target_db, named_project, db_path, |store| {
+        store
+            .set_state_if_version(
+                CAPTURE_MANIFEST_NAMESPACE,
+                manifest_key,
+                &raw,
+                *manifest_version,
+            )
+            .map_err(|e| format!("capture manifest release: {e}"))
+    })?;
+    if !released {
+        return Err("capture manifest ownership was lost while releasing lease".to_string());
+    }
+    *manifest_version += 1;
+    Ok(())
 }
 
 pub(crate) async fn handle_capture_session(
@@ -69,6 +414,30 @@ pub(crate) async fn handle_capture_session(
         .clone()
         .unwrap_or_else(|| build_openclaw_agent_root(&params.agent_id));
     let source_ref_id = format!("{}:{}", params.conversation_id, params.turn_id);
+    let source_revision = crate::tool_params::canonical_json_sha256(&json!({
+        "messages": &params.messages,
+    }))?;
+    let target_identity =
+        capture_target_identity(target_db, named_project.as_deref(), db_path.as_ref());
+    let batch_hash = crate::tool_params::canonical_json_sha256(&json!({
+        "version": 1,
+        "target_identity": target_identity,
+        "agent_id": params.agent_id,
+        "conversation_id": params.conversation_id,
+        "turn_id": params.turn_id,
+        "source_revision": source_revision,
+    }))?;
+    let manifest_key = format!("capture-batch:{batch_hash}");
+    // Reading the durable manifest before extraction is the invariant that
+    // makes an exact replay independent of a second model sample.
+    let replay_manifest = load_manifest(
+        server,
+        target_db,
+        named_project.as_deref(),
+        db_path.as_ref(),
+        &manifest_key,
+    )?;
+    let captured_at = Utc::now();
     let self_evolution_path = format!("{}/self-evolution", base_path.trim_end_matches('/'));
     // User-preference scoping: agents with "user_memory" in their profile get
     // preference notes scoped to "user" instead of the requested scope.
@@ -76,14 +445,40 @@ pub(crate) async fn handle_capture_session(
         || matches_agent_tag(&params.agent_id, "jayne");
 
     let mut entries = Vec::<CapturedEntry>::new();
-    for note in extract_bracket_self_evolution_notes(&params.agent_id, &params.messages) {
+    for (note_slot, note) in
+        extract_bracket_self_evolution_notes(&params.agent_id, &params.messages)
+            .into_iter()
+            .enumerate()
+    {
+        // Legacy bracket IDs were content-derived and therefore collapsed
+        // distinct source events. An archived/corrected/superseded legacy row
+        // is an explicit suppression tombstone and must win before routing.
+        if bracket_capture_is_suppressed(
+            server,
+            target_db,
+            named_project.as_deref(),
+            db_path.as_ref(),
+            &note.id,
+        )? {
+            continue;
+        }
+        let replay_key = build_capture_replay_key(
+            &target_identity,
+            &params.agent_id,
+            &params.conversation_id,
+            &params.turn_id,
+            &source_revision,
+            "bracket_self_evolution",
+            &note.id,
+        )?;
+        let entry_id = replay_key.replacen("capture-replay:", "capture-session:", 1);
         // #1114 (codex round-1 B3 point ③): resolve this entry's routed
         // write-affinity destination BEFORE `inject_provenance` runs, so
         // provenance is stamped against where the row is actually going to
         // land, not the pre-gate default the gate is about to override.
         let (entry_target_db, entry_named_project) = resolve_capture_write_target(
             server,
-            &note.id,
+            &entry_id,
             None,
             &self_evolution_path,
             &note.category,
@@ -92,18 +487,52 @@ pub(crate) async fn handle_capture_session(
             db_path.as_ref(),
             params.project_explicit,
         )?;
+        // The invariant is checked on both sides of write affinity: a local
+        // tombstone prevents routing around it, while a tombstone already at
+        // the routed destination prevents recreating content there.
+        if bracket_capture_is_suppressed(
+            server,
+            entry_target_db,
+            entry_named_project.as_deref(),
+            db_path.as_ref(),
+            &note.id,
+        )? {
+            continue;
+        }
+        let lineage_key = crate::tool_params::canonical_json_sha256(&json!({
+            "version": 1,
+            "target": capture_target_identity(entry_target_db, entry_named_project.as_deref(), None),
+            "agent_id": params.agent_id,
+            "conversation_id": params.conversation_id,
+            "turn_id": params.turn_id,
+            "artifact_kind": "bracket_self_evolution",
+            "note_slot": note_slot,
+        }))?;
+        let predecessor_id = find_lineage_predecessor(
+            server,
+            entry_target_db,
+            entry_named_project.as_deref(),
+            db_path.as_ref(),
+            &self_evolution_path,
+            &lineage_key,
+            &entry_id,
+        )?;
         let metadata = crate::provenance::inject_provenance(
             server,
             json!({
                 "source_refs": [{
                     "ref_type": "turn",
                     "ref_id": source_ref_id.clone(),
+                    "revision": source_revision.clone(),
                 }],
                 "conversation_id": params.conversation_id,
                 "turn_id": params.turn_id,
                 "agent_id": params.agent_id,
                 "message_count": params.messages.len(),
                 "artifact_kind": "bracket_self_evolution",
+                "bracket_note_discriminator": note.id,
+                "artifact_lineage_key": lineage_key,
+                "predecessor_id": predecessor_id,
             }),
             "capture_session",
             "bracket_self_evolution",
@@ -115,6 +544,14 @@ pub(crate) async fn handle_capture_session(
                 "agent_id": params.agent_id,
                 "path_prefix": base_path,
             }),
+        );
+        let metadata = apply_capture_governance_metadata(
+            metadata,
+            &replay_key,
+            &source_revision,
+            &source_ref_id,
+            "bracket_self_evolution",
+            memcore::RetentionPolicy::Durable,
         );
         let strategy_keyword = if note.category == "preference" {
             "user-preference".to_string()
@@ -129,12 +566,12 @@ pub(crate) async fn handle_capture_session(
 
         entries.push(CapturedEntry {
             entry: MemoryEntry {
-                id: note.id,
+                id: entry_id,
                 path: self_evolution_path.clone(),
                 summary: note.text.chars().take(100).collect(),
                 text: note.text,
                 importance: 0.70,
-                timestamp: Utc::now().to_rfc3339(),
+                timestamp: captured_at.to_rfc3339(),
                 valid_from: String::new(),
                 valid_until: None,
                 category: note.category,
@@ -159,7 +596,7 @@ pub(crate) async fn handle_capture_session(
                 revision: 1,
                 metadata,
                 vector: None,
-                retention_policy: None,
+                retention_policy: Some(memcore::RetentionPolicy::Durable.as_str().to_string()),
                 domain: None,
                 recall_count: 0,
                 query_diversity: 0,
@@ -178,23 +615,40 @@ pub(crate) async fn handle_capture_session(
     });
     let request = serde_json::to_string_pretty(&payload)
         .map_err(|e| format!("Failed to serialize session capture payload: {e}"))?;
-    let drafts = match server
-        .llm
-        .call_extract_llm(
-            crate::prompts::SESSION_CAPTURE_PROMPT,
-            &request,
-            None,
-            0.1,
-            2400,
-        )
-        .await
-    {
-        Ok(raw) => match parse_session_capture_response(&raw) {
-            Ok(drafts) => drafts,
+    let drafts = if replay_manifest.is_some() {
+        Vec::new()
+    } else {
+        match server
+            .llm
+            .call_extract_llm(
+                crate::prompts::SESSION_CAPTURE_PROMPT,
+                &request,
+                None,
+                0.1,
+                2400,
+            )
+            .await
+        {
+            Ok(raw) => match parse_session_capture_response(&raw) {
+                Ok(drafts) => drafts,
+                Err(err) if entries.is_empty() => {
+                    return serde_json::to_string(&json!({
+                        "status": "failed",
+                        "reason": "llm_capture_parse_failed",
+                        "error": err,
+                        "captured": 0,
+                        "conversation_id": params.conversation_id,
+                        "turn_id": params.turn_id,
+                        "agent_id": params.agent_id,
+                    }))
+                    .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
+                }
+                Err(_) => Vec::new(),
+            },
             Err(err) if entries.is_empty() => {
                 return serde_json::to_string(&json!({
                     "status": "failed",
-                    "reason": "llm_capture_parse_failed",
+                    "reason": "llm_capture_failed",
                     "error": err,
                     "captured": 0,
                     "conversation_id": params.conversation_id,
@@ -204,23 +658,10 @@ pub(crate) async fn handle_capture_session(
                 .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
             }
             Err(_) => Vec::new(),
-        },
-        Err(err) if entries.is_empty() => {
-            return serde_json::to_string(&json!({
-                "status": "failed",
-                "reason": "llm_capture_failed",
-                "error": err,
-                "captured": 0,
-                "conversation_id": params.conversation_id,
-                "turn_id": params.turn_id,
-                "agent_id": params.agent_id,
-            }))
-            .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
         }
-        Err(_) => Vec::new(),
     };
 
-    if drafts.is_empty() && entries.is_empty() {
+    if drafts.is_empty() && entries.is_empty() && replay_manifest.is_none() {
         return serde_json::to_string(&json!({
             "status": "skipped",
             "reason": "no_durable_memories",
@@ -229,7 +670,8 @@ pub(crate) async fn handle_capture_session(
         .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
     }
 
-    for draft in drafts {
+    let draft_count = drafts.len();
+    for (draft_index, draft) in drafts.into_iter().enumerate() {
         let topic = if draft.topic.trim().is_empty() {
             "session_capture".to_string()
         } else {
@@ -238,10 +680,16 @@ pub(crate) async fn handle_capture_session(
         let scope = normalize_scope(&draft.scope, &requested_scope);
         let entry_path = build_entry_path(&base_path, &topic);
         let entry_category = normalize_category(&draft.category);
-        // LLM drafts always mint a fresh random id here (never caller
-        // -supplied, never deterministic) — hoisted so the SAME id is used
-        // for both the B4 existence pre-check below and the persisted entry.
-        let entry_id = uuid::Uuid::new_v4().to_string();
+        let replay_key = build_capture_replay_key(
+            &target_identity,
+            &params.agent_id,
+            &params.conversation_id,
+            &params.turn_id,
+            &source_revision,
+            "session_capture",
+            &draft_index.to_string(),
+        )?;
+        let entry_id = replay_key.replacen("capture-replay:", "capture-session:", 1);
 
         // #1114 (codex round-1 B3 point ③): resolve BEFORE provenance, same
         // reasoning as the bracket-note loop above.
@@ -262,11 +710,14 @@ pub(crate) async fn handle_capture_session(
                 "source_refs": [{
                     "ref_type": "turn",
                     "ref_id": source_ref_id.clone(),
+                    "revision": source_revision.clone(),
                 }],
                 "conversation_id": params.conversation_id,
                 "turn_id": params.turn_id,
                 "agent_id": params.agent_id,
                 "message_count": params.messages.len(),
+                "artifact_index": draft_index,
+                "artifact_count": draft_count,
             }),
             "capture_session",
             "session_capture",
@@ -278,6 +729,14 @@ pub(crate) async fn handle_capture_session(
                 "agent_id": params.agent_id,
                 "path_prefix": base_path,
             }),
+        );
+        let metadata = apply_capture_governance_metadata(
+            metadata,
+            &replay_key,
+            &source_revision,
+            &source_ref_id,
+            "session_capture",
+            memcore::RetentionPolicy::Ephemeral,
         );
 
         let summary = if draft.summary.trim().is_empty() {
@@ -293,9 +752,11 @@ pub(crate) async fn handle_capture_session(
                 summary,
                 text: draft.text.trim().to_string(),
                 importance: draft.importance.clamp(0.0, 1.0),
-                timestamp: Utc::now().to_rfc3339(),
+                timestamp: captured_at.to_rfc3339(),
                 valid_from: String::new(),
-                valid_until: None,
+                valid_until: Some(
+                    (captured_at + Duration::days(CAPTURE_EPHEMERAL_TTL_DAYS)).to_rfc3339(),
+                ),
                 category: entry_category,
                 topic,
                 keywords: dedup_strings(draft.keywords),
@@ -316,7 +777,7 @@ pub(crate) async fn handle_capture_session(
                 revision: 1,
                 metadata,
                 vector: None,
-                retention_policy: None,
+                retention_policy: Some(memcore::RetentionPolicy::Ephemeral.as_str().to_string()),
                 domain: None,
                 recall_count: 0,
                 query_diversity: 0,
@@ -327,14 +788,82 @@ pub(crate) async fn handle_capture_session(
         });
     }
 
+    let was_recovery = replay_manifest.is_some();
+    let owner = uuid::Uuid::new_v4().to_string();
+    let mut manifest_version;
+    let mut manifest;
+    if let Some((existing, version)) = replay_manifest {
+        manifest = existing;
+        manifest_version = version;
+    } else {
+        manifest = CaptureManifest {
+            // Admission is not ownership. This immediately-expired, ownerless
+            // row freezes the artifact payload while allowing all slow work
+            // to finish before the ownership CAS below.
+            owner: String::new(),
+            lease_until: Utc::now().to_rfc3339(),
+            completed: false,
+            staging_policy: CAPTURE_MANIFEST_STAGING_POLICY.to_string(),
+            expires_at: Some(
+                (Utc::now() + Duration::days(CAPTURE_MANIFEST_STAGING_TTL_DAYS)).to_rfc3339(),
+            ),
+            completed_retention_policy: CAPTURE_MANIFEST_COMPLETED_RETENTION_POLICY.to_string(),
+            artifacts: manifest_artifacts(&entries),
+            destination_receipts: Vec::new(),
+        };
+        let raw = serde_json::to_string(&manifest)
+            .map_err(|e| format!("capture manifest serialize: {e}"))?;
+        let inserted = with_manifest_store(
+            server,
+            target_db,
+            named_project.as_deref(),
+            db_path.as_ref(),
+            |store| {
+                store
+                    .insert_state_if_absent(CAPTURE_MANIFEST_NAMESPACE, &manifest_key, &raw)
+                    .map_err(|e| format!("capture manifest insert: {e}"))
+            },
+        )?;
+        if inserted {
+            manifest_version = 1;
+        } else {
+            (manifest, manifest_version) = load_manifest(
+                server,
+                target_db,
+                named_project.as_deref(),
+                db_path.as_ref(),
+                &manifest_key,
+            )?
+            .ok_or_else(|| "capture manifest disappeared after insert race".to_string())?;
+        }
+    }
+
+    // Always use the admitted artifact set. A racing extractor may have
+    // sampled a different model response, but it cannot replace this payload.
+    // Completed manifests are receipts, not staging payloads. Check before
+    // reconstructing entries or embedding, so exact replay performs no
+    // provider work and never depends on content that completion discarded.
+    if manifest.completed {
+        let duplicate_ids = manifest
+            .artifacts
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>();
+        return serde_json::to_string(&json!({
+            "status": "completed", "captured": 0, "ids": [], "merged_ids": [],
+            "duplicate_ids": duplicate_ids, "duplicates_skipped": manifest.artifacts.len(),
+            "recovered": 0, "maintenance_jobs": [], "db": target_db.as_str(),
+            "path_prefix": base_path,
+            "continuity": {"session_event":{"status":"skipped","reason":"duplicate_capture"},"pipeline":{"status":"skipped","reason":"duplicate_capture"},"by_destination":[]}
+        })).map_err(|e| format!("Failed to serialize capture_session response: {e}"));
+    }
+    entries = captured_entries(&manifest.artifacts);
+    #[cfg(test)]
+    capture_failpoint("after_manifest_admission")?;
     let texts = entries
         .iter()
-        .map(|captured| captured.entry.text.clone())
+        .map(|captured| crate::memory_search_ops::scrub_secrets(&captured.entry.text).0)
         .collect::<Vec<_>>();
-    let texts: Vec<_> = texts
-        .iter()
-        .map(|t| crate::memory_search_ops::scrub_secrets(t).0)
-        .collect();
     let embeddings = match server.llm.embed_voyage_batch(&texts, "document").await {
         Ok(vectors) => Some(vectors),
         Err(err) => {
@@ -348,6 +877,80 @@ pub(crate) async fn handle_capture_session(
         }
     }
 
+    loop {
+        let all_present = manifest_artifacts_all_present(server, &manifest, db_path.as_ref())?;
+        if manifest.completed && all_present {
+            let duplicate_ids = manifest
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.id.clone())
+                .collect::<Vec<_>>();
+            return serde_json::to_string(&json!({
+                "status": "completed",
+                "captured": 0,
+                "ids": [],
+                "merged_ids": [],
+                "duplicate_ids": duplicate_ids,
+                "duplicates_skipped": manifest.artifacts.len(),
+                "recovered": 0,
+                "maintenance_jobs": [],
+                "db": target_db.as_str(),
+                "path_prefix": base_path,
+                "continuity": {
+                    "session_event": {"status": "skipped", "reason": "duplicate_capture"},
+                    "pipeline": {"status": "skipped", "reason": "duplicate_capture"},
+                    "by_destination": [],
+                }
+            }))
+            .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
+        }
+
+        let lease_expired = chrono::DateTime::parse_from_rfc3339(&manifest.lease_until)
+            .map_err(|e| format!("capture manifest lease parse: {e}"))?
+            <= Utc::now();
+        if manifest.owner == owner || manifest.completed || lease_expired {
+            let mut claimed = manifest.clone();
+            claimed.owner = owner.clone();
+            claimed.completed = false;
+            claimed.lease_until =
+                (Utc::now() + Duration::seconds(CAPTURE_PROCESSING_LEASE_SECONDS)).to_rfc3339();
+            let raw = serde_json::to_string(&claimed)
+                .map_err(|e| format!("capture manifest serialize: {e}"))?;
+            let won = with_manifest_store(
+                server,
+                target_db,
+                named_project.as_deref(),
+                db_path.as_ref(),
+                |store| {
+                    store
+                        .set_state_if_version(
+                            CAPTURE_MANIFEST_NAMESPACE,
+                            &manifest_key,
+                            &raw,
+                            manifest_version,
+                        )
+                        .map_err(|e| format!("capture manifest claim: {e}"))
+                },
+            )?;
+            if won {
+                manifest = claimed;
+                manifest_version += 1;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        (manifest, manifest_version) = load_manifest(
+            server,
+            target_db,
+            named_project.as_deref(),
+            db_path.as_ref(),
+            &manifest_key,
+        )?
+        .ok_or_else(|| "capture manifest disappeared while waiting".to_string())?;
+    }
+    let mut duplicate_ids = Vec::new();
+    let entries = entries;
+
     let mut saved_ids = Vec::new();
     // #1114 (codex round-1 B3 point ④): group persisted ids by their ACTUAL
     // (post-gate) destination — a maintenance job or continuity event
@@ -359,15 +962,66 @@ pub(crate) async fn handle_capture_session(
     let mut by_destination: std::collections::BTreeMap<(String, Option<String>), Vec<String>> =
         std::collections::BTreeMap::new();
 
+    // Fence immediately before persistence. A stale owner whose lease was
+    // taken over cannot begin artifact side effects after this CAS fails.
+    renew_capture_lease(
+        server,
+        target_db,
+        named_project.as_deref(),
+        db_path.as_ref(),
+        &manifest_key,
+        &mut manifest,
+        &mut manifest_version,
+        &owner,
+    )?;
+    #[cfg(test)]
+    let mut is_first_artifact = true;
     for captured in &entries {
-        persist_capture_entry(
-            server,
-            captured.target_db,
-            captured.named_project.as_deref(),
-            db_path.as_ref(),
-            &captured.entry,
-        )?;
-        if embeddings.is_none() {
+        let result = if let Some(project) = captured.named_project.as_deref() {
+            server.with_named_project_store(project, |store| {
+                store
+                    .insert_if_absent(&captured.entry)
+                    .map_err(|e| e.to_string())
+            })
+        } else if let Some(path) = db_path.as_ref() {
+            server.with_path_store(path, |store| {
+                store
+                    .insert_if_absent(&captured.entry)
+                    .map_err(|e| e.to_string())
+            })
+        } else {
+            server.with_store_for_scope(captured.target_db, |store| {
+                store
+                    .insert_if_absent(&captured.entry)
+                    .map_err(|e| e.to_string())
+            })
+        }?;
+        if result == memcore::InsertMemoryResult::Existing {
+            let existing = load_capture_entry_at_destination(
+                server,
+                captured.target_db,
+                captured.named_project.as_deref(),
+                db_path.as_ref(),
+                &captured.entry.id,
+            )?
+            .ok_or_else(|| "capture insert winner disappeared".to_string())?;
+            let replay_key = captured
+                .entry
+                .metadata
+                .get("capture_replay_key")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "capture entry missing replay key".to_string())?;
+            if !entry_has_capture_replay_key(&existing, replay_key) {
+                return Err(format!(
+                    "capture replay id collision for '{}'",
+                    captured.entry.id
+                ));
+            }
+            duplicate_ids.push(captured.entry.id.clone());
+        } else {
+            saved_ids.push(captured.entry.id.clone());
+        }
+        if result == memcore::InsertMemoryResult::Inserted && embeddings.is_none() {
             queue_capture_enrichment(
                 server,
                 captured.target_db,
@@ -379,7 +1033,6 @@ pub(crate) async fn handle_capture_session(
                 Some(&base_path),
             );
         }
-        saved_ids.push(captured.entry.id.clone());
         by_destination
             .entry((
                 captured.target_db.as_str().to_string(),
@@ -387,6 +1040,34 @@ pub(crate) async fn handle_capture_session(
             ))
             .or_default()
             .push(captured.entry.id.clone());
+        #[cfg(test)]
+        if is_first_artifact && capture_failpoint("after_artifact_0").is_err() {
+            manifest.owner.clear();
+            manifest.lease_until = (Utc::now() - Duration::seconds(1)).to_rfc3339();
+            let raw = serde_json::to_string(&manifest)
+                .map_err(|e| format!("capture manifest failpoint release serialize: {e}"))?;
+            with_manifest_store(
+                server,
+                target_db,
+                named_project.as_deref(),
+                db_path.as_ref(),
+                |store| {
+                    store
+                        .set_state_if_version(
+                            CAPTURE_MANIFEST_NAMESPACE,
+                            &manifest_key,
+                            &raw,
+                            manifest_version,
+                        )
+                        .map_err(|e| format!("capture manifest failpoint release: {e}"))
+                },
+            )?;
+            return Err("capture_session test failpoint: after_artifact_0".into());
+        }
+        #[cfg(test)]
+        {
+            is_first_artifact = false;
+        }
     }
 
     let saved_ids = dedup_strings(saved_ids);
@@ -404,6 +1085,7 @@ pub(crate) async fn handle_capture_session(
     let default_destination_key = (target_db.as_str().to_string(), named_project.clone());
 
     let mut maintenance_jobs = Vec::new();
+    let mut destination_receipts = Vec::new();
     let mut continuity_by_destination = Vec::new();
     // (destination_key, session_event, pipeline) tuples, in the same order
     // as `continuity_by_destination` — kept alongside the JSON so picking
@@ -411,6 +1093,19 @@ pub(crate) async fn handle_capture_session(
     // through JSON value comparisons.
     let mut continuity_results_by_destination: Vec<((String, Option<String>), Value, Value)> =
         Vec::new();
+
+    // Maintenance and continuity are separately fenced from persistence.
+    // No await occurs between this renewal and these local queue/spawn calls.
+    renew_capture_lease(
+        server,
+        target_db,
+        named_project.as_deref(),
+        db_path.as_ref(),
+        &manifest_key,
+        &mut manifest,
+        &mut manifest_version,
+        &owner,
+    )?;
 
     for (destination_key, raw_ids) in &by_destination {
         let ids = dedup_strings(raw_ids.clone());
@@ -431,7 +1126,12 @@ pub(crate) async fn handle_capture_session(
             ids,
             0,
             0,
+            Some(&format!(
+                "{manifest_key}:{db_str}:{}",
+                group_named_project.as_deref().unwrap_or("default")
+            )),
         )?;
+        let maintenance_job_ids = jobs.iter().map(|job| job.id.clone()).collect();
         maintenance_jobs.append(&mut jobs);
 
         let group_continuity_target = crate::continuity_ops::ContinuityEventTarget::new(
@@ -439,7 +1139,7 @@ pub(crate) async fn handle_capture_session(
             group_named_project.clone(),
             db_path.clone(),
         );
-        let session_event = crate::continuity_ops::emit_session_captured_event(
+        let session_event = match crate::continuity_ops::emit_session_captured_event(
             server,
             &group_continuity_target,
             &params.conversation_id,
@@ -458,7 +1158,25 @@ pub(crate) async fn handle_capture_session(
             // since #1114's B2 fix, is nearly always true for a bound
             // session).
             group_named_project.as_deref(),
-        );
+        ) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                release_capture_lease(
+                    server,
+                    target_db,
+                    named_project.as_deref(),
+                    db_path.as_ref(),
+                    &manifest_key,
+                    &mut manifest,
+                    &mut manifest_version,
+                )?;
+                return Err(error);
+            }
+        };
+        let session_event_id = session_event["event_id"]
+            .as_str()
+            .ok_or_else(|| "session.captured receipt missing event_id".to_string())?
+            .to_string();
 
         // #1114 (codex round-2 item 3 point ③): the session-continuity
         // PIPELINE analyzes the whole conversation (not specific memory
@@ -477,15 +1195,33 @@ pub(crate) async fn handle_capture_session(
             group_named_project.clone(),
             db_path.clone(),
         );
+        let pipeline_operation_key = format!(
+            "{manifest_key}:{db_str}:{}:continuity-pipeline-v1",
+            group_named_project.as_deref().unwrap_or("default")
+        );
         let pipeline = crate::continuity_ops::maybe_spawn_session_continuity_pipeline(
             server,
             pipeline_target,
+            &pipeline_operation_key,
             params.conversation_id.clone(),
             params.turn_id.clone(),
             params.agent_id.clone(),
             group_named_project.clone(),
             params.messages.clone(),
         );
+
+        destination_receipts.push(CaptureDestinationReceipts {
+            target_db: group_target_db.as_str().to_string(),
+            named_project: group_named_project.clone(),
+            memory_ids: ids.clone(),
+            maintenance_job_ids,
+            session_event_id,
+            pipeline_schedule_key: matches!(
+                pipeline["status"].as_str(),
+                Some("scheduled_best_effort" | "already_scheduled")
+            )
+            .then_some(pipeline_operation_key),
+        });
 
         continuity_results_by_destination.push((
             destination_key.clone(),
@@ -518,13 +1254,75 @@ pub(crate) async fn handle_capture_session(
         .map(|(_, _, pipeline)| pipeline.clone())
         .unwrap_or_else(|| json!({"status": "skipped", "reason": "no_captured_entries"}));
 
+    #[cfg(test)]
+    if capture_failpoint("after_maintenance").is_err() {
+        manifest.owner.clear();
+        manifest.lease_until = (Utc::now() - Duration::seconds(1)).to_rfc3339();
+        let raw = serde_json::to_string(&manifest)
+            .map_err(|e| format!("capture manifest failpoint release serialize: {e}"))?;
+        with_manifest_store(
+            server,
+            target_db,
+            named_project.as_deref(),
+            db_path.as_ref(),
+            |store| {
+                store
+                    .set_state_if_version(
+                        CAPTURE_MANIFEST_NAMESPACE,
+                        &manifest_key,
+                        &raw,
+                        manifest_version,
+                    )
+                    .map_err(|e| format!("capture manifest failpoint release: {e}"))
+            },
+        )?;
+        return Err("capture_session test failpoint: after_maintenance".into());
+    }
+
+    manifest.completed = true;
+    manifest.owner.clear();
+    manifest.lease_until.clear();
+    manifest.expires_at = None;
+    manifest.destination_receipts = destination_receipts;
+    // Atomic content drop: completed receipts retain only identity,
+    // destination, digests, and durable side-effect receipt identifiers.
+    for artifact in &mut manifest.artifacts {
+        artifact.entry = None;
+    }
+    let completed_manifest = serde_json::to_string(&manifest)
+        .map_err(|e| format!("capture manifest serialize completion: {e}"))?;
+    let completed = with_manifest_store(
+        server,
+        target_db,
+        named_project.as_deref(),
+        db_path.as_ref(),
+        |store| {
+            store
+                .set_state_if_version(
+                    CAPTURE_MANIFEST_NAMESPACE,
+                    &manifest_key,
+                    &completed_manifest,
+                    manifest_version,
+                )
+                .map_err(|e| format!("capture manifest complete: {e}"))
+        },
+    )?;
+    if !completed {
+        return Err("capture manifest lease was lost before completion".to_string());
+    }
+
     let mut response = serde_json::Map::new();
     response.insert("status".into(), json!("completed"));
     response.insert("captured".into(), json!(saved_ids.len()));
     response.insert("ids".into(), json!(saved_ids));
     response.insert("merged_ids".into(), json!(Vec::<String>::new()));
-    response.insert("duplicate_ids".into(), json!(Vec::<String>::new()));
-    response.insert("duplicates_skipped".into(), json!(0));
+    let duplicate_count = duplicate_ids.len();
+    response.insert("duplicate_ids".into(), json!(duplicate_ids));
+    response.insert("duplicates_skipped".into(), json!(duplicate_count));
+    response.insert(
+        "recovered".into(),
+        json!(if was_recovery { saved_ids.len() } else { 0 }),
+    );
     response.insert("maintenance_jobs".into(), json!(maintenance_jobs));
     response.insert("db".into(), json!(target_db.as_str()));
     response.insert("path_prefix".into(), json!(base_path));
@@ -642,13 +1440,107 @@ fn capture_entry_exists_at(
 ) -> Result<bool, String> {
     let result = if let Some(project_name) = named_project {
         server.with_named_project_store_read(project_name, |store| {
-            store.get(id).map_err(|e| e.to_string())
+            store.get_with_options(id, true).map_err(|e| e.to_string())
         })
     } else {
-        server
-            .with_store_for_scope_read(target_db, |store| store.get(id).map_err(|e| e.to_string()))
+        server.with_store_for_scope_read(target_db, |store| {
+            store.get_with_options(id, true).map_err(|e| e.to_string())
+        })
     };
     Ok(result?.is_some())
+}
+
+fn load_capture_entry_at_destination(
+    server: &MemoryServer,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    db_path: Option<&std::path::PathBuf>,
+    id: &str,
+) -> Result<Option<MemoryEntry>, String> {
+    if let Some(project_name) = named_project {
+        server.with_named_project_store_read(project_name, |store| {
+            store.get_with_options(id, true).map_err(|e| e.to_string())
+        })
+    } else if let Some(path) = db_path {
+        server.with_path_store_read(path, |store| {
+            store.get_with_options(id, true).map_err(|e| e.to_string())
+        })
+    } else {
+        server.with_store_for_scope_read(target_db, |store| {
+            store.get_with_options(id, true).map_err(|e| e.to_string())
+        })
+    }
+}
+
+fn find_lineage_predecessor(
+    server: &MemoryServer,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    db_path: Option<&std::path::PathBuf>,
+    path: &str,
+    lineage_key: &str,
+    current_id: &str,
+) -> Result<Option<String>, String> {
+    let query = |store: &mut memcore::MemoryStore| {
+        store
+            .connection()
+            .query_row(
+                "SELECT id FROM memories
+                 WHERE path = ?1 AND id <> ?2
+                   AND json_extract(metadata, '$.artifact_lineage_key') = ?3
+                 ORDER BY timestamp DESC, created_at DESC LIMIT 1",
+                rusqlite::params![path, current_id, lineage_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| format!("query bracket lineage predecessor: {e}"))
+    };
+    use rusqlite::OptionalExtension;
+    if let Some(project) = named_project {
+        server.with_named_project_store_read(project, query)
+    } else if let Some(path) = db_path {
+        server.with_path_store_read(path, query)
+    } else {
+        server.with_store_for_scope_read(target_db, query)
+    }
+}
+
+fn bracket_capture_is_suppressed(
+    server: &MemoryServer,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    db_path: Option<&std::path::PathBuf>,
+    discriminator: &str,
+) -> Result<bool, String> {
+    let find = |store: &mut memcore::MemoryStore| {
+        store
+            .connection()
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM memories
+                    WHERE (
+                        id = ?1
+                        OR json_extract(metadata, '$.bracket_note_discriminator') = ?1
+                    )
+                    AND (
+                        archived = 1
+                        OR superseded_by IS NOT NULL
+                        OR json_extract(metadata, '$.lifecycle') IN ('corrected', 'superseded')
+                        OR json_type(metadata, '$.superseded_by') IS NOT NULL
+                    )
+                 )",
+                [discriminator],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|e| format!("query bracket suppression tombstone: {e}"))
+    };
+    if let Some(project) = named_project {
+        server.with_named_project_store_read(project, find)
+    } else if let Some(path) = db_path {
+        server.with_path_store_read(path, find)
+    } else {
+        server.with_store_for_scope_read(target_db, find)
+    }
 }
 
 #[cfg(test)]
@@ -980,9 +1872,1138 @@ mod affinity_tests {
 /// this from green to red.
 #[cfg(test)]
 mod handler_tests {
-    use super::handle_capture_session;
+    use super::{
+        build_capture_replay_key, extract_bracket_self_evolution_notes, handle_capture_session,
+        set_capture_failpoint, CAPTURE_EPHEMERAL_TTL_DAYS,
+        CAPTURE_MANIFEST_COMPLETED_RETENTION_POLICY, CAPTURE_MANIFEST_NAMESPACE,
+        CAPTURE_MANIFEST_STAGING_POLICY, CAPTURE_RETENTION_POLICY_VERSION,
+    };
     use crate::server_state::MemoryServer;
     use crate::tool_params::{CaptureSessionParams, Message};
+
+    static FAILPOINT_TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+        std::sync::OnceLock::new();
+
+    async fn spawn_capture_llm(
+        contents: Vec<String>,
+    ) -> (
+        u16,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use axum::{routing::post, Json, Router};
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler_calls = calls.clone();
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let index = handler_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let content = contents
+                    .get(index)
+                    .or_else(|| contents.last())
+                    .expect("fake LLM requires one payload")
+                    .clone();
+                async move {
+                    Json(serde_json::json!({
+                        "choices": [{
+                            "message": {"role": "assistant", "content": content},
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind capture mock LLM");
+        let port = listener.local_addr().expect("mock LLM address").port();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve capture mock LLM");
+        });
+        tokio::task::yield_now().await;
+        (port, calls, handle)
+    }
+
+    #[test]
+    fn capture_replay_key_distinguishes_source_revision_and_event() {
+        let key = |conversation: &str, turn: &str, revision: &str| {
+            build_capture_replay_key(
+                "named-project:alpha",
+                "agent-1",
+                conversation,
+                turn,
+                revision,
+                "session_capture",
+                "0",
+            )
+            .expect("capture replay key")
+        };
+
+        assert_eq!(
+            key("conv-1", "turn-1", "rev-a"),
+            key("conv-1", "turn-1", "rev-a")
+        );
+        assert_ne!(
+            key("conv-1", "turn-1", "rev-a"),
+            key("conv-1", "turn-1", "rev-b")
+        );
+        assert_ne!(
+            key("conv-1", "turn-1", "rev-a"),
+            key("conv-1", "turn-2", "rev-a")
+        );
+    }
+
+    /// #1301 discrimination: exact replay of one durable bracket artifact is
+    /// a no-op. Before capture write governance, both calls reported a save,
+    /// the second unconditional upsert incremented the row revision, and the
+    /// row had no explicit retention class.
+    #[test]
+    fn exact_bracket_capture_replay_is_duplicate_and_keeps_one_durable_revision() {
+        crate::test_support::with_tachi_home(|home| {
+            let global_db = home.join("global").join("memory.db");
+            let project_db = home.join("projects").join("capture").join("memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("mkdir project");
+
+            let params = CaptureSessionParams {
+                conversation_id: "conv-replay".to_string(),
+                turn_id: "turn-replay".to_string(),
+                agent_id: "capture-replay-agent".to_string(),
+                messages: vec![Message {
+                    role: "assistant".to_string(),
+                    content: "（记住了先验证真实对象再相信报告）".to_string(),
+                }],
+                path_prefix: None,
+                scope: "project".to_string(),
+                project: None,
+                project_explicit: false,
+                min_chars: 1,
+                force: true,
+            };
+
+            let _workers =
+                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
+            let _persist = crate::test_support::EnvRestore::set(
+                "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+                "1",
+            );
+            let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
+
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            let (first, replay, server) = rt.block_on(async move {
+                let (port, _calls, mock) = spawn_capture_llm(vec!["[]".to_string()]).await;
+                let _base = crate::test_support::EnvRestore::set(
+                    "EXTRACT_BASE_URL",
+                    &format!("http://127.0.0.1:{port}/chat/completions"),
+                );
+                let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "capture-mock");
+                let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
+                let server =
+                    MemoryServer::new(global_db, Some(project_db)).expect("capture server");
+                let first = handle_capture_session(&server, params.clone())
+                    .await
+                    .expect("first capture");
+                let replay = handle_capture_session(&server, params)
+                    .await
+                    .expect("replayed capture");
+                mock.abort();
+                (first, replay, server)
+            });
+            rt.shutdown_timeout(std::time::Duration::from_millis(500));
+
+            let first: serde_json::Value = serde_json::from_str(&first).expect("first receipt");
+            let replay: serde_json::Value = serde_json::from_str(&replay).expect("replay receipt");
+            assert_eq!(first["captured"], 1, "first receipt: {first}");
+            assert_eq!(replay["captured"], 0, "replay receipt: {replay}");
+            assert_eq!(replay["duplicates_skipped"], 1, "replay receipt: {replay}");
+
+            let id = first["ids"][0].as_str().expect("captured id");
+            let stored = server
+                .with_project_store_read(|store| store.get(id).map_err(|e| e.to_string()))
+                .expect("read captured row")
+                .expect("captured row exists");
+            assert_eq!(stored.revision, 1, "duplicate replay must not upsert");
+            assert_eq!(stored.retention_policy.as_deref(), Some("durable"));
+            assert!(stored.valid_until.is_none());
+        });
+    }
+
+    #[test]
+    fn bracket_artifacts_are_source_event_specific_and_preserve_lineage() {
+        crate::test_support::with_tachi_home(|home| {
+            let global_db = home.join("global/memory.db");
+            let project_db = home.join("projects/bracket-source/memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(project_db.parent().unwrap()).unwrap();
+            let _workers =
+                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
+            let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let server = rt.block_on(async move {
+                let (port, _, mock) = spawn_capture_llm(vec!["[]".into()]).await;
+                let _base = crate::test_support::EnvRestore::set(
+                    "EXTRACT_BASE_URL",
+                    &format!("http://127.0.0.1:{port}/chat/completions"),
+                );
+                let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
+                let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
+                let server = MemoryServer::new(global_db, Some(project_db)).unwrap();
+                let params = |turn: &str, content: &str| CaptureSessionParams {
+                    conversation_id: "source-conversation".into(),
+                    turn_id: turn.into(),
+                    agent_id: "source-agent".into(),
+                    messages: vec![Message {
+                        role: "assistant".into(),
+                        content: content.into(),
+                    }],
+                    path_prefix: None,
+                    scope: "project".into(),
+                    project: None,
+                    project_explicit: false,
+                    min_chars: 1,
+                    force: true,
+                };
+                let first: serde_json::Value = serde_json::from_str(
+                    &handle_capture_session(&server, params("turn-1", "（记住了先核验来源）"))
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                let first_id = first["ids"][0].as_str().unwrap().to_string();
+                let before = server
+                    .with_project_store_read(|s| s.get(&first_id).map_err(|e| e.to_string()))
+                    .unwrap()
+                    .unwrap();
+                let changed: serde_json::Value = serde_json::from_str(
+                    &handle_capture_session(&server, params("turn-1", "（记住了先核验原始来源）"))
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                let changed_id = changed["ids"][0].as_str().unwrap();
+                assert_ne!(first_id, changed_id);
+                let changed_row = server
+                    .with_project_store_read(|s| s.get(changed_id).map_err(|e| e.to_string()))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(changed_row.metadata["predecessor_id"], first_id);
+                let after = server
+                    .with_project_store_read(|s| s.get(&first_id).map_err(|e| e.to_string()))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    serde_json::to_value(before).unwrap(),
+                    serde_json::to_value(after).unwrap()
+                );
+
+                let other: serde_json::Value = serde_json::from_str(
+                    &handle_capture_session(&server, params("turn-2", "（记住了先核验来源）"))
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                let other_id = other["ids"][0].as_str().unwrap();
+                assert_ne!(first_id, other_id);
+                for (id, turn) in [(first_id.as_str(), "turn-1"), (other_id, "turn-2")] {
+                    let row = server
+                        .with_project_store_read(|s| s.get(id).map_err(|e| e.to_string()))
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        row.metadata["source_event_id"],
+                        format!("source-conversation:{turn}")
+                    );
+                }
+                mock.abort();
+                server
+            });
+            rt.shutdown_timeout(std::time::Duration::from_millis(500));
+            drop(server);
+        });
+    }
+
+    #[test]
+    fn concurrent_identical_capture_futures_have_one_receipt_and_one_side_effect_set() {
+        crate::test_support::with_tachi_home(|home| {
+            let global_db = home.join("global").join("memory.db");
+            let project_db = home
+                .join("projects")
+                .join("capture-concurrent")
+                .join("memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("mkdir project");
+            let params = CaptureSessionParams {
+                conversation_id: "conv-concurrent-replay".into(),
+                turn_id: "turn-concurrent-replay".into(),
+                agent_id: "capture-concurrent-agent".into(),
+                messages: vec![Message {
+                    role: "assistant".into(),
+                    content: "（记住了并发重放只能产生一份持久副作用）".into(),
+                }],
+                path_prefix: None,
+                scope: "project".into(),
+                project: None,
+                project_explicit: false,
+                min_chars: 1,
+                force: true,
+            };
+            let _workers =
+                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
+            let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            let project_db_for_query = project_db.clone();
+            let (left, right, replay, server, calls, calls_before_replay) =
+                rt.block_on(async move {
+                    let (port, calls, mock) = spawn_capture_llm(vec!["[]".into()]).await;
+                    let _base = crate::test_support::EnvRestore::set(
+                        "EXTRACT_BASE_URL",
+                        &format!("http://127.0.0.1:{port}/chat/completions"),
+                    );
+                    let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
+                    let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
+                    let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+                    let (left, right) = tokio::join!(
+                        handle_capture_session(&server, params.clone()),
+                        handle_capture_session(&server, params.clone())
+                    );
+                    let calls_before_replay = calls.load(std::sync::atomic::Ordering::SeqCst);
+                    assert!((1..=2).contains(&calls_before_replay));
+                    let replay = handle_capture_session(&server, params)
+                        .await
+                        .expect("completed exact replay");
+                    assert_eq!(
+                        calls.load(std::sync::atomic::Ordering::SeqCst),
+                        calls_before_replay
+                    );
+                    mock.abort();
+                    (
+                        left.expect("left"),
+                        right.expect("right"),
+                        replay,
+                        server,
+                        calls,
+                        calls_before_replay,
+                    )
+                });
+            let left: serde_json::Value = serde_json::from_str(&left).expect("left JSON");
+            let right: serde_json::Value = serde_json::from_str(&right).expect("right JSON");
+            assert_eq!(
+                left["captured"].as_u64().unwrap() + right["captured"].as_u64().unwrap(),
+                1
+            );
+            let winner = if left["captured"] == 1 { &left } else { &right };
+            let duplicate = if left["captured"] == 0 { &left } else { &right };
+            assert_eq!(duplicate["maintenance_jobs"], serde_json::json!([]));
+            assert_eq!(
+                duplicate["continuity"]["by_destination"],
+                serde_json::json!([])
+            );
+            let id = winner["ids"][0].as_str().expect("winner id");
+            let row = server
+                .with_project_store_read(|store| store.get(id).map_err(|e| e.to_string()))
+                .expect("read row")
+                .expect("row");
+            assert_eq!(row.revision, 1);
+            let replay: serde_json::Value = serde_json::from_str(&replay).expect("replay JSON");
+            assert_eq!(replay["captured"], 0);
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                calls_before_replay
+            );
+            let events = server
+                .with_project_store_read(|store| {
+                    store
+                        .list_tachi_events(&memcore::TachiEventQuery {
+                            event_type: Some("session.captured".into()),
+                            limit: 100,
+                            ..Default::default()
+                        })
+                        .map_err(|e| e.to_string())
+                })
+                .expect("query session capture events");
+            assert_eq!(events.len(), 1);
+            let conn = rusqlite::Connection::open(project_db_for_query).expect("open project DB");
+            let (job_count, distinct_job_count): (i64, i64) = conn
+                .query_row(
+                    "SELECT COUNT(*), COUNT(DISTINCT id) FROM foundry_jobs",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("query foundry jobs");
+            assert!(job_count > 0);
+            assert_eq!(job_count, distinct_job_count);
+        });
+    }
+
+    #[test]
+    fn required_session_event_failure_keeps_manifest_recoverable() {
+        let _guard = FAILPOINT_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::test_support::with_tachi_home(|home| {
+            let global_db = home.join("global").join("event-failure.db");
+            let project_db = home
+                .join("projects")
+                .join("event-failure")
+                .join("memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("mkdir project");
+            let params = CaptureSessionParams {
+                conversation_id: "event-failure-conversation".into(),
+                turn_id: "turn-1".into(),
+                agent_id: "event-failure-agent".into(),
+                messages: vec![Message {
+                    role: "user".into(),
+                    content: "Capture one event-failure recovery observation.".into(),
+                }],
+                path_prefix: Some("/capture/event-failure".into()),
+                scope: "project".into(),
+                project: None,
+                project_explicit: false,
+                min_chars: 1,
+                force: true,
+            };
+            let draft = serde_json::json!([{
+                "text": "The required session event must be durable before completion.",
+                "summary": "Required session event",
+                "topic": "recovery",
+                "category": "fact",
+                "scope": "project",
+                "importance": 0.8
+            }])
+            .to_string();
+            let _workers =
+                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
+            let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
+            let rt = tokio::runtime::Runtime::new().expect("runtime");
+            rt.block_on(async move {
+                let (port, calls, mock) = spawn_capture_llm(vec![draft]).await;
+                let _base = crate::test_support::EnvRestore::set(
+                    "EXTRACT_BASE_URL",
+                    &format!("http://127.0.0.1:{port}/chat/completions"),
+                );
+                let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
+                let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
+                let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+
+                set_capture_failpoint("after_artifact_0");
+                handle_capture_session(&server, params.clone())
+                    .await
+                    .expect_err("artifact failpoint must leave an incomplete manifest");
+                let artifact_id = server
+                    .with_project_store_read(|store| {
+                        store
+                            .connection()
+                            .query_row(
+                                "SELECT id FROM memories
+                                 WHERE path LIKE '/capture/event-failure/%' LIMIT 1",
+                                [],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .map_err(|e| e.to_string())
+                    })
+                    .expect("read admitted artifact id");
+                let event_basis = [
+                    "session.captured",
+                    params.conversation_id.as_str(),
+                    params.turn_id.as_str(),
+                    params.agent_id.as_str(),
+                    artifact_id.as_str(),
+                ]
+                .join("|");
+                let event_id = format!("event-{}", crate::utils::stable_hash(&event_basis));
+                let conflicting = memcore::TachiEventRecord {
+                    id: event_id.clone(),
+                    source_repo: "tachi".into(),
+                    adapter: "conflicting-test-fixture".into(),
+                    project: "event-failure".into(),
+                    domain: "session".into(),
+                    session_id: params.conversation_id.clone(),
+                    actor: params.agent_id.clone(),
+                    event_type: "session.captured".into(),
+                    authority: memcore::AuthorityLevel::RawFact,
+                    effects: vec![memcore::EffectScope::MemoryWrite],
+                    projection_hints: vec![memcore::ProjectionKind::Timeline],
+                    payload: serde_json::json!({"conflict": true}),
+                    provenance: serde_json::json!({"fixture": true}),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                };
+                server
+                    .with_project_store(|store| {
+                        store
+                            .insert_tachi_event(&conflicting)
+                            .map_err(|e| e.to_string())
+                    })
+                    .expect("seed deterministic event-id collision");
+
+                let error = handle_capture_session(&server, params.clone())
+                    .await
+                    .expect_err("required event collision must block completion");
+                assert!(error.contains("collision"), "unexpected error: {error}");
+                let incomplete = server
+                    .with_project_store_read(|store| {
+                        store
+                            .list_state(CAPTURE_MANIFEST_NAMESPACE)
+                            .map_err(|e| e.to_string())
+                    })
+                    .expect("read incomplete manifest");
+                let incomplete: serde_json::Value =
+                    serde_json::from_str(&incomplete[0].value_json).expect("manifest JSON");
+                assert_eq!(incomplete["completed"], false);
+                assert!(incomplete["artifacts"][0]["entry"].is_object());
+
+                server
+                    .with_project_store(|store| {
+                        store
+                            .connection()
+                            .execute("DELETE FROM tachi_events WHERE id = ?1", [&event_id])
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    })
+                    .expect("remove transient collision");
+                let recovered: serde_json::Value = serde_json::from_str(
+                    &handle_capture_session(&server, params)
+                        .await
+                        .expect("retry after event failure"),
+                )
+                .expect("recovery receipt");
+                assert_eq!(recovered["status"], "completed");
+                assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+                let (events, manifests) = server
+                    .with_project_store_read(|store| {
+                        let events = store
+                            .list_tachi_events(&memcore::TachiEventQuery {
+                                event_type: Some("session.captured".into()),
+                                limit: 10,
+                                ..Default::default()
+                            })
+                            .map_err(|e| e.to_string())?;
+                        let manifests = store
+                            .list_state(CAPTURE_MANIFEST_NAMESPACE)
+                            .map_err(|e| e.to_string())?;
+                        Ok((events, manifests))
+                    })
+                    .expect("read recovered durable state");
+                assert_eq!(events.len(), 1);
+                let completed: serde_json::Value =
+                    serde_json::from_str(&manifests[0].value_json).expect("completed manifest");
+                assert_eq!(completed["completed"], true);
+                assert!(completed["artifacts"][0]["entry"].is_null());
+                mock.abort();
+            });
+        });
+    }
+
+    #[test]
+    fn capture_failpoints_recover_idempotently_at_every_durable_stage() {
+        let _guard = FAILPOINT_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        for stage in [
+            "after_manifest_admission",
+            "after_artifact_0",
+            "after_maintenance",
+        ] {
+            crate::test_support::with_tachi_home(|home| {
+                let global_db = home.join("global").join(format!("{stage}-global.db"));
+                let project_db = home.join("projects").join(stage).join("memory.db");
+                std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+                std::fs::create_dir_all(project_db.parent().unwrap()).expect("mkdir project");
+                let params = CaptureSessionParams {
+                    conversation_id: format!("conv-{stage}"),
+                    turn_id: "turn-1".into(),
+                    agent_id: "failpoint-agent".into(),
+                    messages: vec![Message {
+                        role: "user".into(),
+                        content: "Capture the durable recovery observation.".into(),
+                    }],
+                    path_prefix: Some(format!("/capture/{stage}")),
+                    scope: "project".into(),
+                    project: None,
+                    project_explicit: false,
+                    min_chars: 1,
+                    force: true,
+                };
+                let draft = serde_json::json!([{
+                    "text": "Failpoint recovery preserves exactly one artifact.",
+                    "summary": "Failpoint recovery",
+                    "topic": "recovery",
+                    "category": "fact",
+                    "scope": "project",
+                    "importance": 0.8
+                }])
+                .to_string();
+                let _workers = crate::test_support::EnvRestore::set(
+                    "TACHI_TEST_ENABLE_BACKGROUND_WORKERS",
+                    "1",
+                );
+                let _persist = crate::test_support::EnvRestore::set(
+                    "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+                    "1",
+                );
+                let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
+                let rt = tokio::runtime::Runtime::new().expect("runtime");
+                let project_db_for_query = project_db.clone();
+                let (second, third, server, calls) = rt.block_on(async move {
+                    let (port, calls, mock) = spawn_capture_llm(vec![draft]).await;
+                    let _base = crate::test_support::EnvRestore::set(
+                        "EXTRACT_BASE_URL",
+                        &format!("http://127.0.0.1:{port}/chat/completions"),
+                    );
+                    let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
+                    let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
+                    let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+                    set_capture_failpoint(stage);
+                    let first = handle_capture_session(&server, params.clone()).await;
+                    assert!(
+                        first
+                            .expect_err("armed failpoint must fail once")
+                            .contains(stage),
+                        "stage {stage} must return an explicit error"
+                    );
+                    let second = handle_capture_session(&server, params.clone())
+                        .await
+                        .expect("recovery");
+                    let calls_after_recovery = calls.load(std::sync::atomic::Ordering::SeqCst);
+                    let third = handle_capture_session(&server, params)
+                        .await
+                        .expect("exact replay");
+                    assert_eq!(
+                        calls.load(std::sync::atomic::Ordering::SeqCst),
+                        calls_after_recovery,
+                        "completed fast path must precede extraction/embedding work"
+                    );
+                    assert_eq!(
+                        calls_after_recovery, 1,
+                        "retry must reuse admitted manifest"
+                    );
+                    mock.abort();
+                    (second, third, server, calls)
+                });
+                rt.shutdown_timeout(std::time::Duration::from_millis(500));
+
+                let second: serde_json::Value = serde_json::from_str(&second).unwrap();
+                let third: serde_json::Value = serde_json::from_str(&third).unwrap();
+                assert_eq!(second["status"], "completed");
+                assert_eq!(third["captured"], 0);
+                assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+                let id = second["ids"]
+                    .as_array()
+                    .and_then(|ids| ids.first())
+                    .or_else(|| {
+                        third["duplicate_ids"]
+                            .as_array()
+                            .and_then(|ids| ids.first())
+                    })
+                    .and_then(serde_json::Value::as_str)
+                    .expect("artifact id");
+                let row = server
+                    .with_project_store_read(|store| store.get(id).map_err(|e| e.to_string()))
+                    .expect("query artifact")
+                    .expect("artifact exists");
+                assert_eq!(row.revision, 1);
+                let (events, manifest) = server
+                    .with_project_store_read(|store| {
+                        let events = store
+                            .list_tachi_events(&memcore::TachiEventQuery {
+                                event_type: Some("session.captured".into()),
+                                limit: 100,
+                                ..Default::default()
+                            })
+                            .map_err(|e| e.to_string())?;
+                        let states = store
+                            .list_state(CAPTURE_MANIFEST_NAMESPACE)
+                            .map_err(|e| e.to_string())?;
+                        Ok((events, states))
+                    })
+                    .expect("query durable side effects");
+                assert_eq!(events.len(), 1);
+                let conn = rusqlite::Connection::open(&project_db_for_query)
+                    .expect("open project DB for durable job query");
+                let artifact_count: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM memories WHERE id = ?1", [id], |row| {
+                        row.get(0)
+                    })
+                    .expect("count capture memory IDs");
+                assert_eq!(artifact_count, 1);
+                let mut statement = conn
+                    .prepare("SELECT id, kind FROM foundry_jobs ORDER BY id")
+                    .expect("prepare foundry job query");
+                let jobs = statement
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .expect("query foundry jobs")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("read foundry jobs");
+                let mut ids = jobs.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>();
+                ids.sort_unstable();
+                ids.dedup();
+                assert_eq!(
+                    ids.len(),
+                    jobs.len(),
+                    "deterministic jobs must not duplicate"
+                );
+                let mut by_kind = std::collections::BTreeMap::new();
+                for (_, kind) in &jobs {
+                    *by_kind.entry(kind).or_insert(0usize) += 1;
+                }
+                assert!(by_kind.values().all(|count| *count == 1));
+                assert!(
+                    !jobs.is_empty(),
+                    "one destination group must enqueue maintenance"
+                );
+                assert_eq!(manifest.len(), 1);
+                let serialized = manifest[0].value_json.clone();
+                let manifest: serde_json::Value =
+                    serde_json::from_str(&serialized).expect("manifest JSON");
+                assert_eq!(manifest["completed"], true);
+                assert_eq!(manifest["artifacts"][0]["entry"], serde_json::Value::Null);
+                let receipt = &manifest["destination_receipts"][0];
+                assert!(receipt["memory_ids"]
+                    .as_array()
+                    .expect("receipt memory ids")
+                    .iter()
+                    .any(|memory_id| memory_id == id));
+                for job_id in receipt["maintenance_job_ids"]
+                    .as_array()
+                    .expect("receipt job ids")
+                {
+                    assert!(jobs
+                        .iter()
+                        .any(|(found, _)| Some(found.as_str()) == job_id.as_str()));
+                }
+                assert!(events.iter().any(|event| {
+                    Some(event.id.as_str()) == receipt["session_event_id"].as_str()
+                }));
+                assert_eq!(manifest["expires_at"], serde_json::Value::Null);
+                assert_eq!(manifest["staging_policy"], CAPTURE_MANIFEST_STAGING_POLICY);
+                assert_eq!(
+                    manifest["completed_retention_policy"],
+                    CAPTURE_MANIFEST_COMPLETED_RETENTION_POLICY
+                );
+                for sensitive in [
+                    "Failpoint recovery preserves exactly one artifact.",
+                    "Failpoint recovery",
+                    "entities",
+                    "keywords",
+                ] {
+                    assert!(
+                        !serialized.contains(sensitive),
+                        "completed receipt leaked {sensitive}"
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn legacy_archived_bracket_fixture_is_preserved_field_for_field_on_replay() {
+        crate::test_support::with_tachi_home(|home| {
+            let global_db = home.join("global").join("memory.db");
+            let project_db = home
+                .join("projects")
+                .join("capture-legacy")
+                .join("memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("mkdir project");
+            let mut params = CaptureSessionParams {
+                conversation_id: "legacy-conv-a".into(),
+                turn_id: "legacy-turn-a".into(),
+                agent_id: "legacy-agent".into(),
+                messages: vec![Message {
+                    role: "assistant".into(),
+                    content: "（记住了旧规则已被纠正）".into(),
+                }],
+                path_prefix: None,
+                scope: "project".into(),
+                project: None,
+                project_explicit: false,
+                min_chars: 1,
+                force: true,
+            };
+            let _workers =
+                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
+            let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
+            let rt = tokio::runtime::Runtime::new().expect("runtime");
+            rt.block_on(async {
+                let (port, _calls, mock) = spawn_capture_llm(vec!["[]".into()]).await;
+                let _base = crate::test_support::EnvRestore::set("EXTRACT_BASE_URL", &format!("http://127.0.0.1:{port}/chat/completions"));
+                let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
+                let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
+                let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+                let receipt: serde_json::Value = serde_json::from_str(&handle_capture_session(&server, params.clone()).await.expect("seed")).unwrap();
+                let id = receipt["ids"][0].as_str().unwrap().to_string();
+                let mut fixture = server.with_project_store_read(|s| s.get(&id).map_err(|e| e.to_string())).unwrap().unwrap();
+                let legacy_id = extract_bracket_self_evolution_notes(&params.agent_id, &params.messages)[0].id.clone();
+                server.with_project_store(|s| s.delete(&id).map_err(|e| e.to_string())).expect("remove modern seed");
+                fixture.id = legacy_id.clone();
+                fixture.archived = true;
+                fixture.metadata = serde_json::json!({"lifecycle":"corrected","authority":"legacy-owner","provenance":{"source":"archive"},"superseded_by":"replacement-7"});
+                server.with_project_store(|s| s.upsert(&fixture).map_err(|e| e.to_string())).expect("install legacy fixture");
+                let before = server.with_project_store_read(|s| s.get_with_options(&legacy_id, true).map_err(|e| e.to_string())).unwrap().unwrap();
+                params.conversation_id = "legacy-conv-b".into();
+                params.turn_id = "legacy-turn-b".into();
+                let replay: serde_json::Value = serde_json::from_str(&handle_capture_session(&server, params).await.expect("replay")).unwrap();
+                assert_eq!(replay["captured"], 0);
+                let after = server.with_project_store_read(|s| s.get_with_options(&legacy_id, true).map_err(|e| e.to_string())).unwrap().unwrap();
+                assert_eq!(serde_json::to_value(&before).unwrap(), serde_json::to_value(&after).unwrap());
+                assert!(after.archived);
+                mock.abort();
+            });
+        });
+    }
+
+    #[test]
+    fn routed_db_supersession_tombstone_blocks_new_bracket_artifact() {
+        crate::test_support::with_tachi_home(|home| {
+            std::fs::write(
+                home.join("routing.json"),
+                r#"{"domain_routes":[{"project":"hapi","domains":["equity_trading"]}]}"#,
+            )
+            .expect("write routing");
+            let global_db = home.join("global").join("memory.db");
+            let quant_db = home.join("projects").join("quant").join("memory.db");
+            let hapi_db = home.join("projects").join("hapi").join("memory.db");
+            for path in [&global_db, &quant_db, &hapi_db] {
+                std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir DB parent");
+            }
+            memcore::MemoryStore::open_with_label(hapi_db.to_str().unwrap(), "hapi")
+                .expect("mount hapi");
+            let params = CaptureSessionParams {
+                conversation_id: "routed-tombstone-conv".into(),
+                turn_id: "turn-1".into(),
+                agent_id: "routed-tombstone-agent".into(),
+                messages: vec![Message {
+                    role: "assistant".into(),
+                    content: "（记住了这次交易复盘的重要经验，下次要更谨慎）".into(),
+                }],
+                path_prefix: Some("/trading/equity".into()),
+                scope: "project".into(),
+                project: None,
+                project_explicit: false,
+                min_chars: 1,
+                force: true,
+            };
+            let discriminator =
+                extract_bracket_self_evolution_notes(&params.agent_id, &params.messages)[0]
+                    .id
+                    .clone();
+            let tombstone_id = "routed-bracket-tombstone";
+            let tombstone = memcore::MemoryEntry {
+                id: tombstone_id.into(),
+                path: "/trading/equity/self-evolution".into(),
+                summary: "superseded bracket evidence".into(),
+                text: "superseded bracket evidence".into(),
+                importance: 0.7,
+                timestamp: "2026-07-19T00:00:00Z".into(),
+                valid_from: String::new(),
+                valid_until: None,
+                category: "preference".into(),
+                topic: "self_evolution".into(),
+                keywords: vec!["bracket-note".into()],
+                persons: Vec::new(),
+                entities: Vec::new(),
+                location: String::new(),
+                source: "bracket_self_evolution".into(),
+                scope: "project".into(),
+                archived: false,
+                access_count: 0,
+                last_access: None,
+                revision: 1,
+                metadata: serde_json::json!({
+                    "bracket_note_discriminator": discriminator,
+                    "authority": "historical",
+                }),
+                vector: None,
+                retention_policy: Some("durable".into()),
+                domain: Some("equity_trading".into()),
+                recall_count: 0,
+                query_diversity: 0,
+                tier: "raw".into(),
+            };
+            let server = MemoryServer::new(global_db, Some(quant_db)).expect("server");
+            server
+                .with_named_project_store("hapi", |store| {
+                    store.upsert(&tombstone).map_err(|e| e.to_string())?;
+                    store
+                        .connection()
+                        .execute(
+                            "UPDATE memories SET superseded_by = 'replacement-9' WHERE id = ?1",
+                            [tombstone_id],
+                        )
+                        .map_err(|e| e.to_string())?;
+                    Ok(())
+                })
+                .expect("seed routed DB-column tombstone");
+            let before: (String, i64, String) = server
+                .with_named_project_store_read("hapi", |store| {
+                    store
+                        .connection()
+                        .query_row(
+                            "SELECT metadata, revision, superseded_by FROM memories WHERE id = ?1",
+                            [tombstone_id],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )
+                        .map_err(|e| e.to_string())
+                })
+                .expect("snapshot tombstone");
+            let _workers =
+                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
+            let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
+            let rt = tokio::runtime::Runtime::new().expect("runtime");
+            rt.block_on(async {
+                let (port, _calls, mock) = spawn_capture_llm(vec!["[]".into()]).await;
+                let _base = crate::test_support::EnvRestore::set(
+                    "EXTRACT_BASE_URL",
+                    &format!("http://127.0.0.1:{port}/chat/completions"),
+                );
+                let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
+                let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
+                let receipt: serde_json::Value = serde_json::from_str(
+                    &handle_capture_session(&server, params)
+                        .await
+                        .expect("suppressed capture"),
+                )
+                .expect("receipt");
+                assert_eq!(receipt["captured"], 0);
+                mock.abort();
+            });
+            let after: (String, i64, String) = server
+                .with_named_project_store_read("hapi", |store| {
+                    store
+                        .connection()
+                        .query_row(
+                            "SELECT metadata, revision, superseded_by FROM memories WHERE id = ?1",
+                            [tombstone_id],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )
+                        .map_err(|e| e.to_string())
+                })
+                .expect("snapshot routed tombstone after capture");
+            assert_eq!(after, before, "suppression must not mutate the tombstone");
+            for project in ["quant", "hapi"] {
+                let active_new: i64 = server
+                    .with_named_project_store_read(project, |store| {
+                        store
+                            .connection()
+                            .query_row(
+                                "SELECT COUNT(*) FROM memories
+                                 WHERE id LIKE 'capture-session:%'
+                                   AND archived = 0 AND superseded_by IS NULL",
+                                [],
+                                |row| row.get(0),
+                            )
+                            .map_err(|e| e.to_string())
+                    })
+                    .expect("count active bracket copies");
+                assert_eq!(active_new, 0, "new active copy appeared in {project}");
+            }
+        });
+    }
+
+    /// #1301 LLM-draft discrimination: a source revision owns deterministic
+    /// artifact slots. Completed receipts do not retain content and therefore
+    /// do not restore an out-of-scope later deletion; the failpoint test above
+    /// covers recovery while the admitted manifest is still incomplete.
+    /// Exact replay is a no-op without resampling the model, and a different
+    /// source event remains separately attributable.
+    #[test]
+    fn session_capture_replay_is_noop_after_completion_and_classifies_ephemeral() {
+        crate::test_support::with_tachi_home(|home| {
+            let global_db = home.join("global").join("memory.db");
+            let project_db = home.join("projects").join("capture").join("memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("mkdir project");
+
+            let params = CaptureSessionParams {
+                conversation_id: "conv-drafts".to_string(),
+                turn_id: "turn-1".to_string(),
+                agent_id: "capture-draft-agent".to_string(),
+                messages: vec![Message {
+                    role: "user".to_string(),
+                    content: "Record the two machine-generated session observations.".to_string(),
+                }],
+                path_prefix: Some("/capture/replay".to_string()),
+                scope: "project".to_string(),
+                project: None,
+                project_explicit: false,
+                min_chars: 1,
+                force: true,
+            };
+            let drafts = serde_json::json!([
+                {
+                    "text": "The first extracted observation remains atomic.",
+                    "summary": "First observation",
+                    "topic": "session",
+                    "category": "fact",
+                    "scope": "project",
+                    "importance": 0.7
+                },
+                {
+                    "text": "The second extracted observation remains atomic.",
+                    "summary": "Second observation",
+                    "topic": "session",
+                    "category": "fact",
+                    "scope": "project",
+                    "importance": 0.7
+                }
+            ])
+            .to_string();
+
+            let _workers =
+                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
+            let _persist = crate::test_support::EnvRestore::set(
+                "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+                "1",
+            );
+            let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
+
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            let (first, completed_replay, replay, changed_event, removed_id, server, calls) =
+                rt.block_on(async move {
+                    let mutated = serde_json::json!([{
+                        "text": "A later model sample changed",
+                        "summary": "changed",
+                        "topic": "other",
+                        "category": "fact",
+                        "scope": "project",
+                        "importance": 0.9
+                    }])
+                    .to_string();
+                    let (port, calls, mock) = spawn_capture_llm(vec![drafts, mutated]).await;
+                    let _base = crate::test_support::EnvRestore::set(
+                        "EXTRACT_BASE_URL",
+                        &format!("http://127.0.0.1:{port}/chat/completions"),
+                    );
+                    let _model =
+                        crate::test_support::EnvRestore::set("EXTRACT_MODEL", "capture-draft-mock");
+                    let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
+                    let server =
+                        MemoryServer::new(global_db, Some(project_db)).expect("capture server");
+
+                    let first = handle_capture_session(&server, params.clone())
+                        .await
+                        .expect("first capture");
+                    let first_json: serde_json::Value =
+                        serde_json::from_str(&first).expect("first receipt JSON");
+                    let removed_id = first_json["ids"][1]
+                        .as_str()
+                        .expect("second captured id")
+                        .to_string();
+                    server
+                        .with_project_store(|store| {
+                            store.delete(&removed_id).map_err(|e| e.to_string())
+                        })
+                        .expect("create a missing-artifact recovery fixture");
+
+                    let completed_replay = handle_capture_session(&server, params.clone())
+                        .await
+                        .expect("completed replay after external deletion");
+                    let replay = handle_capture_session(&server, params.clone())
+                        .await
+                        .expect("exact replay");
+                    assert_eq!(
+                        calls.load(std::sync::atomic::Ordering::SeqCst),
+                        1,
+                        "exact replay must not call LLM; its next payload is intentionally different"
+                    );
+                    let mut changed_params = params;
+                    changed_params.turn_id = "turn-2".to_string();
+                    let changed_event = handle_capture_session(&server, changed_params)
+                        .await
+                        .expect("different source event");
+                    mock.abort();
+                    (
+                        first,
+                        completed_replay,
+                        replay,
+                        changed_event,
+                        removed_id,
+                        server,
+                        calls,
+                    )
+                });
+            rt.shutdown_timeout(std::time::Duration::from_millis(500));
+
+            let first: serde_json::Value = serde_json::from_str(&first).expect("first receipt");
+            let completed_replay: serde_json::Value =
+                serde_json::from_str(&completed_replay).expect("completed replay receipt");
+            let replay: serde_json::Value = serde_json::from_str(&replay).expect("replay receipt");
+            let changed_event: serde_json::Value =
+                serde_json::from_str(&changed_event).expect("changed-event receipt");
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "exact replay/recovery must not resample; only first and changed event call LLM"
+            );
+
+            assert_eq!(first["captured"], 2, "first receipt: {first}");
+            assert_eq!(
+                completed_replay["captured"], 0,
+                "completed replay receipt: {completed_replay}"
+            );
+            assert_eq!(
+                completed_replay["duplicates_skipped"], 2,
+                "completed replay receipt: {completed_replay}"
+            );
+            assert_eq!(replay["captured"], 0, "exact replay receipt: {replay}");
+            assert_eq!(
+                replay["duplicates_skipped"], 2,
+                "exact replay receipt: {replay}"
+            );
+            assert_eq!(
+                changed_event["captured"], 1,
+                "new source event must remain attributable: {changed_event}"
+            );
+            assert_ne!(
+                first["ids"], changed_event["ids"],
+                "source event identity must participate in artifact ids"
+            );
+
+            for id in first["ids"].as_array().expect("first ids") {
+                let id = id.as_str().expect("string id");
+                if id == removed_id {
+                    assert!(
+                        server
+                            .with_project_store_read(|store| {
+                                store.get(id).map_err(|e| e.to_string())
+                            })
+                            .expect("read externally deleted row")
+                            .is_none(),
+                        "completed replay must not resurrect an out-of-scope deletion"
+                    );
+                    continue;
+                }
+                let stored = server
+                    .with_project_store_read(|store| store.get(id).map_err(|e| e.to_string()))
+                    .expect("read capture row")
+                    .expect("capture row exists");
+                assert_eq!(stored.revision, 1, "replay must not update {id}");
+                assert_eq!(stored.retention_policy.as_deref(), Some("ephemeral"));
+                let timestamp = chrono::DateTime::parse_from_rfc3339(&stored.timestamp)
+                    .expect("capture timestamp");
+                let expires = chrono::DateTime::parse_from_rfc3339(
+                    stored.valid_until.as_deref().expect("ephemeral expiry"),
+                )
+                .expect("capture expiry");
+                assert_eq!((expires - timestamp).num_days(), CAPTURE_EPHEMERAL_TTL_DAYS);
+                assert_eq!(
+                    stored.metadata["capture_retention"]["policy_version"],
+                    CAPTURE_RETENTION_POLICY_VERSION
+                );
+                assert!(stored.metadata["source_revision"].as_str().is_some());
+                assert_eq!(stored.metadata["source_refs"][0]["ref_type"], "turn");
+            }
+        });
+    }
 
     // `with_tachi_home` is a plain sync closure (it restores TACHI_HOME the
     // instant the closure returns) — not `#[tokio::test]`-compatible
