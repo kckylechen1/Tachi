@@ -21,9 +21,14 @@ pub(crate) async fn run_provider_probe_report(global_db_path: &Path) -> Provider
             };
         }
     };
-    if let Err(err) = crate::provider_config::materialize_standalone(&llm, global_db_path) {
-        tracing::warn!("[provider] probe secret materialization failed: {err}");
-    }
+    let skipped_alias_probe =
+        match crate::provider_config::materialize_standalone(&llm, global_db_path) {
+            Ok(report) => skipped_alias_probe_result(&report),
+            Err(err) => {
+                tracing::warn!("[provider] probe secret materialization failed: {err}");
+                None
+            }
+        };
 
     // Run probes concurrently so adding chat lanes does not make status
     // probes serially accumulate their timeout budgets.
@@ -66,6 +71,9 @@ pub(crate) async fn run_provider_probe_report(global_db_path: &Path) -> Provider
     );
 
     let mut out = Vec::new();
+    if let Some(probe) = skipped_alias_probe {
+        out.push(probe);
+    }
     out.push(match embed {
         Ok(Ok(vec)) => ProviderProbeResult {
             name: "voyage_embed".to_string(),
@@ -142,6 +150,36 @@ pub(crate) async fn run_provider_probe_report(global_db_path: &Path) -> Provider
         probes: out,
         rotation_groups: run_rotation_group_probes(global_db_path).await,
     }
+}
+
+/// tachi#1287 fix 1: the accessor refresh seam
+/// (`server_state/accessors.rs::refresh_llm_provider_secrets_from_vault`)
+/// already logs every `MaterializeReport.skipped_aliases` entry loudly, but
+/// this health-probe seam only checked the `Err` branch of
+/// `materialize_standalone` and silently discarded `Ok(report)` — so a
+/// per-alias skip on the probe path had no signal in the probe report itself,
+/// only (maybe) in tracing output the status snapshot doesn't capture.
+/// Surface it both ways: log each skip, and return a `ProviderProbeResult` so
+/// `status doctor`/health snapshots show it.
+pub(super) fn skipped_alias_probe_result(
+    report: &tachi_llm::MaterializeReport,
+) -> Option<ProviderProbeResult> {
+    if report.skipped_aliases.is_empty() {
+        return None;
+    }
+    for (key, reason) in &report.skipped_aliases {
+        tracing::warn!(
+            "[provider] skipped alias for '{key}': {}",
+            crate::provider_config::format_skipped_alias_reason(reason)
+        );
+    }
+    Some(ProviderProbeResult {
+        name: "provider_secret_materialization".to_string(),
+        status: "degraded".to_string(),
+        message: Some(crate::provider_config::describe_skipped_aliases(
+            &report.skipped_aliases,
+        )),
+    })
 }
 
 fn probe_llm_client(global_db_path: &Path) -> Result<tachi_llm::LlmClient, String> {
