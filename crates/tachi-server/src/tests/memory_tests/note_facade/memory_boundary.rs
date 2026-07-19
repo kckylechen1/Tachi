@@ -47,6 +47,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
             emit_continuity: false,
             compact: false,
             files: Vec::new(),
+            references: Vec::new(),
             proposal_id: None,
             review_status: None,
             notes: None,

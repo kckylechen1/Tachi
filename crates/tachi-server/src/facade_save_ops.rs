@@ -10,6 +10,7 @@ use crate::memory_search_ops::{handle_remember, handle_save_memory};
 use crate::pipeline_ops::handle_extract_facts;
 use crate::tool_params::*;
 use crate::MemoryServer;
+use chrono::Utc;
 
 pub(crate) async fn handle_tachi_save(
     server: &MemoryServer,
@@ -158,8 +159,20 @@ pub(crate) async fn handle_tachi_save(
         }
         _ => {
             // "memory" or any other value
+            //
+            // tachi#1288 (Fix B): `references[]` used to be consumed only by
+            // the "wiki" arm above (-> `metadata.source_refs`); a plain
+            // memory save silently dropped it on the floor. Validate first
+            // (an invalid reference is a caller error to surface loudly, not
+            // to swallow -- `wiki_ops::validate_references` is the same gate
+            // `tachi_wiki_write` runs), then merge into
+            // `metadata.evidence_refs_v1` -- the #1285-preferred typed shape
+            // (see `wiki_ops::provenance::preferred_wiki_references`), not
+            // the legacy `source_refs` string array.
+            crate::wiki_ops::validate_references(&params.references)?;
             let metadata =
                 merge_referenced_files(params.metadata.clone(), &params.files, &params.text);
+            let metadata = merge_evidence_references(metadata, &params.references);
             let mem_params = SaveMemoryParams {
                 text: params.text.clone(),
                 summary: params.summary.clone().unwrap_or_default(),
@@ -261,6 +274,34 @@ fn merge_referenced_files(
     Some(serde_json::Value::Object(obj))
 }
 
+/// tachi#1288 (Fix B): dual-write validated `references[]` into
+/// `metadata.evidence_refs_v1` (typed, canon doc §7.1 `WikiEvidenceRefV1`
+/// shape -- same builder `tachi_wiki_write` uses via `wiki_layer_metadata`)
+/// for the plain "memory" save path, which previously had no consumer for
+/// this field at all. Returns the metadata unchanged when there are no
+/// references, so old behaviour/payloads stay byte-identical. Callers must
+/// validate `references` first (`wiki_ops::validate_references`) -- this
+/// function assumes they are already well-formed.
+fn merge_evidence_references(
+    metadata: Option<serde_json::Value>,
+    references: &[String],
+) -> Option<serde_json::Value> {
+    if references.is_empty() {
+        return metadata;
+    }
+    let captured_at = Utc::now().to_rfc3339();
+    let evidence_refs_v1 = build_evidence_refs_v1(references, &captured_at);
+    let mut obj = match metadata {
+        Some(serde_json::Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    };
+    obj.insert(
+        "evidence_refs_v1".to_string(),
+        serde_json::json!(evidence_refs_v1),
+    );
+    Some(serde_json::Value::Object(obj))
+}
+
 /// Extract referenced file paths from `spec:` pointer lines, e.g.
 /// `spec: docs/SPEC.md` or `spec:docs/SPEC.md, src/lib.rs`. Conservative by
 /// design — only lines whose first non-space token is `spec:` are considered,
@@ -318,5 +359,55 @@ mod referenced_files_tests {
             merged["files"],
             json!(["docs/A.md", "src/b.rs", "docs/C.md"])
         );
+    }
+}
+
+#[cfg(test)]
+mod evidence_references_tests {
+    use super::merge_evidence_references;
+    use serde_json::json;
+
+    /// tachi#1288 Fix B: no references → metadata passes through unchanged,
+    /// so old callers with no references field stay byte-identical.
+    #[test]
+    fn no_references_leaves_metadata_untouched() {
+        let metadata = Some(json!({ "tier": "raw" }));
+        assert_eq!(
+            merge_evidence_references(metadata.clone(), &[]),
+            metadata,
+            "empty references must not touch metadata at all"
+        );
+        assert!(merge_evidence_references(None, &[]).is_none());
+    }
+
+    /// tachi#1288 Fix B: non-empty references land as the typed
+    /// `evidence_refs_v1` shape (canon doc §7.1 `WikiEvidenceRefV1`), the
+    /// same builder `tachi_wiki_write` uses -- not the legacy `source_refs`
+    /// string array.
+    #[test]
+    fn references_land_as_typed_evidence_refs_v1() {
+        let references = vec!["https://example.com/doc".to_string(), "#1288".to_string()];
+        let merged = merge_evidence_references(Some(json!({ "tier": "raw" })), &references)
+            .expect("metadata present");
+        assert_eq!(merged["tier"], json!("raw"), "existing metadata preserved");
+        let refs = merged["evidence_refs_v1"]
+            .as_array()
+            .expect("evidence_refs_v1 present as array");
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0]["ref"], json!("https://example.com/doc"));
+        assert_eq!(refs[1]["ref"], json!("#1288"));
+        assert!(
+            merged.get("source_refs").is_none(),
+            "must not dual-write the legacy source_refs array: {merged}"
+        );
+    }
+
+    /// References merge into a fresh object when no metadata was supplied,
+    /// mirroring `merge_referenced_files`'s equivalent behavior for `files`.
+    #[test]
+    fn references_create_metadata_object_when_none_supplied() {
+        let merged = merge_evidence_references(None, &["#42".to_string()])
+            .expect("metadata created from references alone");
+        assert_eq!(merged["evidence_refs_v1"].as_array().map(Vec::len), Some(1));
     }
 }

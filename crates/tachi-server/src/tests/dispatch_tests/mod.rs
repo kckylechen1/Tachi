@@ -199,6 +199,7 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         metadata: None,
         emit_continuity: false,
         files: Vec::new(),
+        references: Vec::new(),
         flow_id: None,
         event: None,
         state: None,
