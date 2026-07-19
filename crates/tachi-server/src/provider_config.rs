@@ -140,6 +140,34 @@ fn format_provider_materialization_error(err: String) -> String {
     }
 }
 
+/// #1279: per-alias tolerance means a missing `vault:` alias degrades to a
+/// `MaterializeReport.skipped_aliases` entry instead of an `Err`, so the raw
+/// skip reason from `tachi-llm` no longer flows through
+/// `format_provider_materialization_error`. Every consumer that surfaces a skip
+/// (server refresh log, bootstrap summary, vault-op response, backfill fail-fast)
+/// reattaches the same `vault_unlock`/`vault_set` remediation here — keeping the
+/// remediation wording single-sourced in `tachi-server` rather than duplicated
+/// per call site or leaked into `tachi-llm`.
+pub fn format_skipped_alias_reason(reason: &str) -> String {
+    format_provider_materialization_error(reason.to_string())
+}
+
+/// Render `MaterializeReport.skipped_aliases` into one operator-facing message
+/// with per-alias remediation. Used by fail-loud consumers (vault-op response,
+/// backfill fail-fast) that need a single string; the accessor refresh path logs
+/// each alias on its own line instead.
+pub fn describe_skipped_aliases(skipped: &[(String, String)]) -> String {
+    let details = skipped
+        .iter()
+        .map(|(_key, reason)| format_skipped_alias_reason(reason))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "{} provider alias(es) skipped during materialization: {details}",
+        skipped.len()
+    )
+}
+
 pub fn materialize_for_server(server: &MemoryServer) -> Result<MaterializeReport, String> {
     let global = server.global_db_path_buf();
     let vault_pools = resolve_vault_pools(Some(server), &global);
@@ -223,7 +251,7 @@ pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, St
         v.unlock_time = Some(std::time::Instant::now());
     }
 
-    let loaded = server.refresh_llm_provider_secrets_from_vault()?;
+    let loaded = server.refresh_llm_provider_secrets_from_vault()?.loaded;
     tracing::info!("[vault] auto-unlocked from Keychain ({loaded} provider key(s))");
     server.requeue_auth_failed_enrichment_retries("Keychain auto-unlock");
     Ok(true)
@@ -240,7 +268,29 @@ pub fn bootstrap_provider_runtime(server: &MemoryServer) {
         Err(err) => tracing::warn!("[vault] auto-unlock skipped: {err}"),
     }
     match server.refresh_llm_provider_secrets_from_vault() {
-        Ok(n) if n > 0 => tracing::info!("[provider] {n} provider key(s) ready for LLM/embed"),
+        // #1279: name the specific bad aliases at the bootstrap surface instead of
+        // the old generic "Vault locked or empty". The full per-alias remediation is
+        // logged by `refresh_llm_provider_secrets_from_vault`; this summary lists the
+        // alias keys and points operators at those warnings.
+        Ok(report) if !report.skipped_aliases.is_empty() => {
+            let keys = report
+                .skipped_aliases
+                .iter()
+                .map(|(key, _reason)| key.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::warn!(
+                "[provider] {} provider key(s) ready, {} alias(es) skipped ({keys}); see '[provider] skipped alias' warnings for vault_unlock/vault_set remediation",
+                report.loaded,
+                report.skipped_aliases.len()
+            );
+        }
+        Ok(report) if report.loaded > 0 => {
+            tracing::info!(
+                "[provider] {} provider key(s) ready for LLM/embed",
+                report.loaded
+            )
+        }
         Ok(_) => {
             tracing::debug!("[provider] no provider keys materialized (Vault locked or empty)")
         }
@@ -433,6 +483,14 @@ mod tests {
         assert_eq!(std::env::var("OPENAI_API_KEY").as_deref(), Ok("env-secret"));
     }
 
+    // #1279: a missing `vault:` alias no longer aborts the whole batch with an
+    // `Err`; it degrades to a per-alias entry in `report.skipped_aliases`. This
+    // test preserves the frozen guarantee that the skip stays observable AND
+    // carries `vault_unlock`/`vault_set` remediation (never a naked value) — now
+    // enforced at the consumer surface via `format_skipped_alias_reason`, the
+    // single source consumers use to reattach remediation. Discrimination: if a
+    // consumer surfaced the raw skip reason without remediation, the
+    // `vault_unlock`/`vault_set` assertions below would fail.
     #[test]
     fn materialize_provider_secrets_formats_missing_alias_remediation() {
         let _guard = crate::utils::global_test_lock()
@@ -440,13 +498,22 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _env = EnvRestore::set("VOYAGE_API_KEY", "vault:MISSING_VOYAGE");
         let llm = LlmClient::new().expect("llm client");
-        let err = materialize_provider_secrets(&llm, &HashMap::new())
-            .expect_err("missing alias should fail");
+        let report = materialize_provider_secrets(&llm, &HashMap::new())
+            .expect("missing alias must degrade to a skip, not abort the batch");
 
-        assert!(err.contains("Config key 'VOYAGE_API_KEY' references Vault alias 'MISSING_VOYAGE'"));
-        assert!(!err.contains("VOYAGE_API_KEY=vault:MISSING_VOYAGE"));
-        assert!(err.contains("secret is missing or Vault is locked"));
-        assert!(err.contains("vault_unlock"));
-        assert!(err.contains("vault_set"));
+        let (key, reason) = report
+            .skipped_aliases
+            .iter()
+            .find(|(key, _reason)| key == "VOYAGE_API_KEY")
+            .expect("missing VOYAGE alias must be recorded in skipped_aliases");
+        assert_eq!(key, "VOYAGE_API_KEY");
+
+        let surfaced = format_skipped_alias_reason(reason);
+        assert!(surfaced
+            .contains("Config key 'VOYAGE_API_KEY' references Vault alias 'MISSING_VOYAGE'"));
+        assert!(surfaced.contains("secret is missing or Vault is locked"));
+        assert!(surfaced.contains("vault_unlock"));
+        assert!(surfaced.contains("vault_set"));
+        assert!(!surfaced.contains("VOYAGE_API_KEY=vault:MISSING_VOYAGE"));
     }
 }

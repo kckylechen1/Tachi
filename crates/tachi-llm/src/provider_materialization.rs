@@ -9,6 +9,7 @@ pub struct MaterializeReport {
     pub from_vault: usize,
     pub from_alias: usize,
     pub env_fallbacks_bypassed: usize,
+    pub skipped_aliases: Vec<(String, String)>,
 }
 
 fn flatten_pools(pools: &HashMap<String, Vec<ProviderSecret>>) -> HashMap<String, String> {
@@ -84,22 +85,22 @@ where
         }
 
         if let Some(vault_name) = parse_vault_alias(trimmed) {
-            let pool = vault_pools
-                .get(vault_name)
-                .cloned()
-                .or_else(|| {
-                    vault_map.get(vault_name).cloned().map(|secret| {
-                        vec![ProviderSecret {
-                            key_id: vault_name.to_string(),
-                            value: secret,
-                        }]
-                    })
+            let Some(pool) = vault_pools.get(vault_name).cloned().or_else(|| {
+                vault_map.get(vault_name).cloned().map(|secret| {
+                    vec![ProviderSecret {
+                        key_id: vault_name.to_string(),
+                        value: secret,
+                    }]
                 })
-                .ok_or_else(|| {
+            }) else {
+                report.skipped_aliases.push((
+                    key.clone(),
                     format!(
                         "Config key '{key}' references Vault alias '{vault_name}' but the secret is missing or Vault is locked."
-                    )
-                })?;
+                    ),
+                ));
+                continue;
+            };
             resolved_pools.insert(key.clone(), pool);
             report.from_alias += 1;
             report.env_fallbacks_bypassed += 1;
@@ -236,21 +237,89 @@ mod tests {
         assert_eq!(std::env::var("OPENAI_API_KEY").as_deref(), Ok("env-secret"));
     }
 
+    // Semantics changed (tachi#1279): a single missing Vault alias used to abort the
+    // entire batch with an `Err`. It now degrades to a per-alias skip recorded in
+    // `report.skipped_aliases`, so the rest of the provider keys still materialize.
     #[test]
-    fn materialize_provider_secrets_reports_neutral_missing_alias() {
+    fn materialize_provider_secrets_skips_missing_alias_without_aborting() {
         let _guard = crate::test_support::global_test_lock().lock();
         let _env = EnvGuard::set("TACHI_TEST_PROVIDER_ALIAS_KEY", "vault:MISSING_ALIAS");
         let llm = LlmClient::new().expect("llm client");
-        let err =
+        let report =
             materialize_provider_secrets(&llm, &HashMap::new(), ["TACHI_TEST_PROVIDER_ALIAS_KEY"])
-                .expect_err("missing alias should fail");
+                .expect("missing alias should no longer abort the batch");
 
-        assert!(err.contains(
+        assert_eq!(report.skipped_aliases.len(), 1);
+        let (key, reason) = &report.skipped_aliases[0];
+        assert_eq!(key, "TACHI_TEST_PROVIDER_ALIAS_KEY");
+        assert!(reason.contains(
             "Config key 'TACHI_TEST_PROVIDER_ALIAS_KEY' references Vault alias 'MISSING_ALIAS'"
         ));
-        assert!(!err.contains("TACHI_TEST_PROVIDER_ALIAS_KEY=vault:MISSING_ALIAS"));
-        assert!(!err.contains("config.env"));
-        assert!(!err.contains("vault_unlock"));
-        assert!(!err.contains("vault_set"));
+        assert!(!reason.contains("TACHI_TEST_PROVIDER_ALIAS_KEY=vault:MISSING_ALIAS"));
+        assert!(!reason.contains("config.env"));
+        assert!(!reason.contains("vault_unlock"));
+        assert!(!reason.contains("vault_set"));
+        assert!(llm
+            .provider_secret_for_tests(&["TACHI_TEST_PROVIDER_ALIAS_KEY"])
+            .is_none());
+    }
+
+    // Discrimination test for tachi#1279: on the old batch-abort implementation, the
+    // single missing alias below would short-circuit with `Err` before the loop ever
+    // reached the two good aliases, so `report.from_alias` would never be observed and
+    // this test fails at the `expect("materialize")` call (RED on old code). On the
+    // fixed per-alias-tolerant implementation, the bad alias is recorded in
+    // `skipped_aliases` and the two good aliases still materialize (GREEN).
+    #[test]
+    fn materialize_provider_secrets_isolates_one_bad_alias_from_good_ones() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let _env_good_1 = EnvGuard::set("TACHI_TEST_GOOD_ALIAS_KEY_1", "vault:GOOD_ALIAS_1");
+        let _env_good_2 = EnvGuard::set("TACHI_TEST_GOOD_ALIAS_KEY_2", "vault:GOOD_ALIAS_2");
+        let _env_bad = EnvGuard::set("TACHI_TEST_BAD_ALIAS_KEY", "vault:MISSING_ALIAS");
+        let llm = LlmClient::new().expect("llm client");
+        let vault_pools = HashMap::from([
+            (
+                "GOOD_ALIAS_1".to_string(),
+                vec![ProviderSecret {
+                    key_id: "GOOD_ALIAS_1".to_string(),
+                    value: "good-secret-1".to_string(),
+                }],
+            ),
+            (
+                "GOOD_ALIAS_2".to_string(),
+                vec![ProviderSecret {
+                    key_id: "GOOD_ALIAS_2".to_string(),
+                    value: "good-secret-2".to_string(),
+                }],
+            ),
+        ]);
+
+        let report = materialize_provider_secrets(
+            &llm,
+            &vault_pools,
+            [
+                "TACHI_TEST_GOOD_ALIAS_KEY_1",
+                "TACHI_TEST_GOOD_ALIAS_KEY_2",
+                "TACHI_TEST_BAD_ALIAS_KEY",
+            ],
+        )
+        .expect("one bad alias must not abort the whole batch");
+
+        assert!(report.from_alias >= 2);
+        assert_eq!(
+            llm.provider_secret_for_tests(&["TACHI_TEST_GOOD_ALIAS_KEY_1"])
+                .as_deref(),
+            Some("good-secret-1")
+        );
+        assert_eq!(
+            llm.provider_secret_for_tests(&["TACHI_TEST_GOOD_ALIAS_KEY_2"])
+                .as_deref(),
+            Some("good-secret-2")
+        );
+
+        assert!(report
+            .skipped_aliases
+            .iter()
+            .any(|(key, _reason)| key == "TACHI_TEST_BAD_ALIAS_KEY"));
     }
 }
