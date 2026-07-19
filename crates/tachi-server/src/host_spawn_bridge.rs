@@ -185,9 +185,36 @@ fn payload_str(event: &TachiEventRecord, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Host-native child id, scrubbed. Anchors register + observe idempotency.
+/// Host-native child id, derived into the collision-safe identity anchor
+/// (`native_child_id`). Anchors BOTH register and observe idempotency — they
+/// call this one function so the stored anchor and the lookup anchor are
+/// always derived identically.
 fn child_session_key(event: &TachiEventRecord) -> Option<String> {
-    payload_str(event, "child_session_key").map(|value| scrub(&value))
+    payload_str(event, "child_session_key").map(|value| anchor_from_child_key(&value))
+}
+
+/// Derive the mirror_eval identity anchor from a host child session key,
+/// collision-safe under secret scrubbing (C2 review fix).
+///
+/// `scrub_secrets` collapses EVERY secret-shaped value to the SAME `[REDACTED]`
+/// token, and mirror_eval dedups solely on the stored anchor
+/// (`register_key`, `mirror_eval::register_key`) — so two DISTINCT concurrent
+/// children whose session keys both look secret-shaped would otherwise collapse
+/// into one run, silently merging/dropping one. When redaction actually fires
+/// (`scrubbed != raw`), suffix a deterministic one-way digest of the ORIGINAL
+/// key: distinct originals stay distinct anchors (uniqueness), the same
+/// original always derives the same anchor (idempotent replay), and NO secret
+/// material is stored (the scrubbed token carries none, and the FNV-1a
+/// `stable_hash` digest is one-way — the repo's existing content-hash helper;
+/// no sha2/blake3 dep exists to reuse). A key that scrubs to itself is stored
+/// verbatim with no suffix, so ordinary session keys are unchanged.
+fn anchor_from_child_key(raw: &str) -> String {
+    let scrubbed = scrub(raw);
+    if scrubbed == raw {
+        scrubbed
+    } else {
+        format!("{scrubbed}#{}", crate::utils::stable_hash(raw))
+    }
 }
 
 fn label(event: &TachiEventRecord) -> Option<String> {
@@ -288,19 +315,29 @@ mod tests {
             .expect("count")
     }
 
-    /// (a) `spawned` → register is idempotent under duplicate delivery: two
-    /// identical `host.subagent_spawned` events for the same child id mint ONE
-    /// run, tagged as a host-native subagent owned by the host.
+    /// (a) `spawned` → register is idempotent under duplicate delivery AND the
+    /// duplicate CONVERGES rather than erroring: two identical
+    /// `host.subagent_spawned` events for the same child id mint ONE run.
+    ///
+    /// C6 discrimination: this calls `register_spawn` DIRECTLY (not the
+    /// swallowing `bridge_host_spawn_event`) and asserts the second delivery
+    /// returns `Ok` — the "already registered, content matches" converge path
+    /// in `mirror_eval::register_mirror_eval_run`. If mirror_eval's dedup were
+    /// removed, the second insert would hit the `register_key` UNIQUE
+    /// constraint and return `Err`, turning this assertion RED — whereas an
+    /// assertion only on the swallowing entrypoint + row count would still
+    /// pass (the fail-safe wrapper hides the Err).
     #[test]
-    fn spawned_registers_idempotently_under_duplicate_delivery() {
+    fn spawned_register_converges_under_duplicate_delivery() {
         let (server, _dir) = test_server();
         let event = host_event(
             SPAWNED_EVENT_TYPE,
             json!({ "child_session_key": "child-1", "label": "reviewer-lane" }),
         );
 
-        bridge_host_spawn_event(&server, &event);
-        bridge_host_spawn_event(&server, &event);
+        register_spawn(&server, &event).expect("first register mints the run");
+        register_spawn(&server, &event)
+            .expect("duplicate register must CONVERGE (Ok), never a UNIQUE-constraint Err");
 
         assert_eq!(run_count(&server), 1, "duplicate spawned must not duplicate the run");
         let run = run_by_child(&server, "child-1");
@@ -310,6 +347,62 @@ mod tests {
         assert_eq!(run.native_child_id.as_deref(), Some("child-1"));
         assert_eq!(run.requested_agent.as_deref(), Some("reviewer-lane"));
         assert_eq!(run.frozen_contract_ref, "host_native_subagent:unbound");
+    }
+
+    /// C2: two DISTINCT child session keys that both scrub to the same
+    /// `[REDACTED]` token must NOT collide onto one mirror_eval run, and the
+    /// stored anchor must carry no raw secret material. Idempotent replay of an
+    /// existing secret-shaped key still converges onto its own run.
+    #[test]
+    fn distinct_secret_shaped_keys_get_distinct_anchors() {
+        let (server, _dir) = test_server();
+        // Both match the `sk-[A-Za-z0-9_-]{20,}` scrub pattern → both redact to
+        // the identical `[REDACTED]` token, the pre-fix collision.
+        let key_a = "sk-aaaaaaaaaaaaaaaaaaaa11";
+        let key_b = "sk-bbbbbbbbbbbbbbbbbbbb22";
+        assert_eq!(
+            scrub(key_a),
+            scrub(key_b),
+            "precondition: both keys redact to the same token"
+        );
+        let anchor_a = anchor_from_child_key(key_a);
+        let anchor_b = anchor_from_child_key(key_b);
+        assert_ne!(
+            anchor_a, anchor_b,
+            "distinct secret-shaped keys must derive distinct anchors, not collide"
+        );
+        assert!(
+            !anchor_a.contains("aaaaaaaa") && !anchor_b.contains("bbbbbbbb"),
+            "no raw secret material may appear in the stored anchor"
+        );
+
+        register_spawn(
+            &server,
+            &host_event(SPAWNED_EVENT_TYPE, json!({ "child_session_key": key_a })),
+        )
+        .expect("register key_a");
+        register_spawn(
+            &server,
+            &host_event(SPAWNED_EVENT_TYPE, json!({ "child_session_key": key_b })),
+        )
+        .expect("register key_b");
+        assert_eq!(
+            run_count(&server),
+            2,
+            "two distinct secret-shaped children must be two runs, not one collided row"
+        );
+
+        // Idempotent replay: the SAME original key derives the SAME anchor.
+        register_spawn(
+            &server,
+            &host_event(SPAWNED_EVENT_TYPE, json!({ "child_session_key": key_a })),
+        )
+        .expect("replay of key_a converges");
+        assert_eq!(
+            run_count(&server),
+            2,
+            "replaying an existing secret-shaped key mints no third run"
+        );
     }
 
     /// (b) `ended` → observe records the terminal fact with the host outcome
@@ -349,6 +442,84 @@ mod tests {
             .expect("observation row");
         assert_eq!(terminal_outcome, "completed", "'success' normalizes to the kanban 'completed'");
         assert_eq!(duration_ms, Some(4200));
+    }
+
+    /// Fetch (observation count, terminal_outcome) for a child's run.
+    fn observation_of(server: &MemoryServer, native_child_id: &str) -> (i64, Option<String>) {
+        server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*), MAX(o.terminal_outcome) \
+                         FROM mirror_eval_observations o \
+                         JOIN mirror_eval_runs r ON r.eval_run_id = o.eval_run_id \
+                         WHERE r.native_child_id = ?1",
+                        [native_child_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|e| e.to_string())
+            })
+            .expect("observation query")
+    }
+
+    /// C6 gap: a duplicate `ended` delivery must neither duplicate nor
+    /// destructively overwrite the terminal observation. `observe` allows at
+    /// most one row per run; an identical re-delivery converges (Ok), a genuine
+    /// content change is an explicit conflict — never a silent second row.
+    #[test]
+    fn ended_duplicate_delivery_does_not_duplicate_or_overwrite_observation() {
+        let (server, _dir) = test_server();
+        register_spawn(
+            &server,
+            &host_event(SPAWNED_EVENT_TYPE, json!({ "child_session_key": "child-dup" })),
+        )
+        .expect("register");
+        let ended = host_event(
+            ENDED_EVENT_TYPE,
+            json!({ "child_session_key": "child-dup", "outcome": "success", "duration_ms": 100 }),
+        );
+        observe_terminal(&server, &ended).expect("first observe");
+        observe_terminal(&server, &ended)
+            .expect("duplicate ended must CONVERGE (Ok), not error or duplicate");
+
+        let (count, outcome) = observation_of(&server, "child-dup");
+        assert_eq!(count, 1, "duplicate ended must not duplicate the observation");
+        assert_eq!(outcome.as_deref(), Some("completed"));
+    }
+
+    /// C6 gap: a `spawned` replay arriving AFTER `ended` must converge onto the
+    /// same run and must NOT resurrect/reset the terminal observation — the
+    /// terminal fact is a snapshot, not something a late lifecycle event can
+    /// roll back to in-flight.
+    #[test]
+    fn spawned_replay_after_ended_does_not_reset_terminal() {
+        let (server, _dir) = test_server();
+        let spawned = host_event(
+            SPAWNED_EVENT_TYPE,
+            json!({ "child_session_key": "child-late", "label": "impl-lane" }),
+        );
+        register_spawn(&server, &spawned).expect("register");
+        observe_terminal(
+            &server,
+            &host_event(
+                ENDED_EVENT_TYPE,
+                json!({ "child_session_key": "child-late", "outcome": "failure" }),
+            ),
+        )
+        .expect("observe terminal");
+
+        // Late/duplicate spawned replay.
+        register_spawn(&server, &spawned).expect("late spawned replay converges");
+
+        assert_eq!(run_count(&server), 1, "late spawned replay mints no second run");
+        let (count, outcome) = observation_of(&server, "child-late");
+        assert_eq!(count, 1, "terminal observation survives the late spawned replay");
+        assert_eq!(
+            outcome.as_deref(),
+            Some("failed"),
+            "terminal outcome must not be reset by a late spawned replay"
+        );
     }
 
     /// (b′) An unrecognized host outcome floors to `unknown` (never empty), so
