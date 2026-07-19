@@ -97,6 +97,7 @@ pub(super) async fn run_doctor_command(
     // `fix`, since neither half of this patrol deletes or reconciles anything.
     report.warnings.extend(crate::doctor::scan_orphan_build_resources(
         crate::doctor::DEFAULT_ORPHAN_MAX_AGE_DAYS,
+        global_db_path,
     ));
     report.warnings.extend(crate::doctor::worktree_inspection_report(
         crate::doctor::DEFAULT_WORKTREE_STALE_DAYS,

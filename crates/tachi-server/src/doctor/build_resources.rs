@@ -8,15 +8,22 @@
 //! 1. [`scan_orphan_build_resources`] — private `CARGO_TARGET_DIR`-shaped
 //!    directories that look dead. This is a THIN reuse of
 //!    `exec_env_reaper`'s already-certified scan/protection/holder-probe
-//!    machinery (#1062) — not a second implementation of it — plus exactly
-//!    one new layer: [`is_blessed_target_basename`], a static allowlist
-//!    checked independently of the env-based protection `exec_env_reaper`
-//!    already applies (that protection only fires when the CALLING shell
-//!    happens to export `CARGO_TARGET_DIR`/`TACHI_SHARED_CARGO_TARGET_DIR`;
-//!    `tachi doctor` is commonly run from a plain admin shell with neither
-//!    set, and without this list the live shared cache would misreport as
-//!    an orphan the moment nobody's build happens to be running at that
-//!    exact instant).
+//!    machinery (#1062) — not a second implementation of it — plus two new
+//!    layers: [`is_blessed_target_basename`], a static allowlist checked
+//!    independently of the env-based protection `exec_env_reaper` already
+//!    applies (that protection only fires when the CALLING shell happens to
+//!    export `CARGO_TARGET_DIR`/`TACHI_SHARED_CARGO_TARGET_DIR`; `tachi
+//!    doctor` is commonly run from a plain admin shell with neither set, and
+//!    without this list the live shared cache would misreport as an orphan
+//!    the moment nobody's build happens to be running at that exact
+//!    instant); and [`ledger_held_paths`], a read of the `exec_env_resources`
+//!    lease ledger (tachi#1184 cross-vendor review C3) — a `ps`/`lsof` probe
+//!    alone cannot see a `BuildPrivate` lease's target dir held only via a
+//!    live binding, never an open fd (`exec_env_reaper.rs:854-869` documents
+//!    the exact same blind spot for the certified reaper's own holder
+//!    check), so this patrol reuses the same structural fix the reaper
+//!    already ships (`memcore::list_bound_resource_paths`) rather than
+//!    re-deriving it or leaving the gap open.
 //! 2. [`worktree_inspection_report`] — facts about every managed worktree in
 //!    `tachi_clean::registry`'s registry (age, existence, attribution).
 //!    Deliberately does NOT compute a "terminal"/safe-to-close verdict: that
@@ -26,6 +33,7 @@
 //!    own. This surfaces only the raw facts an operator needs to make that
 //!    call themselves.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -38,7 +46,8 @@ use super::DoctorWarning;
 /// a private orphan candidate — see the module doc for why this check is
 /// independent of (and a defense-in-depth complement to) the env/process
 /// based protection `exec_env_reaper::protected_paths` already applies.
-const BLESSED_SHARED_TARGET_BASENAMES: &[&str] = &["sigil-shared-target", "hyperion-shared-target"];
+const BLESSED_SHARED_TARGET_BASENAMES: &[&str] =
+    &["sigil-shared-target", "hyperion-shared-target"];
 
 /// Default staleness gate for the patrol — same default `exec_env_reaper`'s
 /// own CLI uses (7 days), so the doctor section and `tachi clean
@@ -121,44 +130,206 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Everything that can hold a build-resource candidate, already resolved by
+/// the caller. Kept as its own tiny enum (rather than reusing
+/// `exec_env_reaper::HolderCheck` directly) so [`should_flag_candidate`] below
+/// stays a pure function over a minimal, hermetically-constructible input —
+/// no real `ps`/`lsof` needed to exercise every branch in a test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HolderState {
+    /// No process has an open fd under the path (`HolderCheck::None`).
+    Unheld,
+    /// A process has the path open (`HolderCheck::Held`).
+    Held,
+    /// The check could not be trusted (`HolderCheck::Unknown` — no `lsof`,
+    /// partial walk). Treated exactly like `Held`: a report-only false
+    /// negative costs nothing, a false positive costs a live cache.
+    Unknown,
+}
+
+/// The result of the reaper's own age-vs-`max_age_days` walk
+/// (`exec_env_reaper::Staleness`), reduced to the three states
+/// [`should_flag_candidate`] needs. Self-caught while wiring this up (not
+/// part of the cross-vendor review, but the same defect class it was
+/// hunting): `exec_env_reaper::scan_orphan_candidates` computes this per
+/// candidate but does NOT filter on it — that filter lives downstream, in
+/// `decide_reap`, which only `run_orphan_reap` calls. This patrol calls the
+/// scan directly and never called `decide_reap`, so without this enum and
+/// the gate below, a brand-new, mid-provision `*-target` directory (0 days
+/// old, briefly unheld between build steps) would have been flagged
+/// exactly like a truly dead one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StalenessState {
+    /// Nothing under the tree is newer than `max_age_days` (`Staleness::Stale`).
+    Stale,
+    /// Something under the tree is newer than the cutoff (`Staleness::Fresh`).
+    Fresh,
+    /// The walk was partial/unreadable (`Staleness::Unprovable`) — fail-closed,
+    /// same discipline as an unprovable holder check.
+    Unprovable,
+}
+
+/// Pure decision: should this candidate be flagged as an orphan? Every fence
+/// this patrol applies lives here, in one place, so both a HELD path and a
+/// genuinely ORPHANED path can be exercised directly by a unit test (两造并察
+/// — tachi#1184 review C6b) without touching real `ps`/`lsof`/sqlite.
+///
+/// Order matters for readability only, not correctness — all four checks
+/// are independent short-circuits, any one of which is enough to protect the
+/// path:
+/// 1. blessed basename (the machine's known-good shared target, tachi#1184
+///    item 2's own defense-in-depth layer, independent of env/ledger state),
+/// 2. ledger-held (a `BuildPrivate` lease has this path bound RIGHT NOW —
+///    tachi#1184 review C3: the exact blind spot `exec_env_reaper.rs:854-869`
+///    documents for `ps`/`lsof`-only holder checks, closed here the same way
+///    the certified reaper closes it: consult the lease ledger, not just the
+///    process table),
+/// 3. not (yet) stale ([`StalenessState::Fresh`] / [`StalenessState::Unprovable`]
+///    — see that enum's doc for the self-caught gap this closes),
+/// 4. process-held or unprovable (`HolderState::Held` / `Unknown`).
+pub(crate) fn should_flag_candidate(
+    path: &Path,
+    ledger_held: &HashSet<String>,
+    holder: HolderState,
+    staleness: StalenessState,
+) -> bool {
+    if is_blessed_target_basename(path) {
+        return false;
+    }
+    if is_ledger_held(path, ledger_held) {
+        return false;
+    }
+    if !matches!(staleness, StalenessState::Stale) {
+        return false;
+    }
+    matches!(holder, HolderState::Unheld)
+}
+
+/// Pure: is `path` on the ledger-held set? String-keyed, same discipline
+/// `exec_env_reaper::run_orphan_reap_uncertified` already uses for its own
+/// ledger lookup (`candidate.path.display().to_string()` against
+/// `memcore::find_resource_by_path`) — not a new comparison convention.
+fn is_ledger_held(path: &Path, ledger_held: &HashSet<String>) -> bool {
+    ledger_held.contains(&path.display().to_string())
+}
+
+/// Read every path the `exec_env_resources` ledger currently considers BOUND
+/// (a live lease binding, `released_at IS NULL`) — the exact structural fix
+/// `exec_env_reaper::ledger_protected_paths` uses, reused here via the same
+/// public `memcore::list_bound_resource_paths` read (tachi#1184 review C3).
+///
+/// A global DB that does not exist yet is treated as "zero leases ever
+/// recorded" (`Ok(empty set)`) — genuinely true on a machine where no
+/// `build-private` env has ever been provisioned, not a gap. Any OTHER
+/// failure (unreadable file, schema the binary does not understand, a
+/// missing `exec_env_resources` table) is a GAP: the caller must not proceed
+/// as though "no leases" were proven when it was merely never checked — the
+/// same BUG-3 discipline `exec_env_reaper::Protection::is_complete` applies,
+/// translated to a report-only diagnostic that skips rather than fails.
+fn ledger_held_paths(global_db_path: &Path) -> Result<HashSet<String>, String> {
+    if !global_db_path.exists() {
+        return Ok(HashSet::new());
+    }
+    let path_str = global_db_path
+        .to_str()
+        .ok_or_else(|| "global db path is not valid UTF-8".to_string())?;
+    let store =
+        memcore::MemoryStore::open_read_only(path_str).map_err(|err| format!("open: {err}"))?;
+    memcore::list_bound_resource_paths(store.connection())
+        .map(|paths| paths.into_iter().collect())
+        .map_err(|err| format!("query exec_env_resources: {err}"))
+}
+
 /// Scan the reaper's own default orphan roots (`/private/tmp`, `$TMPDIR`,
 /// `~/.cache`, …) for private build-resource directories that look dead:
 /// name-shaped like a target dir ([`crate::exec_env_reaper::classify_orphan_dir_name`]),
-/// not on the blessed allowlist, not env/process-protected, stale past
-/// `max_age_days`, and with no live holder.
+/// not on the blessed allowlist, not ledger-held, not env/process-protected,
+/// stale past `max_age_days`, and with no live holder.
 ///
-/// REPORT-ONLY. Conservative on purpose: a candidate whose holder check came
-/// back `Unknown` (no `lsof`, partial probe) is treated exactly like `Held`
-/// — skipped, not flagged. A report-only false negative here costs nothing;
-/// a false positive naming a live build cache as safe-to-delete is the
-/// literal shape of the incident this patrol exists to prevent, not repeat.
-///
-/// **Known limitation, by design:** unlike `exec_env_reaper::run_orphan_reap`,
-/// this does NOT consult the `exec_env_resources` ledger (that needs a live
-/// DB connection `tachi doctor` does not otherwise open) — so an
-/// explicitly-approved, currently-idle `build-private` lease's target dir can
-/// surface here as a false-positive warning. That is an acceptable cost for a
-/// report-only diagnostic whose own remediation text already tells the
-/// operator to confirm with `du`/`lsof` before touching anything; it is NOT
-/// acceptable for the certified delete path, which is exactly why that path
-/// (`run_orphan_reap`) unions the ledger in and this function does not try to
-/// re-derive that half of it.
-pub(crate) fn scan_orphan_build_resources(max_age_days: u64) -> Vec<DoctorWarning> {
-    let roots = crate::exec_env_reaper::default_orphan_roots();
+/// REPORT-ONLY. If the lease ledger cannot be consulted (see
+/// [`ledger_held_paths`]'s doc for what counts as a gap vs. a genuine
+/// "no leases"), the scan is skipped entirely and a single explanatory
+/// warning is returned instead — proceeding on an incomplete protected set
+/// is exactly how a live, lease-held cache would get named "safe to
+/// `rm -rf`" (tachi#1184 review C3), and a report-only tool has no
+/// obligation to guess when it can say plainly that it did not check.
+pub(crate) fn scan_orphan_build_resources(
+    max_age_days: u64,
+    global_db_path: &Path,
+) -> Vec<DoctorWarning> {
+    scan_orphan_build_resources_with_roots(
+        max_age_days,
+        global_db_path,
+        &crate::exec_env_reaper::default_orphan_roots(),
+    )
+}
+
+/// [`scan_orphan_build_resources`]'s production body, with the scan roots
+/// INJECTED rather than read from `default_orphan_roots()` — the same "real
+/// production path, controlled inputs" idiom `exec_env_reaper`'s own CLI
+/// already uses (`run_orphan_reap_cli_with_sources` vs `run_orphan_reap_cli`,
+/// `ProtectionSources::deterministic_for_cli_test()` vs `::from_process_env()`).
+/// `default_orphan_roots()` always includes real system paths
+/// (`/private/tmp`, `~/.cache`, …) regardless of any env override a test
+/// might set, so a hermetic test of THIS function needs its own seam rather
+/// than trying to redirect those roots (tachi#1184 review C6c).
+fn scan_orphan_build_resources_with_roots(
+    max_age_days: u64,
+    global_db_path: &Path,
+    roots: &[std::path::PathBuf],
+) -> Vec<DoctorWarning> {
+    let ledger_held = match ledger_held_paths(global_db_path) {
+        Ok(held) => held,
+        Err(err) => {
+            return vec![DoctorWarning {
+                code: "orphan_scan_skipped_ledger_unavailable".to_string(),
+                path: global_db_path.display().to_string(),
+                message: format!(
+                    "build-resource orphan scan skipped: could not consult the \
+                     exec_env_resources lease ledger ({err}) — a lease-held private target \
+                     with no open file descriptor would otherwise misreport as orphan"
+                ),
+                remediation: "confirm the global tachi DB is reachable and migrated, then re-run \
+                              `tachi doctor`"
+                    .to_string(),
+            }];
+        }
+    };
+
     let sources = crate::exec_env_reaper::ProtectionSources::from_process_env();
     let protection = crate::exec_env_reaper::protected_paths(&sources);
     let now = SystemTime::now();
     let scan =
-        crate::exec_env_reaper::scan_orphan_candidates(&roots, &protection, now, max_age_days);
+        crate::exec_env_reaper::scan_orphan_candidates(roots, &protection, now, max_age_days);
 
     scan.candidates
         .iter()
-        .filter(|candidate| !is_blessed_target_basename(&candidate.path))
+        // Cheap pre-filter first: skip the real `lsof` shell-out entirely for
+        // a path already excluded by the blessed list, the (already-read)
+        // ledger, or staleness — `should_flag_candidate` below re-checks all
+        // three anyway (it is the single source of truth for the decision),
+        // this is purely to avoid probing paths that can never survive it.
+        .filter(|candidate| {
+            !is_blessed_target_basename(&candidate.path)
+                && !is_ledger_held(&candidate.path, &ledger_held)
+                && matches!(
+                    candidate.staleness,
+                    crate::exec_env_reaper::Staleness::Stale { .. }
+                )
+        })
         .filter_map(|candidate| {
-            match crate::exec_env_reaper::lsof_holder_probe(&candidate.path) {
-                crate::exec_env_reaper::HolderCheck::None => {}
-                crate::exec_env_reaper::HolderCheck::Held(_)
-                | crate::exec_env_reaper::HolderCheck::Unknown(_) => return None,
+            let holder = match crate::exec_env_reaper::lsof_holder_probe(&candidate.path) {
+                crate::exec_env_reaper::HolderCheck::None => HolderState::Unheld,
+                crate::exec_env_reaper::HolderCheck::Held(_) => HolderState::Held,
+                crate::exec_env_reaper::HolderCheck::Unknown(_) => HolderState::Unknown,
+            };
+            let staleness = match candidate.staleness {
+                crate::exec_env_reaper::Staleness::Stale { .. } => StalenessState::Stale,
+                crate::exec_env_reaper::Staleness::Fresh { .. } => StalenessState::Fresh,
+                crate::exec_env_reaper::Staleness::Unprovable(_) => StalenessState::Unprovable,
+            };
+            if !should_flag_candidate(&candidate.path, &ledger_held, holder, staleness) {
+                return None;
             }
             let facts = OrphanTargetFacts {
                 path: candidate.path.display().to_string(),
@@ -263,6 +434,274 @@ pub(crate) fn worktree_inspection_report(stale_days: i64) -> Vec<DoctorWarning> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── tachi#1184 cross-vendor review C3/C6b: should_flag_candidate ──────
+    // Both sides of the decision (两造并察), fully hermetic — no real ps/du/
+    // sqlite. A ledger-held path must survive exactly like a process-held one;
+    // a genuinely orphaned path (blessed=no, ledger=no, holder=unheld) is the
+    // only shape that gets flagged.
+
+    #[test]
+    fn ledger_held_path_is_never_flagged_even_when_process_probe_says_unheld() {
+        let mut ledger = HashSet::new();
+        ledger.insert("/private/tmp/leased-build-private-target".to_string());
+        assert!(
+            !should_flag_candidate(
+                Path::new("/private/tmp/leased-build-private-target"),
+                &ledger,
+                HolderState::Unheld,
+                StalenessState::Stale,
+            ),
+            "a lease-held path must never be flagged, regardless of what ps/lsof saw"
+        );
+    }
+
+    #[test]
+    fn genuinely_orphaned_path_is_flagged() {
+        let ledger = HashSet::new();
+        assert!(should_flag_candidate(
+            Path::new("/private/tmp/issue1140-review-target"),
+            &ledger,
+            HolderState::Unheld,
+            StalenessState::Stale,
+        ));
+    }
+
+    #[test]
+    fn process_held_path_is_not_flagged() {
+        let ledger = HashSet::new();
+        assert!(!should_flag_candidate(
+            Path::new("/private/tmp/mid-build-target"),
+            &ledger,
+            HolderState::Held,
+            StalenessState::Stale,
+        ));
+    }
+
+    #[test]
+    fn unknown_holder_state_is_not_flagged() {
+        let ledger = HashSet::new();
+        assert!(!should_flag_candidate(
+            Path::new("/private/tmp/unprobable-target"),
+            &ledger,
+            HolderState::Unknown,
+            StalenessState::Stale,
+        ));
+    }
+
+    #[test]
+    fn blessed_path_is_not_flagged_even_if_somehow_ledger_and_process_agree_it_looks_unheld() {
+        let ledger = HashSet::new();
+        assert!(!should_flag_candidate(
+            Path::new("/home/x/.cache/sigil-shared-target"),
+            &ledger,
+            HolderState::Unheld,
+            StalenessState::Stale,
+        ));
+    }
+
+    #[test]
+    fn fresh_candidate_is_never_flagged_even_if_unheld_and_not_ledgered() {
+        // Self-caught gap: `exec_env_reaper::scan_orphan_candidates` computes
+        // staleness but does not filter on it (that gate is `decide_reap`'s,
+        // which only `run_orphan_reap` calls) — without this check, a
+        // brand-new `*-target` dir mid-provision would misreport as orphan.
+        let ledger = HashSet::new();
+        assert!(!should_flag_candidate(
+            Path::new("/private/tmp/just-created-target"),
+            &ledger,
+            HolderState::Unheld,
+            StalenessState::Fresh,
+        ));
+    }
+
+    #[test]
+    fn unprovable_staleness_is_never_flagged() {
+        let ledger = HashSet::new();
+        assert!(!should_flag_candidate(
+            Path::new("/private/tmp/partially-unreadable-target"),
+            &ledger,
+            HolderState::Unheld,
+            StalenessState::Unprovable,
+        ));
+    }
+
+    // ─── tachi#1184 review C3: ledger_held_paths against a real fixture DB ─
+    // "injected ledger fixture", not real ps/lsof — a temp-file sqlite DB
+    // populated through memcore's own public registration API, proving the
+    // SQL wiring (not just the in-memory HashSet decision above) is correct.
+
+    #[test]
+    fn ledger_held_paths_reads_a_live_binding_from_a_real_fixture_db() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("global-fixture.db");
+        {
+            let mut store =
+                memcore::MemoryStore::open_with_label(db_path.to_str().unwrap(), "test-global")
+                    .expect("open fixture db");
+            memcore::insert_exec_env(
+                store.connection(),
+                &memcore::NewExecEnvLease {
+                    env_id: "env-fixture-1".to_string(),
+                    kind: "worktree".to_string(),
+                    path: "/some/worktree".to_string(),
+                    repo_root: "/repo".to_string(),
+                    branch: "feat/x".to_string(),
+                    base_sha: "deadbeef".to_string(),
+                    dispatch_id: None,
+                    env_class: memcore::EnvClass::BuildPrivate,
+                    created_at: "2026-07-18T00:00:00Z".to_string(),
+                },
+            )
+            .expect("insert exec_env fixture");
+            memcore::insert_resource(
+                store.connection_mut(),
+                &memcore::NewExecEnvResource {
+                    resource_id: "res-fixture-1".to_string(),
+                    kind: ResourceKind::BuildTarget,
+                    path: "/private/tmp/leased-build-private-target".to_string(),
+                    bytes: None,
+                    created_at: "2026-07-18T00:00:00Z".to_string(),
+                },
+            )
+            .expect("insert resource fixture");
+            memcore::bind_resource(store.connection_mut(), "env-fixture-1", "res-fixture-1")
+                .expect("bind resource fixture");
+        }
+
+        let held = ledger_held_paths(&db_path).expect("ledger read should succeed");
+        assert!(
+            held.contains("/private/tmp/leased-build-private-target"),
+            "{held:?}"
+        );
+        assert_eq!(held.len(), 1, "{held:?}");
+    }
+
+    #[test]
+    fn ledger_held_paths_is_empty_when_the_global_db_does_not_exist_yet() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("never-provisioned.db");
+        let held =
+            ledger_held_paths(&db_path).expect("a missing db is an empty ledger, not a gap");
+        assert!(held.is_empty());
+    }
+
+    #[test]
+    fn scan_orphan_build_resources_skips_with_a_warning_when_the_ledger_path_is_unreadable() {
+        // A DB path that exists but is not a valid sqlite file: `open_read_only`
+        // must error, and that error must surface as a loud skip-warning, not
+        // as "proceed assuming nothing is held" (tachi#1184 review C3 —
+        // BUG-3-style discipline: an unresolved protection source is a gap).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("corrupt.db");
+        std::fs::write(&db_path, b"not a sqlite file").expect("write corrupt fixture");
+
+        let warnings = scan_orphan_build_resources(7, &db_path);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].code, "orphan_scan_skipped_ledger_unavailable");
+    }
+
+    #[cfg(unix)]
+    fn set_mtime(path: &Path, when: SystemTime) {
+        // Same technique `exec_env_reaper`'s own test module uses: a
+        // directory cannot be opened for writing, but futimens(2) on a
+        // read-only fd is enough to set times on something you own.
+        let file = std::fs::File::open(path).expect("open for mtime set");
+        file.set_times(std::fs::FileTimes::new().set_modified(when))
+            .expect("set mtime");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_orphan_build_resources_is_report_only_and_idempotent_c6c() {
+        // tachi#1184 review C6c ("identical output with and without --fix")
+        // + an end-to-end (not just unit-level) exercise of C3's ledger
+        // gate: a REAL, genuinely stale (mtime backdated past the 7-day
+        // cutoff), non-blessed on-disk directory that IS bound in a real
+        // fixture ledger must never be flagged, must survive two full scans
+        // untouched, and the two scans must return byte-identical output —
+        // the operational meaning of "with/without --fix" for a section
+        // that never reads a `fix` flag at all (see the call site in
+        // `bootstrap::manifest_cli::run_doctor_command`).
+        //
+        // Uses `scan_orphan_build_resources_with_roots` (roots injected)
+        // rather than the public `scan_orphan_build_resources`
+        // (`default_orphan_roots()` always walks the real machine's
+        // `/private/tmp`/`~/.cache`, which would make this test's output
+        // depend on whatever happens to be on the machine running it).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scan_root = dir.path().join("scan-root");
+        std::fs::create_dir_all(&scan_root).expect("scan root");
+        let candidate = scan_root.join("leased-but-old-looking-target");
+        std::fs::create_dir_all(&candidate).expect("candidate dir");
+        let ten_days_ago = SystemTime::now() - std::time::Duration::from_secs(10 * 24 * 60 * 60);
+        set_mtime(&candidate, ten_days_ago);
+        let candidate_str = candidate.display().to_string();
+
+        let db_path = dir.path().join("global-fixture.db");
+        {
+            let mut store =
+                memcore::MemoryStore::open_with_label(db_path.to_str().unwrap(), "test-global")
+                    .expect("open fixture db");
+            memcore::insert_exec_env(
+                store.connection(),
+                &memcore::NewExecEnvLease {
+                    env_id: "env-c6c".to_string(),
+                    kind: "worktree".to_string(),
+                    path: "/some/worktree".to_string(),
+                    repo_root: "/repo".to_string(),
+                    branch: "feat/x".to_string(),
+                    base_sha: "deadbeef".to_string(),
+                    dispatch_id: None,
+                    env_class: memcore::EnvClass::BuildPrivate,
+                    created_at: "2026-07-01T00:00:00Z".to_string(),
+                },
+            )
+            .expect("insert exec_env fixture");
+            memcore::insert_resource(
+                store.connection_mut(),
+                &memcore::NewExecEnvResource {
+                    resource_id: "res-c6c".to_string(),
+                    kind: ResourceKind::BuildTarget,
+                    path: candidate_str.clone(),
+                    bytes: None,
+                    created_at: "2026-07-01T00:00:00Z".to_string(),
+                },
+            )
+            .expect("insert resource fixture");
+            memcore::bind_resource(store.connection_mut(), "env-c6c", "res-c6c")
+                .expect("bind resource fixture");
+        }
+
+        let roots = vec![scan_root.clone()];
+        let first = scan_orphan_build_resources_with_roots(7, &db_path, &roots);
+        let second = scan_orphan_build_resources_with_roots(7, &db_path, &roots);
+
+        assert!(
+            !first.iter().any(|w| w.path == candidate_str),
+            "a ledger-held, genuinely stale directory must never be flagged: {first:?}"
+        );
+        let render = |warnings: &[DoctorWarning]| -> Vec<(String, String)> {
+            warnings
+                .iter()
+                .map(|w| (w.code.clone(), w.path.clone()))
+                .collect()
+        };
+        assert_eq!(
+            render(&first),
+            render(&second),
+            "two consecutive report-only scans over unchanged state must be identical"
+        );
+        assert!(
+            candidate.exists(),
+            "report-only: the directory must survive the scan"
+        );
+        let held_after = ledger_held_paths(&db_path).expect("ledger read after scan");
+        assert!(
+            held_after.contains(&candidate_str),
+            "report-only: the ledger binding must survive the scan too"
+        );
+    }
 
     #[test]
     fn blessed_basename_matches_exactly() {
