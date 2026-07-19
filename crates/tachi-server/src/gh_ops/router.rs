@@ -244,8 +244,12 @@ pub(crate) async fn handle_tachi_gh(
             ))
             .await
         }
+        "handoff_draft" => {
+            let repo = required_repo(&params, "handoff_draft")?;
+            handle_gh_handoff_draft(server, &params, repo)
+        }
         other => Err(format!(
-            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, issue_comment, issue_label, issue_freshness_scan, pr_list, pr_read, pr_comments, pr_comment, pr_review_digest, safe_merge, ship, link_pr, pr_status, pr_handoff, release_note",
+            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, issue_comment, issue_label, issue_freshness_scan, pr_list, pr_read, pr_comments, pr_comment, pr_review_digest, safe_merge, ship, link_pr, pr_status, pr_handoff, release_note, handoff_draft",
             other
         )),
     }?;

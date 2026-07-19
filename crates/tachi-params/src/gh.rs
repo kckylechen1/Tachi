@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Unified GitHub facade — one tool for all GitHub operations.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct TachiGhParams {
-    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "issue_comment", "issue_label", "issue_freshness_scan", "pr_list", "pr_read", "pr_comments", "pr_comment", "pr_review_digest", "safe_merge", "ship", "link_pr", "pr_status", "pr_handoff", "release_note"
+    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "issue_comment", "issue_label", "issue_freshness_scan", "pr_list", "pr_read", "pr_comments", "pr_comment", "pr_review_digest", "safe_merge", "ship", "link_pr", "pr_status", "pr_handoff", "release_note", "handoff_draft"
     pub action: String,
     /// Repository in "owner/repo" format. Required for GitHub primitive actions; lifecycle actions may infer from issue_ref/pr_ref/flow_id.
     #[serde(default)]
@@ -161,6 +161,11 @@ pub struct TachiGhParams {
     /// the scan runs.
     #[serde(default)]
     pub churn_activity_since: Option<String>,
+    /// #1285: RFC3339 override for action="handoff_draft"'s merged-PR ledger
+    /// window. When omitted, defaults to the previous handoff's
+    /// `published_at`, or a 7-day lookback when no previous handoff exists.
+    #[serde(default)]
+    pub since: Option<String>,
 }
 
 /// Parameters for adding/removing labels on a GitHub issue or PR (write-back arc).
