@@ -81,6 +81,7 @@ pub fn default_worktrees_root() -> Result<PathBuf, String> {
                     path.display()
                 ));
             }
+            warn_if_ephemeral_root(&path, "TACHI_WORKTREES_ROOT");
             return Ok(path);
         }
     }
@@ -94,6 +95,82 @@ pub fn default_worktrees_root() -> Result<PathBuf, String> {
              TACHI_WORKTREES_ROOT is not set; refusing to fall back to the current directory"
                 .to_string(),
         ),
+    }
+}
+
+/// Known-ephemeral scratch roots (tachi#1184 item 3 — the worktree-location
+/// law): a worktree meant to outlive a session belongs under a durable cache
+/// dir (`~/.cache/tachi/worktrees/…`, the default above), never one of
+/// these. `--path`/explicit-path escapes of the managed root are already a
+/// HARD refusal ([`path_outside_managed_root_reason`]) — this list exists
+/// for the one path that check does not cover: an operator pointing
+/// `TACHI_WORKTREES_ROOT` itself at an ephemeral volume, which makes that
+/// volume the "managed root" and therefore compliant by that check's own
+/// definition. A hard fail here would be the wrong shape for a
+/// self-configured root (a deliberate throwaway/test root is a legitimate
+/// use), so this is a loud warning, not a refusal.
+fn ephemeral_root_prefixes() -> Vec<PathBuf> {
+    let mut prefixes = vec![PathBuf::from("/tmp"), PathBuf::from("/private/tmp")];
+    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+        if !tmpdir.is_empty() {
+            prefixes.push(PathBuf::from(tmpdir));
+        }
+    }
+    prefixes
+}
+
+/// Does `path` sit at or under one of `ephemeral_roots`? Two passes, neither
+/// one fatal:
+///
+/// 1. **Literal component comparison** first — `path` commonly does not
+///    exist yet (nobody has provisioned into this root), so `/tmp` /
+///    `/private/tmp` are both checked literally by
+///    [`ephemeral_root_prefixes`] specifically so the well-known macOS
+///    `/tmp` -> `/private/tmp` symlink is covered without needing anything
+///    to exist on disk first.
+/// 2. **Canonicalized comparison** as a fallback (tachi#1184 review C4) —
+///    catches the case the literal pass cannot: a root whose *given* spelling
+///    differs from a listed root only through a symlink or case variant it
+///    resolves to on disk (e.g. `$TMPDIR` reporting `/var/folders/xy/T` while
+///    the filesystem's real path is `/private/var/folders/xy/T`).
+///    `std::fs::canonicalize` fails (`ENOENT`, permission) whenever either
+///    side does not exist — that failure is swallowed here and simply drops
+///    this pass, never turning "cannot canonicalize" into a hard error; the
+///    literal pass above already covers the common not-yet-provisioned case.
+///
+/// **Residual, accepted gap:** a root that does not exist yet AND differs
+/// from every listed root only by case on a case-insensitive filesystem
+/// evades both passes — canonicalize has nothing on disk to resolve the case
+/// against, and the literal component comparison is case-sensitive by
+/// design (it must be, to avoid false-positiving on genuinely distinct
+/// paths elsewhere in this file). This is a loud *warning* surface, not a
+/// security fence, so the gap is accepted rather than chased with a
+/// case-folding heuristic that would risk false positives of its own.
+fn is_under_any_root(path: &Path, ephemeral_roots: &[PathBuf]) -> bool {
+    ephemeral_roots.iter().any(|root| {
+        if path == root || path_is_within_components(path, root) {
+            return true;
+        }
+        match (std::fs::canonicalize(path), std::fs::canonicalize(root)) {
+            (Ok(canon_path), Ok(canon_root)) => {
+                canon_path == canon_root || path_is_within_components(&canon_path, &canon_root)
+            }
+            _ => false,
+        }
+    })
+}
+
+/// Loud (never fatal) warning when an explicitly configured managed
+/// worktrees root sits under a known-ephemeral scratch volume.
+fn warn_if_ephemeral_root(path: &Path, source: &str) {
+    if is_under_any_root(path, &ephemeral_root_prefixes()) {
+        eprintln!(
+            "[tachi worktree] WARNING: {source}={} points at an ephemeral scratch volume; a \
+             worktree meant to outlive this session should live under a durable cache dir (the \
+             default is ~/.cache/tachi/worktrees/<repo>), not /private/tmp, /tmp, or $TMPDIR — \
+             those are wiped on reboot and orphan the tree's gitdir (tachi#1184)",
+            path.display()
+        );
     }
 }
 
@@ -910,6 +987,96 @@ mod tests {
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         assert_ne!(a, b, "consecutive short_ids must not collide");
+    }
+
+    // ─── tachi#1184 item 3: worktree-location law ──────────────────────────
+
+    #[test]
+    fn private_tmp_and_tmp_are_ephemeral() {
+        let roots = vec![PathBuf::from("/tmp"), PathBuf::from("/private/tmp")];
+        assert!(is_under_any_root(Path::new("/private/tmp/wz-1184"), &roots));
+        assert!(is_under_any_root(Path::new("/tmp/some-session"), &roots));
+        // The bare root itself also counts, not just children of it.
+        assert!(is_under_any_root(Path::new("/private/tmp"), &roots));
+    }
+
+    #[test]
+    fn cache_root_is_not_ephemeral() {
+        let roots = vec![PathBuf::from("/tmp"), PathBuf::from("/private/tmp")];
+        assert!(!is_under_any_root(
+            Path::new("/home/x/.cache/tachi/worktrees/repo"),
+            &roots
+        ));
+    }
+
+    #[test]
+    fn sibling_directory_is_not_a_false_positive() {
+        // `/private/tmpfs-something` must not match boundary `/private/tmp`
+        // via a naive string-prefix check — this is exactly the sibling
+        // pitfall `path_is_within_components`'s own doc comment calls out
+        // (`~/.cache/tachi/worktrees-evil` vs `~/.cache/tachi/worktrees`).
+        let roots = vec![PathBuf::from("/private/tmp")];
+        assert!(!is_under_any_root(
+            Path::new("/private/tmpfs-something/foo"),
+            &roots
+        ));
+    }
+
+    #[test]
+    fn tmpdir_override_is_treated_as_ephemeral_too() {
+        let roots = vec![
+            PathBuf::from("/tmp"),
+            PathBuf::from("/private/tmp"),
+            PathBuf::from("/var/folders/xy/abc"),
+        ];
+        assert!(is_under_any_root(
+            Path::new("/var/folders/xy/abc/session-42"),
+            &roots
+        ));
+    }
+
+    // symlink construction is unix-only; the canonicalize fallback it
+    // exercises is a portable code path, but this fixture needs a real
+    // symlink to prove it fires, so the test itself is unix-only too (same
+    // convention as `work_claim.rs`'s `held_env_is_found_through_a_symlinked_path_spelling`).
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_root_is_caught_via_canonicalization_c4() {
+        // tachi#1184 review C4: a listed root that is ITSELF a symlink to a
+        // real directory must still catch a candidate path spelled through
+        // the symlink's TARGET (not just the literal listed spelling) — the
+        // exact `/tmp` -> `/private/tmp`-shaped case, reproduced with a real
+        // (hermetic, tempdir-scoped) symlink rather than relying on the
+        // system's actual /tmp layout.
+        let base = unique_temp("wt-open-c4-root");
+        let real_dir = base.join("real-ephemeral-root");
+        let alias = base.join("alias-into-real");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::os::unix::fs::symlink(&real_dir, &alias).unwrap();
+        let candidate = alias.join("session-under-symlink");
+        std::fs::create_dir_all(&candidate).unwrap();
+
+        // The ephemeral roots list only knows the ALIAS spelling; the
+        // candidate path is spelled through it too, so the literal pass
+        // alone already matches here — this establishes the fixture is
+        // sound before the next assertion exercises the canonicalize pass.
+        assert!(is_under_any_root(&candidate, std::slice::from_ref(&alias)));
+
+        // Now spell the SAME candidate through its canonical (real_dir)
+        // form, while the roots list only knows the alias spelling — the
+        // literal pass cannot match this, only the canonicalize fallback
+        // can.
+        let canonical_candidate = std::fs::canonicalize(&candidate).unwrap();
+        assert_ne!(
+            canonical_candidate, candidate,
+            "fixture must actually traverse a symlink for this test to mean anything"
+        );
+        assert!(is_under_any_root(
+            &canonical_candidate,
+            std::slice::from_ref(&alias)
+        ));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn unique_temp(prefix: &str) -> PathBuf {

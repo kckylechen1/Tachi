@@ -18,6 +18,7 @@
 //!                   write to <orig>.checkpointed.db. Original untouched.
 
 mod autofix;
+mod build_resources;
 mod classify;
 mod cross_domain;
 mod hub_lint;
@@ -28,6 +29,13 @@ mod secrets;
 mod types;
 
 pub use autofix::auto_fix_safe;
+/// tachi#1184 item 2 — REPORT-ONLY build-resource patrol (private orphan
+/// `CARGO_TARGET_DIR`-shaped dirs + managed-worktree inspection notes),
+/// folded into `report.warnings` by `bootstrap::manifest_cli::run_doctor_command`.
+pub(crate) use build_resources::{
+    scan_orphan_build_resources, worktree_inspection_report, DEFAULT_ORPHAN_MAX_AGE_DAYS,
+    DEFAULT_WORKTREE_STALE_DAYS,
+};
 #[cfg(test)]
 pub use classify::classify_one;
 /// Reused by `bootstrap::migrate_cli` (kckylechen1/tachi#1223) for the exact
