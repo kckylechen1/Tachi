@@ -8,6 +8,34 @@ use super::common::normalize_utc_iso;
 
 mod ddl;
 
+/// Bare, transaction-less schema init: applies connection PRAGMAs then runs
+/// [`init_schema_inner`] directly on `conn`.
+///
+/// ## Why the missing outer transaction is safe here (#1289 Claim1)
+///
+/// `init_schema_inner` performs its `session_claims` dedup
+/// ([`crate::db::migrations::dedupe_session_claims_identity_conflicts`]) and
+/// the `CREATE UNIQUE INDEX idx_session_claims_identity_active`
+/// (`MIGRATED_INDEXES_SQL`) as two separate connection ops. If a *concurrent*
+/// writer could insert a fresh duplicate active claim between them, the index
+/// build would fail — so that pair would need a transaction to be race-free.
+/// It is not wrapped here because this entry point is only ever reached where
+/// there is NO concurrent writer:
+///
+/// - The sole production caller is [`crate::MemoryStore::open_in_memory`],
+///   which builds a plain `Connection::open_in_memory()` — a private,
+///   single-connection, non-shared-cache DB that no other connection can write
+///   to, so the interleaving window cannot exist.
+/// - Every file-backed production open routes through
+///   [`init_schema_with_label_mut`] instead, which runs `init_schema_inner` +
+///   `run_data_migrations_in_tx` + the version stamp inside ONE
+///   `BEGIN IMMEDIATE` transaction (#984 F1 round 3) — already atomic against
+///   concurrent writers.
+/// - All remaining callers are `#[cfg(test)]` single-threaded fixtures.
+///
+/// A caller that ever wires this bare path onto a *shared* file/in-memory DB
+/// with concurrent writers must switch to [`init_schema_with_label_mut`]'s
+/// transactional entry instead.
 pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     apply_connection_pragmas(conn)?;
     init_schema_inner(conn)
