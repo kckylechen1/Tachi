@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 
-/// Create repo-local DB fixtures outside OS temp roots. Production skip logic
-/// intentionally drops `/.tachi/memory.db` under `/tmp` and `/private/tmp`.
+/// Create repo-local DB fixtures outside OS temp roots and git worktrees.
+/// Production skip logic intentionally drops `/.tachi/memory.db` under
+/// `/tmp` and `/private/tmp`; root-resolution tests additionally need a path
+/// that cannot walk upward into a repository through Cargo's in-tree target.
 pub(crate) fn non_skipped_fixture_tempdir(prefix: &str) -> tempfile::TempDir {
     let base = non_skipped_fixture_base().join("repo-local-db-fixtures");
     std::fs::create_dir_all(&base).expect("repo-local DB fixture base");
@@ -23,8 +25,32 @@ fn non_skipped_fixture_base() -> PathBuf {
         .into_iter()
         .chain(repo_target)
         .chain(dirs::home_dir().map(|home| home.join(".cache/sigil-repo-local-db-fixtures")))
-        .find(|candidate| !has_tmp_skip_prefix(candidate))
-        .unwrap_or_else(|| PathBuf::from("target"))
+        .map(absolutize)
+        .find(|candidate| !has_tmp_skip_prefix(candidate) && !has_git_ancestor(candidate))
+        .expect("repo-local DB tests need a fixture base outside temp roots and git worktrees")
+}
+
+/// Resolve a candidate to an absolute path *before* it is fed to
+/// [`has_git_ancestor`]. `CARGO_TARGET_DIR` can legally hold a relative value
+/// (e.g. `target/fixture-base`); this crate's own build convention points it
+/// at a shared external cache (see repo `AGENTS.md`), so a checkout routinely
+/// has no local `target/` directory at all. When that's true, `has_git_ancestor`'s
+/// `path.ancestors().find(|c| c.exists())` walk — run on the relative path
+/// exactly as given — finds nothing that exists to canonicalize and reports
+/// "no git ancestor", even though the same relative path resolves squarely
+/// inside the current git worktree once `std::fs::create_dir_all` joins it
+/// against the process cwd at use time. Absolutizing against cwd first makes
+/// the ancestor walk see the same directories the filesystem will actually
+/// use, so an existing ancestor (at minimum cwd itself) is always available
+/// to canonicalize and check for `.git`.
+fn absolutize(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    }
 }
 
 fn has_tmp_skip_prefix(path: &Path) -> bool {
@@ -33,6 +59,13 @@ fn has_tmp_skip_prefix(path: &Path) -> bool {
         .replace('\\', "/")
         .to_ascii_lowercase();
     path_lower.starts_with("/tmp/") || path_lower.starts_with("/private/tmp/")
+}
+
+fn has_git_ancestor(path: &Path) -> bool {
+    path.ancestors()
+        .find(|candidate| candidate.exists())
+        .and_then(|candidate| crate::utils::find_git_root_from(candidate))
+        .is_some()
 }
 
 pub(crate) fn assert_repo_local_db_fixture_not_skipped(path: &Path) {
@@ -221,7 +254,8 @@ pub(crate) fn spawn_opencode_probe_server() -> (String, std::thread::JoinHandle<
 
 #[cfg(test)]
 mod tests {
-    use super::{with_tachi_home, EnvRestore};
+    use super::{non_skipped_fixture_base, with_tachi_home, CwdRestore, EnvRestore};
+    use std::path::Path;
 
     /// #1096 leaf-2a round-2 (codex C5): pins the panic-safety claim in
     /// `with_tachi_home`'s doc comment. A closure that panics inside `f`
@@ -270,6 +304,53 @@ mod tests {
             std::env::var("TACHI_APP_HOME").as_deref(),
             Ok("/sentinel/pre-call-app-home"),
             "TACHI_APP_HOME must be restored to its pre-call value even after a panic"
+        );
+    }
+
+    /// #1272 cross-vendor review: `has_git_ancestor`'s ancestor walk ran on
+    /// the candidate exactly as given, so a *relative* `CARGO_TARGET_DIR`
+    /// (e.g. `target/fixture-base`) whose components don't exist yet at
+    /// check time found no existing ancestor to canonicalize and reported
+    /// "no git ancestor" — even when the same relative path resolves inside
+    /// the current git worktree once `create_dir_all` joins it against cwd.
+    /// `project_db_ops::rejects_path_outside_git_repo_when_cargo_target_dir_is_in_a_git_repo`
+    /// only exercised a pre-created ABSOLUTE `CARGO_TARGET_DIR`, so it never
+    /// caught this. Repro: cwd a fake git repo with no local `target/` dir
+    /// (this crate's own convention — `CARGO_TARGET_DIR` points at a shared
+    /// external cache, see repo `AGENTS.md`), set a relative
+    /// `CARGO_TARGET_DIR`, and prove the chosen fixture base does not
+    /// resolve inside that repo.
+    #[test]
+    fn relative_cargo_target_dir_resolving_inside_a_git_repo_is_rejected() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let repo = sandbox.path().join("fixture-repo");
+        std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+        let _cwd = CwdRestore::set(&repo);
+
+        let relative_candidate = Path::new("target/fixture-base");
+        assert!(
+            !relative_candidate.exists()
+                && !relative_candidate.parent().expect("has parent").exists(),
+            "fixture must exercise the case where no ancestor of the relative \
+             candidate exists yet at check time — that's the exact condition \
+             that let it slip past the pre-fix ancestor walk"
+        );
+        let _cargo_target = EnvRestore::set_path("CARGO_TARGET_DIR", relative_candidate);
+
+        let base = non_skipped_fixture_base();
+        let resolved = if base.is_absolute() {
+            base.clone()
+        } else {
+            repo.join(&base)
+        };
+        assert!(
+            !resolved.starts_with(&repo),
+            "a relative CARGO_TARGET_DIR that resolves inside a git repo via \
+             cwd must not be selected as the fixture base, got: {}",
+            base.display()
         );
     }
 }

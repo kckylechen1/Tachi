@@ -434,6 +434,37 @@ mod resolve_or_register_workspace_root_tests {
         });
     }
 
+    #[test]
+    fn rejects_path_outside_git_repo_when_cargo_target_dir_is_in_a_git_repo() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let repo = sandbox.path().join("fixture-repo");
+        let in_repo_target = repo.join("target");
+        std::fs::create_dir_all(repo.join(".git")).expect("fake git repo");
+        std::fs::create_dir_all(&in_repo_target).expect("in-repo target");
+        let _cargo_target = EnvRestore::set_path("CARGO_TARGET_DIR", &in_repo_target);
+
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("workspace-root-");
+        let tachi_home = fixture.path().join("home");
+        std::fs::create_dir_all(&tachi_home).expect("tachi home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+        let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+        let server = make_server(fixture.path());
+        let plain_dir = fixture.path().join("not-a-git-repo");
+        std::fs::create_dir_all(&plain_dir).expect("plain dir");
+        let err = server
+            .resolve_or_register_workspace_root(&plain_dir.display().to_string())
+            .expect_err("a fixture path beneath an in-repo target must remain outside git");
+        assert!(
+            err.contains("not inside a git repository"),
+            "expected a not-a-git-repo error, got: {err}"
+        );
+    }
+
     /// Review finding [1] (#1207): a repo-controlled `.tachi` symlink must
     /// not be able to redirect DB creation outside the git root. Route
     /// through the same canonical containment guard
