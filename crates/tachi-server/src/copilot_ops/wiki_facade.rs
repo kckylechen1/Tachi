@@ -66,6 +66,10 @@ pub(crate) async fn handle_tachi_wiki_write(
         return Err("metadata must be a JSON object when supplied for wiki write".to_string());
     }
     if let Some(obj) = wiki_metadata.as_object_mut() {
+        // Ordinary wiki writes use typed evidence_refs_v1 as their canonical
+        // top-level reference shape. Nested source_refs belong to their
+        // containing metadata and are intentionally unaffected.
+        obj.remove("source_refs");
         obj.insert("wiki".to_string(), json!(true));
         obj.insert("wiki_title".to_string(), json!(params.title.clone()));
         obj.insert("user_force".to_string(), json!(params.force));
@@ -86,6 +90,13 @@ pub(crate) async fn handle_tachi_wiki_write(
     })?;
     if let Some(existing) = &existing {
         if let Some(obj) = wiki_metadata.as_object_mut() {
+            // Metadata patch merging has no delete operation. Tombstone a
+            // legacy top-level source_refs key only when this update is
+            // replacing a row that actually has one, so stale refs cannot
+            // survive and become the preferred reader's fallback.
+            if existing.metadata.get("source_refs").is_some() {
+                obj.insert("source_refs".to_string(), Value::Null);
+            }
             obj.insert("wiki_update_of".to_string(), json!(existing.id));
             obj.insert(
                 "wiki_previous_revision".to_string(),

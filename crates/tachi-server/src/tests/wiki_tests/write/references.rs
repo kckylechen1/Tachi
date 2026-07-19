@@ -45,7 +45,9 @@ async fn tachi_wiki_write_stores_and_rejects_invalid_references() {
             retention_policy: "permanent".to_string(),
             domain: None,
             project: None,
-            metadata: None,
+            metadata: Some(json!({
+                "source_refs": ["https://example.com/forged-legacy-ref"]
+            })),
             force: true,
             references: vec![
                 "https://github.com/kckylechen1/tachi/issues/149".to_string(),
@@ -71,7 +73,7 @@ async fn tachi_wiki_write_stores_and_rejects_invalid_references() {
     let entry: Value = serde_json::from_str(&fetched).expect("entry json");
     assert!(
         entry["metadata"].get("source_refs").is_none(),
-        "new wiki writes must not dual-write legacy source_refs: {entry:#}"
+        "new wiki writes must discard caller-supplied legacy source_refs: {entry:#}"
     );
     let typed_refs = entry["metadata"]["evidence_refs_v1"]
         .as_array()
