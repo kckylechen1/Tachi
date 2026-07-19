@@ -91,6 +91,17 @@ pub(super) async fn run_doctor_command(
     let schema_skew = crate::doctor::schema_version_skew_warnings(&report.findings);
     report.warnings.extend(schema_skew);
 
+    // tachi#1184 item 2: the build-resource patrol (private orphan
+    // CARGO_TARGET_DIR-shaped dirs + managed-worktree inspection notes).
+    // REPORT-ONLY — see `doctor::build_resources` module docs; never gated on
+    // `fix`, since neither half of this patrol deletes or reconciles anything.
+    report.warnings.extend(crate::doctor::scan_orphan_build_resources(
+        crate::doctor::DEFAULT_ORPHAN_MAX_AGE_DAYS,
+    ));
+    report.warnings.extend(crate::doctor::worktree_inspection_report(
+        crate::doctor::DEFAULT_WORKTREE_STALE_DAYS,
+    ));
+
     // Always update the manifest after a doctor run (idempotent; preserves notes).
     let manifest_path = manifest_path(app_home);
     let mut m = crate::manifest::Manifest::load_or_empty(&manifest_path);

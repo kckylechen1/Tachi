@@ -2666,7 +2666,12 @@ pub(crate) fn reclaimed_bytes_by_reason(
 /// Apparent size of a directory tree (same metadata-only walk as
 /// `tachi_clean::target_clean::dir_size`). Expensive: only ever called on a
 /// candidate that already survived every cheap gate.
-fn dir_size(path: &Path) -> u64 {
+///
+/// `pub(crate)` (tachi#1184 item 2): the `tachi doctor` build-resource patrol
+/// (`doctor::build_resources::scan_orphan_build_resources`) reuses this exact
+/// walk to size its own — narrower, blessed-list-filtered — candidate set,
+/// rather than growing a second copy of the same metadata-only recursion.
+pub(crate) fn dir_size(path: &Path) -> u64 {
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return 0;
     };
