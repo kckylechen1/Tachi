@@ -797,6 +797,109 @@ mod tests {
         );
     }
 
+    /// tachi#1288/#1276: `mark_task_dispatch` currently persists
+    /// `write_json_atomic(&status_path, ...)` -- the exact durable signal
+    /// `dispatch_marker_has_any_projection` reads on the next call -- BEFORE
+    /// the `had_marker`-guarded `append_flow_event("dispatch_linked")`. A
+    /// crash/failure landing between those two writes leaves the dedup
+    /// signal durable with the event never emitted: every retry recomputes
+    /// `had_marker == true` and permanently skips the append (at-most-once,
+    /// with total, unrecoverable loss of that one dispatch_linked record).
+    ///
+    /// A literal mid-statement process crash isn't reproducible in a unit
+    /// test, so this probes the *code's write order* directly: `run_dir`
+    /// is chmod'd read-only (but not its already-created `artifacts`
+    /// subdir or its pre-existing `events.jsonl`), which fails the status
+    /// write specifically (it must create a same-directory temp file to
+    /// rename into place) while leaving an append to the *already-existing*
+    /// events.jsonl (opened without needing a new directory entry) able to
+    /// succeed. Whichever of the two writes the source runs first is the
+    /// one that lands durably before the induced failure aborts the call.
+    ///
+    /// Pre-fix (status persisted first): the call fails before
+    /// `append_flow_event` is ever reached, so 0 events land. Post-fix
+    /// (event appended first, mirroring 438f57f1's `dispatch_completed`
+    /// reorder): the event lands durably even though the subsequent status
+    /// persist still fails.
+    #[test]
+    #[allow(clippy::await_holding_lock)]
+    fn dispatch_linked_event_lands_before_status_persist_can_fail_it() {
+        let _env_lock = crate::shell_ops::tachi_run_root_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().expect("temp run root");
+        let run_root = temp.path().join("runs");
+        let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", &run_root);
+        let flow_id = "flow_20260719T000004Z_crash_window";
+        let dispatch_id = "20260719T000004Z-crash-window";
+
+        let run_dir = run_root.join(flow_id);
+        std::fs::create_dir_all(run_dir.join("artifacts")).expect("create run dir + artifacts");
+        std::fs::write(run_dir.join("events.jsonl"), b"").expect("pre-create events.jsonl");
+
+        #[cfg(not(unix))]
+        {
+            eprintln!(
+                "skipping crash-window probe: directory permission fault injection is unix-only"
+            );
+            return;
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&run_dir, std::fs::Permissions::from_mode(0o555))
+                .expect("restrict run_dir to read-only");
+        }
+
+        // Elevated privileges (e.g. root in some CI containers) bypass
+        // directory write-permission checks entirely, which would make
+        // this probe meaningless (both writes would "succeed"). Detect that
+        // up front and skip rather than assert something environment-
+        // dependent.
+        let probe_path = run_dir.join(format!("permission-probe-{}", uuid::Uuid::new_v4()));
+        let permission_enforced = std::fs::File::create(&probe_path).is_err();
+        let _ = std::fs::remove_file(&probe_path);
+        if !permission_enforced {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&run_dir, std::fs::Permissions::from_mode(0o755)).ok();
+            }
+            eprintln!(
+                "skipping crash-window probe: run_dir write permission was not enforced (root?)"
+            );
+            return;
+        }
+
+        let result =
+            mark_task_dispatch(flow_id, dispatch_id, json!({"agent": "crash-window-probe"}));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&run_dir, std::fs::Permissions::from_mode(0o755))
+                .expect("restore run_dir permissions for cleanup");
+        }
+
+        assert!(
+            result.is_err(),
+            "status persist must fail under a read-only run_dir for this probe to be meaningful"
+        );
+
+        let events = std::fs::read_to_string(run_dir.join("events.jsonl")).expect("events");
+        assert_eq!(
+            events
+                .lines()
+                .filter(|line| line.contains("\"event\":\"dispatch_linked\""))
+                .count(),
+            1,
+            "dispatch_linked must be appended before the status persist that gates its own \
+             idempotency guard, so a crash/failure between the two writes never permanently \
+             loses the event: {events}"
+        );
+    }
+
     /// tachi#1271: #1257 made `dispatch_linked` idempotent (the `had_marker`
     /// guard above) but left `mark_task_dispatch_completion`'s
     /// `dispatch_completed` event unconditional, even though
