@@ -98,6 +98,9 @@ fn dispatch_run_dir(dispatch_id: &str, run_dir_hint: Option<&str>) -> Option<Pat
 /// between validation and read. Re-run the identical canonicalize +
 /// `starts_with(runs_root)` check immediately before the read; on failure
 /// return `None`, indistinguishable from "not found" (no probe signal).
+/// A narrower open-by-pathname window still remains between this
+/// revalidation and the actual `open`/`read_to_string` call right after it;
+/// closing that fully needs `openat`/`O_NOFOLLOW`, deferred per #1270.
 fn revalidate_run_dir_at_read_time(run_dir: &Path) -> Option<PathBuf> {
     canonical_dir_within(run_dir, &tachi_home().join("runs"))
 }
