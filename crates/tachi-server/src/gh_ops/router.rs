@@ -244,8 +244,23 @@ pub(crate) async fn handle_tachi_gh(
             ))
             .await
         }
+        "handoff_draft" => {
+            let repo = required_repo(&params, "handoff_draft")?;
+            handle_gh_handoff_draft(server, &params, repo)
+        }
+        "handoff_publish" => {
+            let repo = required_repo(&params, "handoff_publish")?;
+            Box::pin(handle_gh_handoff_publish(server, &params, repo)).await
+        }
+        "handoff_repair" => {
+            let repo = required_repo(&params, "handoff_repair")?;
+            let number = params
+                .number
+                .ok_or("handoff_repair requires 'number' parameter")?;
+            Box::pin(handle_gh_handoff_repair(server, repo, number)).await
+        }
         other => Err(format!(
-            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, issue_comment, issue_label, issue_freshness_scan, pr_list, pr_read, pr_comments, pr_comment, pr_review_digest, safe_merge, ship, link_pr, pr_status, pr_handoff, release_note",
+            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, issue_comment, issue_label, issue_freshness_scan, pr_list, pr_read, pr_comments, pr_comment, pr_review_digest, safe_merge, ship, link_pr, pr_status, pr_handoff, release_note, handoff_draft, handoff_publish, handoff_repair",
             other
         )),
     }?;

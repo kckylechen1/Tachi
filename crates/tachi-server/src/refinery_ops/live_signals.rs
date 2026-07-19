@@ -333,6 +333,7 @@ mod tests {
             merge_commit_sha: Some(merge_commit_sha.to_string()),
             commit_messages: Vec::new(),
             merge_commit_message: String::new(),
+            merged_at: None,
         }
     }
 

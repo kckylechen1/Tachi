@@ -23,6 +23,7 @@ type GhPrCommentsBundle = (Vec<Value>, Vec<Value>, Vec<Value>);
 
 mod ci_watch;
 mod comments;
+mod handoff;
 mod issue_freshness;
 mod issues;
 mod labels;
@@ -41,6 +42,7 @@ mod safe_merge_tests;
 #[cfg(test)]
 mod ship_tests;
 
+use self::handoff::{handle_gh_handoff_draft, handle_gh_handoff_publish, handle_gh_handoff_repair};
 use self::issues::*;
 use self::labels::*;
 use self::prs::*;
@@ -55,8 +57,8 @@ pub(crate) use self::comments::{gh_comment_marker_present, handle_gh_comment};
 pub(crate) use self::issue_freshness::{
     briefing_freshness_queues, extract_referenced_issue_numbers, fetch_and_scan_same_surface_churn,
     fetch_and_scan_stale_candidates, fetch_and_scan_zombies, fetch_merged_prs,
-    reap_stale_kind_rows, save_freshness_row, FreshnessRow, MergedPr, KIND_CHURN_CANDIDATE,
-    KIND_STALE_CANDIDATE, KIND_ZOMBIE, STALE_CANDIDATE_NS, ZOMBIE_NS,
+    fetch_merged_prs_since, reap_stale_kind_rows, save_freshness_row, FreshnessRow, MergedPr,
+    KIND_CHURN_CANDIDATE, KIND_STALE_CANDIDATE, KIND_ZOMBIE, STALE_CANDIDATE_NS, ZOMBIE_NS,
 };
 pub(crate) use self::issues::read_issue_snapshot_bounded;
 pub(crate) use self::router::handle_tachi_gh;

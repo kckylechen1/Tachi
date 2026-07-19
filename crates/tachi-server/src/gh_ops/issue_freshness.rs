@@ -67,6 +67,13 @@ pub(crate) struct MergedPr {
     /// failure here degrades to "this one PR's merge-commit message wasn't
     /// checked", never a hard scan failure.
     pub merge_commit_message: String,
+    /// RFC3339 merge timestamp (`gh`'s `mergedAt` field), when the caller's
+    /// `--json` field list included it. `#1285` handoff-draft ledger uses
+    /// this for G3 windowed accounting (`merged:>=<since>` search, NOT the
+    /// list's default created-order) — the zombie/stale-candidate scanners
+    /// that built this struct originally never needed it, so it stays
+    /// `None` for callers that don't request the field.
+    pub merged_at: Option<String>,
 }
 
 /// Extract issue numbers referenced via `Refs #N`, `Ref #N`, `Refs #N, #M`,
@@ -572,6 +579,44 @@ pub(crate) fn fetch_merged_prs(
     Ok(merged_prs)
 }
 
+/// #1285 handoff-draft G3 ledger: merged PRs since an explicit RFC3339
+/// timestamp, ordered by `merged:>=<since>` — NOT `fetch_merged_prs`'s
+/// `--state merged --limit N` (a systemically wrong "since" proxy: PR list's
+/// default ordering is creation order, so a `--limit` cutover silently drops
+/// PRs merged out of creation order — a PR opened long ago and merged
+/// recently would be missed, and one opened recently but merged long ago
+/// could wrongly appear "in window"). Kept as a separate function rather
+/// than folding a `since` branch into `fetch_merged_prs` because that
+/// function's callers (`fetch_and_scan_zombies`/`fetch_and_scan_same_surface_churn`)
+/// intentionally want limit-bounded "most recent N merges" regardless of
+/// exact merge date, a different selection semantics than a hard
+/// date-window ledger.
+/// Pure arg-builder, split out from [`fetch_merged_prs_since`] so the exact
+/// `gh` invocation shape (search-based window, NOT `--state`/`--limit`) is
+/// unit-testable against a bare `Command` without shelling out to a real
+/// `gh` binary.
+fn apply_merged_prs_since_args(cmd: &mut Command, repo: &str, since_rfc3339: &str, limit: u32) {
+    cmd.args(["pr", "list"])
+        .args(["--repo", repo])
+        .args(["--search", &format!("is:merged merged:>={since_rfc3339}")])
+        .args(["--limit", &limit.to_string()])
+        .args(["--json", "number,title,body,mergeCommit,commits,mergedAt"]);
+}
+
+pub(crate) fn fetch_merged_prs_since(
+    server: &MemoryServer,
+    repo: &str,
+    since_rfc3339: &str,
+    limit: u32,
+) -> Result<Vec<MergedPr>, String> {
+    let (mut cmd, token) = build_gh_command(server)?;
+    apply_merged_prs_since_args(&mut cmd, repo, since_rfc3339, limit);
+    let output = run_gh_json(cmd, &token)?;
+    let value: Value =
+        serde_json::from_str(&output).map_err(|e| format!("parse pr list json: {e}"))?;
+    Ok(parse_merged_prs_json(&value))
+}
+
 /// Read a merge commit's own message from the local checkout: `git -C
 /// repo_root log -1 --format=%B <sha>`. Best-effort — a resolve failure
 /// (commit not present locally, e.g. shallow clone or not yet fetched; `git`
@@ -645,6 +690,14 @@ pub(crate) fn parse_merged_prs_json(value: &Value) -> Vec<MergedPr> {
                         // by `fetch_merged_prs` after this pure parse — `gh`
                         // itself never returns a merge commit's message text.
                         merge_commit_message: String::new(),
+                        // #1285: only present when the caller's `--json`
+                        // field list requested `mergedAt` (both
+                        // `fetch_merged_prs` and `fetch_merged_prs_since`
+                        // request it as of this leaf); absent otherwise.
+                        merged_at: r
+                            .get("mergedAt")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
                     })
                 })
                 .collect()
@@ -1164,6 +1217,7 @@ mod tests {
             merge_commit_sha: Some(format!("sha-{number}")),
             commit_messages: Vec::new(),
             merge_commit_message: String::new(),
+            merged_at: None,
         }
     }
 
@@ -1246,6 +1300,57 @@ mod tests {
         let prs = parse_merged_prs_json(&value);
         assert_eq!(prs.len(), 1);
         assert_eq!(prs[0].number, 2);
+    }
+
+    /// #1285 G3: `mergedAt` is optional in the parser (only present when the
+    /// caller's `--json` field list requested it) — present rows carry it
+    /// through, absent rows degrade to `None` rather than panicking.
+    #[test]
+    fn parse_merged_prs_json_carries_merged_at_when_present() {
+        let value = serde_json::json!([
+            { "number": 10, "title": "t", "body": "b", "mergedAt": "2026-07-15T12:00:00Z" },
+            { "number": 11, "title": "t2", "body": "b2" }
+        ]);
+        let prs = parse_merged_prs_json(&value);
+        assert_eq!(prs.len(), 2);
+        assert_eq!(prs[0].merged_at.as_deref(), Some("2026-07-15T12:00:00Z"));
+        assert_eq!(prs[1].merged_at, None);
+    }
+
+    /// #1285 G3: the handoff-draft ledger MUST window by `merged:>=<since>`
+    /// (a real merge-date search), not `fetch_merged_prs`'s
+    /// `--state merged --limit N` (a creation-order proxy that is a
+    /// systemic misaccounting for "what merged in this window" — see
+    /// `fetch_merged_prs_since`'s doc comment). This locks the exact args
+    /// shape in without shelling out to a real `gh` binary.
+    #[test]
+    fn fetch_merged_prs_since_builds_merged_date_search_not_state_limit() {
+        let repo = "kckylechen1/tachi";
+        let since = "2026-07-12T00:00:00+00:00";
+        let mut cmd = Command::new("gh");
+        apply_merged_prs_since_args(&mut cmd, repo, since, 100);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            args.iter().any(|a| a == "--search"),
+            "must use --search, not --state/--limit-as-window: {args:?}"
+        );
+        assert!(
+            args.iter()
+                .any(|a| a.contains("is:merged") && a.contains(since)),
+            "search query must carry merged:>=<since>: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "--state"),
+            "must not fall back to --state merged (creation-order proxy): {args:?}"
+        );
+        assert!(
+            args.iter()
+                .any(|a| a == "mergedAt" || a.contains("mergedAt")),
+            "must request mergedAt in --json field list: {args:?}"
+        );
     }
 
     /// #1000 codex review finding 8: `gh issue list --json

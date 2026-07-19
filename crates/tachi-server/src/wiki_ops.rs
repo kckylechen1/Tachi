@@ -25,6 +25,7 @@ const WIKI_INGEST_HTTP_MAX_BYTES: usize = 2 * 1024 * 1024;
 static WIKI_INGEST_HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 
 mod export;
+mod handoff_lookup;
 mod ingest;
 mod lint;
 mod log;
@@ -47,6 +48,7 @@ use self::store::{
 };
 
 pub(crate) use self::export::export_wiki_obsidian;
+pub(crate) use self::handoff_lookup::list_handoff_mirrors_for_repo;
 pub(crate) use self::ingest::handle_wiki_ingest;
 pub(crate) use self::lint::{handle_wiki_lint, wiki_hygiene_counts};
 pub(crate) use self::log::append_wiki_log;
