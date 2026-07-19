@@ -2,12 +2,39 @@
 //! pollers until the V2 plan stage (up to 180s LLM call) completes, and a
 //! plan-stage failure must not leave an orphaned kanban row.
 //!
-//! These tests drive the real V2 plan stage against a fake `claude` binary
-//! (`CLAUDE_BIN` env override, same mechanism `v2_smoke.rs` uses) so no
-//! network call / real Claude Code CLI is required. Each test isolates
-//! `TACHI_HOME` to a fresh temp dir and holds `global_test_lock()` because
-//! `CLAUDE_BIN` / `DISPATCH_V2_ENABLED` / `TACHI_HOME` are process-global env
-//! vars.
+//! tachi#1288 (Fix C, CLI-era fixture cleanup): the doc paragraph these tests
+//! originally shipped with claimed the plan stage was driven against a fake
+//! `claude` binary via a `CLAUDE_BIN` env override, "so no network call /
+//! real Claude Code CLI is required." That was true when the V2 plan stage
+//! went through `ClaudePool::call` (which shelled out to the binary at
+//! `CLAUDE_BIN`). #1274 (ClaudePool decommission step 2/3) deleted that
+//! branch entirely: `dispatch_v2::call_plan_llm` now calls
+//! `llm.call_reasoning_llm_provider_only(...)` directly, which never reads
+//! `CLAUDE_BIN` — see `dispatch_v2.rs`'s own
+//! `call_plan_llm_never_reaches_cli_binary_resolver` negative-control test,
+//! which exists specifically to keep that invariant honest.
+//!
+//! Concretely, that leaves this file's tests in two different states:
+//!   * `plan_stage_failure_closes_both_status_and_kanban_row` still gets a
+//!     genuine plan-stage failure (now from the real reasoning-LLM call
+//!     erroring in an unconfigured test environment, not from the fake
+//!     script's `exit 1`) and still verifies the property it's named for
+//!     (status.json + kanban row both close terminal).
+//!   * `successful_dispatch_seeds_status_and_kanban_before_plan_completes`
+//!     and `plan_review_pending_response_projects_input_required_kanban_state`
+//!     need `call_plan_llm` to actually SUCCEED, which now requires a real,
+//!     configured reasoning-lane LLM provider (network egress + credentials)
+//!     — the elaborate `write_fake_claude_binary` / sentinel-release dance
+//!     below no longer influences either test's outcome at all, since
+//!     nothing in the production code path ever executes that file. Without
+//!     a configured provider these two are a known LANE-OUTAGE red pair, not
+//!     a regression this fix is trying to close (rewriting them against a
+//!     real mock provider seam — none exists in `tachi-llm` today — is
+//!     tracked as the tachi#1288 follow-up, not done here).
+//!
+//! Each test isolates `TACHI_HOME` to a fresh temp dir and holds
+//! `global_test_lock()` because `CLAUDE_BIN` / `DISPATCH_V2_ENABLED` /
+//! `TACHI_HOME` are process-global env vars.
 
 use super::super::make_server;
 use super::{
@@ -18,9 +45,18 @@ use crate::test_support::EnvRestore;
 use serde_json::{json, Value};
 
 /// Write a fake `claude` CLI at `path` that either succeeds with a
-/// minimal-but-valid plan envelope, or exits non-zero to force
-/// `ClaudePool::call` into its `Err` branch (mirrors `v2_smoke.rs`'s fixture,
-/// with an added failure mode).
+/// minimal-but-valid plan envelope, or exits non-zero.
+///
+/// tachi#1288 (Fix C): this described forcing `ClaudePool::call` into its
+/// `Err` branch until #1274 deleted that branch. Nothing in the current
+/// `dispatch_v2::call_plan_llm` reads `CLAUDE_BIN` or executes this file
+/// anymore (see the module doc above) — this fixture is now dead machinery
+/// for every caller below. Left in place (rather than deleted) because the
+/// two callers that use `FakeClaudeMode::Success` are a tracked LANE-OUTAGE
+/// red pair, not something this bounded fix rewrites; ripping the fixture
+/// out from underneath already-red tests without being able to re-run them
+/// here would risk hiding whether they still fail for the same documented
+/// reason.
 ///
 /// #971 review-fix (F4): `Success` no longer takes a fixed wall-clock sleep.
 /// A fixed sleep is a CI flake trap — under load, polling can be delayed
@@ -188,6 +224,11 @@ async fn plan_stage_failure_closes_both_status_and_kanban_row() {
 /// row present with pre-plan content (dispatch accepted, no plan yet)
 /// BEFORE the (slow, faked) plan stage completes — proving BOARD-FIRST /
 /// RECEIPT-FIRST ordering is observable, not just eventually-true.
+///
+/// tachi#1288 (Fix C): "faked" above is aspirational, not actual — see the
+/// module doc's CLI-era-fixture note. This test needs `call_plan_llm` to
+/// really succeed, so it's a known LANE-OUTAGE red without a configured
+/// reasoning-lane provider.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
@@ -301,6 +342,11 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
 /// reapable by `gc_expired_kanban_cards` instead of pinned forever — this
 /// test only asserts the vocabulary is consistent; GC aging itself is
 /// covered at the `kanban::gc` unit level, not re-driven end-to-end here.
+///
+/// tachi#1288 (Fix C): same LANE-OUTAGE caveat as
+/// `successful_dispatch_seeds_status_and_kanban_before_plan_completes` above
+/// — this needs `call_plan_llm` to really succeed via a configured
+/// reasoning-lane provider; see the module doc's CLI-era-fixture note.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn plan_review_pending_response_projects_input_required_kanban_state() {

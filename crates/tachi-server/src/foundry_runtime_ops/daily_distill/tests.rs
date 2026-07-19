@@ -377,9 +377,12 @@ fn persist_distill_memory_preserves_used_or_protected_raw_sources() {
 /// would surface "existing executable" again and this test would fail.
 ///
 /// `CLAUDE_BIN` is process-global and mutated by other test files too
-/// (`tests/dispatch_tests/board_first.rs`, `.../v2_smoke.rs`) — this uses
-/// the crate-wide `crate::utils::global_test_lock()`, matching their
-/// convention, not a locally-scoped mutex.
+/// (`tests/dispatch_tests/board_first.rs`) — this uses the crate-wide
+/// `crate::utils::global_test_lock()`, matching their convention, not a
+/// locally-scoped mutex. (tachi#1288 Fix C: this doc used to also point at
+/// `.../v2_smoke.rs`, an `#[ignore]`d test whose own CLAUDE_BIN-driven
+/// premise no longer existed after the same #1274 removal this test guards
+/// against; that dead test was deleted, not merely re-pointed here.)
 #[test]
 fn call_claude_batch_never_reaches_cli_binary_resolver() {
     let _guard = crate::utils::global_test_lock()
