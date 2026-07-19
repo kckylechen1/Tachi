@@ -707,6 +707,92 @@ mod tests {
     }
 
     #[test]
+    fn v12_dedupes_pre_v21_legacy_db_via_standalone_run_data_migrations() {
+        // #1289 Claim5, end-to-end through the PUBLIC entry point: the
+        // standalone `run_data_migrations` path (NOT `init_schema_inner`, which
+        // pre-ensures `mode`) runs v12 BEFORE v21 adds `session_claims.mode`.
+        // On a legacy DB carrying duplicate active claims, v12's dedup must not
+        // reference `mode` or it crashes with `no such column: mode`, rolling
+        // the whole migration back. We reconstruct that on-disk state by
+        // downgrading a freshly-inited DB to its pre-v21 shape — drop the
+        // mode-scoped identity index, drop the `mode` column, and clear the
+        // v12/v21 sentinels so both replay — then re-drive the public entry.
+        let (mut conn, tmp) = open_test_db();
+
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_session_claims_identity_active;
+             ALTER TABLE session_claims DROP COLUMN mode;",
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM hard_state WHERE namespace = 'migrations' \
+             AND key IN ('v12_session_claims_unique_identity', \
+                         'v21_identity_workclaim_spine')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            !table_has_column(&conn, "session_claims", "mode").unwrap(),
+            "fixture precondition: the mode column must be absent (pre-v21 shape)"
+        );
+
+        // Two duplicate active claims for one identity; the index is gone so the
+        // mode-less inserts are not blocked.
+        for (id, hb) in [
+            ("old-dup", "2026-07-11T00:00:00Z"),
+            ("new-dup", "2026-07-11T00:10:00Z"),
+        ] {
+            conn.execute(
+                "INSERT INTO session_claims
+                 (claim_id, session_client, issue_ref, flow_id, branch, state, created_at, heartbeat_at)
+                 VALUES (?1, 'claude-code', 'org/repo#1289', 'flow-1', 'feat/x', 'active', ?2, ?2)",
+                params![id, hb],
+            )
+            .unwrap();
+        }
+
+        let report = run_data_migrations(&mut conn, "global", tmp.path()).expect(
+            "standalone run_data_migrations must not crash on a pre-v21 legacy DB (#1289 Claim5)",
+        );
+        assert_eq!(
+            report.session_claims_duplicates_deduped, 1,
+            "v12 must release exactly the older modeless duplicate"
+        );
+
+        // Convergence: v21 re-added `mode` and rebuilt the mode-scoped index; the
+        // newest heartbeat survived active, the older is released.
+        assert!(
+            table_has_column(&conn, "session_claims", "mode").unwrap(),
+            "v21 must re-add the mode column after v12"
+        );
+        let old_state: String = conn
+            .query_row(
+                "SELECT state FROM session_claims WHERE claim_id = 'old-dup'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_state, "released");
+        let new_state: String = conn
+            .query_row(
+                "SELECT state FROM session_claims WHERE claim_id = 'new-dup'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_state, "active");
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' \
+                 AND name='idx_session_claims_identity_active'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "the identity index must be rebuilt after convergence");
+    }
+
+    #[test]
     fn v7_reconciles_indexed_tags_after_v5_sentinel() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(

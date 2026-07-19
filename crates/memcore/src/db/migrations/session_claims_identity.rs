@@ -86,12 +86,13 @@ pub(super) fn migrate_v12_session_claims_unique_identity(
 /// INDEX` would crash init unless the duplicates are collapsed first — so
 /// `init_schema_inner` calls this right before the index build.
 ///
-/// Scoped to `mode IS NULL` (via [`dedupe_duplicate_active_claims`]) to match
-/// the index predicate EXACTLY: v21 WorkClaims carry a non-null `mode` and are
-/// deliberately allowed to share an identity triple (they use transactional
-/// collision semantics, not this legacy presence index — see
-/// `identity_workclaim_spine.rs`), so a mode-agnostic dedup running on every
-/// startup would wrongly release live v21 claims. Table-exists guarded, so a
+/// Scoped to `mode IS NULL` (via [`dedupe_duplicate_active_claims`], which
+/// applies the predicate because `init_schema_inner` ensures the `mode` column
+/// before calling here) to match the index predicate EXACTLY: v21 WorkClaims
+/// carry a non-null `mode` and are deliberately allowed to share an identity
+/// triple (they use transactional collision semantics, not this legacy presence
+/// index — see `identity_workclaim_spine.rs`), so a mode-agnostic dedup running
+/// on every startup would wrongly release live v21 claims. Table-exists guarded, so a
 /// DB that has never built `session_claims` is a clean no-op; and idempotent
 /// on every subsequent startup because once the index exists no second active
 /// modeless row for an identity can be inserted, leaving nothing to collapse.
@@ -120,21 +121,45 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool, MemoryError> {
 /// choice is deterministic), and release every other row in the group with a
 /// dedicated `release_reason`. Returns the count of rows released.
 ///
-/// Scoped to `mode IS NULL` so it matches the partial UNIQUE index predicate
-/// (`WHERE state = 'active' AND mode IS NULL`) exactly. v21 WorkClaims carry a
-/// non-null `mode` and may legitimately share an identity triple, so they must
-/// never be deduped here (#1289). On a legacy pre-v21 DB the `mode` column was
-/// just added by `init_schema_inner`'s `ensure_column` with no default, so all
-/// existing rows are `mode IS NULL` and the scope is transparent.
+/// ## Conditional `mode IS NULL` scope (#1289)
+///
+/// The `mode` predicate is applied ONLY when the `session_claims.mode` column
+/// actually exists, because this one function is the single source shared by
+/// two callers with different column guarantees:
+///
+/// - **`init_schema_inner`** (via `dedupe_session_claims_identity_conflicts`)
+///   runs its `ensure_column(session_claims, mode)` FIRST, so the column is
+///   present. There we scope to `mode IS NULL` to match the partial UNIQUE
+///   index predicate (`WHERE state = 'active' AND mode IS NULL`) exactly: v21
+///   WorkClaims carry a non-null `mode` and may legitimately share an identity
+///   triple (transactional collision semantics, see
+///   `identity_workclaim_spine.rs`), so a mode-agnostic dedup would wrongly
+///   release live v21 claims.
+/// - **standalone `run_data_migrations`** runs v12 (this migration) BEFORE v21
+///   adds the `mode` column. On a pre-v21 legacy DB the column is absent, and
+///   an unconditional `AND mode IS NULL` would `no such column: mode`-crash the
+///   whole migration. There, mode-set rows cannot exist yet (WorkClaims are a
+///   v21 concept), so a mode-agnostic dedup of every active duplicate is both
+///   safe and correct — and once v21 adds the column + rebuilds the index the
+///   `mode IS NULL` predicate takes over on every subsequent startup.
+///
+/// Building the scope from `column_exists` keeps ONE dedup implementation
+/// rather than forking a mode-aware and a mode-blind copy.
 fn dedupe_duplicate_active_claims(conn: &Connection) -> Result<usize, MemoryError> {
-    let mut stmt = conn.prepare(
+    let mode_scoped = column_exists(conn, "session_claims", "mode")?;
+    let s1_mode = if mode_scoped { " AND mode IS NULL" } else { "" };
+    let s2_mode = if mode_scoped {
+        " AND s2.mode IS NULL"
+    } else {
+        ""
+    };
+
+    let select_sql = format!(
         "SELECT claim_id FROM session_claims s1
-         WHERE state = 'active'
-           AND mode IS NULL
+         WHERE state = 'active'{s1_mode}
            AND EXISTS (
              SELECT 1 FROM session_claims s2
-             WHERE s2.state = 'active'
-               AND s2.mode IS NULL
+             WHERE s2.state = 'active'{s2_mode}
                AND COALESCE(s2.session_client, '') = COALESCE(s1.session_client, '')
                AND COALESCE(s2.issue_ref, '') = COALESCE(s1.issue_ref, '')
                AND COALESCE(s2.flow_id, '') = COALESCE(s1.flow_id, '')
@@ -142,25 +167,40 @@ fn dedupe_duplicate_active_claims(conn: &Connection) -> Result<usize, MemoryErro
                  s2.heartbeat_at > s1.heartbeat_at
                  OR (s2.heartbeat_at = s1.heartbeat_at AND s2.claim_id > s1.claim_id)
                )
-           )",
-    )?;
+           )"
+    );
+    let mut stmt = conn.prepare(&select_sql)?;
     let stale_claim_ids: Vec<String> = stmt
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
 
     let now = super::super::common::now_utc_iso();
+    let update_sql = format!(
+        "UPDATE session_claims SET state = 'released', released_at = ?2, \
+         release_reason = 'superseded-by-unique-identity-migration' \
+         WHERE claim_id = ?1 AND state = 'active'{s1_mode}"
+    );
     let mut released = 0usize;
     for claim_id in stale_claim_ids {
-        conn.execute(
-            "UPDATE session_claims SET state = 'released', released_at = ?2, \
-             release_reason = 'superseded-by-unique-identity-migration' \
-             WHERE claim_id = ?1 AND state = 'active' AND mode IS NULL",
-            params![claim_id, now],
-        )?;
+        conn.execute(&update_sql, params![claim_id, now])?;
         released += 1;
     }
     Ok(released)
+}
+
+/// Does `table.column` exist? Used to make [`dedupe_duplicate_active_claims`]'s
+/// `mode` scope conditional so the same code runs on a pre-v21 legacy DB (no
+/// `mode` column, standalone `run_data_migrations` path) and a mode-carrying DB
+/// (`init_schema_inner` path) without crashing on the former (#1289).
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, MemoryError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let found = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|name| name == column);
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -190,6 +230,32 @@ mod tests {
         let conn = open_test_db();
         conn.execute_batch("DROP INDEX IF EXISTS idx_session_claims_identity_active;")
             .expect("drop index to simulate pre-migration DB");
+        conn
+    }
+
+    /// A pre-v21 `session_claims` shape: the legacy identity/audit columns the
+    /// dedup reads and writes, but WITHOUT the v21 `mode` column. This is the
+    /// exact on-disk state a standalone `run_data_migrations` presents to v12,
+    /// which runs BEFORE v21's `ALTER TABLE ... ADD COLUMN mode`. Built by hand
+    /// (not via `init_schema`, whose forward DDL already carries `mode`) so the
+    /// column really is absent.
+    fn open_pre_v21_session_claims() -> Connection {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE session_claims (
+                claim_id             TEXT PRIMARY KEY,
+                session_client       TEXT,
+                issue_ref            TEXT,
+                flow_id              TEXT,
+                branch               TEXT NOT NULL DEFAULT '',
+                state                TEXT NOT NULL DEFAULT 'active',
+                release_reason       TEXT,
+                created_at           TEXT NOT NULL DEFAULT '',
+                heartbeat_at         TEXT NOT NULL DEFAULT '',
+                released_at          TEXT
+            );",
+        )
+        .expect("build pre-v21 session_claims fixture");
         conn
     }
 
@@ -384,6 +450,73 @@ mod tests {
             )
             .unwrap();
         assert_eq!(both_active, 2);
+    }
+
+    #[test]
+    fn v12_dedupes_pre_v21_db_missing_mode_column() {
+        // #1289 Claim5: in the standalone `run_data_migrations` path v12 runs
+        // BEFORE v21 adds `session_claims.mode`. On a legacy DB carrying
+        // duplicate active claims, v12's dedup must NOT reference `mode` or it
+        // crashes with `no such column: mode`, aborting the migration. Before
+        // the fix, `dedupe_duplicate_active_claims`'s unconditional
+        // `AND mode IS NULL` made this RED; after, the scope is conditional on
+        // the column existing, so a mode-less DB is deduped mode-agnostically
+        // (GREEN) — correct because WorkClaims (the only non-null-mode rows)
+        // are a v21 concept and cannot exist yet.
+        let conn = open_pre_v21_session_claims();
+        insert_claim(
+            &conn,
+            "old-dup",
+            Some("claude-code"),
+            Some("org/repo#1289"),
+            Some("flow-1"),
+            "active",
+            "2026-07-11T00:00:00Z",
+        );
+        insert_claim(
+            &conn,
+            "new-dup",
+            Some("claude-code"),
+            Some("org/repo#1289"),
+            Some("flow-1"),
+            "active",
+            "2026-07-11T00:10:00Z",
+        );
+
+        let released = migrate_v12_session_claims_unique_identity(&conn).expect(
+            "v12 must not crash on a pre-v21 DB missing the mode column (#1289 Claim5)",
+        );
+        assert_eq!(released, 1, "the older modeless duplicate must be released");
+
+        let old_state: String = conn
+            .query_row(
+                "SELECT state FROM session_claims WHERE claim_id = 'old-dup'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_state, "released");
+        let new_state: String = conn
+            .query_row(
+                "SELECT state FROM session_claims WHERE claim_id = 'new-dup'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_state, "active", "newest heartbeat survives as active");
+
+        // v12's own index (predicate `WHERE state = 'active'`, no mode ref) must
+        // still build on the mode-less table; v21 later rebuilds it with the
+        // `mode IS NULL` predicate.
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' \
+                 AND name='idx_session_claims_identity_active'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "v12 must build the partial unique index");
     }
 
     #[test]
