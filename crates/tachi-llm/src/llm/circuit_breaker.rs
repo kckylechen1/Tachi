@@ -213,7 +213,12 @@ impl LaneOutageTracker {
     /// Record that every configured tier failed this call. `now_utc` is an
     /// RFC3339 timestamp string (caller-supplied so this module doesn't need
     /// its own clock dependency).
-    pub(crate) fn record_chain_exhausted(&self, lane: &'static str, now_utc: String, error: String) {
+    pub(crate) fn record_chain_exhausted(
+        &self,
+        lane: &'static str,
+        now_utc: String,
+        error: String,
+    ) {
         let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
         let entry = entries.entry(lane).or_default();
         entry.consecutive_chain_failures += 1;

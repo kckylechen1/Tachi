@@ -171,11 +171,14 @@ impl super::super::LlmClient {
         !Self::availability_is_unusable(availability, remaining_seconds)
     }
 
-    fn availability_is_unusable(availability: KeyAvailability, remaining_seconds: Option<i64>) -> bool {
+    fn availability_is_unusable(
+        availability: KeyAvailability,
+        remaining_seconds: Option<i64>,
+    ) -> bool {
         match availability {
-            KeyAvailability::AuthFailed | KeyAvailability::Disabled | KeyAvailability::Exhausted => {
-                true
-            }
+            KeyAvailability::AuthFailed
+            | KeyAvailability::Disabled
+            | KeyAvailability::Exhausted => true,
             KeyAvailability::Cooldown => remaining_seconds.unwrap_or(0) > 0,
             KeyAvailability::Available => false,
         }
