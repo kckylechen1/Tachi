@@ -1030,8 +1030,20 @@ mod tests {
     #[test]
     fn v13_adds_hard_state_namespace_updated_index() {
         let (mut conn, tmp) = open_test_db();
-        assert!(!index_present(&conn, "idx_hard_state_ns_updated"));
+        // #1289 ruling A: `init_schema`'s product IS the complete current
+        // schema, so a freshly built DB already carries this index (it now
+        // lives in ddl.rs's MIGRATED_INDEXES_SQL, not only in the v13 sentinel
+        // migration). The v13 migration is therefore an idempotent no-op on a
+        // fresh DB and only does real creation work on a legacy DB predating
+        // the index — exercised explicitly at the end of this test.
+        assert!(
+            index_present(&conn, "idx_hard_state_ns_updated"),
+            "init_schema must carry idx_hard_state_ns_updated (#1289 ruling A)"
+        );
 
+        // init_schema runs DDL only, not run_data_migrations, so the v13
+        // sentinel is unset and the migration still runs — as an
+        // IF NOT EXISTS no-op — reporting it ran once. The index stays.
         let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
         assert_eq!(report.hard_state_index_added, 1);
         assert!(index_present(&conn, "idx_hard_state_ns_updated"));
@@ -1065,6 +1077,18 @@ mod tests {
         let report2 = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
         assert_eq!(report2.hard_state_index_added, 0);
         assert!(index_present(&conn, "idx_hard_state_ns_updated"));
+
+        // v13's own creation behavior still holds on a legacy-shaped DB that
+        // predates the index (the DB the migration exists for): drop the index
+        // and drive the migration directly — it must recreate it.
+        conn.execute_batch("DROP INDEX IF EXISTS idx_hard_state_ns_updated;")
+            .unwrap();
+        assert!(!index_present(&conn, "idx_hard_state_ns_updated"));
+        migrate_v13_add_hard_state_index(&conn).unwrap();
+        assert!(
+            index_present(&conn, "idx_hard_state_ns_updated"),
+            "v13 must create the index on a legacy DB that lacks it"
+        );
     }
 
     fn index_present(conn: &Connection, name: &str) -> bool {
