@@ -473,7 +473,7 @@ pub(super) async fn serve_http_daemon(
     Ok(())
 }
 
-fn daemon_uses_manifest_background(
+pub(super) fn daemon_uses_manifest_background(
     app_home: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,

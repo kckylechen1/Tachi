@@ -715,7 +715,17 @@ fn build_server_state(
             &server,
             background_shutdown.clone(),
         ));
-        bg_handles.push(spawn_wal_checkpoint(&server, background_shutdown.clone()));
+        let maintain_named_projects = !cli.daemon
+            || daemon::daemon_uses_manifest_background(
+                &ctx.app_home,
+                global_db_path,
+                hygiene.project_db_path.as_deref(),
+            );
+        bg_handles.push(spawn_wal_checkpoint(
+            &server,
+            maintain_named_projects,
+            background_shutdown.clone(),
+        ));
         bg_handles.push(spawn_background_gc(
             &server,
             hygiene.gc_enabled,
