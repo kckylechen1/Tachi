@@ -381,23 +381,24 @@ fn reap_stale_processes(
         }
 
         let is_daemon = command.contains("--daemon");
-        let (kind, reap, reason): (&'static str, bool, &'static str) =
-            if ppid == 1 && !is_daemon {
-                (
-                    "orphan-stdio",
+        let (kind, reap, reason): (&'static str, bool, &'static str) = if ppid == 1 && !is_daemon {
+            (
+                "orphan-stdio",
+                true,
+                "stdio server was reparented to pid 1; launching MCP host is gone",
+            )
+        } else if is_daemon {
+            match flag_value(&command, "--global-db") {
+                Some(db) if !Path::new(&db).exists() => (
+                    "dead-db-daemon",
                     true,
-                    "stdio server was reparented to pid 1; launching MCP host is gone",
-                )
-            } else if is_daemon {
-                match flag_value(&command, "--global-db") {
-                    Some(db) if !Path::new(&db).exists() => {
-                        ("dead-db-daemon", true, "daemon global DB path no longer exists")
-                    }
-                    _ => ("daemon", false, "daemon is live for an existing DB scope"),
-                }
-            } else {
-                ("stdio", false, "stdio MCP client has a live parent process")
-            };
+                    "daemon global DB path no longer exists",
+                ),
+                _ => ("daemon", false, "daemon is live for an existing DB scope"),
+            }
+        } else {
+            ("stdio", false, "stdio MCP client has a live parent process")
+        };
 
         candidates.push(Candidate {
             pid,
@@ -670,10 +671,16 @@ mod tests {
         let reap = per_parent_dedup_candidates(&live, 3);
         assert_eq!(reap.len(), 5);
         for pid in [10, 11, 12, 13, 14] {
-            assert!(reap.contains(&pid), "expected oldest-by-age pid {pid} reaped");
+            assert!(
+                reap.contains(&pid),
+                "expected oldest-by-age pid {pid} reaped"
+            );
         }
         for pid in [20, 21, 22] {
-            assert!(!reap.contains(&pid), "youngest-by-age pid {pid} must be kept");
+            assert!(
+                !reap.contains(&pid),
+                "youngest-by-age pid {pid} must be kept"
+            );
         }
     }
 
@@ -714,7 +721,10 @@ mod tests {
         let live: Vec<(i64, i64, u64)> = vec![(30, 1, 100), (31, 1, 100), (32, 1, 100)];
         let reap = per_parent_dedup_candidates(&live, 2);
         assert_eq!(reap.len(), 1);
-        assert!(reap.contains(&30), "equal-age tiebreak must reap the lowest pid: {reap:?}");
+        assert!(
+            reap.contains(&30),
+            "equal-age tiebreak must reap the lowest pid: {reap:?}"
+        );
     }
 
     #[test]
@@ -728,7 +738,8 @@ mod tests {
     // ---- #1273 Gap 3: version-skew decision -------------------------------
 
     fn secs_ago(now: SystemTime, secs: u64) -> SystemTime {
-        now.checked_sub(Duration::from_secs(secs)).expect("secs_ago")
+        now.checked_sub(Duration::from_secs(secs))
+            .expect("secs_ago")
     }
 
     #[test]
@@ -759,7 +770,10 @@ mod tests {
             Duration::from_secs(300),
             Duration::from_secs(48 * 3600),
         );
-        assert!(reason.is_none(), "a binary older than the process is not skewed");
+        assert!(
+            reason.is_none(),
+            "a binary older than the process is not skewed"
+        );
     }
 
     #[test]
@@ -789,7 +803,10 @@ mod tests {
             Duration::from_secs(300),
             Duration::from_secs(48 * 3600),
         );
-        assert!(reason.is_some(), "unverifiable ancient process must backstop-flag");
+        assert!(
+            reason.is_some(),
+            "unverifiable ancient process must backstop-flag"
+        );
         assert!(reason.unwrap().contains("backstop"));
     }
 
@@ -855,9 +872,17 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("TACHI_REAP_STDIO_PARENT_CAP", "0");
-        assert_eq!(reap_stdio_parent_cap(), 3, "zero must fall back to the default");
+        assert_eq!(
+            reap_stdio_parent_cap(),
+            3,
+            "zero must fall back to the default"
+        );
         std::env::set_var("TACHI_REAP_STDIO_PARENT_CAP", "not-a-number");
-        assert_eq!(reap_stdio_parent_cap(), 3, "garbage must fall back to the default");
+        assert_eq!(
+            reap_stdio_parent_cap(),
+            3,
+            "garbage must fall back to the default"
+        );
         std::env::set_var("TACHI_REAP_STDIO_PARENT_CAP", "5");
         assert_eq!(reap_stdio_parent_cap(), 5);
         std::env::remove_var("TACHI_REAP_STDIO_PARENT_CAP");
