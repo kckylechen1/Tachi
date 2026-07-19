@@ -57,6 +57,34 @@ fn compact_layer_rows_falls_back_to_legacy_references() {
 }
 
 #[test]
+fn compact_layer_rows_skips_invalid_reference_values() {
+    let rows = vec![
+        json!({
+            "id": "mixed-row",
+            "references": [null, "  "],
+            "metadata": {
+                "evidence_refs_v1": [{"ref": ""}, {"ref": 42}],
+                "source_refs": [null, "", "#legacy", 7]
+            }
+        }),
+        json!({
+            "id": "invalid-row",
+            "metadata": {
+                "evidence_refs_v1": [{"ref": "  "}],
+                "source_refs": null
+            }
+        }),
+    ];
+    let compact = compact_layer_rows(rows, 2, Some("wiki"), None);
+
+    assert_eq!(compact[0]["references"], json!(["#legacy"]));
+    assert!(
+        compact[1].get("references").is_none(),
+        "invalid legacy metadata must not leak a null/scalar references field: {compact:#?}"
+    );
+}
+
+#[test]
 fn build_debug_checklist_prefers_wiki_guidance() {
     let checklist = build_debug_checklist(&[json!({
         "path": "/wiki/debug/mcp-args",

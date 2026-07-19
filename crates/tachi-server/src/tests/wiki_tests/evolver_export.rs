@@ -267,3 +267,27 @@ async fn wiki_export_obsidian_exports_typed_only_refs() {
     assert_eq!(markdown.matches("#1296").count(), 1);
     let _ = std::fs::remove_dir_all(out_dir);
 }
+
+#[tokio::test]
+async fn wiki_export_obsidian_ignores_invalid_typed_refs_and_falls_back_to_legacy() {
+    let mut entry = make_entry("wiki-export-invalid-typed-refs");
+    entry.path = "/wiki/export/invalid-typed".to_string();
+    entry.topic = "invalid-typed-refs".to_string();
+    entry.metadata = json!({
+        "evidence_refs_v1": [{"ref": "  "}, {"ref": 42}],
+        "source_refs": [null, "", "#legacy-valid"]
+    });
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+    let out_dir = std::env::temp_dir().join(format!(
+        "wiki-export-invalid-typed-{}",
+        uuid::Uuid::new_v4()
+    ));
+    crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir).unwrap();
+    let markdown =
+        std::fs::read_to_string(out_dir.join("export/invalid-typed/invalid-typed-refs.md"))
+            .unwrap();
+    assert!(!markdown.contains("## Evidence Refs (typed)"));
+    assert!(markdown.contains("## References\n"));
+    assert_eq!(markdown.matches("#legacy-valid").count(), 1);
+    let _ = std::fs::remove_dir_all(out_dir);
+}

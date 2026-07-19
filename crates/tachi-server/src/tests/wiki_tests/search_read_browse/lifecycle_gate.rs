@@ -159,6 +159,28 @@ async fn wiki_read_falls_back_to_legacy_source_refs_when_no_typed_refs_present()
     );
 }
 
+#[tokio::test]
+async fn wiki_read_falls_back_when_typed_refs_have_no_usable_targets() {
+    let mut entry = active_wiki_entry();
+    entry.path = "/wiki/engineering/lifecycle/invalid-typed-refs".to_string();
+    entry.metadata = json!({
+        "evidence_refs_v1": [{"ref": "  "}, {"ref": 42}],
+        "source_refs": [null, "", "kckylechen1/tachi#1072"]
+    });
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+
+    let value = collect_wiki_read_value(
+        &server,
+        "/wiki/engineering/lifecycle/invalid-typed-refs",
+        "wiki",
+    )
+    .expect("read should succeed");
+    assert_eq!(
+        value["entry"]["references"],
+        json!(["kckylechen1/tachi#1072"])
+    );
+}
+
 /// Cross-vendor review (#1215 BUG 4): "The gate itself fails open: missing
 /// IDs or lookup failures convert to 'serve everything'
 /// (wiki_ops/provenance.rs:47-60, .unwrap_or_default())." Exercises

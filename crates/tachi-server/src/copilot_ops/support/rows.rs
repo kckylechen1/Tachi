@@ -1,5 +1,18 @@
 use serde_json::{json, Value};
 
+fn non_empty_string_array(value: Option<&Value>) -> Option<Vec<String>> {
+    value
+        .and_then(Value::as_array)
+        .map(|refs| {
+            refs.iter()
+                .filter_map(Value::as_str)
+                .filter(|reference| !reference.trim().is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|refs| !refs.is_empty())
+}
+
 pub(in crate::copilot_ops) fn compact_rows(rows: Vec<Value>, limit: usize) -> Vec<Value> {
     compact_layer_rows(rows, limit, None, None)
 }
@@ -51,16 +64,7 @@ pub(in crate::copilot_ops) fn compact_layer_rows(
                 }
             }
 
-            let references = row
-                .get("references")
-                .and_then(Value::as_array)
-                .map(|refs| {
-                    refs.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
-                .filter(|refs| !refs.is_empty())
+            let references = non_empty_string_array(row.get("references"))
                 .map(|refs| json!(refs))
                 .or_else(|| {
                     let typed = metadata
@@ -69,13 +73,14 @@ pub(in crate::copilot_ops) fn compact_layer_rows(
                         .map(|refs| {
                             refs.iter()
                                 .filter_map(|value| value.get("ref").and_then(Value::as_str))
+                                .filter(|reference| !reference.trim().is_empty())
                                 .map(str::to_string)
                                 .collect::<Vec<_>>()
                         })
                         .filter(|refs| !refs.is_empty());
-                    typed
-                        .map(|refs| json!(refs))
-                        .or_else(|| metadata.get("source_refs").cloned())
+                    typed.map(|refs| json!(refs)).or_else(|| {
+                        non_empty_string_array(metadata.get("source_refs")).map(|refs| json!(refs))
+                    })
                 });
             if let Some(references) = references {
                 out.insert("references".to_string(), references);

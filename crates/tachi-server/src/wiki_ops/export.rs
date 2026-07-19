@@ -98,14 +98,21 @@ fn reference_line(ref_str: &str) -> String {
 }
 
 fn append_references_section(body: &mut String, metadata: &serde_json::Value) {
-    let typed_refs = metadata
+    let typed_refs: Vec<&serde_json::Value> = metadata
         .get("evidence_refs_v1")
         .and_then(|v| v.as_array())
-        .filter(|refs| {
+        .map(|refs| {
             refs.iter()
-                .any(|value| value.get("ref").and_then(|v| v.as_str()).is_some())
-        });
-    if let Some(typed_refs) = typed_refs {
+                .filter(|value| {
+                    value
+                        .get("ref")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|reference| !reference.trim().is_empty())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if !typed_refs.is_empty() {
         body.push_str("\n\n## Evidence Refs (typed)\n\n");
         for typed_ref in typed_refs {
             let Some(ref_str) = typed_ref.get("ref").and_then(|v| v.as_str()) else {
@@ -124,15 +131,20 @@ fn append_references_section(body: &mut String, metadata: &serde_json::Value) {
         }
         return;
     }
-    if let Some(refs) = metadata.get("source_refs").and_then(|v| v.as_array()) {
-        if !refs.is_empty() {
-            body.push_str("\n\n## References\n\n");
-            for ref_val in refs {
-                let Some(ref_str) = ref_val.as_str() else {
-                    continue;
-                };
-                body.push_str(&reference_line(ref_str));
-            }
+    let legacy_refs: Vec<&str> = metadata
+        .get("source_refs")
+        .and_then(|v| v.as_array())
+        .map(|refs| {
+            refs.iter()
+                .filter_map(|value| value.as_str())
+                .filter(|reference| !reference.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if !legacy_refs.is_empty() {
+        body.push_str("\n\n## References\n\n");
+        for ref_str in legacy_refs {
+            body.push_str(&reference_line(ref_str));
         }
     }
 }
