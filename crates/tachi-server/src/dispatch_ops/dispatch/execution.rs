@@ -742,7 +742,7 @@ fn resolved_completion_terminal_state(run_dir: &std::path::Path) -> Option<&'sta
         .ok()
         .flatten()?;
     let receipt = status.get("resolved_completion")?.as_object()?;
-    let state = canonical_terminal_state(Some(receipt.get("state")?.as_str()?));
+    let state = receipt.get("state")?.as_str()?;
     receipt
         .get("eval_ledger_id")?
         .as_str()
@@ -750,13 +750,15 @@ fn resolved_completion_terminal_state(run_dir: &std::path::Path) -> Option<&'sta
     receipt.get("reviewed")?.as_bool()?;
     chrono::DateTime::parse_from_rfc3339(receipt.get("recorded_at")?.as_str()?).ok()?;
     match state {
-        Some("TASK_STATE_INPUT_REQUIRED")
+        "TASK_STATE_INPUT_REQUIRED"
             if receipt.get("closure_kind").and_then(Value::as_str) == Some("partial") =>
         {
-            state
+            Some("TASK_STATE_INPUT_REQUIRED")
         }
-        Some("TASK_STATE_INPUT_REQUIRED") => None,
-        terminal if receipt.get("closure_kind").is_some_and(Value::is_null) => terminal,
+        "TASK_STATE_INPUT_REQUIRED" => None,
+        terminal if receipt.get("closure_kind").is_some_and(Value::is_null) => {
+            canonical_terminal_state(Some(terminal))
+        }
         _ => None,
     }
 }
@@ -771,19 +773,19 @@ fn terminal_closure_kind(terminal_state: &str) -> Option<&'static str> {
 
 /// Reduce a polled kanban state `String` (whose lifetime is not `'static`) to
 /// its canonical `&'static str` literal when it is one of the recognized
-/// terminal states; otherwise `None`. INPUT_REQUIRED is terminal for this
-/// execution watchdog when it was written by `tachi_complete(partial)`, even
-/// though other dispatch flows may use that vocabulary while awaiting input.
-/// Used at the `terminal_status_state` call site to thread the polled kanban
-/// value through the helper without leaking the borrowed `String`'s lifetime.
-/// Non-terminal / unknown values map to `None` so the helper's exit-code
-/// fallback still applies.
+/// terminal states; otherwise `None`. INPUT_REQUIRED deliberately remains
+/// non-terminal here because the kanban vocabulary also represents active
+/// plan review. A completed partial is recognized only from the strict
+/// resolved-completion receipt above. Used at the `terminal_status_state` call
+/// site to thread the polled kanban value through the helper without leaking
+/// the borrowed `String`'s lifetime. Non-terminal / unknown values map to
+/// `None` so the watchdog evaluates the predicate instead of silently
+/// synthesizing a partial close.
 fn canonical_terminal_state(polled: Option<&str>) -> Option<&'static str> {
     polled.and_then(|s| match s {
         "TASK_STATE_COMPLETED" => Some("TASK_STATE_COMPLETED"),
         "TASK_STATE_FAILED" => Some("TASK_STATE_FAILED"),
         "TASK_STATE_CANCELED" => Some("TASK_STATE_CANCELED"),
-        "TASK_STATE_INPUT_REQUIRED" => Some("TASK_STATE_INPUT_REQUIRED"),
         _ => None,
     })
 }
@@ -1112,14 +1114,12 @@ mod tests {
     fn tachi_complete_partial_then_exit_zero_stays_input_required() {
         let polled_partial = canonical_terminal_state(Some("TASK_STATE_INPUT_REQUIRED"));
         assert_eq!(
-            polled_partial,
-            Some("TASK_STATE_INPUT_REQUIRED"),
-            "a partial tachi_complete state must be recognized as terminal by the watchdog"
+            polled_partial, None,
+            "the ambiguous kanban spelling alone must not close an active plan review"
         );
-        assert_eq!(
-            terminal_status_state(None, None, polled_partial, Some(0)),
-            "TASK_STATE_INPUT_REQUIRED",
-            "tachi_complete(partial) + exit 0 must stay INPUT_REQUIRED in status.json"
+        assert!(
+            !(None::<&'static str>.is_some() || polled_partial.is_some()),
+            "without the receipt, INPUT_REQUIRED must re-enter the watchdog path"
         );
         assert_eq!(
             terminal_closure_kind("TASK_STATE_INPUT_REQUIRED"),
@@ -1130,6 +1130,54 @@ mod tests {
             terminal_closure_kind("TASK_STATE_COMPLETED"),
             None,
             "ordinary terminal states must not carry partial closure metadata"
+        );
+    }
+
+    /// #1254 discriminator: INPUT_REQUIRED in a live kanban card is also the
+    /// ordinary plan-review waiting state.  It must not skip the watchdog or
+    /// acquire the partial closure marker unless a valid receipt proves a
+    /// deliberate `tachi_complete(partial)` close.
+    #[test]
+    fn ordinary_input_required_reenters_watchdog_without_synthetic_partial() {
+        let temp = tempfile::tempdir().expect("temporary run directory");
+        std::fs::write(
+            temp.path().join("status.json"),
+            serde_json::json!({
+                "state": "TASK_STATE_INPUT_REQUIRED",
+                "closure_kind": null,
+            })
+            .to_string(),
+        )
+        .expect("write ordinary plan-review status");
+
+        let receipt_terminal_state = resolved_completion_terminal_state(temp.path());
+        let polled_terminal_state = canonical_terminal_state(Some("TASK_STATE_INPUT_REQUIRED"));
+        assert_eq!(
+            receipt_terminal_state, None,
+            "ordinary plan-review status has no receipt-backed terminal outcome"
+        );
+        assert_eq!(
+            polled_terminal_state, None,
+            "ordinary INPUT_REQUIRED is not a directly closed kanban state"
+        );
+        assert!(
+            !(receipt_terminal_state.is_some() || polled_terminal_state.is_some()),
+            "the live watchdog gate must evaluate an active plan-review run"
+        );
+
+        // This is the exact final-write fallback after that live watchdog path
+        // has not resolved a predicate outcome.  It must not manufacture a
+        // partial closure simply because the card was awaiting input.
+        let final_status =
+            terminal_status_state(receipt_terminal_state, None, polled_terminal_state, Some(0));
+        assert_eq!(
+            final_status, "TASK_STATE_COMPLETED",
+            "ordinary INPUT_REQUIRED must not become a synthetic partial terminal state"
+        );
+        assert_eq!(
+            terminal_closure_kind(final_status),
+            None,
+            "the watchdog fallback must not persist closure_kind=partial"
         );
     }
 
