@@ -28,6 +28,22 @@ fn compact_layer_rows_prefers_typed_metadata_when_both_channels_exist() {
 }
 
 #[test]
+fn compact_layer_rows_ignores_null_or_empty_normalized_references() {
+    for references in [Value::Null, json!([])] {
+        let rows = vec![json!({
+            "id": "empty-normalized-row",
+            "references": references,
+            "metadata": {
+                "source_refs": ["#legacy"],
+                "evidence_refs_v1": [{"ref": "#typed"}, {"ref": "docs/typed.md"}]
+            }
+        })];
+        let compact = compact_layer_rows(rows, 1, Some("wiki"), None);
+        assert_eq!(compact[0]["references"], json!(["#typed", "docs/typed.md"]));
+    }
+}
+
+#[test]
 fn compact_layer_rows_falls_back_to_legacy_references() {
     let rows = vec![json!({
         "id": "legacy-row",

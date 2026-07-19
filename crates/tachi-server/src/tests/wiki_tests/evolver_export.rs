@@ -226,7 +226,7 @@ async fn wiki_export_obsidian_prefers_typed_refs_when_both_channels_exist() {
     );
     assert!(
         markdown.contains("## Evidence Refs (typed)"),
-        "typed refs section must render alongside legacy refs: {markdown}"
+        "typed refs section must be selected when both channels exist: {markdown}"
     );
     assert!(
         markdown.contains("docs/engineering/architecture/issue-refinery-memory-lanes.md"),

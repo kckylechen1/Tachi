@@ -386,7 +386,7 @@ pub(crate) async fn handle_wiki_ingest(
     let path = format!("/wiki/general/{}", sanitize_safe_path_name(&topic));
     let id = uuid::Uuid::new_v4().to_string();
     let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-    let evidence_refs_v1 = build_evidence_refs_v1(&[params.source.clone()], &timestamp);
+    let evidence_refs_v1 = build_evidence_refs_v1(std::slice::from_ref(&params.source), &timestamp);
 
     let entry = MemoryEntry {
         id: id.clone(),
