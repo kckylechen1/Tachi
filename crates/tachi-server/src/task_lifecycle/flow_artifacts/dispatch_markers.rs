@@ -225,6 +225,17 @@ fn is_dispatch_card_path_for_id(path: &str, dispatch_id: &str) -> bool {
         == Some(format!("dispatch-{dispatch_id}.json").as_str())
 }
 
+/// tachi#1271: same-shape check as `dispatch_marker_has_any_projection`
+/// above, keyed on the `completed_dispatch_ids` array that this function's
+/// own dedup below (~line 342-347) already treats as the durable
+/// "this dispatch_id has already completed" signal.
+fn completion_marker_already_recorded(status: &Value, dispatch_id: &str) -> bool {
+    status
+        .get("completed_dispatch_ids")
+        .and_then(Value::as_array)
+        .is_some_and(|ids| ids.iter().any(|value| value.as_str() == Some(dispatch_id)))
+}
+
 pub(crate) fn mark_task_dispatch_completion(
     flow_id: &str,
     dispatch_id: &str,
@@ -257,6 +268,13 @@ pub(crate) fn mark_task_dispatch_completion(
     if !status.is_object() {
         status = json!({});
     }
+    // tachi#1271: mirror #1257's `had_marker` idempotency guard on
+    // `dispatch_linked` -- captured from the *pre-mutation* status so a
+    // repeat completion call for an already-completed dispatch_id does not
+    // emit a second `dispatch_completed` event, even though the
+    // `completed_dispatch_ids` / card projections below are already
+    // deduped by dispatch_id.
+    let had_completion_marker = completion_marker_already_recorded(&status, dispatch_id);
 
     let card_path = status
         .get("artifacts")
@@ -396,17 +414,19 @@ pub(crate) fn mark_task_dispatch_completion(
     obj.insert("updated_at".to_string(), json!(completed_at.clone()));
     write_json_atomic(&status_path, &status)?;
 
-    append_flow_event(
-        &run_dir,
-        json!({
-            "event": "dispatch_completed",
-            "flow_id": flow_id,
-            "dispatch_id": dispatch_id,
-            "dispatch_card": card_path_string,
-            "completion": completion,
-            "timestamp": completed_at,
-        }),
-    )?;
+    if !had_completion_marker {
+        append_flow_event(
+            &run_dir,
+            json!({
+                "event": "dispatch_completed",
+                "flow_id": flow_id,
+                "dispatch_id": dispatch_id,
+                "dispatch_card": card_path_string,
+                "completion": completion,
+                "timestamp": completed_at,
+            }),
+        )?;
+    }
 
     Ok(json!({
         "recorded": true,
@@ -761,6 +781,41 @@ mod tests {
                 .count(),
             1,
             "repair must not duplicate dispatch_linked: {events}"
+        );
+    }
+
+    /// tachi#1271: #1257 made `dispatch_linked` idempotent (the `had_marker`
+    /// guard above) but left `mark_task_dispatch_completion`'s
+    /// `dispatch_completed` event unconditional, even though
+    /// `completed_dispatch_ids` is already deduped by dispatch_id. A repeat
+    /// completion call for the same dispatch_id (e.g. a retried collector)
+    /// must not emit a second lifecycle event line.
+    #[test]
+    #[allow(clippy::await_holding_lock)]
+    fn repeated_dispatch_completion_does_not_duplicate_completed_event() {
+        let _env_lock = crate::shell_ops::tachi_run_root_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().expect("temp run root");
+        let run_root = temp.path().join("runs");
+        let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", &run_root);
+        let flow_id = "flow_20260719T000003Z-completion-idempotency";
+        let dispatch_id = "20260719T000003Z-completion-marker";
+
+        mark_task_dispatch_completion(flow_id, dispatch_id, json!({"eval_memory_id": "eval-1"}))
+            .expect("first completion");
+        mark_task_dispatch_completion(flow_id, dispatch_id, json!({"eval_memory_id": "eval-2"}))
+            .expect("repeated completion");
+
+        let run_dir = run_dir_for_flow_id(flow_id).expect("run dir");
+        let events = std::fs::read_to_string(run_dir.join("events.jsonl")).expect("events");
+        assert_eq!(
+            events
+                .lines()
+                .filter(|line| line.contains("\"event\":\"dispatch_completed\""))
+                .count(),
+            1,
+            "repeated completion must not duplicate dispatch_completed: {events}"
         );
     }
 }
