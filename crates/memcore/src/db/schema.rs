@@ -125,6 +125,14 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     ensure_column(conn, "memories", "domain", "TEXT")?;
     ensure_column(conn, "memories", "superseded_by", "TEXT")?;
     ensure_column(conn, "memories", "idless_identity", "TEXT")?;
+    // #1289 note: unlike the non-memories evolutionary indexes centralized in
+    // ddl.rs's MIGRATED_INDEXES_SQL, this one is built inline right after its
+    // own `ensure_column` (its own ensure+build unit) — deliberately NOT in the
+    // central list, because the `memories` table is fully rebuilt by
+    // `rebuild_memories_with_check_constraints`, which recreates this same index
+    // by name, so all of `memories`' indexes travel with that rebuild. It still
+    // satisfies ruling A (present on the migration-free init_schema path) and is
+    // covered by the convergence oracle in migration_tests.rs.
     conn.execute(
         r#"CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_idless_identity_active
            ON memories(idless_identity)
