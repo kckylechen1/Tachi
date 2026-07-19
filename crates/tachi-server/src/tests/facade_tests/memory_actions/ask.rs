@@ -48,6 +48,7 @@ async fn tachi_memory_ask_returns_evidence_contract() {
             emit_continuity: false,
             compact: false,
             files: Vec::new(),
+            references: Vec::new(),
             proposal_id: None,
             review_status: None,
             notes: None,

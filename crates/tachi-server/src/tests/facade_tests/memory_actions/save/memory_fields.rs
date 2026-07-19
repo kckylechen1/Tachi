@@ -111,6 +111,7 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
             emit_continuity: false,
             compact: false,
             files: Vec::new(),
+            references: Vec::new(),
             proposal_id: None,
             review_status: None,
             notes: None,
@@ -159,4 +160,77 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
     assert_eq!(entities, r#"["tachi-server","sigil"]"#);
     assert_eq!(domain.as_deref(), Some("rust"));
     assert_eq!(path, "/project/sigil/mcp");
+}
+
+/// tachi#1288 (Fix B): `references[]` used to be silently dropped by the
+/// plain "memory" save path -- only `kind="wiki"` consumed it. A memory save
+/// with `references` must land as typed `metadata.evidence_refs_v1` (the
+/// #1285-preferred shape; see `wiki_ops::provenance::preferred_wiki_references`)
+/// -- not the legacy `metadata.source_refs` string array `tachi_wiki_write`
+/// uses -- so a caller can read the evidence back via `get`/`search`.
+#[tokio::test]
+async fn tachi_memory_save_with_references_records_evidence_refs_v1() {
+    let server = make_server();
+    let memory_id = "save-with-references-001";
+
+    let mut params = tachi_memory_params("save");
+    params.id = Some(memory_id.to_string());
+    params.force = true;
+    params.kind = Some("memory".to_string());
+    params.path = Some("/scratch/save-with-references".to_string());
+    params.text = Some("Decision backed by an external doc and an issue.".to_string());
+    params.references = vec!["https://example.com/doc".to_string(), "#1288".to_string()];
+    crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect("save with references succeeds");
+
+    let entry = server
+        .with_global_store_read(|store| store.get(memory_id).map_err(|e| e.to_string()))
+        .expect("read memory")
+        .expect("memory exists");
+
+    let refs = entry.metadata["evidence_refs_v1"]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!(
+                "evidence_refs_v1 must be present as an array: {:?}",
+                entry.metadata
+            )
+        });
+    assert_eq!(refs.len(), 2, "expected both references recorded: {refs:?}");
+    let ref_strings: Vec<&str> = refs
+        .iter()
+        .filter_map(|r| r.get("ref").and_then(Value::as_str))
+        .collect();
+    assert_eq!(ref_strings, vec!["https://example.com/doc", "#1288"]);
+    assert!(
+        entry.metadata.get("source_refs").is_none(),
+        "memory save path must write the typed evidence_refs_v1 shape only, \
+         not the legacy source_refs array wiki writes: {:?}",
+        entry.metadata
+    );
+}
+
+/// tachi#1288 (Fix B): an invalid reference must be a loud, rejected error --
+/// not silently dropped -- on the "memory" save path, exactly like
+/// `tachi_wiki_write` already rejects one via the same
+/// `wiki_ops::validate_references` gate.
+#[tokio::test]
+async fn tachi_memory_save_rejects_invalid_reference_format() {
+    let server = make_server();
+
+    let mut params = tachi_memory_params("save");
+    params.force = true;
+    params.kind = Some("memory".to_string());
+    params.path = Some("/scratch/save-invalid-reference".to_string());
+    params.text = Some("Should be rejected before anything is persisted.".to_string());
+    params.references = vec!["not-a-valid-reference".to_string()];
+
+    let err = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect_err("invalid reference format must be rejected, not silently dropped");
+    assert!(
+        err.contains("Invalid reference format"),
+        "expected the shared wiki_ops::validate_references error text: {err}"
+    );
 }

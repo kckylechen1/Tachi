@@ -474,6 +474,18 @@ pub struct TachiMemoryParams {
         description = "[action=save] Referenced source files, e.g. docs/SPEC.md, src/lib.rs."
     )]
     pub files: Vec<String>,
+    /// tachi#1288 (Fix B): `TachiSaveParams.references` was already the wire
+    /// contract for `tachi_save`/`tachi_wiki_write`, but `tachi_memory`
+    /// (this struct) had no field to source it from, so
+    /// `save_memory_checkpoint` hardcoded an empty list when it built its
+    /// inner `TachiSaveParams`. Adding this mirrors `files` above so a
+    /// `checkpoint` call can attach evidence the same way a `save`/wiki
+    /// write can.
+    #[serde(default)]
+    #[schemars(
+        description = "[action=save|checkpoint] External references: URLs, absolute paths, or GitHub shorthands (#N, repo#N, owner/repo#N)."
+    )]
+    pub references: Vec<String>,
 
     // --- progress / long-running command fields ---
     #[serde(default)]

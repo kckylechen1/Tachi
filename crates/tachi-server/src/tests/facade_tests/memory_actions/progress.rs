@@ -52,6 +52,7 @@ async fn tachi_memory_progress_writes_append_only_jsonl() {
             emit_continuity: false,
             compact: false,
             files: Vec::new(),
+            references: Vec::new(),
             proposal_id: None,
             review_status: None,
             notes: None,

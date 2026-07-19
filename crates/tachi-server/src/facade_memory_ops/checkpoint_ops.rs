@@ -103,7 +103,10 @@ pub(crate) async fn save_memory_checkpoint(
             .take()
             .or_else(|| Some("durable".to_string())),
         force: true,
-        references: Vec::new(),
+        // tachi#1288 (Fix B): TachiMemoryParams gained a `references` field
+        // mirroring `files` below — this used to be an unconditional
+        // `Vec::new()` with no caller-facing field to source it from.
+        references: std::mem::take(&mut params.references),
         topic: params
             .topic
             .take()
@@ -182,6 +185,7 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         metadata: None,
         emit_continuity: false,
         files: Vec::new(),
+        references: Vec::new(),
         compact: false,
         proposal_id: None,
         review_status: None,

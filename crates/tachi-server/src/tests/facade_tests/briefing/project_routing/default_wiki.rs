@@ -55,6 +55,7 @@ async fn tachi_memory_briefing_defaults_to_named_wiki_project_hits() {
             emit_continuity: false,
             compact: false,
             files: Vec::new(),
+            references: Vec::new(),
             proposal_id: None,
             review_status: None,
             notes: None,

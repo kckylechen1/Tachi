@@ -176,7 +176,13 @@ pub(crate) async fn handle_tachi_memory(
                 domain: params.domain.clone(),
                 retention_policy: params.retention_policy.clone(),
                 force: params.force,
-                references: Vec::new(),
+                // tachi#1288 (Fix B): TachiMemoryParams gained a `references`
+                // field mirroring `files` below -- this was previously an
+                // unconditional `Vec::new()` that silently dropped anything
+                // a `tachi_memory(action='save', references=[...])` caller
+                // supplied, even though `files` right below threads through
+                // fine.
+                references: params.references.clone(),
                 topic: params.topic.clone(),
                 source: params.source.clone(),
                 valid_from: params.valid_from.clone(),

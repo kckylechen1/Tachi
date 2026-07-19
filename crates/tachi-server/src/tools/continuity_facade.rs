@@ -104,6 +104,7 @@ impl MemoryServer {
             metadata: None,
             emit_continuity: false,
             files: Vec::new(),
+            references: Vec::new(),
             compact: true,
             proposal_id: None,
             review_status: None,

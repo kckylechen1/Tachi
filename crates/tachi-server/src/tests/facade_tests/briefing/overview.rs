@@ -48,6 +48,7 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
             emit_continuity: false,
             compact: false,
             files: Vec::new(),
+            references: Vec::new(),
             proposal_id: None,
             review_status: None,
             notes: None,
