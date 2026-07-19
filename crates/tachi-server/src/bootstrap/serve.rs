@@ -819,6 +819,20 @@ async fn start_server_transport(
     }
 
     serve_result?;
+    if !cli.daemon {
+        // #1273 Gap 1: the direct (non-proxy, `TACHI_DISABLE_STDIO_PROXY=1`
+        // debugging-only) stdio path holds a live `MemoryServer`/DB
+        // connection; the WAL-checkpoint and GC background tasks were
+        // already cancelled and joined above, so their cleanup has already
+        // run. From here, force-exit rather than let control fall back
+        // through `tokio_main` into `#[tokio::main]`'s implicit
+        // `Runtime::drop`, which would block indefinitely on the same
+        // un-cancellable stdin blocking-read thread documented on
+        // `stdio::stdio_hard_exit`. The HTTP daemon path never reaches this
+        // branch and is unaffected: it has no stdin transport, so its normal
+        // `Ok(())` return already terminates cleanly.
+        stdio::stdio_hard_exit();
+    }
     Ok(())
 }
 
