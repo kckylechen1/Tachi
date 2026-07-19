@@ -108,8 +108,24 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         credential_profiles: &[],
         common_skills: &[SUPERPOWER_EXECUTING_PLANS],
         signature_skills: &[WAZA_TACHI, CODING_TEST_STRATEGY],
-        passive_traits: &["bounded_diff", "tests_required", "leader_owns_merge"],
-        forbidden_skills: &["unbounded_redesign", "silent_test_workaround"],
+        // tachi#1184: the 56G private-target-dir incident (2026-07-11..16)
+        // was five parallel write lanes each hitting the shared build's lock
+        // and quietly compensating by minting their own `CARGO_TARGET_DIR` —
+        // a contract gap, not agent misbehavior. These two traits close it
+        // in the one place every dispatched write lane actually reads: the
+        // rendered `## Dispatch profile` packet section
+        // (`dispatch_ops/prompt/overlays.rs::render_dispatch_profile_overlay`).
+        passive_traits: &[
+            "bounded_diff",
+            "tests_required",
+            "leader_owns_merge",
+            "build_through_oz_or_declared_shared_target",
+        ],
+        forbidden_skills: &[
+            "unbounded_redesign",
+            "silent_test_workaround",
+            "self_managed_cargo_target_dir",
+        ],
         evidence_required: &["diff", "tests_run", "files_changed"],
         strong_against: &["bounded_patch", "implementation"],
         weak_against: &["ambiguous_architecture", "unbounded_refactor"],
@@ -138,8 +154,16 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
             "bounded_diff",
             "tests_required",
             "credentialed_opencode_config",
+            // tachi#1184: see the sibling `glm_impl` profile's comment above
+            // — same contract gap, same fix, both write-capable executor
+            // profiles.
+            "build_through_oz_or_declared_shared_target",
         ],
-        forbidden_skills: &["unbounded_redesign", "silent_test_workaround"],
+        forbidden_skills: &[
+            "unbounded_redesign",
+            "silent_test_workaround",
+            "self_managed_cargo_target_dir",
+        ],
         evidence_required: &["diff", "tests_run", "files_changed"],
         strong_against: &["bounded_patch", "implementation", "credentialed_dispatch"],
         weak_against: &["ambiguous_architecture", "unbounded_refactor"],
