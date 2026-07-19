@@ -82,30 +82,34 @@ So the spec's job is **codifying prose/cross-domain patterns into one canonical 
   reviewed attached patterns as `hit`. Briefing/context runtime still does not decide
   hit/miss automatically.
 - **Recall:** existing hybrid search supports pattern scope. Session-start preload is
-  available through context/briefing surfaces, but the host-adapter contract is not yet
-  packaged as one protocol.
+  available through context/briefing surfaces. `host_lifecycle` packages the adapter
+  contract as a read model, but per-host enforcement remains unbuilt.
 
 ### Timeline memory
 - **What it stores:** the credibility history of a judgment or pattern — how it was
 discovered, defended, revised, and externally validated. Timeline memory answers
 "why is this conclusion trustworthy?" rather than "what did we discuss on which day?".
 - **Evolution chain:** append-only `tachi_events` plus `ProjectionKind::Timeline`
-  projections exist. Causal graph `add_edge` integration is still a target.
+  projections exist. Explicit causal edges with existing memory-id endpoints persist
+  through `add_edge`; natural-language endpoint resolution remains a target.
 - **Generation:** `capture_session` emits `session.captured`; the optional continuity
   pipeline can emit candidates and `session.outcome`. Context output now carries a
   `TimelineEntry` schema marker and typed metadata; enforced Rust validation is still
   missing.
 
 ### Bonding layer
-- **What it stores:** a per-user shared communication protocol — shorthand references,
-  common investigative history, domain-specific vocabulary, and expected interaction
-  rhythms that let later turns start from accumulated context instead of rebuilding it.
+- **What it stores:** a private `(user trust domain, agent_identity_id)` dyadic
+  communication protocol — shorthand references, common investigative history,
+  domain-specific vocabulary, and expected interaction rhythms that let later turns
+  start from accumulated context instead of rebuilding it.
 - **What it is not:** bonding is neither an emotional state of the model nor an RLHF
   warmth output. The model does not "feel" attached; it reads a structured read model
   that compresses bandwidth between user and system.
-- **Storage:** bonding projections exist under `/user/patterns/bonding/*`.
-  Context output now carries a `SharedLexicon` schema marker and lexicon metadata;
-  enforced Rust validation is still missing.
+- **Current pre-migration storage:** bonding projections exist under unpartitioned
+  `/user/patterns/bonding/*` paths, and local A2A currently exposes refs. The target
+  relationship partition binds the dyad identity and excludes bonding refs/content
+  from A2A, workers, and cold seats. Migration/leakage goldens and enforced Rust
+  validation remain missing.
 - **Precedent:** the RomanBath character card's prose protocol is the working model;
   formalize it (origin, meaning, callback_hits, appropriate/inappropriate contexts).
 - **Delivery carrier:** see Constraint 2 — bonding is **not** warmth.
@@ -345,9 +349,10 @@ Implemented substrate:
 
 Still missing:
 
-- `Agent MD` crystallization is only first-slice: profile import/render/context exists,
-  but mature continuity patterns do not automatically synthesize reviewed profile
-  proposals.
+- `Agent MD` crystallization is only first-slice: the old profile
+  import/render/context MCP surface was retired under #757. Mature patterns can emit
+  pending `agent_profile.proposal` events, but no current surface renders or writes
+  host Agent MD files from them.
 - No cross-process A2A subscription transport has been wired on top of these events;
   only the local read-only `a2a` evidence bundle and poll surface exist through
   `tachi_event action="context"` / `action="a2a"`.
@@ -396,26 +401,28 @@ deciding what a downstream agent may do with it.
 
 ## The relationship store (decided 2026-07-05)
 
-Owner decision: pattern/bonding/affect data about the DYAD moves out of the shared
-memory DBs into a dedicated **relationship store** — a separate database per trust
-domain, not per topic. This specifies the security/ownership model Constraint 6
+Owner decision, refined by the 2026-07-19 AgentSoul ruling: pattern/bonding/affect
+data about a relationship moves out of the shared memory DBs into a dedicated
+**relationship store** — a separate database per trust domain, not per topic. The
+store is addressed by the admitted user/AgentIdentity relationship; it is not the
+AgentSoul authority. This specifies the security/ownership model Constraint 6
 required before high-recall collection.
 
-- **Contents:** the user side (bonding lexicon, preferences, cognitive/judgment
-  patterns — the psychological profile) AND the agent side (emotional state, persona
-  continuity). Bonding is dyadic; both sides of the relationship live together.
-- **One dyad per Tachi instance; no persona key.** Isolation between personas comes
-  from deployment topology — Jayne, zeroclaw personas, and the engineering OS each run
-  their own Tachi instance/fork — which is structurally stronger than any schema key.
-  Cross-persona sharing of bonding material is a non-goal (persona bleed is an
-  anti-feature). Within the engineering instance, all engineering agents form one
-  "thinking buddy" dyad with the owner (归一教义: no named-character SOUL).
+- **Contents:** user-ratified relationship preferences and bonding lexicon, plus
+  agent-side autobiographical/affect candidates. Bonding is dyadic, but neither side
+  silently acquires authority over the user-model or active AgentSoul projection.
+- **Identity-scoped dyads.** `agent_identity_id`, not deployment topology or a
+  self-asserted model name, identifies the agent side. Multiple agents in one Tachi
+  instance do not silently share private bonding material. Changing carrier preserves
+  the dyad only when admission resolves to the same persistent AgentIdentity;
+  identity merge, split, revocation, export, and deletion are explicit operations.
 - **Engine lives upstream in `memcore`;** forks and product instances inherit the
   schema, half-life config, and guardrails instead of reinventing them (hypermemory
   already forked once — per-product relationship schemas would drift within months).
   Emotional state needs no new machinery: mood = short-half-life tier decaying to
-  baseline; personality/persona traits = long-half-life pattern tier; the events →
-  projection pipeline is unchanged.
+  baseline. Stable operating-identity dispositions are not merely long-half-life
+  patterns: they require the reviewed AgentSoul promotion lifecycle. The events →
+  candidate projection pipeline is otherwise unchanged.
 - **Guardrails (structural, not filter-based):** affect/emotion colors tone ONLY
   (`tone_and_reminder_only`, `execution_effect=none` — enforced at read sites);
   delegate/worker recall paths never mount the store; A2A bundles never source from
@@ -425,7 +432,9 @@ required before high-recall collection.
   reviewed instructions/wiki (Agent MD, phase 6), so workers consume distilled rules
   and never the raw profile.
 - **Ops policy:** separate encryption at rest; portability bundles exclude it by
-  default (explicit flag + its own passphrase to include); deletion = delete one file.
+  default (explicit flag + its own passphrase to include). Privacy erasure also
+  follows the derivation manifest to redact exports and invalidate dependent
+  projections; deleting one database file alone is insufficient.
 
 The persistent-drift risk this store creates — a written-then-reloaded agent mood
 becoming a covert agreeableness loop — is exactly Constraint 2/3's territory; the
