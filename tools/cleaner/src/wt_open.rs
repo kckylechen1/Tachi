@@ -81,6 +81,7 @@ pub fn default_worktrees_root() -> Result<PathBuf, String> {
                     path.display()
                 ));
             }
+            warn_if_ephemeral_root(&path, "TACHI_WORKTREES_ROOT");
             return Ok(path);
         }
     }
@@ -94,6 +95,53 @@ pub fn default_worktrees_root() -> Result<PathBuf, String> {
              TACHI_WORKTREES_ROOT is not set; refusing to fall back to the current directory"
                 .to_string(),
         ),
+    }
+}
+
+/// Known-ephemeral scratch roots (tachi#1184 item 3 — the worktree-location
+/// law): a worktree meant to outlive a session belongs under a durable cache
+/// dir (`~/.cache/tachi/worktrees/…`, the default above), never one of
+/// these. `--path`/explicit-path escapes of the managed root are already a
+/// HARD refusal ([`path_outside_managed_root_reason`]) — this list exists
+/// for the one path that check does not cover: an operator pointing
+/// `TACHI_WORKTREES_ROOT` itself at an ephemeral volume, which makes that
+/// volume the "managed root" and therefore compliant by that check's own
+/// definition. A hard fail here would be the wrong shape for a
+/// self-configured root (a deliberate throwaway/test root is a legitimate
+/// use), so this is a loud warning, not a refusal.
+fn ephemeral_root_prefixes() -> Vec<PathBuf> {
+    let mut prefixes = vec![PathBuf::from("/tmp"), PathBuf::from("/private/tmp")];
+    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+        if !tmpdir.is_empty() {
+            prefixes.push(PathBuf::from(tmpdir));
+        }
+    }
+    prefixes
+}
+
+/// Pure decision: does `path` sit at or under one of `ephemeral_roots`?
+/// Lexical component comparison (not `canonicalize_prefix`'s symlink-aware
+/// resolution) is intentional here — `path` may not exist yet, and `/tmp` /
+/// `/private/tmp` are both checked literally by [`ephemeral_root_prefixes`]
+/// specifically so the macOS `/tmp` -> `/private/tmp` symlink is covered
+/// without needing the path to exist first.
+fn is_under_any_root(path: &Path, ephemeral_roots: &[PathBuf]) -> bool {
+    ephemeral_roots
+        .iter()
+        .any(|root| path == root || path_is_within_components(path, root))
+}
+
+/// Loud (never fatal) warning when an explicitly configured managed
+/// worktrees root sits under a known-ephemeral scratch volume.
+fn warn_if_ephemeral_root(path: &Path, source: &str) {
+    if is_under_any_root(path, &ephemeral_root_prefixes()) {
+        eprintln!(
+            "[tachi worktree] WARNING: {source}={} points at an ephemeral scratch volume; a \
+             worktree meant to outlive this session should live under a durable cache dir (the \
+             default is ~/.cache/tachi/worktrees/<repo>), not /private/tmp, /tmp, or $TMPDIR — \
+             those are wiped on reboot and orphan the tree's gitdir (tachi#1184)",
+            path.display()
+        );
     }
 }
 
@@ -910,6 +958,55 @@ mod tests {
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         assert_ne!(a, b, "consecutive short_ids must not collide");
+    }
+
+    // ─── tachi#1184 item 3: worktree-location law ──────────────────────────
+
+    #[test]
+    fn private_tmp_and_tmp_are_ephemeral() {
+        let roots = vec![PathBuf::from("/tmp"), PathBuf::from("/private/tmp")];
+        assert!(is_under_any_root(
+            Path::new("/private/tmp/wz-1184"),
+            &roots
+        ));
+        assert!(is_under_any_root(Path::new("/tmp/some-session"), &roots));
+        // The bare root itself also counts, not just children of it.
+        assert!(is_under_any_root(Path::new("/private/tmp"), &roots));
+    }
+
+    #[test]
+    fn cache_root_is_not_ephemeral() {
+        let roots = vec![PathBuf::from("/tmp"), PathBuf::from("/private/tmp")];
+        assert!(!is_under_any_root(
+            Path::new("/home/x/.cache/tachi/worktrees/repo"),
+            &roots
+        ));
+    }
+
+    #[test]
+    fn sibling_directory_is_not_a_false_positive() {
+        // `/private/tmpfs-something` must not match boundary `/private/tmp`
+        // via a naive string-prefix check — this is exactly the sibling
+        // pitfall `path_is_within_components`'s own doc comment calls out
+        // (`~/.cache/tachi/worktrees-evil` vs `~/.cache/tachi/worktrees`).
+        let roots = vec![PathBuf::from("/private/tmp")];
+        assert!(!is_under_any_root(
+            Path::new("/private/tmpfs-something/foo"),
+            &roots
+        ));
+    }
+
+    #[test]
+    fn tmpdir_override_is_treated_as_ephemeral_too() {
+        let roots = vec![
+            PathBuf::from("/tmp"),
+            PathBuf::from("/private/tmp"),
+            PathBuf::from("/var/folders/xy/abc"),
+        ];
+        assert!(is_under_any_root(
+            Path::new("/var/folders/xy/abc/session-42"),
+            &roots
+        ));
     }
 
     fn unique_temp(prefix: &str) -> PathBuf {
