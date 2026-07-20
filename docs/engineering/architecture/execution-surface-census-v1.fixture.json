@@ -3,7 +3,7 @@
     "issue": 1317,
     "observation": {
         "date": "2026-07-20",
-        "revision": "eb64dc7a937a0625971e28445274485c55a6e6f0",
+        "revision": "648f35f316e31412e783385bccada0f2469d2640",
         "scope": "native composed MemoryServer router after production profile, action-schema, bound-project, and annotation transforms; environment exposure override unset"
     },
     "provisional_budgets": {
