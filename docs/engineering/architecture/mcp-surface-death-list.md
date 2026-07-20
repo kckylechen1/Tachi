@@ -30,6 +30,16 @@ run
 review the printed census and budget rationale, then update the fixture
 explicitly in the same PR. Normal tests never rewrite the fixture.
 
+The deletion target for Task dispatch, Shell, and Arena is frozen separately in
+[`external-staffing-contract-v1.fixture.json`](external-staffing-contract-v1.fixture.json):
+one `TachiDispatchParams` adoption kernel and one canonical run receipt. Its
+secondary-ledger roots, staffing-projection writer sites (owner-module documents
+plus dispatch/completion flow projections), and linked-result-copy inventory
+describe legacy debt and may only decrease as #1319 deletion leaves land. This
+is a staffing projection census, not a census of unrelated lifecycle/GitHub
+writes into the shared flow directory; none of these stores is an additional
+authority.
+
 - `standard` is a 16-tool allow-list in `STANDARD_MINIMAL_TOOL_PATTERNS` after
   removing `tachi_arena` and `tachi_agent_eval`; its `tachi_task` schema also
   omits operator-only `dispatch`.
