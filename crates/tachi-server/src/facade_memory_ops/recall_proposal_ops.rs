@@ -4,7 +4,7 @@ use super::evidence_format::{json_string, wants_json};
 use super::recall_simulate_ops::build_recall_simulation_report;
 use crate::tool_params::*;
 use crate::MemoryServer;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -88,6 +88,13 @@ pub(crate) fn handle_recall_config_review(
             "note": params.notes.clone(),
             "reviewed_at": reviewed_at,
         });
+        // `hard_state` TTL (#1342 follow-up): `rejected` is terminal — the
+        // proposal will never be applied — so it gets a 30-day TTL here.
+        // `approved` is NOT terminal (still awaits `handle_recall_config_apply`),
+        // so it must stay TTL-less until that terminal write.
+        if status == "rejected" {
+            value["expires_at"] = json!((Utc::now() + Duration::days(30)).to_rfc3339());
+        }
         let next = serde_json::to_string(&value)
             .map_err(|e| format!("serialize recall config review: {e}"))?;
         store
@@ -154,6 +161,9 @@ pub(crate) fn handle_recall_config_apply(
     let applied_at = Utc::now().to_rfc3339();
     proposal["status"] = json!("applied");
     proposal["applied_at"] = json!(applied_at);
+    // `hard_state` TTL (#1342 follow-up): `applied` is terminal — the config
+    // patch already landed — so this write gets a 30-day TTL.
+    proposal["expires_at"] = json!((Utc::now() + Duration::days(30)).to_rfc3339());
     proposal["apply_result"] = json!({
         "config_env_path": config_env_path.display().to_string(),
         "updated_keys": config_env.keys().cloned().collect::<Vec<_>>(),

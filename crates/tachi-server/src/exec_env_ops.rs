@@ -65,6 +65,15 @@ use tachi_clean::wt_open::{open_worktree, CargoTargetPolicy, OpenOptions, OpenRe
 use crate::server_state::MemoryServer;
 
 /// `hard_state` namespace for booked private-target reservations; key = env_id.
+///
+/// **Deliberately excluded from the #1342 follow-up TTL/backfill pass.** Its
+/// lifecycle is owned by the #894 exec-env-disk-governor design (`exec_env_reaper`,
+/// see that module's doc header), not by a generic `hard_state` `expires_at`
+/// sweep — a private-target reservation is live/reclaim-worthy exactly when
+/// the disk-governor ledger (`exec_env_resources`/leases) says so, which is a
+/// different, already-load-bearing state machine than "past a wall-clock
+/// timestamp". Bolting a TTL onto this namespace too would give two
+/// independent, potentially-disagreeing reapers authority over the same row.
 pub(crate) const PRIVATE_RESERVATION_NS: &str = "exec_env_private_target";
 
 /// Resolve a worktree to the one persisted physical-path spelling. Existing

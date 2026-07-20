@@ -262,6 +262,14 @@ fn handle_review(server: &MemoryServer, params: &TachiMemoryParams) -> Result<St
             "note": params.notes.clone(),
             "reviewed_at": reviewed_at,
         });
+        // `hard_state` TTL (#1342 follow-up): `rejected` is terminal — the
+        // proposal will never be applied — so it gets a 30-day TTL here.
+        // `approved` is NOT terminal (it still awaits `handle_apply`), so it
+        // must stay TTL-less; the TTL for an approved-then-applied proposal
+        // is stamped by `handle_apply` below instead.
+        if status == "rejected" {
+            value["expires_at"] = json!((Utc::now() + Duration::days(30)).to_rfc3339());
+        }
         let next = serde_json::to_string(&value)
             .map_err(|e| format!("serialize lifecycle review: {e}"))?;
         store
@@ -339,6 +347,9 @@ fn handle_apply(server: &MemoryServer, params: &TachiMemoryParams) -> Result<Str
     let applied_at = Utc::now().to_rfc3339();
     proposal["status"] = json!("applied");
     proposal["applied_at"] = json!(applied_at);
+    // `hard_state` TTL (#1342 follow-up): `applied` is terminal — the
+    // mutation already happened — so this write gets a 30-day TTL.
+    proposal["expires_at"] = json!((Utc::now() + Duration::days(30)).to_rfc3339());
     proposal["apply_result"] = apply_result.clone();
     let proposal_for_store = proposal.clone();
     with_proposal_store(server, params, |store| {

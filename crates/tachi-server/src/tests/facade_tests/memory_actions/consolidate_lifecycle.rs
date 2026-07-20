@@ -94,6 +94,11 @@ async fn consolidate_propose_review_apply_supersedes_older_scratch_duplicate() {
         .expect("review");
     let review_json: Value = serde_json::from_str(&review_body).expect("review json");
     assert_eq!(review_json["proposal"]["status"], json!("approved"));
+    assert!(
+        review_json["proposal"]["expires_at"].is_null(),
+        "#1342 follow-up: an approved-but-not-yet-applied proposal must stay \
+         TTL-less until its own terminal (applied) write: {review_json}"
+    );
 
     // 3) Apply without confirm must fail (discrimination)
     let mut apply_no = tachi_memory_params("consolidate");
@@ -124,6 +129,14 @@ async fn consolidate_propose_review_apply_supersedes_older_scratch_duplicate() {
     );
     assert_eq!(apply_json["apply_result"]["archived"], json!(true));
     assert_eq!(apply_json["apply_result"]["target_id"], json!("life-new-1"));
+    // #1342 follow-up: `applied` is terminal, so this write must carry a TTL.
+    let expires_at = apply_json["proposal"]["expires_at"]
+        .as_str()
+        .expect("applied proposal must carry expires_at");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(expires_at).is_ok(),
+        "expires_at must be a valid RFC3339 timestamp: {expires_at}"
+    );
 
     // Archived rows are hidden from default get; use include_archived.
     let older_after = server
@@ -165,6 +178,71 @@ async fn consolidate_propose_review_apply_supersedes_older_scratch_duplicate() {
     assert!(
         listed.iter().any(|e| e.id == "life-new-1"),
         "survivor must remain listed"
+    );
+}
+
+/// #1342 follow-up: a rejected proposal is terminal (it will never be
+/// applied), so its review write must carry a 30-day TTL immediately —
+/// unlike `approved`, which must wait for `handle_apply`'s own terminal write.
+#[tokio::test]
+async fn consolidate_reject_stamps_a_ttl_immediately() {
+    let server = make_server();
+    let older = seed_scratch(
+        "life-rej-old",
+        "/scratch/sigil/reject-topic",
+        "Older draft of the same decision note about a rejected consolidation",
+        10,
+    );
+    let newer = seed_scratch(
+        "life-rej-new",
+        "/scratch/sigil/reject-topic",
+        "Newer draft of the same decision note about a rejected consolidation",
+        1,
+    );
+    server
+        .with_global_store(|store| {
+            store.upsert(&older).map_err(|e| e.to_string())?;
+            store.upsert(&newer).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed scratch duplicates");
+
+    let mut propose = tachi_memory_params("consolidate");
+    propose.format = Some("json".to_string());
+    propose.path_prefix = Some("/scratch".to_string());
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, propose)
+        .await
+        .expect("propose");
+    let parsed: Value = serde_json::from_str(&body).expect("propose json");
+    let proposals = parsed["generated"].as_array().cloned().unwrap_or_default();
+    let merge = proposals
+        .iter()
+        .find(|p| {
+            p.get("source_id").and_then(Value::as_str) == Some("life-rej-old")
+                && p.get("target_id").and_then(Value::as_str) == Some("life-rej-new")
+        })
+        .expect("a proposal covering the seeded pair");
+    let proposal_id = merge["proposal_id"]
+        .as_str()
+        .expect("proposal_id")
+        .to_string();
+
+    let mut review = tachi_memory_params("consolidate");
+    review.format = Some("json".to_string());
+    review.proposal_id = Some(proposal_id);
+    review.review_status = Some("rejected".to_string());
+    let review_body = crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("review");
+    let review_json: Value = serde_json::from_str(&review_body).expect("review json");
+    assert_eq!(review_json["proposal"]["status"], json!("rejected"));
+
+    let expires_at = review_json["proposal"]["expires_at"]
+        .as_str()
+        .expect("a rejected (terminal) proposal must carry expires_at immediately");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(expires_at).is_ok(),
+        "expires_at must be a valid RFC3339 timestamp: {expires_at}"
     );
 }
 

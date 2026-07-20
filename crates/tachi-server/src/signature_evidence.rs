@@ -22,6 +22,19 @@ use crate::tool_params::{SignatureRecordParams, TachiCompleteParams};
 use crate::MemoryServer;
 
 /// Namespace for append-only signature evidence rows in `hard_state`.
+///
+/// **Not TTL'd, by design (#1342 follow-up: the state-lifecycle-hygiene pass
+/// across `hard_state` namespaces deliberately excludes this one).** This
+/// namespace is the audit log itself — see the module doc above: each row is
+/// an immutable, append-only occurrence record, and the taxonomy/trust
+/// projection built from it (`tachi_dispatch::signatures`, distill's
+/// consumption of this evidence) has no defined "this occurrence is now
+/// stale" cutoff. Retention policy is **permanent**; the consuming surfaces
+/// are `tachi_dispatch`'s signature projection and the distill/eval audit
+/// path. Writing an `expires_at` here would hand `memcore::reap_expired_state`
+/// silent authority to delete evidence a later audit still needs — if this
+/// namespace ever needs bounded retention, that must be a deliberate,
+/// separately-reviewed policy change, not an incidental TTL sweep.
 pub(crate) const SIGNATURE_EVIDENCE_NS: &str = "dispatch_signature_evidence";
 /// Namespace + key holding the seed-once marker, so startup seeding is
 /// idempotent.

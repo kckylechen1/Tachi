@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, ToSql};
 use uuid::Uuid;
 
 use crate::error::MemoryError;
@@ -156,6 +156,87 @@ pub fn reap_expired_state(conn: &Connection, now_rfc3339: &str) -> Result<usize,
         params![now_rfc3339],
     )?;
     Ok(removed)
+}
+
+/// Idempotent TTL backfill for `hard_state` rows written before their
+/// namespace carried an `expires_at` field at all (the seven-namespace
+/// state-lifecycle-hygiene pass this reap function's own header warns every
+/// future `hard_state` writer to check against). Only rows whose JSON has
+/// **no `expires_at` key at all** are touched.
+///
+/// `json_extract(value_json, '$.expires_at') IS NULL` would ALSO match a row
+/// that explicitly carries `"expires_at": null` — the #1301 retain-forever
+/// marker [`reap_expired_state`] treats as a first-class, permanent
+/// exemption — and clobbering that with a TTL would silently undo it. This
+/// uses `json_type(...) IS NULL` instead, which is what SQLite returns for a
+/// JSON path that does not exist at all (see `reap_expired_state`'s own doc
+/// comment on the identical distinction), so it is the correct "the key is
+/// missing" test rather than "the value is missing".
+///
+/// `terminal_status` optionally scopes the backfill to rows whose value at
+/// the given JSON pointer (e.g. `"$.status"`) currently equals one of
+/// `terminal_values` — e.g. only `applied`/`rejected` proposal rows, never
+/// `pending`/`approved` ones, which must stay TTL-less until they reach a
+/// terminal write of their own. `None` backfills every row in the namespace
+/// unconditionally (for namespaces with no "still open" concept at all,
+/// e.g. a build receipt, which is done being useful the instant it is
+/// written).
+///
+/// Safe to re-run against an already-backfilled namespace: the
+/// `json_type(...) IS NULL` guard means a row that already carries
+/// `expires_at` (from an earlier backfill run, or because it was written
+/// with one from the start) is never touched twice, so the returned count is
+/// `0` on a repeat run against unchanged data.
+pub fn backfill_missing_expires_at(
+    conn: &Connection,
+    namespace: &str,
+    ttl_rfc3339: &str,
+    terminal_status: Option<(&str, &[&str])>,
+) -> Result<usize, MemoryError> {
+    match terminal_status {
+        None => {
+            let updated = conn.execute(
+                "UPDATE hard_state
+                 SET value_json = json_set(value_json, '$.expires_at', ?1)
+                 WHERE namespace = ?2
+                   AND json_type(value_json, '$.expires_at') IS NULL",
+                params![ttl_rfc3339, namespace],
+            )?;
+            Ok(updated)
+        }
+        Some((status_path, terminal_values)) => {
+            if terminal_values.is_empty() {
+                // Nothing can ever match an empty allow-list; skip the round
+                // trip rather than hand SQLite a malformed empty `IN ()`.
+                return Ok(0);
+            }
+            let placeholders = (0..terminal_values.len())
+                .map(|i| format!("?{}", i + 3))
+                .collect::<Vec<_>>()
+                .join(", ");
+            // `status_path` is always one of a small set of hardcoded JSON
+            // pointer literals supplied by call sites in this crate/binary
+            // (e.g. `"$.status"`, `"$.cleanup_status"`) — never derived from
+            // request/user input — so interpolating it into the query text
+            // (SQLite has no bind-parameter form for a JSON path segment) is
+            // not an injection surface.
+            let sql = format!(
+                "UPDATE hard_state
+                 SET value_json = json_set(value_json, '$.expires_at', ?1)
+                 WHERE namespace = ?2
+                   AND json_type(value_json, '$.expires_at') IS NULL
+                   AND json_extract(value_json, '{status_path}') IN ({placeholders})"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut bind_params: Vec<&dyn ToSql> =
+                vec![&ttl_rfc3339 as &dyn ToSql, &namespace as &dyn ToSql];
+            for value in terminal_values {
+                bind_params.push(value as &dyn ToSql);
+            }
+            let updated = stmt.execute(bind_params.as_slice())?;
+            Ok(updated)
+        }
+    }
 }
 
 /// List state rows in a namespace, newest first.
@@ -570,6 +651,145 @@ mod tests {
         assert!(
             err.to_string().to_lowercase().contains("no such table"),
             "error should name the missing table, got: {err}"
+        );
+    }
+
+    #[test]
+    fn backfill_missing_expires_at_is_unconditional_and_idempotent() {
+        let conn = open_state_db();
+        set_state(&conn, "build_receipt", "t1", r#"{"outcome":"success"}"#)
+            .expect("seed receipt with no expires_at");
+
+        let ttl = "2126-07-20T00:00:00Z";
+        let backfilled =
+            backfill_missing_expires_at(&conn, "build_receipt", ttl, None).expect("first backfill");
+        assert_eq!(backfilled, 1, "the one missing-key row must be backfilled");
+
+        let (value, _version) = get_state(&conn, "build_receipt", "t1")
+            .expect("get after backfill")
+            .expect("row still present");
+        let parsed: serde_json::Value = serde_json::from_str(&value).expect("valid json");
+        assert_eq!(
+            parsed["expires_at"].as_str(),
+            Some(ttl),
+            "expires_at must be set to the TTL: {value}"
+        );
+        assert_eq!(
+            parsed["outcome"].as_str(),
+            Some("success"),
+            "other fields must survive the backfill untouched: {value}"
+        );
+
+        // Idempotent: a second run against unchanged data touches nothing.
+        let second_run =
+            backfill_missing_expires_at(&conn, "build_receipt", ttl, None).expect("second backfill");
+        assert_eq!(
+            second_run, 0,
+            "re-running the backfill must be a no-op once every row already has expires_at"
+        );
+    }
+
+    #[test]
+    fn backfill_missing_expires_at_never_clobbers_the_explicit_retain_forever_null() {
+        let conn = open_state_db();
+        set_state(
+            &conn,
+            "capture_manifest",
+            "completed-forever",
+            r#"{"expires_at":null,"completed":true}"#,
+        )
+        .expect("seed retain-forever row (#1301)");
+
+        let backfilled =
+            backfill_missing_expires_at(&conn, "capture_manifest", "2126-07-20T00:00:00Z", None)
+                .expect("backfill");
+        assert_eq!(
+            backfilled, 0,
+            "a row that already carries an explicit expires_at:null must not be touched — \
+             json_type(...) IS NULL (missing key) must not be confused with the JSON null value"
+        );
+
+        let (value, _version) = get_state(&conn, "capture_manifest", "completed-forever")
+            .expect("get")
+            .expect("row present");
+        assert_eq!(
+            value, r#"{"expires_at":null,"completed":true}"#,
+            "the #1301 retain-forever marker must survive byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn backfill_missing_expires_at_only_terminal_status_rows_when_scoped() {
+        let conn = open_state_db();
+        set_state(
+            &conn,
+            "memory_lifecycle_proposals",
+            "p-pending",
+            r#"{"status":"pending"}"#,
+        )
+        .expect("seed pending proposal");
+        set_state(
+            &conn,
+            "memory_lifecycle_proposals",
+            "p-approved",
+            r#"{"status":"approved"}"#,
+        )
+        .expect("seed approved-not-yet-applied proposal");
+        set_state(
+            &conn,
+            "memory_lifecycle_proposals",
+            "p-rejected",
+            r#"{"status":"rejected"}"#,
+        )
+        .expect("seed rejected proposal");
+        set_state(
+            &conn,
+            "memory_lifecycle_proposals",
+            "p-applied",
+            r#"{"status":"applied"}"#,
+        )
+        .expect("seed applied proposal");
+
+        let backfilled = backfill_missing_expires_at(
+            &conn,
+            "memory_lifecycle_proposals",
+            "2126-07-20T00:00:00Z",
+            Some(("$.status", &["applied", "rejected"])),
+        )
+        .expect("scoped backfill");
+        assert_eq!(
+            backfilled, 2,
+            "only the applied and rejected rows are terminal"
+        );
+
+        for (key, expect_ttl) in [
+            ("p-pending", false),
+            ("p-approved", false),
+            ("p-rejected", true),
+            ("p-applied", true),
+        ] {
+            let (value, _version) = get_state(&conn, "memory_lifecycle_proposals", key)
+                .expect("get")
+                .expect("row present");
+            let has_ttl = value.contains("expires_at");
+            assert_eq!(
+                has_ttl, expect_ttl,
+                "{key}: expected expires_at presence = {expect_ttl}, row = {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn backfill_missing_expires_at_with_empty_terminal_list_is_a_noop() {
+        let conn = open_state_db();
+        set_state(&conn, "ns", "k1", r#"{"status":"applied"}"#).expect("seed");
+
+        let backfilled =
+            backfill_missing_expires_at(&conn, "ns", "2126-07-20T00:00:00Z", Some(("$.status", &[])))
+                .expect("backfill with empty allow-list");
+        assert_eq!(
+            backfilled, 0,
+            "an empty terminal-values allow-list can never match any row"
         );
     }
 }
