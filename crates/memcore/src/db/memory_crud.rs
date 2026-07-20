@@ -270,6 +270,13 @@ pub enum IdlessUpsertResult {
     Duplicate { id: String },
 }
 
+/// Result of an atomic insert-only memory write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertMemoryResult {
+    Inserted,
+    Existing,
+}
+
 /// Insert or update a memory entry (and its embedding vector if provided).
 pub fn upsert(
     conn: &mut Connection,
@@ -277,6 +284,126 @@ pub fn upsert(
     vec_available: bool,
 ) -> Result<(), MemoryError> {
     upsert_with_idless_identity(conn, entry, vec_available, None).map(|_| ())
+}
+
+/// Insert `entry` only when its id is absent. The existence decision and all
+/// main/FTS/vector writes share the same transaction, so an `Existing` result
+/// never mutates any representation of the winning row.
+pub fn insert_if_absent(
+    conn: &mut Connection,
+    entry: &MemoryEntry,
+    vec_available: bool,
+) -> Result<InsertMemoryResult, MemoryError> {
+    if entry.id.trim().is_empty() || entry.id.starts_with("anchor:") {
+        return Err(MemoryError::InvalidArg(
+            "entry.id must be non-empty and outside the reserved 'anchor:' namespace".to_string(),
+        ));
+    }
+    let path = crate::path_router::normalize_path(&entry.path);
+    let source = MemorySource::parse_or_external(&entry.source);
+    let category = MemoryCategory::normalize(&entry.category);
+    let scope = MemoryScope::normalize(&entry.scope);
+    let retention_policy = entry
+        .retention_policy
+        .clone()
+        .or_else(|| default_retention_for(&path, &source).map(str::to_string));
+    let clean_text = crate::noise::scrub_think_tags(&entry.text);
+    let clean_summary = crate::noise::scrub_think_tags(&entry.summary);
+    let force = entry
+        .metadata
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let importance = crate::types::normalize_importance(entry.importance, category, force);
+    let timestamp_utc = normalize_utc_iso(&entry.timestamp)?;
+    let valid_from_utc = if entry.valid_from.trim().is_empty() {
+        timestamp_utc.clone()
+    } else {
+        normalize_utc_iso(&entry.valid_from)?
+    };
+    let valid_until_utc = entry
+        .valid_until
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(normalize_utc_iso)
+        .transpose()?;
+    let last_access_utc = entry
+        .last_access
+        .as_deref()
+        .map(normalize_utc_iso)
+        .transpose()?;
+    let write_time_utc = now_utc_iso();
+    let mut metadata = entry.metadata.clone();
+    let path = crate::types::apply_location_relocation(&path, &entry.location, &mut metadata);
+    let metadata_json = serde_json::to_string(&metadata)?;
+    let kws_json = serde_json::to_string(&entry.keywords)?;
+    let e_json = canonical_entities_json(entry)?;
+
+    let tx = conn.transaction()?;
+    let rows_changed = tx.execute(
+        r#"INSERT INTO memories
+              (id, path, summary, text, importance, timestamp, valid_from, valid_until,
+               category, topic, keywords, entities, source, scope, archived, created_at,
+               updated_at, access_count, last_access, revision, metadata, retention_policy,
+               domain, recall_count, query_diversity, tier)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,
+                   ?19,?20,?21,?22,?23,?24,?25,?26)
+           ON CONFLICT(id) DO NOTHING"#,
+        params![
+            entry.id,
+            &path,
+            &clean_summary,
+            &clean_text,
+            importance,
+            timestamp_utc,
+            valid_from_utc,
+            valid_until_utc,
+            category,
+            entry.topic,
+            kws_json,
+            e_json,
+            &source,
+            scope,
+            entry.archived,
+            &write_time_utc,
+            &write_time_utc,
+            entry.access_count,
+            last_access_utc,
+            entry.revision.max(1),
+            metadata_json,
+            &retention_policy,
+            entry.domain,
+            entry.recall_count,
+            entry.query_diversity,
+            &entry.tier
+        ],
+    )?;
+    if rows_changed == 0 {
+        tx.commit()?;
+        return Ok(InsertMemoryResult::Existing);
+    }
+    let kws = entry.keywords.join(" ");
+    let mut entities = entry.entities.clone();
+    crate::types::fold_person_names_into_entities(&mut entities, entry.persons.clone());
+    sync_memories_fts(
+        &tx,
+        &entry.id,
+        &path,
+        &clean_summary,
+        &clean_text,
+        &kws,
+        &entities.join(" "),
+    )?;
+    if vec_available {
+        if let Some(vector) = &entry.vector {
+            tx.execute(
+                "INSERT INTO memories_vec(id, embedding) VALUES (?1, ?2)",
+                params![entry.id, serialize_f32(vector)],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(InsertMemoryResult::Inserted)
 }
 
 /// Insert an id-less entry once. A unique modern identity chooses one winner
@@ -671,6 +798,70 @@ mod idless_upsert_tests {
             active_rows, 1,
             "the identity constraint must leave one active row"
         );
+    }
+
+    #[test]
+    fn concurrent_insert_if_absent_preserves_exactly_one_payload_and_fts_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("insert-only.db")
+            .to_string_lossy()
+            .to_string();
+        crate::MemoryStore::open(&path).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let workers = ["payload alpha", "payload beta"].map(|payload| {
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let mut item = entry("shared-insert-id");
+                item.text = payload.to_string();
+                item.summary = format!("summary {payload}");
+                let mut store = crate::MemoryStore::open(&path).unwrap();
+                barrier.wait();
+                (payload, store.insert_if_absent(&item).unwrap())
+            })
+        });
+        let outcomes = workers.map(|worker| worker.join().unwrap());
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|(_, result)| *result == InsertMemoryResult::Inserted)
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|(_, result)| *result == InsertMemoryResult::Existing)
+                .count(),
+            1
+        );
+        let winner = outcomes
+            .iter()
+            .find(|(_, result)| *result == InsertMemoryResult::Inserted)
+            .unwrap()
+            .0;
+        let store = crate::MemoryStore::open(&path).unwrap();
+        let (text, revision): (String, i64) = store
+            .connection()
+            .query_row(
+                "SELECT text, revision FROM memories WHERE id = 'shared-insert-id'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let fts_text: String = store
+            .connection()
+            .query_row(
+                "SELECT text FROM memories_fts WHERE id = 'shared-insert-id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revision, 1);
+        assert_eq!(text, winner);
+        assert_eq!(fts_text, winner);
     }
 
     #[test]

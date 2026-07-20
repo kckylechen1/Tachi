@@ -255,6 +255,7 @@ pub(crate) async fn handle_compact_session_memory(
             &saved_ids,
             0,
             0,
+            None,
         )?
     } else {
         Vec::new()

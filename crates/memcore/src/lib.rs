@@ -77,7 +77,7 @@ pub use db::foundry_jobs::{
     claim_foundry_job_for_run, find_foundry_jobs_for_memory, gc_foundry_jobs, insert_foundry_job,
     job_status_histogram, load_pending_foundry_jobs, requeue_retryable_foundry_jobs,
     update_foundry_job_status_with_reason, FoundryJobLease, FoundryJobSummary, FoundryRetryPolicy,
-    JobStatusHistogram, PersistedFoundryJob, RequeueOutcome,
+    InsertFoundryJobResult, JobStatusHistogram, PersistedFoundryJob, RequeueOutcome,
 };
 #[cfg(feature = "admin")]
 pub use db::mirror_eval::{
@@ -103,7 +103,9 @@ pub use db::{
     is_memory_db_filename, migrate_legacy_filename_if_present, LEGACY_MEMORY_DB_FILENAME,
     MEMORY_DB_FILENAME,
 };
-pub use db::{CategoryPathPrefixMemoryRow, FoundryJobStatusCounts, PathPrefixMemoryRow};
+pub use db::{
+    CategoryPathPrefixMemoryRow, FoundryJobStatusCounts, InsertMemoryResult, PathPrefixMemoryRow,
+};
 pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use db::{DbOpenContext, MigrationAuthority, OpenIntent};
 pub use embed_config::embed_raw_tier_enabled;
