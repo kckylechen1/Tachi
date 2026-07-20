@@ -85,6 +85,7 @@ mod arena_ops;
 mod bootstrap;
 mod build_broker;
 pub mod build_info;
+mod build_info_core;
 mod builtins;
 mod capability_ops;
 mod claims_ops;
