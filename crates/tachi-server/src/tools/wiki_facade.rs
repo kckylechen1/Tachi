@@ -112,7 +112,7 @@ pub(super) async fn handle_tachi_wiki_facade(
                 file_context: None,
                 error_context: None,
                 weights: None,
-                lifecycle: None,
+                lifecycle: params.lifecycle.clone(),
             };
             if wants_json_format(format.as_deref()) {
                 let value = collect_wiki_search_value(server, wiki_params).await?;
@@ -127,7 +127,7 @@ pub(super) async fn handle_tachi_wiki_facade(
                 category: params.category.clone(),
                 limit: params.limit.unwrap_or(50),
                 project: params.project.clone().unwrap_or_else(|| "wiki".to_string()),
-                lifecycle: None,
+                lifecycle: params.lifecycle.clone(),
             };
             if wants_json_format(format.as_deref()) {
                 let value = collect_wiki_browse_value(server, browse_params)?;

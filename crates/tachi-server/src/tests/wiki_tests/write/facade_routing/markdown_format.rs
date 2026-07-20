@@ -10,6 +10,7 @@ async fn tachi_wiki_write_supports_explicit_markdown_format() {
             format: Some("markdown".to_string()),
             query: None,
             category: Some("experience".to_string()),
+            lifecycle: None,
             top_k: None,
             limit: None,
             title: Some("Facade wiki markdown write".to_string()),

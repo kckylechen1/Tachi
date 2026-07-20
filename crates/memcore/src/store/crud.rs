@@ -1,6 +1,7 @@
 //! Core CRUD, search, and diagnostics methods on [`MemoryStore`].
 
 use rusqlite::Connection;
+use std::time::{Duration, Instant};
 
 use crate::{
     db,
@@ -22,7 +23,9 @@ impl MemoryStore {
     ) -> Result<Vec<SearchResult>, MemoryError> {
         let mut options = opts.unwrap_or_default();
         options.vec_available = self.vec_available;
-        hybrid_search(&self.conn, query, &options)
+        retry_search_locked(&self.db_label, || {
+            hybrid_search(&self.conn, query, &options)
+        })
     }
 
     /// Instrumented search for benchmark/evaluation fixtures. Unlike the
@@ -35,7 +38,9 @@ impl MemoryStore {
     ) -> Result<(Vec<SearchResult>, SearchPhaseReceipt), MemoryError> {
         let mut options = opts.unwrap_or_default();
         options.vec_available = self.vec_available;
-        let (results, mut receipt) = hybrid_search_with_receipt(&self.conn, query, &options)?;
+        let (results, mut receipt) = retry_search_locked(&self.db_label, || {
+            hybrid_search_with_receipt(&self.conn, query, &options)
+        })?;
         receipt.operation = SearchReceiptOperation::MemoryStoreSearch;
         receipt.database_scope = SearchReceiptDatabaseScope::Label(self.db_label.clone());
         Ok((results, receipt))
@@ -184,9 +189,111 @@ impl MemoryStore {
     }
 }
 
+/// Search is the user-visible read boundary where a short-lived startup or
+/// migration lock must not leak into otherwise healthy Memory/Wiki sections.
+/// SQLite's busy handler covers `BUSY`, but `LOCKED` can return immediately;
+/// this bounded policy covers both without changing unrelated read methods.
+const SEARCH_LOCK_RETRY_BUDGET: Duration = Duration::from_secs(3);
+const SEARCH_LOCK_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(25);
+const SEARCH_LOCK_RETRY_MAX_BACKOFF: Duration = Duration::from_millis(400);
+
+fn retry_search_locked<T>(
+    db_label: &str,
+    mut operation: impl FnMut() -> Result<T, MemoryError>,
+) -> Result<T, MemoryError> {
+    let started = Instant::now();
+    let mut backoff = SEARCH_LOCK_RETRY_INITIAL_BACKOFF;
+    loop {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(MemoryError::Sqlite(error))
+                if db::sqlite_error_is_locked(&error)
+                    && started.elapsed().saturating_add(backoff) < SEARCH_LOCK_RETRY_BUDGET =>
+            {
+                tracing::debug!(
+                    op = "search",
+                    db_label,
+                    backoff_ms = backoff.as_millis() as u64,
+                    "memcore search lock retry: database busy/locked, backing off"
+                );
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(SEARCH_LOCK_RETRY_MAX_BACKOFF);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_retries_a_real_sqlite_lock_and_preserves_exhaustion_errors() {
+        let path = std::env::temp_dir().join(format!(
+            "memcore-search-lock-retry-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let path_string = path.to_string_lossy().into_owned();
+        let store = MemoryStore::open(&path_string).expect("open search store");
+        store
+            .conn
+            .busy_timeout(Duration::ZERO)
+            .expect("disable SQLite's opaque busy wait for discrimination");
+        store
+            .conn
+            .pragma_update(None, "journal_mode", "DELETE")
+            .expect("use rollback journal so an exclusive lock blocks readers");
+
+        let locker = Connection::open(&path).expect("open independent lock owner");
+        locker
+            .busy_timeout(Duration::ZERO)
+            .expect("disable locker busy wait");
+        locker
+            .execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE;")
+            .expect("hold a real exclusive SQLite lock");
+
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(120));
+            locker.execute_batch("ROLLBACK;").expect("release lock");
+        });
+        store
+            .search(
+                "first search after health",
+                Some(SearchOptions {
+                    record_access: false,
+                    ..Default::default()
+                }),
+            )
+            .expect("search should recover when the real lock clears within budget");
+        release.join().expect("lock owner thread");
+
+        let persistent_locker = Connection::open(&path).expect("open persistent lock owner");
+        persistent_locker
+            .busy_timeout(Duration::ZERO)
+            .expect("disable locker busy wait");
+        persistent_locker
+            .execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE;")
+            .expect("hold persistent real lock");
+        let error = store
+            .search(
+                "honest exhaustion",
+                Some(SearchOptions {
+                    record_access: false,
+                    ..Default::default()
+                }),
+            )
+            .expect_err("persistent lock must remain an honest failure");
+        assert!(
+            matches!(error, MemoryError::Sqlite(ref sqlite) if db::sqlite_error_is_locked(sqlite)),
+            "retry exhaustion must preserve the typed SQLite lock error: {error}"
+        );
+        persistent_locker
+            .execute_batch("ROLLBACK;")
+            .expect("release persistent lock");
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn search_with_receipt_preserves_store_vector_capability_and_db_label() {

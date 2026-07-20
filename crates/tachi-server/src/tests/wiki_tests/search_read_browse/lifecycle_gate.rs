@@ -88,6 +88,44 @@ async fn wiki_search_excludes_pending_review_drafts_by_default_and_includes_with
     );
 }
 
+#[tokio::test]
+async fn wiki_facade_browse_preserves_active_default_and_forwards_all_lifecycle() {
+    let mut fresh = make_entry("wiki-facade-fresh-pending");
+    fresh.path = "/wiki/engineering/fresh-pending".to_string();
+    fresh.metadata = json!({"lifecycle": "pending_review"});
+    let (server, _home) = seed_wiki_project_entries(vec![fresh]);
+
+    let default_params: TachiWikiParams = serde_json::from_value(json!({
+        "action": "browse",
+        "project": "wiki"
+    }))
+    .expect("default facade params");
+    let default_body = server
+        .tachi_wiki(Parameters(default_params))
+        .await
+        .expect("default browse");
+    let default_json: Value = serde_json::from_str(&default_body).expect("default browse JSON");
+    assert_eq!(default_json["total"], 0, "default must remain active-only");
+    assert_eq!(default_json["categories"], json!([]));
+
+    let all_params: TachiWikiParams = serde_json::from_value(json!({
+        "action": "browse",
+        "project": "wiki",
+        "lifecycle": "all"
+    }))
+    .expect("all-lifecycle facade params");
+    let all_body = server
+        .tachi_wiki(Parameters(all_params))
+        .await
+        .expect("all-lifecycle browse");
+    let all_json: Value = serde_json::from_str(&all_body).expect("all browse JSON");
+    assert_eq!(all_json["total"], 1);
+    assert_eq!(
+        all_json["categories"],
+        json!([{"path": "/wiki/engineering", "count": 1}])
+    );
+}
+
 /// #1072 RED case 3: "Read/search currently hide authority/revision/source
 /// refs; GREEN exposes them."
 #[tokio::test]

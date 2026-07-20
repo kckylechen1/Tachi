@@ -1,6 +1,39 @@
 use super::*;
 use std::sync::Arc;
 
+async fn normalize_malformed_mcp_json_response(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let is_mcp_post = request.method() == axum::http::Method::POST
+        && matches!(request.uri().path(), "/mcp" | "/mcp/");
+    let is_json = request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
+    let response = next.run(request).await;
+    if is_mcp_post && is_json && response.status() == axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE
+    {
+        return mcp_parse_error_response();
+    }
+    response
+}
+
+fn mcp_parse_error_response() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        axum::Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": { "code": -32700, "message": "Parse error" }
+        })),
+    )
+        .into_response()
+}
+
 pub(super) async fn serve_http_daemon(
     server: MemoryServer,
     app_home: PathBuf,
@@ -387,7 +420,10 @@ pub(super) async fn serve_http_daemon(
                 }
             }),
         )
-        .nest_service("/mcp", service);
+        .nest_service("/mcp", service)
+        .layer(axum::middleware::from_fn(
+            normalize_malformed_mcp_json_response,
+        ));
     eprintln!("Tachi daemon listening on http://{bind_addr}");
 
     // Write daemon discovery file so CLI invocations can forward writes
@@ -694,6 +730,24 @@ impl Drop for DiscoveryPidGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn malformed_mcp_json_response_is_structured_parse_error() {
+        let response = mcp_parse_error_response();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/json"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("parse error response body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON-RPC body");
+        assert_eq!(body["jsonrpc"], "2.0");
+        assert!(body["id"].is_null());
+        assert_eq!(body["error"]["code"], -32700);
+        assert_eq!(body["error"]["message"], "Parse error");
+    }
 
     #[test]
     fn health_payload_advertises_loopback_trust_and_reconnect() {

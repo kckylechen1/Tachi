@@ -27,6 +27,39 @@ use rmcp::transport::streamable_http_server::{
 
 use crate::service::PortableServer;
 
+async fn normalize_malformed_mcp_json_response(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let is_mcp_post = request.method() == axum::http::Method::POST
+        && matches!(request.uri().path(), "/mcp" | "/mcp/");
+    let is_json = request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
+    let response = next.run(request).await;
+    if is_mcp_post && is_json && response.status() == axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE
+    {
+        return parse_error_response();
+    }
+    response
+}
+
+fn parse_error_response() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        axum::Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "error": { "code": -32700, "message": "Parse error" }
+        })),
+    )
+        .into_response()
+}
+
 /// How often the liveness watchdog (see [`watchdog`]) self-probes.
 const LIVENESS_PROBE_INTERVAL: Duration = Duration::from_secs(30);
 /// Consecutive failed self-probes before the watchdog gives up and fires.
@@ -101,7 +134,10 @@ async fn run(
                 }
             }),
         )
-        .nest_service("/mcp", mcp_service);
+        .nest_service("/mcp", mcp_service)
+        .layer(axum::middleware::from_fn(
+            normalize_malformed_mcp_json_response,
+        ));
 
     // No `with_graceful_shutdown`/cancellation-token wiring: `tokio::select!`
     // drops whichever branch didn't resolve, so the signal branches below
@@ -344,13 +380,53 @@ mod tests {
         assert_eq!(body["status"], "ok");
         assert_eq!(body["bind"], "127.0.0.1");
 
+        // Raw malformed JSON is intercepted before rmcp's extractor can turn
+        // it into a plain-text 415. A non-JSON content type still belongs to
+        // rmcp and remains a genuine 415.
+        let mcp_url = format!("http://{local_addr}/mcp");
+        let malformed = reqwest::Client::new()
+            .post(&mcp_url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(
+                reqwest::header::ACCEPT,
+                "application/json, text/event-stream",
+            )
+            .body(br#"{"jsonrpc":"2.0","method":"tools/list""#.to_vec())
+            .send()
+            .await
+            .expect("POST malformed raw bytes");
+        assert_eq!(malformed.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            malformed.headers()[reqwest::header::CONTENT_TYPE],
+            "application/json"
+        );
+        let malformed_body: serde_json::Value = malformed.json().await.expect("parse error JSON");
+        assert_eq!(malformed_body["jsonrpc"], "2.0");
+        assert!(malformed_body["id"].is_null());
+        assert_eq!(malformed_body["error"]["code"], -32700);
+
+        let genuine_415 = reqwest::Client::new()
+            .post(&mcp_url)
+            .header(reqwest::header::CONTENT_TYPE, "text/plain")
+            .header(
+                reqwest::header::ACCEPT,
+                "application/json, text/event-stream",
+            )
+            .body("not json")
+            .send()
+            .await
+            .expect("POST unsupported content type");
+        assert_eq!(
+            genuine_415.status(),
+            reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+
         // MCP initialize + tools/list round-trips over streamable HTTP at /mcp.
         use rmcp::transport::streamable_http_client::{
             StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
         };
         use rmcp::ServiceExt;
 
-        let mcp_url = format!("http://{local_addr}/mcp");
         let transport_config = StreamableHttpClientTransportConfig::with_uri(mcp_url);
         let transport = StreamableHttpClientTransport::from_config(transport_config);
         let client = tokio::time::timeout(
