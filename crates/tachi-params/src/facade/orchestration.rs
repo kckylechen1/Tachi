@@ -1,4 +1,4 @@
-use super::{action_inventory, string_enum_schema, DispatchMcpAccessParams};
+use super::{action_inventory, string_enum_schema, DispatchMcpAccessParams, TachiDispatchReason};
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
@@ -110,8 +110,18 @@ pub struct TachiArenaParams {
 
     /// When true, spawn creates the tracked mission documents and also launches
     /// the supported worker harness through the existing dispatch runtime.
+    /// Ordinary local delegation should leave this false and hand the returned
+    /// tracked prompt to the host harness's native subagent.
     #[serde(default)]
     pub launch: bool,
+
+    /// Required when launch=true selects a launch-capable Tachi worker lane.
+    /// Packet/document-only missions do not require a dispatch exception.
+    #[serde(default)]
+    #[schemars(
+        description = "[action=spawn, launch=true] Required native-first exception for a launch-capable lane: explicit_user_request, durable_cross_session, cross_device_remote, or native_subagent_unavailable."
+    )]
+    pub dispatch_reason: Option<TachiDispatchReason>,
 
     /// Optional dispatch profile used when launch=true.
     #[serde(default, alias = "dispatch_profile")]
@@ -367,6 +377,11 @@ pub struct TachiShellParams {
     /// produced and the caller is expected to dispatch separately.
     #[serde(default)]
     pub async_dispatch: bool,
+
+    /// Required when `async_dispatch=true`; ordinary shell packets are handed
+    /// to harness-native subagents and need no Tachi dispatch reason.
+    #[serde(default)]
+    pub dispatch_reason: Option<TachiDispatchReason>,
 
     /// Project DB hint passed through to underlying handlers (kanban etc.).
     #[serde(default)]

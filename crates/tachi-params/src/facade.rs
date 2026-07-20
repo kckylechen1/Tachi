@@ -611,7 +611,7 @@ pub struct TachiSkillParams {
 }
 
 mod task;
-pub use task::TachiTaskParams;
+pub use task::{TachiDispatchReason, TachiTaskParams};
 
 mod action_enums;
 mod action_inventory;

@@ -1,10 +1,19 @@
 # Tachikoma Backplane: Deck, Card, Move, and Upstream Skill Corpus
 
-Status: draft canonical spec
-Updated: 2026-06-15
+Status: active vocabulary; execution-ownership sections superseded by
+`dispatch-lifecycle.md` and issue #749
+Updated: 2026-07-20
 Related: GitHub issue #381, GitHub issue #382, GitHub issue #383,
 `docs/engineering/architecture/dispatch-policy-learning-spec.md`,
 `docs/engineering/architecture/credentialed-dispatch-profiles.md`
+
+> **Native-first execution boundary:** Deck/Card/Move remain vocabulary for
+> advice, packets, evidence and evaluation. They do not instruct an ordinary
+> agent to launch a Tachi worker. The host harness owns normal subagent
+> lifecycle; Tachi-owned CLI/acpx paths below are compatibility/operator
+> exceptions admitted only when host-native candidates cannot satisfy a frozen
+> boundary requirement. Where historical execution prose conflicts, #749 and
+> `dispatch-lifecycle.md` win.
 
 This spec defines the vocabulary and boundaries for treating Tachi as a
 Tachikoma-style agent work backplane: a shared layer that receives bounded work
@@ -51,8 +60,9 @@ Primary IDE assistant / human
   -> Card selection (Poke / SCV / Raven / Medic)
   -> Guidance injection (Superpowers)
   -> Move resolution (Waza + approved external skills)
-  -> bounded worker dispatch
-  -> execution backend (CLI / acpx / future transport)
+  -> freeze packet and required guarantees
+  -> host-harness native subagent by default
+     OR admitted operator-owned external backend exception
   -> evidence artifact collection
   -> leader verification
   -> /eval completion row
@@ -61,10 +71,11 @@ Primary IDE assistant / human
   -> GitHub issue/PR + docs + memory link-back
 ```
 
-Tachi owns the control plane. Worker CLIs such as Codex, Claude Code, OpenCode,
-Kimi, GLM, DeepSeek, and ACP clients keep their native execution loops. Tachi
-passes bounded work packets to them and collects evaluated outcomes; it does not
-replace their inner agents.
+The host harness owns ordinary worker lifecycle. Tachi owns policy advice,
+packet/claim/receipt/eval records and may pass bounded work packets to native
+workers without owning their processes. CLI/acpx launch remains an explicit
+operator compatibility path, not the routine continuation after Card
+selection.
 
 ## ACP Execution Backends
 

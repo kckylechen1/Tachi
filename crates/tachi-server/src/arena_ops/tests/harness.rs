@@ -130,6 +130,7 @@ async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
     spawn.harness = Some("opencode".into());
     spawn.role = Some("explore".into());
     spawn.launch = true;
+    spawn.dispatch_reason = Some(tachi_params::TachiDispatchReason::ExplicitUserRequest);
     spawn.timeout_secs = Some(5);
     let spawned: Value =
         serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
@@ -305,6 +306,7 @@ async fn arena_opencode_executor_fallback_uses_glm_registry_model() {
     spawn.harness = Some("opencode".into());
     spawn.role = Some("execute".into());
     spawn.launch = true;
+    spawn.dispatch_reason = Some(tachi_params::TachiDispatchReason::ExplicitUserRequest);
     spawn.timeout_secs = Some(5);
     let spawned: Value =
         serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();

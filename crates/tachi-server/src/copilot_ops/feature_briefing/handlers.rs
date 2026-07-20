@@ -1,7 +1,7 @@
 use super::super::*;
 use super::board::{feature_board, feature_needles, feature_run_artifacts};
 use super::dispatch::{
-    feature_dispatch_recommendation, relevant_feature_profiles, suggested_feature_dispatch,
+    feature_dispatch_recommendation, relevant_feature_profiles, suggested_feature_handoff,
 };
 use super::docs::{
     build_feature_doc_index, canonical_doc_refs, feature_briefing_query, project_work_records,
@@ -304,7 +304,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
     )
     .await;
     let feedback_rules_trace = crate::feedback_rule_ops::feedback_rules_trace(&feedback_rules);
-    let suggested_dispatch = suggested_feature_dispatch(params, &query, &route_recommendation);
+    let suggested_handoff = suggested_feature_handoff(params, &query, &route_recommendation);
     let relevant_profiles = relevant_feature_profiles(&route_recommendation);
     let next_action = feature_next_action(
         params,
@@ -365,7 +365,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
         },
         "route_recommendation": route_recommendation,
         "relevant_profiles": relevant_profiles,
-        "suggested_dispatch": suggested_dispatch,
+        "suggested_handoff": suggested_handoff,
         "guide_hits": guide_hits,
         "feedback_rules": feedback_rules_trace,
         "memory_fragments": memory_fragments,

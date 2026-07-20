@@ -1,7 +1,7 @@
 # Dispatch Policy Learning
 
 Status: active canonical spec
-Updated: 2026-06-09
+Updated: 2026-07-20
 Related: GitHub issue #194, `docs/engineering/architecture/subagent-eval-system.md`,
 `docs/engineering/architecture/sft-memory-eval-playbook.md`,
 `docs/engineering/architecture/credentialed-dispatch-profiles.md`
@@ -22,7 +22,9 @@ Issue or task
   -> deterministic risk classification
   -> DispatchProfile and MBIT card recommendation
   -> capability and skill loadout resolution
-  -> bounded worker dispatch
+  -> freeze required guarantees and choose an admitted execution owner
+  -> host-native worker by default; qualified external assignment only when
+     native candidates cannot satisfy the frozen boundary requirement
   -> leader verification
   -> live /eval completion row
   -> performance matrix aggregation
@@ -30,10 +32,12 @@ Issue or task
   -> release note and close-loop synthesis
 ```
 
-Tachi owns the control plane. Worker CLIs such as Codex, Claude Code, OpenCode,
-Kimi, GLM, and DeepSeek keep their native execution loops. Tachi should pass
-bounded work packets to them and collect evaluated outcomes, not replace their
-inner agents.
+The host harness owns ordinary worker lifecycle. Tachi owns policy advice,
+frozen contracts, claims, receipts, adjudication evidence and routing
+projections. Worker CLIs such as Codex, Claude Code, OpenCode, Kimi, GLM, and
+DeepSeek keep their native execution loops. Tachi may own an external worker
+only through an operator/admin staffing exception admitted under #749; user
+preference or model choice alone is not authority.
 
 ## Public Facade Rule
 
@@ -48,7 +52,7 @@ invent calls that are not exposed yet.
 | route recommendation | `tachi_task(action="recommend")` | implemented |
 | route policy replay | `tachi_task(action="route_simulate")` | implemented |
 | route policy proposals | `tachi_task(action="proposals"|"review_proposal"|"apply_proposals")` | implemented |
-| dispatch by profile | `tachi_task(action="dispatch", profile=...)` | implemented |
+| external staffing exception | admin/operator `tachi_task(action="dispatch", dispatch_reason=..., profile=...)` | implemented compatibility path; not ordinary delegation |
 | worker board | `tachi_task(action="board")` | implemented |
 | completion and eval | `tachi_task(action="complete")` / `tachi_complete` | implemented |
 | performance matrix | `tachi_agent_eval(action="aggregate_live"|"perf"|"telemetry")` | implemented |
@@ -198,10 +202,13 @@ Every substantial policy-learning slice should be able to pass this workflow:
 3. `tachi_task(action="cycle_plan", flow_id=...)`
 4. `tachi_task(action="ux_matrix", flow_id=...)`
 5. `tachi_task(action="recommend", task=..., doc_paths=[...])`
-6. `tachi_task(action="dispatch", profile=..., flow_id=..., issue_ref=...)`
-7. `tachi_task(action="board", flow_id=...)`
+6. launch the host harness's native subagent with the frozen packet; use the
+   admin/operator external staffing exception only when a proven boundary
+   requirement exceeds host-native guarantees
+7. ingest native accepted/started/terminal receipts into the same work ledger
 8. leader verification and `tachi_verify`
-9. `tachi_task(action="complete", flow_id=..., dispatch_id=...)`
+9. submit evidence and independently adjudicate the outcome; legacy explicit
+   Tachi runs may still use `tachi_task(action="complete", flow_id=..., dispatch_id=...)`
 10. rerun `tachi_task(action="cycle_plan", flow_id=...)` before PR handoff
 11. `tachi_gh(action="link_pr", flow_id=..., pr_ref=...)`
 12. `tachi_gh(action="pr_status", flow_id=..., pr_ref=...)`

@@ -48,7 +48,7 @@ async fn unknown_tool_returns_tool_error_without_crashing_service() {
 }
 
 #[tokio::test]
-async fn standard_profile_exposes_arena_but_hides_heavy_coordination_facades() {
+async fn standard_profile_exposes_agent_intents_not_execution_internals() {
     let server = make_server();
     server.set_tool_profile(Some(
         tachi_hub::parse_tool_profile("standard").expect("standard profile should parse"),
@@ -61,16 +61,14 @@ async fn standard_profile_exposes_arena_but_hides_heavy_coordination_facades() {
 
     assert!(tools.contains("`tachi_memory`"));
     assert!(tools.contains("`tachi_task`"));
-    assert!(tools.contains("`tachi_arena`"));
+    assert!(!tools.contains("`tachi_arena`"));
     assert!(tools.contains("`tachi_verify`"));
     assert!(tools.contains("`tachi_gh`"));
     assert!(!tools.contains("`tachi_event`"));
-    // #1066: tachi_agent_eval's register/observe/adjudicate/get mirror eval
-    // intake is a daily facade entrypoint for any host-native session (AC-1
-    // "standard profile exposes this tool") — flipped from hidden now that
-    // the facade carries more than the admin-only aggregate/telemetry/perf
-    // read actions it had when this assertion was written.
-    assert!(tools.contains("`tachi_agent_eval`"));
+    // Harnesses report native lifecycle/eval facts through their adapter
+    // protocol. Ordinary agents supply semantic completion/adjudication via
+    // the work ledger instead of manually relaying system bookkeeping.
+    assert!(!tools.contains("`tachi_agent_eval`"));
     assert!(!tools.contains("`tachi_shell`"));
     assert!(!tools.contains("`tachi_orchestrator`"));
 }
@@ -151,6 +149,40 @@ async fn delegate_tachi_task_dispatch_is_denied_end_to_end() {
     // exactly what the F3 action-level gate (as opposed to tool-level
     // filtering alone) exists for.
     assert!(!message.contains("tool not found"));
+}
+
+#[tokio::test]
+async fn standard_tachi_task_dispatch_is_operator_only_end_to_end() {
+    let server = make_server();
+    server.set_tool_profile(Some(
+        tachi_hub::parse_tool_profile("standard").expect("standard profile should parse"),
+    ));
+
+    let mut args = serde_json::Map::new();
+    args.insert("action".to_string(), serde_json::json!("dispatch"));
+    args.insert("agent".to_string(), serde_json::json!("opencode"));
+    args.insert(
+        "dispatch_reason".to_string(),
+        serde_json::json!("explicit_user_request"),
+    );
+    args.insert(
+        "task".to_string(),
+        serde_json::json!("attempt Tachi-owned launch from a daily agent profile"),
+    );
+
+    let result = call_tool_via_server(server, "tachi_task", Some(args))
+        .await
+        .expect("denied action should return a tool result");
+
+    assert_eq!(result.is_error, Some(true));
+    let message = result
+        .content
+        .first()
+        .and_then(|content| content.as_text())
+        .map(|text| text.text.as_str())
+        .unwrap_or("");
+    assert!(message.contains("not allowed"), "{message}");
+    assert!(message.contains("dispatch"), "{message}");
 }
 
 /// Positive control for the RED test above: the same delegate profile CAN

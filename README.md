@@ -190,26 +190,13 @@ These examples show the JSON arguments you would pass to the MCP tools. Facade t
   }
 }
 
-// tachi_arena — open a tracked work arena
+// Ask Tachi for context-aware planning, then delegate ordinary bounded work
+// with your host's native subagent:
 {
-  "tool": "tachi_arena",
+  "tool": "tachi_task",
   "arguments": {
-    "action": "open",
-    "title": "API boundary review",
-    "objective": "Collect external review evidence before editing the API."
-  }
-}
-
-// tachi_arena — spawn a tracked subagent/advisor mission
-{
-  "tool": "tachi_arena",
-  "arguments": {
-    "action": "spawn",
-    "arena_id": "<arena_id returned by open>",
-    "role": "critic",
-    "harness": "manual",
-    "launch": false,
-    "prompt": "Review the API boundary and write result.md with findings."
+    "action": "plan",
+    "task": "Review the API boundary and identify compatibility risks."
   }
 }
 ```
@@ -375,11 +362,11 @@ Tachi exposes a filtered MCP surface based on `TACHI_PROFILE`. The full `admin` 
 
 | Profile | What is exposed | Best for |
 |---------|-----------------|----------|
-| `standard` | Daily facade surface: `tachi_save`, `tachi_memory`, `tachi_task`, `tachi_arena`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `vault_status`, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. | IDE agents: Claude, Cursor, Codex, Windsurf, Trae, Antigravity. |
-| `coordinate` | `remember` + `coordinate` bundles: adds `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`, `tachi_agents`, `approve_merge`, `tachi_gh`, `tachi_shell`, `tachi_arena`, `tachi_verify`; dispatch runs through `tachi_task(action='dispatch')`. | Leader/orchestrator agents that dispatch work and coordinate across agents. |
+| `standard` | Daily agent-intent surface: `tachi_save`, `tachi_memory`, the non-dispatch actions of `tachi_task`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `peer_query`, vault session/status tools, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. Arena and manual native-eval intake are adapter/internal surfaces, not ordinary agent tools. | IDE agents: Claude, Cursor, Codex, Windsurf, Trae, Antigravity. Ordinary delegation uses the host's native subagent. |
+| `coordinate` | `remember` + `coordinate` bundles: adds `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`, `tachi_agents`, `tachi_gh`, `tachi_shell`, `tachi_arena`, and `tachi_verify`. Tachi-owned `tachi_task(action='dispatch')` remains operator-only. | Advanced coordination and adapter workflows; not a replacement for host-native subagents. |
 | `operate` | `remember` + `operate` bundles: adds Foundry lifecycle, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters, OpenClaw, ops automation. |
-| `delegate` | Curated worker surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_event`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_task`, `tachi_complete`, `tachi_skill(action='discover'|'run'|'bundle')`. Standalone `run_skill` remains a legacy compatibility route outside the default delegate profile. | Worker subagents spawned by `tachi_task(action='dispatch')`. No dispatch, no handoff, no skill candidate registration. |
-| `admin` | Full catalog. | Maintenance, development, and governance. |
+| `delegate` | Curated worker surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_event`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_task`, `tachi_complete`, `tachi_skill(action='discover'|'run'|'bundle')`, and read-only `peer_query`. Standalone `run_skill` remains a legacy compatibility route outside the default delegate profile. | Worker subagents spawned by an explicitly admitted admin dispatch. No recursive dispatch, no handoff, no skill candidate registration. |
+| `admin` | Full catalog, including explicitly justified durable/remote Tachi dispatch. | Maintenance, development, governance, and operator-approved execution exceptions. |
 
 Host aliases are resolved automatically: `claude`, `claude-code`, `codex`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity` → `standard`; `worker`, `subagent`, `delegate` → `delegate`; `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`.
 

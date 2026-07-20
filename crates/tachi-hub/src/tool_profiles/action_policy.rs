@@ -40,6 +40,13 @@ fn memory_action_requires_admin(action: &str) -> bool {
     matches!(action, "delete" | "gc" | "ingest" | "ingest_source")
 }
 
+/// Tachi-owned worker launch is an expert/operator exception, never part of
+/// an ordinary agent profile. Native harness delegation remains available to
+/// standard/coordinate agents without exposing this action.
+fn task_action_requires_admin(action: &str) -> bool {
+    action == "dispatch"
+}
+
 // Note: sticky_leave/sticky_check (#964) are deliberately NOT admin-only —
 // worker/delegate seats must be able to leave/check stickies addressed to
 // their own seat name, which is the feature's core worker↔leader use case.
@@ -100,6 +107,13 @@ pub fn facade_action_allowed(
     if tool_name == "tachi_memory"
         && action
             .map(|a| memory_action_requires_admin(&a.to_ascii_lowercase()))
+            .unwrap_or(false)
+    {
+        return false;
+    }
+    if tool_name == "tachi_task"
+        && action
+            .map(|a| task_action_requires_admin(&a.to_ascii_lowercase()))
             .unwrap_or(false)
     {
         return false;
@@ -373,8 +387,8 @@ mod tests {
     }
 
     #[test]
-    fn f3_standard_and_admin_allow_dispatch() {
-        assert!(facade_action_allowed(
+    fn native_first_profiles_hide_dispatch_while_admin_retains_the_exception() {
+        assert!(!facade_action_allowed(
             "tachi_task",
             Some("dispatch"),
             Some(ToolProfile::standard())
@@ -384,10 +398,15 @@ mod tests {
             Some("dispatch"),
             Some(ToolProfile::admin())
         ));
-        assert!(facade_action_allowed(
+        assert!(!facade_action_allowed(
             "tachi_task",
             Some("dispatch"),
             Some(ToolProfile::coordinate())
+        ));
+        assert!(facade_action_allowed(
+            "tachi_task",
+            Some("recommend"),
+            Some(ToolProfile::standard())
         ));
     }
 

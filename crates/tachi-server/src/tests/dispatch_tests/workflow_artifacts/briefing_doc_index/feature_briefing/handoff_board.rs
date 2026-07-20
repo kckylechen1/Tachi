@@ -254,25 +254,25 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
             })
         }));
     assert_eq!(
-        briefing["suggested_dispatch"]["tool"],
-        json!("tachi_task"),
-        "feature briefing should tell leaders which facade to call next: {briefing:#}"
+        briefing["suggested_handoff"]["mechanism"],
+        json!("harness_native_subagent"),
+        "feature briefing should preserve the host harness's worker lifecycle: {briefing:#}"
     );
     assert_eq!(
-        briefing["suggested_dispatch"]["arguments"]["action"],
-        json!("dispatch")
-    );
-    assert_eq!(
-        briefing["suggested_dispatch"]["arguments"]["issue_ref"],
+        briefing["suggested_handoff"]["context"]["issue_ref"],
         json!("kckylechen1/tachi#194")
     );
     assert_eq!(
-        briefing["suggested_dispatch"]["arguments"]["flow_id"],
+        briefing["suggested_handoff"]["context"]["flow_id"],
         json!(flow_id)
     );
-    assert!(briefing["suggested_dispatch"]["arguments"]["profile"]
+    assert!(briefing["suggested_handoff"]["context"]["advisory_profile"]
         .as_str()
         .is_some_and(|profile| !profile.is_empty()));
+    assert!(
+        briefing.get("suggested_dispatch").is_none(),
+        "advisory routing must not be converted into a Tachi dispatch call: {briefing:#}"
+    );
     assert!(
         briefing["memory_fragments"]
             .as_array()

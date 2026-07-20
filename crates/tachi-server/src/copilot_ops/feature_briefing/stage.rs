@@ -65,12 +65,12 @@ pub(super) fn feature_next_action(
             .is_some_and(|path| path.ends_with("result.md"))
             && artifact.get("exists").and_then(Value::as_bool) == Some(true)
     }) {
-        return "Use the flow instruction packet as the worker handoff source and dispatch a bounded slice.".to_string();
+        return "Use the flow instruction packet as the handoff source for a bounded harness-native subagent; use Tachi dispatch only for an explicit durable/remote exception.".to_string();
     }
     if memory_rows.is_empty() {
         return "Start with tachi_task(action='plan') or save a checkpoint after the next concrete decision.".to_string();
     }
-    "Run tachi_task(action='recommend') for the next worker profile, then dispatch or review with explicit verification.".to_string()
+    "Optionally run tachi_task(action='recommend') for advisory card evidence, then use a harness-native subagent or review with explicit verification.".to_string()
 }
 
 fn cycle_plan_command(params: &TachiTaskParams) -> Option<String> {

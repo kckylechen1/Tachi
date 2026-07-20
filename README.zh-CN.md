@@ -265,8 +265,8 @@ graph TD
 ### 8. 工作流控制平面
 Tachi 不只是记忆库；它正在演变为 Agent 工程的持久控制平面：
 
-- **`tachi_task`** —— 贯通 issue intake、docs/spec、派发建议、PR handoff、release note 和 close-loop 写回。
-- **`tachi_arena`** —— 可审计的工作/顾问任务账本，记录运行状态。
+- **`tachi_task`** —— 贯通 issue intake、docs/spec、路由建议、工作账本和 close-loop 写回；普通本地委派使用宿主原生 subagent。
+- **`tachi_arena`** —— 专家/适配器使用的工作任务账本，不是 `standard` Agent 的日常 subagent 入口。
 - **`tachi_verify`** —— 记录后台验证证据（测试、类型检查、safe-merge gate）到 `.tachi/runs/<flow_id>/verification.json`。
 - **`tachi_gh`** —— 读取 issue/PR，写评论，汇总 review 状态，并用 lifecycle/verification 证据运行 safe-merge 检查。
 
@@ -285,11 +285,11 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 
 | Profile | 暴露内容 | 适用场景 |
 |---------|----------|----------|
-| `standard` | 日常门面：`tachi_save`、`tachi_memory`、`tachi_task`、`tachi_arena`、`tachi_verify`、`tachi_web_search`、`tachi_wiki`、`tachi_skill`、`tachi_gh`、`vault_status`，以及 `runtime_info`、`tachi_status`、`tachi_briefing` 和 `tachi_tools`。 | IDE Agent：Claude、Cursor、Codex、Windsurf、Trae、Antigravity。 |
-| `coordinate` | `remember` + `coordinate` bundles：增加 `tachi_handoff`、`tachi_workflow`、`tachi_orchestrator`、`tachi_agents`、`approve_merge`、`tachi_gh`、`tachi_shell`、`tachi_arena`、`tachi_verify`；派发通过 `tachi_task(action='dispatch')`。 | 主控/编排 Agent，负责派发任务并协调多 Agent。 |
+| `standard` | 日常 Agent 意图面：`tachi_save`、`tachi_memory`、`tachi_task` 的非派发动作、`tachi_verify`、`tachi_web_search`、`tachi_wiki`、`tachi_skill`、`tachi_gh`、`peer_query`、Vault 会话/状态工具，以及 `runtime_info`、`tachi_status`、`tachi_briefing` 和 `tachi_tools`。Arena 和手工 eval intake 不暴露。 | IDE Agent：Claude、Cursor、Codex、Windsurf、Trae、Antigravity；普通委派使用宿主原生 subagent。 |
+| `coordinate` | `remember` + `coordinate` bundles：增加高级 handoff/workflow/shell/arena 工具；Tachi 自有 worker launch 仍是 admin/operator 例外。 | 高级协调与适配器工作流，不替代宿主原生 subagent。 |
 | `operate` | `remember` + `operate` bundles：增加 Foundry 生命周期、`hub_call`、`vault_unlock`/`lock`/`status`、`wiki_lint`。 | 运行时适配器、OpenClaw、运维自动化。 |
-| `delegate` | 精选 worker 工具面：`tachi_tools`、`runtime_info`、`tachi_memory`、`tachi_event`、`tachi_web_search`、`tachi_browse`、`tachi_unstick`、`tachi_task`、`tachi_complete`、`tachi_skill(action='discover'|'run'|'bundle')`。独立 `run_skill` 仍是默认 delegate profile 之外的旧兼容入口。 | `tachi_task(action='dispatch')` 派生的工作 Agent。无派发、无交接、无技能候选注册。 |
-| `admin` | 完整目录。 | 维护、开发与治理。 |
+| `delegate` | 精选 worker 工具面：`tachi_tools`、`runtime_info`、`tachi_memory`、`tachi_event`、`tachi_web_search`、`tachi_browse`、`tachi_unstick`、`tachi_task`、`tachi_complete`、`tachi_skill(action='discover'|'run'|'bundle')` 和只读 `peer_query`。 | 由显式准入的 admin 派发产生的工作 Agent；无递归派发、无交接、无技能候选注册。 |
+| `admin` | 完整目录，包括有类型理由的 durable/remote Tachi worker 例外。 | 维护、开发、治理和 operator 批准的执行例外。 |
 
 宿主别名自动解析：`claude`、`claude-code`、`codex`、`cursor`、`trae`、`windsurf`、`ide`、`antigravity` → `standard`；`worker`、`subagent`、`delegate` → `delegate`；`openclaw`、`hermes`、`runtime`、`adapter`、`ops` → `operate`。
 

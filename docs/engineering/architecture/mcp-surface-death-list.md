@@ -16,15 +16,20 @@ leaf issue or be folded into an existing one.
 
 ## Decision Frame
 
-The current system already hides most complexity from default clients:
+The current system already hides most complexity from default clients. The
+counts below were refreshed for the #1312 native-first cut on 2026-07-20;
+#1315 owns the complete schema-byte/property census and further re-slice:
 
-- `standard` is a 14-tool allow-list in `STANDARD_MINIMAL_TOOL_PATTERNS`.
-- `delegate` is a 9-tool allow-list in `DELEGATE_MINIMAL_TOOL_PATTERNS`.
+- `standard` is a 16-tool allow-list in `STANDARD_MINIMAL_TOOL_PATTERNS` after
+  removing `tachi_arena` and `tachi_agent_eval`; its `tachi_task` schema also
+  omits operator-only `dispatch`.
+- `delegate` is an 11-tool allow-list in `DELEGATE_MINIMAL_TOOL_PATTERNS`.
 - `admin` is not a curated management profile. `tool_visible()` returns true
   immediately for admin, so admin exposes the full native catalog plus any
   directly exposed proxy/skill tools.
-- Current native inventory is 132 routed `#[tool]` methods: 76 in non-admin
-  bundle patterns and 56 expected admin-only names.
+- The source currently contains 103 routed `#[tool]` methods. The old 132-tool
+  and 76/56 breakdown is retired; regenerate profile-level counts under #1315
+  rather than treating that historical split as current truth.
 
 The product goal is stricter than profile hiding: daily agents should see a
 small canonical surface, and retired capabilities should disappear instead of

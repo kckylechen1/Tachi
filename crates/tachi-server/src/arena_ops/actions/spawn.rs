@@ -16,6 +16,11 @@ pub(super) async fn handle_spawn(
     if !arena.join("manifest.json").exists() {
         return Err(format!("arena not found: {arena_id}"));
     }
+    let lane = harness_lane(params.harness.as_deref());
+    if params.launch && matches!(lane.id, "opencode" | "claude") && params.dispatch_reason.is_none()
+    {
+        return Err("tachi_arena launch is not the default subagent mechanism: use the host harness's native subagent with launch=false, or provide dispatch_reason for an explicit durable/remote exception; zero mission or dispatch artifacts were created.".to_string());
+    }
     let mission_id = params
         .mission_id
         .clone()
@@ -33,7 +38,6 @@ pub(super) async fn handle_spawn(
     let stderr_path = dir.join("stderr.log");
     let status_path = dir.join("status.json");
     let now = Utc::now().to_rfc3339();
-    let lane = harness_lane(params.harness.as_deref());
     let requested_harness = params.harness.as_deref().unwrap_or("manual");
     let feedback_rules = crate::feedback_rule_ops::applicable_feedback_rules(
         server,

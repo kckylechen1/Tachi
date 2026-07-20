@@ -37,6 +37,7 @@ async fn tachi_task_dispatch_requires_leader_confirmation_for_blocked_issue_flow
     params.issue_ref = Some("kckylechen1/tachi#380".to_string());
     params.task = Some("Automate issue dispatch".to_string());
     params.agent = Some("codex".to_string());
+    params.dispatch_reason = Some(tachi_params::TachiDispatchReason::ExplicitUserRequest);
     let err = server
         .tachi_task(Parameters(params))
         .await
