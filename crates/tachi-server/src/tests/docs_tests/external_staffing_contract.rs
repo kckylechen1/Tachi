@@ -48,7 +48,32 @@ fn relative_path(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
+fn code_before_line_comment(line: &str) -> &str {
+    let mut quoted = false;
+    let mut escaped = false;
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let character = bytes[index];
+        if escaped {
+            escaped = false;
+        } else if character == b'\\' && quoted {
+            escaped = true;
+        } else if character == b'"' {
+            quoted = !quoted;
+        } else if !quoted
+            && character == b'/'
+            && bytes.get(index + 1).is_some_and(|next| *next == b'/')
+        {
+            return &line[..index];
+        }
+        index += 1;
+    }
+    line
+}
+
 fn function_name(line: &str) -> Option<String> {
+    let line = code_before_line_comment(line);
     let marker = line.find("fn ")?;
     let before = &line[..marker];
     if before
@@ -69,7 +94,7 @@ fn brace_delta(line: &str) -> i64 {
     let mut delta = 0_i64;
     let mut quoted = false;
     let mut escaped = false;
-    for character in line.split("//").next().unwrap_or_default().chars() {
+    for character in code_before_line_comment(line).chars() {
         if escaped {
             escaped = false;
             continue;
@@ -111,11 +136,7 @@ fn functions_in_source(relative: &str, source: &str) -> Vec<RustFunction> {
                 let mut opened = false;
                 while index < lines.len() {
                     let change = brace_delta(lines[index]);
-                    opened |= lines[index]
-                        .split("//")
-                        .next()
-                        .unwrap_or_default()
-                        .contains('{');
+                    opened |= code_before_line_comment(lines[index]).contains('{');
                     depth += change;
                     index += 1;
                     if opened && depth == 0 {
@@ -142,11 +163,7 @@ fn functions_in_source(relative: &str, source: &str) -> Vec<RustFunction> {
         let mut opened = false;
         while index < lines.len() {
             let change = brace_delta(lines[index]);
-            opened |= lines[index]
-                .split("//")
-                .next()
-                .unwrap_or_default()
-                .contains('{');
+            opened |= code_before_line_comment(lines[index]).contains('{');
             depth += change;
             index += 1;
             if opened && depth == 0 {
@@ -178,6 +195,24 @@ fn occurrence_count(source: &str, needle: &str) -> usize {
 fn numbered_sites(function: &RustFunction, needle: &str, label: &str) -> Vec<String> {
     (1..=occurrence_count(&function.source, needle))
         .map(|ordinal| format!("{}::{label}#{ordinal}", function.symbol))
+        .collect()
+}
+
+fn staffing_ledger_root_variables(source: &str) -> Vec<&str> {
+    ["std::env::var", "std::env::var_os"]
+        .into_iter()
+        .flat_map(|call| {
+            source.match_indices(call).filter_map(move |(index, _)| {
+                let argument = source[index + call.len()..].trim_start();
+                let argument = argument.strip_prefix('(')?.trim_start();
+                let variable = argument.strip_prefix('"')?.split('"').next()?;
+                let is_root = variable.starts_with("TACHI_") && variable.ends_with("_ROOT");
+                // Skills and config roots locate static inputs, not staffing ledgers.
+                let is_known_non_ledger =
+                    matches!(variable, "TACHI_SKILLS_ROOT" | "TACHI_CONFIG_ROOT");
+                (is_root && !is_known_non_ledger).then_some(variable)
+            })
+        })
         .collect()
 }
 
@@ -224,10 +259,8 @@ fn observe_functions(functions: &[RustFunction]) -> Value {
             && function.source.contains("run_dir_for_flow_id(")
             && function.source.contains("dispatch_id");
         if is_legacy_owner
-            && function.name.ends_with("_root")
-            && (function.name.contains("run") || function.name.contains("arena"))
             && function.source.contains("PathBuf")
-            && function.source.contains("std::env::var(\"TACHI_")
+            && !staffing_ledger_root_variables(&function.source).is_empty()
         {
             ledger_roots.push(function.symbol.clone());
         }
@@ -264,11 +297,9 @@ fn observe_functions(functions: &[RustFunction]) -> Value {
         if function.source.contains("read_linked_dispatch_result(")
             && function.source.contains("result_path")
         {
-            linked_result_copies.extend(numbered_sites(
-                function,
-                "write_owner_only_file_atomic(",
-                "linked-result-copy",
-            ));
+            for call in writer_calls {
+                linked_result_copies.extend(numbered_sites(function, call, "linked-result-copy"));
+            }
         }
     }
     definitions.sort();
@@ -430,8 +461,14 @@ fn external_staffing_source_observer_discriminates_same_function_growth_and_test
                     append_run_event(run_dir, first);
                     append_run_event(run_dir, second);
                 }
-                pub(crate) fn shadow_runs_root() -> PathBuf {
+                pub(crate) fn unrelated_path_factory() -> PathBuf {
                     std::env::var("TACHI_SHADOW_ROOT");
+                    std::env::var_os("TACHI_SHADOW_ROOT");
+                    PathBuf::new()
+                }
+                pub(crate) fn skills_configuration_location() -> PathBuf {
+                    std::env::var("TACHI_SKILLS_ROOT");
+                    std::env::var_os("TACHI_CONFIG_ROOT");
                     PathBuf::new()
                 }
                 #[cfg(test)]
@@ -446,7 +483,7 @@ fn external_staffing_source_observer_discriminates_same_function_growth_and_test
                 fn copied_result() {
                     let result = read_linked_dispatch_result(id, hint);
                     write_owner_only_file_atomic(&result_path, result);
-                    write_owner_only_file_atomic(&result_path, result);
+                    tokio::fs::write(&result_path, result);
                 }
             "#,
         ),
@@ -485,7 +522,7 @@ fn external_staffing_source_observer_discriminates_same_function_growth_and_test
             .as_array()
             .unwrap(),
         &[json!(
-            "crates/tachi-server/src/shell_ops/actions/synthetic.rs::shadow_runs_root"
+            "crates/tachi-server/src/shell_ops/actions/synthetic.rs::unrelated_path_factory"
         )]
     );
     assert_eq!(
@@ -530,4 +567,22 @@ fn external_staffing_source_observer_discriminates_same_function_growth_and_test
             .iter()
             .any(|violation| violation.contains("adoption_entrypoint_definitions"))
     );
+}
+
+#[test]
+fn external_staffing_source_observer_ignores_comment_functions_and_string_slashes() {
+    let observed = observe_sources([(
+        "crates/tachi-server/src/tools/parser_synthetic.rs",
+        r#"
+            // fn fake() { handle_tachi_dispatch(server, params); }
+            fn real() {
+                let url = "https://example.invalid/{not_a_brace}";
+                handle_tachi_dispatch(server, params);
+            }
+            fn next() { let _ = TachiDispatchParams { task }; }
+        "#,
+    )]);
+
+    assert_eq!(observed["production_adopters"].as_array().unwrap().len(), 1);
+    assert_eq!(observed["request_builders"].as_array().unwrap().len(), 1);
 }
