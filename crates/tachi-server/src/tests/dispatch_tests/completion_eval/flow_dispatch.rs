@@ -63,7 +63,7 @@ async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
         "{bundle:#}"
     );
 
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("flow run dir");
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("flow run dir");
     let status: Value = serde_json::from_str(
         &std::fs::read_to_string(run_dir.join("status.json")).expect("status"),
     )
@@ -151,7 +151,7 @@ async fn tachi_complete_infers_task_agent_and_profile_from_dispatch_card() {
         "{bundle:#}"
     );
 
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("flow run dir");
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("flow run dir");
     let status: Value = serde_json::from_str(
         &std::fs::read_to_string(run_dir.join("status.json")).expect("status"),
     )

@@ -159,7 +159,7 @@ async fn tachi_task_close_loop_marks_flow_complete_for_ux_matrix() {
     let parsed: Value = serde_json::from_str(&raw).expect("close_loop response JSON");
     assert_eq!(parsed["ok"], json!(true));
 
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("run dir");
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("run dir");
     assert!(run_dir.join("close_loop.json").exists());
     let status: Value = serde_json::from_str(
         &std::fs::read_to_string(run_dir.join("status.json")).expect("status"),

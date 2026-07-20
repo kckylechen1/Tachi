@@ -133,26 +133,6 @@ async fn async_shell_dispatch_requires_native_first_exception_before_artifacts()
         .expect("packet-only shell dispatch remains available");
 }
 
-#[test]
-fn flow_id_rejects_path_traversal() {
-    for invalid in [
-        "../../etc",
-        "flow_../../etc",
-        "/tmp/evil",
-        "flow_/tmp/evil",
-        "flow_..",
-        "flow_bad/name",
-        "flow_bad\\name",
-        "notflow_20260505",
-    ] {
-        assert!(
-            validate_flow_id(invalid).is_err(),
-            "expected invalid flow_id to be rejected: {invalid}"
-        );
-    }
-    assert!(validate_flow_id("flow_20260505T000000Z_demo-1").is_ok());
-}
-
 #[tokio::test]
 async fn status_action_returns_not_found_for_missing_flow() {
     let _root = temp_runs_root();

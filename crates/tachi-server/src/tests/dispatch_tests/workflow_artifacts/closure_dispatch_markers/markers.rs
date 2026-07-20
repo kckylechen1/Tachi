@@ -36,7 +36,7 @@ fn tachi_task_dispatch_marker_updates_flow_status_idempotently() {
         "dispatch marker ids must stay filename-safe"
     );
 
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("flow run dir");
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("flow run dir");
     let status: Value = serde_json::from_str(
         &std::fs::read_to_string(run_dir.join("status.json")).expect("status"),
     )
@@ -107,7 +107,7 @@ fn tachi_task_dispatch_completion_marker_updates_card_and_status_idempotently() 
     )
     .expect("mark completion idempotently");
 
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("flow run dir");
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("flow run dir");
     let status: Value = serde_json::from_str(
         &std::fs::read_to_string(run_dir.join("status.json")).expect("status"),
     )

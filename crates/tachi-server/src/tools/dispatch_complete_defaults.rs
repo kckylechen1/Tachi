@@ -50,7 +50,7 @@ pub(super) fn read_dispatch_defaults_for_complete_with_flow(
     }
     let mut defaults = read_dispatch_defaults_for_complete(home, dispatch_id).unwrap_or_default();
     if let Some(flow_id) = flow_id {
-        if let Ok(run_dir) = crate::shell_ops::run_dir_for_flow_id(flow_id) {
+        if let Ok(run_dir) = crate::task_lifecycle::run_dir_for_flow_id(flow_id) {
             merge_dispatch_defaults_from_path(
                 &mut defaults,
                 &run_dir

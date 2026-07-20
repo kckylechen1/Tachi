@@ -31,7 +31,7 @@ async fn tachi_gh_pr_handoff_writes_pr_body_with_verification_and_gaps() {
         &automation_plan,
     )
     .expect("write intake artifacts");
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("run dir");
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("run dir");
     std::fs::write(
         run_dir.join("verification.json"),
         serde_json::to_string_pretty(&json!({

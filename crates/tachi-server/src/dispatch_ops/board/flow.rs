@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
 pub(super) fn flow_dispatch_ids(flow_id: &str) -> Result<Vec<String>, String> {
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id)?;
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id)?;
     let status_path = run_dir.join("status.json");
     let Some(status) = crate::task_lifecycle::read_json_file(&status_path)? else {
         return Ok(Vec::new());

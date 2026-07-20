@@ -12,7 +12,7 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
     let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", temp_runs.path());
     let server = make_server();
     let flow_id = "flow_20260608T000000Z_feature_briefing_test";
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("valid flow id");
+    let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id).expect("valid flow id");
     std::fs::create_dir_all(&run_dir).expect("create flow run dir");
     std::fs::write(
         run_dir.join("instruction.md"),

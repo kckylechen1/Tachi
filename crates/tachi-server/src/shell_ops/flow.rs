@@ -1,31 +1,5 @@
 use super::*;
 
-// ─── Run-root resolution ─────────────────────────────────────────────────────
-
-/// Resolve the runs root directory.
-///
-/// Order:
-/// 1. `$TACHI_RUN_ROOT`
-/// 2. `<repo_root>/.tachi/runs/` if a git repo is detected via `git rev-parse --show-toplevel`
-/// 3. `$TACHI_HOME/runs/`
-/// 4. `$HOME/.tachi/runs/`
-/// 5. `<temp>/tachi/runs/`
-pub(crate) fn shell_runs_root() -> PathBuf {
-    if let Ok(p) = std::env::var("TACHI_RUN_ROOT") {
-        return PathBuf::from(p);
-    }
-    if let Some(root) = crate::path_utils::cached_git_root() {
-        return root.join(".tachi").join("runs");
-    }
-    if let Ok(home) = std::env::var("TACHI_HOME") {
-        return PathBuf::from(home).join("runs");
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".tachi").join("runs");
-    }
-    std::env::temp_dir().join("tachi").join("runs")
-}
-
 pub(super) fn slugify(s: &str) -> String {
     let s = s.trim().to_ascii_lowercase();
     let mut out = String::with_capacity(s.len());
@@ -56,28 +30,6 @@ pub(super) fn new_flow_id(title: Option<&str>, task: Option<&str>) -> String {
         .unwrap_or_else(|| "flow".to_string());
     let suffix = uuid::Uuid::new_v4().as_simple().to_string()[..8].to_string();
     format!("flow_{}_{}_{}", stamp, slugify(&basis), suffix)
-}
-
-pub(crate) fn validate_flow_id(id: &str) -> Result<(), String> {
-    if !id.starts_with("flow_")
-        || id.contains('/')
-        || id.contains('\\')
-        || id.contains("..")
-        || !id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        return Err(format!(
-            "Invalid flow_id: '{}'. Expected a safe id starting with 'flow_' and containing only ASCII letters, numbers, '_' or '-'. Example: flow_20260609T014037Z_tachi_dispatch_ux_smoke",
-            id
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn run_dir_for_flow_id(flow_id: &str) -> Result<PathBuf, String> {
-    validate_flow_id(flow_id)?;
-    Ok(shell_runs_root().join(flow_id))
 }
 
 /// Cross-flow closure-debt scan. Walks every flow run dir and surfaces:
