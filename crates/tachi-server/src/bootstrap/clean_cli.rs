@@ -978,7 +978,11 @@ mod tests {
         let locked_parent = dir.join("locked-parent");
         std::fs::create_dir_all(&locked_parent).unwrap();
         let blocked_path = locked_parent.join("wt");
-        insert_active_lease(&store, "env-reclaim-unknown", blocked_path.to_str().unwrap());
+        insert_active_lease(
+            &store,
+            "env-reclaim-unknown",
+            blocked_path.to_str().unwrap(),
+        );
 
         // Fetch the lease value BEFORE locking the parent — this is what a
         // caller's list/preview half would have handed to the reclaim half

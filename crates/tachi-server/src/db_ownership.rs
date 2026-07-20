@@ -395,7 +395,9 @@ mod tests {
         }
 
         holder.kill().expect("kill external holder process");
-        holder.wait().expect("wait for external holder process exit");
+        holder
+            .wait()
+            .expect("wait for external holder process exit");
 
         // After the sole holder exits (fd closed), the probe must clear.
         let deadline = Instant::now() + Duration::from_secs(5);

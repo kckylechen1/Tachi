@@ -934,8 +934,8 @@ fn sigil_1289_init_schema_only() -> Connection {
 ///   - named index -> normalized CREATE sql (lowercased, `IF NOT EXISTS`
 ///     stripped, whitespace collapsed) so the same index created via different
 ///     statements (BASE vs migration DROP+CREATE) compares equal.
-/// FTS5 virtual/shadow tables and sqlite autoindexes are excluded: identical
-/// across build paths and pure noise for the #1289 convergence question.
+///     FTS5 virtual/shadow tables and sqlite autoindexes are excluded: identical
+///     across build paths and pure noise for the #1289 convergence question.
 fn sigil_1289_normalized_schema(
     conn: &Connection,
 ) -> (

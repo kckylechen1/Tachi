@@ -245,10 +245,7 @@ impl DualDaemonLock {
     /// naming exactly which lock is held by a live process; the scoped
     /// lock is checked first and released again before returning if the
     /// legacy lock turns out to be busy (no partial hold on error).
-    pub(crate) fn acquire(
-        app_home: &Path,
-        global_db_path: &Path,
-    ) -> Result<Self, DualLockError> {
+    pub(crate) fn acquire(app_home: &Path, global_db_path: &Path) -> Result<Self, DualLockError> {
         let scoped_path = scoped_daemon_lock_path(app_home, global_db_path);
         let scoped = match DaemonLock::acquire(&scoped_path) {
             Ok(lock) => lock,
@@ -327,16 +324,11 @@ pub(crate) struct ScopedDaemonLock {
 }
 
 impl ScopedDaemonLock {
-    pub(crate) fn acquire(
-        app_home: &Path,
-        global_db_path: &Path,
-    ) -> Result<Self, ScopedLockError> {
+    pub(crate) fn acquire(app_home: &Path, global_db_path: &Path) -> Result<Self, ScopedLockError> {
         let scoped_path = scoped_daemon_lock_path(app_home, global_db_path);
         match DaemonLock::acquire(&scoped_path) {
             Ok(lock) => Ok(ScopedDaemonLock { _scoped: lock }),
-            Err(DaemonLockError::AlreadyRunning { pid }) => {
-                Err(ScopedLockError::Running { pid })
-            }
+            Err(DaemonLockError::AlreadyRunning { pid }) => Err(ScopedLockError::Running { pid }),
             Err(DaemonLockError::Io(e)) => Err(ScopedLockError::Io(e)),
         }
     }
