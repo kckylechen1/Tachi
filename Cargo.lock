@@ -2354,6 +2354,7 @@ dependencies = [
 name = "tachi-params"
 version = "1.9.0"
 dependencies = [
+ "blake2",
  "chrono",
  "memcore",
  "ring",

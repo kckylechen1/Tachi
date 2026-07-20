@@ -32,6 +32,9 @@ pub(crate) use kanban_helpers::get_kanban_state;
 #[cfg(test)]
 pub(crate) use kanban_helpers::should_cleanup_run;
 pub(crate) use kanban_helpers::update_kanban_state;
+pub(crate) use prompt::seat_card::{
+    complete_counter_clause_projection, resolve_exact_seat_card_readiness,
+};
 // tachi#1173 k2 fix: shared dispatch-id path-traversal gate (allowlist +
 // canonicalize-and-confine), consumed by `board::runs`, `dispatch::dedupe`,
 // `tools::dispatch_complete_defaults`, and `predicate` -- see `path_gate` for

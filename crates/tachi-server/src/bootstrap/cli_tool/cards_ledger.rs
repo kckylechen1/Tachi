@@ -89,6 +89,71 @@ pub(super) async fn run_cards_command(
     schema_migration: &memcore::MigrationAuthority,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
+        CardsAction::Draft { input } => super::cards_governance::draft_command(&input),
+        CardsAction::Review { input } => super::cards_governance::review_command(&input),
+        CardsAction::Approve { input, dir } => super::cards_governance::approve_command(
+            &input,
+            dir.as_deref().unwrap_or(&default_cards_dir()),
+        ),
+        CardsAction::Apply {
+            approval,
+            evidence,
+            dir,
+        } => {
+            let dir = dir.unwrap_or_else(default_cards_dir);
+            let outcome = super::cards_governance::apply_command(&approval, &evidence, &dir)?;
+            // Source commit is complete before mirror sync. A failed mirror is
+            // a structured pending outcome; replay will not append again.
+            let completion = match sync_one_card(
+                &dir,
+                &outcome.seat,
+                db_path,
+                app_home,
+                schema_migration,
+            )
+            .await
+            {
+                Ok(row) => {
+                    let server =
+                        match crate::cli_client::build_in_process_server_with_migration_authority(
+                            db_path,
+                            None,
+                            schema_migration.clone(),
+                        ) {
+                            Ok(server) => server,
+                            Err(error) => return mirror_pending(&outcome, error.to_string()),
+                        };
+                    let current = match read_card_file(&dir, &outcome.seat) {
+                        Ok(file) => file,
+                        Err(error) => return mirror_pending(&outcome, error.to_string()),
+                    };
+                    match crate::dispatch_ops::resolve_exact_seat_card_readiness(
+                        &server,
+                        &outcome.seat,
+                    ) {
+                        Some(readiness)
+                            if current.hash == outcome.source_hash
+                                && row.content_hash == outcome.source_hash
+                                && readiness.source_hash == outcome.source_hash
+                                && readiness.complete_projection =>
+                        {
+                            print_pretty_json(
+                                &json!({"schema_version":"tachi.cards.apply.v1","source_status":outcome.source_status,"seat":outcome.seat,"source_hash":outcome.source_hash,"mirror_status":"synced","mirror_content_hash":row.content_hash,"projection_status":"ready","readiness_source_hash":readiness.source_hash,"mirror_revision":readiness.mirror_revision,"counter_clause_hash":readiness.counter_clause_hash}),
+                            )
+                        }
+                        _ => {
+                            return mirror_pending(
+                                &outcome,
+                                "mirror/readiness/canonical hash mismatch or incomplete projection"
+                                    .into(),
+                            )
+                        }
+                    }
+                }
+                Err(error) => return mirror_pending(&outcome, error.to_string()),
+            };
+            completion
+        }
         CardsAction::Sync { dir, json } => {
             let dir = dir.unwrap_or_else(default_cards_dir);
             let rows = sync_cards(&dir, db_path, app_home, schema_migration).await?;
@@ -109,6 +174,16 @@ pub(super) async fn run_cards_command(
             }
         }
     }
+}
+
+fn mirror_pending(
+    outcome: &super::cards_governance::ApplySourceOutcome,
+    error: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    print_pretty_json(
+        &json!({"schema_version":"tachi.cards.apply.v1","status":"source_applied_mirror_pending","source_status":outcome.source_status,"seat":outcome.seat,"source_hash":outcome.source_hash,"mirror_status":"pending","projection_status":"pending","error":error}),
+    )?;
+    Err("source applied; mirror/projection pending".into())
 }
 
 fn default_cards_dir() -> PathBuf {
@@ -183,7 +258,7 @@ fn heading_level(line: &str) -> Option<usize> {
 /// scans non-heading prose (inline bold counter-clause text under an
 /// unrelated heading, e.g. `wizard-sonnet.md`, is a known accepted gap, not
 /// a bug this function should paper over).
-fn extract_counter_clauses(text: &str) -> Option<String> {
+pub(super) fn extract_counter_clauses(text: &str) -> Option<String> {
     let re = counter_clause_heading_regex();
     let lines: Vec<&str> = text.lines().collect();
     let mut sections: Vec<String> = Vec::new();
@@ -226,6 +301,30 @@ struct CardFile {
     counter_clauses: Option<String>,
 }
 
+fn read_card_file(dir: &Path, seat: &str) -> Result<CardFile, Box<dyn std::error::Error>> {
+    // The seat was governance-validated before this boundary. Do not scan the
+    // directory: unrelated malformed cards cannot affect targeted recovery.
+    let path = dir.join(format!("{seat}.md"));
+    let metadata = std::fs::symlink_metadata(&path)?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(format!(
+            "target card {} must be a regular non-symlink file",
+            path.display()
+        )
+        .into());
+    }
+    let bytes = std::fs::read(&path)?;
+    let text = String::from_utf8(bytes.clone())
+        .map_err(|_| format!("card {} is not strict UTF-8", path.display()))?;
+    Ok(CardFile {
+        seat: seat.to_string(),
+        path,
+        hash: content_hash_hex(&bytes),
+        counter_clauses: extract_counter_clauses(&text),
+        text,
+    })
+}
+
 fn scan_card_files(dir: &Path) -> Result<Vec<CardFile>, Box<dyn std::error::Error>> {
     let read_dir =
         std::fs::read_dir(dir).map_err(|e| format!("read cards dir {}: {e}", dir.display()))?;
@@ -233,7 +332,8 @@ fn scan_card_files(dir: &Path) -> Result<Vec<CardFile>, Box<dyn std::error::Erro
     for entry in read_dir {
         let entry = entry?;
         let path = entry.path();
-        if !path.is_file() {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
             continue;
         }
         if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
@@ -244,7 +344,8 @@ fn scan_card_files(dir: &Path) -> Result<Vec<CardFile>, Box<dyn std::error::Erro
         };
         let bytes =
             std::fs::read(&path).map_err(|e| format!("read card file {}: {e}", path.display()))?;
-        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let text = String::from_utf8(bytes.clone())
+            .map_err(|_| format!("card file {} is not strict UTF-8", path.display()))?;
         let hash = content_hash_hex(&bytes);
         let counter_clauses = extract_counter_clauses(&text);
         files.push(CardFile {
@@ -302,6 +403,7 @@ pub(super) struct CardSyncRow {
     seat: String,
     status: &'static str,
     revision: i64,
+    content_hash: String,
 }
 
 async fn sync_cards(
@@ -310,24 +412,87 @@ async fn sync_cards(
     app_home: &PathBuf,
     schema_migration: &memcore::MigrationAuthority,
 ) -> Result<Vec<CardSyncRow>, Box<dyn std::error::Error>> {
-    let files = scan_card_files(dir)?;
+    sync_cards_selected(dir, None, true, db_path, app_home, schema_migration).await
+}
+
+/// Targeted post-apply mirror update. It intentionally does not run the
+/// missing-file archival pass: applying one card cannot adjudicate unrelated
+/// cards' lifecycle.
+async fn sync_one_card(
+    dir: &Path,
+    seat: &str,
+    db_path: &PathBuf,
+    app_home: &PathBuf,
+    schema_migration: &memcore::MigrationAuthority,
+) -> Result<CardSyncRow, Box<dyn std::error::Error>> {
+    let rows =
+        sync_cards_selected(dir, Some(seat), false, db_path, app_home, schema_migration).await?;
+    rows.into_iter()
+        .find(|r| r.seat == seat)
+        .ok_or_else(|| format!("target card {seat}.md was not mirrored").into())
+}
+
+async fn sync_cards_selected(
+    dir: &Path,
+    selected_seat: Option<&str>,
+    archive_missing: bool,
+    db_path: &PathBuf,
+    app_home: &PathBuf,
+    schema_migration: &memcore::MigrationAuthority,
+) -> Result<Vec<CardSyncRow>, Box<dyn std::error::Error>> {
+    let files = match selected_seat {
+        Some(seat) => vec![read_card_file(dir, seat)?],
+        None => scan_card_files(dir)?,
+    };
     let mut existing = read_existing_mirrors(db_path, schema_migration)?;
     let mut rows = Vec::with_capacity(files.len());
 
-    for file in &files {
+    for scanned_file in &files {
+        // Full sync cooperates with governed apply on the same per-card lock.
+        // The pre-lock directory scan is discovery only: after acquiring the
+        // lock, re-read the source and retain the lock through mirror write.
+        // Targeted post-apply sync already runs while ApplySourceOutcome owns
+        // this lock, so it must not reacquire it.
+        let _source_lock = if selected_seat.is_none() {
+            Some(super::cards_governance::lock(&scanned_file.path)?)
+        } else {
+            None
+        };
+        let locked_file = if _source_lock.is_some() {
+            Some(read_card_file(dir, &scanned_file.seat)?)
+        } else {
+            None
+        };
+        let file = locked_file.as_ref().unwrap_or(scanned_file);
         let prior = existing.remove(&file.seat);
 
         if let Some(prior_entry) = &prior {
-            let hash_unchanged = prior_entry
+            let metadata = &prior_entry.metadata;
+            let fully_unchanged = prior_entry
                 .metadata
                 .get("content_hash")
                 .and_then(Value::as_str)
-                == Some(file.hash.as_str());
-            if hash_unchanged && !prior_entry.archived {
+                == Some(file.hash.as_str())
+                // save_memory's established text contract trims surrounding
+                // whitespace; compare against that deterministic projection
+                // while content_hash continues to receipt the exact bytes.
+                && prior_entry.text == file.text.trim()
+                && metadata.get("source").and_then(Value::as_str) == Some(CARDS_METADATA_SOURCE)
+                && metadata.get("authority").and_then(Value::as_str) == Some("advisory")
+                && metadata.get("source_file").and_then(Value::as_str)
+                    == Some(file.path.to_string_lossy().as_ref())
+                && metadata
+                    .get("counter_clauses_present")
+                    .and_then(Value::as_bool)
+                    == Some(file.counter_clauses.is_some())
+                && metadata.get("counter_clauses").and_then(Value::as_str)
+                    == file.counter_clauses.as_deref();
+            if fully_unchanged && !prior_entry.archived {
                 rows.push(CardSyncRow {
                     seat: file.seat.clone(),
                     status: "unchanged",
                     revision: prior_entry.revision,
+                    content_hash: file.hash.clone(),
                 });
                 continue;
             }
@@ -401,7 +566,29 @@ async fn sync_cards(
                 "created"
             },
             revision,
+            content_hash: file.hash.clone(),
         });
+        if selected_seat.is_some() {
+            let verified = read_existing_mirrors(db_path, schema_migration)?
+                .remove(&file.seat)
+                .ok_or("targeted mirror row missing after write")?;
+            let m = &verified.metadata;
+            if verified.archived
+                || verified.revision != revision
+                || verified.text != file.text.trim()
+                || m.get("content_hash").and_then(Value::as_str) != Some(file.hash.as_str())
+                || m.get("source").and_then(Value::as_str) != Some(CARDS_METADATA_SOURCE)
+                || m.get("authority").and_then(Value::as_str) != Some("advisory")
+                || m.get("source_file").and_then(Value::as_str)
+                    != Some(file.path.to_string_lossy().as_ref())
+                || m.get("counter_clauses_present").and_then(Value::as_bool)
+                    != Some(file.counter_clauses.is_some())
+                || m.get("counter_clauses").and_then(Value::as_str)
+                    != file.counter_clauses.as_deref()
+            {
+                return Err("targeted mirror verification diverged".into());
+            }
+        }
     }
 
     // Everything left in `existing` has a mirror row but no file this run.
@@ -409,36 +596,44 @@ async fn sync_cards(
     // still missing is left alone: `archive_memory` is a DB-level no-op on
     // an already-archived id, and re-reporting a stale transition every run
     // would be noise, not new information about THIS sync.
-    for (seat, entry) in existing {
-        if entry.archived {
-            continue;
+    if archive_missing {
+        for (seat, entry) in existing {
+            if entry.archived {
+                continue;
+            }
+            let mut args = serde_json::Map::new();
+            args.insert("id".into(), json!(entry.id.clone()));
+
+            dispatch_cli_tool_with_migration_authority(
+                "archive_memory",
+                args,
+                db_path,
+                None,
+                app_home,
+                schema_migration,
+                |server, args_map| {
+                    Box::pin(async move {
+                        let params: ArchiveMemoryParams =
+                            serde_json::from_value(Value::Object(args_map))
+                                .map_err(|e| format!("invalid archive_memory args: {e}"))?;
+                        handle_archive_memory(&server, params).await
+                    })
+                },
+            )
+            .await?;
+
+            rows.push(CardSyncRow {
+                seat,
+                status: "archived",
+                revision: entry.revision + 1,
+                content_hash: entry
+                    .metadata
+                    .get("content_hash")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            });
         }
-        let mut args = serde_json::Map::new();
-        args.insert("id".into(), json!(entry.id.clone()));
-
-        dispatch_cli_tool_with_migration_authority(
-            "archive_memory",
-            args,
-            db_path,
-            None,
-            app_home,
-            schema_migration,
-            |server, args_map| {
-                Box::pin(async move {
-                    let params: ArchiveMemoryParams =
-                        serde_json::from_value(Value::Object(args_map))
-                            .map_err(|e| format!("invalid archive_memory args: {e}"))?;
-                    handle_archive_memory(&server, params).await
-                })
-            },
-        )
-        .await?;
-
-        rows.push(CardSyncRow {
-            seat,
-            status: "archived",
-            revision: entry.revision + 1,
-        });
     }
 
     rows.sort_by(|a, b| a.seat.cmp(&b.seat));
@@ -454,6 +649,7 @@ fn sync_rows_json(rows: &[CardSyncRow]) -> Value {
                 "seat": row.seat,
                 "status": row.status,
                 "revision": row.revision,
+                "content_hash": row.content_hash,
             }))
             .collect::<Vec<_>>(),
     })
@@ -725,6 +921,12 @@ unrelated section after
         let wizard_row = find_row(&rows, "wizard-sonnet");
         assert_eq!(wizard_row.status, "created");
         assert_eq!(wizard_row.revision, 1);
+        assert_eq!(
+            wizard_row.content_hash,
+            content_hash_hex(
+                "## 反制条款(派单包必带)\n- always pwd-check the worktree\n".as_bytes()
+            )
+        );
         let grok_row = find_row(&rows, "grok-4.5");
         assert_eq!(grok_row.status, "created");
         assert_eq!(grok_row.revision, 1);
@@ -879,6 +1081,200 @@ unrelated section after
         assert!(
             !dump.contains("pwd-check"),
             "old clause text must not be reachable anywhere in the mirrored metadata: {dump}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn targeted_sync_ignores_unrelated_malformed_and_symlink_cards() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let (app_home, db_path) = app_home_and_db(temp.path());
+        let cards = temp.path().join("cards");
+        std::fs::create_dir(&cards).unwrap();
+        write_fixture(&cards, "target", "## Counter\n- exact clause\n");
+        std::fs::write(cards.join("bad.md"), [0xff, 0xfe]).unwrap();
+        symlink(cards.join("bad.md"), cards.join("linked.md")).unwrap();
+        let row = sync_one_card(
+            &cards,
+            "target",
+            &db_path,
+            &app_home,
+            &memcore::MigrationAuthority::Deny,
+        )
+        .await
+        .unwrap();
+        assert_eq!(row.seat, "target");
+        assert_eq!(
+            row.content_hash,
+            content_hash_hex(b"## Counter\n- exact clause\n")
+        );
+        let mirrors = read_existing_mirrors(&db_path, &memcore::MigrationAuthority::Deny).unwrap();
+        assert_eq!(
+            mirrors.len(),
+            1,
+            "targeted sync must neither load nor archive unrelated seats"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn full_sync_honors_apply_lock_and_never_writes_its_unlocked_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let (app_home, db_path) = app_home_and_db(temp.path());
+        let cards = temp.path().join("cards");
+        std::fs::create_dir(&cards).unwrap();
+        let card = cards.join("target.md");
+        std::fs::write(&card, "## Counter\n- source A\n").unwrap();
+        sync_cards(
+            &cards,
+            &db_path,
+            &app_home,
+            &memcore::MigrationAuthority::Deny,
+        )
+        .await
+        .unwrap();
+
+        std::fs::write(&card, "## Counter\n- source B\n").unwrap();
+        let apply_lock = super::super::cards_governance::lock(&card).unwrap();
+        assert!(
+            sync_cards(
+                &cards,
+                &db_path,
+                &app_home,
+                &memcore::MigrationAuthority::Deny,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("lock"),
+            "full sync must not proceed from a pre-lock source snapshot"
+        );
+        let mirrors = read_existing_mirrors(&db_path, &memcore::MigrationAuthority::Deny).unwrap();
+        assert!(mirrors["target"].text.contains("source A"));
+        drop(apply_lock);
+
+        sync_cards(
+            &cards,
+            &db_path,
+            &app_home,
+            &memcore::MigrationAuthority::Deny,
+        )
+        .await
+        .unwrap();
+        let mirrors = read_existing_mirrors(&db_path, &memcore::MigrationAuthority::Deny).unwrap();
+        assert!(mirrors["target"].text.contains("source B"));
+    }
+
+    #[tokio::test]
+    async fn governed_append_mirror_and_prompt_share_the_accepted_source_hash() {
+        use tachi_params::{
+            draft_lane_card, hash_bytes, hash_json, review_lane_card, ApprovalArtifact,
+            DraftRequest, EvidenceRelation, EvidenceSnapshot, EvidenceState, LaneAuthority,
+            ReviewDecision, ReviewRequest, TachiDispatchParams, GOVERNANCE_VERSION,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let (app_home, db_path) = app_home_and_db(temp.path());
+        let cards = temp.path().join("cards");
+        std::fs::create_dir(&cards).unwrap();
+        let source = b"# reviewed-seat\n";
+        std::fs::write(cards.join("reviewed-seat.md"), source).unwrap();
+
+        let evidence = vec![EvidenceSnapshot {
+            id: "run-42".into(),
+            subject_role: "reviewer".into(),
+            subject_vendor: "openai".into(),
+            subject_agent: Some("codex".into()),
+            source_ref: "dispatch/run-42".into(),
+            source_kind: "dispatch_run".into(),
+            immutable_revision: "sha256:42".into(),
+            assertion_hash: "blake2:42".into(),
+            relation: EvidenceRelation::Supports,
+            state: EvidenceState::Current,
+        }];
+        let draft = draft_lane_card(DraftRequest {
+            schema_version: GOVERNANCE_VERSION.into(),
+            seat: "reviewed-seat".into(),
+            role: "reviewer".into(),
+            vendor: "openai".into(),
+            agent: Some("codex".into()),
+            author: "author".into(),
+            observed_at: "2026-07-19".into(),
+            observed_failure_or_capability: "Caught a stale source.".into(),
+            recurrence_context: "Repeated in two reviewed runs.".into(),
+            counter_clause: "Recheck the canonical source hash before writing.".into(),
+            authority: LaneAuthority::LaneOperationalEvidence,
+            evidence: evidence.clone(),
+        })
+        .unwrap();
+        let review = review_lane_card(ReviewRequest {
+            schema_version: GOVERNANCE_VERSION.into(),
+            draft: draft.clone(),
+            reviewer: "independent-reviewer".into(),
+            decision: ReviewDecision::Accepted,
+            notes: "accepted".into(),
+        })
+        .unwrap();
+        let append = draft.append_markdown.as_bytes().to_vec();
+        let result = [source.as_slice(), append.as_slice()].concat();
+        let mut approval = ApprovalArtifact {
+            schema_version: GOVERNANCE_VERSION.into(),
+            draft,
+            review,
+            leader: "leader".into(),
+            decision: "approved".into(),
+            source_hash: hash_bytes(source),
+            source_byte_len: source.len() as u64,
+            append_offset: source.len() as u64,
+            append_bytes_hash: hash_bytes(&append),
+            append_bytes: append,
+            expected_result_hash: hash_bytes(&result),
+            approval_hash: String::new(),
+        };
+        approval.approval_hash = hash_json(&approval).unwrap();
+        let approval_path = temp.path().join("approval.json");
+        let evidence_path = temp.path().join("evidence.json");
+        std::fs::write(&approval_path, serde_json::to_vec(&approval).unwrap()).unwrap();
+        std::fs::write(&evidence_path, serde_json::to_vec(&evidence).unwrap()).unwrap();
+
+        let outcome =
+            super::super::cards_governance::apply_command(&approval_path, &evidence_path, &cards)
+                .unwrap();
+        let row = sync_one_card(
+            &cards,
+            "reviewed-seat",
+            &db_path,
+            &app_home,
+            &memcore::MigrationAuthority::Deny,
+        )
+        .await
+        .unwrap();
+        let server = crate::cli_client::build_in_process_server_with_migration_authority(
+            &db_path,
+            None,
+            memcore::MigrationAuthority::Deny,
+        )
+        .unwrap();
+        let readiness =
+            crate::dispatch_ops::resolve_exact_seat_card_readiness(&server, "reviewed-seat")
+                .unwrap();
+        assert_eq!(outcome.source_hash, hash_bytes(&result));
+        assert_eq!(row.content_hash, outcome.source_hash);
+        assert_eq!(readiness.source_hash, outcome.source_hash);
+        assert!(readiness.complete_projection);
+
+        let params: TachiDispatchParams = serde_json::from_value(json!({
+            "agent": "codex",
+            "profile": "reviewed-seat",
+            "task": "review the bounded change",
+            "auto_capability_bundle": false
+        }))
+        .unwrap();
+        let prompt = crate::dispatch_ops::assemble_prompt(&server, &params).await;
+        assert!(
+            prompt.contains("Recheck the canonical source hash before writing."),
+            "accepted clause must project from the mirror into the prompt: {prompt}"
         );
     }
 

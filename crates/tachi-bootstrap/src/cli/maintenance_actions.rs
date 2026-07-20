@@ -632,6 +632,32 @@ pub enum CardAction {
 /// model/vendor playbooks) into GLOBAL-db `/cards/<seat>` rows.
 #[derive(Subcommand, Debug, Clone)]
 pub enum CardsAction {
+    /// Produce a deterministic, card-write-free draft artifact from JSON.
+    Draft {
+        #[arg(long, value_name = "FILE")]
+        input: PathBuf,
+    },
+    /// Produce an independent review receipt from JSON.
+    Review {
+        #[arg(long, value_name = "FILE")]
+        input: PathBuf,
+    },
+    /// Bind accepted draft/review JSON to the current canonical card revision.
+    Approve {
+        #[arg(long, value_name = "FILE")]
+        input: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
+    },
+    /// Apply approved bytes using a fresh evidence-state JSON bundle.
+    Apply {
+        #[arg(long, value_name = "FILE")]
+        approval: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        evidence: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        dir: Option<PathBuf>,
+    },
     /// Read every `*.md` lane card under `--dir` (default:
     /// `~/.agents/dispatch-ledger/cards`) and create/update/no-op/archive its
     /// `/cards/<seat>` mirror row accordingly. Writes go through the same
