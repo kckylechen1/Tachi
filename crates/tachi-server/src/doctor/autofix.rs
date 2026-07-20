@@ -785,24 +785,56 @@ fn probe_db_ownership(db_path: &Path) -> DbOwnership {
     // beginning with `-` are treated literally.
     let output = Command::new("lsof").arg("--").arg(&abs_str).output();
     match output {
-        Ok(o) if o.status.success() => {
+        Ok(o) => classify_lsof_output(
+            o.status.code(),
+            &String::from_utf8_lossy(&o.stdout),
+            &String::from_utf8_lossy(&o.stderr),
+        ),
+        Err(e) => DbOwnership::Unknown(format!("lsof unavailable: {e}")),
+    }
+}
+
+/// Pure classification of an `lsof` invocation's exit signature into
+/// ownership — no process execution, so every signature below is
+/// unit-testable without needing to actually kill `lsof` mid-run (a
+/// genuinely signal-killed subprocess is not reliably reproducible in an
+/// integration-style test).
+///
+/// `status_code` is `Option<i32>` per `std::process::ExitStatus::code()`:
+/// `None` means the process was terminated by a signal on unix (SIGKILL,
+/// an OOM kill, ...) rather than exiting normally — that case must be
+/// checked *before* the "both streams empty" heuristic below, because a
+/// signal-killed `lsof` also leaves both streams empty and would otherwise
+/// be misread as the harmless "no holders found" signature.
+///
+/// Signatures:
+/// - `Some(0)` + >1 stdout line → `Owned` (header + at least one holder line)
+/// - `Some(0)` + ≤1 stdout line → `NotOwned` (header only / no output)
+/// - `Some(n)` (n != 0) + both streams empty → `NotOwned` (lsof's normal,
+///   silent "no holders" exit-1 signature)
+/// - `None` (signal death) → `Unknown("lsof terminated by signal")`,
+///   regardless of stream contents
+/// - `Some(n)` (n != 0) + diagnostic text on either stream → `Unknown`
+///   with the first diagnostic line surfaced
+#[cfg(unix)]
+fn classify_lsof_output(status_code: Option<i32>, stdout: &str, stderr: &str) -> DbOwnership {
+    match status_code {
+        Some(0) => {
             // lsof prints a header line + one line per holder; >1 line means held.
-            let stdout = String::from_utf8_lossy(&o.stdout);
             if stdout.lines().count() > 1 {
                 DbOwnership::Owned
             } else {
                 DbOwnership::NotOwned
             }
         }
-        Ok(o) => {
+        None => DbOwnership::Unknown("lsof terminated by signal".to_string()),
+        Some(_) => {
             // lsof's non-zero exit is ambiguous by design: it means either
             // "no holders found" (the common, harmless case — empty
             // stdout/stderr) or a genuine fault (permission denied, lsof
             // internal error, unexpected args). Only trust the "no holders"
             // reading when lsof stayed silent on both streams; any
             // diagnostic text means we cannot tell, so fail closed.
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            let stdout = String::from_utf8_lossy(&o.stdout);
             if stderr.trim().is_empty() && stdout.trim().is_empty() {
                 DbOwnership::NotOwned
             } else {
@@ -817,7 +849,6 @@ fn probe_db_ownership(db_path: &Path) -> DbOwnership {
                 DbOwnership::Unknown(format!("lsof error: {detail}"))
             }
         }
-        Err(e) => DbOwnership::Unknown(format!("lsof unavailable: {e}")),
     }
 }
 
@@ -1437,6 +1468,85 @@ mod checkpoint_honesty_tests {
         assert_ne!(
             unknown_action.note, owned_action.note,
             "Unknown and Owned must not collapse into the same receipt note"
+        );
+    }
+
+    // classify_lsof_output is pure (no process execution), so every exit
+    // signature — including signal death, which cannot be reliably forced
+    // on a real subprocess in a test — is directly testable here.
+
+    #[test]
+    fn classify_success_multiple_holders_is_owned() {
+        let header_plus_holder = "COMMAND  PID USER  FD TYPE\ntachi  123 kyle  10r REG\n";
+        assert_eq!(
+            classify_lsof_output(Some(0), header_plus_holder, ""),
+            DbOwnership::Owned
+        );
+    }
+
+    #[test]
+    fn classify_success_no_holder_lines_is_not_owned() {
+        // Some(0) with header-only (or empty) stdout: exit succeeded but
+        // nothing matched.
+        assert_eq!(classify_lsof_output(Some(0), "", ""), DbOwnership::NotOwned);
+        assert_eq!(
+            classify_lsof_output(Some(0), "COMMAND  PID USER  FD TYPE\n", ""),
+            DbOwnership::NotOwned
+        );
+    }
+
+    #[test]
+    fn classify_nonzero_exit_both_streams_empty_is_not_owned() {
+        // lsof's normal, silent "no holders found" signature: exit 1, not a
+        // fault, both streams empty.
+        assert_eq!(classify_lsof_output(Some(1), "", ""), DbOwnership::NotOwned);
+    }
+
+    #[test]
+    fn classify_signal_death_is_unknown_even_with_empty_streams() {
+        // The bug this test guards: a signal-killed lsof (SIGKILL/OOM) also
+        // leaves both streams empty, which is indistinguishable from the
+        // "no holders" signature by stream contents alone. `status_code()
+        // == None` must be checked first and must never resolve to
+        // `NotOwned`.
+        assert_eq!(
+            classify_lsof_output(None, "", ""),
+            DbOwnership::Unknown("lsof terminated by signal".to_string())
+        );
+        // Also must not be swayed by incidental non-empty output preceding
+        // the kill — signal death always wins.
+        assert_eq!(
+            classify_lsof_output(None, "COMMAND  PID USER  FD TYPE\n", "some partial text"),
+            DbOwnership::Unknown("lsof terminated by signal".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_nonzero_exit_with_diagnostic_is_unknown() {
+        let unknown = classify_lsof_output(
+            Some(1),
+            "",
+            "lsof: status error on /x: No such file or directory\n",
+        );
+        match unknown {
+            DbOwnership::Unknown(reason) => {
+                assert!(
+                    reason.contains("lsof: status error on /x"),
+                    "reason must surface the diagnostic line, got: {reason}"
+                );
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_signal_death_distinct_from_clean_not_owned() {
+        // Regression guard: signal death and the ordinary silent-exit
+        // NotOwned signature must never collapse to the same variant even
+        // though both present as "both streams empty".
+        assert_ne!(
+            classify_lsof_output(None, "", ""),
+            classify_lsof_output(Some(1), "", "")
         );
     }
 }
