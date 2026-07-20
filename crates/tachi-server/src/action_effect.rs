@@ -352,7 +352,7 @@ fn facade_action_effect(
             // produces a scan report with no read-only disclaimer.
             &["issue_freshness_scan", "pr_review_digest"],
         ),
-        // status is the only clear read; the other six are workflow stages
+        // status is the only clear read; the other five are workflow stages
         // that advance state ("Required Tachi shell workflow stage").
         "tachi_shell" => (&["status"], &[]),
         // Facades with a generic `action` concept that have not been

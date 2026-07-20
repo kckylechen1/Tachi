@@ -112,7 +112,6 @@ async fn convoy_dispatch_creates_slice_dirs_and_status() {
         async_dispatch: false,
         dispatch_reason: None,
         project: None,
-        state_filter: None,
         limit: None,
         notes: None,
         validation: vec![],

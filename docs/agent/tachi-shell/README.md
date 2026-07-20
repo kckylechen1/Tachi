@@ -28,6 +28,6 @@ The goal is to keep design decisions, implementation status, validation evidence
 When Tachi Shell is mature enough, this directory should map to first-class shell artifacts:
 
 - `README.md` -> shell overview / help surface
-- `status.md` -> `tachi_shell(status/kanban)` and memory summaries
+- `status.md` -> `tachi_shell(action="status")`, `tachi_task(action="board")`, and memory summaries
 - `decisions.md` -> design memory / wiki entries / ship gates
 - follow-up task lists -> GitHub issues or PR checklists only when lifecycle management is needed

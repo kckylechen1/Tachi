@@ -3,7 +3,7 @@
     "issue": 1317,
     "observation": {
         "date": "2026-07-20",
-        "revision": "edbab1d9e6705e23aa393380a8d2bd97658a9bd9",
+        "revision": "eb64dc7a937a0625971e28445274485c55a6e6f0",
         "scope": "native composed MemoryServer router after production profile, action-schema, bound-project, and annotation transforms; environment exposure override unset"
     },
     "provisional_budgets": {
@@ -23,8 +23,8 @@
             },
             "coordinate": {
                 "max_visible_tools": 40,
-                "max_total_input_schema_bytes": 134926,
-                "max_total_tool_definition_bytes": 154343,
+                "max_total_input_schema_bytes": 134717,
+                "max_total_tool_definition_bytes": 154139,
                 "rationale": "Current expert coordination surface ceiling pending #1315 re-slice."
             },
             "operate": {
@@ -35,8 +35,8 @@
             },
             "admin": {
                 "max_visible_tools": 103,
-                "max_total_input_schema_bytes": 199848,
-                "max_total_tool_definition_bytes": 238577,
+                "max_total_input_schema_bytes": 199639,
+                "max_total_tool_definition_bytes": 238373,
                 "rationale": "Full native compatibility ceiling; additions still require explicit classification."
             }
         },
@@ -163,11 +163,10 @@
                 ]
             },
             "tachi_shell": {
-                "action_count": 7,
+                "action_count": 6,
                 "actions": [
                     "brainstorm",
                     "dispatch",
-                    "kanban",
                     "plan",
                     "review",
                     "ship",
@@ -240,8 +239,8 @@
         },
         "profiles": {
             "admin": {
-                "total_input_schema_bytes": 199848,
-                "total_tool_definition_bytes": 238577,
+                "total_input_schema_bytes": 199639,
+                "total_tool_definition_bytes": 238373,
                 "visible_tool_count": 103,
                 "visible_tools": [
                     "archive_memory",
@@ -350,8 +349,8 @@
                 ]
             },
             "coordinate": {
-                "total_input_schema_bytes": 134926,
-                "total_tool_definition_bytes": 154343,
+                "total_input_schema_bytes": 134717,
+                "total_tool_definition_bytes": 154139,
                 "visible_tool_count": 40,
                 "visible_tools": [
                     "extract_facts",
@@ -684,8 +683,8 @@
                         ]
                     },
                     "tachi_shell": {
-                        "input_schema_bytes": 6233,
-                        "property_count": 20,
+                        "input_schema_bytes": 6024,
+                        "property_count": 19,
                         "property_names": [
                             "action",
                             "agent",
@@ -702,7 +701,6 @@
                             "profile",
                             "project",
                             "slices",
-                            "state_filter",
                             "task",
                             "title",
                             "tool_profile",
@@ -901,8 +899,8 @@
                         ]
                     },
                     "tachi_shell": {
-                        "input_schema_bytes": 6233,
-                        "property_count": 20,
+                        "input_schema_bytes": 6024,
+                        "property_count": 19,
                         "property_names": [
                             "action",
                             "agent",
@@ -919,7 +917,6 @@
                             "profile",
                             "project",
                             "slices",
-                            "state_filter",
                             "task",
                             "title",
                             "tool_profile",

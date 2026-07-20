@@ -6,17 +6,14 @@
 //!   1. Resolves / creates a `flow_id` and its run directory.
 //!   2. Injects the meta skill SOP file required for the stage.
 //!   3. Writes / updates `instruction.md`, `status.json`, `events.jsonl`.
-//!   4. For `kanban` / `status` it delegates to existing read-only handlers.
+//!   4. For `status` it delegates to the existing read-only handler.
 //!   5. For `dispatch` it can optionally hand off to the existing
 //!      `dispatch_ops::handle_tachi_dispatch` (Phase 4 hook).
 //!
 //! This module deliberately does **not** re-implement clanker dispatch,
-//! kanban, or skill discovery — it composes existing infra.
+//! or skill discovery — it composes existing infra.
 
-use crate::{
-    MemoryServer, TachiBoardParams, TachiDispatchParams, TachiShellDispatchSliceParams,
-    TachiShellParams,
-};
+use crate::{MemoryServer, TachiDispatchParams, TachiShellDispatchSliceParams, TachiShellParams};
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;

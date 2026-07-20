@@ -33,6 +33,17 @@ fn read_status_json(run_dir: &std::path::Path) -> Value {
     serde_json::from_str(&raw).expect("valid status.json")
 }
 
+#[tokio::test]
+async fn shell_kanban_action_is_rejected() {
+    let server = make_server();
+    let error = handle_tachi_shell(&server, shell_params("kanban"))
+        .await
+        .expect_err("removed kanban action must be rejected");
+
+    assert!(error.contains("Invalid action 'kanban'"), "{error}");
+    assert!(!error.contains("Use 'kanban'"), "{error}");
+}
+
 /// Runs the full brainstorm → plan → dispatch → status → review → ship chain
 /// against a single flow_id and asserts cross-stage invariants.
 #[tokio::test]

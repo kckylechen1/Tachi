@@ -95,15 +95,8 @@ pub const TACHI_SKILL_ACTIONS: &[&str] = &["discover", "run", "bundle", "loadout
 /// `tachi_shell` facade actions (workflow stages). Single source for
 /// `orchestration::tachi_shell_action_schema` and #1098's `action_effect`
 /// completeness test.
-pub const TACHI_SHELL_ACTIONS: &[&str] = &[
-    "brainstorm",
-    "plan",
-    "dispatch",
-    "kanban",
-    "status",
-    "review",
-    "ship",
-];
+pub const TACHI_SHELL_ACTIONS: &[&str] =
+    &["brainstorm", "plan", "dispatch", "status", "review", "ship"];
 
 /// `tachi_arena` facade actions. Single source for
 /// `orchestration::tachi_arena_action_schema` and #1098's `action_effect`
