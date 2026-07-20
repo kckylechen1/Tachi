@@ -126,6 +126,39 @@ fn expand_cli_path(raw: &Path, home: &Path) -> PathBuf {
     expand_user_path(raw.to_string_lossy().as_ref(), home)
 }
 
+/// Copy a legacy DB file to `dest`, refusing when a live daemon holds `src`
+/// open (`Owned`) or ownership cannot be determined (`Unknown`) — either
+/// case risks copying a torn snapshot (`tokio::fs::copy` only touches the
+/// main file, not `-wal`/`-shm`, and runs before this process' own daemon
+/// lock is taken). Only a confirmed `NotOwned` proceeds. Shared by both
+/// legacy-DB migration call sites below (global + project).
+async fn copy_legacy_db_guarded(src: &Path, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    match crate::db_ownership::daemon_ownership(src) {
+        crate::db_ownership::DbOwnership::Owned => {
+            return Err(format!(
+                "legacy DB {} is held open by a live daemon; refusing to copy a possibly torn snapshot to {}. Stop the daemon first.",
+                src.display(),
+                dest.display()
+            )
+            .into());
+        }
+        crate::db_ownership::DbOwnership::Unknown(reason) => {
+            return Err(format!(
+                "cannot determine whether legacy DB {} is held by a live daemon ({reason}); refusing to copy a possibly torn snapshot to {}",
+                src.display(),
+                dest.display()
+            )
+            .into());
+        }
+        crate::db_ownership::DbOwnership::NotOwned => {}
+    }
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::copy(src, dest).await?;
+    Ok(())
+}
+
 fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::error::Error>> {
     // Load config from dotenv files (same as before)
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -228,10 +261,7 @@ async fn resolve_global_db(
         if !default_global.exists() {
             for legacy in legacy_candidates {
                 if legacy.exists() {
-                    if let Some(parent) = default_global.parent() {
-                        tokio::fs::create_dir_all(parent).await?;
-                    }
-                    tokio::fs::copy(&legacy, &default_global).await?;
+                    copy_legacy_db_guarded(&legacy, &default_global).await?;
                     eprintln!(
                         "Migrated legacy DB: {} -> {}",
                         legacy.display(),
@@ -443,10 +473,7 @@ async fn run_startup_hygiene(
         let project_legacy = root.join(".sigil").join(memcore::LEGACY_MEMORY_DB_FILENAME);
 
         if project_legacy.exists() && !project_default.exists() {
-            if let Some(parent) = project_default.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            tokio::fs::copy(&project_legacy, &project_default).await?;
+            copy_legacy_db_guarded(&project_legacy, &project_default).await?;
             eprintln!(
                 "Migrated legacy project DB: {} -> {}",
                 project_legacy.display(),
@@ -872,6 +899,88 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    struct ClearOwnershipInject;
+    #[cfg(unix)]
+    impl Drop for ClearOwnershipInject {
+        fn drop(&mut self) {
+            crate::db_ownership::set_ownership_inject_for_test(None);
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn copy_legacy_db_guarded_refuses_when_owned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("legacy.db");
+        let dest = dir.path().join("global").join("memory.db");
+        std::fs::write(&src, b"legacy-bytes").expect("seed legacy db");
+
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::Owned,
+        ));
+
+        let result = copy_legacy_db_guarded(&src, &dest).await;
+
+        assert!(
+            result.is_err(),
+            "must refuse to copy a DB a live daemon holds open"
+        );
+        assert!(
+            !dest.exists(),
+            "refused copy must leave zero bytes at the destination"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn copy_legacy_db_guarded_refuses_when_unknown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("legacy.db");
+        let dest = dir.path().join("global").join("memory.db");
+        std::fs::write(&src, b"legacy-bytes").expect("seed legacy db");
+
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::Unknown("lsof unavailable: test".to_string()),
+        ));
+
+        let result = copy_legacy_db_guarded(&src, &dest).await;
+
+        let err = result.err().expect("undetermined ownership must refuse");
+        assert!(
+            err.to_string().contains("cannot determine"),
+            "error must say ownership was undetermined, got: {err}"
+        );
+        assert!(
+            !dest.exists(),
+            "refused copy must leave zero bytes at the destination"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn copy_legacy_db_guarded_proceeds_when_not_owned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("legacy.db");
+        let dest = dir.path().join("global").join("memory.db");
+        std::fs::write(&src, b"legacy-bytes").expect("seed legacy db");
+
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::NotOwned,
+        ));
+
+        let result = copy_legacy_db_guarded(&src, &dest).await;
+
+        assert!(result.is_ok(), "not-owned must proceed: {result:?}");
+        assert_eq!(
+            std::fs::read(&dest).expect("dest must exist"),
+            b"legacy-bytes"
+        );
+    }
 
     fn remember_cli(global_db: std::path::PathBuf, allow_schema_migration: bool) -> Cli {
         Cli {

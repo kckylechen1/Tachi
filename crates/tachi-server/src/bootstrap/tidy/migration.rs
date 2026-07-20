@@ -281,6 +281,34 @@ fn migrate_single_db(
     }
 
     let rows_after = target_store.stats(true)?.total as usize;
+
+    // Ownership guard: the archive step below moves main/-wal/-shm as three
+    // sequential, non-atomic filesystem operations. If a live daemon still
+    // holds the source DB open — or ownership cannot be determined — that
+    // race can leave a torn archived copy. Roll back the rows we just
+    // copied into the target and fail the whole migration atomically (the
+    // same rollback path used for a mid-copy SQL error above) rather than
+    // leaving a copied-but-unarchived half-state; the source stays on disk
+    // untouched and will simply be reconsidered by the next `tidy` run.
+    if let Some(reason) = archive_unsafe_reason(&source_path) {
+        for id in &newly_inserted_ids {
+            let _ = target_store.delete(id);
+        }
+        drop(target_store);
+        return Ok(TidyMigrationOutcome {
+            source_path: migration.source_path.clone(),
+            target_path: migration.target_path.clone(),
+            archive_path: None,
+            status: "failed".to_string(),
+            rows_before_target: rows_before,
+            rows_after_target: rows_before,
+            rows_copied: 0,
+            message: format!(
+                "rolled back after {copied}/{source_count} rows ({} reverted): {reason}",
+                newly_inserted_ids.len()
+            ),
+        });
+    }
     drop(target_store);
 
     // Archive the source DB file. Move (rename) when possible; fall back to
@@ -321,6 +349,23 @@ fn migrate_single_db(
         rows_copied: copied,
         message: format!("migrated {copied} rows ({rows_before} -> {rows_after} on target)"),
     })
+}
+
+/// `None` when it is safe to archive-move `source_path` (main + `-wal` +
+/// `-shm`, three sequential non-atomic filesystem operations); `Some(reason)`
+/// when a live daemon holds it open or ownership could not be determined —
+/// either case risks tearing the archived copy.
+fn archive_unsafe_reason(source_path: &std::path::Path) -> Option<String> {
+    match crate::db_ownership::daemon_ownership(source_path) {
+        crate::db_ownership::DbOwnership::NotOwned => None,
+        crate::db_ownership::DbOwnership::Owned => Some(
+            "live daemon holds this DB open; refusing to archive a possibly torn main/-wal/-shm copy"
+                .to_string(),
+        ),
+        crate::db_ownership::DbOwnership::Unknown(reason) => Some(format!(
+            "daemon ownership undetermined ({reason}); refusing to risk a torn archive copy"
+        )),
+    }
 }
 
 /// Drop migrated source entries from the manifest and ensure the target entry

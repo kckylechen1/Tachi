@@ -192,6 +192,92 @@ fn read_pid(file: &File) -> std::io::Result<i32> {
     Ok(s.trim().parse::<i32>().unwrap_or(0))
 }
 
+/// Error from [`DualDaemonLock::acquire`]: names *which* of the two lock
+/// files is held by a live process, so the caller can report who is
+/// blocking the operation instead of a generic "already running".
+#[derive(Debug)]
+pub(crate) enum DualLockError {
+    /// The scoped `daemon-<hash>.lock` (matching the operation's target
+    /// global DB) is held by a live process.
+    ScopedRunning { pid: i32 },
+    /// The legacy `daemon.lock` (pre-scoping daemon versions) is held by a
+    /// live process.
+    LegacyRunning { pid: i32 },
+    /// Filesystem/syscall error while opening or locking either file.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for DualLockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DualLockError::ScopedRunning { pid } => write!(
+                f,
+                "another tachi daemon is already running for this DB (pid {pid}, scoped lock)"
+            ),
+            DualLockError::LegacyRunning { pid } => write!(
+                f,
+                "another tachi daemon is already running (pid {pid}, legacy lock)"
+            ),
+            DualLockError::Io(e) => write!(f, "daemon lock io error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for DualLockError {}
+
+/// Holds both the scoped (`daemon-<hash>.lock`) and legacy (`daemon.lock`)
+/// singleton locks for the duration of an operation that must not race a
+/// live daemon under either naming scheme. Tidy `--execute` and VACUUM
+/// previously probed only the legacy path, so a daemon running under the
+/// current scoped-lock scheme (the common case since the scoped lock was
+/// introduced) was invisible to them and concurrent writes could corrupt
+/// the DB. Acquiring both closes that gap: any live holder of either file
+/// blocks acquisition here, and holding both for the operation's lifetime
+/// also blocks a new daemon (under either scheme) from starting mid-operation.
+pub(crate) struct DualDaemonLock {
+    _scoped: DaemonLock,
+    _legacy: DaemonLock,
+}
+
+impl DualDaemonLock {
+    /// Acquire both locks for `global_db_path` under `app_home`. Returns
+    /// `Err(DualLockError::ScopedRunning{..})` / `Err(LegacyRunning{..})`
+    /// naming exactly which lock is held by a live process; the scoped
+    /// lock is checked first and released again before returning if the
+    /// legacy lock turns out to be busy (no partial hold on error).
+    pub(crate) fn acquire(
+        app_home: &Path,
+        global_db_path: &Path,
+    ) -> Result<Self, DualLockError> {
+        let scoped_path = scoped_daemon_lock_path(app_home, global_db_path);
+        let scoped = match DaemonLock::acquire(&scoped_path) {
+            Ok(lock) => lock,
+            Err(DaemonLockError::AlreadyRunning { pid }) => {
+                return Err(DualLockError::ScopedRunning { pid })
+            }
+            Err(DaemonLockError::Io(e)) => return Err(DualLockError::Io(e)),
+        };
+
+        let legacy_path = legacy_daemon_lock_path(app_home);
+        let legacy = match DaemonLock::acquire(&legacy_path) {
+            Ok(lock) => lock,
+            Err(DaemonLockError::AlreadyRunning { pid }) => {
+                // Returning drops `scoped` (a local of this function) on the
+                // way out, releasing its flock + removing its pid file
+                // before the caller sees the legacy conflict — no partial
+                // hold survives a failed acquire.
+                return Err(DualLockError::LegacyRunning { pid });
+            }
+            Err(DaemonLockError::Io(e)) => return Err(DualLockError::Io(e)),
+        };
+
+        Ok(DualDaemonLock {
+            _scoped: scoped,
+            _legacy: legacy,
+        })
+    }
+}
+
 /// Check whether `pid` refers to a live process this user can signal. Uses
 /// `kill(pid, 0)` which performs the permission and existence check without
 /// delivering a signal. Returns `false` for pid<=1.
@@ -326,5 +412,72 @@ mod tests {
         // pid 1 is conventionally init; we explicitly reject pid<=1 to avoid
         // false positives from EPERM.
         assert!(!process_alive(1));
+    }
+
+    #[test]
+    fn dual_lock_acquires_both_when_free() {
+        let dir = tempdir().unwrap();
+        let global = dir.path().join("global").join("memory.db");
+        std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+        std::fs::write(&global, b"db").unwrap();
+
+        let dual = DualDaemonLock::acquire(dir.path(), &global).expect("both locks free");
+        let scoped_path = scoped_daemon_lock_path(dir.path(), &global);
+        let legacy_path = legacy_daemon_lock_path(dir.path());
+        assert!(scoped_path.exists(), "scoped lock file must be created");
+        assert!(legacy_path.exists(), "legacy lock file must be created");
+        drop(dual);
+
+        // Dropping releases both flocks: a fresh acquire on each path
+        // (independently, mimicking a live daemon under either scheme)
+        // must succeed again.
+        let _scoped_again = DaemonLock::acquire(&scoped_path).expect("scoped released on drop");
+        let _legacy_again = DaemonLock::acquire(&legacy_path).expect("legacy released on drop");
+    }
+
+    #[test]
+    fn dual_lock_scoped_busy_reports_scoped_running() {
+        let dir = tempdir().unwrap();
+        let global = dir.path().join("global").join("memory.db");
+        std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+        std::fs::write(&global, b"db").unwrap();
+        let scoped_path = scoped_daemon_lock_path(dir.path(), &global);
+        let _holder = DaemonLock::acquire(&scoped_path).expect("pre-acquire scoped lock");
+
+        let err = DualDaemonLock::acquire(dir.path(), &global)
+            .err()
+            .expect("scoped lock busy must refuse");
+        match err {
+            DualLockError::ScopedRunning { pid } => {
+                assert_eq!(pid as u32, std::process::id());
+            }
+            other => panic!("expected ScopedRunning, got {other}"),
+        }
+    }
+
+    #[test]
+    fn dual_lock_legacy_busy_reports_legacy_running_and_releases_scoped() {
+        let dir = tempdir().unwrap();
+        let global = dir.path().join("global").join("memory.db");
+        std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+        std::fs::write(&global, b"db").unwrap();
+        let legacy_path = legacy_daemon_lock_path(dir.path());
+        let _holder = DaemonLock::acquire(&legacy_path).expect("pre-acquire legacy lock");
+
+        let err = DualDaemonLock::acquire(dir.path(), &global)
+            .err()
+            .expect("legacy lock busy must refuse");
+        match err {
+            DualLockError::LegacyRunning { pid } => {
+                assert_eq!(pid as u32, std::process::id());
+            }
+            other => panic!("expected LegacyRunning, got {other}"),
+        }
+
+        // The scoped lock must not remain held after the legacy conflict —
+        // no partial acquisition may survive a failed DualDaemonLock::acquire.
+        let scoped_path = scoped_daemon_lock_path(dir.path(), &global);
+        let _scoped_free = DaemonLock::acquire(&scoped_path)
+            .expect("scoped lock must have been released after legacy conflict");
     }
 }
