@@ -187,11 +187,15 @@ fn few_shot_for_intent(intent: &str) -> Vec<&str> {
 
 ---
 
-### 2.4 Shell Ops — 5-Stage Lifecycle 的动态示例
+### 2.4 Shell Ops — Retained Dispatch 的动态示例
 
-**现状：** `crates/tachi-server/src/shell_ops/mod.rs` 的 `meta_skill_for_stage()` 硬编码 5 个静态 skill path。
+**当前现状：** Shell 只保留 `dispatch` 和只读 `status` 两个 action；其中只有
+`dispatch` 映射到 `skill/superpowers/skills/executing-plans/SKILL.md` SOP。
+早期研究设想的 `brainstorm → plan → dispatch → review → ship` 五阶段 lifecycle
+已经删除，不再是当前架构或 skill mapping。
 
-**数据价值：** 样本就是 **动态生成的 stage 示例**。
+**历史数据价值：** 下表仍记录原五阶段研究如何将 SFT 样本分类为动态示例，
+但这些分类不是现行 Shell action inventory。
 
 | Stage | 数据中的对应 | 样本数 |
 |-------|------------|--------|
@@ -203,7 +207,7 @@ fn few_shot_for_intent(intent: &str) -> Vec<&str> {
 
 **实现方式：**
 - 不替换静态 SKILL.md，而是作为 **dynamic context** 注入
-- `tachi_shell` 进入 stage 时，从 SFT 数据中检索同类型的 2-3 条样本作为 few-shot
+- 若未来为保留的 `dispatch` 增加 SFT few-shot，应从同类型数据中检索 2-3 条样本作为 dynamic context；`status` 不注入 SOP 或示例
 - 未来可以用隔离的 SFT scope 或 run-scoped fixture 检索；不要把 SFT 数据导入生产普通 recall vector DB
 
 ---

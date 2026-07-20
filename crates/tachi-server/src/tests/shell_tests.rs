@@ -77,6 +77,21 @@ async fn non_async_dispatch_writes_packet_status_and_event_without_worker() {
     assert_eq!(response["stage"], "dispatch");
     assert_eq!(response["async"], false);
     assert!(response["dispatch_id"].is_null());
+    let injection = &response["injected_skill"];
+    assert_eq!(injection["required"], true);
+    assert_eq!(
+        injection["rel_path"],
+        "skill/superpowers/skills/executing-plans/SKILL.md"
+    );
+    if injection["loaded"] == true {
+        assert!(injection["source_path"].is_string());
+        assert!(injection["injected_path"].is_string());
+        assert!(injection["warning"].is_null());
+        assert!(injection["failure_class"].is_null());
+    } else {
+        assert!(injection["warning"].is_string());
+        assert!(injection["failure_class"].is_string());
+    }
     assert!(run_dir.join("instruction.md").exists());
 
     let status: Value = serde_json::from_str(
