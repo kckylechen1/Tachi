@@ -45,10 +45,25 @@ Read the branch that applies to you before treating the rest of this file as lit
 
 ## Issue portfolio and lifecycle law
 
-- Every open issue has exactly one primary portfolio: `area:memory-continuity` → #734; `area:product-surface` → #745; `area:trust-security` → #748; `area:agent-control-plane` → #749; `area:platform-reliability` → #1299. Existing protected umbrellas are subtracks, not additional peer portfolios.
+- The open portfolio is a **GitHub-native parent/sub-issue tree**, not a flat backlog. Normally only these six routers may be open without a parent:
+
+  | Router | Authority |
+  | --- | --- |
+  | #734 | memory continuity, Soul, judgment, precedent, and growth |
+  | #745 | model-facing verbs, facades, schemas, evidence presentation, and agent UX |
+  | #749 | task ownership, staffing, claims, receipts, adjudication, and federation |
+  | #868 | AGENTS/CLAUDE instructions and skill/plugin/MCP injection or projection |
+  | #1299 | performance, concurrency, CI, deployment, database/data health, and recovery |
+  | #1316 | identity and delegation authority, credentials, data partitioning, and egress |
+
+- Every other open issue has exactly one native primary parent: attach it to the nearest coherent child umbrella or router when creating it. A bounded implementation leaf belongs below the design/migration umbrella that owns its acceptance criteria, not directly below a root merely because the labels match. A parentless non-router issue is governance drift and must be attached, absorbed, or closed—not left in the root view.
+- Cross-domain work still chooses one primary parent. Express secondary relationships with `Related to #…` or issue comments; do not duplicate the issue or invent multi-headed ownership. Example: an instruction compiler that projects memory belongs under #868, with #734 related; a credential leak in worker launch belongs under #1316, with #749 related.
+- Start portfolio review from the six parentless routers and expand their native children; do not use a flat open-issue list as the default planning view. New leaf/design/bug issues must not create a seventh root. Labels aid search but do not replace native parentage.
 - Before designing or dispatching from an issue, read its latest disposition and inspect current code. A historical body with `DESIGN-SPLIT`, `PREMISE-COLLAPSED`, `ABSORBED`, or a supersession warning is not an executable contract.
 - Mark code/current-state honestly: `STALE-COMPLETE`, `STALE-BODY / VALID-REMAINDER`, `PREMISE-COLLAPSED / SUPERSEDED`, `STILL-VALID`, or `UNVERIFIED`. Code presence never proves host deployment or live-data repair.
-- New work attaches to one existing portfolio/subtrack and a bounded leaf; do not open a new umbrella for a renderer, project-manager persona, summary cache, carrier integration, or shared helper.
+- Do not open a new umbrella for a renderer, project-manager persona, summary cache, carrier integration, or shared helper. When an umbrella is genuinely needed, create it as a child of one of the six routers and move/attach its coherent leaves beneath it.
+- Umbrellas carrying `type:umbrella` or `agent:no-close` are owner/adjudicator-close only. Implementation PRs use `Refs` / `Related`, never `Closes`, and update the parent ledger, child disposition, and relevant umbrella comments when scope or completion changes.
+- #1319 is the contraction umbrella beneath #749 for staffing surfaces: converge Task dispatch, Shell, and Arena onto one internal staffing kernel and one receipt lifecycle, organized around Lead / ephemeral Worker / Ops. It is not a seventh router. Work under it must reduce model-facing tools, facades, schemas, duplicate ledgers, and production code; hiding old surfaces behind profiles, renaming them, or adding wrapper facades is not completion.
 
 ## Execution ownership boundary
 
