@@ -75,7 +75,7 @@ pub(crate) struct ConcurrencyCallReceipt {
     pub message_class: Option<String>,
     /// Loopback `host:port` only — no scheme, path, query, fragment, or userinfo.
     pub daemon_endpoint: String,
-    /// Opaque hash of the daemon URL (identity without leaking raw URL secrets).
+    /// Opaque hash of the sanitized `host:port` endpoint (never raw URL secrets).
     pub daemon_id: String,
     pub daemon_pid: Option<i64>,
     pub tool: &'static str,
@@ -210,16 +210,22 @@ pub(crate) fn sanitize_daemon_endpoint(url: &str) -> String {
         .next()
         .unwrap_or(rest)
         .trim();
-    if authority.is_empty() || authority.contains('@') {
+    // Drop userinfo (`user:pass@`) so receipts never fingerprint credentials.
+    let host_port = match authority.rsplit_once('@') {
+        Some((_, host_port)) => host_port,
+        None => authority,
+    };
+    if host_port.is_empty() {
         return "redacted".into();
     }
-    authority.to_string()
+    host_port.to_string()
 }
 
-/// Opaque non-secret daemon identity derived from the URL.
+/// Opaque daemon identity derived from the sanitized `host:port` endpoint.
+/// Never hashes raw URL credentials/query — that would be a stable secret fingerprint.
 pub(crate) fn opaque_daemon_id(url: &str) -> String {
     let mut hasher = DefaultHasher::new();
-    url.hash(&mut hasher);
+    sanitize_daemon_endpoint(url).hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -551,11 +557,44 @@ mod tests {
         );
         assert_eq!(
             sanitize_daemon_endpoint("http://user:pass@127.0.0.1:9/mcp"),
-            "redacted"
+            "127.0.0.1:9"
         );
         let id = opaque_daemon_id("http://127.0.0.1:9/mcp?token=x");
         assert_eq!(id.len(), 16);
         assert!(!id.contains("token"));
+    }
+
+    #[test]
+    fn opaque_daemon_id_ignores_credentials_query_and_fragment() {
+        let base = opaque_daemon_id("http://127.0.0.1:4242/mcp");
+        assert_eq!(
+            opaque_daemon_id("http://user:sekret@127.0.0.1:4242/mcp"),
+            base,
+            "userinfo must not change daemon_id"
+        );
+        assert_eq!(
+            opaque_daemon_id("http://127.0.0.1:4242/mcp?token=sekret"),
+            base,
+            "query must not change daemon_id"
+        );
+        assert_eq!(
+            opaque_daemon_id("http://127.0.0.1:4242/mcp#frag"),
+            base,
+            "fragment must not change daemon_id"
+        );
+        assert_eq!(
+            opaque_daemon_id("http://other:pass@127.0.0.1:4242/other?q=1#x"),
+            base,
+            "combined credential/query/fragment/path noise must not change daemon_id"
+        );
+        let other_port = opaque_daemon_id("http://127.0.0.1:4243/mcp");
+        assert_ne!(
+            other_port, base,
+            "different ports must yield different daemon_ids"
+        );
+        assert!(!base.contains("sekret"));
+        assert!(!base.contains("token"));
+        assert!(!base.contains("user"));
     }
 
     #[test]
