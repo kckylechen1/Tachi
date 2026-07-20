@@ -8,6 +8,16 @@ impl MemoryServer {
         rl.entry_counts()
     }
 
+    /// Rate-limit check keyed by this clone's stamped `#1255` session id.
+    pub(crate) fn check_session_rate_limit(
+        &self,
+        tool_name: &str,
+        args_hash: &str,
+    ) -> Result<Option<String>, rmcp::ErrorData> {
+        let session_id = self.rate_limit_session_id();
+        self.check_rate_limit(tool_name, args_hash, &session_id)
+    }
+
     pub(crate) fn check_rate_limit(
         &self,
         tool_name: &str,

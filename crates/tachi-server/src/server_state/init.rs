@@ -271,6 +271,7 @@ impl MemoryServer {
                 session_project: None,
                 work_claim_connection: None,
                 session_dispatch_depth: None,
+                rate_limit_session_id: uuid::Uuid::new_v4().to_string(),
             })),
             bound_agent_id: Arc::new(StdRwLock::new(bound_agent_id)),
             home_dir,

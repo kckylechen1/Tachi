@@ -19,6 +19,11 @@ pub(crate) struct AgentRuntime {
     /// lives at the gate in `session_identity::resolve_dispatch_depth`; `None`
     /// means "no marker seen" ≡ depth 0 (a leader session).
     pub(crate) session_dispatch_depth: Option<String>,
+    /// #1255: opaque rate-limit identity for this MCP session. Shared
+    /// `RateLimiter` state keys burst/RPM windows by this id; stamped fresh on
+    /// each `clone_for_mcp_session` so sessions do not inherit each other's
+    /// burst counters. Not a client-facing session token.
+    pub(crate) rate_limit_session_id: String,
     // #1099: `handoff_memos` (in-memory duplicate of the persisted
     // `handoff:<id>` store rows, LRU-capped, populated only by the retired
     // `handoff_leave`/`handoff_check` handlers) removed — it was the

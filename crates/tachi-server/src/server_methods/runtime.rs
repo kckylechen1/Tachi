@@ -5,8 +5,18 @@ use tachi_hub::ToolProfile;
 impl MemoryServer {
     pub(crate) fn clone_for_mcp_session(&self) -> Self {
         let mut clone = self.clone();
-        clone.agent_runtime = Arc::new(StdRwLock::new(self.agent_runtime_read().clone()));
+        let mut runtime = self.agent_runtime_read().clone();
+        // #1255: each MCP session gets its own opaque rate-limit identity so
+        // burst/RPM windows keyed by session_id do not bleed across clones
+        // that still share the process-global RateLimiter.
+        runtime.rate_limit_session_id = uuid::Uuid::new_v4().to_string();
+        clone.agent_runtime = Arc::new(StdRwLock::new(runtime));
         clone
+    }
+
+    /// #1255: opaque rate-limit session id stamped on this server/clone.
+    pub(crate) fn rate_limit_session_id(&self) -> String {
+        self.agent_runtime_read().rate_limit_session_id.clone()
     }
 
     pub(crate) fn set_tool_profile(&self, profile: Option<ToolProfile>) {

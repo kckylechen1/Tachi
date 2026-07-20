@@ -792,10 +792,11 @@ impl ServerHandler for MemoryServer {
                     .as_ref()
                     .map(|a| stable_hash(&serde_json::to_string(a).unwrap_or_default()))
                     .unwrap_or_default();
-                // Each MemoryServer clone corresponds to one MCP session
-                // (StreamableHttpService creates one clone per session), so
-                // "default" as session_id is correct for per-session limiting.
-                self.check_rate_limit(name, &args_hash, "default")?
+                // #1255: `clone_for_mcp_session` stamps a unique opaque id on
+                // each MCP session clone; `check_session_rate_limit` keys burst
+                // windows by that id so sessions sharing the process-global
+                // RateLimiter do not inherit each other's counters.
+                self.check_session_rate_limit(name, &args_hash)?
             };
 
             // #757-fold fix (gpt-5.6-terra review, CONCERN): `tachi_doctor_scan`
