@@ -3,18 +3,30 @@
 //! Drives serial vs concurrent `call_daemon_tool_raw` / `_with_phases` against
 //! an in-process Streamable-HTTP test daemon (same fixture shape as stdio /
 //! CLI dispatch tests). Emits machine-readable JSON-line receipts and asserts:
-//! - every call is recorded
+//! - every call is recorded client-side
+//! - the HTTP service observes the same unique tool-call markers server-side
 //! - serial baseline is predominantly `ok` on a healthy local daemon
-//! - concurrent mode produces overlapping wall-time intervals
+//! - concurrent mode produces overlapping client wall times AND ≥2 overlapping
+//!   in-flight tool handlers on the server (not merely serializable scheduling)
 //!
 //! Non-goals (explicit): do not raise `DAEMON_CALL_TIMEOUT`, do not add a
 //! session pool, do not change idle-reaper / rate-limit policy.
 
+use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
+use std::future::Future;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rmcp::model::CallToolRequestParams;
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, InitializeRequestParams, InitializeResult,
+    ListToolsResult, PaginatedRequestParams, ServerInfo,
+};
+use rmcp::service::{RequestContext, RoleServer};
+use rmcp::ServerHandler;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
@@ -22,6 +34,14 @@ use super::detect::DaemonInfo;
 use super::transport::{
     call_daemon_tool_raw_with_phases, DaemonCallError, DaemonCallPhaseTiming,
 };
+
+/// Allowlisted receipt error tags — never copy arbitrary error text.
+pub(crate) const MSG_DAEMON_CALL_TIMEOUT: &str = "daemon_call_timeout";
+pub(crate) const MSG_LOOP_DETECTED: &str = "loop_detected";
+pub(crate) const MSG_HANDSHAKE_FAILED: &str = "handshake_failed";
+pub(crate) const MSG_INVALID_PROXY_PROJECT: &str = "invalid_proxy_project";
+pub(crate) const MSG_TOOL_ERROR: &str = "tool_error";
+pub(crate) const MSG_OTHER: &str = "other";
 
 /// Outcome class for one transport-path call (no secrets).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -51,11 +71,156 @@ pub(crate) struct ConcurrencyCallReceipt {
     pub handshake_ms: u64,
     pub call_ms: u64,
     pub outcome: CallOutcome,
-    /// Short non-secret message class (error prefix / tag), never full payloads.
+    /// Allowlisted error tag only (see `MSG_*`); never arbitrary error text.
     pub message_class: Option<String>,
-    pub daemon_url: String,
+    /// Loopback `host:port` only — no scheme, path, query, fragment, or userinfo.
+    pub daemon_endpoint: String,
+    /// Opaque hash of the daemon URL (identity without leaking raw URL secrets).
+    pub daemon_id: String,
     pub daemon_pid: Option<i64>,
     pub tool: &'static str,
+}
+
+/// Server-side observation for the receipt harness (tool-handler enter/exit).
+#[derive(Debug)]
+struct ReceiptObserver {
+    tool_calls: AtomicU64,
+    in_flight: AtomicU64,
+    max_in_flight: AtomicU64,
+    markers: Mutex<HashSet<u64>>,
+    /// Brief hold at tool-handler entry so concurrent sessions can latch
+    /// overlapping in-flight work. Harness-only; not production behavior.
+    hold_ms: u64,
+}
+
+impl ReceiptObserver {
+    fn new(hold_ms: u64) -> Arc<Self> {
+        Arc::new(Self {
+            tool_calls: AtomicU64::new(0),
+            in_flight: AtomicU64::new(0),
+            max_in_flight: AtomicU64::new(0),
+            markers: Mutex::new(HashSet::new()),
+            hold_ms,
+        })
+    }
+
+    fn enter(self: &Arc<Self>, marker: Option<u64>) -> InFlightGuard {
+        self.tool_calls.fetch_add(1, Ordering::SeqCst);
+        let cur = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_in_flight.fetch_max(cur, Ordering::SeqCst);
+        if let Some(m) = marker {
+            if let Ok(mut set) = self.markers.lock() {
+                set.insert(m);
+            }
+        }
+        InFlightGuard {
+            observer: Arc::clone(self),
+        }
+    }
+
+    fn tool_call_count(&self) -> u64 {
+        self.tool_calls.load(Ordering::SeqCst)
+    }
+
+    fn max_in_flight(&self) -> u64 {
+        self.max_in_flight.load(Ordering::SeqCst)
+    }
+
+    fn unique_markers(&self) -> HashSet<u64> {
+        self.markers
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+}
+
+struct InFlightGuard {
+    observer: Arc<ReceiptObserver>,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.observer.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// MemoryServer wrapper that records server-side tool-call observation.
+#[derive(Clone)]
+struct ObservedServer {
+    inner: crate::MemoryServer,
+    observer: Arc<ReceiptObserver>,
+}
+
+impl ServerHandler for ObservedServer {
+    fn get_info(&self) -> ServerInfo {
+        self.inner.get_info()
+    }
+
+    fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<InitializeResult, rmcp::ErrorData>> + Send + '_ {
+        self.inner.initialize(request, context)
+    }
+
+    fn list_tools(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListToolsResult, rmcp::ErrorData>> + Send + '_ {
+        self.inner.list_tools(request, context)
+    }
+
+    fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<CallToolResult, rmcp::ErrorData>> + Send + '_ {
+        async move {
+            let marker = extract_receipt_marker(&request);
+            let _guard = self.observer.enter(marker);
+            if self.observer.hold_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(self.observer.hold_ms)).await;
+            }
+            self.inner.call_tool(request, context).await
+        }
+    }
+}
+
+fn extract_receipt_marker(params: &CallToolRequestParams) -> Option<u64> {
+    params
+        .arguments
+        .as_ref()
+        .and_then(|args| args.get("receipt_marker"))
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok()))
+        })
+}
+
+/// Strip scheme / path / query / fragment / userinfo — keep `host:port` only.
+pub(crate) fn sanitize_daemon_endpoint(url: &str) -> String {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(rest)
+        .trim();
+    if authority.is_empty() || authority.contains('@') {
+        return "redacted".into();
+    }
+    authority.to_string()
+}
+
+/// Opaque non-secret daemon identity derived from the URL.
+pub(crate) fn opaque_daemon_id(url: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    url.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 pub(crate) fn classify_daemon_call_outcome(
@@ -65,24 +230,27 @@ pub(crate) fn classify_daemon_call_outcome(
         Ok(tool_result) if tool_result.is_error.unwrap_or(false) => {
             let text = first_text_preview(tool_result);
             if text.contains("Loop detected") {
-                (CallOutcome::RateLimited, Some("loop_detected".into()))
+                (CallOutcome::RateLimited, Some(MSG_LOOP_DETECTED.into()))
             } else {
-                (CallOutcome::OtherError, Some(message_class(&text)))
+                (CallOutcome::OtherError, Some(MSG_TOOL_ERROR.into()))
             }
         }
         Ok(_) => (CallOutcome::Ok, None),
         Err(err) => {
             let msg = err.message();
             if msg.contains("timed out") {
-                (CallOutcome::Timeout, Some("daemon_call_timeout".into()))
+                (CallOutcome::Timeout, Some(MSG_DAEMON_CALL_TIMEOUT.into()))
             } else if msg.contains("Loop detected") {
-                (CallOutcome::RateLimited, Some("loop_detected".into()))
+                (CallOutcome::RateLimited, Some(MSG_LOOP_DETECTED.into()))
             } else if msg.contains("handshake failed") {
-                (CallOutcome::OtherError, Some("handshake_failed".into()))
+                (CallOutcome::OtherError, Some(MSG_HANDSHAKE_FAILED.into()))
             } else if msg.contains("invalid proxy project") {
-                (CallOutcome::OtherError, Some("invalid_proxy_project".into()))
+                (
+                    CallOutcome::OtherError,
+                    Some(MSG_INVALID_PROXY_PROJECT.into()),
+                )
             } else {
-                (CallOutcome::OtherError, Some(message_class(msg)))
+                (CallOutcome::OtherError, Some(MSG_OTHER.into()))
             }
         }
     }
@@ -102,9 +270,16 @@ fn first_text_preview(result: &rmcp::model::CallToolResult) -> String {
         .collect()
 }
 
-fn message_class(msg: &str) -> String {
-    let head = msg.split(':').next().unwrap_or(msg).trim();
-    head.chars().take(64).collect()
+fn is_allowlisted_message_class(class: &str) -> bool {
+    matches!(
+        class,
+        MSG_DAEMON_CALL_TIMEOUT
+            | MSG_LOOP_DETECTED
+            | MSG_HANDSHAKE_FAILED
+            | MSG_INVALID_PROXY_PROJECT
+            | MSG_TOOL_ERROR
+            | MSG_OTHER
+    )
 }
 
 pub(crate) fn intervals_overlap(a_start: u64, a_end: u64, b_start: u64, b_end: u64) -> bool {
@@ -134,6 +309,14 @@ fn rel_ms(epoch: Instant) -> u64 {
     u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+fn runtime_info_params(call_id: usize) -> CallToolRequestParams {
+    let mut params = CallToolRequestParams::new("runtime_info".to_string());
+    let mut args = serde_json::Map::new();
+    args.insert("receipt_marker".into(), serde_json::json!(call_id as u64));
+    params.arguments = Some(args);
+    params
+}
+
 async fn record_runtime_info_call(
     info: DaemonInfo,
     call_id: usize,
@@ -143,11 +326,17 @@ async fn record_runtime_info_call(
 ) -> ConcurrencyCallReceipt {
     let start_unix_ms = unix_ms_now();
     let start_rel_ms = rel_ms(harness_epoch);
-    let params = CallToolRequestParams::new("runtime_info".to_string());
+    let params = runtime_info_params(call_id);
     let (result, phases) = call_daemon_tool_raw_with_phases(&info, params, None).await;
     let end_unix_ms = unix_ms_now();
     let end_rel_ms = rel_ms(harness_epoch);
     let (outcome, message_class) = classify_daemon_call_outcome(&result);
+    if let Some(ref class) = message_class {
+        debug_assert!(
+            is_allowlisted_message_class(class),
+            "message_class must be allowlisted: {class}"
+        );
+    }
     let DaemonCallPhaseTiming {
         handshake_ms,
         call_ms,
@@ -167,7 +356,8 @@ async fn record_runtime_info_call(
         call_ms,
         outcome,
         message_class,
-        daemon_url: info.url,
+        daemon_endpoint: sanitize_daemon_endpoint(&info.url),
+        daemon_id: opaque_daemon_id(&info.url),
         daemon_pid: info.pid,
         tool: "runtime_info",
     }
@@ -184,6 +374,7 @@ fn emit_receipt_jsonl(receipts: &[ConcurrencyCallReceipt]) {
 async fn spawn_receipt_http_daemon(
     server: crate::MemoryServer,
     global_db_path: &Path,
+    observer: Arc<ReceiptObserver>,
 ) -> (
     DaemonInfo,
     CancellationToken,
@@ -205,9 +396,15 @@ async fn spawn_receipt_http_daemon(
     http_config.cancellation_token = ct.child_token();
 
     // Fresh MCP session id per Streamable connection so concurrent callers do
-    // not share one burst window (post-#1328 per-session limiter).
+    // not share one burst window (post-#1328 per-session limiter). ObservedServer
+    // wraps each session clone and records tool-handler enter/exit.
     let service = StreamableHttpService::new(
-        move || Ok(server.clone_for_mcp_session()),
+        move || {
+            Ok(ObservedServer {
+                inner: server.clone_for_mcp_session(),
+                observer: Arc::clone(&observer),
+            })
+        },
         Arc::new(LocalSessionManager::default()),
         http_config,
     );
@@ -229,6 +426,26 @@ async fn spawn_receipt_http_daemon(
         ct,
         handle,
     )
+}
+
+async fn wait_until_server_saw(
+    observer: &ReceiptObserver,
+    expected: u64,
+    label: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let seen = observer.tool_call_count();
+        if seen >= expected {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "server did not observe {expected} {label} tool calls within 5s; saw {seen}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 async fn run_serial_baseline(
@@ -278,14 +495,13 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn classify_timeout_and_rate_limit_message_classes() {
+    fn classify_uses_allowlisted_message_classes_only() {
         let timeout = Err(DaemonCallError::AfterDispatch(
             "daemon call 'runtime_info' timed out after 60s".into(),
         ));
-        assert_eq!(
-            classify_daemon_call_outcome(&timeout).0,
-            CallOutcome::Timeout
-        );
+        let (outcome, class) = classify_daemon_call_outcome(&timeout);
+        assert_eq!(outcome, CallOutcome::Timeout);
+        assert_eq!(class.as_deref(), Some(MSG_DAEMON_CALL_TIMEOUT));
 
         let limited = Err(DaemonCallError::AfterDispatch(
             "Loop detected: identical runtime_info calls".into(),
@@ -294,13 +510,52 @@ mod tests {
             classify_daemon_call_outcome(&limited).0,
             CallOutcome::RateLimited
         );
+        assert_eq!(
+            classify_daemon_call_outcome(&limited).1.as_deref(),
+            Some(MSG_LOOP_DETECTED)
+        );
 
         let handshake = Err(DaemonCallError::BeforeDispatch(
-            "daemon handshake failed at http://127.0.0.1:9/mcp: connect".into(),
+            "daemon handshake failed at http://127.0.0.1:9/mcp?token=secret: connect".into(),
         ));
         let (outcome, class) = classify_daemon_call_outcome(&handshake);
         assert_eq!(outcome, CallOutcome::OtherError);
-        assert_eq!(class.as_deref(), Some("handshake_failed"));
+        assert_eq!(class.as_deref(), Some(MSG_HANDSHAKE_FAILED));
+
+        let proxy = Err(DaemonCallError::BeforeDispatch(
+            "invalid proxy project header value: bad".into(),
+        ));
+        assert_eq!(
+            classify_daemon_call_outcome(&proxy).1.as_deref(),
+            Some(MSG_INVALID_PROXY_PROJECT)
+        );
+
+        let other = Err(DaemonCallError::AfterDispatch(
+            "daemon call 'runtime_info' failed: totally-arbitrary-secret-text".into(),
+        ));
+        let (outcome, class) = classify_daemon_call_outcome(&other);
+        assert_eq!(outcome, CallOutcome::OtherError);
+        assert_eq!(class.as_deref(), Some(MSG_OTHER));
+        assert!(!class.unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn sanitize_daemon_endpoint_strips_path_query_and_userinfo() {
+        assert_eq!(
+            sanitize_daemon_endpoint("http://127.0.0.1:1234/mcp"),
+            "127.0.0.1:1234"
+        );
+        assert_eq!(
+            sanitize_daemon_endpoint("http://127.0.0.1:1234/mcp?token=sekret#frag"),
+            "127.0.0.1:1234"
+        );
+        assert_eq!(
+            sanitize_daemon_endpoint("http://user:pass@127.0.0.1:9/mcp"),
+            "redacted"
+        );
+        let id = opaque_daemon_id("http://127.0.0.1:9/mcp?token=x");
+        assert_eq!(id.len(), 16);
+        assert!(!id.contains("token"));
     }
 
     #[test]
@@ -318,7 +573,8 @@ mod tests {
             call_ms: 20,
             outcome: CallOutcome::Ok,
             message_class: None,
-            daemon_url: "http://127.0.0.1:1234/mcp".into(),
+            daemon_endpoint: "127.0.0.1:1234".into(),
+            daemon_id: "abcd1234abcd1234".into(),
             daemon_pid: Some(42),
             tool: "runtime_info",
         };
@@ -329,9 +585,14 @@ mod tests {
         assert_eq!(value["handshake_ms"], json!(30));
         assert_eq!(value["call_ms"], json!(20));
         assert_eq!(value["tool"], json!("runtime_info"));
+        assert_eq!(value["daemon_endpoint"], json!("127.0.0.1:1234"));
+        assert!(value.get("daemon_url").is_none());
         assert!(value.get("arguments").is_none());
         assert!(value.get("token").is_none());
         assert!(value.get("authorization").is_none());
+        let dumped = value.to_string();
+        assert!(!dumped.contains("http://"));
+        assert!(!dumped.contains("/mcp"));
     }
 
     #[test]
@@ -349,7 +610,8 @@ mod tests {
             call_ms: 90,
             outcome: CallOutcome::Ok,
             message_class: None,
-            daemon_url: "http://127.0.0.1:1/mcp".into(),
+            daemon_endpoint: "127.0.0.1:1".into(),
+            daemon_id: "deadbeefdeadbeef".into(),
             daemon_pid: None,
             tool: "runtime_info",
         };
@@ -366,7 +628,8 @@ mod tests {
     }
 
     /// Live transport-path harness: serial baseline + concurrent burst via
-    /// `call_daemon_tool_raw_with_phases` against an in-process test daemon.
+    /// `call_daemon_tool_raw_with_phases` against an in-process test daemon
+    /// with server-side call observation.
     ///
     /// Run:
     /// ```text
@@ -380,7 +643,11 @@ mod tests {
         let global: PathBuf = temp.path().join("global/memory.db");
         std::fs::create_dir_all(global.parent().expect("parent")).expect("mkdir");
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
-        let (daemon, ct, daemon_task) = spawn_receipt_http_daemon(server, &global).await;
+        // 40ms enter-hold widens the overlap window so concurrent sessions can
+        // prove a real in-flight high-water mark ≥ 2 on the tool handler.
+        let observer = ReceiptObserver::new(40);
+        let (daemon, ct, daemon_task) =
+            spawn_receipt_http_daemon(server, &global, Arc::clone(&observer)).await;
 
         // Give the axum listener a beat to accept.
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -393,16 +660,45 @@ mod tests {
         const CALLS_PER_CALLER: usize = 3;
 
         let mut serial = run_serial_baseline(&daemon, SERIAL_N, harness_epoch, &mut next_id).await;
+        wait_until_server_saw(&observer, SERIAL_N as u64, "serial").await;
+        assert_eq!(
+            observer.tool_call_count(),
+            SERIAL_N as u64,
+            "server-observed serial tool calls must equal client-emitted receipts"
+        );
+
+        let max_after_serial = observer.max_in_flight();
         let mut concurrent =
             run_concurrent_burst(&daemon, CALLERS, CALLS_PER_CALLER, harness_epoch, &mut next_id)
                 .await;
 
         let expected = SERIAL_N + CALLERS * CALLS_PER_CALLER;
+        wait_until_server_saw(&observer, expected as u64, "total").await;
+
         assert_eq!(
             serial.len() + concurrent.len(),
             expected,
             "harness must record every call"
         );
+        assert_eq!(
+            observer.tool_call_count(),
+            expected as u64,
+            "server-observed tool calls must equal client-emitted receipt count"
+        );
+
+        let markers = observer.unique_markers();
+        assert_eq!(
+            markers.len(),
+            expected,
+            "server must see every unique receipt_marker; markers={markers:?}"
+        );
+        for receipt in serial.iter().chain(concurrent.iter()) {
+            assert!(
+                markers.contains(&(receipt.call_id as u64)),
+                "missing server marker for call_id={}",
+                receipt.call_id
+            );
+        }
 
         let serial_ok = serial
             .iter()
@@ -419,10 +715,29 @@ mod tests {
             "concurrent mode must produce overlapping wall times; receipts={concurrent:?}"
         );
 
+        let max_in_flight = observer.max_in_flight();
+        assert!(
+            max_in_flight >= 2,
+            "server must accept ≥2 overlapping in-flight tool calls during concurrent burst \
+             (max_in_flight={max_in_flight}, max_after_serial={max_after_serial}); \
+             if this fails the stack may be serializing call_tool — do not weaken this gate"
+        );
+
+        let expected_endpoint = sanitize_daemon_endpoint(&daemon.url);
+        let expected_daemon_id = opaque_daemon_id(&daemon.url);
         for receipt in serial.iter().chain(concurrent.iter()) {
             assert_eq!(receipt.tool, "runtime_info");
-            assert_eq!(receipt.daemon_url, daemon.url);
+            assert_eq!(receipt.daemon_endpoint, expected_endpoint);
+            assert_eq!(receipt.daemon_id, expected_daemon_id);
             assert_eq!(receipt.daemon_pid, daemon.pid);
+            assert!(!receipt.daemon_endpoint.contains("://"));
+            assert!(!receipt.daemon_endpoint.contains('/'));
+            if let Some(ref class) = receipt.message_class {
+                assert!(
+                    is_allowlisted_message_class(class),
+                    "non-allowlisted message_class: {class}"
+                );
+            }
             // Successful calls should report a measurable handshake phase —
             // this is the #1255 evidence leaf for later transport-reuse work.
             if receipt.outcome == CallOutcome::Ok {
@@ -446,6 +761,13 @@ mod tests {
         assert_eq!(
             timeout_count, 0,
             "unexpected DAEMON_CALL_TIMEOUT under in-process harness; receipts={all:?}"
+        );
+
+        println!(
+            "1255_concurrency_receipt_server_obs tool_calls={} max_in_flight={} unique_markers={}",
+            observer.tool_call_count(),
+            max_in_flight,
+            markers.len()
         );
 
         ct.cancel();
