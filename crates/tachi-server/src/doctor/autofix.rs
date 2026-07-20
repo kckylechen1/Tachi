@@ -4,9 +4,19 @@ use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+#[cfg(all(test, unix))]
+use std::cell::Cell;
 
 use super::classify::sidecar;
 use super::{AutoFixAction, DbClassification, DoctorFinding};
+
+// Test inject: corrupt the exclusive dest before open/checkpoint so the
+// failure path runs, and force `discard_incomplete_checkpoint` to leave the
+// ordinary `.checkpointed.*.db` name in place (stuck cleanup).
+#[cfg(all(test, unix))]
+thread_local! {
+    static INJECT_STUCK_FAILED_DEST: Cell<bool> = const { Cell::new(false) };
+}
 
 // ─── Auto-fix ────────────────────────────────────────────────────────────────
 
@@ -487,11 +497,12 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
     // must block success. Do not open/checkpoint an incomplete main-only copy.
     if wal.exists() {
         if let Err(e) = fs::copy(&wal, &wal_dest) {
-            return checkpoint_failure_action(
+            let (action, skip_gc) = checkpoint_failure_action(
                 src,
                 &dest,
                 format!("copy wal: {e}"),
             );
+            return finish_checkpoint_action(src_path, action, skip_gc);
         }
     }
 
@@ -506,23 +517,40 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
         "shm=ok".to_string()
     };
 
+    #[cfg(all(test, unix))]
+    if INJECT_STUCK_FAILED_DEST.get() {
+        // Force open/checkpoint failure while leaving a normal-looking dest name
+        // for discard inject (see discard_incomplete_checkpoint).
+        // Drop copied sidecars first — a leftover -wal can mask a corrupt main.
+        let _ = fs::remove_file(&wal_dest);
+        let _ = fs::remove_file(&shm_dest);
+        fs::write(
+            &dest,
+            b"not-a-sqlite-db-for-stuck-discard-inject!!!!!",
+        )
+        .expect("inject corrupt dest");
+    }
+
     // Open the COPY read-write and force a TRUNCATE checkpoint.
     // Success alone may advertise destination; open/checkpoint failures must
     // discard and return destination: None (never a usable action target).
     let dest_str = dest.to_string_lossy().to_string();
-    let result = match memcore::db::open_for_wal_checkpoint(&dest_str) {
+    let (result, skip_gc) = match memcore::db::open_for_wal_checkpoint(&dest_str) {
         Ok(conn) => {
             // Best-effort; ignore returned WAL stats.
             match memcore::db::checkpoint_wal_truncate(&conn) {
-                Ok(_) => AutoFixAction {
-                    path: src.to_string(),
-                    action: "checkpoint_wal_copy".to_string(),
-                    outcome: "ok".to_string(),
-                    note: format!(
-                        "wrote .checkpointed.<stamp>.db copy (original untouched); {shm_token}"
-                    ),
-                    destination: Some(dest_str),
-                },
+                Ok(_) => (
+                    AutoFixAction {
+                        path: src.to_string(),
+                        action: "checkpoint_wal_copy".to_string(),
+                        outcome: "ok".to_string(),
+                        note: format!(
+                            "wrote .checkpointed.<stamp>.db copy (original untouched); {shm_token}"
+                        ),
+                        destination: Some(dest_str),
+                    },
+                    false,
+                ),
                 Err(e) => checkpoint_failure_action(
                     src,
                     &dest,
@@ -537,6 +565,19 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
         ),
     };
 
+    finish_checkpoint_action(src_path, result, skip_gc)
+}
+
+/// GC after a checkpoint attempt, unless cleanup left a stuck ordinary
+/// `.checkpointed.*.db` name (which GC would treat as a usable copy).
+fn finish_checkpoint_action(
+    src_path: &Path,
+    result: AutoFixAction,
+    skip_gc: bool,
+) -> AutoFixAction {
+    if skip_gc {
+        return result;
+    }
     // GC: keep at most the 3 most recent .checkpointed.*.db copies per
     // source DB. Sidecar NotFound is success; other delete errors surface.
     let gc_note = gc_old_checkpoint_copies(src_path, 3);
@@ -588,21 +629,36 @@ fn copy_create_new(src: &Path, dest: &Path) -> io::Result<()> {
     let mut inp = File::open(src)?;
     io::copy(&mut inp, &mut out)?;
     out.flush()?;
+    // Exclusive create uses process umask defaults; restore source mode bits
+    // before any success advertisement (owner-only DBs must stay owner-only).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(src)?.permissions().mode();
+        fs::set_permissions(dest, fs::Permissions::from_mode(mode))?;
+    }
     Ok(())
 }
 
-fn checkpoint_failure_action(src: &str, dest: &Path, note: String) -> AutoFixAction {
-    let note = match discard_incomplete_checkpoint(dest) {
+/// Discard incomplete dest; second value is `true` when cleanup could not
+/// remove or quarantine the ordinary checkpoint name — caller must skip GC.
+fn checkpoint_failure_action(src: &str, dest: &Path, note: String) -> (AutoFixAction, bool) {
+    let stuck = discard_incomplete_checkpoint(dest);
+    let skip_gc = stuck.is_some();
+    let note = match stuck {
         Some(cleanup) => format!("{note}; {cleanup}"),
         None => note,
     };
-    AutoFixAction {
-        path: src.to_string(),
-        action: "checkpoint_wal_copy".to_string(),
-        outcome: "error".to_string(),
-        note,
-        destination: None,
-    }
+    (
+        AutoFixAction {
+            path: src.to_string(),
+            action: "checkpoint_wal_copy".to_string(),
+            outcome: "error".to_string(),
+            note,
+            destination: None,
+        },
+        skip_gc,
+    )
 }
 
 fn shm_copy_failure_token(shm_dest: &Path, copy_err: &io::Error) -> String {
@@ -634,6 +690,16 @@ fn shm_copy_failure_token(shm_dest: &Path, copy_err: &io::Error) -> String {
 /// never a normal-looking usable checkpoint. Returns a note when a usable
 /// name could not be cleared.
 fn discard_incomplete_checkpoint(dest: &Path) -> Option<String> {
+    #[cfg(all(test, unix))]
+    if INJECT_STUCK_FAILED_DEST.get() {
+        // Leave the ordinary `.checkpointed.*.db` name in place so GC would
+        // otherwise treat it as a usable copy (discrimination for skip-GC).
+        return Some(format!(
+            "incomplete remains at {} (rm: injected; rename: injected)",
+            dest.display()
+        ));
+    }
+
     let mut stuck = Vec::new();
     for path in [
         dest.to_path_buf(),
@@ -1089,5 +1155,90 @@ mod checkpoint_honesty_tests {
 
         let second = gc_old_checkpoint_copies(&src, 2);
         assert!(second.is_none(), "second run must be clean: {second:?}");
+    }
+
+    #[test]
+    fn stuck_failed_dest_skips_gc_preserving_prior_successes() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        write_wal_mode_db(&db);
+
+        let mut priors = Vec::new();
+        for _ in 0..3 {
+            let action = checkpoint_wal_copy(db.to_str().unwrap());
+            assert_eq!(action.outcome, "ok");
+            let dest = PathBuf::from(action.destination.expect("success dest"));
+            assert!(dest.exists());
+            priors.push(dest);
+        }
+        assert_eq!(checkpointed_globs(dir.path(), "memory.db").len(), 3);
+
+        struct ClearStuckInject;
+        impl Drop for ClearStuckInject {
+            fn drop(&mut self) {
+                INJECT_STUCK_FAILED_DEST.set(false);
+            }
+        }
+        INJECT_STUCK_FAILED_DEST.set(true);
+        let _clear = ClearStuckInject;
+        let failed = checkpoint_wal_copy(db.to_str().unwrap());
+        drop(_clear);
+
+        assert_eq!(failed.outcome, "error");
+        assert!(failed.destination.is_none());
+        assert!(
+            failed.note.contains("incomplete remains"),
+            "failure note must record stuck cleanup, got: {}",
+            failed.note
+        );
+
+        for prior in &priors {
+            assert!(
+                prior.exists(),
+                "stuck failed dest must not let GC cull prior success {}",
+                prior.display()
+            );
+        }
+        let remaining = checkpointed_globs(dir.path(), "memory.db");
+        assert!(
+            remaining.len() >= 3,
+            "all three prior successes must survive; got {remaining:?}"
+        );
+        for prior in &priors {
+            assert!(
+                remaining.iter().any(|p| p == prior),
+                "prior {} missing from remaining {remaining:?}",
+                prior.display()
+            );
+        }
+        // Allow tempdir cleanup of the stuck leftover.
+        for p in remaining {
+            if !priors.iter().any(|prior| prior == &p) {
+                let _ = fs::remove_file(&p);
+            }
+        }
+    }
+
+    #[test]
+    fn checkpoint_dest_preserves_source_mode_bits() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        write_delete_mode_db(&db);
+        chmod(&db, 0o600);
+
+        let action = checkpoint_wal_copy(db.to_str().unwrap());
+
+        assert_eq!(action.outcome, "ok");
+        let dest = PathBuf::from(action.destination.expect("success dest"));
+        let mode = fs::metadata(&dest).expect("dest metadata").permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "checkpoint dest must preserve source mode bits (not world-readable)"
+        );
+        assert_eq!(
+            mode & 0o044,
+            0,
+            "checkpoint dest must not be group/world-readable"
+        );
     }
 }
