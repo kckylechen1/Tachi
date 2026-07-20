@@ -15,6 +15,28 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+/// **No `hard_state` TTL/backfill here (#1342 follow-up STOPPED on this
+/// namespace deliberately — see the implementer's report for the full STOP,
+/// this is the pointer left in-code).** Two independent key shapes share this
+/// namespace and neither has an unambiguous single-row "terminal write":
+///
+/// - `todos:<task_id>` ([`OrchestratorTodoList`]) is a LIST of per-todo
+///   [`TodoStatus`] values; "terminal" is an aggregate over the whole vec
+///   (see [`has_incomplete_todos`]) that can flip back from all-done to
+///   incomplete the moment a new todo is added to the same row — a TTL
+///   stamped on the "all done" write would then need to be explicitly
+///   un-stamped on the next non-terminal write, and a reap racing that window
+///   would delete an active task's row.
+/// - `handoff:<task_id>` ([`HandoffPacket`]) has NO terminal-state enum at
+///   all: `current_state` is caller-supplied free text, not one of a fixed
+///   set of states this module can pattern-match on.
+///
+/// Guessing a terminal-write point here (rather than following the actual
+/// code) is exactly the failure mode the #1342 packet's own escape hatch
+/// warns against; if this namespace gets a TTL, the todo-list aggregate rule
+/// and the handoff terminal-state concept both need to be designed and
+/// reviewed first, not backed into as a side effect of a lifecycle-hygiene
+/// pass.
 const ORCHESTRATOR_NS: &str = "orchestrator";
 /// A todo update reads, modifies, and writes one shared list. Retrying a small,
 /// fixed number of CAS conflicts preserves independent concurrent updates without

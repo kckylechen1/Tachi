@@ -309,6 +309,46 @@ fn concurrent_claim_smoke_single_winner_under_load() {
     let _ = std::fs::remove_file(format!("{db_path_str}-shm"));
 }
 
+/// #1342 follow-up: a claim row is spent the instant it lands, so every write
+/// must carry a 90-day `hard_state` TTL (`memcore::reap_expired_state` owns
+/// the actual cleanup off this field).
+#[test]
+fn claim_write_carries_a_ninety_day_hard_state_ttl() {
+    let db_path = std::env::temp_dir().join(format!(
+        "sticky-claim-ttl-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = test_server(db_path.clone());
+
+    server
+        .with_global_store(|store| try_claim_sticky(store, "ttl-sticky", Some("oz")))
+        .expect("claim sticky");
+
+    let (raw, _version) = server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(super::claim::STICKY_CLAIM_NAMESPACE, "ttl-sticky")
+                .map_err(|e| e.to_string())
+        })
+        .expect("read claim row")
+        .expect("claim row present");
+    let value: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+    let expires_at = value["expires_at"]
+        .as_str()
+        .expect("expires_at must be a string");
+    let parsed = chrono::DateTime::parse_from_rfc3339(expires_at)
+        .expect("expires_at must be valid RFC3339")
+        .with_timezone(&chrono::Utc);
+    assert!(
+        parsed > chrono::Utc::now() + chrono::Duration::days(89),
+        "expires_at ({parsed}) must be roughly 90 days out"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
+    let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
+}
+
 #[test]
 fn is_claimed_reflects_successful_claim() {
     let db_path = std::env::temp_dir().join(format!(

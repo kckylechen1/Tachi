@@ -79,6 +79,14 @@ pub(crate) struct BuildTicket {
     pub env_id: Option<String>,
     pub dispatch_id: Option<String>,
     pub created_at: String,
+    /// `hard_state` TTL (#1342 follow-up), stamped once at [`BuildTicket::new`]
+    /// — a ticket is write-once/immutable, so `now + 90d` is set at creation
+    /// and never revisited. `#[serde(default)]` lets a pre-TTL ticket already
+    /// on disk decode as `""` (never reaped; see `BuildReceipt::expires_at`'s
+    /// doc for the identical reasoning); `background.rs`'s idempotent backfill
+    /// assigns those rows a real TTL.
+    #[serde(default)]
+    pub expires_at: String,
 }
 
 impl BuildTicket {
@@ -142,6 +150,7 @@ impl BuildTicket {
             env_id,
             dispatch_id,
             created_at: chrono::Utc::now().to_rfc3339(),
+            expires_at: (chrono::Utc::now() + chrono::Duration::days(90)).to_rfc3339(),
         })
     }
 
@@ -209,6 +218,14 @@ pub(crate) struct TicketStatus {
     /// Why it failed / was cancelled (the most recent reason).
     pub last_error: Option<String>,
     pub updated_at: String,
+    /// `hard_state` TTL (#1342 follow-up): stamped `now + 90d` on every
+    /// write (this row is mutable, unlike [`BuildTicket`], but every write
+    /// here is either a fresh failed-attempt record or a terminal
+    /// cancel — never a "still open, don't expire" state — so the TTL is
+    /// unconditional, same as `super::BuildReceipt`'s `expires_at`.
+    /// `#[serde(default)]` for the same pre-TTL-row reasoning as there.
+    #[serde(default)]
+    pub expires_at: String,
 }
 
 /// Submit a ticket. Write-once: re-submitting the *same request* is an
@@ -376,6 +393,7 @@ pub(crate) fn record_failed_attempt(
         attempts,
         last_error: Some(truncate(error, 1_000)),
         updated_at: chrono::Utc::now().to_rfc3339(),
+        expires_at: (chrono::Utc::now() + chrono::Duration::days(90)).to_rfc3339(),
     };
     write_status(store, &status)?;
     Ok(status)
@@ -425,6 +443,7 @@ pub(crate) fn cancel_ticket(
             attempts,
             last_error: Some(truncate(reason, 1_000)),
             updated_at: chrono::Utc::now().to_rfc3339(),
+            expires_at: (chrono::Utc::now() + chrono::Duration::days(90)).to_rfc3339(),
         },
     )?;
     Ok(CancelOutcome::Cancelled)

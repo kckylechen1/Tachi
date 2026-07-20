@@ -5,7 +5,7 @@ use std::path::Path;
 use rusqlite::Connection;
 use serde_json::json;
 
-use crate::daemon_lock::DaemonLock;
+use crate::daemon_lock::{DualDaemonLock, DualLockError};
 use crate::manifest::Manifest;
 
 use super::{backup_db, inventory::resolve_one};
@@ -45,15 +45,29 @@ pub async fn run_vacuum_cli(
         return Ok(());
     }
 
-    // Acquire daemon.lock exclusively. If a live daemon is using it, refuse.
-    let lock_path = app_home.join("daemon.lock");
-    let _lock = match DaemonLock::acquire(&lock_path) {
+    // Acquire BOTH the scoped (daemon-<hash>.lock, matching `path`) and
+    // legacy (daemon.lock) daemon locks exclusively. Probing only the
+    // legacy path (the old behavior) was invisible to a daemon running
+    // under the current scoped-lock scheme, letting VACUUM race a live
+    // daemon's writes.
+    let _lock = match DualDaemonLock::acquire(app_home, &path) {
         Ok(l) => l,
-        Err(e) => {
+        Err(DualLockError::ScopedRunning { pid }) => {
             return Err(format!(
-                "cannot acquire daemon.lock for VACUUM ({e}). Stop the daemon first: `tachi daemon kill`"
+                "cannot VACUUM {}: tachi daemon is running (pid {pid}, scoped lock). Stop the daemon first: `tachi daemon kill`",
+                path.display()
             )
             .into());
+        }
+        Err(DualLockError::LegacyRunning { pid }) => {
+            return Err(format!(
+                "cannot VACUUM {}: tachi daemon is running (pid {pid}, legacy lock). Stop the daemon first: `tachi daemon kill`",
+                path.display()
+            )
+            .into());
+        }
+        Err(DualLockError::Io(e)) => {
+            return Err(format!("daemon lock probe failed for VACUUM: {e}").into());
         }
     };
 
@@ -95,4 +109,91 @@ fn sibling(path: &Path, suffix: &str) -> std::path::PathBuf {
     s.push(".");
     s.push(suffix);
     std::path::PathBuf::from(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::manifest::{DbEntry, DbRole, Manifest};
+    use tempfile::tempdir;
+
+    /// Fresh app_home + a manifest with exactly one resolvable "tachi" DB
+    /// entry pointing at an on-disk file, so `resolve_one` succeeds and the
+    /// lock-acquisition path (the only thing exercised before any real
+    /// VACUUM I/O) is reached deterministically.
+    fn fresh_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempdir().unwrap();
+        let app_home = dir.path().join(".tachi");
+        std::fs::create_dir_all(&app_home).unwrap();
+        let db_path = dir.path().join("project").join("memory.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        std::fs::write(&db_path, b"not-a-real-sqlite-file").unwrap();
+
+        let mut manifest = Manifest::empty();
+        manifest.dbs.push(DbEntry {
+            path: db_path.display().to_string(),
+            role: DbRole::Project,
+            owner: "tachi".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_classification: "healthy".to_string(),
+            scope_hint: "test-fixture".to_string(),
+            notes: String::new(),
+        });
+        manifest.save(&app_home.join("manifest.json")).unwrap();
+
+        (dir, app_home, db_path)
+    }
+
+    #[tokio::test]
+    async fn vacuum_refuses_when_scoped_lock_is_held() {
+        let (_dir, app_home, db_path) = fresh_fixture();
+        let scoped_path = crate::daemon_lock::scoped_daemon_lock_path(&app_home, &db_path);
+        let _holder = crate::daemon_lock::DaemonLock::acquire(&scoped_path)
+            .expect("pre-acquire scoped lock to simulate a live daemon");
+
+        let db_arg = db_path.display().to_string();
+        let result = run_vacuum_cli(&db_arg, true, &app_home, false).await;
+
+        let err = result.err().expect("must refuse while scoped lock is held");
+        assert!(
+            err.to_string().contains("scoped lock"),
+            "error must name the scoped lock, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn vacuum_refuses_when_legacy_lock_is_held() {
+        let (_dir, app_home, db_path) = fresh_fixture();
+        let legacy_path = crate::daemon_lock::legacy_daemon_lock_path(&app_home);
+        let _holder = crate::daemon_lock::DaemonLock::acquire(&legacy_path)
+            .expect("pre-acquire legacy lock to simulate an un-upgraded live daemon");
+
+        let db_arg = db_path.display().to_string();
+        let result = run_vacuum_cli(&db_arg, true, &app_home, false).await;
+
+        let err = result.err().expect("must refuse while legacy lock is held");
+        assert!(
+            err.to_string().contains("legacy lock"),
+            "error must name the legacy lock, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_does_not_touch_locks() {
+        // --apply=false must short-circuit before any lock acquisition —
+        // even with a live-looking scoped lock present, dry-run must not
+        // error out on it.
+        let (_dir, app_home, db_path) = fresh_fixture();
+        let scoped_path = crate::daemon_lock::scoped_daemon_lock_path(&app_home, &db_path);
+        let _holder = crate::daemon_lock::DaemonLock::acquire(&scoped_path)
+            .expect("pre-acquire scoped lock");
+
+        let db_arg = db_path.display().to_string();
+        let result = run_vacuum_cli(&db_arg, false, &app_home, false).await;
+
+        assert!(result.is_ok(), "dry-run must not touch locks: {result:?}");
+    }
 }

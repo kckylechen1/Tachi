@@ -92,6 +92,11 @@ async fn tachi_memory_recall_proposals_review_and_apply_config_env() {
         .expect("review should succeed");
     let review_json: Value = serde_json::from_str(&review_body).expect("review JSON");
     assert_eq!(review_json["proposal"]["status"], json!("approved"));
+    assert!(
+        review_json["proposal"]["expires_at"].is_null(),
+        "#1342 follow-up: an approved-but-not-yet-applied proposal must stay \
+         TTL-less until its own terminal (applied) write: {review_json}"
+    );
 
     let mut missing_confirm = tachi_memory_params("apply_recall_proposals");
     missing_confirm.proposal_id = Some(proposal_id.clone());
@@ -113,9 +118,144 @@ async fn tachi_memory_recall_proposals_review_and_apply_config_env() {
         .as_array()
         .expect("updated keys")
         .contains(&json!("TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR")));
+    // #1342 follow-up: `applied` is terminal, so this write must carry a TTL.
+    let expires_at = apply_json["proposal"]["expires_at"]
+        .as_str()
+        .expect("applied recall config proposal must carry expires_at");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(expires_at).is_ok(),
+        "expires_at must be a valid RFC3339 timestamp: {expires_at}"
+    );
 
     let config_body = std::fs::read_to_string(&config_env).expect("read config.env");
     assert!(config_body.contains("VOYAGE_API_KEY=vault:VOYAGE_API_KEY"));
     assert!(config_body.contains("TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.6"));
     assert!(config_body.contains("TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4"));
+}
+
+/// #1342 follow-up: a rejected recall-config proposal is terminal (it will
+/// never be applied), so its review write must carry a 30-day TTL
+/// immediately — unlike `approved`, which must wait for the apply action's
+/// own terminal write.
+#[tokio::test]
+async fn recall_proposal_reject_stamps_a_ttl_immediately() {
+    let (server, _temp_home) = make_server_with_temp_home();
+
+    server
+        .with_global_store(|store| {
+            let mut all_terms = make_entry("recall-reject-all-terms");
+            all_terms.path = "/scratch/tachi/recall-reject-all-terms".to_string();
+            all_terms.summary = "Recall reject all terms".to_string();
+            all_terms.text = "cleanup preview safe deployment note".to_string();
+            all_terms.keywords = vec![
+                "cleanup".to_string(),
+                "preview".to_string(),
+                "safe".to_string(),
+            ];
+            store.upsert(&all_terms).map_err(|e| e.to_string())?;
+
+            let mut partial = make_entry("recall-reject-partial-term");
+            partial.path = "/scratch/tachi/recall-reject-partial-term".to_string();
+            partial.summary = "Recall reject partial term".to_string();
+            partial.text = "cleanup preview deletes stale artifacts".to_string();
+            partial.keywords = Vec::new();
+            store.upsert(&partial).map_err(|e| e.to_string())
+        })
+        .expect("seed recall proposal entries");
+
+    let metadata = json!({
+        "cases": [
+            {
+                "name": "partial-cleanup",
+                "query": "cleanup preview safe",
+                "expected_id": "recall-reject-partial-term"
+            }
+        ],
+        "variants": [
+            {
+                "name": "or-fallback-0.6",
+                "recall_config": {
+                    "or_fallback_fts_score_factor": 0.6,
+                    "or_fallback_fts_max_terms": 4
+                }
+            }
+        ]
+    });
+
+    let mut proposals = tachi_memory_params("recall_proposals");
+    proposals.format = Some("json".to_string());
+    proposals.scope = Some("memory".to_string());
+    proposals.top_k = 3;
+    proposals.force = true;
+    proposals.metadata = Some(metadata.clone());
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, proposals)
+        .await
+        .expect("recall proposals should succeed");
+    let parsed: Value = serde_json::from_str(&body).expect("proposal response JSON");
+    let proposal = parsed["proposals"]
+        .as_array()
+        .expect("proposal list")
+        .iter()
+        .find(|proposal| proposal["variant"] == json!("or-fallback-0.6"))
+        .unwrap_or_else(|| panic!("expected recall proposal in response: {parsed}"));
+    let proposal_id = proposal["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_string();
+
+    let mut review = tachi_memory_params("review_recall_proposal");
+    review.format = Some("json".to_string());
+    review.proposal_id = Some(proposal_id.clone());
+    review.review_status = Some("rejected".to_string());
+    let review_body = crate::facade_memory_ops::handle_tachi_memory(&server, review)
+        .await
+        .expect("review should succeed");
+    let review_json: Value = serde_json::from_str(&review_body).expect("review JSON");
+    assert_eq!(review_json["proposal"]["status"], json!("rejected"));
+
+    let expires_at = review_json["proposal"]["expires_at"]
+        .as_str()
+        .expect("a rejected (terminal) recall proposal must carry expires_at immediately")
+        .to_string();
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(&expires_at).is_ok(),
+        "expires_at must be a valid RFC3339 timestamp: {expires_at}"
+    );
+
+    // #1342 follow-up BUG (cross-vendor review): re-generating proposals
+    // (the same eval-input path a repeat `tachi_memory(action='recall_proposals',
+    // ...)` call takes) used to rewrite this now-terminal row from scratch,
+    // silently erasing its `expires_at` — which the next maintenance tick's
+    // idempotent backfill would then re-stamp with a brand-new `now+30d`.
+    // Refreshing before the original TTL elapsed meant the row's expiry
+    // never actually arrived. The proposal_id is deterministic (hash of
+    // variant name + config_env), so re-submitting identical metadata must
+    // hit the SAME id and must NOT change its `expires_at` at all.
+    let mut regenerate = tachi_memory_params("recall_proposals");
+    regenerate.format = Some("json".to_string());
+    regenerate.scope = Some("memory".to_string());
+    regenerate.top_k = 3;
+    regenerate.force = true;
+    regenerate.metadata = Some(metadata);
+    let regen_body = crate::facade_memory_ops::handle_tachi_memory(&server, regenerate)
+        .await
+        .expect("recall proposals regenerate should succeed");
+    let regen_parsed: Value = serde_json::from_str(&regen_body).expect("regen response JSON");
+    let regen_proposal = regen_parsed["proposals"]
+        .as_array()
+        .expect("proposal list")
+        .iter()
+        .find(|proposal| proposal["proposal_id"] == json!(proposal_id))
+        .unwrap_or_else(|| panic!("expected the same proposal_id after regenerate: {regen_parsed}"));
+    assert_eq!(
+        regen_proposal["status"],
+        json!("rejected"),
+        "the rejected status itself must also survive the regenerate refresh"
+    );
+    assert_eq!(
+        regen_proposal["expires_at"].as_str(),
+        Some(expires_at.as_str()),
+        "expires_at must be the ORIGINAL value verbatim after a regenerate refresh, not merely \
+         present and not a freshly recomputed timestamp: {regen_proposal}"
+    );
 }

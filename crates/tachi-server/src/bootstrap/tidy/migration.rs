@@ -17,6 +17,12 @@ pub(crate) struct MigrationConfig {
     pub dry_run: bool,
     /// True when prompts are appropriate (TTY + !yes).
     pub interactive: bool,
+    /// `~/.tachi` (or test-fixture equivalent): needed to compute the
+    /// per-source-DB scoped daemon lock (`daemon_lock::scoped_daemon_lock_path`)
+    /// in `migrate_single_db` — `target_db`'s scope is already covered by the
+    /// caller's outer `DualDaemonLock`, but a migration source can belong to
+    /// a different scope with its own daemon.
+    pub app_home: PathBuf,
 }
 
 /// Build the list of source DBs that are candidates for fragment-consolidation
@@ -259,6 +265,17 @@ fn migrate_single_db(
             }
         }
     }
+    // Drop the read-only source connection now — it is never used again in
+    // this function, and the archive-safety guard below probes whether some
+    // OTHER process still holds `source_path` open. Leaving this process's
+    // own connection alive across that probe would make lsof see this very
+    // call as a "holder" of the file it is about to archive-move, which
+    // (before `daemon_ownership`'s self-PID exclusion landed) made every
+    // migration look permanently `Owned` and roll back. Both layers matter:
+    // this drop removes the self-hold at its source; the self-PID exclusion
+    // in `db_ownership.rs` is defense in depth for any other call site that
+    // probes while holding its own connection.
+    drop(source_store);
 
     if let Some(err) = copy_err {
         // Best-effort rollback: delete rows we newly inserted in this run.
@@ -281,6 +298,102 @@ fn migrate_single_db(
     }
 
     let rows_after = target_store.stats(true)?.total as usize;
+
+    // Source-scope lock: the caller's outer `DualDaemonLock` — acquired once
+    // in `run_tidy_command` (`crates/tachi-server/src/bootstrap/tidy/command.rs:39`),
+    // held for the whole `--execute` run — already covers `target_db`'s
+    // scoped lock AND, because `legacy_daemon_lock_path` is a single fixed
+    // path per `app_home` (not scoped per DB), the legacy lock for EVERY
+    // scope. `source_path` can belong to a DIFFERENT scope (its own
+    // project/daemon) that only the scoped half of that coverage says
+    // nothing about — that daemon could start and begin writing
+    // `source_path` in the window between the ownership probe below and the
+    // archive-move further down. Acquire a *scoped-only* lock for
+    // `source_path` and hold it across both the probe and the archive-move.
+    //
+    // Deliberately scoped-only, not another `DualDaemonLock` (do not
+    // "reinstate" a legacy attempt here): the outer lock's legacy fd is
+    // already held by THIS SAME PROCESS. `flock(2)` locks are per open file
+    // description, not per process ("may be denied by a lock that the
+    // calling process has already placed via another file descriptor") — a
+    // second `DaemonLock::acquire` on the legacy path here would open a
+    // fresh fd, collide with the outer lock's fd on the identical file, and
+    // misreport the process's own outer hold as `LegacyRunning { pid: self }`,
+    // rolling back every migration whose source scope differs from the
+    // target's. `ScopedDaemonLock` (see `daemon_lock.rs`) exists specifically
+    // to avoid this: the outer hold already excludes every legacy-scheme
+    // daemon for the whole run, so only the scoped lock — unique per DB —
+    // needs a fresh acquisition here.
+    //
+    // Skip acquiring even the scoped lock when `source_path` resolves to the
+    // SAME scoped lock file as `target_db` (degenerate same-scope input):
+    // the lock file IS the mutual-exclusion unit, so if two DB paths hash to
+    // the same lock path their daemon would have to be the same process
+    // holding the same file — and the outer lock already holds exactly that
+    // file for the whole run. Skipping here is not an approximation, it is
+    // the same collision-avoidance the scoped-only fix above makes for the
+    // legacy path, applied to the scoped path when the two scopes coincide.
+    let source_scoped_path =
+        crate::daemon_lock::scoped_daemon_lock_path(&cfg.app_home, &source_path);
+    let target_scoped_path =
+        crate::daemon_lock::scoped_daemon_lock_path(&cfg.app_home, &cfg.target_db);
+    let _source_lock = if source_scoped_path == target_scoped_path {
+        None
+    } else {
+        match crate::daemon_lock::ScopedDaemonLock::acquire(&cfg.app_home, &source_path) {
+            Ok(lock) => Some(lock),
+            Err(crate::daemon_lock::ScopedLockError::Running { pid }) => {
+                let outcome = rollback_failed_outcome(
+                    migration,
+                    &mut target_store,
+                    &newly_inserted_ids,
+                    rows_before,
+                    copied,
+                    source_count,
+                    &format!(
+                        "source DB's own daemon is running (pid {pid}, scoped lock); refusing to risk a torn archive copy"
+                    ),
+                );
+                drop(target_store);
+                return Ok(outcome);
+            }
+            Err(crate::daemon_lock::ScopedLockError::Io(e)) => {
+                let outcome = rollback_failed_outcome(
+                    migration,
+                    &mut target_store,
+                    &newly_inserted_ids,
+                    rows_before,
+                    copied,
+                    source_count,
+                    &format!("source DB daemon lock probe failed: {e}"),
+                );
+                drop(target_store);
+                return Ok(outcome);
+            }
+        }
+    };
+
+    // Ownership guard: the archive step below moves main/-wal/-shm as three
+    // sequential, non-atomic filesystem operations. If a live daemon still
+    // holds the source DB open — or ownership cannot be determined — that
+    // race can leave a torn archived copy. Roll back the rows we just
+    // copied into the target and fail the whole migration atomically (the
+    // same rollback path used for a mid-copy SQL error above) rather than
+    // leaving a copied-but-unarchived half-state; the source stays on disk
+    // untouched and will simply be reconsidered by the next `tidy` run.
+    if let Some(reason) = archive_unsafe_reason(&source_path) {
+        let outcome = rollback_failed_outcome(
+            migration,
+            &mut target_store,
+            &newly_inserted_ids,
+            rows_before,
+            copied,
+            source_count,
+            &reason,
+        );
+        drop(target_store);
+        return Ok(outcome);
+    }
     drop(target_store);
 
     // Archive the source DB file. Move (rename) when possible; fall back to
@@ -321,6 +434,55 @@ fn migrate_single_db(
         rows_copied: copied,
         message: format!("migrated {copied} rows ({rows_before} -> {rows_after} on target)"),
     })
+}
+
+/// Build a "failed, rolled back" `TidyMigrationOutcome`, deleting the rows
+/// this migration attempt newly inserted into `target_store` before
+/// reporting. Shared by every failure path downstream of a successful
+/// row-copy (source/legacy daemon-lock conflicts, the archive-safety probe)
+/// so the rollback + message shape stays identical across all of them.
+fn rollback_failed_outcome(
+    migration: &TidyMigration,
+    target_store: &mut memcore::MemoryStore,
+    newly_inserted_ids: &[String],
+    rows_before: usize,
+    copied: usize,
+    source_count: usize,
+    reason: &str,
+) -> TidyMigrationOutcome {
+    for id in newly_inserted_ids {
+        let _ = target_store.delete(id);
+    }
+    TidyMigrationOutcome {
+        source_path: migration.source_path.clone(),
+        target_path: migration.target_path.clone(),
+        archive_path: None,
+        status: "failed".to_string(),
+        rows_before_target: rows_before,
+        rows_after_target: rows_before,
+        rows_copied: 0,
+        message: format!(
+            "rolled back after {copied}/{source_count} rows ({} reverted): {reason}",
+            newly_inserted_ids.len()
+        ),
+    }
+}
+
+/// `None` when it is safe to archive-move `source_path` (main + `-wal` +
+/// `-shm`, three sequential non-atomic filesystem operations); `Some(reason)`
+/// when a live daemon holds it open or ownership could not be determined —
+/// either case risks tearing the archived copy.
+fn archive_unsafe_reason(source_path: &std::path::Path) -> Option<String> {
+    match crate::db_ownership::daemon_ownership(source_path) {
+        crate::db_ownership::DbOwnership::NotOwned => None,
+        crate::db_ownership::DbOwnership::Owned => Some(
+            "live daemon holds this DB open; refusing to archive a possibly torn main/-wal/-shm copy"
+                .to_string(),
+        ),
+        crate::db_ownership::DbOwnership::Unknown(reason) => Some(format!(
+            "daemon ownership undetermined ({reason}); refusing to risk a torn archive copy"
+        )),
+    }
 }
 
 /// Drop migrated source entries from the manifest and ensure the target entry

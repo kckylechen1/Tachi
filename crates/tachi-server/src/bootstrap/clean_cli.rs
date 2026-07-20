@@ -272,15 +272,48 @@ fn sweep_stale_exec_env_leases_cli(force: bool) {
     }
 }
 
-/// Read-only: list `active` exec_env leases whose worktree path no longer exists
-/// on disk (#1029 sweep backstop, preview half). Never mutates — the preview /
-/// dry-run path calls this and reports the count WITHOUT reclaiming, preserving
-/// the "preview does not change state" contract (#1029 D1).
+/// Three states, the same doctrine as `exec_env_reaper`'s `HolderCheck`
+/// (`crates/tachi-server/src/exec_env_reaper.rs:330-343`): a stale-lease sweep
+/// may only ever act on a *confirmed* absence, never on "the stat call did
+/// not work". [`std::path::Path::exists`] collapses every `stat` error —
+/// `NotFound` as much as `PermissionDenied` or a mount hiccup — into the same
+/// `false`, so a live worktree lease can be swept out from under it just
+/// because a stat had a bad moment (a flaky mount, a permission change on an
+/// ancestor directory). `symlink_metadata` is used, not `metadata`, so a
+/// dangling symlink at `lease.path` reads as "present but broken", not as
+/// "gone" via a followed link.
+enum LeasePathState {
+    /// The stat call resolved something at the path (or a broken symlink) —
+    /// leave the lease alone.
+    Present,
+    /// A `NotFound` stat error is the *only* state a sweep may reclaim on.
+    ConfirmedAbsent,
+    /// Anything else — fail closed: not reclaimed, and loud about why.
+    Unknown(std::io::Error),
+}
+
+fn lease_path_state(path: &str) -> LeasePathState {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => LeasePathState::Present,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => LeasePathState::ConfirmedAbsent,
+        Err(err) => LeasePathState::Unknown(err),
+    }
+}
+
+/// Read-only: list `active` exec_env leases whose worktree path is *confirmed*
+/// gone on disk (#1029 sweep backstop, preview half). Never mutates — the
+/// preview / dry-run path calls this and reports the count WITHOUT reclaiming,
+/// preserving the "preview does not change state" contract (#1029 D1).
 ///
 /// Active leases whose path still exists are left out: only a crash / kill -9 /
 /// any non-`safe_merge` exit leaves an `active` lease pointing at a worktree that
 /// is already gone, and `find_active_exec_env_by_path` would otherwise hand that
 /// stale lease to a later dispatch (#976).
+///
+/// A lease whose stat could not be resolved either way (permission denied on
+/// an ancestor, a transient mount error) is also left out — [`LeasePathState`]
+/// fail-closed — and the reason is surfaced loudly (`eprintln!` + `tracing::warn!`)
+/// rather than silently treated as "gone".
 fn list_stale_exec_env_leases(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<memcore::ExecEnvLease>, String> {
@@ -288,7 +321,23 @@ fn list_stale_exec_env_leases(
         .map_err(|e| e.to_string())?;
     Ok(active
         .into_iter()
-        .filter(|lease| !std::path::Path::new(&lease.path).exists())
+        .filter(|lease| match lease_path_state(&lease.path) {
+            LeasePathState::ConfirmedAbsent => true,
+            LeasePathState::Present => false,
+            LeasePathState::Unknown(err) => {
+                eprintln!(
+                    "exec_env lease sweep: warning: could not confirm '{}' is gone ({err}); \
+                     not reclaiming",
+                    lease.path
+                );
+                tracing::warn!(
+                    path = %lease.path,
+                    error = %err,
+                    "stale-lease stat inconclusive; retaining lease"
+                );
+                false
+            }
+        })
         .collect())
 }
 
@@ -313,8 +362,28 @@ fn reclaim_stale_exec_env_leases(
         // between the list (read) half and this reclaim (write) half — e.g. a
         // provision recreating the same leaf. A lease whose worktree exists
         // again is no longer stale and must not be reclaimed (TOCTOU guard).
-        if std::path::Path::new(&lease.path).exists() {
-            continue;
+        //
+        // Same fail-closed doctrine as `list_stale_exec_env_leases`'s own
+        // `lease_path_state` check (this function used to re-derive its own
+        // `.exists()` here, which had the identical fail-open bug: a stat
+        // error indistinguishable from "confirmed gone"). `Present` and
+        // `Unknown` both skip the reclaim; only `ConfirmedAbsent` proceeds.
+        match lease_path_state(&lease.path) {
+            LeasePathState::Present => continue,
+            LeasePathState::Unknown(err) => {
+                eprintln!(
+                    "exec_env lease sweep: warning: could not confirm '{}' is gone at reclaim \
+                     time ({err}); not reclaiming",
+                    lease.path
+                );
+                tracing::warn!(
+                    path = %lease.path,
+                    error = %err,
+                    "stale-lease stat inconclusive at reclaim time; retaining lease"
+                );
+                continue;
+            }
+            LeasePathState::ConfirmedAbsent => {}
         }
         let outcome = memcore::reclaim_exec_env(
             conn,
@@ -796,6 +865,163 @@ mod tests {
         let lease = lease_state(&store, "env-gate");
         assert_eq!(lease.state, memcore::ExecEnvState::Reclaimed);
         assert_eq!(lease.reclaim_reason.as_deref(), Some("sweep_stale"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A capturing [`tracing_subscriber::fmt::MakeWriter`] so the fail-closed
+    /// `tracing::warn!` below can be asserted on directly, instead of trusting
+    /// that a `stderr`-only `eprintln!` fired.
+    #[derive(Clone, Default)]
+    struct BufWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweep_leaves_lease_whose_stat_is_inconclusive_and_logs_why() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // SAFETY: `geteuid()` reads the caller's effective uid; no pointers, no
+        // aliasing. Running as root would defeat the chmod (root's stat still
+        // succeeds through a 0o000 parent), so skip there — same idiom as
+        // `exec_env_postflight::tests::an_unreadable_entry_makes_the_preimage_fail_closed`.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        let dir = unique_temp_dir("tachi-clean-cli-lease-unknown");
+        let store = open_lease_store(&dir);
+
+        // Lock the parent directory so `symlink_metadata` on a child path
+        // fails with `PermissionDenied`, not `NotFound` — the exact ambiguity
+        // `Path::exists()` used to collapse into "gone".
+        let locked_parent = dir.join("locked-parent");
+        std::fs::create_dir_all(&locked_parent).unwrap();
+        let blocked_path = locked_parent.join("wt");
+        std::fs::set_permissions(&locked_parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        insert_active_lease(&store, "env-unknown", blocked_path.to_str().unwrap());
+
+        let buf = BufWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+
+        let stale = tracing::subscriber::with_default(subscriber, || {
+            list_stale_exec_env_leases(store.connection()).unwrap()
+        });
+
+        // Restore permissions immediately so temp-dir cleanup can walk it,
+        // regardless of what the assertions below find.
+        std::fs::set_permissions(&locked_parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            stale.is_empty(),
+            "an inconclusive stat must NOT be treated as 'confirmed gone': {stale:?}"
+        );
+        let lease = lease_state(&store, "env-unknown");
+        assert_eq!(lease.state, memcore::ExecEnvState::Active);
+        assert_eq!(lease.reclaim_reason, None);
+
+        let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            logged.contains("stale-lease stat inconclusive"),
+            "the fail-closed retain must be logged loudly, not silently: {logged}"
+        );
+        assert!(
+            logged.contains("env-unknown") || logged.contains("wt"),
+            "the log line must name which lease/path it retained: {logged}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The TOCTOU re-check inside `reclaim_stale_exec_env_leases` (the mutate
+    /// half) must share the exact same fail-closed doctrine as the list/preview
+    /// half above, not its own bare `.exists()`. Feeds the lease straight into
+    /// `reclaim_stale_exec_env_leases` (bypassing `list_stale_exec_env_leases`,
+    /// which would itself exclude an `Unknown`-stat lease from `stale` and so
+    /// never reach the reclaim half at all) to exercise that inner re-check in
+    /// isolation.
+    #[cfg(unix)]
+    #[test]
+    fn reclaim_toctou_recheck_leaves_lease_whose_stat_is_inconclusive_and_logs_why() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // SAFETY: see `sweep_leaves_lease_whose_stat_is_inconclusive_and_logs_why`
+        // above — root's stat still succeeds through a 0o000 parent, defeating
+        // the chmod, so skip there.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        let dir = unique_temp_dir("tachi-clean-cli-reclaim-unknown");
+        let mut store = open_lease_store(&dir);
+
+        let locked_parent = dir.join("locked-parent");
+        std::fs::create_dir_all(&locked_parent).unwrap();
+        let blocked_path = locked_parent.join("wt");
+        insert_active_lease(&store, "env-reclaim-unknown", blocked_path.to_str().unwrap());
+
+        // Fetch the lease value BEFORE locking the parent — this is what a
+        // caller's list/preview half would have handed to the reclaim half
+        // (the TOCTOU window this re-check exists to guard).
+        let lease = lease_state(&store, "env-reclaim-unknown");
+
+        std::fs::set_permissions(&locked_parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let buf = BufWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+
+        let reclaimed = tracing::subscriber::with_default(subscriber, || {
+            reclaim_stale_exec_env_leases(store.connection_mut(), std::slice::from_ref(&lease))
+                .unwrap()
+        });
+
+        // Restore permissions immediately so temp-dir cleanup can walk it.
+        std::fs::set_permissions(&locked_parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            reclaimed, 0,
+            "an inconclusive stat at reclaim time must NOT be treated as 'confirmed gone'"
+        );
+        let after = lease_state(&store, "env-reclaim-unknown");
+        assert_eq!(
+            after.state,
+            memcore::ExecEnvState::Active,
+            "the lease must remain active, not reclaimed, on an inconclusive re-check"
+        );
+        assert_eq!(after.reclaim_reason, None);
+
+        let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            logged.contains("stale-lease stat inconclusive at reclaim time"),
+            "the fail-closed retain at reclaim time must be logged loudly, not silently: {logged}"
+        );
+        assert!(
+            logged.contains("wt"),
+            "the log line must name which path it retained: {logged}"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }

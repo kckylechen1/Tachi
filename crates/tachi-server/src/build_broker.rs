@@ -111,6 +111,16 @@ pub(crate) struct BuildReceipt {
     pub finished_at: String,
     pub stdout_tail: String,
     pub stderr_tail: String,
+    /// `hard_state` TTL (#1342 follow-up): a receipt is done being useful the
+    /// instant it is written (it is an immutable, already-consumed result),
+    /// so every new write stamps `now + 90d` here — `memcore::reap_expired_state`
+    /// (which reads this exact top-level JSON field) then owns cleanup.
+    /// `#[serde(default)]` lets a pre-TTL receipt already on disk decode as
+    /// `""`, which `reap_expired_state` treats as un-parseable and therefore
+    /// never reaps (fail-closed, not a retroactive expiry); `background.rs`'s
+    /// idempotent backfill is what actually assigns those rows a real TTL.
+    #[serde(default)]
+    pub expires_at: String,
 }
 
 /// Read a ticket's receipt, if the build has already run.
@@ -434,6 +444,7 @@ fn execute_holding_slot(
         finished_at: chrono::Utc::now().to_rfc3339(),
         stdout_tail: run.stdout_tail,
         stderr_tail: run.stderr_tail,
+        expires_at: (chrono::Utc::now() + chrono::Duration::days(90)).to_rfc3339(),
     };
     write_receipt(store, &receipt)?;
     Ok(receipt)

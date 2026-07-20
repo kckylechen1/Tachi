@@ -258,6 +258,20 @@ fn store() -> MemoryStore {
     MemoryStore::open_in_memory().expect("in-memory store")
 }
 
+/// #1342 follow-up: every `hard_state` row this subsystem writes must carry
+/// a real (roughly 90-day-out) `expires_at`, never the `""` a pre-#1342 row
+/// would decode to.
+fn assert_ninety_day_ttl(expires_at: &str) {
+    let parsed = chrono::DateTime::parse_from_rfc3339(expires_at)
+        .unwrap_or_else(|e| panic!("expires_at '{expires_at}' must be valid RFC3339: {e}"))
+        .with_timezone(&chrono::Utc);
+    let lower_bound = chrono::Utc::now() + chrono::Duration::days(89);
+    assert!(
+        parsed > lower_bound,
+        "expires_at ({parsed}) must be roughly 90 days out"
+    );
+}
+
 // ─── ③ the poisoning defense (the load-bearing one) ─────────────────────────
 
 #[test]
@@ -908,6 +922,56 @@ fn the_queue_drains_oldest_first_and_a_built_ticket_leaves_it() {
         .expect("generation stamped");
     assert_eq!(gen.head_sha, MAIN_SHA);
     assert_eq!(gen.ticket_id, "t-second");
+}
+
+/// #1342 follow-up: a receipt is done being useful the instant it is
+/// written, so every new write must carry a 90-day `hard_state` TTL
+/// (`memcore::reap_expired_state` owns the actual cleanup off this field).
+#[test]
+fn a_new_receipt_carries_a_ninety_day_hard_state_ttl() {
+    let mut store = store();
+    let seat = seat();
+    let lineage = FakeLineage::with(&[(MAIN_SHA, MAIN_SHA)]);
+    let runner = FakeRunner::new(BuildOutcome::Success);
+
+    submit_ticket(&store, &ticket("t-ttl", MAIN_SHA)).unwrap();
+    let receipt = run_next(&mut store, &seat, REPO, &runner, &lineage)
+        .unwrap()
+        .receipt
+        .expect("a ticket ran");
+
+    assert_ninety_day_ttl(&receipt.expires_at);
+
+    // And the value actually stored in `hard_state` carries it too, not just
+    // the in-memory receipt struct.
+    let stored = load_receipt(&store, "t-ttl").unwrap().unwrap();
+    assert_eq!(stored.expires_at, receipt.expires_at);
+}
+
+/// #1342 follow-up: a submitted ticket (write-once) and every ticket-status
+/// write (failed attempt, cancel) must carry a 90-day `hard_state` TTL.
+#[test]
+fn ticket_and_status_writes_carry_a_ninety_day_hard_state_ttl() {
+    let store = store();
+
+    let submitted = ticket("t-ttl-ticket", MAIN_SHA);
+    submit_ticket(&store, &submitted).unwrap();
+    let loaded = super::ticket::load_ticket(&store, "t-ttl-ticket")
+        .unwrap()
+        .expect("ticket present");
+    assert_ninety_day_ttl(&loaded.expires_at);
+
+    let failed_status =
+        super::ticket::record_failed_attempt(&store, "t-ttl-ticket", "boom").unwrap();
+    assert_ninety_day_ttl(&failed_status.expires_at);
+
+    let to_cancel = ticket("t-ttl-cancel", MAIN_SHA);
+    submit_ticket(&store, &to_cancel).unwrap();
+    cancel_queued_ticket(&store, "t-ttl-cancel", "superseded").unwrap();
+    let cancelled_status = super::ticket::load_status(&store, "t-ttl-cancel")
+        .unwrap()
+        .expect("status present");
+    assert_ninety_day_ttl(&cancelled_status.expires_at);
 }
 
 #[test]

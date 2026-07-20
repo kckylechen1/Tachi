@@ -84,6 +84,7 @@ fn manifest_update_drops_migrated_sources_and_inserts_target() {
         manifest_path: manifest_path.clone(),
         dry_run: false,
         interactive: false,
+        app_home: root.join(".tachi"),
     };
     let outcomes = vec![crate::bootstrap::TidyMigrationOutcome {
         source_path: "/tmp/legacy/memory.db".to_string(),
