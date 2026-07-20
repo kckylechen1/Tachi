@@ -169,10 +169,83 @@ fn narrow_gated_action_schemas(
             })
             .collect();
         narrow_action_enum_property(tool, &allowed);
+        hide_operator_dispatch_properties(tool);
         tool.description = Some(std::borrow::Cow::Borrowed(
             "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent. Use briefing/doc_index/plan for context and planning; recommend for advisory profile/card evidence; complete/adjudicate/board and lifecycle actions for work-ledger state; and merge only for an existing operator-created local worktree. GitHub PR lifecycle is tachi_gh only.",
         ));
     }
+}
+
+/// Operator-owned worker launch is not an ordinary agent intent. Remove its
+/// exclusive parameters from non-admin schemas and suppress stale launch
+/// wording on shared fields that remain useful to recommend/wait/complete.
+fn hide_operator_dispatch_properties(tool: &mut rmcp::model::Tool) {
+    const OPERATOR_LAUNCH_PROPERTIES: &[&str] = &[
+        "dispatch_reason",
+        "cwd",
+        "env_id",
+        "unmanaged_cwd",
+        "skills",
+        "context_query",
+        "model",
+        "permission_profile",
+        "allowed_tools",
+        "completion_predicate",
+        "max_turns",
+        "sandbox",
+        "inject_tachi_mcp",
+        "inject_hub_mcps",
+        "command",
+        "harness_transport",
+        "harness_server_url",
+        "credential_profiles",
+        "mcp_access",
+        "allowed_mcp_servers",
+        "inject_card",
+    ];
+    const OPERATOR_LAUNCH_DEFINITIONS: &[&str] = &[
+        "CompletionPredicate",
+        "DispatchMcpAccessParams",
+        "TachiDispatchReason",
+    ];
+
+    let mut schema = (*tool.input_schema).clone();
+    let Some(properties) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        schema.clear();
+        schema.insert("not".to_string(), serde_json::json!({}));
+        tool.input_schema = std::sync::Arc::new(schema);
+        return;
+    };
+    for property in OPERATOR_LAUNCH_PROPERTIES {
+        properties.remove(*property);
+    }
+    for property in properties.values_mut() {
+        let Some(property) = property.as_object_mut() else {
+            continue;
+        };
+        let advertises_launch = property
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|description| description.to_ascii_lowercase().contains("dispatch"));
+        if advertises_launch {
+            property.remove("description");
+        }
+    }
+    for definitions_key in ["$defs", "definitions"] {
+        let Some(definitions) = schema
+            .get_mut(definitions_key)
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+        for definition in OPERATOR_LAUNCH_DEFINITIONS {
+            definitions.remove(*definition);
+        }
+    }
+    tool.input_schema = std::sync::Arc::new(schema);
 }
 
 /// Intersect the existing `properties.action.enum` with `allowed`. An absent
@@ -912,21 +985,11 @@ mod tests {
     #[test]
     fn standard_schema_hides_operator_dispatch_while_admin_keeps_it() {
         fn task_tool() -> rmcp::model::Tool {
-            serde_json::from_value(json!({
-                "name": "tachi_task",
-                "description": "task facade action='dispatch' requires dispatch_reason",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "description": "action='dispatch' requires dispatch_reason",
-                            "enum": ["plan", "recommend", "dispatch", "complete", "board"]
-                        }
-                    }
-                }
-            }))
-            .expect("task tool")
+            MemoryServer::workflow_tool_router()
+                .list_all()
+                .into_iter()
+                .find(|tool| tool.name.as_ref() == "tachi_task")
+                .expect("routed tachi_task tool")
         }
 
         let mut standard = vec![task_tool()];
@@ -934,15 +997,22 @@ mod tests {
         let standard_actions = standard[0].input_schema["properties"]["action"]["enum"]
             .as_array()
             .expect("standard action enum");
-        assert_eq!(
-            standard_actions,
-            &vec![
-                json!("plan"),
-                json!("recommend"),
-                json!("complete"),
-                json!("board")
-            ]
-        );
+        assert!(!standard_actions.contains(&json!("dispatch")));
+        assert!(standard_actions.contains(&json!("recommend")));
+        assert!(standard_actions.contains(&json!("complete")));
+        let standard_properties = standard[0].input_schema["properties"]
+            .as_object()
+            .expect("standard properties");
+        for hidden in [
+            "dispatch_reason",
+            "cwd",
+            "env_id",
+            "command",
+            "credential_profiles",
+            "mcp_access",
+        ] {
+            assert!(!standard_properties.contains_key(hidden), "{hidden}");
+        }
         assert!(!standard[0]
             .description
             .as_deref()
@@ -954,6 +1024,25 @@ mod tests {
                 .unwrap_or_default()
                 .contains("dispatch")
         );
+        for property in standard_properties.values() {
+            assert!(!property
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .contains("dispatch"));
+        }
+        let standard_schema =
+            serde_json::to_string(&*standard[0].input_schema).expect("standard schema serializes");
+        for hidden_text in [
+            "dispatch_reason",
+            "explicit_user_request",
+            "action=dispatch",
+            "spawned agent",
+            "TachiDispatchReason",
+        ] {
+            assert!(!standard_schema.contains(hidden_text), "{hidden_text}");
+        }
 
         for profile in [
             tachi_hub::ToolProfile::coordinate(),
@@ -965,6 +1054,10 @@ mod tests {
                 .as_array()
                 .expect("non-admin action enum");
             assert!(!actions.contains(&json!("dispatch")));
+            assert!(!tools[0].input_schema["properties"]
+                .as_object()
+                .expect("non-admin properties")
+                .contains_key("dispatch_reason"));
             assert!(!tools[0]
                 .description
                 .as_deref()
@@ -984,6 +1077,10 @@ mod tests {
             .as_array()
             .expect("admin action enum");
         assert!(admin_actions.contains(&json!("dispatch")));
+        assert!(admin[0].input_schema["properties"]
+            .as_object()
+            .expect("admin properties")
+            .contains_key("dispatch_reason"));
         assert!(admin[0]
             .description
             .as_deref()
