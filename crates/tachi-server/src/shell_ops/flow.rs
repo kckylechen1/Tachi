@@ -2,23 +2,6 @@ use super::*;
 
 // ─── Run-root resolution ─────────────────────────────────────────────────────
 
-pub(super) fn cached_git_root() -> Option<&'static PathBuf> {
-    static GIT_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
-    GIT_ROOT
-        .get_or_init(|| {
-            std::process::Command::new("git")
-                .args(["rev-parse", "--show-toplevel"])
-                .output()
-                .ok()
-                .filter(|out| out.status.success())
-                .and_then(|out| String::from_utf8(out.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-        })
-        .as_ref()
-}
-
 /// Resolve the runs root directory.
 ///
 /// Order:
@@ -31,7 +14,7 @@ pub(crate) fn shell_runs_root() -> PathBuf {
     if let Ok(p) = std::env::var("TACHI_RUN_ROOT") {
         return PathBuf::from(p);
     }
-    if let Some(root) = cached_git_root() {
+    if let Some(root) = crate::path_utils::cached_git_root() {
         return root.join(".tachi").join("runs");
     }
     if let Ok(home) = std::env::var("TACHI_HOME") {

@@ -8,7 +8,7 @@
 //! symlink target, and a checkout without that host path couldn't build at
 //! all. This module exercises the runtime replacement:
 //! `helpers::resolve_skill_content_source`, which resolves through the same
-//! `shell_ops::resolve_meta_skill` fallback chain the flow-stage injection
+//! `skill_source_resolver::resolve_vendored_skill_path` fallback chain the flow-stage injection
 //! path already uses, at *seed* time instead of compile time.
 //!
 //! Both tests below use a synthetic `rel_path` that cannot exist in the repo
@@ -73,7 +73,7 @@ fn resolve_skill_content_source_library_present_resolves_and_hashes() {
     // the real central library), so a resolve success below is driven by
     // the fixture we're about to mount, not an accidental hit.
     assert!(
-        crate::shell_ops::resolve_meta_skill(rel_path).is_none(),
+        crate::skill_source_resolver::resolve_vendored_skill_path(rel_path).is_none(),
         "fixture probe must not resolve before the fixture central library is mounted"
     );
 
@@ -114,7 +114,7 @@ fn resolve_skill_content_source_library_absent_degrades_to_stub_not_error() {
 
     let rel_path = "skill/__hermeticity_fixture_absent__/SKILL.md";
     assert!(
-        crate::shell_ops::resolve_meta_skill(rel_path).is_none(),
+        crate::skill_source_resolver::resolve_vendored_skill_path(rel_path).is_none(),
         "fixture probe must not resolve before the (empty) fixture library is mounted either"
     );
 
@@ -129,7 +129,7 @@ fn resolve_skill_content_source_library_absent_degrades_to_stub_not_error() {
     // return — and must produce a stub: empty content, no resolved path,
     // `content_hash: None` (serializes to JSON `null` in the capability
     // definition built by `waza.rs` / `superpowers.rs`). A hard-error
-    // implementation (e.g. propagating `resolve_meta_skill`'s `None` via
+    // implementation (e.g. propagating the resolver's `None` via
     // `?` up through `builtin_waza_skills() -> Result<..., String>`, failing
     // the whole seed pass) would fail this test differently: either it
     // wouldn't compile against this infallible signature, or — if adapted to
@@ -160,7 +160,7 @@ fn resolve_skill_content_source_library_absent_degrades_to_stub_not_error() {
 #[test]
 fn builtin_waza_and_superpowers_seed_successfully_regardless_of_library_state() {
     // Read-only w.r.t. `TACHI_SKILLS_ROOT`, but still shares the global test
-    // lock: `resolve_meta_skill` reads that env var internally, and the two
+    // lock: the resolver reads that env var internally, and the two
     // tests above mutate it, so grabbing the lock (even just to read) keeps
     // this test from ever observing a transiently-mutated value.
     let _lock = crate::utils::global_test_lock()

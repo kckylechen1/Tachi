@@ -94,16 +94,16 @@ fn skill_surface_reads_cc_switch_projection_matrix() {
 fn skill_source_report_reads_builtin_manifest_status() {
     // #909 hermeticity follow-up (tachi#911): `build_skill_source_report()`
     // resolves each `SKILL_SOURCE_MANIFESTS` entry through
-    // `shell_ops::resolve_meta_skill("skill/<corpus>/manifest.yaml")`. That
+    // `skill_source_resolver::resolve_vendored_skill_path("skill/<corpus>/manifest.yaml")`. That
     // resolver checks the repo-root-relative path *before* `$TACHI_SKILLS_ROOT`
-    // (see `resolve_meta_skill`'s doc comment / resolution order), and in this
+    // (see the resolver's doc comment / resolution order), and in this
     // repo `skill/` is itself a git-tracked *absolute symlink* into a
     // host-local vendored-skills library (kckylechen1/tachi#895) — so on any
     // host where that symlink target exists, repo-root resolution wins and a
     // `$TACHI_SKILLS_ROOT` fixture can never be observed by this function; on
     // a host where the target is absent, every resolution step fails and the
     // call returns `Err`. Neither path lets this test mount a small fixture
-    // without changing `resolve_meta_skill`'s production resolution order
+    // without changing the resolver's production resolution order
     // (out of scope here), so instead of asserting exact skill counts/SHAs
     // tied to today's snapshot of the host library, this test:
     //   1. skips (does not fail the suite) when the library isn't mounted, and

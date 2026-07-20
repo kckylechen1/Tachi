@@ -20,7 +20,7 @@ const SOURCE_STATUS_NOT_CHECKED_REASON: &str =
 struct SkillSourceManifestSpec {
     corpus: &'static str,
     /// Repo-relative path of the corpus manifest. Read at *runtime* through
-    /// `shell_ops::resolve_meta_skill` (see `sources::read_skill_source_manifest`),
+    /// the crate-level skill source resolver (see `sources::read_skill_source_manifest`),
     /// not embedded at compile time — `skill/` is a host-absolute git symlink
     /// (kckylechen1/tachi#895), so `include_str!` against it is neither
     /// hermetic (same SHA, different binary per host) nor portable (a
@@ -40,22 +40,23 @@ const SKILL_SOURCE_MANIFESTS: &[SkillSourceManifestSpec] = &[
 ];
 
 /// Resolve + read a `SkillSourceManifestSpec`'s manifest content at call
-/// time, through the same runtime resolver `shell_ops`'s flow-stage
-/// injection and `builtins::helpers` capability-seed path already use.
+/// time, through the same runtime resolver that flow-stage injection and
+/// `builtins::helpers` capability seeding already use.
 ///
 /// Unlike builtin-capability seeding, this is an on-demand CLI read (`tachi
 /// skill-surface sources` / `sync-plan`), not a server-boot seed pass — an
 /// unresolvable manifest here surfaces as a clear command error, not a
 /// silently-degraded stub.
 fn read_skill_source_manifest_content(spec: &SkillSourceManifestSpec) -> Result<String, String> {
-    let resolved = crate::shell_ops::resolve_meta_skill(spec.path).ok_or_else(|| {
-        format!(
+    let resolved = crate::skill_source_resolver::resolve_vendored_skill_path(spec.path)
+        .ok_or_else(|| {
+            format!(
             "{MISSING_VENDORED_MANIFEST_PREFIX}{}: not found in repo root, cwd, cargo manifest \
              dir, or the central vendored-skills library (set $TACHI_SKILLS_ROOT, or mount \
              ~/.agents/vendored-skills)",
             spec.path
         )
-    })?;
+        })?;
     std::fs::read_to_string(&resolved).map_err(|e| format!("read {}: {e}", resolved.display()))
 }
 

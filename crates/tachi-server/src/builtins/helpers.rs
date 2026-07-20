@@ -45,10 +45,9 @@ pub(super) fn resolve_skill_content_source(
 }
 
 /// Resolve a vendored-skill source file at seed time via the same runtime
-/// resolver the flow-stage injection path uses
-/// (`shell_ops::resolve_meta_skill`), so a seeded builtin skill capability's
-/// content always matches what a live flow-stage injection would load from
-/// the same `rel_path` — no compile-time `include_str!` against `skill/`,
+/// resolver the flow-stage injection path uses, so a seeded builtin skill
+/// capability's content always matches what a live flow-stage injection would
+/// load from the same `rel_path` — no compile-time `include_str!` against `skill/`,
 /// no host-path lock-in (kckylechen1/tachi#895 made `skill/` a host-absolute
 /// symlink, so compile-time embedding is neither hermetic nor portable).
 ///
@@ -60,7 +59,7 @@ pub(super) fn resolve_skill_content_source(
 pub(super) fn resolve_skill_source(
     rel_path: &str,
 ) -> (Option<String>, Option<String>, Option<String>) {
-    let resolved = match crate::shell_ops::resolve_meta_skill(rel_path) {
+    let resolved = match crate::skill_source_resolver::resolve_vendored_skill_path(rel_path) {
         Some(p) => p,
         None => {
             tracing::warn!(
