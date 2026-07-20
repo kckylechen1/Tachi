@@ -127,6 +127,110 @@ fn expand_cli_path(raw: &Path, home: &Path) -> PathBuf {
     expand_user_path(raw.to_string_lossy().as_ref(), home)
 }
 
+/// `<main>-wal` / `<main>-shm` sidecar path for a SQLite main file.
+fn sidecar_path(main: &Path, suffix: &str) -> PathBuf {
+    let mut s = main.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// Copy a legacy DB (main file + `-wal`/`-shm` sidecars, if present) to
+/// `dest`, refusing when a live daemon holds `src` open (`Owned`) or
+/// ownership cannot be determined (`Unknown`) — either case risks copying a
+/// torn snapshot. Only a confirmed `NotOwned` proceeds. Shared by both
+/// legacy-DB migration call sites below (global + project).
+///
+/// Sidecar semantics: a WAL-mode source that crashed (or was never
+/// checkpointed) before this migration ran has committed rows living ONLY in
+/// `-wal` — copying just the main file silently drops them. So once `NotOwned`
+/// clears the copy, each sidecar that exists on disk is copied too; a missing
+/// sidecar is a normal (non-WAL or already-checkpointed) source and is
+/// skipped. Any sidecar copy failure discards the *whole* destination (main +
+/// any sidecars already copied for this call) and returns `Err` — never a
+/// main-file-only (silently data-losing) copy left behind. The discard
+/// itself is honest about its own failures: any file it could not delete
+/// (path + underlying error; a missing file is success, not a failure) is
+/// named in the returned error message rather than swallowed, so an
+/// orphaned partial copy is reported, not silently left on disk.
+///
+/// Accepted, documented race: there is a narrow window between the ownership
+/// probe above and the copy below in which a daemon could start and begin
+/// writing `src`. This call site cannot hold a lock across another process's
+/// startup for a path outside its own control, so — same acceptance as
+/// doctor's `checkpoint_wal_copy` — the probe-then-copy gap is a known,
+/// accepted residual race, not something this guard eliminates.
+async fn copy_legacy_db_guarded(src: &Path, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    match crate::db_ownership::daemon_ownership(src) {
+        crate::db_ownership::DbOwnership::Owned => {
+            return Err(format!(
+                "legacy DB {} is held open by a live daemon; refusing to copy a possibly torn snapshot to {}. Stop the daemon first.",
+                src.display(),
+                dest.display()
+            )
+            .into());
+        }
+        crate::db_ownership::DbOwnership::Unknown(reason) => {
+            return Err(format!(
+                "cannot determine whether legacy DB {} is held by a live daemon ({reason}); refusing to copy a possibly torn snapshot to {}",
+                src.display(),
+                dest.display()
+            )
+            .into());
+        }
+        crate::db_ownership::DbOwnership::NotOwned => {}
+    }
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::copy(src, dest).await?;
+
+    for suffix in ["-wal", "-shm"] {
+        let side_src = sidecar_path(src, suffix);
+        if !side_src.exists() {
+            continue;
+        }
+        let side_dest = sidecar_path(dest, suffix);
+        if let Err(e) = tokio::fs::copy(&side_src, &side_dest).await {
+            // Discard the whole destination — main file plus any sidecar
+            // already copied in this call — rather than leave a partial,
+            // silently data-losing copy at `dest`. A delete failure here
+            // must never be swallowed (拒必有声): collect every one (path +
+            // error, a missing file is success — nothing to discard) and
+            // fold them into the returned error so an orphaned partial copy
+            // is reported, not silently left on disk.
+            let mut cleanup_failures = Vec::new();
+            if let Err(rm_err) = tokio::fs::remove_file(dest).await {
+                if rm_err.kind() != std::io::ErrorKind::NotFound {
+                    cleanup_failures.push(format!("{}: {rm_err}", dest.display()));
+                }
+            }
+            for cleanup_suffix in ["-wal", "-shm"] {
+                let cleanup_path = sidecar_path(dest, cleanup_suffix);
+                if let Err(rm_err) = tokio::fs::remove_file(&cleanup_path).await {
+                    if rm_err.kind() != std::io::ErrorKind::NotFound {
+                        cleanup_failures.push(format!("{}: {rm_err}", cleanup_path.display()));
+                    }
+                }
+            }
+            let discard_note = if cleanup_failures.is_empty() {
+                format!("discarded partial legacy-DB copy at {}", dest.display())
+            } else {
+                format!(
+                    "partial copy could not be fully discarded: {}",
+                    cleanup_failures.join(", ")
+                )
+            };
+            return Err(format!(
+                "failed to copy sidecar {} to {}: {e}; {discard_note}",
+                side_src.display(),
+                side_dest.display(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::error::Error>> {
     // Load config from dotenv files (same as before)
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -229,10 +333,7 @@ async fn resolve_global_db(
         if !default_global.exists() {
             for legacy in legacy_candidates {
                 if legacy.exists() {
-                    if let Some(parent) = default_global.parent() {
-                        tokio::fs::create_dir_all(parent).await?;
-                    }
-                    tokio::fs::copy(&legacy, &default_global).await?;
+                    copy_legacy_db_guarded(&legacy, &default_global).await?;
                     eprintln!(
                         "Migrated legacy DB: {} -> {}",
                         legacy.display(),
@@ -444,10 +545,7 @@ async fn run_startup_hygiene(
         let project_legacy = root.join(".sigil").join(memcore::LEGACY_MEMORY_DB_FILENAME);
 
         if project_legacy.exists() && !project_default.exists() {
-            if let Some(parent) = project_default.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            tokio::fs::copy(&project_legacy, &project_default).await?;
+            copy_legacy_db_guarded(&project_legacy, &project_default).await?;
             eprintln!(
                 "Migrated legacy project DB: {} -> {}",
                 project_legacy.display(),
@@ -873,6 +971,191 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    struct ClearOwnershipInject;
+    #[cfg(unix)]
+    impl Drop for ClearOwnershipInject {
+        fn drop(&mut self) {
+            crate::db_ownership::set_ownership_inject_for_test(None);
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn copy_legacy_db_guarded_refuses_when_owned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("legacy.db");
+        let dest = dir.path().join("global").join("memory.db");
+        std::fs::write(&src, b"legacy-bytes").expect("seed legacy db");
+
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::Owned,
+        ));
+
+        let result = copy_legacy_db_guarded(&src, &dest).await;
+
+        assert!(
+            result.is_err(),
+            "must refuse to copy a DB a live daemon holds open"
+        );
+        assert!(
+            !dest.exists(),
+            "refused copy must leave zero bytes at the destination"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn copy_legacy_db_guarded_refuses_when_unknown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("legacy.db");
+        let dest = dir.path().join("global").join("memory.db");
+        std::fs::write(&src, b"legacy-bytes").expect("seed legacy db");
+
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::Unknown("lsof unavailable: test".to_string()),
+        ));
+
+        let result = copy_legacy_db_guarded(&src, &dest).await;
+
+        let err = result.err().expect("undetermined ownership must refuse");
+        assert!(
+            err.to_string().contains("cannot determine"),
+            "error must say ownership was undetermined, got: {err}"
+        );
+        assert!(
+            !dest.exists(),
+            "refused copy must leave zero bytes at the destination"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn copy_legacy_db_guarded_proceeds_when_not_owned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("legacy.db");
+        let dest = dir.path().join("global").join("memory.db");
+        std::fs::write(&src, b"legacy-bytes").expect("seed legacy db");
+
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::NotOwned,
+        ));
+
+        let result = copy_legacy_db_guarded(&src, &dest).await;
+
+        assert!(result.is_ok(), "not-owned must proceed: {result:?}");
+        assert_eq!(
+            std::fs::read(&dest).expect("dest must exist"),
+            b"legacy-bytes"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn copy_legacy_db_guarded_copies_wal_and_shm_sidecars_when_present() {
+        // Crashed-WAL fixture: committed rows can live only in `-wal` until
+        // checkpointed. Copying just the main file would silently drop them.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("legacy.db");
+        let dest = dir.path().join("global").join("memory.db");
+        std::fs::write(&src, b"legacy-main").expect("seed legacy main");
+        std::fs::write(sidecar_path(&src, "-wal"), b"legacy-wal-rows").expect("seed legacy wal");
+        std::fs::write(sidecar_path(&src, "-shm"), b"legacy-shm").expect("seed legacy shm");
+
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::NotOwned,
+        ));
+
+        let result = copy_legacy_db_guarded(&src, &dest).await;
+
+        assert!(result.is_ok(), "not-owned must proceed: {result:?}");
+        assert_eq!(std::fs::read(&dest).expect("dest main"), b"legacy-main");
+        assert_eq!(
+            std::fs::read(sidecar_path(&dest, "-wal")).expect("dest wal must exist"),
+            b"legacy-wal-rows",
+            "committed-only-in-WAL rows must not be silently dropped"
+        );
+        assert_eq!(
+            std::fs::read(sidecar_path(&dest, "-shm")).expect("dest shm must exist"),
+            b"legacy-shm"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn copy_legacy_db_guarded_skips_absent_sidecars() {
+        // No -wal/-shm on disk (already checkpointed / non-WAL source): the
+        // copy must still succeed and must not fabricate sidecar files.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("legacy.db");
+        let dest = dir.path().join("global").join("memory.db");
+        std::fs::write(&src, b"legacy-main").expect("seed legacy main");
+
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::NotOwned,
+        ));
+
+        let result = copy_legacy_db_guarded(&src, &dest).await;
+
+        assert!(result.is_ok(), "not-owned must proceed: {result:?}");
+        assert!(!sidecar_path(&dest, "-wal").exists());
+        assert!(!sidecar_path(&dest, "-shm").exists());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn copy_legacy_db_guarded_discards_partial_copy_when_sidecar_copy_fails() {
+        // Force the -wal sidecar copy to fail (source is a directory, not a
+        // regular file) after the main file has already been copied. The
+        // whole destination — main + any sidecar already copied — must be
+        // discarded; a main-file-only leftover would silently drop the rows
+        // that only exist in -wal.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("legacy.db");
+        let dest = dir.path().join("global").join("memory.db");
+        std::fs::write(&src, b"legacy-main").expect("seed legacy main");
+        std::fs::create_dir(sidecar_path(&src, "-wal")).expect("wal as directory");
+
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::NotOwned,
+        ));
+
+        let result = copy_legacy_db_guarded(&src, &dest).await;
+
+        assert!(
+            result.is_err(),
+            "sidecar copy failure must fail the whole operation"
+        );
+        assert!(
+            !dest.exists(),
+            "partial main-file-only copy must be discarded on sidecar failure"
+        );
+        assert!(!sidecar_path(&dest, "-wal").exists());
+        assert!(!sidecar_path(&dest, "-shm").exists());
+    }
+
+    // No test exercises the "cleanup itself fails" branch (the
+    // `partial copy could not be fully discarded: ...` message) — there is
+    // no cheap injection available for it. `unlink(2)`/`remove_file` needs
+    // WRITE permission on the file's *parent directory*, not the file
+    // itself; that is the exact same permission `tokio::fs::copy` needs to
+    // *create* `dest` a few lines earlier in this same call. Chmod'ing
+    // `dest`'s parent read-only before the call blocks the initial copy
+    // (a different, earlier failure) rather than isolating a delete-only
+    // failure; chmod'ing it read-only *between* the main-file copy and the
+    // sidecar-failure trigger would require instrumenting the function
+    // itself (a test seam this function does not otherwise need), and a
+    // platform-specific immutable-file flag (e.g. macOS `chflags uchg`) is
+    // not portable enough to call "cheap". The message-formatting logic
+    // itself is straight-line and covered by review; if a cheap injection
+    // seam is added to this function later, add the test alongside it.
 
     fn remember_cli(global_db: std::path::PathBuf, allow_schema_migration: bool) -> Cli {
         Cli {
