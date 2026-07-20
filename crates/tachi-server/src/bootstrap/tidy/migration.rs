@@ -17,6 +17,12 @@ pub(crate) struct MigrationConfig {
     pub dry_run: bool,
     /// True when prompts are appropriate (TTY + !yes).
     pub interactive: bool,
+    /// `~/.tachi` (or test-fixture equivalent): needed to compute the
+    /// per-source-DB scoped daemon lock (`daemon_lock::scoped_daemon_lock_path`)
+    /// in `migrate_single_db` — `target_db`'s scope is already covered by the
+    /// caller's outer `DualDaemonLock`, but a migration source can belong to
+    /// a different scope with its own daemon.
+    pub app_home: PathBuf,
 }
 
 /// Build the list of source DBs that are candidates for fragment-consolidation
@@ -293,6 +299,79 @@ fn migrate_single_db(
 
     let rows_after = target_store.stats(true)?.total as usize;
 
+    // Source-scope lock: the caller's outer `DualDaemonLock` (acquired once,
+    // in `run_tidy_command`, for the whole `--execute` run) only covers
+    // `target_db`'s scope. `source_path` can belong to a DIFFERENT scope
+    // (its own project/daemon) that the outer lock says nothing about — that
+    // daemon could start and begin writing `source_path` in the window
+    // between the ownership probe below and the archive-move further down.
+    // Acquire a `DualDaemonLock` scoped to `source_path` too, and hold it
+    // across both the probe and the archive-move: a daemon trying to start
+    // against this scope during that window fails to acquire its own lock
+    // instead of racing us. A failed acquire (some OTHER live process
+    // already holds it) is treated exactly like a live-daemon `Owned` probe
+    // result: roll back and fail, naming which lock and PID.
+    //
+    // Skip re-acquiring when `source_path` resolves to the SAME scoped lock
+    // file as `target_db` (degenerate same-scope input): a second `flock`
+    // attempt on a file this process's outer lock already holds would see
+    // its own hold and misreport a conflict that isn't real — the outer
+    // lock already covers that scope for the whole run.
+    let source_scoped_path =
+        crate::daemon_lock::scoped_daemon_lock_path(&cfg.app_home, &source_path);
+    let target_scoped_path =
+        crate::daemon_lock::scoped_daemon_lock_path(&cfg.app_home, &cfg.target_db);
+    let _source_lock = if source_scoped_path == target_scoped_path {
+        None
+    } else {
+        match crate::daemon_lock::DualDaemonLock::acquire(&cfg.app_home, &source_path) {
+            Ok(lock) => Some(lock),
+            Err(crate::daemon_lock::DualLockError::ScopedRunning { pid }) => {
+                let outcome = rollback_failed_outcome(
+                    migration,
+                    &mut target_store,
+                    &newly_inserted_ids,
+                    rows_before,
+                    copied,
+                    source_count,
+                    &format!(
+                        "source DB's own daemon is running (pid {pid}, scoped lock); refusing to risk a torn archive copy"
+                    ),
+                );
+                drop(target_store);
+                return Ok(outcome);
+            }
+            Err(crate::daemon_lock::DualLockError::LegacyRunning { pid }) => {
+                let outcome = rollback_failed_outcome(
+                    migration,
+                    &mut target_store,
+                    &newly_inserted_ids,
+                    rows_before,
+                    copied,
+                    source_count,
+                    &format!(
+                        "source DB's own daemon is running (pid {pid}, legacy lock); refusing to risk a torn archive copy"
+                    ),
+                );
+                drop(target_store);
+                return Ok(outcome);
+            }
+            Err(crate::daemon_lock::DualLockError::Io(e)) => {
+                let outcome = rollback_failed_outcome(
+                    migration,
+                    &mut target_store,
+                    &newly_inserted_ids,
+                    rows_before,
+                    copied,
+                    source_count,
+                    &format!("source DB daemon lock probe failed: {e}"),
+                );
+                drop(target_store);
+                return Ok(outcome);
+            }
+        }
+    };
+
     // Ownership guard: the archive step below moves main/-wal/-shm as three
     // sequential, non-atomic filesystem operations. If a live daemon still
     // holds the source DB open — or ownership cannot be determined — that
@@ -302,23 +381,17 @@ fn migrate_single_db(
     // leaving a copied-but-unarchived half-state; the source stays on disk
     // untouched and will simply be reconsidered by the next `tidy` run.
     if let Some(reason) = archive_unsafe_reason(&source_path) {
-        for id in &newly_inserted_ids {
-            let _ = target_store.delete(id);
-        }
+        let outcome = rollback_failed_outcome(
+            migration,
+            &mut target_store,
+            &newly_inserted_ids,
+            rows_before,
+            copied,
+            source_count,
+            &reason,
+        );
         drop(target_store);
-        return Ok(TidyMigrationOutcome {
-            source_path: migration.source_path.clone(),
-            target_path: migration.target_path.clone(),
-            archive_path: None,
-            status: "failed".to_string(),
-            rows_before_target: rows_before,
-            rows_after_target: rows_before,
-            rows_copied: 0,
-            message: format!(
-                "rolled back after {copied}/{source_count} rows ({} reverted): {reason}",
-                newly_inserted_ids.len()
-            ),
-        });
+        return Ok(outcome);
     }
     drop(target_store);
 
@@ -360,6 +433,38 @@ fn migrate_single_db(
         rows_copied: copied,
         message: format!("migrated {copied} rows ({rows_before} -> {rows_after} on target)"),
     })
+}
+
+/// Build a "failed, rolled back" `TidyMigrationOutcome`, deleting the rows
+/// this migration attempt newly inserted into `target_store` before
+/// reporting. Shared by every failure path downstream of a successful
+/// row-copy (source/legacy daemon-lock conflicts, the archive-safety probe)
+/// so the rollback + message shape stays identical across all of them.
+fn rollback_failed_outcome(
+    migration: &TidyMigration,
+    target_store: &mut memcore::MemoryStore,
+    newly_inserted_ids: &[String],
+    rows_before: usize,
+    copied: usize,
+    source_count: usize,
+    reason: &str,
+) -> TidyMigrationOutcome {
+    for id in newly_inserted_ids {
+        let _ = target_store.delete(id);
+    }
+    TidyMigrationOutcome {
+        source_path: migration.source_path.clone(),
+        target_path: migration.target_path.clone(),
+        archive_path: None,
+        status: "failed".to_string(),
+        rows_before_target: rows_before,
+        rows_after_target: rows_before,
+        rows_copied: 0,
+        message: format!(
+            "rolled back after {copied}/{source_count} rows ({} reverted): {reason}",
+            newly_inserted_ids.len()
+        ),
+    }
 }
 
 /// `None` when it is safe to archive-move `source_path` (main + `-wal` +

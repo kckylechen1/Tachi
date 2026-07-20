@@ -126,12 +126,34 @@ fn expand_cli_path(raw: &Path, home: &Path) -> PathBuf {
     expand_user_path(raw.to_string_lossy().as_ref(), home)
 }
 
-/// Copy a legacy DB file to `dest`, refusing when a live daemon holds `src`
-/// open (`Owned`) or ownership cannot be determined (`Unknown`) — either
-/// case risks copying a torn snapshot (`tokio::fs::copy` only touches the
-/// main file, not `-wal`/`-shm`, and runs before this process' own daemon
-/// lock is taken). Only a confirmed `NotOwned` proceeds. Shared by both
+/// `<main>-wal` / `<main>-shm` sidecar path for a SQLite main file.
+fn sidecar_path(main: &Path, suffix: &str) -> PathBuf {
+    let mut s = main.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// Copy a legacy DB (main file + `-wal`/`-shm` sidecars, if present) to
+/// `dest`, refusing when a live daemon holds `src` open (`Owned`) or
+/// ownership cannot be determined (`Unknown`) — either case risks copying a
+/// torn snapshot. Only a confirmed `NotOwned` proceeds. Shared by both
 /// legacy-DB migration call sites below (global + project).
+///
+/// Sidecar semantics: a WAL-mode source that crashed (or was never
+/// checkpointed) before this migration ran has committed rows living ONLY in
+/// `-wal` — copying just the main file silently drops them. So once `NotOwned`
+/// clears the copy, each sidecar that exists on disk is copied too; a missing
+/// sidecar is a normal (non-WAL or already-checkpointed) source and is
+/// skipped. Any sidecar copy failure discards the *whole* destination (main +
+/// any sidecars already copied for this call) and returns `Err` — never a
+/// main-file-only (silently data-losing) copy left behind.
+///
+/// Accepted, documented race: there is a narrow window between the ownership
+/// probe above and the copy below in which a daemon could start and begin
+/// writing `src`. This call site cannot hold a lock across another process's
+/// startup for a path outside its own control, so — same acceptance as
+/// doctor's `checkpoint_wal_copy` — the probe-then-copy gap is a known,
+/// accepted residual race, not something this guard eliminates.
 async fn copy_legacy_db_guarded(src: &Path, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
     match crate::db_ownership::daemon_ownership(src) {
         crate::db_ownership::DbOwnership::Owned => {
@@ -156,6 +178,30 @@ async fn copy_legacy_db_guarded(src: &Path, dest: &Path) -> Result<(), Box<dyn s
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::copy(src, dest).await?;
+
+    for suffix in ["-wal", "-shm"] {
+        let side_src = sidecar_path(src, suffix);
+        if !side_src.exists() {
+            continue;
+        }
+        let side_dest = sidecar_path(dest, suffix);
+        if let Err(e) = tokio::fs::copy(&side_src, &side_dest).await {
+            // Discard the whole destination — main file plus any sidecar
+            // already copied in this call — rather than leave a partial,
+            // silently data-losing copy at `dest`.
+            let _ = tokio::fs::remove_file(dest).await;
+            for cleanup_suffix in ["-wal", "-shm"] {
+                let _ = tokio::fs::remove_file(sidecar_path(dest, cleanup_suffix)).await;
+            }
+            return Err(format!(
+                "failed to copy sidecar {} to {}: {e}; discarded partial legacy-DB copy at {}",
+                side_src.display(),
+                side_dest.display(),
+                dest.display()
+            )
+            .into());
+        }
+    }
     Ok(())
 }
 
@@ -980,6 +1026,93 @@ mod tests {
             std::fs::read(&dest).expect("dest must exist"),
             b"legacy-bytes"
         );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn copy_legacy_db_guarded_copies_wal_and_shm_sidecars_when_present() {
+        // Crashed-WAL fixture: committed rows can live only in `-wal` until
+        // checkpointed. Copying just the main file would silently drop them.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("legacy.db");
+        let dest = dir.path().join("global").join("memory.db");
+        std::fs::write(&src, b"legacy-main").expect("seed legacy main");
+        std::fs::write(sidecar_path(&src, "-wal"), b"legacy-wal-rows").expect("seed legacy wal");
+        std::fs::write(sidecar_path(&src, "-shm"), b"legacy-shm").expect("seed legacy shm");
+
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::NotOwned,
+        ));
+
+        let result = copy_legacy_db_guarded(&src, &dest).await;
+
+        assert!(result.is_ok(), "not-owned must proceed: {result:?}");
+        assert_eq!(std::fs::read(&dest).expect("dest main"), b"legacy-main");
+        assert_eq!(
+            std::fs::read(sidecar_path(&dest, "-wal")).expect("dest wal must exist"),
+            b"legacy-wal-rows",
+            "committed-only-in-WAL rows must not be silently dropped"
+        );
+        assert_eq!(
+            std::fs::read(sidecar_path(&dest, "-shm")).expect("dest shm must exist"),
+            b"legacy-shm"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn copy_legacy_db_guarded_skips_absent_sidecars() {
+        // No -wal/-shm on disk (already checkpointed / non-WAL source): the
+        // copy must still succeed and must not fabricate sidecar files.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("legacy.db");
+        let dest = dir.path().join("global").join("memory.db");
+        std::fs::write(&src, b"legacy-main").expect("seed legacy main");
+
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::NotOwned,
+        ));
+
+        let result = copy_legacy_db_guarded(&src, &dest).await;
+
+        assert!(result.is_ok(), "not-owned must proceed: {result:?}");
+        assert!(!sidecar_path(&dest, "-wal").exists());
+        assert!(!sidecar_path(&dest, "-shm").exists());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn copy_legacy_db_guarded_discards_partial_copy_when_sidecar_copy_fails() {
+        // Force the -wal sidecar copy to fail (source is a directory, not a
+        // regular file) after the main file has already been copied. The
+        // whole destination — main + any sidecar already copied — must be
+        // discarded; a main-file-only leftover would silently drop the rows
+        // that only exist in -wal.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("legacy.db");
+        let dest = dir.path().join("global").join("memory.db");
+        std::fs::write(&src, b"legacy-main").expect("seed legacy main");
+        std::fs::create_dir(sidecar_path(&src, "-wal")).expect("wal as directory");
+
+        let _clear = ClearOwnershipInject;
+        crate::db_ownership::set_ownership_inject_for_test(Some(
+            crate::db_ownership::DbOwnership::NotOwned,
+        ));
+
+        let result = copy_legacy_db_guarded(&src, &dest).await;
+
+        assert!(
+            result.is_err(),
+            "sidecar copy failure must fail the whole operation"
+        );
+        assert!(
+            !dest.exists(),
+            "partial main-file-only copy must be discarded on sidecar failure"
+        );
+        assert!(!sidecar_path(&dest, "-wal").exists());
+        assert!(!sidecar_path(&dest, "-shm").exists());
     }
 
     fn remember_cli(global_db: std::path::PathBuf, allow_schema_migration: bool) -> Cli {

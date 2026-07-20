@@ -28,6 +28,7 @@ fn tidy_execute_migrates_rows_and_archives_source() {
         manifest_path: app_home.join("manifest.json"),
         dry_run: true,
         interactive: false,
+        app_home: app_home.clone(),
     };
     let dry_summary =
         crate::bootstrap::execute_tidy_migrations(&plan, &dry_cfg).expect("dry-run summary");
@@ -62,6 +63,7 @@ fn tidy_execute_migrates_rows_and_archives_source() {
         manifest_path: app_home.join("manifest.json"),
         dry_run: false,
         interactive: false,
+        app_home: app_home.clone(),
     };
     let summary =
         crate::bootstrap::execute_tidy_migrations(&plan, &exec_cfg).expect("execute summary");
@@ -157,6 +159,7 @@ fn tidy_execute_rolls_back_when_source_db_is_owned() {
         manifest_path: app_home.join("manifest.json"),
         dry_run: false,
         interactive: false,
+        app_home: app_home.clone(),
     };
 
     let _clear = ClearOwnershipInject;
@@ -244,6 +247,7 @@ fn tidy_execute_rolls_back_when_source_db_ownership_is_unknown() {
         manifest_path: app_home.join("manifest.json"),
         dry_run: false,
         interactive: false,
+        app_home: app_home.clone(),
     };
 
     let _clear = ClearOwnershipInject;
@@ -267,5 +271,116 @@ fn tidy_execute_rolls_back_when_source_db_ownership_is_unknown() {
     assert_eq!(tgt_after.stats(true).unwrap().total, 1);
     drop(tgt_after);
 
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Codex-review follow-up: `tidy`'s outer `DualDaemonLock` (held by
+/// `run_tidy_command` around the whole `--execute` run) only covers
+/// `target_db`'s scope. A migration `source_path` belonging to a DIFFERENT
+/// scope has no lock protection from that outer hold — `migrate_single_db`
+/// must acquire its own `DualDaemonLock` for `source_path` and treat a busy
+/// source-scope lock the same as a live-daemon `Owned` probe result: roll
+/// back and fail, source untouched. No ownership injection needed here —
+/// the lock conflict is detected and the migration fails before the
+/// lsof-based ownership probe ever runs.
+#[test]
+fn tidy_execute_rolls_back_when_source_scope_lock_is_held() {
+    let root = std::env::temp_dir().join(format!("tachi-tidy-srclock-{}", uuid::Uuid::new_v4()));
+    let home = root.clone();
+    let app_home = home.join(".tachi");
+    std::fs::create_dir_all(&app_home).expect("create app_home");
+    let target_db = app_home.join("global").join("memory.db");
+
+    std::fs::create_dir_all(target_db.parent().unwrap()).expect("create target parent");
+    let mut tgt = MemoryStore::open(target_db.to_str().unwrap()).expect("open target");
+    tgt.upsert(&make_entry("preexisting-target"))
+        .expect("seed target");
+    drop(tgt);
+
+    let source_db = home.join("legacy-src-locked").join("memory.db");
+    std::fs::create_dir_all(source_db.parent().unwrap()).expect("create source parent");
+    let mut src = MemoryStore::open(source_db.to_str().unwrap()).expect("open source");
+    src.upsert(&make_entry("src-locked-row"))
+        .expect("seed source");
+    drop(src);
+
+    // Simulate "source DB's own daemon is running": pre-acquire the scoped
+    // lock for `source_db` (a different scope than `target_db`).
+    let source_scoped_lock_path =
+        crate::daemon_lock::scoped_daemon_lock_path(&app_home, &source_db);
+    let target_scoped_lock_path =
+        crate::daemon_lock::scoped_daemon_lock_path(&app_home, &target_db);
+    assert_ne!(
+        source_scoped_lock_path, target_scoped_lock_path,
+        "fixture must exercise a genuinely different scope than the target"
+    );
+    let _source_daemon = crate::daemon_lock::DaemonLock::acquire(&source_scoped_lock_path)
+        .expect("pre-acquire source-scope lock to simulate its own live daemon");
+
+    let archive_path = app_home
+        .join("archive")
+        .join("ts-srclock-test")
+        .join("legacy-src-locked-memory.db");
+    let migration = crate::bootstrap::TidyMigration {
+        source_path: source_db.display().to_string(),
+        target_path: target_db.display().to_string(),
+        archive_path: archive_path.display().to_string(),
+        scope_suggestion: "test".to_string(),
+        action: "review_for_legacy_migration".to_string(),
+        source_row_count: 1,
+        reason: "test fixture".to_string(),
+    };
+    let cfg = crate::bootstrap::MigrationConfig {
+        target_db: target_db.clone(),
+        manifest_path: app_home.join("manifest.json"),
+        dry_run: false,
+        interactive: false,
+        app_home: app_home.clone(),
+    };
+
+    let summary = crate::bootstrap::execute_tidy_migrations(std::slice::from_ref(&migration), &cfg)
+        .expect("execute summary");
+
+    assert_eq!(summary.migrated_count, 0, "must not report migrated");
+    assert_eq!(summary.failed_count, 1, "must report failed (refused)");
+    let outcome = &summary.outcomes[0];
+    assert_eq!(outcome.status, "failed");
+    assert!(
+        outcome.message.contains("rolled back"),
+        "message must say rows were rolled back, got: {}",
+        outcome.message
+    );
+    assert!(
+        outcome.message.contains("source DB's own daemon is running"),
+        "message must name the source-scope lock conflict, got: {}",
+        outcome.message
+    );
+    assert!(
+        outcome.message.contains("scoped lock"),
+        "message must name which lock kind conflicted, got: {}",
+        outcome.message
+    );
+    assert!(outcome.archive_path.is_none());
+
+    // Source must survive untouched — never archived while its own scope's
+    // lock is held by someone else.
+    assert!(
+        source_db.exists(),
+        "source DB must remain on disk when its scope's lock was busy"
+    );
+    assert!(
+        !archive_path.exists(),
+        "no archive copy may exist when the migration was refused"
+    );
+    let tgt_after =
+        MemoryStore::open_read_only(target_db.to_str().unwrap()).expect("open target after");
+    assert_eq!(
+        tgt_after.stats(true).unwrap().total,
+        1,
+        "target rows must be rolled back to the preexisting count"
+    );
+    drop(tgt_after);
+
+    drop(_source_daemon);
     let _ = std::fs::remove_dir_all(&root);
 }

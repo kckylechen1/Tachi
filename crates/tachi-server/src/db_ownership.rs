@@ -313,4 +313,101 @@ mod tests {
             classify_lsof_output(Some(1), "", "", OTHER_SELF_PID)
         );
     }
+
+    /// End-to-end proof that the self-PID exclusion is narrowly scoped to
+    /// THIS calling process: it must not swallow a genuinely external
+    /// holder. Every other test in this file exercises the pure classifier
+    /// or an injected result; this is the only one that drives the real
+    /// `daemon_ownership` -> `probe_db_ownership` -> `lsof` path against an
+    /// actual second process holding the file open.
+    ///
+    /// Holder is `tail -f <path>` (a single, non-forking process that opens
+    /// the path directly) rather than this test's own connection — a
+    /// same-process hold would be *excluded* by design and prove nothing
+    /// about external holders. If `tail` can't be spawned or `lsof`
+    /// resolves to `Unknown` (either environment-dependent), the test skips
+    /// with an explanation rather than failing — there is no existing
+    /// precedent in this file for hard-failing on an unavailable OS tool
+    /// (`probe_db_ownership` itself already treats a missing `lsof` as
+    /// `Unknown`, not a bug).
+    #[test]
+    fn e2e_probe_sees_external_holder_and_clears_after_release() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("held.db");
+        std::fs::write(&db_path, b"placeholder").expect("seed fixture file");
+
+        let mut holder = match Command::new("tail")
+            .arg("-f")
+            .arg(&db_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) => {
+                eprintln!(
+                    "skipping e2e_probe_sees_external_holder_and_clears_after_release: \
+                     could not spawn external holder process ({e})"
+                );
+                return;
+            }
+        };
+
+        // Poll: `spawn()` returning doesn't mean `tail` has opened the file
+        // yet, and this same probe is what must observe `Unknown` if `lsof`
+        // itself is unavailable in this environment.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut observed = daemon_ownership(&db_path);
+        while Instant::now() < deadline && observed != DbOwnership::Owned {
+            if matches!(observed, DbOwnership::Unknown(_)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            observed = daemon_ownership(&db_path);
+        }
+
+        match observed {
+            DbOwnership::Owned => {
+                // Confirmed: lsof genuinely detects the external holder, and
+                // self-PID exclusion (a different PID here) did not swallow it.
+            }
+            DbOwnership::Unknown(reason) => {
+                let _ = holder.kill();
+                let _ = holder.wait();
+                eprintln!(
+                    "skipping e2e_probe_sees_external_holder_and_clears_after_release: \
+                     lsof unavailable in this environment ({reason})"
+                );
+                return;
+            }
+            DbOwnership::NotOwned => {
+                let _ = holder.kill();
+                let _ = holder.wait();
+                panic!(
+                    "expected Owned (external holder present, or eventually \
+                     Unknown if lsof is unavailable) but got NotOwned — \
+                     external-holder detection is broken, not just self-exclusion"
+                );
+            }
+        }
+
+        holder.kill().expect("kill external holder process");
+        holder.wait().expect("wait for external holder process exit");
+
+        // After the sole holder exits (fd closed), the probe must clear.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut cleared = daemon_ownership(&db_path);
+        while Instant::now() < deadline && cleared != DbOwnership::NotOwned {
+            std::thread::sleep(Duration::from_millis(50));
+            cleared = daemon_ownership(&db_path);
+        }
+        assert_eq!(
+            cleared,
+            DbOwnership::NotOwned,
+            "probe must clear to NotOwned after the external holder released the file"
+        );
+    }
 }

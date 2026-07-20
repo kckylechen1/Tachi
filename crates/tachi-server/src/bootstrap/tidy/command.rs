@@ -66,6 +66,7 @@ pub(in crate::bootstrap) async fn run_tidy_command(
             manifest_path: crate::manifest::Manifest::default_path(home),
             dry_run: false,
             interactive: !yes && atty_stdout(),
+            app_home: app_home.to_path_buf(),
         };
 
         let summary = execute_tidy_migrations(&plan, &cfg)?;
