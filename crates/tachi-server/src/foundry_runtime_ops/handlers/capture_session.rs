@@ -35,6 +35,7 @@ fn set_capture_failpoint(stage: &str) {
         "after_manifest_admission" => 1,
         "after_artifact_0" => 2,
         "after_maintenance" => 3,
+        "before_enqueue_maintenance" => 4,
         _ => panic!("unknown capture failpoint: {stage}"),
     };
     CAPTURE_FAILPOINT.store(value, std::sync::atomic::Ordering::SeqCst);
@@ -46,6 +47,7 @@ fn capture_failpoint(stage: &str) -> Result<(), String> {
         "after_manifest_admission" => 1,
         "after_artifact_0" => 2,
         "after_maintenance" => 3,
+        "before_enqueue_maintenance" => 4,
         _ => return Ok(()),
     };
     if CAPTURE_FAILPOINT
@@ -1116,21 +1118,49 @@ pub(crate) async fn handle_capture_session(
         } else {
             DbScope::Project
         };
-        let mut jobs = enqueue_capture_maintenance_jobs(
-            server,
-            group_target_db,
-            group_named_project.clone(),
-            db_path.clone(),
-            &params.agent_id,
-            &base_path,
-            ids,
-            0,
-            0,
-            Some(&format!(
-                "{manifest_key}:{db_str}:{}",
-                group_named_project.as_deref().unwrap_or("default")
-            )),
-        )?;
+        let mut jobs = match (|| -> Result<Vec<memcore::FoundryJobSpec>, String> {
+            // Test-only injection point so the lease-release-on-enqueue-
+            // failure path below is exercised without depending on a real
+            // foundry-queue write failure. Compiled out (and a no-op) on
+            // non-test builds.
+            #[cfg(test)]
+            capture_failpoint("before_enqueue_maintenance")?;
+            enqueue_capture_maintenance_jobs(
+                server,
+                group_target_db,
+                group_named_project.clone(),
+                db_path.clone(),
+                &params.agent_id,
+                &base_path,
+                ids,
+                0,
+                0,
+                Some(&format!(
+                    "{manifest_key}:{db_str}:{}",
+                    group_named_project.as_deref().unwrap_or("default")
+                )),
+            )
+        })() {
+            Ok(jobs) => jobs,
+            Err(error) => {
+                // Symmetric with the `emit_session_captured_event` failure
+                // path below: an error here must not leak the manifest
+                // lease. Without this release, a failed enqueue left the
+                // lease held until `CAPTURE_PROCESSING_LEASE_SECONDS`
+                // (30s) elapsed on its own, forcing concurrent/retrying
+                // callers to spin-wait on a lease nobody was still using.
+                release_capture_lease(
+                    server,
+                    target_db,
+                    named_project.as_deref(),
+                    db_path.as_ref(),
+                    &manifest_key,
+                    &mut manifest,
+                    &mut manifest_version,
+                )?;
+                return Err(error);
+            }
+        };
         let maintenance_job_ids = jobs.iter().map(|job| job.id.clone()).collect();
         maintenance_jobs.append(&mut jobs);
 
@@ -2602,6 +2632,196 @@ mod handler_tests {
                 }
             });
         }
+    }
+
+    /// #1301-adjacent lease-leak fix: `enqueue_capture_maintenance_jobs`
+    /// failing must release the manifest lease immediately — same
+    /// obligation `emit_session_captured_event`'s failure path already
+    /// honors a few lines below it. Before this fix, an enqueue failure
+    /// propagated the error with `?` and skipped `release_capture_lease`
+    /// entirely, leaving `owner` set and `lease_until` ~30s in the future;
+    /// concurrent/retrying callers would spin-wait on a lease nobody was
+    /// still using. This asserts the manifest's durable state directly
+    /// (rather than timing a retry) so the proof doesn't depend on the
+    /// spin-wait loop's cadence.
+    #[test]
+    fn enqueue_maintenance_failure_releases_the_manifest_lease_immediately() {
+        let _guard = FAILPOINT_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        crate::test_support::with_tachi_home(|home| {
+            let stage = "before_enqueue_maintenance";
+            let global_db = home.join("global").join(format!("{stage}-global.db"));
+            let project_db = home.join("projects").join(stage).join("memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("mkdir project");
+            let params = CaptureSessionParams {
+                conversation_id: format!("conv-{stage}"),
+                turn_id: "turn-1".into(),
+                agent_id: "failpoint-agent".into(),
+                messages: vec![Message {
+                    role: "user".into(),
+                    content: "Capture the lease-release-on-enqueue-failure observation.".into(),
+                }],
+                path_prefix: Some(format!("/capture/{stage}")),
+                scope: "project".into(),
+                project: None,
+                project_explicit: false,
+                min_chars: 1,
+                force: true,
+            };
+            let draft = serde_json::json!([{
+                "text": "Enqueue failure must not leak the manifest lease.",
+                "summary": "Lease release on enqueue failure",
+                "topic": "recovery",
+                "category": "fact",
+                "scope": "project",
+                "importance": 0.8
+            }])
+            .to_string();
+            let _workers =
+                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
+            let _persist = crate::test_support::EnvRestore::set(
+                "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+                "1",
+            );
+            let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
+            let rt = tokio::runtime::Runtime::new().expect("runtime");
+            rt.block_on(async move {
+                let (port, _calls, mock) = spawn_capture_llm(vec![draft]).await;
+                let _base = crate::test_support::EnvRestore::set(
+                    "EXTRACT_BASE_URL",
+                    &format!("http://127.0.0.1:{port}/chat/completions"),
+                );
+                let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
+                let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
+                let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+                set_capture_failpoint(stage);
+                let err = handle_capture_session(&server, params)
+                    .await
+                    .expect_err("armed failpoint must fail the enqueue step");
+                assert!(
+                    err.contains(stage),
+                    "error must name the failpoint stage, got: {err}"
+                );
+
+                let manifests = server
+                    .with_project_store_read(|store| {
+                        store
+                            .list_state(CAPTURE_MANIFEST_NAMESPACE)
+                            .map_err(|e| e.to_string())
+                    })
+                    .expect("read manifest state after failed enqueue");
+                assert_eq!(
+                    manifests.len(),
+                    1,
+                    "capture admission must have written exactly one manifest row"
+                );
+                let manifest: serde_json::Value =
+                    serde_json::from_str(&manifests[0].value_json).expect("manifest JSON");
+                assert_eq!(
+                    manifest["owner"], "",
+                    "enqueue failure must clear the manifest owner immediately, not leave it \
+                     held until the 30s processing lease expires on its own"
+                );
+                let lease_until = manifest["lease_until"]
+                    .as_str()
+                    .expect("lease_until is a string");
+                let lease_until_dt = chrono::DateTime::parse_from_rfc3339(lease_until)
+                    .expect("lease_until parses as RFC3339");
+                assert!(
+                    lease_until_dt <= chrono::Utc::now(),
+                    "lease_until must already be in the past — proof the lease was actively \
+                     released rather than left to expire naturally"
+                );
+                mock.abort();
+            });
+            rt.shutdown_timeout(std::time::Duration::from_millis(500));
+        });
+    }
+
+    /// Discrimination test for the reported "embed short-batch silently
+    /// drops the tail" concern: the embedding-assignment code right after
+    /// `embed_voyage_batch` is called (`entries.iter_mut().zip(vectors.iter())`,
+    /// this file, immediately below the `server.llm.embed_voyage_batch(...)`
+    /// call near the top of `handle_capture_session`) would silently
+    /// under-embed the tail of a batch IF `embed_voyage_batch` could ever
+    /// return `Ok(vectors)` with `vectors.len() < texts.len()`.
+    ///
+    /// It cannot, by construction: `parse_voyage_batch_embeddings`
+    /// (`crates/tachi-llm/src/llm/embedding.rs:25-31`) rejects any chunk
+    /// whose returned item count doesn't match the requested count, and
+    /// `embed_voyage_batch` only ever returns `Ok` after every chunk has
+    /// passed that check (`crates/tachi-llm/src/llm/embedding.rs:197,200`)
+    /// — a short response always becomes `Err`, which this handler already
+    /// treats as "defer the whole batch" (the `Err(err) => { ...; None }`
+    /// arm right next to the zip). This test proves that guarantee
+    /// end-to-end against a real (mocked) short HTTP response rather than
+    /// resting on a reading of the tachi-llm source, so a future change
+    /// that weakens the tachi-llm-side check would turn this test red
+    /// instead of silently reintroducing the reported bug.
+    #[test]
+    fn short_voyage_batch_response_is_rejected_not_silently_truncated() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async move {
+            use axum::{routing::post, Json, Router};
+
+            // Responds to every /v1/embeddings call with exactly ONE
+            // embedding, regardless of how many inputs were requested — the
+            // shape a provider would produce if it silently dropped part of
+            // a batch.
+            let app = Router::new().route(
+                "/v1/embeddings",
+                post(|| async move {
+                    Json(serde_json::json!({
+                        "data": [{
+                            "index": 0,
+                            "embedding": vec![0.0_f64; 1024],
+                        }]
+                    }))
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind short-batch voyage mock");
+            let port = listener.local_addr().expect("voyage mock address").port();
+            let mock = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .await
+                    .expect("serve short-batch voyage mock");
+            });
+            tokio::task::yield_now().await;
+
+            let _base = crate::test_support::EnvRestore::set(
+                "VOYAGE_BASE_URL",
+                &format!("http://127.0.0.1:{port}"),
+            );
+            let _key =
+                crate::test_support::EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
+            let _attempts =
+                crate::test_support::EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
+
+            let client = tachi_llm::LlmClient::new().expect("client should initialize");
+            let texts = vec!["first entry".to_string(), "second entry".to_string()];
+            let err = client
+                .embed_voyage_batch(&texts, "document")
+                .await
+                .expect_err(
+                    "a 1-embedding response for a 2-text request must be rejected, not \
+                     silently accepted as a short Ok batch",
+                );
+            assert!(
+                err.contains("returned") && err.contains("embeddings") && err.contains("inputs"),
+                "error should name the count mismatch, got: {err}"
+            );
+
+            mock.abort();
+        });
     }
 
     #[test]

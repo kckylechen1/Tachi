@@ -106,6 +106,29 @@ pub fn delete_state(conn: &Connection, namespace: &str, key: &str) -> Result<boo
     Ok(changed > 0)
 }
 
+/// Delete all `hard_state` rows whose JSON payload declares an `expires_at`
+/// timestamp that has passed `now_rfc3339`.
+///
+/// `expires_at` is not a table column (see `schema/ddl.rs`'s `hard_state`
+/// DDL) — callers embed it as a field inside `value_json` (e.g. the capture
+/// manifest's staging TTL, `crates/tachi-server/.../capture_session.rs`), so
+/// this reads it back via SQLite's JSON1 `json_extract`, already used
+/// elsewhere in this DB layer (see `crates/memcore/src/db/tests.rs`'s
+/// `json_extract must work` assertion). Rows with no `expires_at` field (or
+/// an explicit JSON `null`) are left untouched forever — `json_extract`
+/// returns SQL NULL for both, so the `IS NOT NULL` guard already excludes
+/// them; this is the caller's deliberate retain-forever policy (#1301), not
+/// an oversight.
+pub fn reap_expired_state(conn: &Connection, now_rfc3339: &str) -> Result<usize, MemoryError> {
+    let removed = conn.execute(
+        "DELETE FROM hard_state
+         WHERE json_extract(value_json, '$.expires_at') IS NOT NULL
+           AND json_extract(value_json, '$.expires_at') < ?1",
+        params![now_rfc3339],
+    )?;
+    Ok(removed)
+}
+
 /// List state rows in a namespace, newest first.
 pub fn list_state(conn: &Connection, namespace: &str) -> Result<Vec<StateRow>, MemoryError> {
     let mut stmt = conn.prepare(
@@ -303,5 +326,67 @@ mod tests {
             .expect("get after delete")
             .is_none());
         assert!(!delete_state(&conn, "ns", "k1").expect("delete missing is a no-op"));
+    }
+
+    #[test]
+    fn reap_expired_state_removes_only_rows_past_their_expires_at() {
+        let conn = open_state_db();
+        set_state(
+            &conn,
+            "capture_manifest",
+            "expired",
+            r#"{"expires_at":"2020-01-01T00:00:00Z","completed":false}"#,
+        )
+        .expect("seed expired row");
+        set_state(
+            &conn,
+            "capture_manifest",
+            "future",
+            r#"{"expires_at":"2999-01-01T00:00:00Z","completed":false}"#,
+        )
+        .expect("seed not-yet-expired row");
+        set_state(
+            &conn,
+            "capture_manifest",
+            "retain_forever",
+            r#"{"expires_at":null,"completed":true}"#,
+        )
+        .expect("seed retain-forever row (completed manifest)");
+        set_state(&conn, "claim", "no_expiry_field", r#"{"status":"queued"}"#)
+            .expect("seed row with no expires_at field at all");
+
+        let removed = reap_expired_state(&conn, "2026-01-01T00:00:00Z").expect("reap");
+
+        assert_eq!(removed, 1, "only the past-expiry row should be deleted");
+        assert!(get_state(&conn, "capture_manifest", "expired")
+            .expect("get expired")
+            .is_none());
+        assert!(
+            get_state(&conn, "capture_manifest", "future")
+                .expect("get future")
+                .is_some(),
+            "not-yet-expired row must survive"
+        );
+        assert!(
+            get_state(&conn, "capture_manifest", "retain_forever")
+                .expect("get retain_forever")
+                .is_some(),
+            "explicit expires_at:null (retain-forever, #1301) must never be reaped"
+        );
+        assert!(
+            get_state(&conn, "claim", "no_expiry_field")
+                .expect("get no_expiry_field")
+                .is_some(),
+            "rows whose JSON has no expires_at key at all must never be reaped"
+        );
+    }
+
+    #[test]
+    fn reap_expired_state_is_a_noop_on_an_empty_table() {
+        let conn = open_state_db();
+        assert_eq!(
+            reap_expired_state(&conn, "2026-01-01T00:00:00Z").expect("reap empty table"),
+            0
+        );
     }
 }
