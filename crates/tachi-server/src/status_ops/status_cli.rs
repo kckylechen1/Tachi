@@ -1,3 +1,4 @@
+mod capture_archive;
 mod daemon_cli;
 mod foundry;
 mod status_render;

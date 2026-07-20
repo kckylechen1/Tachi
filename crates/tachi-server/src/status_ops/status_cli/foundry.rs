@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use memcore::{get_foundry_config, set_foundry_config, MemoryStore, PerDbConfig};
 use serde_json::json;
 
+use super::capture_archive;
 use crate::manifest::Manifest;
 use tachi_bootstrap::cli::FoundryAction;
 
@@ -12,6 +13,43 @@ pub(crate) async fn run_foundry(
     global_db_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
+        FoundryAction::CaptureArchivePlan { db, as_of, output } => {
+            let target = db.unwrap_or_else(|| global_db_path.to_path_buf());
+            let as_of = match as_of {
+                Some(value) => value
+                    .parse()
+                    .map_err(|e| format!("invalid --as-of RFC3339: {e}"))?,
+                None => chrono::Utc::now(),
+            };
+            let plan = capture_archive::build_plan(&target, as_of)?;
+            let json = serde_json::to_string_pretty(&plan)?;
+            println!("{json}");
+            if let Some(path) = output {
+                capture_archive::write_owner_atomic(&path, json.as_bytes())?;
+            }
+            Ok(())
+        }
+        FoundryAction::CaptureArchiveApply { db, plan, confirm } => {
+            let target = db.unwrap_or_else(|| global_db_path.to_path_buf());
+            let receipt =
+                capture_archive::apply(&target, capture_archive::read_plan(&plan)?, confirm)?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+            Ok(())
+        }
+        FoundryAction::CaptureArchiveRestore {
+            db,
+            receipt,
+            confirm,
+        } => {
+            let target = db.unwrap_or_else(|| global_db_path.to_path_buf());
+            let receipt = capture_archive::restore(
+                &target,
+                capture_archive::read_receipt(&receipt)?,
+                confirm,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+            Ok(())
+        }
         FoundryAction::ConfigGet { db } => {
             let target = db.unwrap_or_else(|| global_db_path.to_path_buf());
             let cfg = read_per_db_config(&target)?;

@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicU64;
 mod capture;
 mod daily_distill;
 mod handlers;
+pub(crate) use handlers::{CAPTURE_EPHEMERAL_TTL_DAYS, CAPTURE_RETENTION_POLICY_VERSION};
 mod helpers;
 mod maintenance;
 mod recall;

@@ -16,8 +16,8 @@ use serde_json::{json, Value};
 
 /// #1301 provisional capture policy. The named constant is deliberately kept
 /// beside the classifier so archive policy never grows a second flat age.
-const CAPTURE_EPHEMERAL_TTL_DAYS: i64 = 30;
-const CAPTURE_RETENTION_POLICY_VERSION: &str = "capture-v1";
+pub(crate) const CAPTURE_EPHEMERAL_TTL_DAYS: i64 = 30;
+pub(crate) const CAPTURE_RETENTION_POLICY_VERSION: &str = "capture-v1";
 const CAPTURE_MANIFEST_NAMESPACE: &str = "capture-session-manifest-v1";
 const CAPTURE_MANIFEST_STAGING_POLICY: &str = "capture-manifest-staging-v1";
 const CAPTURE_MANIFEST_COMPLETED_RETENTION_POLICY: &str = "capture-manifest-receipt-retain-v1";

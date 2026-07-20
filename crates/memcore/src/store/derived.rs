@@ -53,6 +53,24 @@ impl MemoryStore {
         db::archive_memory(&self.conn, id)
     }
 
+    /// Archive an active memory only when its revision is the one inspected.
+    pub fn archive_memory_if_revision(
+        &self,
+        id: &str,
+        expected_revision: i64,
+    ) -> Result<bool, MemoryError> {
+        db::archive_memory_if_revision(&self.conn, id, expected_revision)
+    }
+
+    /// Restore an archived memory only when its archived revision is unchanged.
+    pub fn restore_archived_if_revision(
+        &self,
+        id: &str,
+        expected_revision: i64,
+    ) -> Result<bool, MemoryError> {
+        db::restore_archived_if_revision(&self.conn, id, expected_revision)
+    }
+
     /// Mark a memory as superseded by a newer/canonical memory.
     pub fn supersede_memory(&self, id: &str, superseded_by: &str) -> Result<bool, MemoryError> {
         db::supersede_memory(&self.conn, id, superseded_by)

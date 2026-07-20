@@ -192,6 +192,38 @@ fn archive_memory_marks_archived() {
 }
 
 #[test]
+fn archive_and_restore_revision_cas() {
+    let mut conn = make_conn();
+    upsert(
+        &mut conn,
+        &make_entry("arch-cas", "unchanged specimen"),
+        false,
+    )
+    .unwrap();
+    let revision: i64 = conn
+        .query_row(
+            "SELECT revision FROM memories WHERE id='arch-cas'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!archive_memory_if_revision(&conn, "arch-cas", revision + 1).unwrap());
+    assert!(archive_memory_if_revision(&conn, "arch-cas", revision).unwrap());
+    assert!(!restore_archived_if_revision(&conn, "arch-cas", revision).unwrap());
+    assert!(restore_archived_if_revision(&conn, "arch-cas", revision + 1).unwrap());
+    let (archived, text, restored_revision): (bool, String, i64) = conn
+        .query_row(
+            "SELECT archived, text, revision FROM memories WHERE id='arch-cas'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert!(!archived);
+    assert_eq!(text, "unchanged specimen");
+    assert_eq!(restored_revision, revision + 2);
+}
+
+#[test]
 fn archive_excluded_from_default_fetch() {
     let mut conn = make_conn();
     upsert(
