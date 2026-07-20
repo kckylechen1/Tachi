@@ -95,13 +95,17 @@ pub struct AutoFixAction {
     pub path: String,
     pub action: String,  // quarantine_placeholder | checkpoint_wal_copy
     pub outcome: String, // ok | error | skipped
-    /// Human-readable receipt. For `checkpoint_wal_copy` success paths the
-    /// note includes an explicit SHM token: `shm=ok`, `shm=absent`, or
-    /// `shm=copy_failed_proceeded_without` (SHM is not durability-equivalent
-    /// to WAL; a failed SHM copy does not block the checkpoint).
+    /// Human-readable receipt. For `checkpoint_wal_copy` the note includes an
+    /// explicit SHM token: `shm=ok`, `shm=absent`,
+    /// `shm=copy_failed_proceeded_without` (partial dest removed),
+    /// `shm=copy_failed_partial_renamed_incomplete`, or
+    /// `shm=copy_failed_partial_remains`. SHM is not durability-equivalent to
+    /// WAL; a failed SHM copy does not block the checkpoint.
     pub note: String,
-    /// Usable checkpoint path on success. Must be `None` when a present
-    /// source WAL could not be copied (incomplete destination discarded).
+    /// Usable checkpoint path on success only. Must be `None` on any failure
+    /// after a copy was attempted (incomplete destination discarded or
+    /// quarantined as `.incomplete`), including when a present source WAL
+    /// could not be copied.
     pub destination: Option<String>,
 }
 

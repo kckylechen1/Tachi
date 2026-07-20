@@ -1,7 +1,8 @@
 use chrono::Utc;
 #[cfg(unix)]
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use super::classify::sidecar;
@@ -454,14 +455,20 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
         };
     }
 
-    // Timestamped destination so repeated `tachi doctor` runs do not
-    // overwrite each other (previously: a single `<src>.checkpointed.db`
-    // got clobbered or accumulated unbounded depending on path layout).
-    let ts = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let dest = {
-        let mut s = src_path.as_os_str().to_owned();
-        s.push(format!(".checkpointed.{ts}.db"));
-        PathBuf::from(s)
+    // Collision-resistant destination: timestamp (µs) + short uuid so two
+    // runs in the same second cannot share a path. Pattern stays
+    // `.checkpointed.<stamp>.db` for scan/GC recognition.
+    let dest = match copy_main_exclusive(src_path) {
+        Ok(p) => p,
+        Err(e) => {
+            return AutoFixAction {
+                path: src.to_string(),
+                action: "checkpoint_wal_copy".to_string(),
+                outcome: "error".to_string(),
+                note: format!("copy main: {e}"),
+                destination: None,
+            };
+        }
     };
     let wal = sidecar(src_path, "-wal");
     let shm = sidecar(src_path, "-shm");
@@ -476,44 +483,32 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
         PathBuf::from(p)
     };
 
-    // Copy main DB.
-    if let Err(e) = fs::copy(src_path, &dest) {
-        return AutoFixAction {
-            path: src.to_string(),
-            action: "checkpoint_wal_copy".to_string(),
-            outcome: "error".to_string(),
-            note: format!("copy main: {e}"),
-            destination: None,
-        };
-    }
-
     // WAL is durability-critical: a present source WAL that cannot be copied
     // must block success. Do not open/checkpoint an incomplete main-only copy.
     if wal.exists() {
         if let Err(e) = fs::copy(&wal, &wal_dest) {
-            discard_incomplete_checkpoint(&dest);
-            return AutoFixAction {
-                path: src.to_string(),
-                action: "checkpoint_wal_copy".to_string(),
-                outcome: "error".to_string(),
-                note: format!("copy wal: {e}"),
-                destination: None,
-            };
+            return checkpoint_failure_action(
+                src,
+                &dest,
+                format!("copy wal: {e}"),
+            );
         }
     }
 
     // SHM is NOT durability-equivalent to WAL. Copy failure: drop any partial
-    // shm dest and proceed with main(+wal); receipt must name the outcome.
+    // shm dest and proceed with main(+wal); receipt must name the outcome
+    // honestly if a partial shm cannot be removed.
     let shm_token = if !shm.exists() {
-        "shm=absent"
-    } else if let Err(_e) = fs::copy(&shm, &shm_dest) {
-        let _ = fs::remove_file(&shm_dest);
-        "shm=copy_failed_proceeded_without"
+        "shm=absent".to_string()
+    } else if let Err(copy_err) = fs::copy(&shm, &shm_dest) {
+        shm_copy_failure_token(&shm_dest, &copy_err)
     } else {
-        "shm=ok"
+        "shm=ok".to_string()
     };
 
     // Open the COPY read-write and force a TRUNCATE checkpoint.
+    // Success alone may advertise destination; open/checkpoint failures must
+    // discard and return destination: None (never a usable action target).
     let dest_str = dest.to_string_lossy().to_string();
     let result = match memcore::db::open_for_wal_checkpoint(&dest_str) {
         Ok(conn) => {
@@ -524,26 +519,22 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
                     action: "checkpoint_wal_copy".to_string(),
                     outcome: "ok".to_string(),
                     note: format!(
-                        "wrote .checkpointed.<ts>.db copy (original untouched); {shm_token}"
+                        "wrote .checkpointed.<stamp>.db copy (original untouched); {shm_token}"
                     ),
                     destination: Some(dest_str),
                 },
-                Err(e) => AutoFixAction {
-                    path: src.to_string(),
-                    action: "checkpoint_wal_copy".to_string(),
-                    outcome: "error".to_string(),
-                    note: format!("wal_checkpoint failed on copy: {e}; {shm_token}"),
-                    destination: Some(dest_str),
-                },
+                Err(e) => checkpoint_failure_action(
+                    src,
+                    &dest,
+                    format!("wal_checkpoint failed on copy: {e}; {shm_token}"),
+                ),
             }
         }
-        Err(e) => AutoFixAction {
-            path: src.to_string(),
-            action: "checkpoint_wal_copy".to_string(),
-            outcome: "error".to_string(),
-            note: format!("open copy: {e}; {shm_token}"),
-            destination: Some(dest_str),
-        },
+        Err(e) => checkpoint_failure_action(
+            src,
+            &dest,
+            format!("open copy: {e}; {shm_token}"),
+        ),
     };
 
     // GC: keep at most the 3 most recent .checkpointed.*.db copies per
@@ -561,10 +552,89 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
     result
 }
 
+/// Unique `.checkpointed.<ts>-<uuid8>.db` path under exclusive create-new.
+fn unique_checkpoint_dest(src_path: &Path) -> PathBuf {
+    let stamp = format!(
+        "{}-{}",
+        Utc::now().format("%Y%m%dT%H%M%S%.6fZ"),
+        &uuid::Uuid::new_v4().as_simple().to_string()[..8]
+    );
+    let mut s = src_path.as_os_str().to_owned();
+    s.push(format!(".checkpointed.{stamp}.db"));
+    PathBuf::from(s)
+}
+
+/// Copy main DB into a newly claimed exclusive destination (retry on name clash).
+fn copy_main_exclusive(src: &Path) -> io::Result<PathBuf> {
+    for _ in 0..16 {
+        let dest = unique_checkpoint_dest(src);
+        match copy_create_new(src, &dest) {
+            Ok(()) => return Ok(dest),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                let _ = fs::remove_file(&dest);
+                return Err(e);
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "exhausted unique checkpoint destination names",
+    ))
+}
+
+fn copy_create_new(src: &Path, dest: &Path) -> io::Result<()> {
+    let mut out = OpenOptions::new().write(true).create_new(true).open(dest)?;
+    let mut inp = File::open(src)?;
+    io::copy(&mut inp, &mut out)?;
+    out.flush()?;
+    Ok(())
+}
+
+fn checkpoint_failure_action(src: &str, dest: &Path, note: String) -> AutoFixAction {
+    let note = match discard_incomplete_checkpoint(dest) {
+        Some(cleanup) => format!("{note}; {cleanup}"),
+        None => note,
+    };
+    AutoFixAction {
+        path: src.to_string(),
+        action: "checkpoint_wal_copy".to_string(),
+        outcome: "error".to_string(),
+        note,
+        destination: None,
+    }
+}
+
+fn shm_copy_failure_token(shm_dest: &Path, copy_err: &io::Error) -> String {
+    match fs::remove_file(shm_dest) {
+        Ok(()) => "shm=copy_failed_proceeded_without".to_string(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            "shm=copy_failed_proceeded_without".to_string()
+        }
+        Err(rm_err) => {
+            let incomplete = {
+                let mut p = shm_dest.as_os_str().to_owned();
+                p.push(".incomplete");
+                PathBuf::from(p)
+            };
+            match fs::rename(shm_dest, &incomplete) {
+                Ok(()) => format!(
+                    "shm=copy_failed_partial_renamed_incomplete (copy: {copy_err}; rm: {rm_err})"
+                ),
+                Err(rename_err) => format!(
+                    "shm=copy_failed_partial_remains (copy: {copy_err}; rm: {rm_err}; rename: {rename_err})"
+                ),
+            }
+        }
+    }
+}
+
 /// Remove a partial checkpoint destination (main + sidecars). On stubborn
-/// main-file delete failure, rename to an explicit `.incomplete` suffix so
-/// the path is never advertised as a usable checkpoint.
-fn discard_incomplete_checkpoint(dest: &Path) {
+/// delete failure, rename to an explicit `.incomplete` suffix so the path is
+/// never a normal-looking usable checkpoint. Returns a note when a usable
+/// name could not be cleared.
+fn discard_incomplete_checkpoint(dest: &Path) -> Option<String> {
+    let mut stuck = Vec::new();
     for path in [
         dest.to_path_buf(),
         sidecar(dest, "-wal"),
@@ -572,15 +642,27 @@ fn discard_incomplete_checkpoint(dest: &Path) {
     ] {
         match fs::remove_file(&path) {
             Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => {
-                if path == dest {
-                    let mut incomplete = dest.as_os_str().to_owned();
-                    incomplete.push(".incomplete");
-                    let _ = fs::rename(dest, PathBuf::from(incomplete));
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(rm_err) => {
+                let incomplete = {
+                    let mut p = path.as_os_str().to_owned();
+                    p.push(".incomplete");
+                    PathBuf::from(p)
+                };
+                match fs::rename(&path, &incomplete) {
+                    Ok(()) => {}
+                    Err(rename_err) => stuck.push(format!(
+                        "incomplete remains at {} (rm: {rm_err}; rename: {rename_err})",
+                        path.display()
+                    )),
                 }
             }
         }
+    }
+    if stuck.is_empty() {
+        None
+    } else {
+        Some(stuck.join("; "))
     }
 }
 
@@ -617,7 +699,7 @@ fn daemon_owns_db(_db_path: &Path) -> bool {
 /// Remove all but the `keep` most-recent `<src>.checkpointed.*.db` (and
 /// their `-wal`/`-shm` sidecars) sitting next to `src_path`. Returns
 /// Some(note) only on partial failure so the caller can surface it.
-fn gc_old_checkpoint_copies(src_path: &Path, keep: usize) -> Option<String> {
+    fn gc_old_checkpoint_copies(src_path: &Path, keep: usize) -> Option<String> {
     let dir = src_path.parent()?;
     let basename = src_path.file_name()?.to_string_lossy().to_string();
     let prefix = format!("{basename}.checkpointed.");
@@ -628,7 +710,11 @@ fn gc_old_checkpoint_copies(src_path: &Path, keep: usize) -> Option<String> {
     for ent in entries.flatten() {
         let name = ent.file_name().to_string_lossy().to_string();
         // `ends_with(".db")` already excludes `.db-wal` / `.db-shm` sidecars
-        // — those go away together with their parent below.
+        // — those go away together with their parent below. Skip quarantined
+        // `.incomplete` leftovers so GC never treats them as usable copies.
+        if name.contains(".incomplete") {
+            continue;
+        }
         if name.starts_with(&prefix) && name.ends_with(suffix) {
             if let Ok(meta) = ent.metadata() {
                 if let Ok(mtime) = meta.modified() {
@@ -741,15 +827,18 @@ mod checkpoint_honesty_tests {
 
     #[test]
     fn wal_copy_fail_returns_error_without_usable_destination() {
+        // Deterministic inject: replace -wal with a directory so copy fails
+        // without depending on chmod/privilege behavior.
         let dir = tempdir().unwrap();
         let db = dir.path().join("memory.db");
         write_wal_mode_db(&db);
         let wal = sidecar(&db, "-wal");
-        chmod(&wal, 0o000);
+        fs::remove_file(&wal).expect("remove wal file");
+        fs::create_dir(&wal).expect("wal path as directory");
 
         let action = checkpoint_wal_copy(db.to_str().unwrap());
 
-        chmod(&wal, 0o644); // allow tempdir cleanup
+        let _ = fs::remove_dir(&wal); // allow tempdir cleanup
         assert_eq!(action.outcome, "error");
         assert!(
             action.note.contains("copy wal:"),
@@ -767,6 +856,97 @@ mod checkpoint_honesty_tests {
     }
 
     #[test]
+    fn wal_copy_fail_chmod_denied_still_discards() {
+        // Retain privilege-path coverage alongside the directory inject.
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        write_wal_mode_db(&db);
+        let wal = sidecar(&db, "-wal");
+        chmod(&wal, 0o000);
+
+        let action = checkpoint_wal_copy(db.to_str().unwrap());
+
+        chmod(&wal, 0o644); // allow tempdir cleanup
+        assert_eq!(action.outcome, "error");
+        assert!(action.destination.is_none());
+        assert!(checkpointed_globs(dir.path(), "memory.db").is_empty());
+    }
+
+    #[test]
+    fn open_failure_discards_destination_and_returns_none() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        // Non-SQLite bytes copy fine but open_for_wal_checkpoint fails.
+        fs::write(&db, b"this is not a sqlite database file!!!!!").unwrap();
+        fs::write(sidecar(&db, "-wal"), b"wal-bytes").unwrap();
+
+        let action = checkpoint_wal_copy(db.to_str().unwrap());
+
+        assert_eq!(action.outcome, "error");
+        // rusqlite may fail at open or at the first pragma on non-DB bytes;
+        // either arm must discard and return destination: None.
+        assert!(
+            action.note.contains("open copy:")
+                || action.note.contains("wal_checkpoint failed on copy:"),
+            "note must name open/checkpoint failure, got: {}",
+            action.note
+        );
+        assert!(
+            action.note.contains("shm="),
+            "failure note must retain shm token, got: {}",
+            action.note
+        );
+        assert!(
+            action.destination.is_none(),
+            "must not advertise a usable destination on open/checkpoint failure"
+        );
+        assert!(
+            checkpointed_globs(dir.path(), "memory.db").is_empty(),
+            "no usable .checkpointed.*.db may remain after open/checkpoint failure"
+        );
+    }
+
+    #[test]
+    fn failed_checkpoint_does_not_clobber_prior_success() {
+        let dir = tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        write_wal_mode_db(&db);
+
+        let first = checkpoint_wal_copy(db.to_str().unwrap());
+        assert_eq!(first.outcome, "ok");
+        let first_dest = PathBuf::from(first.destination.expect("first success dest"));
+        assert!(first_dest.exists());
+        let first_bytes = fs::read(&first_dest).expect("read first checkpoint");
+
+        // Force a later mid-copy WAL failure (same second is fine — names collide
+        // no longer; discard must not delete the earlier success).
+        let wal = sidecar(&db, "-wal");
+        fs::remove_file(&wal).expect("remove wal");
+        fs::create_dir(&wal).expect("wal as directory");
+
+        let second = checkpoint_wal_copy(db.to_str().unwrap());
+        let _ = fs::remove_dir(&wal);
+
+        assert_eq!(second.outcome, "error");
+        assert!(second.destination.is_none());
+        assert!(
+            first_dest.exists(),
+            "later WAL-copy failure must not delete prior success at {}",
+            first_dest.display()
+        );
+        assert_eq!(
+            fs::read(&first_dest).expect("re-read first"),
+            first_bytes,
+            "prior success contents must be intact"
+        );
+        let remaining = checkpointed_globs(dir.path(), "memory.db");
+        assert!(
+            remaining.iter().any(|p| p == &first_dest),
+            "prior success must remain a usable .checkpointed.*.db, got {remaining:?}"
+        );
+    }
+
+    #[test]
     fn wal_copy_ok_checkpoint_succeeds() {
         let dir = tempdir().unwrap();
         let db = dir.path().join("memory.db");
@@ -780,6 +960,15 @@ mod checkpoint_honesty_tests {
         assert!(
             dest.contains(".checkpointed.") && dest.ends_with(".db"),
             "timestamped checkpoint naming preserved: {dest}"
+        );
+        // Collision-resistant stamp: fractional seconds + short hex suffix.
+        let name = Path::new(&dest)
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        assert!(
+            name.contains('-'),
+            "dest name should include uuid suffix separator: {name}"
         );
         assert!(
             action.note.contains("shm=ok") || action.note.contains("shm=absent"),
