@@ -182,7 +182,6 @@ fn narrow_gated_action_schemas(
 fn hide_operator_dispatch_properties(tool: &mut rmcp::model::Tool) {
     const OPERATOR_LAUNCH_PROPERTIES: &[&str] = &[
         "dispatch_reason",
-        "cwd",
         "env_id",
         "unmanaged_cwd",
         "skills",
@@ -233,6 +232,18 @@ fn hide_operator_dispatch_properties(tool: &mut rmcp::model::Tool) {
         if advertises_launch {
             property.remove("description");
         }
+    }
+    if let Some(cwd) = properties
+        .get_mut("cwd")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        cwd.insert(
+            "description".to_string(),
+            serde_json::Value::String(
+                "[action=briefing|doc_index] Workspace root used to resolve relative canonical document paths."
+                    .to_string(),
+            ),
+        );
     }
     for definitions_key in ["$defs", "definitions"] {
         let Some(definitions) = schema
@@ -1005,7 +1016,6 @@ mod tests {
             .expect("standard properties");
         for hidden in [
             "dispatch_reason",
-            "cwd",
             "env_id",
             "command",
             "credential_profiles",
@@ -1013,6 +1023,11 @@ mod tests {
         ] {
             assert!(!standard_properties.contains_key(hidden), "{hidden}");
         }
+        assert!(standard_properties.contains_key("cwd"));
+        assert_eq!(
+            standard_properties["cwd"]["description"],
+            json!("[action=briefing|doc_index] Workspace root used to resolve relative canonical document paths.")
+        );
         assert!(!standard[0]
             .description
             .as_deref()
