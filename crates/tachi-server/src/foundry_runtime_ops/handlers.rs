@@ -6,6 +6,7 @@ mod section;
 mod target;
 
 pub(crate) use capture_session::handle_capture_session;
+pub(crate) use capture_session::{CAPTURE_EPHEMERAL_TTL_DAYS, CAPTURE_RETENTION_POLICY_VERSION};
 pub(crate) use compact::{
     handle_compact_context, handle_compact_rollup, handle_compact_session_memory,
     COMPACT_CONTEXT_PERSIST_REFUSAL,

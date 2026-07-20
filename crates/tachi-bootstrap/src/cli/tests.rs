@@ -2,6 +2,75 @@ use super::*;
 use clap::{CommandFactory, Parser};
 
 #[test]
+fn capture_archive_commands_parse_and_mutations_require_confirm() {
+    let plan = Cli::try_parse_from([
+        "tachi",
+        "foundry",
+        "capture-archive-plan",
+        "--db",
+        "/tmp/a.db",
+        "--as-of",
+        "2026-07-20T00:00:00Z",
+        "--output",
+        "plan.json",
+    ])
+    .expect("capture archive plan should parse");
+    assert!(matches!(
+        plan.command,
+        Some(Commands::Foundry { action: FoundryAction::CaptureArchivePlan { db: Some(db), as_of: Some(as_of), output: Some(output) } })
+            if db == std::path::Path::new("/tmp/a.db")
+                && as_of == "2026-07-20T00:00:00Z"
+                && output == std::path::Path::new("plan.json")
+    ));
+
+    let apply = Cli::try_parse_from([
+        "tachi",
+        "foundry",
+        "capture-archive-apply",
+        "--plan",
+        "plan.json",
+        "--confirm",
+    ])
+    .expect("confirmed capture archive apply should parse");
+    assert!(matches!(
+        apply.command,
+        Some(Commands::Foundry { action: FoundryAction::CaptureArchiveApply { plan, confirm: true, .. } })
+            if plan == std::path::Path::new("plan.json")
+    ));
+    assert!(Cli::try_parse_from([
+        "tachi",
+        "foundry",
+        "capture-archive-apply",
+        "--plan",
+        "plan.json"
+    ])
+    .is_err());
+
+    let restore = Cli::try_parse_from([
+        "tachi",
+        "foundry",
+        "capture-archive-restore",
+        "--receipt",
+        "receipt.json",
+        "--confirm",
+    ])
+    .expect("confirmed capture archive restore should parse");
+    assert!(matches!(
+        restore.command,
+        Some(Commands::Foundry { action: FoundryAction::CaptureArchiveRestore { receipt, confirm: true, .. } })
+            if receipt == std::path::Path::new("receipt.json")
+    ));
+    assert!(Cli::try_parse_from([
+        "tachi",
+        "foundry",
+        "capture-archive-restore",
+        "--receipt",
+        "receipt.json"
+    ])
+    .is_err());
+}
+
+#[test]
 fn card_cli_parses_list_and_show() {
     let list =
         Cli::try_parse_from(["tachi", "card", "list", "--json"]).expect("card list should parse");

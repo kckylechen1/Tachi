@@ -1057,6 +1057,32 @@ pub fn archive_memory(conn: &Connection, id: &str) -> Result<bool, MemoryError> 
     Ok(conn.changes() > 0)
 }
 
+pub fn archive_memory_if_revision(
+    conn: &Connection,
+    id: &str,
+    expected_revision: i64,
+) -> Result<bool, MemoryError> {
+    let now = now_utc_iso();
+    conn.execute(
+        "UPDATE memories SET archived = 1, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 0 AND revision = ?3",
+        params![now, id, expected_revision],
+    )?;
+    Ok(conn.changes() > 0)
+}
+
+pub fn restore_archived_if_revision(
+    conn: &Connection,
+    id: &str,
+    expected_revision: i64,
+) -> Result<bool, MemoryError> {
+    let now = now_utc_iso();
+    conn.execute(
+        "UPDATE memories SET archived = 0, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 1 AND revision = ?3",
+        params![now, id, expected_revision],
+    )?;
+    Ok(conn.changes() > 0)
+}
+
 /// Mark a memory as superseded by a newer/canonical memory. Superseded rows are
 /// hidden from default search but remain available for audit/history.
 pub fn supersede_memory(

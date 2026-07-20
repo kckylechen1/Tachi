@@ -426,6 +426,33 @@ pub enum WatcherAction {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum FoundryAction {
+    /// Plan a fail-closed archive sweep of expired auto-capture rows.
+    CaptureArchivePlan {
+        #[arg(long, value_name = "PATH")]
+        db: Option<PathBuf>,
+        #[arg(long, value_name = "RFC3339")]
+        as_of: Option<String>,
+        #[arg(long, value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
+    /// Apply a previously emitted capture archive plan.
+    CaptureArchiveApply {
+        #[arg(long, value_name = "PATH")]
+        db: Option<PathBuf>,
+        #[arg(long, value_name = "FILE")]
+        plan: PathBuf,
+        #[arg(long, required = true)]
+        confirm: bool,
+    },
+    /// Restore rows archived by one capture archive receipt.
+    CaptureArchiveRestore {
+        #[arg(long, value_name = "PATH")]
+        db: Option<PathBuf>,
+        #[arg(long, value_name = "FILE")]
+        receipt: PathBuf,
+        #[arg(long, required = true)]
+        confirm: bool,
+    },
     /// Per-DB runtime config: get current values for one DB.
     ConfigGet {
         /// Absolute path to the target DB. Defaults to the global DB.
