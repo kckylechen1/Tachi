@@ -5,13 +5,25 @@ use super::{
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
+/// Why execution is leaving the host harness instead of using its native
+/// subagent. Tachi is memory/ledger by default; these are the only admitted
+/// exceptions for its legacy durable dispatch backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TachiDispatchReason {
+    ExplicitUserRequest,
+    DurableCrossSession,
+    CrossDeviceRemote,
+    NativeSubagentUnavailable,
+}
+
 fn tachi_task_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     // #757: GH PR lifecycle is only on tachi_gh — not accepted by tachi_task.
     string_enum_schema(
         &super::action_enums::TachiTaskAction::primary_wire_strings(),
-        "Required Tachi task facade action. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'wait'/'board'/'cancel' manage dispatches; action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='recommend'/'route_simulate'/'proposals' manage routing; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs); action='refine_issues' is a manually-triggered, read-only, proposal-only semantic refinement of one GitHub issue (#1002) — it never closes/reopens/edits/writes back.",
+        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation. action='dispatch' is only an explicit durable/remote/native-unavailable exception and requires dispatch_reason; action='recommend' is advisory and does not authorize dispatch. GitHub PR lifecycle (link_pr/pr_status/pr_handoff/release_note) is tachi_gh only. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the layered source index; action='status'/'wait'/'board'/'cancel' manage existing explicit dispatches; action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='recommend'/'route_simulate'/'proposals' manage routing evidence; action='intake' binds issues; action='cycle_status'/'cycle_plan' lifecycle read models; action='ux_matrix' UX checklist; action='close_loop' wiki closure; action='merge' is local worktree merge only (use tachi_gh safe_merge for GitHub PRs); action='refine_issues' is a manually-triggered, read-only, proposal-only semantic refinement of one GitHub issue (#1002) — it never closes/reopens/edits/writes back.",
         generator,
     )
 }
@@ -84,6 +96,14 @@ pub struct TachiTaskParams {
         description = "[action=dispatch|recommend|route_simulate] Declared side-effect level L0–L3. Omitted → L1 for host admission."
     )]
     pub execution_level: Option<super::ExecutionLevel>,
+    /// [action=dispatch] Required exception to the native-subagent-first law.
+    /// Installing Tachi, wanting parallelism, ordinary tracking, or choosing
+    /// a model/vendor is not sufficient. Omit for every non-dispatch action.
+    #[serde(default)]
+    #[schemars(
+        description = "[action=dispatch] Required native-first exception: explicit_user_request, durable_cross_session, cross_device_remote, or native_subagent_unavailable. Ordinary local delegation must use the host harness's native subagent."
+    )]
+    pub dispatch_reason: Option<TachiDispatchReason>,
     #[serde(default)]
     #[schemars(description = "[action=plan|recommend|dispatch] Requesting agent id.")]
     pub agent_id: Option<String>,
@@ -560,4 +580,29 @@ pub struct TachiTaskParams {
     #[serde(default)]
     #[schemars(description = "[action=release] Explicit release reason.")]
     pub release_reason: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TachiDispatchReason, TachiTaskParams};
+
+    #[test]
+    fn dispatch_reason_is_allowlisted_not_free_form() {
+        let params: TachiTaskParams = serde_json::from_value(serde_json::json!({
+            "action": "dispatch",
+            "dispatch_reason": "durable_cross_session"
+        }))
+        .expect("allowlisted reason deserializes");
+        assert_eq!(
+            params.dispatch_reason,
+            Some(TachiDispatchReason::DurableCrossSession)
+        );
+
+        let error = serde_json::from_value::<TachiTaskParams>(serde_json::json!({
+            "action": "dispatch",
+            "dispatch_reason": "want_parallelism"
+        }))
+        .expect_err("free-form reasons must fail schema deserialization");
+        assert!(error.to_string().contains("unknown variant"));
+    }
 }

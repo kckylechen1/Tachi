@@ -43,11 +43,15 @@ Every task is placed on a five-tier ladder; the tier decides the ceremony, not t
 
 The tier is a routing-topology decision, not merely a vendor choice: high-severity domains (security, credentials, merge-gate changes) *escalate the tier* to mandatory dual-track, never merely swap the vendor.
 
+**Execution-owner invariant.** These topologies describe roles and evidence gates, not a command to use Tachi as the worker launcher. The host harness's native subagent owns ordinary local execution and session lifecycle. Tachi supplies memory, policy/card advice, claims, ledger, receipts, and eval—including mirrored native-worker outcomes. Every launch-capable Tachi surface (`tachi_task(action="dispatch")`, `tachi_shell(async_dispatch=true)`, and `tachi_arena(spawn, launch=true)` for a launch-capable lane) is opt-in only for an explicit owner request, durable work that must outlive the current harness session, cross-device/remote pickup, or absence of a usable native subagent, expressed as a closed typed `dispatch_reason` before any run/flow/mission artifact is created. Packet-only shell and arena operations remain available without that exception. `recommend` is advisory and never converts into dispatch authority by itself.
+
+Examples: “inspect these three modules in parallel” stays inside the harness's native subagents, even if the leader records their outcomes in Tachi. “Run this overnight after my current harness exits and let another device pick it up” may use Tachi dispatch with `dispatch_reason="durable_cross_session"` or `"cross_device_remote"`. “Use Codex” alone still uses a native Codex seat when the harness provides one; vendor selection is not a dispatch exception.
+
 ### 2.2 Pre-dispatch card consult
 
 Before a T2/T3 packet is frozen, the leader consults the card store (surfaces in §4). The consult produces four things, in order:
 
-1. **recommend** — a profile choice derived deterministically from task type, a risk classification, and eval evidence. This is `tachi_task(action="recommend")`; it consumes the live performance matrix and explains its fallback when live samples are thin.
+1. **recommend** — an advisory profile/card choice derived deterministically from task type, a risk classification, and eval evidence. This is `tachi_task(action="recommend")`; it consumes the live performance matrix and explains its fallback when live samples are thin. The host may apply that advice to a native subagent; the result is not permission or an instruction to call Tachi dispatch.
 2. **loadout** — the skills, evidence contract, and overlays the profile projects (`tachi_skill(action="loadout")`).
 3. **vaccination projection** — the top-N ACT-R-decayed counter-clauses for this `(role, vendor)`, injected verbatim into the packet's frozen-spec section as *additional mandatory clauses* (the wire is PR #738; see §4 and §6).
 4. **trust-flag consumption** — if the vendor carries an unresolved `falsified_ci_report` signature, its `self_report_trust` is low and the packet mandates independent re-verification of *every* self-report.

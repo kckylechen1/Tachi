@@ -60,6 +60,7 @@ fn task_params(action: &str) -> TachiTaskParams {
         include_card: None,
         task: None,
         execution_level: None,
+        dispatch_reason: None,
         agent_id: None,
         domain: None,
         path_prefix: None,

@@ -9,6 +9,9 @@ pub(super) async fn handle_dispatch_action(
         .task
         .clone()
         .ok_or_else(|| "'task' is required for action='dispatch'".to_string())?;
+    if params.async_dispatch && params.dispatch_reason.is_none() {
+        return Err("tachi_shell async_dispatch is not the default subagent mechanism: use a harness-native subagent, or provide dispatch_reason for an explicit durable/remote exception; zero flow or dispatch artifacts were created.".to_string());
+    }
     let (flow_id, run_dir, created) = resolve_or_create_flow(&params, &task)?;
     let injection = inject_meta_skill("dispatch", &run_dir).await;
 

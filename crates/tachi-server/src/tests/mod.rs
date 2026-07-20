@@ -258,6 +258,7 @@ fn shell_params(action: &str) -> TachiShellParams {
         mcp_access: None,
         allowed_mcp_servers: Vec::new(),
         async_dispatch: false,
+        dispatch_reason: None,
         project: None,
         state_filter: None,
         limit: None,

@@ -25,6 +25,8 @@ Ownership is split across #954 (ask/conversation lifecycle; never dispatch from 
 
 ## Current default vendor assignment (owner-ratified; may change — the role invariant in `AGENTS.md` does not)
 
+All lanes below use Claude Code/OpenCode's native `Agent`/sub-agent mechanism by default. Do **not** translate this table into `tachi_task(action='dispatch')` merely because Tachi is connected. Tachi dispatch requires an explicit user request, durable cross-session work, cross-device/remote pickup, or an unavailable native subagent; otherwise Tachi remains memory + policy + ledger + receipts/eval.
+
 - **T0 trivial**: main agent inline, zero ceremony.
 - **T1 lookup / current-state mapping**: `Explore` agent, `model: sonnet`.
 - **T2 implementation, bounded + spec-frozen (default; owner-ratified 2026-07-14)**: supervised GLM — the `Clanker` supervisor agent (sonnet) drives a GLM opencode write lane under a vaccine contract (explicit file allowlist, no cargo except `cargo fmt --all`, STOP-on-scope-gap); a fresh `codex:dispatch` / `codex:rescue` session reviews with numbered checkpoints. The supervisor + cross-vendor review are what make the cheap lane safe — never run GLM writes through a bare relay.
@@ -47,7 +49,7 @@ Use exactly one primary area: #734 memory/continuity/judgment/ask; #745 verbs/sk
 ## Build/worktree specifics
 
 - `CARGO_TARGET_DIR=$HOME/.cache/sigil-shared-target` is stated in `AGENTS.md` itself as a repo fact (it applies to every carrier building this repo, not just Claude).
-- Dispatched-lane worktrees are created via the `EnterWorktree` tool (for a session already inside this repo) or `tachi_task(action='dispatch')`-managed worktrees. Ad-hoc `git worktree add` outside those two mechanisms needs explicit user approval per the Operating Discipline in the global Claude adapter.
+- Native dispatched-lane worktrees are created via the `EnterWorktree` tool. A `tachi_task(action='dispatch')`-managed worktree exists only for one of the explicit native-first exceptions above. Ad-hoc `git worktree add` outside those mechanisms needs explicit user approval per the Operating Discipline in the global Claude adapter.
 
 ## Where the rest lives
 

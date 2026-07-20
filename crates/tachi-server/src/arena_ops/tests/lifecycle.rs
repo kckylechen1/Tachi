@@ -217,6 +217,7 @@ async fn arena_spawn_launch_failure_returns_recoverable_mission_status() {
     spawn.harness = Some("opencode".into());
     spawn.profile = Some("missing_dispatch_profile".into());
     spawn.launch = true;
+    spawn.dispatch_reason = Some(tachi_params::TachiDispatchReason::ExplicitUserRequest);
     let spawned: Value =
         serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
 
@@ -230,4 +231,33 @@ async fn arena_spawn_launch_failure_returns_recoverable_mission_status() {
         .contains("missing_dispatch_profile"));
     assert!(PathBuf::from(spawned["prompt_path"].as_str().unwrap()).exists());
     assert!(PathBuf::from(spawned["status_path"].as_str().unwrap()).exists());
+}
+
+#[tokio::test]
+async fn arena_worker_launch_requires_native_first_exception_before_mission_artifacts() {
+    let _root = temp_arena_root();
+    let server = server();
+    let mut open = params("open");
+    open.objective = Some("reject an unadmitted worker launch".into());
+    let opened: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
+    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
+    let arena_dir = PathBuf::from(opened["arena_dir"].as_str().unwrap());
+
+    let mut spawn = params("spawn");
+    spawn.arena_id = Some(arena_id);
+    spawn.mission_id = Some("must-not-exist".into());
+    spawn.prompt = Some("ordinary local parallel work".into());
+    spawn.harness = Some("opencode".into());
+    spawn.launch = true;
+    let error = handle_tachi_arena(&server, spawn)
+        .await
+        .expect_err("launch-capable lanes require a typed exception");
+
+    assert!(error.contains("native subagent"), "{error}");
+    assert!(
+        error.contains("zero mission or dispatch artifacts"),
+        "{error}"
+    );
+    assert!(!arena_dir.join("missions/must-not-exist").exists());
 }

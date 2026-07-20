@@ -110,6 +110,7 @@ async fn convoy_dispatch_creates_slice_dirs_and_status() {
         mcp_access: None,
         allowed_mcp_servers: Vec::new(),
         async_dispatch: false,
+        dispatch_reason: None,
         project: None,
         state_filter: None,
         limit: None,

@@ -208,7 +208,7 @@ pub(super) async fn seed_intake_orchestrator(
             task_id: Some(flow_id.to_string()),
             todo_id: Some("dispatch-or-plan".to_string()),
             todo_content: Some(
-                "Run cycle_plan, then follow the next lifecycle step for briefing/recommend/dispatch or PR handoff."
+                "Run cycle_plan, then follow the next lifecycle step for briefing/advisory recommend, harness-native execution, or PR handoff."
                     .to_string(),
             ),
             todo_status: Some(

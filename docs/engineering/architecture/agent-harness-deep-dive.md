@@ -9,6 +9,8 @@
 - Codex CLI v0.135.0 分析
 - 2,841 sessions / 278,000+ turns / 2,014+ 小时实证数据
 
+> **Historical conclusion superseded (2026-07-20, #1312):** the research below pre-dates harness-native subagent lifecycle and mirror-eval support. Tachi does not “必须自己做 Orchestrator” for ordinary local delegation. The harness owns native workers; Tachi owns memory, policy, ledger, receipts, and eval. Its retained dispatcher is an explicit durable/remote fallback only.
+
 ---
 
 ## 1. 核心结论（TL;DR）

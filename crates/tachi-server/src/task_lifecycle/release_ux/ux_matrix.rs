@@ -153,13 +153,13 @@ pub(crate) fn handle_task_ux_matrix(params: &TachiTaskParams) -> Result<String, 
         },
         vec!["read-only action; consumes task, risk, docs/spec paths, and live eval".to_string()],
         gaps_if([(task.trim().is_empty(), "task text is missing")]),
-        "Choose a profile before assigning external workers.",
+        "Advisory card evidence may inform a native worker; it does not authorize Tachi dispatch.",
         true,
     ));
     matrix.push(ux_step(
         "dispatch",
-        "Worker dispatch",
-        "tachi_task(action='dispatch')",
+        "Explicit durable/remote worker dispatch",
+        "tachi_task(action='dispatch', dispatch_reason=...) — otherwise use a native subagent",
         if !dispatch_ids.is_empty() {
             "passed"
         } else if flow_id.is_some() {

@@ -34,6 +34,7 @@ pub(super) async fn handle_tachi_task_facade(
             return handle_tachi_feature_briefing(server, &params).await
         }
         TachiTaskAction::Dispatch => {
+            require_tachi_dispatch_reason(params.dispatch_reason)?;
             crate::task_lifecycle::guard_issue_flow_dispatch(&params)?;
             if params.agent.is_none() && params.profile.is_none() {
                 return Err("agent or profile is required when action='dispatch'".to_string());
@@ -401,6 +402,15 @@ pub(super) async fn handle_tachi_task_facade(
     )
 }
 
+fn require_tachi_dispatch_reason(
+    reason: Option<tachi_params::TachiDispatchReason>,
+) -> Result<(), String> {
+    reason.map(|_| ()).ok_or_else(|| {
+        "tachi_task(action='dispatch') is not the default subagent mechanism: use the host harness's native subagent for ordinary local delegation. Set dispatch_reason only for an explicit user request, durable cross-session work, cross-device/remote pickup, or when no native subagent is available; zero dispatch artifacts were created."
+            .to_string()
+    })
+}
+
 fn attach_host_admission(
     raw: String,
     admission: &crate::host_profile::HostAdmission,
@@ -431,7 +441,24 @@ fn reject_delegate_task_action(server: &MemoryServer, action: &str) -> Result<()
 
 #[cfg(test)]
 mod host_admission_tests {
-    use super::attach_host_admission;
+    use super::{attach_host_admission, require_tachi_dispatch_reason};
+
+    #[test]
+    fn dispatch_requires_a_native_first_exception() {
+        let error = require_tachi_dispatch_reason(None)
+            .expect_err("ordinary delegation must not enter Tachi dispatch");
+        assert!(error.contains("native subagent"));
+        assert!(error.contains("zero dispatch artifacts were created"));
+
+        for reason in [
+            tachi_params::TachiDispatchReason::ExplicitUserRequest,
+            tachi_params::TachiDispatchReason::DurableCrossSession,
+            tachi_params::TachiDispatchReason::CrossDeviceRemote,
+            tachi_params::TachiDispatchReason::NativeSubagentUnavailable,
+        ] {
+            require_tachi_dispatch_reason(Some(reason)).expect("named exception is admitted");
+        }
+    }
 
     #[test]
     fn attach_host_admission_rejects_non_object_producer_payloads() {

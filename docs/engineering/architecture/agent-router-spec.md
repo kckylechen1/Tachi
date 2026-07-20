@@ -6,6 +6,8 @@
 **Related:** `tachi_dispatch` tool, `ClaudePool`, `DispatchOps`  
 **Fleet policy (canonical):** [`agent-fleet.md`](agent-fleet.md) — Phase 1 is **four** dispatch agents only.
 
+> **Superseded execution default (2026-07-20, #1312):** this document describes Tachi's retained durable/remote dispatch backend, not the ordinary subagent path. Harness-native subagents are now the default; Tachi dispatch requires an explicit native-first exception. See [`dispatch-lifecycle.md`](dispatch-lifecycle.md#21-tiers--one-table-no-vibes) for current authority.
+
 ---
 
 ## 1. Goal

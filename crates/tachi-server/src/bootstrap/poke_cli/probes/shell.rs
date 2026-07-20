@@ -21,6 +21,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_shell_artifact(
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
             async_dispatch: false,
+            dispatch_reason: None,
             project: None,
             state_filter: None,
             limit: None,

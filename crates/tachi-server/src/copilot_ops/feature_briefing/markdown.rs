@@ -190,14 +190,14 @@ pub(super) fn markdown_presence_section(value: &Value) -> String {
 }
 
 pub(super) fn markdown_dispatch_recommendation(value: &Value) -> String {
-    let mut out = vec!["\n## Recommended Dispatch".to_string()];
+    let mut out = vec!["\n## Native Subagent Handoff".to_string()];
     let recommendation = value.get("route_recommendation").unwrap_or(&Value::Null);
-    let suggested = value.get("suggested_dispatch").unwrap_or(&Value::Null);
+    let suggested = value.get("suggested_handoff").unwrap_or(&Value::Null);
     let Some(profile) = recommendation
         .get("recommended_profile")
         .and_then(Value::as_str)
     else {
-        out.push("- No dispatch profile recommendation available.".to_string());
+        out.push("- No advisory profile recommendation available.".to_string());
         return out.join("\n");
     };
     let agent = recommendation
@@ -221,9 +221,10 @@ pub(super) fn markdown_dispatch_recommendation(value: &Value) -> String {
             out.push(format!("- Why: {}", reason.join("; ")));
         }
     }
-    if let Some(arguments) = suggested.get("arguments") {
-        out.push(format!("- Dispatch args: `{}`", compact_json(arguments)));
+    if let Some(context) = suggested.get("context") {
+        out.push(format!("- Handoff context: `{}`", compact_json(context)));
     }
+    out.push("- Use the host harness's native subagent; this recommendation does not authorize Tachi worker dispatch.".to_string());
     out.join("\n")
 }
 

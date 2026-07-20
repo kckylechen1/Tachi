@@ -21,6 +21,7 @@ fn arena_params(action: &str) -> TachiArenaParams {
         permissions: Vec::new(),
         timeout_secs: None,
         launch: false,
+        dispatch_reason: None,
         profile: None,
         model: None,
         project: None,

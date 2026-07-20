@@ -18,6 +18,12 @@ Read the branch that applies to you before treating the rest of this file as lit
 - **You were explicitly handed a packet by a leader/dispatcher** — a background sub-task, a Tachi dispatch, or an equivalent mechanism that gave you a base SHA and a defined scope — → you are an executing lane in a dispatch loop. Obey the workspace law, report contract, and frozen-assertion law below; everything else is in the canon doc.
 - **You are the sole interactive session working this repo** — no external leader gave you a packet — → the sections below are not direct instructions to fabricate. Work in the current checkout as normal. Do not invent a packet, a base SHA, or a dispatch id you were never given. The frozen-assertion law and the STOP/never-merge rules still describe the standing engineering discipline for this repo and apply to your own changes regardless.
 
+## Execution ownership: native workers first
+
+- The host harness's native subagent is the default for ordinary local delegation. Installing or exposing Tachi, wanting parallelism, ordinary task tracking, or choosing a vendor does not transfer worker/session lifecycle to Tachi.
+- Tachi owns memory, admission/policy, claims, ledger, receipts, and eval. It may consume mirrored native-worker outcomes without pretending it spawned, waits for, cancels, or resumes that worker.
+- Tachi-managed dispatch is an explicit exception only: the user specifically requested it, work must survive the current harness session, work is cross-device/remote pickup, or the host has no usable native subagent. Carrier-private manuals name the concrete native tool; this public contract does not.
+
 ## Workspace law (restated every dispatch AND every resume)
 
 - **Dispatched-lane only:** work in a **worktree cut from the leader-verified base SHA** given in the packet — never the primary checkout, never a base you fetched/derived yourself (no-network sandboxes make "cut from origin/main" a lie). If you are the sole session, work in the current checkout.
