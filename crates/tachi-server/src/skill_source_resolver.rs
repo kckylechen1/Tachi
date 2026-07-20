@@ -15,25 +15,31 @@ pub(crate) fn resolve_vendored_skill_path(rel_path: &str) -> Option<PathBuf> {
         return None;
     }
 
-    let mut roots = Vec::new();
     if let Some(root) = crate::path_utils::cached_git_root() {
-        roots.push(root.clone());
+        let candidate = root.join(rel_path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
     }
-    roots.push(PathBuf::new());
+    if rel_path.exists() {
+        return Some(rel_path.to_path_buf());
+    }
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        roots.push(PathBuf::from(manifest_dir).join("..").join(".."));
+        let candidate = PathBuf::from(manifest_dir)
+            .join("..")
+            .join("..")
+            .join(rel_path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
     }
     if let Some(root) = central_skills_root() {
-        roots.push(root);
+        let candidate = root.join(rel_path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
     }
-    first_existing_path(&roots, rel_path)
-}
-
-fn first_existing_path(roots: &[PathBuf], rel_path: &Path) -> Option<PathBuf> {
-    roots
-        .iter()
-        .map(|root| root.join(rel_path))
-        .find(|candidate| candidate.exists())
+    None
 }
 
 fn central_skills_root() -> Option<PathBuf> {
