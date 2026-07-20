@@ -44,7 +44,7 @@ If a carrier is unavailable or capacity-constrained, preserve the frozen contrac
 
 ## Issue routing for Claude triage
 
-Use exactly one primary area: #734 memory/continuity/judgment/ask; #745 verbs/skills/projections/UX; #748 credentials/privacy/isolation; #749 identity/dispatch/execution/federation; #1299 performance/concurrency/CI/deployment/data health. Read the latest disposition and current code before trusting a historical body. Protected subtracks marked owner-close-ready are flagged, never closed by the agent.
+Follow `AGENTS.md`'s six-router native parent/sub-issue law; do not duplicate its router list here or treat labels as parentage. Read the latest disposition and current code before trusting a historical body. Protected subtracks marked owner-close-ready are flagged, never closed by the agent.
 
 ## Build/worktree specifics
 
