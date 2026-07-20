@@ -5,17 +5,10 @@ use super::*;
 /// MVP hardcoded stage → meta skill SOP file path (relative to repo root).
 pub(super) fn meta_skill_for_stage(stage: &str) -> Option<&'static str> {
     match stage {
-        "brainstorm" => Some("skill/superpowers/skills/brainstorming/SKILL.md"),
-        "plan" => Some("skill/superpowers/skills/writing-plans/SKILL.md"),
         "dispatch" => Some("skill/superpowers/skills/executing-plans/SKILL.md"),
-        "review" => Some("skill/superpowers/skills/requesting-code-review/SKILL.md"),
-        "ship" => Some("skill/superpowers/skills/finishing-a-development-branch/SKILL.md"),
         _ => None,
     }
 }
-
-/// Stages that bear a skill gate and create/advance a flow run.
-pub(super) const STAGE_ACTIONS: &[&str] = &["brainstorm", "plan", "dispatch", "review", "ship"];
 
 // ─── Meta skill injection ────────────────────────────────────────────────────
 

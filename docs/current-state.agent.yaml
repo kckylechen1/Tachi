@@ -103,10 +103,10 @@ implemented_now:
         dedicated 30-day handoff GC branch was retired along with the write path)"
 
   dispatch_v2:
-    stages: brainstorm / plan / dispatch / review / ship
+    actions: dispatch / status
     features:
-      - two-stage plan/execute with plan review gate
-      - tachi_shell orchestration facade
+      - dispatch packet generation with injected execution SOP
+      - read-only Shell flow status
       - tachi_task dispatch + kanban board
       - auto-daemon readiness probe
       - watchdog polling for kanban state

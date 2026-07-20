@@ -367,13 +367,11 @@ pub(super) fn advance_stage(
             "injected": injection.injected_path,
         }),
     )?;
-    let _ = STAGE_ACTIONS; // touch to silence dead-code if list trims later
     Ok(())
 }
 
 fn stage_state_for(stage: &str) -> &'static str {
     match stage {
-        "brainstorm" | "plan" | "review" | "ship" => "instruction_ready",
         "dispatch" => "dispatch_ready",
         _ => "unknown",
     }

@@ -12,26 +12,24 @@ Tachi Shell has a working MVP for skill-gated flow artifact generation, but the 
 
 ## Completed
 
-- Added `tachi_shell` MCP facade with actions: `brainstorm`, `plan`, `dispatch`, `status`, `review`, and `ship`.
+- `tachi_shell` now exposes exactly `dispatch` and `status`: dispatch writes bounded packets and may launch only an admitted durable/remote exception; status is read-only.
 - Added flow artifact layout under `.tachi/runs/<flow_id>/`.
 - Generate `instruction.md`, `status.json`, `events.jsonl`, and injected meta skill files.
-- Added stage-to-meta-skill mapping for Superpowers workflow gates.
+- Retained dispatch-to-executing-plans SOP injection and shared skill resolution.
 - Hardened `flow_id` handling against path traversal.
 - Cached git root lookup used by shell artifact resolution.
 - Replaced misleading digest wording with `content_hash` / `fingerprint` terminology.
-- Added PR-first release flow language to `ship` instruction generation.
+- Removed the packet-only brainstorm, plan, review, and ship actions; canonical planning, review, and GitHub shipping remain on their owning surfaces.
 - Opened PR #78 for the first large Rust file mechanical refactor.
 
 ## Partially complete
 
 - Async dispatch integration exists at the instruction/artifact level, but full durable background orchestration is not yet complete.
 - `tachi_shell(action="status")` reports Shell flow state, but a full multi-subagent convoy dashboard through `tachi_task(action="board")` is not yet complete.
-- `ship` generates release instructions, but does not yet execute the whole test/gitleaks/commit/push/PR/CI/distill sequence.
 
 ## Not yet complete
 
-- GitHub PR/issue lifecycle integration from `tachi_shell`.
-- CI-gated ship automation.
+- GitHub PR/issue lifecycle and CI-gated shipping remain owned by `tachi_gh`, `tachi_task`, and `tachi_verify`, not Shell.
 - Memory/GitHub linkage for flow artifacts and PR summaries.
 - Parallel worktree subagent dispatch as a first-class shell mode.
 - Automatic migration from document control plane to runtime shell artifacts.
@@ -50,4 +48,3 @@ Tachi Shell has a working MVP for skill-gated flow artifact generation, but the 
 2. Review and merge PR #78.
 3. Continue Stage 2b / Stage 3 / Stage 4 as separate branches or PRs.
 4. Add `parallel_worktrees` / convoy design to the formal Tachi Shell plan.
-5. Implement `ship` execution in small increments: preflight, PR body, PR creation, CI status, distill.

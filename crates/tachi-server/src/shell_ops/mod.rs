@@ -1,13 +1,13 @@
-//! `tachi_shell` — skill-gated flow orchestration facade.
+//! `tachi_shell` — dispatch packet and flow-status facade.
 //!
 //! Implements the MVP described in `wiki/agent/tachi/Tachi-Shell-重构计划-2026-05-04.md`.
 //!
-//! Each `tachi_shell(action=...)` call is a thin coordinator that:
+//! A dispatch call is a thin coordinator that:
 //!   1. Resolves / creates a `flow_id` and its run directory.
 //!   2. Injects the meta skill SOP file required for the stage.
 //!   3. Writes / updates `instruction.md`, `status.json`, `events.jsonl`.
-//!   4. For `status` it delegates to the existing read-only handler.
-//!   5. For `dispatch` it can optionally hand off to the existing
+//!
+//! Status delegates to the existing read-only handler. Dispatch can optionally hand off to
 //!      `dispatch_ops::handle_tachi_dispatch` (Phase 4 hook).
 //!
 //! This module deliberately does **not** re-implement clanker dispatch,
@@ -38,7 +38,7 @@ use self::flow::{
 };
 #[cfg(test)]
 use self::injection::meta_skill_for_stage;
-use self::injection::{inject_meta_skill, InjectionResult, STAGE_ACTIONS};
+use self::injection::{inject_meta_skill, InjectionResult};
 use self::instruction::build_instruction_md;
 
 // Re-exported for `builtins::helpers` (capability-seed time) and

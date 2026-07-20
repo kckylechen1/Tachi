@@ -293,7 +293,7 @@ pub struct TachiVerifyParams {
     pub checks: Vec<TachiVerifyCheckItem>,
 }
 
-// ─── Facade: tachi_shell (skill-gated flow orchestration) ────────────────────
+// ─── Facade: tachi_shell (dispatch packet and flow status) ──────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiShellDispatchSliceParams {
@@ -325,7 +325,7 @@ pub struct TachiShellDispatchSliceParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiShellParams {
-    /// Action: "brainstorm" | "plan" | "dispatch" | "status" | "review" | "ship"
+    /// Action: "dispatch" | "status"
     #[schemars(schema_with = "tachi_shell_action_schema")]
     pub action: String,
 
@@ -333,13 +333,11 @@ pub struct TachiShellParams {
     #[serde(default)]
     pub format: Option<String>,
 
-    /// Existing flow id to continue (optional). When omitted, a new flow_id is generated
-    /// for stage-bearing actions (brainstorm/plan/dispatch/review/ship).
+    /// Existing flow id to continue (optional). When omitted, dispatch generates a new flow_id.
     #[serde(default)]
     pub flow_id: Option<String>,
 
-    /// Free-form task / goal description. Required for brainstorm/plan/dispatch when no
-    /// existing flow_id is supplied.
+    /// Free-form task / goal description. Required for dispatch.
     #[serde(default)]
     pub task: Option<String>,
 

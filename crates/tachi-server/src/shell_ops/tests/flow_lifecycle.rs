@@ -11,7 +11,7 @@ fn flow_id_is_well_formed() {
 fn resolve_or_create_flow_creates_dir() {
     let _root = temp_runs_root();
     let p = TachiShellParams {
-        action: "plan".into(),
+        action: "dispatch".into(),
         format: None,
         flow_id: None,
         task: Some("hello".into()),
@@ -41,7 +41,7 @@ fn resolve_or_create_flow_creates_dir() {
 fn advance_stage_writes_status_and_events() {
     let _root = temp_runs_root();
     let p = TachiShellParams {
-        action: "plan".into(),
+        action: "dispatch".into(),
         format: None,
         flow_id: None,
         task: Some("t".into()),
@@ -72,12 +72,15 @@ fn advance_stage_writes_status_and_events() {
         warning: Some("missing".into()),
         failure_class: Some("missing_source_roots"),
     };
-    advance_stage(&dir, &fid, "plan", "t", &inj, true).unwrap();
+    advance_stage(&dir, &fid, "dispatch", "t", &inj, true).unwrap();
     let status = read_status(&dir);
-    assert_eq!(status.get("stage").and_then(|v| v.as_str()), Some("plan"));
+    assert_eq!(
+        status.get("stage").and_then(|v| v.as_str()),
+        Some("dispatch")
+    );
     assert_eq!(
         status.get("state").and_then(|v| v.as_str()),
-        Some("instruction_ready")
+        Some("dispatch_ready")
     );
     let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
     assert!(events.contains("flow_created"));
@@ -187,7 +190,7 @@ async fn status_action_lists_known_flows() {
     std::fs::create_dir_all(&fdir).unwrap();
     std::fs::write(
             fdir.join("status.json"),
-            r#"{"flow_id":"flow_20260505T000000Z_demo","stage":"plan","state":"instruction_ready","updated_at":"2026-05-05T00:00:00Z"}"#,
+            r#"{"flow_id":"flow_20260505T000000Z_demo","stage":"dispatch","state":"dispatch_ready","updated_at":"2026-05-05T00:00:00Z"}"#,
         )
         .unwrap();
     let p = TachiShellParams {
