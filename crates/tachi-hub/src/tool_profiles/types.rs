@@ -16,7 +16,7 @@ pub struct ToolProfile {
     /// Standard profile: curated daily allow-list for IDE + CLI agents.
     /// When set, only patterns in STANDARD_MINIMAL_TOOL_PATTERNS pass.
     standard_minimal: bool,
-    /// Delegate profile: curated 6-tool allow-list for worker agents.
+    /// Delegate profile: curated worker allow-list for Tachi-managed agents.
     /// When set, only patterns in DELEGATE_MINIMAL_TOOL_PATTERNS pass.
     /// Standard takes precedence over delegate if both are set.
     delegate_minimal: bool,
@@ -98,8 +98,8 @@ impl ToolProfile {
         }
     }
 
-    /// Delegate profile for worker agents spawned by tachi_dispatch.
-    /// Read + remember bundles only, intersected with a curated 7-tool allow-list.
+    /// Delegate profile for workers spawned by an admitted Tachi dispatch.
+    /// Read + remember bundles only, intersected with a curated allow-list.
     /// No dispatch (prevent recursion), no handoff (parent manages), no hub_discover.
     pub const fn delegate() -> Self {
         Self {

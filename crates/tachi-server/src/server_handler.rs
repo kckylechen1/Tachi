@@ -145,21 +145,16 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
     tool.annotations = Some(annotations);
 }
 
-/// #919 CONCERN: the `tachi_task` MCP schema advertises every primary action
-/// (including `dispatch`/`recommend`/`merge`) regardless of profile, even
-/// though the F3 action-policy gate (`facade_action_allowed`) denies those to
-/// a delegate worker at call time. Advertising a capability the gate then
-/// denies is an unnecessary info-leak/confusion surface, so for a delegate
-/// session intersect the advertised `action` enum with what the SAME gate
-/// (single source of truth — no separate hardcoded list to drift) actually
-/// allows. Read-only: only narrows the schema, never widens it beyond what
-/// `TachiTaskAction::PRIMARY` already declares.
+/// Intersect the advertised `tachi_task.action` enum with the same action
+/// policy used at call time. This keeps ordinary profiles from planning around
+/// operator-only Tachi dispatch and prevents restricted profiles from seeing
+/// capabilities they cannot invoke. Admin retains the complete schema.
 fn narrow_gated_action_schemas(
     tools: &mut [rmcp::model::Tool],
     profile: Option<tachi_hub::ToolProfile>,
 ) {
     let profile = profile.unwrap_or_else(tachi_hub::default_tool_profile);
-    if profile.as_str() != "delegate" {
+    if profile.as_str() == "admin" {
         return;
     }
     for tool in tools.iter_mut() {
@@ -174,13 +169,15 @@ fn narrow_gated_action_schemas(
             })
             .collect();
         narrow_action_enum_property(tool, &allowed);
+        tool.description = Some(std::borrow::Cow::Borrowed(
+            "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent. Use briefing/doc_index/plan for context and planning; recommend for advisory profile/card evidence; complete/adjudicate/board and lifecycle actions for work-ledger state; and merge only for an existing operator-created local worktree. GitHub PR lifecycle is tachi_gh only.",
+        ));
     }
 }
 
-/// Rewrite the `properties.action.enum` array of a tool's input schema to
-/// `allowed`, if that property/shape is present. No-op for tools whose
-/// schema doesn't have the expected `{properties: {action: {enum: [...]}}}`
-/// shape (defensive — a schema change elsewhere should never panic list_tools).
+/// Intersect the existing `properties.action.enum` with `allowed`. An absent
+/// enum fails closed to an empty set rather than advertising an action that
+/// runtime policy rejects.
 fn narrow_action_enum_property(tool: &mut rmcp::model::Tool, allowed: &[&str]) {
     let mut schema = (*tool.input_schema).clone();
     let Some(action_prop) = schema
@@ -189,15 +186,28 @@ fn narrow_action_enum_property(tool: &mut rmcp::model::Tool, allowed: &[&str]) {
         .and_then(|props| props.get_mut("action"))
         .and_then(|a| a.as_object_mut())
     else {
+        schema.clear();
+        schema.insert("not".to_string(), serde_json::json!({}));
+        tool.input_schema = std::sync::Arc::new(schema);
         return;
     };
+    let values = action_prop
+        .entry("enum")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if let Some(values) = values.as_array_mut() {
+        values.retain(|value| {
+            value
+                .as_str()
+                .is_some_and(|action| allowed.contains(&action))
+        });
+    } else {
+        *values = serde_json::Value::Array(Vec::new());
+    }
     action_prop.insert(
-        "enum".to_string(),
-        serde_json::Value::Array(
-            allowed
-                .iter()
-                .map(|a| serde_json::Value::String((*a).to_string()))
-                .collect(),
+        "description".to_string(),
+        serde_json::Value::String(
+            "Required task memory, policy, or ledger action. Ordinary local delegation uses the host harness's native subagent. Recommendations are advisory and do not authorize an execution backend. GitHub PR lifecycle is tachi_gh only."
+                .to_string(),
         ),
     );
     tool.input_schema = std::sync::Arc::new(schema);
@@ -897,6 +907,88 @@ mod tests {
         let ann = tool.annotations.expect("annotations set");
         assert_eq!(ann.read_only_hint, Some(true));
         assert_eq!(ann.destructive_hint, Some(false));
+    }
+
+    #[test]
+    fn standard_schema_hides_operator_dispatch_while_admin_keeps_it() {
+        fn task_tool() -> rmcp::model::Tool {
+            serde_json::from_value(json!({
+                "name": "tachi_task",
+                "description": "task facade action='dispatch' requires dispatch_reason",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "description": "action='dispatch' requires dispatch_reason",
+                            "enum": ["plan", "recommend", "dispatch", "complete", "board"]
+                        }
+                    }
+                }
+            }))
+            .expect("task tool")
+        }
+
+        let mut standard = vec![task_tool()];
+        narrow_gated_action_schemas(&mut standard, Some(tachi_hub::ToolProfile::standard()));
+        let standard_actions = standard[0].input_schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("standard action enum");
+        assert_eq!(
+            standard_actions,
+            &vec![
+                json!("plan"),
+                json!("recommend"),
+                json!("complete"),
+                json!("board")
+            ]
+        );
+        assert!(!standard[0]
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("dispatch"));
+        assert!(
+            !standard[0].input_schema["properties"]["action"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("dispatch")
+        );
+
+        for profile in [
+            tachi_hub::ToolProfile::coordinate(),
+            tachi_hub::ToolProfile::delegate(),
+        ] {
+            let mut tools = vec![task_tool()];
+            narrow_gated_action_schemas(&mut tools, Some(profile));
+            let actions = tools[0].input_schema["properties"]["action"]["enum"]
+                .as_array()
+                .expect("non-admin action enum");
+            assert!(!actions.contains(&json!("dispatch")));
+            assert!(!tools[0]
+                .description
+                .as_deref()
+                .unwrap_or_default()
+                .contains("dispatch"));
+            assert!(
+                !tools[0].input_schema["properties"]["action"]["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("dispatch")
+            );
+        }
+
+        let mut admin = vec![task_tool()];
+        narrow_gated_action_schemas(&mut admin, Some(tachi_hub::ToolProfile::admin()));
+        let admin_actions = admin[0].input_schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("admin action enum");
+        assert!(admin_actions.contains(&json!("dispatch")));
+        assert!(admin[0]
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .contains("dispatch"));
     }
 
     #[test]
