@@ -1,48 +1,18 @@
 //! Compile-time build provenance — the daemon's answer to "which commit am I?".
 //!
-//! The values here are injected by [`build.rs`](../build.rs) via
-//! `cargo:rustc-env=...` at compile time:
-//!
-//! * [`GIT_SHA`] — full 40-char git HEAD SHA, or `"unknown"` for a no-git
-//!   (tarball/sandbox) build.
-//! * [`BUILD_TIME`] — UTC build timestamp, or `"unknown"`.
-//!
 //! Rationale (deploy autopsy 2026-07-06): `CARGO_PKG_VERSION` alone cannot
 //! distinguish two builds sharing a semver, so a stale daemon could masquerade
 //! as "current" while running source that diverged from the build source.
 //! Surfacing `GIT_SHA` on `/health`, the pid file, and `--version` makes
 //! "build source == run source" auditable at runtime.
+//!
+//! The shared consts/fns (injected by [`build.rs`](../build.rs) via
+//! `cargo:rustc-env=...` at compile time) live in `build_info_core`,
+//! byte-identical to `tachi_bootstrap`'s copy of the same file — enforced
+//! below by `build_info_core_stays_in_parity_with_bootstrap`. This file
+//! only re-exports them plus this crate's tests.
 
-/// Full git HEAD SHA captured at build time, or `"unknown"` if git was not
-/// available (e.g. a tarball build). This is the SAME value reported by
-/// `/health`'s `git_sha` field.
-pub const GIT_SHA: &str = env!("GIT_SHA");
-
-/// UTC build timestamp captured at build time, or `"unknown"`.
-pub const BUILD_TIME: &str = env!("BUILD_TIME");
-
-/// The package version (`CARGO_PKG_VERSION`), kept here so callers have a
-/// single source for "what version am I".
-pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// A short (first 12 chars) git SHA, or the full value if shorter than 12
-/// (covers the `"unknown"` fallback). 12 chars matches GitHub's abbreviated
-/// SHAs and is collision-resistant enough for human-readable surfaces.
-pub fn git_sha_short() -> &'static str {
-    if GIT_SHA.len() >= 12 {
-        &GIT_SHA[..12]
-    } else {
-        GIT_SHA
-    }
-}
-
-/// Human-readable build identifier: `"{version}+{git_sha_short}"`.
-///
-/// Used by `--version` and startup logging where a single line is preferred
-/// over separate fields. Example: `"1.6.4+52fdd5306a1a"`.
-pub fn build_version_string() -> String {
-    format!("{PKG_VERSION}+{}", git_sha_short())
-}
+pub use crate::build_info_core::*;
 
 #[cfg(test)]
 mod tests {
@@ -107,5 +77,25 @@ mod tests {
             .and_then(|v| v.as_str())
             .expect("git_sha must be a string");
         assert!(!git_sha.is_empty(), "git_sha must be non-empty");
+    }
+
+    // `build_info_core.rs` here and in `tachi-bootstrap` were hand-synced
+    // twins (comments said so by construction, before this test existed —
+    // same shape as the malformed-JSON middleware parity gate added for
+    // tachi-server/portable-server). tachi-bootstrap has no dependency edge
+    // onto tachi-server (and vice versa), so there is no shared crate to
+    // hold these ~50 lines of build-provenance logic in without adding one.
+    // Enforced duplication is the ruled-on tradeoff instead. This test is
+    // the enforcement: it fails loudly if the two copies ever drift.
+    #[test]
+    fn build_info_core_stays_in_parity_with_bootstrap() {
+        let tachi_server_copy = include_str!("build_info_core.rs");
+        let bootstrap_copy = include_str!("../../tachi-bootstrap/src/build_info_core.rs");
+        assert_eq!(
+            tachi_server_copy, bootstrap_copy,
+            "crates/tachi-server/src/build_info_core.rs and \
+             crates/tachi-bootstrap/src/build_info_core.rs must stay \
+             byte-identical — edit one, edit its twin too"
+        );
     }
 }
