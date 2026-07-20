@@ -146,7 +146,11 @@ fn sidecar_path(main: &Path, suffix: &str) -> PathBuf {
 /// sidecar is a normal (non-WAL or already-checkpointed) source and is
 /// skipped. Any sidecar copy failure discards the *whole* destination (main +
 /// any sidecars already copied for this call) and returns `Err` — never a
-/// main-file-only (silently data-losing) copy left behind.
+/// main-file-only (silently data-losing) copy left behind. The discard
+/// itself is honest about its own failures: any file it could not delete
+/// (path + underlying error; a missing file is success, not a failure) is
+/// named in the returned error message rather than swallowed, so an
+/// orphaned partial copy is reported, not silently left on disk.
 ///
 /// Accepted, documented race: there is a narrow window between the ownership
 /// probe above and the copy below in which a daemon could start and begin
@@ -188,16 +192,37 @@ async fn copy_legacy_db_guarded(src: &Path, dest: &Path) -> Result<(), Box<dyn s
         if let Err(e) = tokio::fs::copy(&side_src, &side_dest).await {
             // Discard the whole destination — main file plus any sidecar
             // already copied in this call — rather than leave a partial,
-            // silently data-losing copy at `dest`.
-            let _ = tokio::fs::remove_file(dest).await;
-            for cleanup_suffix in ["-wal", "-shm"] {
-                let _ = tokio::fs::remove_file(sidecar_path(dest, cleanup_suffix)).await;
+            // silently data-losing copy at `dest`. A delete failure here
+            // must never be swallowed (拒必有声): collect every one (path +
+            // error, a missing file is success — nothing to discard) and
+            // fold them into the returned error so an orphaned partial copy
+            // is reported, not silently left on disk.
+            let mut cleanup_failures = Vec::new();
+            if let Err(rm_err) = tokio::fs::remove_file(dest).await {
+                if rm_err.kind() != std::io::ErrorKind::NotFound {
+                    cleanup_failures.push(format!("{}: {rm_err}", dest.display()));
+                }
             }
+            for cleanup_suffix in ["-wal", "-shm"] {
+                let cleanup_path = sidecar_path(dest, cleanup_suffix);
+                if let Err(rm_err) = tokio::fs::remove_file(&cleanup_path).await {
+                    if rm_err.kind() != std::io::ErrorKind::NotFound {
+                        cleanup_failures.push(format!("{}: {rm_err}", cleanup_path.display()));
+                    }
+                }
+            }
+            let discard_note = if cleanup_failures.is_empty() {
+                format!("discarded partial legacy-DB copy at {}", dest.display())
+            } else {
+                format!(
+                    "partial copy could not be fully discarded: {}",
+                    cleanup_failures.join(", ")
+                )
+            };
             return Err(format!(
-                "failed to copy sidecar {} to {}: {e}; discarded partial legacy-DB copy at {}",
+                "failed to copy sidecar {} to {}: {e}; {discard_note}",
                 side_src.display(),
                 side_dest.display(),
-                dest.display()
             )
             .into());
         }
@@ -1114,6 +1139,22 @@ mod tests {
         assert!(!sidecar_path(&dest, "-wal").exists());
         assert!(!sidecar_path(&dest, "-shm").exists());
     }
+
+    // No test exercises the "cleanup itself fails" branch (the
+    // `partial copy could not be fully discarded: ...` message) — there is
+    // no cheap injection available for it. `unlink(2)`/`remove_file` needs
+    // WRITE permission on the file's *parent directory*, not the file
+    // itself; that is the exact same permission `tokio::fs::copy` needs to
+    // *create* `dest` a few lines earlier in this same call. Chmod'ing
+    // `dest`'s parent read-only before the call blocks the initial copy
+    // (a different, earlier failure) rather than isolating a delete-only
+    // failure; chmod'ing it read-only *between* the main-file copy and the
+    // sidecar-failure trigger would require instrumenting the function
+    // itself (a test seam this function does not otherwise need), and a
+    // platform-specific immutable-file flag (e.g. macOS `chflags uchg`) is
+    // not portable enough to call "cheap". The message-formatting logic
+    // itself is straight-line and covered by review; if a cheap injection
+    // seam is added to this function later, add the test alongside it.
 
     fn remember_cli(global_db: std::path::PathBuf, allow_schema_migration: bool) -> Cli {
         Cli {

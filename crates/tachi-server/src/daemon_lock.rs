@@ -278,6 +278,70 @@ impl DualDaemonLock {
     }
 }
 
+/// Error from [`ScopedDaemonLock::acquire`].
+#[derive(Debug)]
+pub(crate) enum ScopedLockError {
+    /// The scoped `daemon-<hash>.lock` for this DB is held by a live process.
+    Running { pid: i32 },
+    /// Filesystem/syscall error while opening or locking the file.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for ScopedLockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScopedLockError::Running { pid } => write!(
+                f,
+                "another tachi daemon is already running for this DB (pid {pid}, scoped lock)"
+            ),
+            ScopedLockError::Io(e) => write!(f, "daemon lock io error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ScopedLockError {}
+
+/// Holds only the scoped (`daemon-<hash>.lock`) singleton lock for
+/// `global_db_path` — no legacy-lock attempt.
+///
+/// This exists for callers that already run *inside* the lifetime of an
+/// outer, wider-scoped [`DualDaemonLock`] held elsewhere in the same
+/// process (e.g. `tidy --execute`'s outer lock on `target_db`, held for the
+/// whole run in `bootstrap/tidy/command.rs`). `legacy_daemon_lock_path` is a
+/// single fixed path per `app_home` — NOT scoped per DB — so a second
+/// `DaemonLock::acquire` on it from a *different* file descriptor in the
+/// same process is not a no-op: `flock(2)` locks are associated with the
+/// open file description, not the process, so a second `flock(LOCK_EX)` via
+/// a fresh fd on a file this process already holds via another fd is
+/// refused exactly like a foreign holder ("may be denied by a lock that the
+/// calling process has already placed via another file descriptor" —
+/// flock(2)). Re-attempting the legacy lock here would misreport the
+/// process's OWN outer hold as `LegacyRunning { pid: self }` and roll back
+/// every migration whose source belongs to a different scope than the
+/// target — this is not a redundant safety net, it is a guaranteed
+/// self-deadlock. The outer lock already excludes every legacy-scheme
+/// daemon for the whole operation; only the scoped lock, which is unique
+/// per DB, needs a fresh acquisition here.
+pub(crate) struct ScopedDaemonLock {
+    _scoped: DaemonLock,
+}
+
+impl ScopedDaemonLock {
+    pub(crate) fn acquire(
+        app_home: &Path,
+        global_db_path: &Path,
+    ) -> Result<Self, ScopedLockError> {
+        let scoped_path = scoped_daemon_lock_path(app_home, global_db_path);
+        match DaemonLock::acquire(&scoped_path) {
+            Ok(lock) => Ok(ScopedDaemonLock { _scoped: lock }),
+            Err(DaemonLockError::AlreadyRunning { pid }) => {
+                Err(ScopedLockError::Running { pid })
+            }
+            Err(DaemonLockError::Io(e)) => Err(ScopedLockError::Io(e)),
+        }
+    }
+}
+
 /// Check whether `pid` refers to a live process this user can signal. Uses
 /// `kill(pid, 0)` which performs the permission and existence check without
 /// delivering a signal. Returns `false` for pid<=1.
@@ -479,5 +543,66 @@ mod tests {
         let scoped_path = scoped_daemon_lock_path(dir.path(), &global);
         let _scoped_free = DaemonLock::acquire(&scoped_path)
             .expect("scoped lock must have been released after legacy conflict");
+    }
+
+    #[test]
+    fn scoped_only_lock_acquires_and_releases_on_drop() {
+        let dir = tempdir().unwrap();
+        let global = dir.path().join("global").join("memory.db");
+        std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+        std::fs::write(&global, b"db").unwrap();
+
+        let lock = ScopedDaemonLock::acquire(dir.path(), &global).expect("scope free");
+        let scoped_path = scoped_daemon_lock_path(dir.path(), &global);
+        assert!(scoped_path.exists());
+        drop(lock);
+
+        let _again = DaemonLock::acquire(&scoped_path).expect("released on drop");
+    }
+
+    #[test]
+    fn scoped_only_lock_busy_reports_running() {
+        let dir = tempdir().unwrap();
+        let global = dir.path().join("global").join("memory.db");
+        std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+        std::fs::write(&global, b"db").unwrap();
+        let scoped_path = scoped_daemon_lock_path(dir.path(), &global);
+        let _holder = DaemonLock::acquire(&scoped_path).expect("pre-acquire");
+
+        let err = ScopedDaemonLock::acquire(dir.path(), &global)
+            .err()
+            .expect("busy scope must refuse");
+        match err {
+            ScopedLockError::Running { pid } => assert_eq!(pid as u32, std::process::id()),
+            other => panic!("expected Running, got {other}"),
+        }
+    }
+
+    #[test]
+    fn scoped_lock_succeeds_for_different_db_while_outer_dual_lock_holds_legacy() {
+        // Regression for the exact self-deadlock `ScopedDaemonLock` exists to
+        // avoid: while an outer `DualDaemonLock` (e.g. `tidy --execute`'s
+        // target-scope lock, held for the whole run in
+        // `bootstrap/tidy/command.rs`) holds BOTH scoped(target) and legacy,
+        // acquiring a scoped-only lock for a DIFFERENT DB's scope must
+        // succeed — a second `DualDaemonLock::acquire` here would hit the
+        // same legacy-lock file via a fresh fd and incorrectly report
+        // `LegacyRunning { pid: self }` (flock is per-fd, not per-process).
+        let dir = tempdir().unwrap();
+        let target_db = dir.path().join("target").join("memory.db");
+        let source_db = dir.path().join("source").join("memory.db");
+        std::fs::create_dir_all(target_db.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(source_db.parent().unwrap()).unwrap();
+        std::fs::write(&target_db, b"t").unwrap();
+        std::fs::write(&source_db, b"s").unwrap();
+
+        let _outer = DualDaemonLock::acquire(dir.path(), &target_db)
+            .expect("outer lock on target scope must succeed");
+
+        let scoped_source = ScopedDaemonLock::acquire(dir.path(), &source_db).expect(
+            "scoped-only acquire for a DIFFERENT scope must succeed even while \
+             the outer DualDaemonLock holds the shared legacy lock",
+        );
+        drop(scoped_source);
     }
 }

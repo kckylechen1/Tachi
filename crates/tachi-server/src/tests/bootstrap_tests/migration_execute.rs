@@ -384,3 +384,116 @@ fn tidy_execute_rolls_back_when_source_scope_lock_is_held() {
     drop(_source_daemon);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The regression this fix targets: `run_tidy_command` holds an outer
+/// `DualDaemonLock` for `target_db`'s scope — which also holds the single,
+/// non-scoped legacy lock file — for the ENTIRE `--execute` run (see
+/// `crates/tachi-server/src/bootstrap/tidy/command.rs:39`, held via `_lock`
+/// until after `execute_tidy_migrations` returns). Before this fix,
+/// `migrate_single_db` re-acquired a full `DualDaemonLock` (scoped + legacy)
+/// for `source_path` too; when `source_path` belongs to a DIFFERENT scope
+/// than `target_db`, that second legacy attempt opens a fresh fd on the
+/// SAME legacy lock file the outer lock already holds via another fd —
+/// `flock(2)` is per open file description, not per process, so it
+/// collides with itself and misreports `LegacyRunning { pid: self }`,
+/// rolling back every cross-scope migration unconditionally.
+///
+/// This test reproduces the outer lock's real lifetime around the call
+/// (acquire before, hold across `execute_tidy_migrations`, drop after) so it
+/// actually exercises that collision: on the pre-fix code this test is red
+/// (spurious rollback); after switching the source-side acquisition to
+/// `ScopedDaemonLock` (scoped-only, no legacy re-attempt) it is green.
+#[test]
+fn tidy_execute_migrates_cross_scope_source_while_outer_target_lock_is_held() {
+    let root = std::env::temp_dir().join(format!("tachi-tidy-crossscope-{}", uuid::Uuid::new_v4()));
+    let home = root.clone();
+    let app_home = home.join(".tachi");
+    std::fs::create_dir_all(&app_home).expect("create app_home");
+    let target_db = app_home.join("global").join("memory.db");
+
+    std::fs::create_dir_all(target_db.parent().unwrap()).expect("create target parent");
+    let mut tgt = MemoryStore::open(target_db.to_str().unwrap()).expect("open target");
+    tgt.upsert(&make_entry("preexisting-target"))
+        .expect("seed target");
+    drop(tgt);
+
+    let source_db = home.join("legacy-cross-scope").join("memory.db");
+    std::fs::create_dir_all(source_db.parent().unwrap()).expect("create source parent");
+    let mut src = MemoryStore::open(source_db.to_str().unwrap()).expect("open source");
+    src.upsert(&make_entry("cross-scope-row-1"))
+        .expect("seed source 1");
+    src.upsert(&make_entry("cross-scope-row-2"))
+        .expect("seed source 2");
+    drop(src);
+
+    let source_scoped_lock_path =
+        crate::daemon_lock::scoped_daemon_lock_path(&app_home, &source_db);
+    let target_scoped_lock_path =
+        crate::daemon_lock::scoped_daemon_lock_path(&app_home, &target_db);
+    assert_ne!(
+        source_scoped_lock_path, target_scoped_lock_path,
+        "fixture must exercise a genuinely different scope than the target"
+    );
+
+    let archive_path = app_home
+        .join("archive")
+        .join("ts-crossscope-test")
+        .join("legacy-cross-scope-memory.db");
+    let migration = crate::bootstrap::TidyMigration {
+        source_path: source_db.display().to_string(),
+        target_path: target_db.display().to_string(),
+        archive_path: archive_path.display().to_string(),
+        scope_suggestion: "test".to_string(),
+        action: "review_for_legacy_migration".to_string(),
+        source_row_count: 2,
+        reason: "test fixture".to_string(),
+    };
+    let cfg = crate::bootstrap::MigrationConfig {
+        target_db: target_db.clone(),
+        manifest_path: app_home.join("manifest.json"),
+        dry_run: false,
+        interactive: false,
+        app_home: app_home.clone(),
+    };
+
+    // Simulate `run_tidy_command`'s real outer-lock lifetime: acquired
+    // before the migration run, held across the whole
+    // `execute_tidy_migrations` call, dropped after — exactly the window in
+    // which the pre-fix source-side `DualDaemonLock::acquire` would have
+    // self-collided on the shared legacy fd.
+    let _outer_lock = crate::daemon_lock::DualDaemonLock::acquire(&app_home, &target_db)
+        .expect("outer lock on target scope must succeed (nothing else holds it)");
+
+    let summary = crate::bootstrap::execute_tidy_migrations(std::slice::from_ref(&migration), &cfg)
+        .expect("execute summary");
+
+    drop(_outer_lock);
+
+    let outcome = &summary.outcomes[0];
+    assert_eq!(
+        summary.migrated_count, 1,
+        "cross-scope source with no holder must migrate successfully; outcome: {outcome:?}"
+    );
+    assert_eq!(summary.failed_count, 0, "outcome: {outcome:?}");
+    assert_eq!(outcome.status, "migrated");
+    assert!(
+        !outcome.message.contains("rolled back"),
+        "must not roll back a genuinely free cross-scope source, got: {}",
+        outcome.message
+    );
+    assert!(
+        !source_db.exists(),
+        "source DB must be archived (moved) on a successful cross-scope migration"
+    );
+    assert!(archive_path.exists(), "archive copy must exist");
+    let tgt_after =
+        MemoryStore::open_read_only(target_db.to_str().unwrap()).expect("open target after");
+    assert_eq!(
+        tgt_after.stats(true).unwrap().total,
+        3,
+        "target must have preexisting (1) + migrated (2) rows"
+    );
+    drop(tgt_after);
+
+    let _ = std::fs::remove_dir_all(&root);
+}

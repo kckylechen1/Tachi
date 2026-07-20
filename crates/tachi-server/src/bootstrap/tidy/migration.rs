@@ -299,24 +299,40 @@ fn migrate_single_db(
 
     let rows_after = target_store.stats(true)?.total as usize;
 
-    // Source-scope lock: the caller's outer `DualDaemonLock` (acquired once,
-    // in `run_tidy_command`, for the whole `--execute` run) only covers
-    // `target_db`'s scope. `source_path` can belong to a DIFFERENT scope
-    // (its own project/daemon) that the outer lock says nothing about — that
-    // daemon could start and begin writing `source_path` in the window
-    // between the ownership probe below and the archive-move further down.
-    // Acquire a `DualDaemonLock` scoped to `source_path` too, and hold it
-    // across both the probe and the archive-move: a daemon trying to start
-    // against this scope during that window fails to acquire its own lock
-    // instead of racing us. A failed acquire (some OTHER live process
-    // already holds it) is treated exactly like a live-daemon `Owned` probe
-    // result: roll back and fail, naming which lock and PID.
+    // Source-scope lock: the caller's outer `DualDaemonLock` — acquired once
+    // in `run_tidy_command` (`crates/tachi-server/src/bootstrap/tidy/command.rs:39`),
+    // held for the whole `--execute` run — already covers `target_db`'s
+    // scoped lock AND, because `legacy_daemon_lock_path` is a single fixed
+    // path per `app_home` (not scoped per DB), the legacy lock for EVERY
+    // scope. `source_path` can belong to a DIFFERENT scope (its own
+    // project/daemon) that only the scoped half of that coverage says
+    // nothing about — that daemon could start and begin writing
+    // `source_path` in the window between the ownership probe below and the
+    // archive-move further down. Acquire a *scoped-only* lock for
+    // `source_path` and hold it across both the probe and the archive-move.
     //
-    // Skip re-acquiring when `source_path` resolves to the SAME scoped lock
-    // file as `target_db` (degenerate same-scope input): a second `flock`
-    // attempt on a file this process's outer lock already holds would see
-    // its own hold and misreport a conflict that isn't real — the outer
-    // lock already covers that scope for the whole run.
+    // Deliberately scoped-only, not another `DualDaemonLock` (do not
+    // "reinstate" a legacy attempt here): the outer lock's legacy fd is
+    // already held by THIS SAME PROCESS. `flock(2)` locks are per open file
+    // description, not per process ("may be denied by a lock that the
+    // calling process has already placed via another file descriptor") — a
+    // second `DaemonLock::acquire` on the legacy path here would open a
+    // fresh fd, collide with the outer lock's fd on the identical file, and
+    // misreport the process's own outer hold as `LegacyRunning { pid: self }`,
+    // rolling back every migration whose source scope differs from the
+    // target's. `ScopedDaemonLock` (see `daemon_lock.rs`) exists specifically
+    // to avoid this: the outer hold already excludes every legacy-scheme
+    // daemon for the whole run, so only the scoped lock — unique per DB —
+    // needs a fresh acquisition here.
+    //
+    // Skip acquiring even the scoped lock when `source_path` resolves to the
+    // SAME scoped lock file as `target_db` (degenerate same-scope input):
+    // the lock file IS the mutual-exclusion unit, so if two DB paths hash to
+    // the same lock path their daemon would have to be the same process
+    // holding the same file — and the outer lock already holds exactly that
+    // file for the whole run. Skipping here is not an approximation, it is
+    // the same collision-avoidance the scoped-only fix above makes for the
+    // legacy path, applied to the scoped path when the two scopes coincide.
     let source_scoped_path =
         crate::daemon_lock::scoped_daemon_lock_path(&cfg.app_home, &source_path);
     let target_scoped_path =
@@ -324,9 +340,9 @@ fn migrate_single_db(
     let _source_lock = if source_scoped_path == target_scoped_path {
         None
     } else {
-        match crate::daemon_lock::DualDaemonLock::acquire(&cfg.app_home, &source_path) {
+        match crate::daemon_lock::ScopedDaemonLock::acquire(&cfg.app_home, &source_path) {
             Ok(lock) => Some(lock),
-            Err(crate::daemon_lock::DualLockError::ScopedRunning { pid }) => {
+            Err(crate::daemon_lock::ScopedLockError::Running { pid }) => {
                 let outcome = rollback_failed_outcome(
                     migration,
                     &mut target_store,
@@ -341,22 +357,7 @@ fn migrate_single_db(
                 drop(target_store);
                 return Ok(outcome);
             }
-            Err(crate::daemon_lock::DualLockError::LegacyRunning { pid }) => {
-                let outcome = rollback_failed_outcome(
-                    migration,
-                    &mut target_store,
-                    &newly_inserted_ids,
-                    rows_before,
-                    copied,
-                    source_count,
-                    &format!(
-                        "source DB's own daemon is running (pid {pid}, legacy lock); refusing to risk a torn archive copy"
-                    ),
-                );
-                drop(target_store);
-                return Ok(outcome);
-            }
-            Err(crate::daemon_lock::DualLockError::Io(e)) => {
+            Err(crate::daemon_lock::ScopedLockError::Io(e)) => {
                 let outcome = rollback_failed_outcome(
                     migration,
                     &mut target_store,
