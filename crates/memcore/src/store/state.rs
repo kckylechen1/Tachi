@@ -61,4 +61,17 @@ impl MemoryStore {
     pub fn reap_expired_state(&self, now_rfc3339: &str) -> Result<usize, MemoryError> {
         db::reap_expired_state(&self.conn, now_rfc3339)
     }
+
+    /// Idempotent TTL backfill for `hard_state` rows in `namespace` that were
+    /// written before it carried an `expires_at` field. See
+    /// `db::backfill_missing_expires_at` for the exact "which rows" and
+    /// "safe to re-run" contract.
+    pub fn backfill_missing_expires_at(
+        &self,
+        namespace: &str,
+        ttl_rfc3339: &str,
+        terminal_status: Option<(&str, &[&str])>,
+    ) -> Result<usize, MemoryError> {
+        db::backfill_missing_expires_at(&self.conn, namespace, ttl_rfc3339, terminal_status)
+    }
 }

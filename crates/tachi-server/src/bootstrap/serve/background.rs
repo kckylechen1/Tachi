@@ -84,6 +84,108 @@ fn reap_expired_hard_state(
     }
 }
 
+/// Idempotent TTL backfill (#1342 follow-up) for `hard_state` namespaces that
+/// historically wrote rows with no `expires_at` at all. Runs on one store,
+/// right alongside the reap step above and on the same "quiet moment"
+/// cadence. Like the reap step, a failure here is always logged (never
+/// swallowed): `[state-ttl-backfill] ... failed` is always visible, even
+/// though the backfill itself, like the reap, is best-effort.
+fn backfill_hard_state_ttl(
+    ckpt_server: &MemoryServer,
+    label: &str,
+    run: impl FnOnce(&MemoryServer) -> Result<usize, String>,
+) {
+    match run(ckpt_server) {
+        Ok(backfilled) => {
+            if backfilled > 0 {
+                eprintln!(
+                    "[state-ttl-backfill] {label}: stamped expires_at on {backfilled} \
+                     pre-existing hard_state row(s)"
+                );
+            }
+        }
+        Err(e) => eprintln!("[state-ttl-backfill] {label} backfill failed: {e}"),
+    }
+}
+
+/// The seven-namespace state-lifecycle-hygiene pass (#1342 follow-up): every
+/// `hard_state` namespace that historically wrote rows with no `expires_at`
+/// field gets backfilled here, once per store scope, idempotently (a row
+/// that already carries `expires_at` — freshly written, or backfilled on an
+/// earlier tick — is never touched twice; see
+/// `memcore::db::backfill_missing_expires_at`'s own doc for the exact
+/// "missing key" vs "explicit null" distinction).
+///
+/// Two namespaces in the #1342 packet are deliberately absent from this list:
+/// `orchestrator` (STOPPED — see `orchestrator_ops.rs`'s doc comment on
+/// `ORCHESTRATOR_NS` for why no terminal-write point is unambiguous there)
+/// and `dispatch_signature_evidence` / `exec_env_private_target` (excluded by
+/// design — see those namespaces' own doc comments in `signature_evidence.rs`
+/// / `exec_env_ops.rs`).
+fn backfill_hard_state_ttls(store: &memcore::MemoryStore) -> Result<usize, String> {
+    let now = chrono::Utc::now();
+    let ninety_days = (now + chrono::Duration::days(90)).to_rfc3339();
+    let thirty_days = (now + chrono::Duration::days(30)).to_rfc3339();
+
+    let mut total = 0usize;
+
+    // Unconditional 90-day TTL: a build receipt/ticket/ticket-status row and a
+    // sticky claim row all have no "still open" concept — each is done being
+    // useful the instant it is written.
+    for namespace in [
+        crate::build_broker::RECEIPT_NS,
+        crate::build_broker::ticket::TICKET_NS,
+        crate::build_broker::ticket::STATUS_NS,
+        // `sticky_ops::claim::STICKY_CLAIM_NAMESPACE` is `pub(super)` (visible
+        // only within `sticky_ops`, not from here) — hardcoded literal,
+        // source of truth: crates/tachi-server/src/sticky_ops/claim.rs:23.
+        "sticky_claim",
+    ] {
+        total += store
+            .backfill_missing_expires_at(namespace, &ninety_days, None)
+            .map_err(|e| format!("backfill {namespace}: {e}"))?;
+    }
+
+    // Terminal-only 30-day TTL keyed on `$.status`: only `applied`/`rejected`
+    // proposal rows — `pending`/`approved` rows must stay TTL-less until
+    // their own terminal write.
+    for namespace in [
+        // `consolidate_ops::LIFECYCLE_PROPOSAL_NS` and
+        // `recall_proposal_ops::RECALL_CONFIG_PROPOSAL_NS` are module-private
+        // (not reachable from here) — hardcoded literals, source of truth:
+        // crates/tachi-server/src/facade_memory_ops/consolidate_ops.rs:42 and
+        // crates/tachi-server/src/facade_memory_ops/recall_proposal_ops.rs:12.
+        "memory_lifecycle_proposals",
+        "recall_config_proposals",
+    ] {
+        total += store
+            .backfill_missing_expires_at(
+                namespace,
+                &thirty_days,
+                Some(("$.status", &["applied", "rejected"])),
+            )
+            .map_err(|e| format!("backfill {namespace}: {e}"))?;
+    }
+
+    // Terminal-only 30-day TTL keyed on `$.cleanup_status` (not `$.status`):
+    // a credential-materialization row that has not been cleaned yet must
+    // never get a TTL.
+    total += store
+        .backfill_missing_expires_at(
+            crate::credential_profile::CREDENTIAL_MATERIALIZATION_NAMESPACE,
+            &thirty_days,
+            Some(("$.cleanup_status", &["cleaned"])),
+        )
+        .map_err(|e| {
+            format!(
+                "backfill {}: {e}",
+                crate::credential_profile::CREDENTIAL_MATERIALIZATION_NAMESPACE
+            )
+        })?;
+
+    Ok(total)
+}
+
 fn run_wal_checkpoint(ckpt_server: &MemoryServer, maintain_named_projects: bool) {
     let now_rfc3339 = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     if let Err(e) = ckpt_server
@@ -99,6 +201,9 @@ fn run_wal_checkpoint(ckpt_server: &MemoryServer, maintain_named_projects: bool)
     reap_expired_hard_state(ckpt_server, "global", &now_rfc3339, |server, now| {
         server.with_global_store(|store| store.reap_expired_state(now).map_err(|e| e.to_string()))
     });
+    backfill_hard_state_ttl(ckpt_server, "global", |server| {
+        server.with_global_store(|store| backfill_hard_state_ttls(store))
+    });
     if ckpt_server.has_project_db() {
         if let Err(e) = ckpt_server
             .with_project_store(|store| store.checkpoint_wal_truncate().map_err(|e| e.to_string()))
@@ -113,6 +218,9 @@ fn run_wal_checkpoint(ckpt_server: &MemoryServer, maintain_named_projects: bool)
         reap_expired_hard_state(ckpt_server, "project", &now_rfc3339, |server, now| {
             server
                 .with_project_store(|store| store.reap_expired_state(now).map_err(|e| e.to_string()))
+        });
+        backfill_hard_state_ttl(ckpt_server, "project", |server| {
+            server.with_project_store(|store| backfill_hard_state_ttls(store))
         });
     }
     if maintain_named_projects {
@@ -137,6 +245,9 @@ fn run_wal_checkpoint(ckpt_server: &MemoryServer, maintain_named_projects: bool)
                     })
                 },
             );
+            backfill_hard_state_ttl(ckpt_server, &format!("named-project '{name}'"), |server| {
+                server.with_named_project_store(&name, |store| backfill_hard_state_ttls(store))
+            });
         }
     }
 }
@@ -653,6 +764,109 @@ mod tests {
             project_expired.is_none(),
             "expired project hard_state row must be reaped by wal-checkpoint maintenance \
              (own-project scope, no maintain_named_projects gate)"
+        );
+    }
+
+    /// #1342 follow-up: `run_wal_checkpoint` must also backfill the
+    /// seven-namespace TTL pass, idempotently, on both global and project
+    /// scope — this is the wiring test; the per-namespace "what counts as
+    /// terminal" logic is unit-tested at its own write points.
+    #[test]
+    fn wal_checkpoint_backfills_missing_expires_at_idempotently() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let global_db = tmp.path().join("global.db");
+        let project_db = tmp.path().join("project.db");
+        let server =
+            MemoryServer::new(global_db, Some(project_db)).expect("server with project db");
+
+        // Unconditional-TTL namespace (build_receipt): a pre-#1342 row with
+        // no expires_at key at all.
+        server
+            .with_global_store(|store| {
+                store
+                    .set_state("build_receipt", "t-legacy", r#"{"outcome":"success"}"#)
+                    .map_err(|e| e.to_string())
+            })
+            .expect("seed legacy global build_receipt row");
+        // Terminal-scoped namespace (memory_lifecycle_proposals): an applied
+        // (terminal) row with no expires_at, and a still-pending row that
+        // must NEVER get one.
+        server
+            .with_project_store(|store| {
+                store
+                    .set_state(
+                        "memory_lifecycle_proposals",
+                        "p-legacy-applied",
+                        r#"{"status":"applied"}"#,
+                    )
+                    .map_err(|e| e.to_string())?;
+                store
+                    .set_state(
+                        "memory_lifecycle_proposals",
+                        "p-legacy-pending",
+                        r#"{"status":"pending"}"#,
+                    )
+                    .map_err(|e| e.to_string())
+            })
+            .expect("seed project lifecycle proposal rows");
+
+        run_wal_checkpoint(&server, false);
+
+        let receipt = server
+            .with_global_store(|store| {
+                store
+                    .get_state_kv("build_receipt", "t-legacy")
+                    .map_err(|e| e.to_string())
+            })
+            .expect("read backfilled receipt")
+            .expect("receipt row still present");
+        assert!(
+            receipt.0.contains("expires_at"),
+            "a legacy build_receipt row must be backfilled with an expires_at: {}",
+            receipt.0
+        );
+
+        let applied = server
+            .with_project_store(|store| {
+                store
+                    .get_state_kv("memory_lifecycle_proposals", "p-legacy-applied")
+                    .map_err(|e| e.to_string())
+            })
+            .expect("read backfilled applied proposal")
+            .expect("applied proposal row still present");
+        assert!(
+            applied.0.contains("expires_at"),
+            "a legacy applied proposal row must be backfilled with an expires_at: {}",
+            applied.0
+        );
+
+        let pending = server
+            .with_project_store(|store| {
+                store
+                    .get_state_kv("memory_lifecycle_proposals", "p-legacy-pending")
+                    .map_err(|e| e.to_string())
+            })
+            .expect("read pending proposal")
+            .expect("pending proposal row still present");
+        assert!(
+            !pending.0.contains("expires_at"),
+            "a still-pending proposal row must NEVER be backfilled with a TTL: {}",
+            pending.0
+        );
+
+        // Idempotent: a second checkpoint tick must not error or double-stamp.
+        run_wal_checkpoint(&server, false);
+        let receipt_again = server
+            .with_global_store(|store| {
+                store
+                    .get_state_kv("build_receipt", "t-legacy")
+                    .map_err(|e| e.to_string())
+            })
+            .expect("read receipt after second checkpoint")
+            .expect("receipt row still present");
+        assert_eq!(
+            receipt.0, receipt_again.0,
+            "a second backfill pass over already-backfilled rows must be a no-op"
         );
     }
 

@@ -24,6 +24,15 @@ pub(super) struct ManagedCredentialMaterialization {
     pub(super) cleaned_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) cleanup_run_dir: Option<String>,
+    /// `hard_state` TTL (#1342 follow-up): only stamped once
+    /// [`mark_metadata_cleaned`] flips `cleanup_status` to `"cleaned"` — a
+    /// row still in active use (not yet cleaned) must never carry a TTL, or
+    /// `memcore::reap_expired_state` could delete this materialization's own
+    /// bookkeeping while the credential file it describes is still live.
+    /// `skip_serializing_if` keeps a not-yet-cleaned row's JSON identical to
+    /// before this change (no stray `"expires_at":null`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) expires_at: Option<String>,
 }
 
 fn managed_materialization_key(
@@ -88,6 +97,7 @@ pub(super) fn record_managed_materialization(
         cleanup_status: None,
         cleaned_at: None,
         cleanup_run_dir: None,
+        expires_at: None,
     };
     let value = serde_json::to_string(&metadata)
         .map_err(|e| format!("serialize credential materialization metadata: {e}"))?;
@@ -130,6 +140,9 @@ pub(super) fn mark_metadata_cleaned(
     metadata.cleanup_status = Some("cleaned".to_string());
     metadata.cleaned_at = Some(chrono::Utc::now().to_rfc3339());
     metadata.cleanup_run_dir = cleanup_run_dir.map(|run_dir| run_dir.to_string_lossy().to_string());
+    // `hard_state` TTL (#1342 follow-up): cleaned is terminal for this row —
+    // a short 30-day audit tail, then `memcore::reap_expired_state` reaps it.
+    metadata.expires_at = Some((chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339());
     let value = serde_json::to_string(metadata)
         .map_err(|e| format!("serialize cleaned credential metadata: {e}"))?;
     store

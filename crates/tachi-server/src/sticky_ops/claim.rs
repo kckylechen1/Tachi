@@ -32,9 +32,13 @@ pub(super) fn try_claim_sticky(
     sticky_id: &str,
     claimed_by: Option<&str>,
 ) -> Result<bool, String> {
+    // `hard_state` TTL (#1342 follow-up): a claim row is spent the instant it
+    // lands — its only purpose is the CAS gate at write time — so every write
+    // stamps `now + 90d` unconditionally, same as the build broker's rows.
     let value_json = serde_json::json!({
         "claimed_by": claimed_by,
         "claimed_at": chrono::Utc::now().to_rfc3339(),
+        "expires_at": (chrono::Utc::now() + chrono::Duration::days(90)).to_rfc3339(),
     })
     .to_string();
     store
