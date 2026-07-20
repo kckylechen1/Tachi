@@ -338,6 +338,20 @@ fn persist_generated_proposals(server: &MemoryServer, proposals: Vec<Value>) -> 
                     if let Some(apply_result) = existing_json.get("apply_result") {
                         next["apply_result"] = apply_result.clone();
                     }
+                    // #1342 follow-up (BUG, cross-vendor review): a re-generate
+                    // rewrites the whole `next` value fresh off the freshly
+                    // computed proposal, which carries no `expires_at` at all —
+                    // without this preserve, a terminal (applied/rejected) row's
+                    // TTL was silently erased on every refresh, and the next
+                    // maintenance tick's idempotent backfill would then stamp a
+                    // brand-new `now+30d` on it. Repeated refreshes before the
+                    // TTL elapsed meant the row's expiry never actually arrived —
+                    // the state-lifecycle-hygiene pass this namespace's TTL exists
+                    // for was defeated by its own refresh path. Preserve the
+                    // ORIGINAL timestamp, not a recomputed one.
+                    if let Some(expires_at) = existing_json.get("expires_at") {
+                        next["expires_at"] = expires_at.clone();
+                    }
                 }
             }
             let raw = serde_json::to_string(&next)

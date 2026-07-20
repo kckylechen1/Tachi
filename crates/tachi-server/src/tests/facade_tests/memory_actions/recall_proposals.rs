@@ -163,12 +163,7 @@ async fn recall_proposal_reject_stamps_a_ttl_immediately() {
         })
         .expect("seed recall proposal entries");
 
-    let mut proposals = tachi_memory_params("recall_proposals");
-    proposals.format = Some("json".to_string());
-    proposals.scope = Some("memory".to_string());
-    proposals.top_k = 3;
-    proposals.force = true;
-    proposals.metadata = Some(json!({
+    let metadata = json!({
         "cases": [
             {
                 "name": "partial-cleanup",
@@ -185,7 +180,14 @@ async fn recall_proposal_reject_stamps_a_ttl_immediately() {
                 }
             }
         ]
-    }));
+    });
+
+    let mut proposals = tachi_memory_params("recall_proposals");
+    proposals.format = Some("json".to_string());
+    proposals.scope = Some("memory".to_string());
+    proposals.top_k = 3;
+    proposals.force = true;
+    proposals.metadata = Some(metadata.clone());
     let body = crate::facade_memory_ops::handle_tachi_memory(&server, proposals)
         .await
         .expect("recall proposals should succeed");
@@ -203,7 +205,7 @@ async fn recall_proposal_reject_stamps_a_ttl_immediately() {
 
     let mut review = tachi_memory_params("review_recall_proposal");
     review.format = Some("json".to_string());
-    review.proposal_id = Some(proposal_id);
+    review.proposal_id = Some(proposal_id.clone());
     review.review_status = Some("rejected".to_string());
     let review_body = crate::facade_memory_ops::handle_tachi_memory(&server, review)
         .await
@@ -213,9 +215,47 @@ async fn recall_proposal_reject_stamps_a_ttl_immediately() {
 
     let expires_at = review_json["proposal"]["expires_at"]
         .as_str()
-        .expect("a rejected (terminal) recall proposal must carry expires_at immediately");
+        .expect("a rejected (terminal) recall proposal must carry expires_at immediately")
+        .to_string();
     assert!(
-        chrono::DateTime::parse_from_rfc3339(expires_at).is_ok(),
+        chrono::DateTime::parse_from_rfc3339(&expires_at).is_ok(),
         "expires_at must be a valid RFC3339 timestamp: {expires_at}"
+    );
+
+    // #1342 follow-up BUG (cross-vendor review): re-generating proposals
+    // (the same eval-input path a repeat `tachi_memory(action='recall_proposals',
+    // ...)` call takes) used to rewrite this now-terminal row from scratch,
+    // silently erasing its `expires_at` — which the next maintenance tick's
+    // idempotent backfill would then re-stamp with a brand-new `now+30d`.
+    // Refreshing before the original TTL elapsed meant the row's expiry
+    // never actually arrived. The proposal_id is deterministic (hash of
+    // variant name + config_env), so re-submitting identical metadata must
+    // hit the SAME id and must NOT change its `expires_at` at all.
+    let mut regenerate = tachi_memory_params("recall_proposals");
+    regenerate.format = Some("json".to_string());
+    regenerate.scope = Some("memory".to_string());
+    regenerate.top_k = 3;
+    regenerate.force = true;
+    regenerate.metadata = Some(metadata);
+    let regen_body = crate::facade_memory_ops::handle_tachi_memory(&server, regenerate)
+        .await
+        .expect("recall proposals regenerate should succeed");
+    let regen_parsed: Value = serde_json::from_str(&regen_body).expect("regen response JSON");
+    let regen_proposal = regen_parsed["proposals"]
+        .as_array()
+        .expect("proposal list")
+        .iter()
+        .find(|proposal| proposal["proposal_id"] == json!(proposal_id))
+        .unwrap_or_else(|| panic!("expected the same proposal_id after regenerate: {regen_parsed}"));
+    assert_eq!(
+        regen_proposal["status"],
+        json!("rejected"),
+        "the rejected status itself must also survive the regenerate refresh"
+    );
+    assert_eq!(
+        regen_proposal["expires_at"].as_str(),
+        Some(expires_at.as_str()),
+        "expires_at must be the ORIGINAL value verbatim after a regenerate refresh, not merely \
+         present and not a freshly recomputed timestamp: {regen_proposal}"
     );
 }

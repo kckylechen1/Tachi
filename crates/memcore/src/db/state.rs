@@ -158,6 +158,18 @@ pub fn reap_expired_state(conn: &Connection, now_rfc3339: &str) -> Result<usize,
     Ok(removed)
 }
 
+/// The exact set of JSON pointers [`backfill_missing_expires_at`]'s
+/// `terminal_status` may scope on. Every current call site passes a
+/// hardcoded literal (`"$.status"` or `"$.cleanup_status"`, never
+/// request/user input) — but the function signature itself (`&str`) does not
+/// enforce that, and `status_path` is interpolated directly into SQL text
+/// (SQLite has no bind-parameter form for a JSON path segment; see that
+/// function's own doc). An allow-list closes that gap structurally: a path
+/// not on this list is refused with an `Err`, not trusted and interpolated.
+/// Extend this list (after verifying the new caller) rather than widening the
+/// check.
+const ALLOWED_TERMINAL_STATUS_PATHS: &[&str] = &["$.status", "$.cleanup_status"];
+
 /// Idempotent TTL backfill for `hard_state` rows written before their
 /// namespace carried an `expires_at` field at all (the seven-namespace
 /// state-lifecycle-hygiene pass this reap function's own header warns every
@@ -187,6 +199,10 @@ pub fn reap_expired_state(conn: &Connection, now_rfc3339: &str) -> Result<usize,
 /// `expires_at` (from an earlier backfill run, or because it was written
 /// with one from the start) is never touched twice, so the returned count is
 /// `0` on a repeat run against unchanged data.
+///
+/// `terminal_status`'s JSON-pointer half is checked against
+/// [`ALLOWED_TERMINAL_STATUS_PATHS`] before use — see that const's own doc
+/// for why.
 pub fn backfill_missing_expires_at(
     conn: &Connection,
     namespace: &str,
@@ -205,6 +221,16 @@ pub fn backfill_missing_expires_at(
             Ok(updated)
         }
         Some((status_path, terminal_values)) => {
+            if !ALLOWED_TERMINAL_STATUS_PATHS.contains(&status_path) {
+                return Err(MemoryError::InvalidArg(format!(
+                    "backfill_missing_expires_at: status_path '{status_path}' is not on the \
+                     allowed list {ALLOWED_TERMINAL_STATUS_PATHS:?} — this function \
+                     interpolates status_path directly into SQL text (no bind-parameter form \
+                     exists for a JSON path segment), so an unlisted path is refused rather \
+                     than trusted. Add it to ALLOWED_TERMINAL_STATUS_PATHS after verifying the \
+                     new call site."
+                )));
+            }
             if terminal_values.is_empty() {
                 // Nothing can ever match an empty allow-list; skip the round
                 // trip rather than hand SQLite a malformed empty `IN ()`.
@@ -214,12 +240,9 @@ pub fn backfill_missing_expires_at(
                 .map(|i| format!("?{}", i + 3))
                 .collect::<Vec<_>>()
                 .join(", ");
-            // `status_path` is always one of a small set of hardcoded JSON
-            // pointer literals supplied by call sites in this crate/binary
-            // (e.g. `"$.status"`, `"$.cleanup_status"`) — never derived from
-            // request/user input — so interpolating it into the query text
-            // (SQLite has no bind-parameter form for a JSON path segment) is
-            // not an injection surface.
+            // `status_path` is now verified against `ALLOWED_TERMINAL_STATUS_PATHS`
+            // above, so interpolating it into the query text here is safe —
+            // it is one of a fixed, reviewed set, never arbitrary caller input.
             let sql = format!(
                 "UPDATE hard_state
                  SET value_json = json_set(value_json, '$.expires_at', ?1)
@@ -790,6 +813,43 @@ mod tests {
         assert_eq!(
             backfilled, 0,
             "an empty terminal-values allow-list can never match any row"
+        );
+    }
+
+    /// CONCERN 6 (cross-vendor review): `status_path` is interpolated
+    /// directly into SQL text, and the function signature (`&str`) does not
+    /// stop a caller from passing something off the reviewed allow-list. An
+    /// unrecognized path must be refused with an `Err`, not silently
+    /// interpolated — and critically, must not touch any row: this is a
+    /// fail-closed refusal, not a partial/degraded backfill.
+    #[test]
+    fn backfill_missing_expires_at_rejects_a_status_path_not_on_the_allow_list() {
+        let conn = open_state_db();
+        set_state(&conn, "ns", "k1", r#"{"status":"applied"}"#).expect("seed");
+
+        let err = backfill_missing_expires_at(
+            &conn,
+            "ns",
+            "2126-07-20T00:00:00Z",
+            Some(("$.attacker_controlled", &["applied"])),
+        )
+        .expect_err("an unlisted status_path must be refused, not trusted");
+        assert!(
+            err.to_string().contains("attacker_controlled"),
+            "the refusal must name the offending path: {err}"
+        );
+        assert!(
+            err.to_string().contains("not on the allowed list"),
+            "the refusal must explain why: {err}"
+        );
+
+        // And nothing was touched — a refused call must not partially apply.
+        let (value, _version) = get_state(&conn, "ns", "k1")
+            .expect("get")
+            .expect("row present");
+        assert_eq!(
+            value, r#"{"status":"applied"}"#,
+            "a refused backfill call must leave every row byte-for-byte untouched"
         );
     }
 }
