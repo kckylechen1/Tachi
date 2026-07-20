@@ -176,6 +176,35 @@ fn narrow_gated_action_schemas(
     }
 }
 
+/// Apply the production profile, action-schema, and annotation projection used
+/// by `tools/list`. Keeping this as one pure transform lets architecture census
+/// tests measure the model-facing definitions without duplicating runtime
+/// policy.
+pub(crate) fn project_tool_definitions(
+    tools: Vec<rmcp::model::Tool>,
+    profile: Option<tachi_hub::ToolProfile>,
+    env_patterns: Option<&[String]>,
+) -> Vec<rmcp::model::Tool> {
+    let mut tools = tachi_hub::filter_tool_defs(tools, profile, env_patterns);
+    narrow_gated_action_schemas(&mut tools, profile);
+    for tool in &mut tools {
+        annotate_tool(tool);
+    }
+    tools
+}
+
+/// Apply native-only schema preparation before proxy and skill definitions are
+/// joined to the list. This is a separate stage because bound-project schema
+/// annotations must not be added to third-party tools.
+pub(crate) fn prepare_native_tool_definitions(
+    mut tools: Vec<rmcp::model::Tool>,
+) -> Vec<rmcp::model::Tool> {
+    for tool in &mut tools {
+        annotate_bound_project_schema(tool);
+    }
+    tools
+}
+
 /// Operator-owned worker launch is not an ordinary agent intent. Remove its
 /// exclusive parameters from non-admin schemas and suppress stale launch
 /// wording on shared fields that remain useful to recommend/wait/complete.
@@ -625,10 +654,7 @@ impl ServerHandler for MemoryServer {
     {
         async move {
             let all_native = self.tool_router.list_all();
-            let mut tools: Vec<rmcp::model::Tool> = all_native;
-            for tool in &mut tools {
-                annotate_bound_project_schema(tool);
-            }
+            let mut tools = prepare_native_tool_definitions(all_native);
 
             // Add proxy tools from registered MCP servers
             let proxy_snapshot =
@@ -678,15 +704,11 @@ impl ServerHandler for MemoryServer {
             }
 
             let env_patterns = current_exposed_tool_patterns();
-            tools = tachi_hub::filter_tool_defs(
+            tools = project_tool_definitions(
                 tools,
                 self.active_tool_profile(),
                 env_patterns.as_deref(),
             );
-            narrow_gated_action_schemas(&mut tools, self.active_tool_profile());
-            for tool in &mut tools {
-                annotate_tool(tool);
-            }
 
             Ok(rmcp::model::ListToolsResult {
                 tools,

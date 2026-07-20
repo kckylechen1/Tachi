@@ -16,7 +16,7 @@ fn ensure_test_env() {
     });
 }
 
-fn native_route_names() -> Vec<String> {
+pub(super) fn native_route_definitions() -> Vec<rmcp::model::Tool> {
     ensure_test_env();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -28,9 +28,11 @@ fn native_route_names() -> Vec<String> {
         uuid::Uuid::new_v4()
     ));
     let server = crate::MemoryServer::new(db_path, None).expect("test memory server");
-    let mut names: Vec<String> = server
-        .tool_router
-        .list_all()
+    server.tool_router.list_all()
+}
+
+fn native_route_names() -> Vec<String> {
+    let mut names: Vec<String> = native_route_definitions()
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect();

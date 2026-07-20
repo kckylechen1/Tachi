@@ -20,6 +20,16 @@ The current system already hides most complexity from default clients. The
 counts below were refreshed for the #1312 native-first cut on 2026-07-20;
 #1315 owns the complete schema-byte/property census and further re-slice:
 
+The machine-readable baseline is
+[`execution-surface-census-v1.fixture.json`](execution-surface-census-v1.fixture.json).
+It is recomputed from the composed native router through the same production
+profile and action-schema transforms as `tools/list`; observed values and
+provisional budgets are deliberately separate. To inspect a candidate update,
+run
+`TACHI_PRINT_EXECUTION_SURFACE_CENSUS=1 cargo test -p tachi-server execution_surface_census -- --nocapture`,
+review the printed census and budget rationale, then update the fixture
+explicitly in the same PR. Normal tests never rewrite the fixture.
+
 - `standard` is a 16-tool allow-list in `STANDARD_MINIMAL_TOOL_PATTERNS` after
   removing `tachi_arena` and `tachi_agent_eval`; its `tachi_task` schema also
   omits operator-only `dispatch`.
