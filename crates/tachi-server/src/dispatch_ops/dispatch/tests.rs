@@ -991,6 +991,104 @@ async fn dispatch_receipt_carries_the_effective_authority_contract() {
     );
 }
 
+/// #1324: a successful external-staffing start is receipt-first, and the
+/// accepted response and terminal worker evidence stay in one canonical run
+/// directory. This test exercises the canonical kernel directly; legacy
+/// Shell/Arena projections are frozen by the separate structural inventory.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn canonical_external_staffing_start_and_terminal_receipt_share_one_run_dir() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &temp_home.path().join(".tachi"));
+    let cwd = tempfile::tempdir().expect("dispatch cwd");
+    let release_worker = cwd.path().join("release-worker");
+    let run_root = dispatch_runs_root();
+    let server = crate::tests::make_server();
+
+    let mut params = test_dispatch_params(Some("custom"), "prove one staffing receipt");
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import pathlib,sys,time; p=pathlib.Path(sys.argv[1]);\nwhile not p.exists(): time.sleep(0.01)\nprint('canonical staffing result')".to_string(),
+        release_worker.to_string_lossy().to_string(),
+    ];
+    params.cwd = Some(cwd.path().to_string_lossy().to_string());
+    params.unmanaged_cwd = Some(true);
+
+    let raw = handle_tachi_dispatch(&server, params)
+        .await
+        .expect("staffing start accepted");
+    let response: Value = serde_json::from_str(&raw).expect("start response JSON");
+    let dispatch_id = response["dispatch_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .expect("non-empty dispatch_id");
+    assert_eq!(response["state"], json!("TASK_STATE_WORKING"));
+    let run_dir = std::path::PathBuf::from(
+        response["run_dir"]
+            .as_str()
+            .filter(|path| !path.is_empty())
+            .expect("non-empty canonical run_dir"),
+    );
+    assert_eq!(run_dir, run_root.join(dispatch_id));
+
+    let accepted_status: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json"))
+            .expect("status exists before start returns"),
+    )
+    .expect("accepted status JSON");
+    assert_eq!(accepted_status["dispatch_id"], json!(dispatch_id));
+    assert_eq!(accepted_status["state"], response["state"]);
+    assert_eq!(accepted_status["run_dir"], response["run_dir"]);
+
+    std::fs::write(&release_worker, b"release").expect("release custom worker");
+    let result = wait_for_result(&run_dir).await;
+    assert_eq!(result.trim(), "canonical staffing result");
+    let result_locations = std::fs::read_dir(&run_root)
+        .expect("read canonical runs root")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("result.md"))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        result_locations,
+        vec![run_dir.join("result.md")],
+        "one worker result must have one canonical run location"
+    );
+
+    let mut terminal_status = None;
+    for _ in 0..120 {
+        let status: Value = serde_json::from_str(
+            &tokio::fs::read_to_string(run_dir.join("status.json"))
+                .await
+                .expect("terminal status remains readable"),
+        )
+        .expect("terminal status JSON");
+        if matches!(
+            status["state"].as_str(),
+            Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED")
+        ) {
+            terminal_status = Some(status);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let terminal_status = terminal_status.expect("dispatch reaches a terminal receipt");
+    assert_eq!(terminal_status["dispatch_id"], json!(dispatch_id));
+    assert_eq!(terminal_status["run_dir"], response["run_dir"]);
+    assert_eq!(terminal_status["state"], json!("TASK_STATE_COMPLETED"));
+    assert!(terminal_status["result_written"].as_bool().unwrap_or(false));
+
+    let trajectory = tokio::fs::read_to_string(run_dir.join("trajectory.jsonl"))
+        .await
+        .expect("canonical trajectory exists");
+    assert!(trajectory.contains("dispatch_received"), "{trajectory}");
+    assert!(trajectory.contains("dispatch_finished"), "{trajectory}");
+}
+
 /// tachi#1173 item 1 discriminator: on origin/main (pre-#1173) the dispatch
 /// response always embeds the full routing card (`profile` — the whole
 /// `ResolvedDispatchProfile` including its own nested `mbit_card` and

@@ -1,0 +1,141 @@
+{
+  "schema_version": "external_staffing.v1",
+  "issue": 1324,
+  "canonical_request": {
+    "rust_type": "tachi_params::TachiDispatchParams",
+    "adoption_entrypoint": "crate::dispatch_ops::handle_tachi_dispatch",
+    "operations": [
+      "start",
+      "status"
+    ]
+  },
+  "accepted_start": {
+    "required_fields": [
+      "dispatch_id",
+      "state",
+      "run_dir"
+    ],
+    "initial_state": "TASK_STATE_WORKING",
+    "durability_precondition": "status.json exists and agrees before a successful response"
+  },
+  "canonical_receipt": {
+    "directory": "<tachi_home>/runs/<dispatch_id>",
+    "status": "status.json",
+    "result": "result.md",
+    "trajectory": "trajectory.jsonl",
+    "identity": "status.json.identity_receipt",
+    "authority": "status.json.authority",
+    "resolved_terminal_completion": "status.json.resolved_completion"
+  },
+  "terminal_semantics": {
+    "terminal_states": [
+      "TASK_STATE_COMPLETED",
+      "TASK_STATE_FAILED",
+      "TASK_STATE_CANCELED"
+    ],
+    "closed_partial": {
+      "state": "TASK_STATE_INPUT_REQUIRED",
+      "closure_kind": "partial"
+    }
+  },
+  "observed_topology": {
+    "adoption_entrypoint_definitions": [
+      "crates/tachi-server/src/dispatch_ops/dispatch.rs::handle_tachi_dispatch"
+    ],
+    "production_adopters": [
+      "crates/tachi-server/src/arena_ops/actions/spawn.rs::handle_spawn::dispatch-kernel-call#1",
+      "crates/tachi-server/src/bootstrap/poke_cli/probes/dispatch.rs::probe_dispatch_mock::dispatch-kernel-call#1",
+      "crates/tachi-server/src/shell_ops/actions/convoy.rs::handle_convoy_dispatch_action::dispatch-kernel-call#1",
+      "crates/tachi-server/src/shell_ops/actions/dispatch.rs::handle_dispatch_action::dispatch-kernel-call#1",
+      "crates/tachi-server/src/tools/task_router.rs::handle_tachi_task_facade::dispatch-kernel-call#1"
+    ],
+    "request_builders": [
+      "crates/tachi-server/src/arena_ops/dispatch_bridge.rs::dispatch_params_for_mission::request-literal#1",
+      "crates/tachi-server/src/bootstrap/poke_cli/probes/dispatch.rs::probe_dispatch_mock::request-literal#1",
+      "crates/tachi-server/src/shell_ops/actions/convoy.rs::handle_convoy_dispatch_action::request-literal#1",
+      "crates/tachi-server/src/shell_ops/actions/dispatch.rs::handle_dispatch_action::request-literal#1",
+      "crates/tachi-server/src/tools/task_router.rs::handle_tachi_task_facade::request-literal#1"
+    ],
+    "launch_advertising_facades": [
+      "crates/tachi-server/src/tools/workflow_facade.rs::tachi_arena",
+      "crates/tachi-server/src/tools/workflow_facade.rs::tachi_shell",
+      "crates/tachi-server/src/tools/workflow_facade.rs::tachi_task"
+    ],
+    "legacy_secondary_ledger_roots": [
+      "crates/tachi-server/src/arena_ops/state.rs::arena_root",
+      "crates/tachi-server/src/shell_ops/flow.rs::shell_runs_root"
+    ],
+    "legacy_staffing_projection_writer_sites": [
+      "crates/tachi-server/src/arena_ops/actions/board.rs::refresh_board::write_json_file_owner_only#1",
+      "crates/tachi-server/src/arena_ops/actions/collect.rs::handle_collect::append_run_event#1",
+      "crates/tachi-server/src/arena_ops/actions/collect.rs::handle_collect::write_owner_only_file_atomic#1",
+      "crates/tachi-server/src/arena_ops/actions/lifecycle.rs::handle_abort::append_run_event#1",
+      "crates/tachi-server/src/arena_ops/actions/lifecycle.rs::handle_close::append_run_event#1",
+      "crates/tachi-server/src/arena_ops/actions/lifecycle.rs::handle_close::write_json_file_owner_only#1",
+      "crates/tachi-server/src/arena_ops/actions/lifecycle.rs::handle_close::write_owner_only_file_atomic#1",
+      "crates/tachi-server/src/arena_ops/actions/open.rs::handle_open::append_run_event#1",
+      "crates/tachi-server/src/arena_ops/actions/open.rs::handle_open::write_json_file_owner_only#1",
+      "crates/tachi-server/src/arena_ops/actions/open.rs::handle_open::write_json_file_owner_only#2",
+      "crates/tachi-server/src/arena_ops/actions/open.rs::handle_open::write_owner_only_file_atomic#1",
+      "crates/tachi-server/src/arena_ops/actions/spawn.rs::handle_spawn::append_run_event#1",
+      "crates/tachi-server/src/arena_ops/actions/spawn.rs::handle_spawn::write_json_file_owner_only#1",
+      "crates/tachi-server/src/arena_ops/actions/spawn.rs::handle_spawn::write_owner_only_file_atomic#1",
+      "crates/tachi-server/src/arena_ops/state.rs::update_mission_status::write_json_file_owner_only#1",
+      "crates/tachi-server/src/shell_ops/actions/convoy.rs::handle_convoy_dispatch_action::append_run_event#1",
+      "crates/tachi-server/src/shell_ops/actions/convoy.rs::handle_convoy_dispatch_action::append_run_event#2",
+      "crates/tachi-server/src/shell_ops/actions/convoy.rs::handle_convoy_dispatch_action::tokio::fs::write#1",
+      "crates/tachi-server/src/shell_ops/actions/convoy.rs::handle_convoy_dispatch_action::tokio::fs::write#2",
+      "crates/tachi-server/src/shell_ops/actions/convoy.rs::handle_convoy_dispatch_action::write_run_status_file#1",
+      "crates/tachi-server/src/shell_ops/actions/dispatch.rs::handle_dispatch_action::append_run_event#1",
+      "crates/tachi-server/src/shell_ops/actions/dispatch.rs::handle_dispatch_action::tokio::fs::write#1",
+      "crates/tachi-server/src/shell_ops/actions/dispatch.rs::handle_dispatch_action::write_run_status_file#1",
+      "crates/tachi-server/src/shell_ops/actions/stage.rs::handle_stage_action::tokio::fs::write#1",
+      "crates/tachi-server/src/shell_ops/flow.rs::advance_stage::append_run_event#1",
+      "crates/tachi-server/src/shell_ops/flow.rs::advance_stage::write_run_status_file#1",
+      "crates/tachi-server/src/shell_ops/injection.rs::inject_meta_skill::tokio::fs::write#1",
+      "crates/tachi-server/src/shell_ops/shell_github.rs::append_github_event::append_run_event#1",
+      "crates/tachi-server/src/shell_ops/shell_github.rs::merge_github_status::write_run_status_file#1",
+      "crates/tachi-server/src/task_lifecycle/flow_artifacts/dispatch_markers.rs::mark_task_dispatch::append_flow_event#1",
+      "crates/tachi-server/src/task_lifecycle/flow_artifacts/dispatch_markers.rs::mark_task_dispatch::write_json_atomic#1",
+      "crates/tachi-server/src/task_lifecycle/flow_artifacts/dispatch_markers.rs::mark_task_dispatch::write_json_atomic#2",
+      "crates/tachi-server/src/task_lifecycle/flow_artifacts/dispatch_markers.rs::mark_task_dispatch_completion::append_flow_event#1",
+      "crates/tachi-server/src/task_lifecycle/flow_artifacts/dispatch_markers.rs::mark_task_dispatch_completion::write_json_atomic#1",
+      "crates/tachi-server/src/task_lifecycle/flow_artifacts/dispatch_markers.rs::mark_task_dispatch_completion::write_json_atomic#2"
+    ],
+    "linked_result_copies": [
+      "crates/tachi-server/src/arena_ops/actions/collect.rs::handle_collect::linked-result-copy#1"
+    ]
+  },
+  "contraction_budgets": {
+    "launch_kernels": 1,
+    "production_adopters": 5,
+    "request_builders": 5,
+    "launch_advertising_facades": 3,
+    "legacy_secondary_ledger_roots": 2,
+    "legacy_staffing_projection_writer_sites": 35,
+    "linked_result_copies": 1,
+    "direction": "budgets may only decrease as deletion leaves land"
+  },
+  "legacy_debt": [
+    {
+      "owner": "tachi_arena",
+      "root_symbol": "arena_root",
+      "authority": false,
+      "retirement_leaf": "D"
+    },
+    {
+      "owner": "tachi_shell",
+      "root_symbol": "shell_runs_root",
+      "authority": false,
+      "retirement_leaf": "B"
+    }
+  ],
+  "non_goals": [
+    "new_public_facade",
+    "new_request_wrapper",
+    "new_receipt_wrapper",
+    "route_deletion",
+    "cancellation_contract",
+    "full_dynamic_json_schema_freeze"
+  ]
+}
