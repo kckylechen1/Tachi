@@ -259,6 +259,17 @@ fn migrate_single_db(
             }
         }
     }
+    // Drop the read-only source connection now — it is never used again in
+    // this function, and the archive-safety guard below probes whether some
+    // OTHER process still holds `source_path` open. Leaving this process's
+    // own connection alive across that probe would make lsof see this very
+    // call as a "holder" of the file it is about to archive-move, which
+    // (before `daemon_ownership`'s self-PID exclusion landed) made every
+    // migration look permanently `Owned` and roll back. Both layers matter:
+    // this drop removes the self-hold at its source; the self-PID exclusion
+    // in `db_ownership.rs` is defense in depth for any other call site that
+    // probes while holding its own connection.
+    drop(source_store);
 
     if let Some(err) = copy_err {
         // Best-effort rollback: delete rows we newly inserted in this run.

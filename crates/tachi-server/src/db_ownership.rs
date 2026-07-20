@@ -26,12 +26,15 @@ pub(crate) enum DbOwnership {
     Unknown(String),
 }
 
-/// Best-effort detection: does any running tachi-tachi-server have an
-/// open file handle on `db_path`? Uses `lsof` on Unix. Only a clean lsof
-/// run (readable exit status + output) may resolve to `Owned`/`NotOwned`;
-/// canonicalize failure, a missing/erroring `lsof`, and non-unix platforms
-/// all return `Unknown` — the caller must fail closed on that, not fall
-/// through to the unguarded copy path.
+/// Best-effort detection: does some *other* running tachi-tachi-server have
+/// an open file handle on `db_path`? Uses `lsof` on Unix, excluding the
+/// calling process's own PID from the holder count — a caller may
+/// legitimately hold its own connection to `db_path` at the moment it
+/// probes (see `count_other_holders`), and that is not a concurrent daemon.
+/// Only a clean lsof run (readable exit status + output) may resolve to
+/// `Owned`/`NotOwned`; canonicalize failure, a missing/erroring `lsof`, and
+/// non-unix platforms all return `Unknown` — the caller must fail closed on
+/// that, not fall through to the unguarded copy path.
 #[cfg(unix)]
 fn probe_db_ownership(db_path: &Path) -> DbOwnership {
     use std::process::Command;
@@ -48,6 +51,7 @@ fn probe_db_ownership(db_path: &Path) -> DbOwnership {
             o.status.code(),
             &String::from_utf8_lossy(&o.stdout),
             &String::from_utf8_lossy(&o.stderr),
+            std::process::id(),
         ),
         Err(e) => DbOwnership::Unknown(format!("lsof unavailable: {e}")),
     }
@@ -66,9 +70,16 @@ fn probe_db_ownership(db_path: &Path) -> DbOwnership {
 /// signal-killed `lsof` also leaves both streams empty and would otherwise
 /// be misread as the harmless "no holders found" signature.
 ///
+/// `self_pid` excludes the calling process's own holder line: this process
+/// itself may legitimately have `db_path` open (a read-only migration scan,
+/// an in-progress doctor read, ...) at the moment it probes, and that is not
+/// a concurrent daemon — only some *other* process holding the file open is
+/// a torn-copy risk. A holder line whose PID field cannot be parsed is
+/// counted as a holder anyway (fail closed, never silently excluded).
+///
 /// Signatures:
-/// - `Some(0)` + >1 stdout line → `Owned` (header + at least one holder line)
-/// - `Some(0)` + ≤1 stdout line → `NotOwned` (header only / no output)
+/// - `Some(0)` + at least one non-self holder line → `Owned`
+/// - `Some(0)` + header only, or only self-owned holder lines → `NotOwned`
 /// - `Some(n)` (n != 0) + both streams empty → `NotOwned` (lsof's normal,
 ///   silent "no holders" exit-1 signature)
 /// - `None` (signal death) → `Unknown("lsof terminated by signal")`,
@@ -76,11 +87,16 @@ fn probe_db_ownership(db_path: &Path) -> DbOwnership {
 /// - `Some(n)` (n != 0) + diagnostic text on either stream → `Unknown`
 ///   with the first diagnostic line surfaced
 #[cfg(unix)]
-fn classify_lsof_output(status_code: Option<i32>, stdout: &str, stderr: &str) -> DbOwnership {
+fn classify_lsof_output(
+    status_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+    self_pid: u32,
+) -> DbOwnership {
     match status_code {
         Some(0) => {
-            // lsof prints a header line + one line per holder; >1 line means held.
-            if stdout.lines().count() > 1 {
+            // lsof prints a header line + one line per holder.
+            if count_other_holders(stdout, self_pid) > 0 {
                 DbOwnership::Owned
             } else {
                 DbOwnership::NotOwned
@@ -109,6 +125,25 @@ fn classify_lsof_output(status_code: Option<i32>, stdout: &str, stderr: &str) ->
             }
         }
     }
+}
+
+/// Count lsof holder lines (skipping the header line) whose PID differs
+/// from `self_pid`. A line whose PID field can't be parsed is counted as a
+/// holder anyway — an unparsable line is not proof it's harmless, so this
+/// fails toward `Owned`/blocking rather than silently excluding it.
+#[cfg(unix)]
+fn count_other_holders(stdout: &str, self_pid: u32) -> usize {
+    stdout
+        .lines()
+        .skip(1) // header: "COMMAND  PID USER  FD TYPE ..."
+        .filter(|line| {
+            line.split_whitespace()
+                .nth(1)
+                .and_then(|field| field.parse::<u32>().ok())
+                .map(|pid| pid != self_pid)
+                .unwrap_or(true)
+        })
+        .count()
 }
 
 #[cfg(not(unix))]
@@ -151,11 +186,17 @@ pub(crate) fn set_ownership_inject_for_test(value: Option<DbOwnership>) {
 mod tests {
     use super::*;
 
+    /// Dummy "self" PID used by tests whose fixture holder lines represent
+    /// some *other* process (never matches the `123` etc. used below), so
+    /// existing Owned/NotOwned assertions keep meaning what they said before
+    /// `classify_lsof_output` grew the self-exclusion parameter.
+    const OTHER_SELF_PID: u32 = 999_999;
+
     #[test]
     fn classify_success_multiple_holders_is_owned() {
         let header_plus_holder = "COMMAND  PID USER  FD TYPE\ntachi  123 kyle  10r REG\n";
         assert_eq!(
-            classify_lsof_output(Some(0), header_plus_holder, ""),
+            classify_lsof_output(Some(0), header_plus_holder, "", OTHER_SELF_PID),
             DbOwnership::Owned
         );
     }
@@ -164,10 +205,48 @@ mod tests {
     fn classify_success_no_holder_lines_is_not_owned() {
         // Some(0) with header-only (or empty) stdout: exit succeeded but
         // nothing matched.
-        assert_eq!(classify_lsof_output(Some(0), "", ""), DbOwnership::NotOwned);
         assert_eq!(
-            classify_lsof_output(Some(0), "COMMAND  PID USER  FD TYPE\n", ""),
+            classify_lsof_output(Some(0), "", "", OTHER_SELF_PID),
             DbOwnership::NotOwned
+        );
+        assert_eq!(
+            classify_lsof_output(Some(0), "COMMAND  PID USER  FD TYPE\n", "", OTHER_SELF_PID),
+            DbOwnership::NotOwned
+        );
+    }
+
+    #[test]
+    fn classify_self_only_holder_is_not_owned() {
+        // The caller (e.g. a migration's own read-only connection) may be
+        // the only "holder" lsof reports for its own PID — that must not
+        // register as a live daemon.
+        let header_plus_self = "COMMAND  PID USER  FD TYPE\ntachi  4242 kyle  10r REG\n";
+        assert_eq!(
+            classify_lsof_output(Some(0), header_plus_self, "", 4242),
+            DbOwnership::NotOwned
+        );
+    }
+
+    #[test]
+    fn classify_self_and_other_holder_is_owned() {
+        // Self holds it AND some other process holds it too — the other
+        // holder still makes this Owned.
+        let header_self_and_other =
+            "COMMAND  PID USER  FD TYPE\ntachi  4242 kyle  10r REG\ntachi  777 kyle  11r REG\n";
+        assert_eq!(
+            classify_lsof_output(Some(0), header_self_and_other, "", 4242),
+            DbOwnership::Owned
+        );
+    }
+
+    #[test]
+    fn classify_unparsable_pid_field_counts_as_holder() {
+        // A holder line whose PID field can't be parsed as u32 is not proof
+        // it's harmless (e.g. self) — fail closed and count it.
+        let header_plus_garbled = "COMMAND  PID USER  FD TYPE\ntachi  ??? kyle  10r REG\n";
+        assert_eq!(
+            classify_lsof_output(Some(0), header_plus_garbled, "", OTHER_SELF_PID),
+            DbOwnership::Owned
         );
     }
 
@@ -175,7 +254,10 @@ mod tests {
     fn classify_nonzero_exit_both_streams_empty_is_not_owned() {
         // lsof's normal, silent "no holders found" signature: exit 1, not a
         // fault, both streams empty.
-        assert_eq!(classify_lsof_output(Some(1), "", ""), DbOwnership::NotOwned);
+        assert_eq!(
+            classify_lsof_output(Some(1), "", "", OTHER_SELF_PID),
+            DbOwnership::NotOwned
+        );
     }
 
     #[test]
@@ -186,13 +268,18 @@ mod tests {
         // == None` must be checked first and must never resolve to
         // `NotOwned`.
         assert_eq!(
-            classify_lsof_output(None, "", ""),
+            classify_lsof_output(None, "", "", OTHER_SELF_PID),
             DbOwnership::Unknown("lsof terminated by signal".to_string())
         );
         // Also must not be swayed by incidental non-empty output preceding
         // the kill — signal death always wins.
         assert_eq!(
-            classify_lsof_output(None, "COMMAND  PID USER  FD TYPE\n", "some partial text"),
+            classify_lsof_output(
+                None,
+                "COMMAND  PID USER  FD TYPE\n",
+                "some partial text",
+                OTHER_SELF_PID
+            ),
             DbOwnership::Unknown("lsof terminated by signal".to_string())
         );
     }
@@ -203,6 +290,7 @@ mod tests {
             Some(1),
             "",
             "lsof: status error on /x: No such file or directory\n",
+            OTHER_SELF_PID,
         );
         match unknown {
             DbOwnership::Unknown(reason) => {
@@ -221,8 +309,8 @@ mod tests {
         // NotOwned signature must never collapse to the same variant even
         // though both present as "both streams empty".
         assert_ne!(
-            classify_lsof_output(None, "", ""),
-            classify_lsof_output(Some(1), "", "")
+            classify_lsof_output(None, "", "", OTHER_SELF_PID),
+            classify_lsof_output(Some(1), "", "", OTHER_SELF_PID)
         );
     }
 }
