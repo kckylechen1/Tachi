@@ -153,11 +153,21 @@ mod tests {
         let _holder = crate::daemon_lock::DaemonLock::acquire(&scoped_path)
             .expect("pre-acquire scoped lock to simulate a live daemon");
 
-        let result =
-            run_tidy_command(false, false, false, true, true, None, &home, &app_home, vec![], None)
-                .await;
+        let result = run_tidy_command(
+            false,
+            false,
+            false,
+            true,
+            true,
+            None,
+            &home,
+            &app_home,
+            vec![],
+            None,
+        )
+        .await;
 
-        let err = result.err().expect("must refuse while scoped lock is held");
+        let err = result.expect_err("must refuse while scoped lock is held");
         assert!(
             err.to_string().contains("scoped lock"),
             "error must name the scoped lock, got: {err}"
@@ -171,11 +181,21 @@ mod tests {
         let _holder = crate::daemon_lock::DaemonLock::acquire(&legacy_path)
             .expect("pre-acquire legacy lock to simulate an un-upgraded live daemon");
 
-        let result =
-            run_tidy_command(false, false, false, true, true, None, &home, &app_home, vec![], None)
-                .await;
+        let result = run_tidy_command(
+            false,
+            false,
+            false,
+            true,
+            true,
+            None,
+            &home,
+            &app_home,
+            vec![],
+            None,
+        )
+        .await;
 
-        let err = result.err().expect("must refuse while legacy lock is held");
+        let err = result.expect_err("must refuse while legacy lock is held");
         assert!(
             err.to_string().contains("legacy lock"),
             "error must name the legacy lock, got: {err}"
@@ -186,9 +206,19 @@ mod tests {
     async fn execute_proceeds_when_no_lock_is_held() {
         let (_dir, home, app_home) = fresh_home();
 
-        let result =
-            run_tidy_command(true, false, false, true, true, None, &home, &app_home, vec![], None)
-                .await;
+        let result = run_tidy_command(
+            true,
+            false,
+            false,
+            true,
+            true,
+            None,
+            &home,
+            &app_home,
+            vec![],
+            None,
+        )
+        .await;
 
         assert!(
             result.is_ok(),

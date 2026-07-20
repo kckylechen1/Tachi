@@ -157,7 +157,7 @@ mod tests {
         let db_arg = db_path.display().to_string();
         let result = run_vacuum_cli(&db_arg, true, &app_home, false).await;
 
-        let err = result.err().expect("must refuse while scoped lock is held");
+        let err = result.expect_err("must refuse while scoped lock is held");
         assert!(
             err.to_string().contains("scoped lock"),
             "error must name the scoped lock, got: {err}"
@@ -174,7 +174,7 @@ mod tests {
         let db_arg = db_path.display().to_string();
         let result = run_vacuum_cli(&db_arg, true, &app_home, false).await;
 
-        let err = result.err().expect("must refuse while legacy lock is held");
+        let err = result.expect_err("must refuse while legacy lock is held");
         assert!(
             err.to_string().contains("legacy lock"),
             "error must name the legacy lock, got: {err}"
@@ -188,8 +188,8 @@ mod tests {
         // error out on it.
         let (_dir, app_home, db_path) = fresh_fixture();
         let scoped_path = crate::daemon_lock::scoped_daemon_lock_path(&app_home, &db_path);
-        let _holder = crate::daemon_lock::DaemonLock::acquire(&scoped_path)
-            .expect("pre-acquire scoped lock");
+        let _holder =
+            crate::daemon_lock::DaemonLock::acquire(&scoped_path).expect("pre-acquire scoped lock");
 
         let db_arg = db_path.display().to_string();
         let result = run_vacuum_cli(&db_arg, false, &app_home, false).await;

@@ -246,7 +246,9 @@ async fn recall_proposal_reject_stamps_a_ttl_immediately() {
         .expect("proposal list")
         .iter()
         .find(|proposal| proposal["proposal_id"] == json!(proposal_id))
-        .unwrap_or_else(|| panic!("expected the same proposal_id after regenerate: {regen_parsed}"));
+        .unwrap_or_else(|| {
+            panic!("expected the same proposal_id after regenerate: {regen_parsed}")
+        });
     assert_eq!(
         regen_proposal["status"],
         json!("rejected"),

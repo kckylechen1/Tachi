@@ -602,11 +602,18 @@ mod tests {
 
         let removed = reap_expired_state(&conn, now).expect("reap");
 
-        assert_eq!(removed, 1, "only the genuinely-expired row should be deleted");
+        assert_eq!(
+            removed, 1,
+            "only the genuinely-expired row should be deleted"
+        );
         assert!(
-            get_state(&conn, "capture_manifest", "same-second-not-expired-reversed")
-                .expect("get same-second row")
-                .is_some(),
+            get_state(
+                &conn,
+                "capture_manifest",
+                "same-second-not-expired-reversed"
+            )
+            .expect("get same-second row")
+            .is_some(),
             "same-second row must survive regardless of which side renders Z vs \
              numeric offset"
         );
@@ -635,8 +642,7 @@ mod tests {
             r#"{"expires_at":"not-a-real-timestamp"}"#,
         )
         .expect("seed garbage string");
-        set_state(&conn, "ns", "empty_string", r#"{"expires_at":""}"#)
-            .expect("seed empty string");
+        set_state(&conn, "ns", "empty_string", r#"{"expires_at":""}"#).expect("seed empty string");
 
         let removed = reap_expired_state(&conn, now).expect("reap");
 
@@ -704,8 +710,8 @@ mod tests {
         );
 
         // Idempotent: a second run against unchanged data touches nothing.
-        let second_run =
-            backfill_missing_expires_at(&conn, "build_receipt", ttl, None).expect("second backfill");
+        let second_run = backfill_missing_expires_at(&conn, "build_receipt", ttl, None)
+            .expect("second backfill");
         assert_eq!(
             second_run, 0,
             "re-running the backfill must be a no-op once every row already has expires_at"
@@ -807,9 +813,13 @@ mod tests {
         let conn = open_state_db();
         set_state(&conn, "ns", "k1", r#"{"status":"applied"}"#).expect("seed");
 
-        let backfilled =
-            backfill_missing_expires_at(&conn, "ns", "2126-07-20T00:00:00Z", Some(("$.status", &[])))
-                .expect("backfill with empty allow-list");
+        let backfilled = backfill_missing_expires_at(
+            &conn,
+            "ns",
+            "2126-07-20T00:00:00Z",
+            Some(("$.status", &[])),
+        )
+        .expect("backfill with empty allow-list");
         assert_eq!(
             backfilled, 0,
             "an empty terminal-values allow-list can never match any row"

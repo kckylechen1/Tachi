@@ -163,7 +163,9 @@ fn tidy_execute_rolls_back_when_source_db_is_owned() {
     };
 
     let _clear = ClearOwnershipInject;
-    crate::db_ownership::set_ownership_inject_for_test(Some(crate::db_ownership::DbOwnership::Owned));
+    crate::db_ownership::set_ownership_inject_for_test(Some(
+        crate::db_ownership::DbOwnership::Owned,
+    ));
 
     let summary = crate::bootstrap::execute_tidy_migrations(std::slice::from_ref(&migration), &cfg)
         .expect("execute summary");
@@ -351,7 +353,9 @@ fn tidy_execute_rolls_back_when_source_scope_lock_is_held() {
         outcome.message
     );
     assert!(
-        outcome.message.contains("source DB's own daemon is running"),
+        outcome
+            .message
+            .contains("source DB's own daemon is running"),
         "message must name the source-scope lock conflict, got: {}",
         outcome.message
     );

@@ -1,0 +1,20 @@
+name: Format Gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-rust
+      - name: Check formatting
+        run: cargo fmt --all --check

@@ -1074,6 +1074,8 @@ pub(crate) async fn handle_capture_session(
     // lease on this early return the same way it does for every other exit
     // — including this one, which a prior version of this handler left
     // completely unreleased on renew failure.
+    // deliberate IIFE error-scope gate (lease release on Err); do not de-nest
+    #[allow(clippy::redundant_closure_call)]
     (|| -> Result<(), String> {
         // Test-only injection point proving the structural gate covers a
         // SECOND, previously-unfixed early-return site (not just the
@@ -1217,6 +1219,8 @@ pub(crate) async fn handle_capture_session(
         } else {
             DbScope::Project
         };
+        // deliberate IIFE error-scope gate (lease release on Err); do not de-nest
+        #[allow(clippy::redundant_closure_call)]
         let mut jobs = match (|| -> Result<Vec<memcore::FoundryJobSpec>, String> {
             // Test-only injection point so the lease-release-on-enqueue-
             // failure path below is exercised without depending on a real
@@ -2964,8 +2968,7 @@ mod handler_tests {
                 "VOYAGE_BASE_URL",
                 &format!("http://127.0.0.1:{port}"),
             );
-            let _key =
-                crate::test_support::EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
+            let _key = crate::test_support::EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
             let _attempts =
                 crate::test_support::EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
 

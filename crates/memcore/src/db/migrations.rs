@@ -789,7 +789,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(idx, 1, "the identity index must be rebuilt after convergence");
+        assert_eq!(
+            idx, 1,
+            "the identity index must be rebuilt after convergence"
+        );
     }
 
     #[test]

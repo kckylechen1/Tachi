@@ -1021,7 +1021,7 @@ mod tests {
 
         let result = copy_legacy_db_guarded(&src, &dest).await;
 
-        let err = result.err().expect("undetermined ownership must refuse");
+        let err = result.expect_err("undetermined ownership must refuse");
         assert!(
             err.to_string().contains("cannot determine"),
             "error must say ownership was undetermined, got: {err}"

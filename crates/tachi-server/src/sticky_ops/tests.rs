@@ -314,10 +314,8 @@ fn concurrent_claim_smoke_single_winner_under_load() {
 /// the actual cleanup off this field).
 #[test]
 fn claim_write_carries_a_ninety_day_hard_state_ttl() {
-    let db_path = std::env::temp_dir().join(format!(
-        "sticky-claim-ttl-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path =
+        std::env::temp_dir().join(format!("sticky-claim-ttl-{}.sqlite", uuid::Uuid::new_v4()));
     let server = test_server(db_path.clone());
 
     server

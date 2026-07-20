@@ -216,8 +216,9 @@ fn run_wal_checkpoint(ckpt_server: &MemoryServer, maintain_named_projects: bool)
             eprintln!("[optimize] project optimize skipped: {e}");
         }
         reap_expired_hard_state(ckpt_server, "project", &now_rfc3339, |server, now| {
-            server
-                .with_project_store(|store| store.reap_expired_state(now).map_err(|e| e.to_string()))
+            server.with_project_store(|store| {
+                store.reap_expired_state(now).map_err(|e| e.to_string())
+            })
         });
         backfill_hard_state_ttl(ckpt_server, "project", |server| {
             server.with_project_store(|store| backfill_hard_state_ttls(store))
