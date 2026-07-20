@@ -164,6 +164,7 @@ mod shell_ops;
 mod signature_evidence;
 mod skill_chain_ops;
 mod skill_policy;
+mod skill_source_resolver;
 mod status_ops;
 mod sticky_ops;
 mod task_lifecycle;

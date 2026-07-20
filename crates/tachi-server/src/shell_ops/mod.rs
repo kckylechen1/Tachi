@@ -19,7 +19,6 @@ use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 mod actions;
 mod flow;
@@ -33,18 +32,13 @@ mod tests;
 #[cfg(test)]
 use self::flow::new_flow_id;
 use self::flow::{
-    advance_stage, cached_git_root, injection_to_json, read_status, read_status_async,
-    resolve_or_create_flow, slugify, validate_slice_id,
+    advance_stage, injection_to_json, read_status, read_status_async, resolve_or_create_flow,
+    slugify, validate_slice_id,
 };
 #[cfg(test)]
 use self::injection::meta_skill_for_stage;
 use self::injection::{inject_meta_skill, InjectionResult};
 use self::instruction::build_instruction_md;
-
-// Re-exported for `builtins::helpers` (capability-seed time) and
-// `bootstrap::skill_surface_cli` (manifest-read time) — see the `pub(crate)`
-// doc comment on `injection::resolve_meta_skill` for why.
-pub(crate) use self::injection::resolve_meta_skill;
 
 pub(crate) use self::actions::handle_tachi_shell;
 #[cfg(test)]

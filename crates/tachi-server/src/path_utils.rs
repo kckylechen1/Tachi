@@ -19,3 +19,21 @@ pub(crate) use symlink::{
     ensure_plan_c_symlink, plan_c_split_brain, plan_c_split_brain_for_local_db,
 };
 pub(crate) use types::{PlanCLinkOutcome, PlanCSplitBrain};
+
+/// Return the process-cached root of the current Git worktree, when available.
+pub(crate) fn cached_git_root() -> Option<&'static std::path::PathBuf> {
+    static GIT_ROOT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    GIT_ROOT
+        .get_or_init(|| {
+            std::process::Command::new("git")
+                .args(["rev-parse", "--show-toplevel"])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .and_then(|out| String::from_utf8(out.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from)
+        })
+        .as_ref()
+}
