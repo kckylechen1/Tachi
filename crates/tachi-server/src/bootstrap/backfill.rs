@@ -145,8 +145,8 @@ pub(super) async fn run_backfill_vectors(
     }
 
     let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
-    let materialize_report =
-        materialize_standalone(&llm, vault_db_path).map_err(|e| IoError::new(ErrorKind::Other, e))?;
+    let materialize_report = materialize_standalone(&llm, vault_db_path)
+        .map_err(|e| IoError::new(ErrorKind::Other, e))?;
     // #1279: backfill stays strict — batch jobs fail-fast on skipped aliases.
     ensure_no_skipped_aliases(&materialize_report)?;
     let entries = list_missing_vector_entries(&store, skip_recall_cache, None)
@@ -277,8 +277,8 @@ pub(super) async fn run_backfill_summaries(
 
     let llm = LlmClient::new_with_vault_db(Some(vault_db_path))
         .map_err(|e| format!("LLM client init failed: {e}"))?;
-    let materialize_report =
-        materialize_standalone(&llm, vault_db_path).map_err(|e| IoError::new(ErrorKind::Other, e))?;
+    let materialize_report = materialize_standalone(&llm, vault_db_path)
+        .map_err(|e| IoError::new(ErrorKind::Other, e))?;
     // #1279: backfill stays strict — batch jobs fail-fast on skipped aliases.
     ensure_no_skipped_aliases(&materialize_report)?;
     let concurrency = backfill_llm_concurrency();
@@ -385,8 +385,8 @@ pub(super) async fn run_backfill_metadata(
 
     let llm = LlmClient::new_with_vault_db(Some(vault_db_path))
         .map_err(|e| format!("LLM client init failed: {e}"))?;
-    let materialize_report =
-        materialize_standalone(&llm, vault_db_path).map_err(|e| IoError::new(ErrorKind::Other, e))?;
+    let materialize_report = materialize_standalone(&llm, vault_db_path)
+        .map_err(|e| IoError::new(ErrorKind::Other, e))?;
     // #1279: backfill stays strict — batch jobs fail-fast on skipped aliases.
     ensure_no_skipped_aliases(&materialize_report)?;
     let concurrency = backfill_llm_concurrency();

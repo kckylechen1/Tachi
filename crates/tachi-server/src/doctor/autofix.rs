@@ -1,11 +1,11 @@
 use chrono::Utc;
+#[cfg(all(test, unix))]
+use std::cell::Cell;
 #[cfg(unix)]
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-#[cfg(all(test, unix))]
-use std::cell::Cell;
 
 use super::classify::sidecar;
 use super::{AutoFixAction, DbClassification, DoctorFinding};
@@ -516,11 +516,7 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
     // must block success. Do not open/checkpoint an incomplete main-only copy.
     if wal.exists() {
         if let Err(e) = fs::copy(&wal, &wal_dest) {
-            let (action, skip_gc) = checkpoint_failure_action(
-                src,
-                &dest,
-                format!("copy wal: {e}"),
-            );
+            let (action, skip_gc) = checkpoint_failure_action(src, &dest, format!("copy wal: {e}"));
             return finish_checkpoint_action(src_path, action, skip_gc);
         }
     }
@@ -543,11 +539,8 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
         // Drop copied sidecars first — a leftover -wal can mask a corrupt main.
         let _ = fs::remove_file(&wal_dest);
         let _ = fs::remove_file(&shm_dest);
-        fs::write(
-            &dest,
-            b"not-a-sqlite-db-for-stuck-discard-inject!!!!!",
-        )
-        .expect("inject corrupt dest");
+        fs::write(&dest, b"not-a-sqlite-db-for-stuck-discard-inject!!!!!")
+            .expect("inject corrupt dest");
     }
 
     // Open the COPY read-write and force a TRUNCATE checkpoint.
@@ -577,11 +570,7 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
                 ),
             }
         }
-        Err(e) => checkpoint_failure_action(
-            src,
-            &dest,
-            format!("open copy: {e}; {shm_token}"),
-        ),
+        Err(e) => checkpoint_failure_action(src, &dest, format!("open copy: {e}; {shm_token}")),
     };
 
     finish_checkpoint_action(src_path, result, skip_gc)
@@ -879,7 +868,7 @@ fn daemon_ownership(db_path: &Path) -> DbOwnership {
 /// Remove all but the `keep` most-recent `<src>.checkpointed.*.db` (and
 /// their `-wal`/`-shm` sidecars) sitting next to `src_path`. Returns
 /// Some(note) only on partial failure so the caller can surface it.
-    fn gc_old_checkpoint_copies(src_path: &Path, keep: usize) -> Option<String> {
+fn gc_old_checkpoint_copies(src_path: &Path, keep: usize) -> Option<String> {
     let dir = src_path.parent()?;
     let basename = src_path.file_name()?.to_string_lossy().to_string();
     let prefix = format!("{basename}.checkpointed.");
@@ -1142,10 +1131,7 @@ mod checkpoint_honesty_tests {
             "timestamped checkpoint naming preserved: {dest}"
         );
         // Collision-resistant stamp: fractional seconds + short hex suffix.
-        let name = Path::new(&dest)
-            .file_name()
-            .unwrap()
-            .to_string_lossy();
+        let name = Path::new(&dest).file_name().unwrap().to_string_lossy();
         assert!(
             name.contains('-'),
             "dest name should include uuid suffix separator: {name}"
@@ -1344,7 +1330,11 @@ mod checkpoint_honesty_tests {
 
         assert_eq!(action.outcome, "ok");
         let dest = PathBuf::from(action.destination.expect("success dest"));
-        let mode = fs::metadata(&dest).expect("dest metadata").permissions().mode() & 0o777;
+        let mode = fs::metadata(&dest)
+            .expect("dest metadata")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(
             mode, 0o600,
             "checkpoint dest must preserve source mode bits (not world-readable)"

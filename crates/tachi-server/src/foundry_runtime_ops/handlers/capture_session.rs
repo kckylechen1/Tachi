@@ -2964,8 +2964,7 @@ mod handler_tests {
                 "VOYAGE_BASE_URL",
                 &format!("http://127.0.0.1:{port}"),
             );
-            let _key =
-                crate::test_support::EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
+            let _key = crate::test_support::EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
             let _attempts =
                 crate::test_support::EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
 

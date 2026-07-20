@@ -483,9 +483,8 @@ mod tests {
             "2026-07-11T00:10:00Z",
         );
 
-        let released = migrate_v12_session_claims_unique_identity(&conn).expect(
-            "v12 must not crash on a pre-v21 DB missing the mode column (#1289 Claim5)",
-        );
+        let released = migrate_v12_session_claims_unique_identity(&conn)
+            .expect("v12 must not crash on a pre-v21 DB missing the mode column (#1289 Claim5)");
         assert_eq!(released, 1, "the older modeless duplicate must be released");
 
         let old_state: String = conn

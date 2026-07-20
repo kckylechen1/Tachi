@@ -39,7 +39,8 @@ async fn rate_limit_burst_does_not_bleed_across_mcp_session_clones() {
     for i in 0..8 {
         let outcome = call_tool_rate_limit_outcome(session_a.clone()).await;
         assert_eq!(
-            outcome, "ok",
+            outcome,
+            "ok",
             "session A call {} should succeed via call_tool, got {outcome}",
             i + 1
         );

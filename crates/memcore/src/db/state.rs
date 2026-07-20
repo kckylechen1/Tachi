@@ -498,11 +498,18 @@ mod tests {
 
         let removed = reap_expired_state(&conn, now).expect("reap");
 
-        assert_eq!(removed, 1, "only the genuinely-expired row should be deleted");
+        assert_eq!(
+            removed, 1,
+            "only the genuinely-expired row should be deleted"
+        );
         assert!(
-            get_state(&conn, "capture_manifest", "same-second-not-expired-reversed")
-                .expect("get same-second row")
-                .is_some(),
+            get_state(
+                &conn,
+                "capture_manifest",
+                "same-second-not-expired-reversed"
+            )
+            .expect("get same-second row")
+            .is_some(),
             "same-second row must survive regardless of which side renders Z vs \
              numeric offset"
         );
@@ -531,8 +538,7 @@ mod tests {
             r#"{"expires_at":"not-a-real-timestamp"}"#,
         )
         .expect("seed garbage string");
-        set_state(&conn, "ns", "empty_string", r#"{"expires_at":""}"#)
-            .expect("seed empty string");
+        set_state(&conn, "ns", "empty_string", r#"{"expires_at":""}"#).expect("seed empty string");
 
         let removed = reap_expired_state(&conn, now).expect("reap");
 

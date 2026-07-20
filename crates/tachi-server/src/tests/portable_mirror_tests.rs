@@ -88,8 +88,7 @@ fn portable_max_search_top_k_mirrors_tachi_params() {
 
 #[test]
 fn portable_max_search_candidates_per_channel_mirrors_tachi_params() {
-    let mirrored =
-        extract_usize_const(PORTABLE_SERVICE_SRC, "MAX_SEARCH_CANDIDATES_PER_CHANNEL");
+    let mirrored = extract_usize_const(PORTABLE_SERVICE_SRC, "MAX_SEARCH_CANDIDATES_PER_CHANNEL");
     assert_eq!(
         mirrored,
         tachi_params::MAX_SEARCH_CANDIDATES_PER_CHANNEL,
