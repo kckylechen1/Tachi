@@ -68,7 +68,7 @@ fn simple_query_input(query: &str) -> String {
 }
 
 pub(crate) const MEMORY_SELECT_COLUMNS: &str = "id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier";
-const MEMORY_SELECT_COLUMNS_QUALIFIED: &str = "m.id,m.path,m.summary,m.text,m.importance,m.timestamp,m.valid_from,m.valid_until,m.category,m.topic,m.keywords,'[]' AS persons,m.entities,'' AS location,m.source,m.scope,m.archived,m.access_count,m.last_access,m.revision,m.metadata,m.retention_policy,m.domain,m.recall_count,m.query_diversity,m.tier";
+pub(crate) const MEMORY_SELECT_COLUMNS_QUALIFIED: &str = "m.id,m.path,m.summary,m.text,m.importance,m.timestamp,m.valid_from,m.valid_until,m.category,m.topic,m.keywords,'[]' AS persons,m.entities,'' AS location,m.source,m.scope,m.archived,m.access_count,m.last_access,m.revision,m.metadata,m.retention_policy,m.domain,m.recall_count,m.query_diversity,m.tier";
 
 static FTS_SYNC_LOCK: Mutex<()> = Mutex::new(());
 
@@ -97,6 +97,53 @@ fn sync_memories_fts(
          VALUES (?1,?2,?3,?4,?5,?6)",
         params![id, path, summary, text, keywords_joined, entities_joined],
     )?;
+    // Symbolic trigram index stores raw memories column bytes (JSON tags
+    // included) so LIKE eligibility matches a table scan (#1331).
+    sync_memories_symbolic_fts(tx, id)?;
+    Ok(())
+}
+
+/// Refresh one row in `memories_symbolic_fts` from the live `memories` row.
+/// No-op when the virtual table is absent (legacy fixtures / mid-migration).
+fn sync_memories_symbolic_fts(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+) -> Result<(), MemoryError> {
+    let exists: bool = tx
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories_symbolic_fts'",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if !exists {
+        return Ok(());
+    }
+    tx.execute("DELETE FROM memories_symbolic_fts WHERE id = ?1", params![id])?;
+    tx.execute(
+        r#"INSERT INTO memories_symbolic_fts(id, path, summary, text, keywords, entities, topic)
+           SELECT id, path, summary, text, keywords, entities, topic
+           FROM memories WHERE id = ?1"#,
+        params![id],
+    )?;
+    Ok(())
+}
+
+fn delete_memories_symbolic_fts(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+) -> Result<(), MemoryError> {
+    let exists: bool = tx
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories_symbolic_fts'",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if !exists {
+        return Ok(());
+    }
+    tx.execute("DELETE FROM memories_symbolic_fts WHERE id = ?1", params![id])?;
     Ok(())
 }
 
@@ -1020,6 +1067,7 @@ pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bo
     if deleted {
         // Clean up FTS index
         tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![trimmed])?;
+        delete_memories_symbolic_fts(&tx, trimmed)?;
 
         if vec_available {
             tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![trimmed])?;

@@ -396,6 +396,13 @@ impl MemoryStore {
                WHERE id NOT IN (SELECT id FROM memories_fts)"#,
             [],
         )?;
+        let _ = self.conn.execute(
+            r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
+               SELECT id, path, summary, text, keywords, entities, topic
+               FROM memories
+               WHERE id NOT IN (SELECT id FROM memories_symbolic_fts)"#,
+            [],
+        )?;
         Ok(inserted)
     }
 
@@ -420,6 +427,26 @@ impl MemoryStore {
                  id, path, summary, text,
                  trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
                  trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
+               FROM memories"#,
+            [],
+        )?;
+        self.conn
+            .execute_batch("DROP TABLE IF EXISTS memories_symbolic_fts;")?;
+        self.conn.execute_batch(
+            r#"CREATE VIRTUAL TABLE IF NOT EXISTS memories_symbolic_fts USING fts5(
+                   id,
+                   path,
+                   summary,
+                   text,
+                   keywords,
+                   entities,
+                   topic,
+                   tokenize = 'trigram case_sensitive 0'
+               );"#,
+        )?;
+        let _ = self.conn.execute(
+            r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
+               SELECT id, path, summary, text, keywords, entities, topic
                FROM memories"#,
             [],
         )?;

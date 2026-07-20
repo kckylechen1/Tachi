@@ -964,6 +964,29 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
         [],
     )?;
 
+    // Symbolic trigram index (#1331): same drift-repair shape as memories_fts,
+    // but stores raw column bytes so LIKE eligibility stays identical.
+    let symbolic_fts_present: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories_symbolic_fts'",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if symbolic_fts_present {
+        conn.execute(
+            "DELETE FROM memories_symbolic_fts WHERE id NOT IN (SELECT id FROM memories)",
+            [],
+        )?;
+        conn.execute(
+            r#"INSERT INTO memories_symbolic_fts (id, path, summary, text, keywords, entities, topic)
+               SELECT m.id, m.path, m.summary, m.text, m.keywords, m.entities, m.topic
+               FROM memories m
+               WHERE NOT EXISTS (SELECT 1 FROM memories_symbolic_fts f WHERE f.id = m.id)"#,
+            [],
+        )?;
+    }
+
     Ok(())
 }
 

@@ -981,32 +981,32 @@ fn pad_to_bytes(base: &str, target_bytes: usize, i: usize) -> String {
 
 /// Structural mirror of the WHERE/ORDER BY shape in
 /// `crates/memcore/src/db/memory_crud/search.rs`
-/// (`search_symbolic_candidates_with_relevance`, as of this commit — hand-
-/// check both if that function's shape moves; it is `pub(crate)` and its SQL
-/// is built inline, so an example cannot call into it directly to extract
-/// the real statement). Two deliberate simplifications from the real
-/// statement, neither of which changes SQLite's chosen access strategy (SCAN
-/// vs SEARCH; sorted vs unsorted), which is all `EXPLAIN QUERY PLAN` reports:
+/// (`search_symbolic_via_trigram`, as of #1331 — hand-check both if that
+/// function's shape moves; it is private and its SQL is built inline, so an
+/// example cannot call into it directly to extract the real statement). Two
+/// deliberate simplifications from the real statement, neither of which
+/// changes SQLite's chosen access strategy (SCAN vs SEARCH; sorted vs
+/// unsorted), which is all `EXPLAIN QUERY PLAN` reports:
 ///
-///   1. `SELECT id` instead of the full column list — column selection does
-///      not affect the WHERE/ORDER BY strategy on a table with no relevant
-///      secondary index over these text columns.
-///   2. One representative term OR-clause (`?5`) instead of up to 12 —
-///      SQLite's strategy for N OR'd unanchored `LIKE '%...%'` predicates
-///      across non-indexed columns is the same for any N >= 1; more terms
-///      change per-row work, not per-row access strategy.
+///   1. `SELECT m.id` instead of the full column list — column selection does
+///      not affect the WHERE/ORDER BY strategy for this join shape.
+///   2. One representative quoted MATCH phrase (`?5`) instead of up to 12
+///      OR'd phrases — SQLite's trigram MATCH access strategy is the same
+///      for any N >= 1; more terms change per-row work, not strategy.
 ///
 /// `tachi_symbolic_score` must already be registered on `conn` — it is a
 /// side effect of any prior `search_symbolic_candidates` call, and every
 /// grid cell makes one before this runs.
-const SYMBOLIC_SCAN_MIRROR_SQL: &str = r#"SELECT id FROM memories
- WHERE (?1 = 1 OR archived = 0)
-   AND (?2 = 1 OR superseded_by IS NULL)
-   AND (?3 IS NULL OR path LIKE ?3)
-   AND (?4 IS NULL OR (COALESCE(NULLIF(valid_from, ''), timestamp) <= ?4 AND (valid_until IS NULL OR valid_until > ?4)))
-   AND id NOT LIKE 'anchor:%'
-   AND (id LIKE ?5 ESCAPE '\' OR path LIKE ?5 ESCAPE '\' OR summary LIKE ?5 ESCAPE '\' OR text LIKE ?5 ESCAPE '\' OR keywords LIKE ?5 ESCAPE '\' OR entities LIKE ?5 ESCAPE '\' OR topic LIKE ?5 ESCAPE '\')
- ORDER BY tachi_symbolic_score(?6, id, path, topic, summary, text, keywords, entities) DESC, julianday(timestamp) DESC, id ASC
+const SYMBOLIC_SCAN_MIRROR_SQL: &str = r#"SELECT m.id
+ FROM memories_symbolic_fts
+ JOIN memories m ON m.id = memories_symbolic_fts.id
+ WHERE (?1 = 1 OR m.archived = 0)
+   AND (?2 = 1 OR m.superseded_by IS NULL)
+   AND (?3 IS NULL OR m.path LIKE ?3)
+   AND (?4 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?4 AND (m.valid_until IS NULL OR m.valid_until > ?4)))
+   AND m.id NOT LIKE 'anchor:%'
+   AND memories_symbolic_fts MATCH ?5
+ ORDER BY tachi_symbolic_score(?6, m.id, m.path, m.topic, m.summary, m.text, m.keywords, m.entities) DESC, julianday(m.timestamp) DESC, m.id ASC
  LIMIT ?7"#;
 
 /// `EXPLAIN QUERY PLAN` rows (the `detail` column only) for
@@ -1038,7 +1038,7 @@ fn symbolic_scan_mirror_query_plan(conn: &Connection) -> Vec<String> {
                 0i64,
                 Option::<String>::None,
                 Option::<String>::None,
-                "%x%",
+                "\"x\"",
                 "x",
                 1i64,
             ],
@@ -1399,17 +1399,14 @@ mod grid_tests {
         );
     }
 
-    /// Scope note (cross-vendor review checkpoint 2): this only asserts the
-    /// SCAN-vs-SEARCH access strategy (`EXPLAIN QUERY PLAN`'s `detail`
-    /// column contains `"SCAN memories"`), not the full `ORDER BY` sort
-    /// order or the real statement's up-to-12-term OR-clause shape. If
-    /// `search.rs`'s WHERE/ORDER BY shape drifts in a way that changes the
-    /// sort strategy but not the SCAN-vs-SEARCH choice, this test stays
-    /// green on the stale mirror — see `SYMBOLIC_SCAN_MIRROR_SQL`'s doc for
-    /// why the two known simplifications (single-column SELECT, one
-    /// representative term) don't themselves change either.
+    /// Scope note (cross-vendor review checkpoint 2 / #1331): this asserts
+    /// the trigram-virtual-table access strategy (`EXPLAIN QUERY PLAN`'s
+    /// `detail` mentions `memories_symbolic_fts` / `VIRTUAL TABLE INDEX`),
+    /// not the full `ORDER BY` sort order or the real statement's up-to-12-
+    /// term OR-clause shape. Pre-#1331 this locked a full `SCAN memories`;
+    /// the bound leaf replaces that with the trigram index probe.
     #[test]
-    fn mirror_query_plan_shows_no_index_can_serve_this_query() {
+    fn mirror_query_plan_uses_symbolic_trigram_index() {
         let mut store = MemoryStore::open_in_memory().expect("open grid test store");
         seed_grid_corpus(&mut store, GRID_ROW_COUNTS[0], ByteDistribution::OneLine);
         let conn = store.connection();
@@ -1428,9 +1425,16 @@ mod grid_tests {
 
         let plan = symbolic_scan_mirror_query_plan(conn);
         assert!(
-            plan.iter().any(|line| line.contains("SCAN memories")),
-            "expected a full table scan (unanchored LIKE across non-indexed \
-             columns cannot use an index), got: {plan:?}"
+            plan.iter().any(|line| {
+                line.contains("VIRTUAL TABLE INDEX")
+                    && (line.contains('M') || line.contains("memories_symbolic_fts"))
+            }) || plan.iter().any(|line| line.contains("VIRTUAL TABLE INDEX 0:M")),
+            "expected trigram MATCH virtual-table probe (INDEX …M…), got: {plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|line| line == "SCAN memories"),
+            "full memories table scan must not remain the primary access \
+             strategy after #1331, got: {plan:?}"
         );
     }
 }
