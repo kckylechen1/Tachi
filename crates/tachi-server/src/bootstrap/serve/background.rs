@@ -62,7 +62,30 @@ pub(super) fn spawn_wal_checkpoint(
     })
 }
 
+/// Reap expired `hard_state` rows (e.g. capture-manifest staging TTLs, see
+/// `memcore::db::reap_expired_state`) on one store. Best-effort like the
+/// checkpoint/optimize calls above it, but unlike them a reap failure must
+/// never be swallowed silently: it is always logged (even when it reaps
+/// nothing worth reporting, the checkpoint/optimize calls stay silent on
+/// success — a reap failure is not allowed the same silence).
+fn reap_expired_hard_state(
+    ckpt_server: &MemoryServer,
+    label: &str,
+    now_rfc3339: &str,
+    run: impl FnOnce(&MemoryServer, &str) -> Result<usize, String>,
+) {
+    match run(ckpt_server, now_rfc3339) {
+        Ok(removed) => {
+            if removed > 0 {
+                eprintln!("[state-reap] {label}: reaped {removed} expired hard_state row(s)");
+            }
+        }
+        Err(e) => eprintln!("[state-reap] {label} reap failed: {e}"),
+    }
+}
+
 fn run_wal_checkpoint(ckpt_server: &MemoryServer, maintain_named_projects: bool) {
+    let now_rfc3339 = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     if let Err(e) = ckpt_server
         .with_global_store(|store| store.checkpoint_wal_truncate().map_err(|e| e.to_string()))
     {
@@ -73,6 +96,9 @@ fn run_wal_checkpoint(ckpt_server: &MemoryServer, maintain_named_projects: bool)
     {
         eprintln!("[optimize] global optimize skipped: {e}");
     }
+    reap_expired_hard_state(ckpt_server, "global", &now_rfc3339, |server, now| {
+        server.with_global_store(|store| store.reap_expired_state(now).map_err(|e| e.to_string()))
+    });
     if ckpt_server.has_project_db() {
         if let Err(e) = ckpt_server
             .with_project_store(|store| store.checkpoint_wal_truncate().map_err(|e| e.to_string()))
@@ -84,6 +110,10 @@ fn run_wal_checkpoint(ckpt_server: &MemoryServer, maintain_named_projects: bool)
         {
             eprintln!("[optimize] project optimize skipped: {e}");
         }
+        reap_expired_hard_state(ckpt_server, "project", &now_rfc3339, |server, now| {
+            server
+                .with_project_store(|store| store.reap_expired_state(now).map_err(|e| e.to_string()))
+        });
     }
     if maintain_named_projects {
         for name in crate::path_utils::list_named_projects() {
@@ -97,6 +127,16 @@ fn run_wal_checkpoint(ckpt_server: &MemoryServer, maintain_named_projects: bool)
             }) {
                 eprintln!("[optimize] named-project '{name}' optimize skipped: {e}");
             }
+            reap_expired_hard_state(
+                ckpt_server,
+                &format!("named-project '{name}'"),
+                &now_rfc3339,
+                |server, now| {
+                    server.with_named_project_store(&name, |store| {
+                        store.reap_expired_state(now).map_err(|e| e.to_string())
+                    })
+                },
+            );
         }
     }
 }
@@ -531,6 +571,147 @@ mod tests {
             attached
                 .contains_key(&std::fs::canonicalize(foreign_db).expect("canonical foreign DB")),
             "manifest-wide maintenance must keep maintaining named-project DBs"
+        );
+    }
+
+    #[test]
+    fn wal_checkpoint_reaps_expired_hard_state_on_global_and_project_scope() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let global_db = tmp.path().join("global.db");
+        let project_db = tmp.path().join("project.db");
+        let server =
+            MemoryServer::new(global_db, Some(project_db)).expect("server with project db");
+
+        server
+            .with_global_store(|store| {
+                store
+                    .set_state(
+                        "capture_manifest",
+                        "expired-global",
+                        r#"{"expires_at":"2000-01-01T00:00:00Z"}"#,
+                    )
+                    .map_err(|e| e.to_string())
+            })
+            .expect("seed expired global hard_state row");
+        server
+            .with_global_store(|store| {
+                store
+                    .set_state(
+                        "capture_manifest",
+                        "not-yet-expired-global",
+                        r#"{"expires_at":"2999-01-01T00:00:00Z"}"#,
+                    )
+                    .map_err(|e| e.to_string())
+            })
+            .expect("seed not-yet-expired global hard_state row");
+        server
+            .with_project_store(|store| {
+                store
+                    .set_state(
+                        "capture_manifest",
+                        "expired-project",
+                        r#"{"expires_at":"2000-01-01T00:00:00Z"}"#,
+                    )
+                    .map_err(|e| e.to_string())
+            })
+            .expect("seed expired project hard_state row");
+
+        run_wal_checkpoint(&server, false);
+
+        let global_expired = server
+            .with_global_store(|store| {
+                store
+                    .get_state_kv("capture_manifest", "expired-global")
+                    .map_err(|e| e.to_string())
+            })
+            .expect("read global expired state");
+        assert!(
+            global_expired.is_none(),
+            "expired global hard_state row must be reaped by wal-checkpoint maintenance"
+        );
+
+        let global_future = server
+            .with_global_store(|store| {
+                store
+                    .get_state_kv("capture_manifest", "not-yet-expired-global")
+                    .map_err(|e| e.to_string())
+            })
+            .expect("read global not-yet-expired state");
+        assert!(
+            global_future.is_some(),
+            "not-yet-expired global hard_state row must survive"
+        );
+
+        let project_expired = server
+            .with_project_store(|store| {
+                store
+                    .get_state_kv("capture_manifest", "expired-project")
+                    .map_err(|e| e.to_string())
+            })
+            .expect("read project expired state");
+        assert!(
+            project_expired.is_none(),
+            "expired project hard_state row must be reaped by wal-checkpoint maintenance \
+             (own-project scope, no maintain_named_projects gate)"
+        );
+    }
+
+    #[test]
+    fn wal_checkpoint_reaps_named_project_hard_state_only_when_maintenance_enabled() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+
+        let foreign_db = tachi_home
+            .join("projects")
+            .join("foreign")
+            .join(memcore::MEMORY_DB_FILENAME);
+        {
+            let foreign_server =
+                MemoryServer::new(foreign_db.clone(), None).expect("foreign named-project DB");
+            foreign_server
+                .with_global_store(|store| {
+                    store
+                        .set_state(
+                            "capture_manifest",
+                            "expired-named",
+                            r#"{"expires_at":"2000-01-01T00:00:00Z"}"#,
+                        )
+                        .map_err(|e| e.to_string())
+                })
+                .expect("seed expired named-project hard_state row");
+        }
+
+        let server = MemoryServer::new(tachi_home.join("global.db"), None).expect("server");
+
+        run_wal_checkpoint(&server, false);
+        let row_after_disabled = server
+            .with_named_project_store("foreign", |store| {
+                store
+                    .get_state_kv("capture_manifest", "expired-named")
+                    .map_err(|e| e.to_string())
+            })
+            .expect("read named-project state after disabled maintenance");
+        assert!(
+            row_after_disabled.is_some(),
+            "named-project hard_state reap must not run when maintain_named_projects=false, \
+             mirroring the checkpoint/optimize scope gate"
+        );
+
+        run_wal_checkpoint(&server, true);
+        let row_after_enabled = server
+            .with_named_project_store("foreign", |store| {
+                store
+                    .get_state_kv("capture_manifest", "expired-named")
+                    .map_err(|e| e.to_string())
+            })
+            .expect("read named-project state after enabled maintenance");
+        assert!(
+            row_after_enabled.is_none(),
+            "named-project hard_state reap must run when maintain_named_projects=true"
         );
     }
 

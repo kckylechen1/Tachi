@@ -106,6 +106,58 @@ pub fn delete_state(conn: &Connection, namespace: &str, key: &str) -> Result<boo
     Ok(changed > 0)
 }
 
+/// Delete all `hard_state` rows whose JSON payload declares an `expires_at`
+/// timestamp that has passed `now_rfc3339`. **Destructive and generic**: it
+/// runs against every namespace, so its `expires_at` contract binds every
+/// present and future caller that writes into `hard_state`, not just capture
+/// manifests. Any change here must be re-verified against every namespace
+/// with an `expires_at` field, not just the one that happened to motivate it.
+///
+/// `expires_at` is not a table column (see `schema/ddl.rs`'s `hard_state`
+/// DDL) — callers embed it as a field inside `value_json` (e.g. the capture
+/// manifest's staging TTL, `crates/tachi-server/.../capture_session.rs`), so
+/// this reads it back via SQLite's JSON1 `json_extract`, already used
+/// elsewhere in this DB layer (see `crates/memcore/src/db/tests.rs`'s
+/// `json_extract must work` assertion).
+///
+/// The comparison is semantic (`datetime(...)`), not lexical string
+/// comparison — an earlier version compared the raw JSON strings directly,
+/// which is unsound because callers don't agree on RFC3339 rendering: this
+/// module's own `now_utc_iso()` renders `...123Z` (`to_rfc3339_opts`,
+/// `SecondsFormat::Millis`, `use_z=true`) while capture manifests render
+/// `...123456+00:00` (plain `to_rfc3339()`, microsecond precision, numeric
+/// offset). `'+'` (0x2B) sorts before `'Z'` (0x5A) lexically, so a
+/// *not-yet-expired* `+00:00`-rendered row can string-compare as "less than"
+/// a `Z`-rendered `now`, deleting live rows. `datetime(...)` parses either
+/// rendering, any offset, and any sub-second precision, and normalizes to
+/// UTC at second granularity (plenty for a multi-day TTL) before comparing —
+/// so rendering differences between callers can no longer flip the verdict.
+///
+/// Three **fail-closed** exclusions, each independently sufficient to retain
+/// a row (only a row that fails ALL three is a reap candidate):
+/// - `json_type(...) != 'text'` — a non-string `expires_at` (JSON `null`,
+///   `number`, `bool`, array, object) is retained. This is also how a
+///   *missing* `expires_at` key is excluded: `json_type` on an absent path
+///   returns SQL NULL, which is `!= 'text'`. This preserves the #1301
+///   retain-forever policy for completed manifests (`expires_at: None`
+///   serializes to JSON `null`) as a single case of the same rule, not a
+///   special-cased `IS NOT NULL` guard on the raw extract.
+/// - `datetime(...) IS NULL` — a string that isn't a datetime SQLite can
+///   parse (garbage, a non-timestamp string) is retained rather than risk
+///   an unpredictable comparison result.
+/// - `datetime(...) < datetime(?1)` false — an unexpired (or exactly-now)
+///   timestamp is retained.
+pub fn reap_expired_state(conn: &Connection, now_rfc3339: &str) -> Result<usize, MemoryError> {
+    let removed = conn.execute(
+        "DELETE FROM hard_state
+         WHERE json_type(value_json, '$.expires_at') = 'text'
+           AND datetime(json_extract(value_json, '$.expires_at')) IS NOT NULL
+           AND datetime(json_extract(value_json, '$.expires_at')) < datetime(?1)",
+        params![now_rfc3339],
+    )?;
+    Ok(removed)
+}
+
 /// List state rows in a namespace, newest first.
 pub fn list_state(conn: &Connection, namespace: &str) -> Result<Vec<StateRow>, MemoryError> {
     let mut stmt = conn.prepare(
@@ -303,5 +355,221 @@ mod tests {
             .expect("get after delete")
             .is_none());
         assert!(!delete_state(&conn, "ns", "k1").expect("delete missing is a no-op"));
+    }
+
+    #[test]
+    fn reap_expired_state_removes_only_rows_past_their_expires_at() {
+        let conn = open_state_db();
+        set_state(
+            &conn,
+            "capture_manifest",
+            "expired",
+            r#"{"expires_at":"2020-01-01T00:00:00Z","completed":false}"#,
+        )
+        .expect("seed expired row");
+        set_state(
+            &conn,
+            "capture_manifest",
+            "future",
+            r#"{"expires_at":"2999-01-01T00:00:00Z","completed":false}"#,
+        )
+        .expect("seed not-yet-expired row");
+        set_state(
+            &conn,
+            "capture_manifest",
+            "retain_forever",
+            r#"{"expires_at":null,"completed":true}"#,
+        )
+        .expect("seed retain-forever row (completed manifest)");
+        set_state(&conn, "claim", "no_expiry_field", r#"{"status":"queued"}"#)
+            .expect("seed row with no expires_at field at all");
+
+        let removed = reap_expired_state(&conn, "2026-01-01T00:00:00Z").expect("reap");
+
+        assert_eq!(removed, 1, "only the past-expiry row should be deleted");
+        assert!(get_state(&conn, "capture_manifest", "expired")
+            .expect("get expired")
+            .is_none());
+        assert!(
+            get_state(&conn, "capture_manifest", "future")
+                .expect("get future")
+                .is_some(),
+            "not-yet-expired row must survive"
+        );
+        assert!(
+            get_state(&conn, "capture_manifest", "retain_forever")
+                .expect("get retain_forever")
+                .is_some(),
+            "explicit expires_at:null (retain-forever, #1301) must never be reaped"
+        );
+        assert!(
+            get_state(&conn, "claim", "no_expiry_field")
+                .expect("get no_expiry_field")
+                .is_some(),
+            "rows whose JSON has no expires_at key at all must never be reaped"
+        );
+    }
+
+    #[test]
+    fn reap_expired_state_is_a_noop_on_an_empty_table() {
+        let conn = open_state_db();
+        assert_eq!(
+            reap_expired_state(&conn, "2026-01-01T00:00:00Z").expect("reap empty table"),
+            0
+        );
+    }
+
+    #[test]
+    fn reap_expired_state_uses_semantic_not_lexical_comparison_across_real_renderings() {
+        // Production combination: capture manifests write `expires_at` via
+        // `to_rfc3339()` (`capture_session.rs`), which renders a numeric
+        // offset (`+00:00`) at microsecond precision. The daemon maintenance
+        // loop's `now` (`background.rs`) comes from
+        // `to_rfc3339_opts(SecondsFormat::Millis, true)`, which renders `Z`
+        // at millisecond precision. A raw string comparison is unsound here
+        // — `'+'` (0x2B) sorts before `'Z'` (0x5A) — so a row at the SAME
+        // wall-clock second as `now` (not actually past it) can
+        // string-compare as "less than" `now` purely from the rendering
+        // difference. This reproduces the exact counterexample from review:
+        // `'...12:00:00.100999+00:00' < '...12:00:00.100Z'` is `true` under
+        // naive string comparison (verified directly against sqlite3 3.51).
+        let conn = open_state_db();
+        let now = "2026-07-20T12:00:00.100Z"; // background.rs rendering
+        set_state(
+            &conn,
+            "capture_manifest",
+            "same-second-not-expired",
+            r#"{"expires_at":"2026-07-20T12:00:00.100999+00:00"}"#, // capture_session.rs rendering, same second as `now`
+        )
+        .expect("seed same-second row");
+        set_state(
+            &conn,
+            "capture_manifest",
+            "actually-expired-mixed-format",
+            r#"{"expires_at":"2026-07-19T12:00:00.999999+00:00"}"#, // a full day earlier
+        )
+        .expect("seed genuinely expired row");
+
+        let removed = reap_expired_state(&conn, now).expect("reap");
+
+        assert_eq!(
+            removed, 1,
+            "only the genuinely-expired (a day earlier) row should be deleted"
+        );
+        assert!(
+            get_state(&conn, "capture_manifest", "same-second-not-expired")
+                .expect("get same-second row")
+                .is_some(),
+            "a row at the same wall-clock second as `now`, rendered with a numeric \
+             offset at microsecond precision, must survive — under the old lexical \
+             comparison this row was wrongly reaped"
+        );
+        assert!(
+            get_state(&conn, "capture_manifest", "actually-expired-mixed-format")
+                .expect("get expired row")
+                .is_none(),
+            "a genuinely expired row (a full day earlier) must still be reaped \
+             across mixed renderings"
+        );
+    }
+
+    #[test]
+    fn reap_expired_state_semantic_comparison_holds_in_the_reversed_rendering_combination() {
+        // Same defect class as the test above, with the renderings swapped
+        // (`now` carries the numeric-offset/microsecond rendering, the
+        // stored row carries the `Z`/millisecond rendering) — proves the
+        // fix is not direction-specific.
+        let conn = open_state_db();
+        let now = "2026-07-20T12:00:00.999999+00:00";
+        set_state(
+            &conn,
+            "capture_manifest",
+            "same-second-not-expired-reversed",
+            r#"{"expires_at":"2026-07-20T12:00:00.050Z"}"#, // same second as `now`, smaller fraction digit
+        )
+        .expect("seed same-second row");
+        set_state(
+            &conn,
+            "capture_manifest",
+            "actually-expired-reversed",
+            r#"{"expires_at":"2026-07-19T12:00:00.001Z"}"#, // a full day earlier
+        )
+        .expect("seed genuinely expired row");
+
+        let removed = reap_expired_state(&conn, now).expect("reap");
+
+        assert_eq!(removed, 1, "only the genuinely-expired row should be deleted");
+        assert!(
+            get_state(&conn, "capture_manifest", "same-second-not-expired-reversed")
+                .expect("get same-second row")
+                .is_some(),
+            "same-second row must survive regardless of which side renders Z vs \
+             numeric offset"
+        );
+        assert!(
+            get_state(&conn, "capture_manifest", "actually-expired-reversed")
+                .expect("get expired row")
+                .is_none(),
+            "a genuinely expired row must still be reaped in the reversed \
+             rendering combination too"
+        );
+    }
+
+    #[test]
+    fn reap_expired_state_fail_closed_on_non_string_or_unparseable_expires_at() {
+        let conn = open_state_db();
+        // A far-future `now` so any accidental "expired" match would be
+        // impossible to explain except by the fail-closed guards failing.
+        let now = "2999-01-01T00:00:00Z";
+        set_state(&conn, "ns", "number", r#"{"expires_at":12345}"#).expect("seed number");
+        set_state(&conn, "ns", "bool_true", r#"{"expires_at":true}"#).expect("seed bool true");
+        set_state(&conn, "ns", "bool_false", r#"{"expires_at":false}"#).expect("seed bool false");
+        set_state(
+            &conn,
+            "ns",
+            "garbage_string",
+            r#"{"expires_at":"not-a-real-timestamp"}"#,
+        )
+        .expect("seed garbage string");
+        set_state(&conn, "ns", "empty_string", r#"{"expires_at":""}"#)
+            .expect("seed empty string");
+
+        let removed = reap_expired_state(&conn, now).expect("reap");
+
+        assert_eq!(
+            removed, 0,
+            "non-string and unparseable expires_at values must never be reaped, \
+             even against a far-future `now` (fail-closed, not fail-open)"
+        );
+        for key in [
+            "number",
+            "bool_true",
+            "bool_false",
+            "garbage_string",
+            "empty_string",
+        ] {
+            assert!(
+                get_state(&conn, "ns", key).expect("get row").is_some(),
+                "{key} row must survive the fail-closed guards"
+            );
+        }
+    }
+
+    #[test]
+    fn reap_expired_state_surfaces_a_hard_error_instead_of_swallowing_it() {
+        // No `hard_state` table created on this connection — a stand-in for
+        // the kind of hard DB-level failure a closed/unusable store would
+        // produce. `reap_expired_state`'s caller (the daemon maintenance
+        // loop) must be able to observe this as a genuine `Err`, not have it
+        // silently swallowed into `Ok(0)` — a silent swallow here would be
+        // indistinguishable from "nothing was expired yet".
+        let conn = Connection::open_in_memory().expect("open db");
+        let err = reap_expired_state(&conn, "2026-01-01T00:00:00Z").expect_err(
+            "reap against a DB missing the hard_state table must error, not succeed silently",
+        );
+        assert!(
+            err.to_string().to_lowercase().contains("no such table"),
+            "error should name the missing table, got: {err}"
+        );
     }
 }

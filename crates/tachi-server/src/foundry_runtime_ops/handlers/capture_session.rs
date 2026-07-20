@@ -35,6 +35,8 @@ fn set_capture_failpoint(stage: &str) {
         "after_manifest_admission" => 1,
         "after_artifact_0" => 2,
         "after_maintenance" => 3,
+        "before_enqueue_maintenance" => 4,
+        "before_first_renew" => 5,
         _ => panic!("unknown capture failpoint: {stage}"),
     };
     CAPTURE_FAILPOINT.store(value, std::sync::atomic::Ordering::SeqCst);
@@ -46,6 +48,8 @@ fn capture_failpoint(stage: &str) -> Result<(), String> {
         "after_manifest_admission" => 1,
         "after_artifact_0" => 2,
         "after_maintenance" => 3,
+        "before_enqueue_maintenance" => 4,
+        "before_first_renew" => 5,
         _ => return Ok(()),
     };
     if CAPTURE_FAILPOINT
@@ -340,35 +344,121 @@ fn renew_capture_lease(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn release_capture_lease(
+/// Best-effort lease release: reloads the manifest fresh from storage
+/// (rather than trusting a caller-held `&mut CaptureManifest`/`&mut u32`,
+/// which a `Drop` impl can't borrow — it may be borrowed elsewhere, or the
+/// caller's stack frame may already be unwinding) and clears the lease only
+/// if it's still genuinely ours to clear.
+///
+/// This is the ONE mechanism every early exit from `handle_capture_session`
+/// after a successful claim relies on (via `CaptureLeaseGuard`'s `Drop`)
+/// instead of a manual `release_capture_lease(...)` call at each individual
+/// `?`/`return Err(...)` site. A prior version patched failure sites one at
+/// a time; a review found FOUR separate un-released-lease early-return
+/// paths that had been missed that way (renew-lease failures, artifact
+/// insert/replay-key failures, a malformed event receipt, the completion
+/// write losing its CAS) plus a FIFTH bug in the sites that HAD been
+/// patched: `release_capture_lease(...)?` let a release-phase failure
+/// silently replace the original error being propagated. Tying release to
+/// scope exit (via `Drop`) closes the whole class at once, including sites
+/// nobody has enumerated yet.
+///
+/// Never returns an error: this runs from `Drop`, which cannot propagate
+/// one. Every internal failure (reload error, serialize error, lost CAS
+/// race) is logged and treated as "nothing more to do here", never a panic.
+fn release_capture_lease_best_effort(
     server: &MemoryServer,
     target_db: DbScope,
     named_project: Option<&str>,
     db_path: Option<&std::path::PathBuf>,
     manifest_key: &str,
-    manifest: &mut CaptureManifest,
-    manifest_version: &mut u32,
-) -> Result<(), String> {
+    owner: &str,
+) {
+    let loaded = match load_manifest(server, target_db, named_project, db_path, manifest_key) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            tracing::warn!(
+                "[capture_session] lease release: failed to reload manifest \
+                 '{manifest_key}': {err}"
+            );
+            return;
+        }
+    };
+    let Some((mut manifest, version)) = loaded else {
+        // Manifest already gone — nothing to release.
+        return;
+    };
+    if manifest.completed {
+        // Legitimately finished between guard creation and drop (the normal
+        // success path writes `completed = true` durably before returning).
+        // A completed manifest is a durable receipt; never touch its lease
+        // fields again.
+        return;
+    }
+    if manifest.owner != owner {
+        // Our lease already expired and a concurrent caller legitimately
+        // re-claimed it. Releasing now would clobber a live claim that
+        // isn't ours — not our lease to release anymore, not an error.
+        return;
+    }
     manifest.owner.clear();
     manifest.lease_until = (Utc::now() - Duration::seconds(1)).to_rfc3339();
-    let raw = serde_json::to_string(manifest)
-        .map_err(|e| format!("capture manifest release serialize: {e}"))?;
-    let released = with_manifest_store(server, target_db, named_project, db_path, |store| {
+    let raw = match serde_json::to_string(&manifest) {
+        Ok(raw) => raw,
+        Err(err) => {
+            tracing::warn!(
+                "[capture_session] lease release: failed to serialize manifest \
+                 '{manifest_key}': {err}"
+            );
+            return;
+        }
+    };
+    match with_manifest_store(server, target_db, named_project, db_path, |store| {
         store
-            .set_state_if_version(
-                CAPTURE_MANIFEST_NAMESPACE,
-                manifest_key,
-                &raw,
-                *manifest_version,
-            )
+            .set_state_if_version(CAPTURE_MANIFEST_NAMESPACE, manifest_key, &raw, version)
             .map_err(|e| format!("capture manifest release: {e}"))
-    })?;
-    if !released {
-        return Err("capture manifest ownership was lost while releasing lease".to_string());
+    }) {
+        Ok(true) => {}
+        Ok(false) => {
+            // Lost the CAS race to a concurrent renew/claim between our
+            // reload and our write — again, not our lease anymore.
+        }
+        Err(err) => {
+            tracing::warn!(
+                "[capture_session] lease release: failed to write released state for \
+                 '{manifest_key}': {err}"
+            );
+        }
     }
-    *manifest_version += 1;
-    Ok(())
+}
+
+/// RAII structural gate for the capture manifest lease. Create one
+/// immediately after winning the claim CAS; every subsequent exit from
+/// `handle_capture_session` — success (the manifest is already durably
+/// `completed` by the time this drops, so the release no-ops) or any early
+/// `?`/`return Err(...)`, known or future — releases through the same
+/// `release_capture_lease_best_effort` path via `Drop`, so no individual
+/// failure site needs its own release call.
+struct CaptureLeaseGuard<'a> {
+    server: &'a MemoryServer,
+    target_db: DbScope,
+    named_project: Option<String>,
+    db_path: Option<std::path::PathBuf>,
+    manifest_key: String,
+    owner: String,
+}
+
+impl Drop for CaptureLeaseGuard<'_> {
+    fn drop(&mut self) {
+        release_capture_lease_best_effort(
+            self.server,
+            self.target_db,
+            self.named_project.as_deref(),
+            self.db_path.as_ref(),
+            &self.manifest_key,
+            &self.owner,
+        );
+    }
 }
 
 pub(crate) async fn handle_capture_session(
@@ -948,6 +1038,22 @@ pub(crate) async fn handle_capture_session(
         )?
         .ok_or_else(|| "capture manifest disappeared while waiting".to_string())?;
     }
+
+    // Structural gate: from here on `manifest`/`manifest_version` represent
+    // OUR successful claim. `CaptureLeaseGuard`'s `Drop` releases it on
+    // every exit below — success (the completion write below durably marks
+    // `completed = true` first, so the release no-ops) or any early
+    // `?`/`return Err(...)` — so no individual failure site past this point
+    // needs its own manual release call.
+    let _capture_lease_guard = CaptureLeaseGuard {
+        server,
+        target_db,
+        named_project: named_project.clone(),
+        db_path: db_path.clone(),
+        manifest_key: manifest_key.clone(),
+        owner: owner.clone(),
+    };
+
     let mut duplicate_ids = Vec::new();
     let entries = entries;
 
@@ -964,16 +1070,27 @@ pub(crate) async fn handle_capture_session(
 
     // Fence immediately before persistence. A stale owner whose lease was
     // taken over cannot begin artifact side effects after this CAS fails.
-    renew_capture_lease(
-        server,
-        target_db,
-        named_project.as_deref(),
-        db_path.as_ref(),
-        &manifest_key,
-        &mut manifest,
-        &mut manifest_version,
-        &owner,
-    )?;
+    // `CaptureLeaseGuard` (armed above, right after the claim) releases the
+    // lease on this early return the same way it does for every other exit
+    // — including this one, which a prior version of this handler left
+    // completely unreleased on renew failure.
+    (|| -> Result<(), String> {
+        // Test-only injection point proving the structural gate covers a
+        // SECOND, previously-unfixed early-return site (not just the
+        // enqueue-maintenance one) without any manual release call here.
+        #[cfg(test)]
+        capture_failpoint("before_first_renew")?;
+        renew_capture_lease(
+            server,
+            target_db,
+            named_project.as_deref(),
+            db_path.as_ref(),
+            &manifest_key,
+            &mut manifest,
+            &mut manifest_version,
+            &owner,
+        )
+    })()?;
     #[cfg(test)]
     let mut is_first_artifact = true;
     for captured in &entries {
@@ -1040,28 +1157,12 @@ pub(crate) async fn handle_capture_session(
             ))
             .or_default()
             .push(captured.entry.id.clone());
+        // The manual lease-release inline here was removed when the
+        // release mechanism moved to `CaptureLeaseGuard`'s `Drop` (armed
+        // right after this caller's claim, above) — this early return now
+        // releases the same way every other exit does.
         #[cfg(test)]
         if is_first_artifact && capture_failpoint("after_artifact_0").is_err() {
-            manifest.owner.clear();
-            manifest.lease_until = (Utc::now() - Duration::seconds(1)).to_rfc3339();
-            let raw = serde_json::to_string(&manifest)
-                .map_err(|e| format!("capture manifest failpoint release serialize: {e}"))?;
-            with_manifest_store(
-                server,
-                target_db,
-                named_project.as_deref(),
-                db_path.as_ref(),
-                |store| {
-                    store
-                        .set_state_if_version(
-                            CAPTURE_MANIFEST_NAMESPACE,
-                            &manifest_key,
-                            &raw,
-                            manifest_version,
-                        )
-                        .map_err(|e| format!("capture manifest failpoint release: {e}"))
-                },
-            )?;
             return Err("capture_session test failpoint: after_artifact_0".into());
         }
         #[cfg(test)]
@@ -1116,21 +1217,35 @@ pub(crate) async fn handle_capture_session(
         } else {
             DbScope::Project
         };
-        let mut jobs = enqueue_capture_maintenance_jobs(
-            server,
-            group_target_db,
-            group_named_project.clone(),
-            db_path.clone(),
-            &params.agent_id,
-            &base_path,
-            ids,
-            0,
-            0,
-            Some(&format!(
-                "{manifest_key}:{db_str}:{}",
-                group_named_project.as_deref().unwrap_or("default")
-            )),
-        )?;
+        let mut jobs = match (|| -> Result<Vec<memcore::FoundryJobSpec>, String> {
+            // Test-only injection point so the lease-release-on-enqueue-
+            // failure path below is exercised without depending on a real
+            // foundry-queue write failure. Compiled out (and a no-op) on
+            // non-test builds.
+            #[cfg(test)]
+            capture_failpoint("before_enqueue_maintenance")?;
+            enqueue_capture_maintenance_jobs(
+                server,
+                group_target_db,
+                group_named_project.clone(),
+                db_path.clone(),
+                &params.agent_id,
+                &base_path,
+                ids,
+                0,
+                0,
+                Some(&format!(
+                    "{manifest_key}:{db_str}:{}",
+                    group_named_project.as_deref().unwrap_or("default")
+                )),
+            )
+        })() {
+            // `CaptureLeaseGuard` (armed after the claim, above) releases
+            // the lease on this return the same way it does for every
+            // other exit — no manual release call needed here.
+            Ok(jobs) => jobs,
+            Err(error) => return Err(error),
+        };
         let maintenance_job_ids = jobs.iter().map(|job| job.id.clone()).collect();
         maintenance_jobs.append(&mut jobs);
 
@@ -1160,18 +1275,9 @@ pub(crate) async fn handle_capture_session(
             group_named_project.as_deref(),
         ) {
             Ok(receipt) => receipt,
-            Err(error) => {
-                release_capture_lease(
-                    server,
-                    target_db,
-                    named_project.as_deref(),
-                    db_path.as_ref(),
-                    &manifest_key,
-                    &mut manifest,
-                    &mut manifest_version,
-                )?;
-                return Err(error);
-            }
+            // `CaptureLeaseGuard` releases the lease on this return the
+            // same way it does for every other exit.
+            Err(error) => return Err(error),
         };
         let session_event_id = session_event["event_id"]
             .as_str()
@@ -1254,28 +1360,10 @@ pub(crate) async fn handle_capture_session(
         .map(|(_, _, pipeline)| pipeline.clone())
         .unwrap_or_else(|| json!({"status": "skipped", "reason": "no_captured_entries"}));
 
+    // `CaptureLeaseGuard` releases the lease on this return the same way
+    // it does for every other exit.
     #[cfg(test)]
     if capture_failpoint("after_maintenance").is_err() {
-        manifest.owner.clear();
-        manifest.lease_until = (Utc::now() - Duration::seconds(1)).to_rfc3339();
-        let raw = serde_json::to_string(&manifest)
-            .map_err(|e| format!("capture manifest failpoint release serialize: {e}"))?;
-        with_manifest_store(
-            server,
-            target_db,
-            named_project.as_deref(),
-            db_path.as_ref(),
-            |store| {
-                store
-                    .set_state_if_version(
-                        CAPTURE_MANIFEST_NAMESPACE,
-                        &manifest_key,
-                        &raw,
-                        manifest_version,
-                    )
-                    .map_err(|e| format!("capture manifest failpoint release: {e}"))
-            },
-        )?;
         return Err("capture_session test failpoint: after_maintenance".into());
     }
 
@@ -2602,6 +2690,301 @@ mod handler_tests {
                 }
             });
         }
+    }
+
+    /// #1301-adjacent lease-leak fix: `enqueue_capture_maintenance_jobs`
+    /// failing must release the manifest lease immediately — same
+    /// obligation `emit_session_captured_event`'s failure path already
+    /// honors a few lines below it. Before this fix, an enqueue failure
+    /// propagated the error with `?` and skipped `release_capture_lease`
+    /// entirely, leaving `owner` set and `lease_until` ~30s in the future;
+    /// concurrent/retrying callers would spin-wait on a lease nobody was
+    /// still using. This asserts the manifest's durable state directly
+    /// (rather than timing a retry) so the proof doesn't depend on the
+    /// spin-wait loop's cadence.
+    #[test]
+    fn enqueue_maintenance_failure_releases_the_manifest_lease_immediately() {
+        let _guard = FAILPOINT_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        crate::test_support::with_tachi_home(|home| {
+            let stage = "before_enqueue_maintenance";
+            let global_db = home.join("global").join(format!("{stage}-global.db"));
+            let project_db = home.join("projects").join(stage).join("memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("mkdir project");
+            let params = CaptureSessionParams {
+                conversation_id: format!("conv-{stage}"),
+                turn_id: "turn-1".into(),
+                agent_id: "failpoint-agent".into(),
+                messages: vec![Message {
+                    role: "user".into(),
+                    content: "Capture the lease-release-on-enqueue-failure observation.".into(),
+                }],
+                path_prefix: Some(format!("/capture/{stage}")),
+                scope: "project".into(),
+                project: None,
+                project_explicit: false,
+                min_chars: 1,
+                force: true,
+            };
+            let draft = serde_json::json!([{
+                "text": "Enqueue failure must not leak the manifest lease.",
+                "summary": "Lease release on enqueue failure",
+                "topic": "recovery",
+                "category": "fact",
+                "scope": "project",
+                "importance": 0.8
+            }])
+            .to_string();
+            let _workers =
+                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
+            let _persist = crate::test_support::EnvRestore::set(
+                "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+                "1",
+            );
+            let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
+            let rt = tokio::runtime::Runtime::new().expect("runtime");
+            rt.block_on(async move {
+                let (port, _calls, mock) = spawn_capture_llm(vec![draft]).await;
+                let _base = crate::test_support::EnvRestore::set(
+                    "EXTRACT_BASE_URL",
+                    &format!("http://127.0.0.1:{port}/chat/completions"),
+                );
+                let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
+                let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
+                let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+                set_capture_failpoint(stage);
+                let err = handle_capture_session(&server, params)
+                    .await
+                    .expect_err("armed failpoint must fail the enqueue step");
+                assert!(
+                    err.contains(stage),
+                    "error must name the failpoint stage, got: {err}"
+                );
+
+                let manifests = server
+                    .with_project_store_read(|store| {
+                        store
+                            .list_state(CAPTURE_MANIFEST_NAMESPACE)
+                            .map_err(|e| e.to_string())
+                    })
+                    .expect("read manifest state after failed enqueue");
+                assert_eq!(
+                    manifests.len(),
+                    1,
+                    "capture admission must have written exactly one manifest row"
+                );
+                let manifest: serde_json::Value =
+                    serde_json::from_str(&manifests[0].value_json).expect("manifest JSON");
+                assert_eq!(
+                    manifest["owner"], "",
+                    "enqueue failure must clear the manifest owner immediately, not leave it \
+                     held until the 30s processing lease expires on its own"
+                );
+                let lease_until = manifest["lease_until"]
+                    .as_str()
+                    .expect("lease_until is a string");
+                let lease_until_dt = chrono::DateTime::parse_from_rfc3339(lease_until)
+                    .expect("lease_until parses as RFC3339");
+                assert!(
+                    lease_until_dt <= chrono::Utc::now(),
+                    "lease_until must already be in the past — proof the lease was actively \
+                     released rather than left to expire naturally"
+                );
+                mock.abort();
+            });
+            rt.shutdown_timeout(std::time::Duration::from_millis(500));
+        });
+    }
+
+    /// Proves `CaptureLeaseGuard`'s structural release covers a SECOND,
+    /// previously-unfixed early-return site — the first `renew_capture_lease`
+    /// call, right after the entries loop's post-claim fence — not just the
+    /// one enumerated call site the prior (per-site) patch happened to cover.
+    /// Before the `Drop`-based guard, this exact site propagated a renew
+    /// failure with a bare `?` and never released anything.
+    #[test]
+    fn renew_lease_failure_releases_the_manifest_lease_via_the_structural_gate() {
+        let _guard = FAILPOINT_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        crate::test_support::with_tachi_home(|home| {
+            let stage = "before_first_renew";
+            let global_db = home.join("global").join(format!("{stage}-global.db"));
+            let project_db = home.join("projects").join(stage).join("memory.db");
+            std::fs::create_dir_all(global_db.parent().unwrap()).expect("mkdir global");
+            std::fs::create_dir_all(project_db.parent().unwrap()).expect("mkdir project");
+            let params = CaptureSessionParams {
+                conversation_id: format!("conv-{stage}"),
+                turn_id: "turn-1".into(),
+                agent_id: "failpoint-agent".into(),
+                messages: vec![Message {
+                    role: "user".into(),
+                    content: "Capture the lease-release-on-renew-failure observation.".into(),
+                }],
+                path_prefix: Some(format!("/capture/{stage}")),
+                scope: "project".into(),
+                project: None,
+                project_explicit: false,
+                min_chars: 1,
+                force: true,
+            };
+            let draft = serde_json::json!([{
+                "text": "Renew failure must not leak the manifest lease.",
+                "summary": "Lease release on renew failure",
+                "topic": "recovery",
+                "category": "fact",
+                "scope": "project",
+                "importance": 0.8
+            }])
+            .to_string();
+            let _workers =
+                crate::test_support::EnvRestore::set("TACHI_TEST_ENABLE_BACKGROUND_WORKERS", "1");
+            let _persist = crate::test_support::EnvRestore::set(
+                "TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST",
+                "1",
+            );
+            let _voyage = crate::test_support::EnvRestore::remove("VOYAGE_API_KEY");
+            let rt = tokio::runtime::Runtime::new().expect("runtime");
+            rt.block_on(async move {
+                let (port, _calls, mock) = spawn_capture_llm(vec![draft]).await;
+                let _base = crate::test_support::EnvRestore::set(
+                    "EXTRACT_BASE_URL",
+                    &format!("http://127.0.0.1:{port}/chat/completions"),
+                );
+                let _model = crate::test_support::EnvRestore::set("EXTRACT_MODEL", "mock");
+                let _key = crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "test-key");
+                let server = MemoryServer::new(global_db, Some(project_db)).expect("server");
+                set_capture_failpoint(stage);
+                let err = handle_capture_session(&server, params)
+                    .await
+                    .expect_err("armed failpoint must fail the first renew step");
+                assert!(
+                    err.contains(stage),
+                    "error must name the failpoint stage, got: {err}"
+                );
+
+                let manifests = server
+                    .with_project_store_read(|store| {
+                        store
+                            .list_state(CAPTURE_MANIFEST_NAMESPACE)
+                            .map_err(|e| e.to_string())
+                    })
+                    .expect("read manifest state after failed renew");
+                assert_eq!(
+                    manifests.len(),
+                    1,
+                    "capture admission must have written exactly one manifest row"
+                );
+                let manifest: serde_json::Value =
+                    serde_json::from_str(&manifests[0].value_json).expect("manifest JSON");
+                assert_eq!(
+                    manifest["owner"], "",
+                    "renew failure must clear the manifest owner immediately via the \
+                     structural gate, even though this exact site never had its own \
+                     manual release call"
+                );
+                let lease_until = manifest["lease_until"]
+                    .as_str()
+                    .expect("lease_until is a string");
+                let lease_until_dt = chrono::DateTime::parse_from_rfc3339(lease_until)
+                    .expect("lease_until parses as RFC3339");
+                assert!(
+                    lease_until_dt <= chrono::Utc::now(),
+                    "lease_until must already be in the past — proof the structural gate \
+                     released it, not just the one previously-patched enqueue site"
+                );
+                mock.abort();
+            });
+            rt.shutdown_timeout(std::time::Duration::from_millis(500));
+        });
+    }
+
+    /// Discrimination test for the reported "embed short-batch silently
+    /// drops the tail" concern: the embedding-assignment code right after
+    /// `embed_voyage_batch` is called (`entries.iter_mut().zip(vectors.iter())`,
+    /// this file, immediately below the `server.llm.embed_voyage_batch(...)`
+    /// call near the top of `handle_capture_session`) would silently
+    /// under-embed the tail of a batch IF `embed_voyage_batch` could ever
+    /// return `Ok(vectors)` with `vectors.len() < texts.len()`.
+    ///
+    /// It cannot, by construction: `parse_voyage_batch_embeddings`
+    /// (`crates/tachi-llm/src/llm/embedding.rs:25-31`) rejects any chunk
+    /// whose returned item count doesn't match the requested count, and
+    /// `embed_voyage_batch` only ever returns `Ok` after every chunk has
+    /// passed that check (`crates/tachi-llm/src/llm/embedding.rs:197,200`)
+    /// — a short response always becomes `Err`, which this handler already
+    /// treats as "defer the whole batch" (the `Err(err) => { ...; None }`
+    /// arm right next to the zip). This test proves that guarantee
+    /// end-to-end against a real (mocked) short HTTP response rather than
+    /// resting on a reading of the tachi-llm source, so a future change
+    /// that weakens the tachi-llm-side check would turn this test red
+    /// instead of silently reintroducing the reported bug.
+    #[test]
+    fn short_voyage_batch_response_is_rejected_not_silently_truncated() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        rt.block_on(async move {
+            use axum::{routing::post, Json, Router};
+
+            // Responds to every /v1/embeddings call with exactly ONE
+            // embedding, regardless of how many inputs were requested — the
+            // shape a provider would produce if it silently dropped part of
+            // a batch.
+            let app = Router::new().route(
+                "/v1/embeddings",
+                post(|| async move {
+                    Json(serde_json::json!({
+                        "data": [{
+                            "index": 0,
+                            "embedding": vec![0.0_f64; 1024],
+                        }]
+                    }))
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind short-batch voyage mock");
+            let port = listener.local_addr().expect("voyage mock address").port();
+            let mock = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .await
+                    .expect("serve short-batch voyage mock");
+            });
+            tokio::task::yield_now().await;
+
+            let _base = crate::test_support::EnvRestore::set(
+                "VOYAGE_BASE_URL",
+                &format!("http://127.0.0.1:{port}"),
+            );
+            let _key =
+                crate::test_support::EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
+            let _attempts =
+                crate::test_support::EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
+
+            let client = tachi_llm::LlmClient::new().expect("client should initialize");
+            let texts = vec!["first entry".to_string(), "second entry".to_string()];
+            let err = client
+                .embed_voyage_batch(&texts, "document")
+                .await
+                .expect_err(
+                    "a 1-embedding response for a 2-text request must be rejected, not \
+                     silently accepted as a short Ok batch",
+                );
+            assert!(
+                err.contains("returned") && err.contains("embeddings") && err.contains("inputs"),
+                "error should name the count mismatch, got: {err}"
+            );
+
+            mock.abort();
+        });
     }
 
     #[test]

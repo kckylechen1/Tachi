@@ -53,4 +53,12 @@ impl MemoryStore {
     pub fn delete_state(&self, namespace: &str, key: &str) -> Result<bool, MemoryError> {
         db::delete_state(&self.conn, namespace, key)
     }
+
+    /// Reap `hard_state` rows across all namespaces whose JSON payload
+    /// declares an `expires_at` that has passed. Returns the number of rows
+    /// deleted. See `db::reap_expired_state` for what "expired" means and
+    /// which rows are deliberately exempt.
+    pub fn reap_expired_state(&self, now_rfc3339: &str) -> Result<usize, MemoryError> {
+        db::reap_expired_state(&self.conn, now_rfc3339)
+    }
 }

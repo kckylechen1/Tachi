@@ -140,7 +140,8 @@ pub use sqlite_extensions::enable_simple_auto_extension;
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
 pub use state::{
     delete_state, get_state, insert_state_if_absent, list_derived_by_source, list_state,
-    save_derived, save_derived_with_id, set_state, set_state_if_version, StateRow,
+    reap_expired_state, save_derived, save_derived_with_id, set_state, set_state_if_version,
+    StateRow,
 };
 pub use stats_gc::{archive_stale_memories, gc_tables, stats};
 #[cfg(feature = "admin")]
