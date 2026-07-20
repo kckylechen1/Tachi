@@ -94,8 +94,14 @@ pub struct DoctorFinding {
 pub struct AutoFixAction {
     pub path: String,
     pub action: String,  // quarantine_placeholder | checkpoint_wal_copy
-    pub outcome: String, // ok | error
+    pub outcome: String, // ok | error | skipped
+    /// Human-readable receipt. For `checkpoint_wal_copy` success paths the
+    /// note includes an explicit SHM token: `shm=ok`, `shm=absent`, or
+    /// `shm=copy_failed_proceeded_without` (SHM is not durability-equivalent
+    /// to WAL; a failed SHM copy does not block the checkpoint).
     pub note: String,
+    /// Usable checkpoint path on success. Must be `None` when a present
+    /// source WAL could not be copied (incomplete destination discarded).
     pub destination: Option<String>,
 }
 
