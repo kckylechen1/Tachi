@@ -75,7 +75,7 @@ impl MemoryServer {
     // ─── Tachi Shell: skill-gated flow orchestration facade ─────────────────
 
     #[tool(
-        description = "Skill-gated flow packet and ledger orchestration for multi-step projects. This does not replace the host harness's native subagents. action='brainstorm': explore options; action='plan': produce a decision-complete plan; action='dispatch': prepare bounded handoff packets, using native workers by default (legacy async Tachi execution is only for an explicit durable/remote exception); action='kanban': check progress; action='review': gate before merge; action='ship': release. Each stage-bearing action injects the corresponding skill SOP and writes an instruction.md packet under .tachi/runs/<flow_id>/."
+        description = "Skill-gated flow packet and ledger orchestration for multi-step projects. This does not replace the host harness's native subagents. action='brainstorm': explore options; action='plan': produce a decision-complete plan; action='dispatch': prepare bounded handoff packets, using native workers by default (legacy async Tachi execution is only for an explicit durable/remote exception); action='status': check flow progress; action='review': gate before merge; action='ship': release. Each stage-bearing action injects the corresponding skill SOP and writes an instruction.md packet under .tachi/runs/<flow_id>/."
     )]
     pub(crate) async fn tachi_shell(
         &self,

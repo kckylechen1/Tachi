@@ -151,6 +151,21 @@ fn tachi_skill_action_schema_declares_bundle_and_loadout() {
 }
 
 #[test]
+fn tachi_shell_schema_omits_removed_kanban_action_and_filter() {
+    let schema = rmcp::schemars::schema_for!(crate::tool_params::TachiShellParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let properties = value["properties"].as_object().expect("shell properties");
+    let actions = properties["action"]["enum"]
+        .as_array()
+        .expect("shell action enum");
+
+    assert_eq!(actions.len(), 6);
+    assert!(!actions.contains(&json!("kanban")));
+    assert!(!properties.contains_key("state_filter"));
+    assert!(properties.contains_key("limit"));
+}
+
+#[test]
 fn tachi_task_action_schema_declares_feature_briefing() {
     let schema = rmcp::schemars::schema_for!(TachiTaskParams);
     let value = serde_json::to_value(schema).expect("schema serializes");

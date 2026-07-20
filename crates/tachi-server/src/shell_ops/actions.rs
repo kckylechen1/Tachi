@@ -2,14 +2,12 @@ use super::*;
 
 mod convoy;
 mod dispatch;
-mod kanban;
 mod stage;
 mod status;
 
 #[cfg(test)]
 pub(super) use self::convoy::resolve_slice_id;
 use self::dispatch::handle_dispatch_action;
-use self::kanban::handle_kanban_action;
 use self::stage::handle_stage_action;
 pub(super) use self::status::handle_status_action;
 
@@ -26,10 +24,9 @@ pub(crate) async fn handle_tachi_shell(
             handle_stage_action(server, &action, params).await
         }
         "dispatch" => handle_dispatch_action(server, params).await,
-        "kanban" => handle_kanban_action(server, params).await,
         "status" => handle_status_action(params).await,
         _ => Err(format!(
-            "Invalid action '{}'. Use 'brainstorm', 'plan', 'dispatch', 'kanban', 'status', 'review', or 'ship'.",
+            "Invalid action '{}'. Use 'brainstorm', 'plan', 'dispatch', 'status', 'review', or 'ship'.",
             params.action
         )),
     }

@@ -12,7 +12,7 @@ Tachi Shell has a working MVP for skill-gated flow artifact generation, but the 
 
 ## Completed
 
-- Added `tachi_shell` MCP facade with actions: `brainstorm`, `plan`, `dispatch`, `kanban`, `status`, `review`, and `ship`.
+- Added `tachi_shell` MCP facade with actions: `brainstorm`, `plan`, `dispatch`, `status`, `review`, and `ship`.
 - Added flow artifact layout under `.tachi/runs/<flow_id>/`.
 - Generate `instruction.md`, `status.json`, `events.jsonl`, and injected meta skill files.
 - Added stage-to-meta-skill mapping for Superpowers workflow gates.
@@ -25,7 +25,7 @@ Tachi Shell has a working MVP for skill-gated flow artifact generation, but the 
 ## Partially complete
 
 - Async dispatch integration exists at the instruction/artifact level, but full durable background orchestration is not yet complete.
-- `kanban` and `status` exist, but not yet as a full multi-subagent convoy dashboard.
+- `tachi_shell(action="status")` reports Shell flow state, but a full multi-subagent convoy dashboard through `tachi_task(action="board")` is not yet complete.
 - `ship` generates release instructions, but does not yet execute the whole test/gitleaks/commit/push/PR/CI/distill sequence.
 
 ## Not yet complete

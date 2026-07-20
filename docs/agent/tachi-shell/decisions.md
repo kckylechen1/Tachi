@@ -66,7 +66,7 @@ For decomposable tasks, Tachi Shell should support a parallel subagent convoy:
 - Dispatch one implementer subagent per slice.
 - Run review gates per slice.
 - Keep branches and PRs separate unless a human explicitly chooses to combine them.
-- Track aggregate state through `kanban` / `status`.
+- Track aggregate work through `tachi_task(action="board")` and Shell flow state through `tachi_shell(action="status")`.
 
 This should become a first-class shell mode such as `parallel_worktrees`, not an ad hoc manual pattern.
 

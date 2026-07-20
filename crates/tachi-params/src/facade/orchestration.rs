@@ -325,7 +325,7 @@ pub struct TachiShellDispatchSliceParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiShellParams {
-    /// Action: "brainstorm" | "plan" | "dispatch" | "kanban" | "status" | "review" | "ship"
+    /// Action: "brainstorm" | "plan" | "dispatch" | "status" | "review" | "ship"
     #[schemars(schema_with = "tachi_shell_action_schema")]
     pub action: String,
 
@@ -383,15 +383,11 @@ pub struct TachiShellParams {
     #[serde(default)]
     pub dispatch_reason: Option<TachiDispatchReason>,
 
-    /// Project DB hint passed through to underlying handlers (kanban etc.).
+    /// Project DB hint passed through to underlying handlers.
     #[serde(default)]
     pub project: Option<String>,
 
-    /// Filter for kanban (passed through to tachi_task board): "working" | "completed" | etc.
-    #[serde(default)]
-    pub state_filter: Option<String>,
-
-    /// Limit for kanban / status list views.
+    /// Limit for status list views.
     #[serde(default)]
     pub limit: Option<usize>,
 

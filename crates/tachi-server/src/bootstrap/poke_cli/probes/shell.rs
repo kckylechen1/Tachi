@@ -23,7 +23,6 @@ pub(in crate::bootstrap::poke_cli) async fn probe_shell_artifact(
             async_dispatch: false,
             dispatch_reason: None,
             project: None,
-            state_filter: None,
             limit: None,
             notes: Some(
                 "Poke probe: verify instruction/status/injected SOP artifacts.".to_string(),

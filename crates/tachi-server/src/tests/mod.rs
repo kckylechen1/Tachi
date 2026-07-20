@@ -260,7 +260,6 @@ fn shell_params(action: &str) -> TachiShellParams {
         async_dispatch: false,
         dispatch_reason: None,
         project: None,
-        state_filter: None,
         limit: None,
         notes: None,
         validation: Vec::new(),
